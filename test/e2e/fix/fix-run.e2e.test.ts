@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, unlink, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { createGovernor, currentJobContext } from '../../../src/kernel/governor.js';
 import { runPlan } from '../../../src/kernel/runner.js';
@@ -13,10 +13,21 @@ import { makeFixRun, type FixRunReport } from '../../../src/ops/fix/runFix.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runCli } from '../../../src/cli/main.js';
 import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
+import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
 import { readCommittedMarkers } from '../../../src/ops/sweep/unit.js';
 
 vi.setConfig({ testTimeout: 30_000 });
+
+let gitleaks: Awaited<ReturnType<typeof makeGitleaksFixture>>;
+beforeEach(async () => {
+  gitleaks = await makeGitleaksFixture();
+  vi.stubEnv('PATH', gitleaks.path);
+});
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await rm(gitleaks.root, { recursive: true, force: true });
+});
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -161,11 +172,12 @@ test('fresh portable fixture CLI fixes both tests without a project denylist and
     expect(tree).not.toContain('check-output.txt');
     expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
     expect(report.usage.input).toBe(4);
+    expect((await gitleaks.calls()).length).toBeGreaterThan(0);
     if (process.env.CQ_FIX_TRANSCRIPT_PATH) {
       await mkdir(dirname(process.env.CQ_FIX_TRANSCRIPT_PATH), { recursive: true });
       await writeFile(
         process.env.CQ_FIX_TRANSCRIPT_PATH,
-        '# fix.run tests fixture transcript\n\nFresh repository, scripted driver, real git and offline checks. The fixture entry injects only the driver through the CLI ops-root seam; production CLI parsing, fix.run schema, fix engine and validation run unchanged.\n\nCommand: `node test/fixtures/fix-cli/entry.mjs fix.run --source=tests --repoRoot=<fixture>/repo --selector=\'{"mode":"workspace-all"}\' --journalDir=<fixture>/journal --runPrefix=cq/fixture --json`\n\nObserved process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture paths redacted):\n\n```json\n' +
+        '# fix.run tests fixture transcript\n\nFresh repository, scripted driver, real git and offline checks. A hermetic gitleaks executable supplies clean scan reports through the real subprocess scanner; the fixture entry injects the driver through the CLI ops-root seam; production CLI parsing, fix.run schema, fix engine and validation run unchanged.\n\nCommand: `node test/fixtures/fix-cli/entry.mjs fix.run --source=tests --repoRoot=<fixture>/repo --selector=\'{"mode":"workspace-all"}\' --journalDir=<fixture>/journal --runPrefix=cq/fixture --json`\n\nObserved process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture paths redacted):\n\n```json\n' +
           JSON.stringify(result, null, 2).replaceAll(f.root, '<fixture>') +
           '\n```\n',
       );
@@ -464,35 +476,40 @@ test.each(['active', 'entry', 'after-first'] as const)(
   },
 );
 
-test('an explicitly configured missing denylist refuses real scanner composition before worker dispatch', async () => {
-  const f = await fixture();
-  let calls = 0;
-  try {
-    await unlink(join(f.repo, 'upload-policy.yml'));
-    await git(f.repo, 'add', '-A');
-    await git(f.repo, 'commit', '-m', 'remove configured policy');
-    const drivers: DriverFactory = {
-      resolve: (request) => {
-        const resolved = scripted().resolve(request);
-        return {
-          ...resolved,
-          driver: {
-            run: async (invocation, options) => {
-              calls++;
-              return resolved.driver.run(invocation, options);
+test.each(['missing-policy', 'scanner-fault'] as const)(
+  'real scanner composition refuses %s before worker dispatch',
+  async (mode) => {
+    const f = await fixture();
+    let calls = 0;
+    try {
+      if (mode === 'missing-policy') {
+        await unlink(join(f.repo, 'upload-policy.yml'));
+        await git(f.repo, 'add', '-A');
+        await git(f.repo, 'commit', '-m', 'remove configured policy');
+      } else vi.stubEnv('CQ_TEST_GITLEAKS_EXIT', '2');
+      const drivers: DriverFactory = {
+        resolve: (request) => {
+          const resolved = scripted().resolve(request);
+          return {
+            ...resolved,
+            driver: {
+              run: async (invocation, options) => {
+                calls++;
+                return resolved.driver.run(invocation, options);
+              },
             },
-          },
-        };
-      },
-    };
-    const result = await makeFixRun({ drivers })(input(f));
-    expect(result.status).toBe('needs-human');
-    expect(calls).toBe(0);
-    expect(reportOf(result).tasks.every((task) => task.reason?.includes('upload refused'))).toBe(
-      true,
-    );
-    expect(reportOf(result).fixesPerRun).toBe(0);
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
+          };
+        },
+      };
+      const result = await makeFixRun({ drivers })(input(f));
+      expect(result.status).toBe('needs-human');
+      expect(calls).toBe(0);
+      expect(reportOf(result).tasks.every((task) => task.reason?.includes('upload refused'))).toBe(
+        true,
+      );
+      expect(reportOf(result).fixesPerRun).toBe(0);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);

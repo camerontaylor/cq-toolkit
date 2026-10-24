@@ -22,6 +22,7 @@ import { mkdtempSync } from 'node:fs';
 import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { MockLanguageModelV4 } from 'ai/test';
+import { makeGitleaksFixture } from '../helpers/gitleaks-fixture.js';
 import { bindingsFromDispatch } from '../../src/ops/sweep/unit.js';
 import { APICallError } from '@ai-sdk/provider';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
@@ -2434,6 +2435,8 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
   'configured upload policy preserves source paths and decoded text (%s)',
   async (mode) => {
     const root = await mkdtemp(join(tmpdir(), 'aidrv-path-upload-'));
+    const gitleaks = await makeGitleaksFixture();
+    vi.stubEnv('PATH', gitleaks.path);
     let sends = 0;
     try {
       await writeFile(
@@ -2484,6 +2487,14 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
           }),
         },
       );
+      expect(bindings.scanPrompt).toBeDefined();
+      await expect(bindings.scanPrompt?.('safe')).resolves.toBeUndefined();
+      await expect(bindings.scanPrompt?.('\nBLOCKEDWORD')).rejects.toThrow(
+        'worker upload refused by denylist scan',
+      );
+      vi.stubEnv('CQ_TEST_GITLEAKS_EXIT', '2');
+      await expect(bindings.scanPrompt?.('safe')).rejects.toThrow('gitleaks failed to run');
+      vi.stubEnv('CQ_TEST_GITLEAKS_EXIT', '0');
       const model = new MockLanguageModelV4({
         modelId: 'mock-1',
         doGenerate: async () => {
@@ -2507,7 +2518,11 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
       );
       expect(sends).toBe(mode === 'public' ? 2 : mode === 'prompt' ? 0 : 1);
       expect(result.stopReason === 'complete').toBe(mode === 'public');
+      if (mode === 'prompt') expect(result.error).toContain('worker upload refused by scan');
+      expect((await gitleaks.calls()).length).toBeGreaterThan(3);
     } finally {
+      vi.unstubAllEnvs();
+      await rm(gitleaks.root, { recursive: true, force: true });
       await rm(root, { recursive: true, force: true });
     }
   },
