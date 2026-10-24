@@ -101,6 +101,8 @@ export interface AddressWorkerDeps {
   isBookkeepingPath?(path: string): Promise<boolean>;
   /** Snapshot and classify under the enclosing engine's bookkeeping write fence. */
   inspectUntracked?(read: () => Promise<string[]>): Promise<{ paths: string[]; unknown: string[] }>;
+  /** Restore engine-owned historical metadata before initial unknown-path inspection. */
+  prepareBookkeeping?(): Promise<void>;
   parentSignal?: AbortSignal;
 }
 
@@ -445,6 +447,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   };
   const initialize = (admit = stop) =>
     (initialization ??= withMutation(async () => {
+      await deps.prepareBookkeeping?.();
+      admit();
       if (
         (await git(root, ['diff', '--name-only', '-z', 'HEAD'])) ||
         (await git(root, ['diff', '--cached', '--name-only', '-z']))

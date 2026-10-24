@@ -44,6 +44,7 @@ async function fixture(
     scanner?: DiffSecretScanner;
     providerRequest?: boolean;
     indexIdentityUnavailable?: boolean;
+    prepareBookkeeping?: () => Promise<void>;
     gitHook?: (args: string[], run: GhFn) => ReturnType<GhFn>;
     runPrefix?: string;
     objectFormat?: 'sha256';
@@ -181,6 +182,7 @@ async function fixture(
     journalDir: journal,
     policy: resolveCqConfigDefaults(config, { packageName: 'fixture' }),
     attempts,
+    ...(options.prepareBookkeeping ? { prepareBookkeeping: options.prepareBookkeeping } : {}),
     ...(options.runPrefix ? { runPrefix: options.runPrefix } : {}),
     remainingTokens: () => config.budgets!.run!.maxTokens! - spent,
     remainingWallMs: options.remainingWallMs ?? (() => 20000),
@@ -211,6 +213,45 @@ async function fixture(
 }
 
 describe('review.address verified admission fence', () => {
+  test('cancellation while preparing historical bookkeeping prevents admission after await', async () => {
+    const parent = new AbortController();
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const f = await fixture(undefined, '', {
+      parentSignal: parent.signal,
+      prepareBookkeeping: async () => {
+        enter();
+        await held;
+      },
+    });
+    let admitted = false;
+    const pending = f.engine.withVerifiedHead!(async () => {
+      admitted = true;
+    });
+    const refused = expect(pending).rejects.toThrow(/parent cancelled/);
+    try {
+      await entered;
+      parent.abort();
+      release();
+      await refused;
+      expect(admitted).toBe(false);
+      expect(f.calls()).toBe(0);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(f.repo.git('diff', '--cached', '--name-only')).toBe('');
+    } finally {
+      parent.abort();
+      release();
+      await Promise.allSettled([pending, refused]);
+      await f.cleanup();
+    }
+  });
+
   test.each(['before', 'during'] as const)(
     'external HEAD movement %s admission refuses',
     async (timing) => {

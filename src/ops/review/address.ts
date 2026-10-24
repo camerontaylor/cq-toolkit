@@ -30,6 +30,7 @@ import {
   type AddressFix,
   type AddressWorker,
 } from './addressWorker.js';
+import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
 import type { AddressFailedAttempt } from './internal/addressEvidence.js';
 import { FixReviewItemInputSchema } from './registry.js';
 import {
@@ -154,6 +155,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     };
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
+    let bookkeepingRevision = 0;
+    let persistedBookkeeping: ReturnType<typeof makeAddressBookkeepingReceipt> | undefined;
     const noteBookkeeping = async (path: string) => {
       const canonical = await realpath(path);
       const stat = await lstat(canonical);
@@ -165,6 +168,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           .update(await readFile(canonical))
           .digest('hex'),
       );
+      bookkeepingRevision++;
     };
     let worker: AddressWorker | undefined;
     let publishOnExit: (() => Promise<void>) | undefined;
@@ -369,6 +373,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             return ref.slice('refs/heads/'.length);
           };
           const admitHistory = async (root: string, branch: string) => {
+            // PR history must have an exact engine receipt; filenames/schema alone confer no ownership.
+            if (persistedBookkeeping) return;
             const folder = resolve(root, '.cq', 'review', encodeURIComponent(branch));
             let names: string[];
             try {
@@ -422,7 +428,23 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const withBookkeepingAccess = <T>(root: string, action: () => Promise<T>): Promise<T> => {
             const pending = bookkeepingWrites.then(async () => {
               await assertBookkeeping(root);
-              return action();
+              try {
+                await persistedBookkeeping?.assertUnchanged();
+              } catch (error) {
+                bookkeepingTampered = true;
+                throw error;
+              }
+              const revision = bookkeepingRevision;
+              const result = await action();
+              if (persistedBookkeeping && bookkeepingRevision !== revision) {
+                try {
+                  await persistedBookkeeping.persist();
+                } catch (error) {
+                  bookkeepingTampered = true;
+                  throw error;
+                }
+              }
+              return result;
             });
             bookkeepingWrites = pending.catch(() => undefined);
             return pending;
@@ -446,6 +468,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               drivers,
               attempts: report.attempts,
               failedAttempts: report.failed,
+              prepareBookkeeping: () =>
+                withBookkeepingAccess(root, async () => {
+                  try {
+                    await persistedBookkeeping?.prepare(root);
+                  } catch (error) {
+                    bookkeepingTampered = true;
+                    throw error;
+                  }
+                }),
               isBookkeepingPath: (path) =>
                 withBookkeepingAccess(root, () => untrackedAllowed(root, path)),
               inspectUntracked: (read) =>
@@ -467,7 +498,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const publicationTreeClean = async (root: string) => {
             // A later engine rewrite must not erase an observed ownership violation.
             if (bookkeepingTampered) return false;
-            await admitHistory(root, await branchName(root));
+            // With no fix jobs, publication must still restore metadata before inspection,
+            // inside the same mutation → checkout → bookkeeping order.
+            if (persistedBookkeeping && !worker) {
+              const bound = bindWorker(root);
+              if (bound.withVerifiedHead) await bound.withVerifiedHead(async () => {});
+              else await withBookkeepingAccess(root, () => persistedBookkeeping!.prepare(root));
+            }
+            await withBookkeepingAccess(root, async () =>
+              admitHistory(root, await branchName(root)),
+            );
             if (await gitText(root, ['diff', '--cached', '--name-only', '-z'])) return false;
             if (await gitText(root, ['diff', '--name-only', '-z'])) return false;
             const untracked = await git([
@@ -539,6 +579,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const admitRecord = async (root: string, record: FindingsRecord) => {
             if (deps.disposition) return;
             return withBookkeepingAccess(root, async () => {
+              await persistedBookkeeping?.prepare(root);
               const effects = makeSubprocessDevEffects(root);
               const read = await readWorkState(effects, {
                 target: input.target ?? 'merge-queue',
@@ -788,6 +829,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const receiptDir = resolve(root, commonDir, 'cq-review-address', namespace);
             await mkdir(receiptDir, { recursive: true });
             dispatchLogPath = resolve(receiptDir, 'dispatch.jsonl');
+            persistedBookkeeping = makeAddressBookkeepingReceipt({
+              path: resolve(await realpath(receiptDir), 'bookkeeping.json'),
+              identity: namespace,
+              fingerprints: bookkeeping,
+              git: gitText,
+            });
           }
           if (input.source === 'local') {
             const read = await readWorkState(makeSubprocessDevEffects(root), {
@@ -803,6 +850,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (prMetadata) {
               const meta = prMetadata;
               const fixesById = new Map<string, AddressFix>();
+              let admissionRefused = false;
               const entry: OpRegistryEntry = {
                 name: 'review.fixItem',
                 inputSchema: FixReviewItemInputSchema,
@@ -837,8 +885,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       findings: [finding],
                     });
                   };
-                  if (bound.withVerifiedHead) await bound.withVerifiedHead(admit);
-                  else await admit(await gitText(root, ['rev-parse', 'HEAD']));
+                  try {
+                    if (bound.withVerifiedHead) await bound.withVerifiedHead(admit);
+                    else await admit(await gitText(root, ['rev-parse', 'HEAD']));
+                  } catch (error) {
+                    // Initial ownership/admission refusal must not become a
+                    // re-review write to unregistered caller metadata. Model and
+                    // normal edit failures occur after this narrow fence.
+                    admissionRefused = true;
+                    throw error;
+                  }
                   const fix = await bound.fix(finding, round);
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
@@ -913,6 +969,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 publishedBase = await gitText(root, ['rev-parse', 'HEAD']);
               }
               if (loop.status !== 'ok') report.reasons.push(...loop.reasons);
+              if (admissionRefused)
+                return await finish(
+                  'needs-human',
+                  'PR worker admission refused; persisted/caller bytes retained',
+                );
               const fetched = await fetchReviewState(
                 { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                 undefined,

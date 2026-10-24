@@ -145,6 +145,25 @@ editing workers still run concurrently. Any mismatch remains a sticky refusal, r
 changed bytes and verified local commits, and withholds publication, disposition
 proof and further reviewer dispatch.
 
+A fresh PR invocation restores prior bookkeeping only through a private exact-byte
+receipt in Git's existing PR/target/actor namespace. The receipt binds the canonical
+checkout, branch, HEAD and each allowed ledger/history path and SHA-256. Every entry
+must be an ordinary file with matching bytes, valid branch schema and ancestral
+record heads; all entries validate before any ownership is registered. Filename or
+schema alone cannot admit PR history. Missing, partial, stale or corrupt receipts
+leave existing metadata untrusted; older worktrees without receipts fail closed.
+Caller files and changed metadata are preserved for manual recovery.
+
+The optional worker `prepareBookkeeping` hook restores this ownership inside
+initialization's mutation/checkout lock before untracked inspection. Receipt refresh
+settles at the end of the existing successful bookkeeping FIFO transaction, after
+all engine-written fingerprints refresh. Its create-only temporary file is closed
+and cleaned independently of cancellation; caller changes to the receipt refuse
+replacement. No-job publication uses the same initialization fence. Initial PR
+admission refusal stops before ledger loading or re-review; normal edit failures
+retain their existing re-review behavior. These private author-tier receipts do
+not establish current clean/rejection proof or alter public report schemas.
+
 PR findings capture and ledger admission use the worker's optional runtime
 `withVerifiedHead` callback under the same mutation FIFO and checkout lock as
 commit verification. Initialization completes before admission; callbacks do not

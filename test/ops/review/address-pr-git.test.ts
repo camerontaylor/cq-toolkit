@@ -1,6 +1,17 @@
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+  mkdir,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
@@ -74,6 +85,20 @@ afterEach(async () => {
 test.each([
   'local-only',
   'publish',
+  'publish-reuse',
+  'publish-reuse-alias',
+  'publish-reuse-modified-ledger',
+  'publish-reuse-modified-history',
+  'publish-reuse-caller',
+  'publish-reuse-unregistered',
+  'publish-reuse-malformed',
+  'publish-reuse-missing-receipt',
+  'publish-reuse-corrupt-receipt',
+  'publish-reuse-partial-receipt',
+  'publish-reuse-wrong-branch',
+  'publish-reuse-wrong-root',
+  'publish-reuse-wrong-identity',
+  'publish-reuse-stale-head',
   'publish-siblings',
   'publish-admission-transition',
   'publish-siblings-ledger-snapshot',
@@ -94,7 +119,9 @@ test.each([
     const ledgerSnapshot = mode === 'publish-siblings-ledger-snapshot';
     const siblings =
       mode === 'publish-siblings' || ledgerSnapshot || rejection || admissionTransition;
-    const publish = mode === 'publish' || siblings;
+    const reuse = mode.startsWith('publish-reuse');
+    const refusedReuse = reuse && mode !== 'publish-reuse' && mode !== 'publish-reuse-alias';
+    const publish = mode === 'publish' || reuse || siblings;
     const earlyTamper = mode === 'bookkeeping-before-disposition';
     const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
     const repo = await makeTestRepo();
@@ -131,6 +158,7 @@ test.each([
         stdout: typeof value === 'string' ? value : JSON.stringify(value),
         stderr: '',
       });
+      let reuseRound = false;
       const resolvedThreads = new Set<string>();
       const actions: string[] = [];
       const replies: Array<{
@@ -159,7 +187,8 @@ test.each([
           expect(remoteHead()).not.toBe(initial);
           expect(
             replies.some(
-              (reply) => reply.in_reply_to_id === (flag('threadId') === 'T1' ? 101 : 102),
+              (reply) =>
+                reply.in_reply_to_id === (reuseRound ? 103 : flag('threadId') === 'T1' ? 101 : 102),
             ),
           ).toBe(true);
           resolvedThreads.add(flag('threadId'));
@@ -194,17 +223,17 @@ test.each([
                   headRefOid: remoteHead(),
                   reviewThreads: {
                     nodes: (siblings ? ['T1', 'T2'] : ['T1']).map((id, index) => ({
-                      id,
-                      isResolved: resolvedThreads.has(id),
+                      id: reuseRound ? 'T2' : id,
+                      isResolved: resolvedThreads.has(reuseRound ? 'T2' : id),
                       isOutdated: false,
                       path: index === 0 ? 'src/a.ts' : 'src/b.ts',
                       line: 1,
                       comments: {
                         nodes: [
                           {
-                            databaseId: 101 + index,
+                            databaseId: (reuseRound ? 103 : 101) + index,
                             author: { login: 'reviewer', __typename: 'User' },
-                            body: 'Replace BAD with GOOD',
+                            body: reuseRound ? 'Replace GOOD with BETTER' : 'Replace BAD with GOOD',
                             createdAt: rootCreatedAt,
                           },
                         ],
@@ -222,9 +251,9 @@ test.each([
         if (endpoint.includes('/pulls/7/comments'))
           return ok([
             // REST reply chains require their real roots to authenticate discussion proof.
-            ...(siblings ? [101, 102] : [101]).map((id) => ({
+            ...(siblings ? [101, 102] : [reuseRound ? 103 : 101]).map((id) => ({
               id,
-              body: 'Replace BAD with GOOD',
+              body: reuseRound ? 'Replace GOOD with BETTER' : 'Replace BAD with GOOD',
               user: { login: 'reviewer' },
               created_at: rootCreatedAt,
             })),
@@ -283,7 +312,7 @@ test.each([
               let output: unknown;
               if (schema === 'review.agent/v2') {
                 expect(await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8')).toContain(
-                  'GOOD',
+                  reuseRound ? 'BETTER' : 'GOOD',
                 );
                 output = {
                   receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
@@ -336,7 +365,7 @@ test.each([
                   }
                   await writeFile(
                     join(workerRoot, file),
-                    `export const ${file === 'src/a.ts' ? 'a' : 'b'} = "GOOD";\n${rejection ? '// introduced citation\n' : ''}`,
+                    `export const ${file === 'src/a.ts' ? 'a' : 'b'} = "${reuseRound ? 'BETTER' : 'GOOD'}";\n${rejection ? '// introduced citation\n' : ''}`,
                   );
                   if (siblings && !admissionTransition) editing--;
                 }
@@ -705,6 +734,124 @@ test.each([
             ).toBe('CALLER PRIVATE BYTES\n');
           }
         }
+      }
+      if (reuse) {
+        const originalRoot = workerRoot;
+        const priorLedger = await readFile(devLedgerPath(workerRoot, 'cq-review/pr-7'), 'utf8');
+        expect(priorLedger).toContain('disposition');
+        repo.git('-C', workerRoot, 'push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+        const ledgerPath = devLedgerPath(workerRoot, 'cq-review/pr-7');
+        const historyFolder = join(workerRoot, '.cq/review', encodeURIComponent('cq-review/pr-7'));
+        const historyPath = join(
+          historyFolder,
+          (await readdir(historyFolder)).find((name) => /^\d+\.json$/.test(name))!,
+        );
+        const namespace = createHash('sha256')
+          .update(
+            JSON.stringify([
+              'octo',
+              'widget',
+              7,
+              'merge-queue',
+              null,
+              'octo/widget',
+              'feature/x',
+              'author',
+            ]),
+          )
+          .digest('hex');
+        const receiptPath = join(
+          repo.root,
+          '.git/cq-review-address',
+          namespace,
+          'bookkeeping.json',
+        );
+        const receiptBytes = await readFile(receiptPath, 'utf8');
+        const receipt = JSON.parse(receiptBytes) as {
+          files: Array<{ path: string; sha256: string }>;
+          branch: string;
+          root: string;
+          identity: string;
+          head: string;
+        };
+        expect(
+          receipt.files.some(
+            (row: { path: string }) => row.path === relative(workerRoot, ledgerPath),
+          ),
+        ).toBe(true);
+        let protectedPath: string | undefined;
+        if (mode === 'publish-reuse-modified-ledger' || mode === 'publish-reuse-malformed') {
+          protectedPath = ledgerPath;
+          await writeFile(
+            ledgerPath,
+            mode === 'publish-reuse-malformed' ? '{bad' : priorLedger + '\n',
+          );
+        }
+        if (mode === 'publish-reuse-modified-history') {
+          protectedPath = historyPath;
+          await writeFile(historyPath, `${await readFile(historyPath, 'utf8')}\n`);
+        }
+        if (mode === 'publish-reuse-caller' || mode === 'publish-reuse-unregistered') {
+          protectedPath =
+            mode === 'publish-reuse-caller'
+              ? join(workerRoot, '.cq/private.txt')
+              : join(historyFolder, '999999.json');
+          await writeFile(
+            protectedPath,
+            mode === 'publish-reuse-caller'
+              ? 'CALLER PRIVATE BYTES\n'
+              : await readFile(historyPath),
+          );
+        }
+        if (mode === 'publish-reuse-missing-receipt') await unlink(receiptPath);
+        else if (mode === 'publish-reuse-corrupt-receipt') {
+          protectedPath = receiptPath;
+          await writeFile(receiptPath, '{bad');
+        } else if (mode === 'publish-reuse-partial-receipt') {
+          protectedPath = receiptPath;
+          receipt.files = receipt.files.filter(
+            (row: { path: string }) => row.path !== relative(workerRoot, ledgerPath),
+          );
+          await writeFile(receiptPath, JSON.stringify(receipt));
+        } else if (mode.startsWith('publish-reuse-wrong-') || mode === 'publish-reuse-stale-head') {
+          protectedPath = receiptPath;
+          if (mode === 'publish-reuse-wrong-branch') receipt.branch = 'different';
+          if (mode === 'publish-reuse-wrong-root') receipt.root = repo.root;
+          if (mode === 'publish-reuse-wrong-identity') receipt.identity = 'other-pr-actor';
+          if (mode === 'publish-reuse-stale-head') receipt.head = initial;
+          await writeFile(receiptPath, JSON.stringify(receipt));
+        }
+        const protectedBytes = protectedPath ? await readFile(protectedPath) : undefined;
+        const previousHead = repo.git('-C', workerRoot, 'rev-parse', 'HEAD').trim();
+        const invocationCount = invocations.length;
+        const actionCount = actions.length;
+        const callerAlias = join(journal, 'caller-alias');
+        if (mode === 'publish-reuse-alias') await symlink(repo.root, callerAlias, 'dir');
+        reuseRound = true;
+        // A fresh default invocation must discover and reuse the same no-ignore checkout.
+        const second = await makeReviewAddress({ gh, git, drivers })({
+          repoRoot: mode === 'publish-reuse-alias' ? callerAlias : repo.root,
+          source: 'pr:7',
+          rounds: 1,
+          push: true,
+        });
+        const again = second.status === 'ok' ? second.value : second.report!;
+        if (refusedReuse) {
+          expect(second.status, JSON.stringify(again.reasons)).toBe('needs-human');
+          expect(again.fixesPerRun, JSON.stringify(again.reasons)).toBe(0);
+          expect(invocations).toHaveLength(invocationCount);
+          expect(actions).toHaveLength(actionCount);
+          expect(repo.git('-C', originalRoot, 'rev-parse', 'HEAD').trim()).toBe(previousHead);
+          if (protectedPath) expect(await readFile(protectedPath)).toEqual(protectedBytes);
+          if (mode === 'publish-reuse-missing-receipt')
+            await expect(readFile(receiptPath)).rejects.toMatchObject({ code: 'ENOENT' });
+          return;
+        }
+        expect(again.fixesPerRun, JSON.stringify(again.reasons)).toBe(1);
+        expect(second.status, JSON.stringify(again.reasons)).toBe('ok');
+        expect(await realpath(workerRoot)).toBe(await realpath(originalRoot));
+        expect(repo.git('-C', workerRoot, 'show', 'HEAD:src/a.ts')).toContain('BETTER');
+        expect(await readFile(devLedgerPath(workerRoot, 'cq-review/pr-7'), 'utf8')).toContain('T2');
       }
     } finally {
       await repo.cleanup();

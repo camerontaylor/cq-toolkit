@@ -626,3 +626,104 @@ and schemas are unchanged. No provider, live, CR, coverage, budget, baseline or
 policy change. Independent exact-delta review and fresh CI are still required.
 The complete current-PR aggregate 60000-token blocker and positive live acceptance
 remain unmet; focused source tests do not certify whole-PR acceptance.
+
+## Reused PR worktree bookkeeping (#463)
+
+The real no-ignore PR adapter now exercises a first publish, persisted ledger and
+findings, then a fresh default invocation on the same checkout with a new
+reviewer thread and GOOD→BETTER fix. The corrected regression on unchanged
+`fe814dd2ededf9df7552f47841eadbcdbd2f3788` refused the second job at worker
+initialization: `review.address requires no unknown worker files`, zero second
+fixes, plus dirty-worktree. No offending source path was inferred.
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="23/24" failed=1 skipped=0 wait="0.0s" duration="64.2s" nice=5 load="5.6" uptime="552015s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+The sole additive runtime API is optional `AddressWorkerDeps.prepareBookkeeping`.
+The composition restores private Git-namespace receipts inside initialization's
+mutation→checkout→bookkeeping lock order, before unknown-file inspection. Exact
+canonical checkout, PR/target/actor identity, branch, HEAD, allowed paths, ordinary
+file identity and SHA-256 must match; ledger/findings schemas and historical heads
+must validate. All entries validate before registration. Current clean/rejection
+proof remains separate. PR history is never adopted by filename/schema alone.
+Legacy worktrees without receipts fail closed, retaining metadata for manual
+recovery. No public report, frozen schema, kernel or CLI contract changed.
+
+Receipt refresh occurs only after successful bookkeeping FIFO transactions finish
+all engine writes and fingerprint updates. The receipt's previous bytes are
+checked before processing and immediately before atomic replacement. Create-only
+temporary ownership, close and cleanup settle independently of cancellation.
+Initial admission refusal returns after the settled loop before ledger loading or
+re-review; ordinary worker-edit failures retain their normal re-review behavior.
+Verified sibling commits and report evidence remain retained.
+
+The new controls cover valid reuse and canonical aliases; valid-JSON whitespace
+changes to ledger/history; caller files and unregistered valid history; malformed
+metadata; missing, corrupt or partial receipts; wrong root/branch/PR-actor identity;
+and stale HEAD. Refusals assert no further driver/forge call, zero new fixes and
+unchanged protected bytes. Private receipt tests also cover invalid schemas,
+non-ancestral heads, symlinks, duplicate/escaping paths, exact trailing bytes,
+SHA-256 repositories, and caller receipt changes during replacement with no owned
+temporary residue. A held initialization callback proves cancellation after its
+await prevents admission/provider dispatch without changing HEAD/index.
+
+The corrected positive initially passed 24/24. Expanded lifecycle/receipt/registry
+controls passed 85/85 before the final atomic-replacement rendezvous was added:
+
+```text
+test:narrow result="pass" exit=0 files=4 projects="pure,process" tests="85/85" failed=0 skipped=0 wait="0.0s" duration="178.5s" nice=5 load="5.0" uptime="552569s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/addressBookkeeping.test.ts"
+```
+
+Worker/shared-consumer checkpoint, including preparation cancellation and existing
+literal-path, owned-capture, closure provenance, concurrent admission, child
+termination and rejection controls:
+
+```text
+test:narrow result="pass" exit=0 files=6 projects="pure,process" tests="190/190" failed=0 skipped=0 wait="0.0s" duration="109.1s" nice=5 load="5.3" uptime="552759s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/registry.test.ts"
+```
+
+Retained intermediate evidence matters: the first reuse fixture accidentally
+inherited the prior thread's resolved flag, so its original 23/24 failure proved
+only no-job dirty publication, not job initialization. Corrected IDs/root comments
+and resolution state produced the causal worker failure quoted above. The first
+receipt prototype was 13/24 because it tried to persist inside a findings callback
+before the same transaction refreshed the ledger fingerprint. Expanded controls
+then ran 71/85: all 14 reuse variants stopped at one fixture assertion that guessed
+the raw branch filename; it now uses the actual `devLedgerPath`. None of those
+checkpoints establishes the later negative controls. Typed static checking also
+required explicit fixture JSON types; no runtime assertions or policy weakened.
+
+An op-doc check launched during stale-dist rebuilding failed to import the built
+registry. Its verification must run after the wrapper's build settles. No host-load
+cause is asserted for any functional failure. Durable logs are under
+`/home/ctaylor/review-evidence/pr435-reuse-*.log` on triton.
+
+Independent exact-delta review and exact-head CI remain separate gates. The
+complete current-PR aggregate 60000-token feasibility blocker and positive live
+acceptance remain unmet. No provider/live/CR run, budget/baseline/policy change,
+whole-PR marker or merge is authorized by these source checks.
+
+The final four-file checkpoint passed all 35 real-PR and 25 private-receipt cases,
+including the atomic replacement rendezvous, but was **85/86**: the unchanged
+`test/cli/registry.test.ts:586` root-barrel dynamic import exceeded its 5000 ms
+limit (5083 ms observed). All other 23 registry cases and inventory passed.
+The preceding 85/85 checkpoint had passed this same root-barrel assertion; the
+only later production change was a function-body receipt recheck, with no import
+graph/top-level evaluation change. This does not establish the timeout's cause.
+
+```text
+test:narrow result="fail" exit=1 files=4 projects="pure,process" tests="85/86" failed=1 skipped=0 wait="0.0s" duration="118.7s" nice=5 load="1.8" uptime="552893s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/addressBookkeeping.test.ts"
+```
+
+One bounded diagnostic of the failing named file, with unchanged source, fixture
+and timeout, passed all 24 registry cases plus inventory. Its pass does not erase
+the failed batch or prove a host-load cause. No broader retry was run.
+
+```text
+test:narrow result="pass" exit=0 files=2 projects="pure" tests="26/26" failed=0 skipped=0 wait="0.0s" duration="8.4s" nice=5 load="1.0" uptime="553099s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts"
+```
+
+Final static checking passes with zero errors against baseline zero; typed lint,
+Knip, formatting and generated operation docs (54) pass. The red batch remains an
+explicit local verification limitation for independent delta review and CI.
