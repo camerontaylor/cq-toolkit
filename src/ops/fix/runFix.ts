@@ -20,6 +20,7 @@ import {
   type PlanSweepReport,
 } from '../sweep/planSweep.js';
 import { SweepUnitDispatchInputSchema } from '../sweep/registry.js';
+import { isScopedEslintTemplate } from '../sweep/tasks.js';
 import {
   bindingsFromDispatch,
   makeSweepUnitOp,
@@ -33,7 +34,7 @@ import type { FixRunInputSchema } from './registry.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
 export interface FixRunReport {
-  source: 'tests';
+  source: 'tests' | 'static';
   runPrefix: string;
   reportPath: string;
   verdict: 'pass' | 'fail' | 'needs-human';
@@ -62,7 +63,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       input.journalDir ?? resolve(repoRoot, '..', '.cq-fix-runs', randomUUID()),
     );
     const report: FixRunReport = {
-      source: 'tests',
+      source: input.source,
       runPrefix,
       reportPath: resolve(journalDir, `fix-run-report-${randomUUID()}.json`),
       verdict: 'needs-human',
@@ -129,9 +130,42 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       if (maxTokens === undefined) return await finish('needs-human', 'token budget required');
       const role = policy.roles.worker;
       if (!role) return await finish('needs-human', 'cq.json roles.worker is required');
-      const checks = policy.checks.filter((check) => check.kind === input.source);
+      const selected =
+        input.checks === undefined
+          ? undefined
+          : Array.isArray(input.checks)
+            ? input.checks
+            : [input.checks];
+      const aliases = { tsc: 'tsc-lines', eslint: 'eslint-json', vitest: 'vitest-json' } as const;
+      const available = policy.checks.filter((check) => check.kind === input.source);
+      if (selected?.some((alias) => !available.some((check) => check.adapter === aliases[alias])))
+        return await finish(
+          'needs-human',
+          'requested checks are unavailable for this source; use tsc, eslint or vitest from cq.json',
+        );
+      const checks = available.filter(
+        (check) =>
+          selected === undefined || selected.some((alias) => check.adapter === aliases[alias]),
+      );
       if (!checks.length)
         return await finish('needs-human', `cq.json has no ${input.source} checks`);
+      if (input.source === 'static') {
+        if (checks.some((check) => !['tsc-lines', 'eslint-json'].includes(check.adapter)))
+          return await finish(
+            'needs-human',
+            'static source supports tsc-lines and eslint-json checks only',
+          );
+        if (
+          checks.some(
+            (check) =>
+              check.adapter === 'eslint-json' && !isScopedEslintTemplate(check.relatedArgs),
+          )
+        )
+          return await finish(
+            'needs-human',
+            'static ESLint requires checks[].relatedArgs with a standalone {files} token replacing the full argv, without broad . or ./ operands (for example ["{files}", "--format=json"])',
+          );
+      }
       if (
         checks.some(
           (check) =>
@@ -151,7 +185,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         base: input.base ?? 'HEAD',
         packages: policy.packages,
         selector: input.selector,
-        fixers: checks.map((_, index) => `tests-${String(index + 1)}`),
+        fixers: checks.map((_, index) => `${input.source}-${String(index + 1)}`),
       };
       const planned = await makePlanSweep(makeSubprocessSweepPlannerDeps(repoRoot))(
         sweepPlannerInput(config),
@@ -177,12 +211,16 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         unit.driver = { ...role, budget: { maxTokens, wallClockMs: policy.budgets.step.wallMs } };
         unit.check = { adapter: check.adapter, ...check.command };
         unit.taskLoop = {
+          source: input.source,
           protectTests: input.protectTests ?? false,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}
             : { denylistPatternsFile: policy.review.denylistPatternsFile }),
           wallMs: policy.budgets.unit.wallMs,
-          ...(check.relatedArgs === undefined ? {} : { relatedArgs: check.relatedArgs }),
+          ...(check.relatedArgs === undefined ||
+          (input.source === 'static' && check.adapter === 'tsc-lines')
+            ? {}
+            : { relatedArgs: check.relatedArgs }),
         };
         unit.push = (input.push ?? false) || (input.pr ?? false);
         unit.proposeOnly = input.proposeOnly ?? false;

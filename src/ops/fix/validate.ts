@@ -19,6 +19,10 @@ export interface ValidationVerdict {
 export interface ValidationInput {
   baseline: FailureSet;
   related: () => Promise<FailureSet>;
+  /** Static tasks allow existing sibling clusters; the assigned cluster must disappear. */
+  relatedAccepts?: (set: FailureSet) => boolean;
+  /** Only reuse a full related check run against the exact base-owned staged tree. */
+  reuseRelatedForBroader?: boolean;
   /** Must check the exact staged tree in a base-owned checkout. */
   broader: () => Promise<FailureSet>;
   stagedPaths: readonly string[];
@@ -35,6 +39,7 @@ export interface ValidationInput {
 export async function validateFix(input: ValidationInput): Promise<ValidationVerdict> {
   const gates: FixGateRecord[] = [];
   let final: FailureSet | undefined;
+  let related: FailureSet | undefined;
   const finish = (verdict: ValidationVerdict['verdict']): ValidationVerdict => ({
     verdict,
     gates,
@@ -58,8 +63,9 @@ export async function validateFix(input: ValidationInput): Promise<ValidationVer
   };
   if (
     !(await step('related', async () => {
-      const related = await input.related();
-      return related.exitCode === 0 && related.failures.length === 0
+      related = await input.related();
+      return (input.relatedAccepts?.(related) ??
+        (related.exitCode === 0 && related.failures.length === 0))
         ? undefined
         : 'related check did not pass';
     }))
@@ -67,7 +73,8 @@ export async function validateFix(input: ValidationInput): Promise<ValidationVer
     return finish('fail');
   if (
     !(await step('broader', async () => {
-      final = await input.broader();
+      final =
+        input.reuseRelatedForBroader && related !== undefined ? related : await input.broader();
       const compared = await regressionGate({ base: input.baseline, final });
       if (compared.status !== 'ok') return `regression gate: ${compared.status}`;
       if (compared.value.verdict === 'regression') return 'novel failures or test-total regression';
@@ -78,6 +85,10 @@ export async function validateFix(input: ValidationInput): Promise<ValidationVer
     }))
   )
     return finish('fail');
+  if (input.reuseRelatedForBroader) {
+    const gate = gates.at(-1);
+    if (gate) gate.detail = 'reused full related check from the base-owned staged tree';
+  }
   const paths = classifyStagePaths(
     input.stagedPaths,
     input.allowlist,

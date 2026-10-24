@@ -6,7 +6,13 @@ import type { FixRunInput } from './runFix.js';
 export const FixRunInputSchema = z
   .object({
     repoRoot: z.string().min(1),
-    source: z.literal('tests'),
+    source: z.enum(['tests', 'static']),
+    checks: z
+      .union([
+        z.enum(['tsc', 'eslint', 'vitest']),
+        z.array(z.enum(['tsc', 'eslint', 'vitest'])).min(1),
+      ])
+      .exactOptional(),
     selector: PlanSweepSelectorSchema,
     push: z.boolean().default(false),
     pr: z.boolean().default(false),

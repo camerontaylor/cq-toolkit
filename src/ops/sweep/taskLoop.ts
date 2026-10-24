@@ -11,6 +11,9 @@ import { validateFix, type ValidationVerdict } from '../fix/validate.js';
 import { classifyStagePaths, stagedPathsOf } from './stagePaths.js';
 import {
   tasksFromFailures,
+  staticTasksFromFailures,
+  staticRelatedCheckCommand,
+  taskHasFailures,
   relatedCheckCommand,
   normalizeFailurePaths,
   type FixTask,
@@ -21,6 +24,7 @@ import type { WorkUnit } from './planSweep.js';
 import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
 
 export interface TaskLoopConfig {
+  source?: 'tests' | 'static';
   relatedArgs?: string[];
   denylistPatternsFile?: string;
   protectTests?: boolean;
@@ -83,7 +87,10 @@ async function runTaskLoopInner(
 ): Promise<OpResult<SweepUnitReport>> {
   const config = bindings.taskLoop ?? {};
   const tasks =
-    bindings.deriveTasks?.(baseline.failureSet) ?? tasksFromFailures(baseline.failureSet);
+    bindings.deriveTasks?.(baseline.failureSet) ??
+    (config.source === 'static'
+      ? staticTasksFromFailures(baseline.failureSet)
+      : tasksFromFailures(baseline.failureSet));
   const reports: FixTaskReport[] = [];
   let accepted = baseline;
   let lastSha: string | undefined;
@@ -148,13 +155,9 @@ async function runTaskLoopInner(
       row.reason = 'failure has no attributed file';
       continue;
     }
-    if (
-      !accepted.failureSet.failures.some(
-        (failure) => failure.file !== null && task.files.includes(failure.file),
-      )
-    ) {
+    if (!taskHasFailures(task, accepted.failureSet, config.source)) {
       row.outcome = 'fixed';
-      row.reason = 'earlier verified task resolved this file';
+      row.reason = 'earlier verified task resolved this file or cluster';
       continue;
     }
     let parent: string | undefined;
@@ -162,7 +165,12 @@ async function runTaskLoopInner(
     try {
       parent = await git(['rev-parse', 'HEAD']);
       const fullCheck = bindings.checkCommand(unit, worktree.path);
-      const related = relatedCheckCommand(
+      const related = (
+        config.source === 'static'
+          ? (command: CheckCommand, files: string[], args?: string[]) =>
+              staticRelatedCheckCommand(command, bindings.adapter, files, args)
+          : relatedCheckCommand
+      )(
         fullCheck,
         task.files.map((file) =>
           relative(fullCheck.cwd ?? worktree.path, resolve(worktree.path, file)),
@@ -353,19 +361,31 @@ async function runTaskLoopInner(
             ? 'chore(test)'
             : `fix(${unit.package})`;
       const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: ${String(output.confidence)}\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}`;
+      const identical =
+        config.source === 'static' && JSON.stringify(related) === JSON.stringify(fullCheck);
+      const broader = async () => {
+        if (parent === undefined) throw new Error('missing task parent');
+        const remainingWall = (config.wallMs ?? 3_600_000) - (Date.now() - unitStart);
+        if (remainingWall <= 0) {
+          budgetStopped = true;
+          throw new Error('unit wall budget exhausted');
+        }
+        finalTree = await effects.broader(parent, remainingWall);
+        return finalTree.final.failureSet;
+      };
       const validation = await validateFix({
         baseline: accepted.failureSet,
-        related: () => check(related),
-        broader: async () => {
-          if (parent === undefined) throw new Error('missing task parent');
-          const remainingWall = (config.wallMs ?? 3_600_000) - (Date.now() - unitStart);
-          if (remainingWall <= 0) {
-            budgetStopped = true;
-            throw new Error('unit wall budget exhausted');
-          }
-          finalTree = await effects.broader(parent, remainingWall);
-          return finalTree.final.failureSet;
-        },
+        related: identical ? broader : () => check(related),
+        broader,
+        ...(config.source !== 'static'
+          ? {}
+          : {
+              relatedAccepts: (set: FailureSet) =>
+                set.exitCode !== null &&
+                (set.exitCode === 0 || set.failures.length > 0) &&
+                !taskHasFailures(task, set, 'static'),
+              reuseRelatedForBroader: identical,
+            }),
         stagedPaths: paths,
         diff: await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']),
         message,
