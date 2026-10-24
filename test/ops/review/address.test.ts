@@ -35,6 +35,7 @@ async function fixture(findings: Finding[] = [finding('a')]) {
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch: 'feature/x',
+    reviewed: { base: repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(), scope: 'full' },
     head: repo.git('rev-parse', 'HEAD').trim(),
     sources: [{ kind: 'agent', status: 'terminal' }],
     findings,
@@ -377,6 +378,85 @@ test('report storage failure retains the complete non-ok artifact', async () => 
     expect(result.status === 'failed' && result.error).toContain('report write failed');
     expect(reportOf(result).findings).toEqual([]);
     expect(reportOf(result).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test.each(['matching', 'uncommitted', 'different-base', 'missing'] as const)(
+  'clean record needs immutable full review scope: %s',
+  async (mode) => {
+    const f = await fixture([]);
+    try {
+      const record = f.record();
+      if (mode === 'uncommitted') record.reviewed!.scope = 'uncommitted';
+      if (mode === 'different-base') record.reviewed!.base = record.head;
+      if (mode === 'missing') delete record.reviewed;
+      const result = await makeReviewAddress({ ...f.deps, initialRecord: record })(f.input);
+      expect(result.status).toBe(mode === 'matching' ? 'ok' : 'needs-human');
+      expect(f.calls).toEqual([]);
+      if (mode !== 'matching')
+        expect(reportOf(result).reasons.join(' ')).toContain('reviewed base/scope');
+      expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
+        reportOf(result),
+      );
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+test('a record reviewed against HEAD cannot certify the wider target diff on the same clean head', async () => {
+  const f = await fixture([]);
+  try {
+    const record = { ...f.record(), reviewed: { base: f.record().head, scope: 'full' as const } };
+    const same = await makeReviewAddress({ ...f.deps, initialRecord: record })({
+      ...f.input,
+      base: record.head,
+    });
+    expect(same.status).toBe('ok');
+    const wider = await makeReviewAddress({ ...f.deps, initialRecord: record })(f.input);
+    expect(wider.status).toBe('needs-human');
+    expect(reportOf(wider).reasons.join(' ')).toContain('reviewed base/scope');
+    expect(f.calls).toEqual([]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('re-review keeps the original full comparison when a mutable target ref moves during work', async () => {
+  const f = await fixture();
+  const originalBase = f.record().reviewed!.base;
+  let reviewedBase: string | undefined;
+  try {
+    const result = await makeReviewAddress({
+      ...f.deps,
+      workerFactory: () => ({
+        escalation: createEscalationState,
+        fix: async (item) => {
+          const observedHead = f.record().head;
+          await f.repo.write('src/a.ts', 'verified fixture fix\n');
+          const commit = f.repo.commitAll('scripted verified fix');
+          f.repo.git('update-ref', 'refs/remotes/origin/merge-queue', commit);
+          return {
+            finding: { ...item, status: 'fixed' },
+            commit,
+            reason: 'fixed',
+            observedHead,
+            validation: [],
+          };
+        },
+      }),
+      review: async (input) => {
+        reviewedBase = input.base;
+        return {
+          status: 'ok',
+          value: { ...f.record(), reviewed: { base: input.base!, scope: 'full' }, findings: [] },
+        };
+      },
+    })(f.input);
+    expect(result.status).toBe('ok');
+    expect(reviewedBase).toBe(originalBase);
+    expect(f.repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim()).not.toBe(originalBase);
   } finally {
     await f.cleanup();
   }

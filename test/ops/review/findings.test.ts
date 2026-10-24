@@ -203,3 +203,19 @@ it('deferred major findings remain blocking for every shared readiness consumer'
   ]);
   expect(openBlocking(r, ['critical', 'major']).map((finding) => finding.id)).toEqual(['deferred']);
 });
+
+it('keeps reviewed scope only when every merged source attests the same immutable comparison', () => {
+  const one = {
+    ...record('agent', 'terminal'),
+    reviewed: { base: 'a'.repeat(40), scope: 'full' as const },
+  };
+  const two = { ...record('coderabbit', 'terminal'), reviewed: one.reviewed };
+  expect(merge([one, two]).reviewed).toEqual(one.reviewed);
+  expect(merge([one, record('coderabbit', 'terminal')]).reviewed).toBeUndefined();
+  expect(
+    merge([one, { ...two, reviewed: { ...one.reviewed, base: 'b'.repeat(40) } }]).reviewed,
+  ).toBeUndefined();
+  expect(
+    merge([one, { ...two, reviewed: { ...one.reviewed, scope: 'uncommitted' } }]).reviewed,
+  ).toBeUndefined();
+});

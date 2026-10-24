@@ -342,11 +342,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       };
       const dispositions = new Map<string, Finding>();
       let bookkeepingFailed = false;
+      let reviewedBase: string | undefined;
       const admitCleanRecord = async (root: string, record: FindingsRecord) => {
         const effects = makeSubprocessDevEffects(root);
         const read = await readWorkState(effects, {
           target: input.target ?? 'merge-queue',
-          ...(input.base ? { base: input.base } : {}),
+          ...(reviewedBase ? { base: reviewedBase } : {}),
         });
         if (!read.ok) throw new Error(read.reason);
         const state = read.state;
@@ -359,6 +360,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         )
           throw new Error(
             'clean findings record cannot prove dirty or untracked worktree content; run review.run again',
+          );
+        if (record.reviewed?.scope !== 'full' || record.reviewed.base !== reviewedBase)
+          throw new Error(
+            'clean findings record lacks matching full reviewed base/scope; run review.run again',
           );
         if (stop()) throw new Error(stop());
       };
@@ -558,6 +563,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           headRepo: `${meta.headRepositoryOwner.login}/${meta.headRepository.name}`,
           login: loginResult.stdout.trim(),
         };
+      }
+      if (input.source === 'local') {
+        const read = await readWorkState(makeSubprocessDevEffects(root), {
+          target: input.target ?? 'merge-queue',
+          ...(input.base ? { base: input.base } : {}),
+        });
+        if (!read.ok) return await finish('needs-human', read.reason);
+        reviewedBase = read.state.base;
       }
       for (let round = 1; round <= policy.review.rounds; round++) {
         const stopped = stop();
@@ -843,7 +856,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         const refreshed = await review({
           repoRoot: root,
           target: input.target ?? 'merge-queue',
-          ...(input.base ? { base: input.base } : {}),
+          ...(reviewedBase ? { base: reviewedBase } : {}),
           maxTokens: Math.max(1, remainingTokens()),
           wallMs: Math.max(1, remainingWallMs()),
         });

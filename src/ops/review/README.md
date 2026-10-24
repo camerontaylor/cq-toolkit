@@ -17,6 +17,13 @@ opt-in; without `--push`, local commits remain available and PR mutations
 are withheld. Explicit parent cancellation stops publication; a local
 budget stop can still publish earlier verified commits.
 
+Findings records carry `reviewed: { base, scope }`: the immutable comparison
+commit and `full` or `uncommitted` review scope. Local clean acceptance requires
+a full review against the addressing run's pinned base, in addition to exact
+branch/head, terminal sources and a clean index/worktree. Older records remain
+readable but lack that proof; run `review.run` again before accepting them as
+clean. An uncommitted-only review cannot certify the full target diff.
+
 Workers share one checkout but edit only their assigned literal file.
 Missing scope and overlapping files are refused or serialized. Workers
 cannot stage, commit or run commands. The engine serializes each candidate
@@ -31,7 +38,11 @@ in the PR worktree before retrying. Dependency provisioning never runs an
 install command on a worker's behalf. Canonical repository aliases retain
 the same file identity; outside symlinks remain refused.
 Rejected/deferred code citations are verified at the worker's observed
-execution head, even when a sibling commits later.
+execution head, even when a sibling commits later. Git path lists use NUL
+delimiters, retaining Unicode, whitespace, newlines and quotes as literal
+filenames. Parent cancellation reaches baseline, related and broader check
+subprocesses; the engine awaits child termination before candidate cleanup,
+restoration or releasing its serial validation boundary.
 
 The engine uses the shared escalation allocator: configured worker
 attempts, then bounded rescue, then human. An affirmative broader

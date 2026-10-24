@@ -203,7 +203,11 @@ async function world(
         .filter(([file, text]) => text !== tree.get(file))
         .map(([file]) => file);
       if (a.includes('--name-only'))
-        return ok((a.includes('--cached') ? indexed : changed).join('\n'));
+        return ok(
+          (a.includes('--cached') ? indexed : changed)
+            .map((path) => path + (a.includes('-z') ? '\0' : '\n'))
+            .join(''),
+        );
       return ok(
         indexed
           .map(

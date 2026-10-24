@@ -30,6 +30,14 @@ export const FindingsRecordSchema = z
     schemaVersion: z.literal(1),
     branch: z.string(),
     head: z.string(),
+    /** Immutable comparison and coverage attested by the review producer. Legacy records lack proof. */
+    reviewed: z
+      .object({
+        base: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+        scope: z.enum(['full', 'uncommitted']),
+      })
+      .strict()
+      .optional(),
     sources: z.array(ReviewSourceSchema),
     findings: z.array(FindingSchema),
   })
@@ -105,6 +113,14 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
     schemaVersion: 1,
     branch: first.branch,
     head: first.head,
+    ...(first.reviewed &&
+    records.every(
+      (record) =>
+        record.reviewed?.base === first.reviewed!.base &&
+        record.reviewed.scope === first.reviewed!.scope,
+    )
+      ? { reviewed: first.reviewed }
+      : {}),
     sources: [...sources.values()],
     findings: [...findings.values()],
   };

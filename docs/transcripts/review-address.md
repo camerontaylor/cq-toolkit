@@ -71,3 +71,30 @@ and blocked cycle logs and partial findings remain available. Evidence and
 restore cleanup do not inherit work-admission guards. A reviewer that returns
 terminal output after the deadline cannot produce an exit-0 clean result.
 These controls are hermetic checks, not additional live dogfood runs.
+
+The required #445–#447 repair checkpoint adds actual `review.run` → local
+`review.address` controls. A clean, full record against the same immutable
+base exits 0; uncommitted-only, missing-proof and different-base records
+refuse. A matching explicit narrow base is accepted only when addressing
+requests that same base. Moving the target ref during a scripted fix does
+not change the re-review comparison.
+
+Real check children signal readiness before parent cancellation. Baseline,
+related and broader cases must settle before the configured check timeout;
+the child PID must already be gone when the operation returns, candidate
+worktrees must be removed, owned edits restored and later dispatch withheld.
+Path controls commit exact Unicode, space, newline, quote and trailing-newline
+filenames alongside a parallel sibling, checking each commit's NUL-delimited
+path list and the clean final index/worktree.
+
+The named regression set was also run against the original five source
+files: 19/168 failed, including each of the three defects (the space-name
+control passed). Restoring the repair produces the passing focused
+checkpoint below. The spawned CLI again observed success exit 0 and honest
+defer/budget exits 3; these remain hermetic fixture evidence, with no new
+production dogfood or CodeRabbit invocation.
+
+```text
+test:narrow result="pass" exit=0 files=7 projects="pure,process" tests="179/179" failed=0 skipped=0 wait="0.0s" duration="34.4s" nice=5 load="1.6" uptime="536466s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/gates/adapters.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/findings.test.ts,test/ops/review/run.test.ts"
+test:narrow result="pass" exit=0 files=7 projects="pure,process,integration" tests="198/198" failed=0 skipped=0 wait="0.0s" duration="15.2s" nice=5 load="2.3" uptime="536506s" source="explicit" ran="test/cli/registry-props.test.ts,test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/registry.test.ts"
+```

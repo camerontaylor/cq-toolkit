@@ -129,7 +129,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
           repoRoot: input.repoRoot,
           reviewer: 'coderabbit',
           target,
-          ...(input.base ? { base: input.base } : {}),
+          base: state.base,
           ...(input.uncommitted === undefined ? {} : { uncommitted: input.uncommitted }),
         });
         if (result.status === 'ok') {
@@ -430,6 +430,10 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
       }
       const boundRecords = records.map((record) => ({
         ...record,
+        reviewed: {
+          base: input.uncommitted ? state.head : state.base,
+          scope: input.uncommitted ? ('uncommitted' as const) : ('full' as const),
+        },
         branch: record.branch || state.branch,
         head: record.head || state.head,
       }));

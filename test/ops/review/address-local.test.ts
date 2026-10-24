@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { makeReviewRun } from '../../../src/ops/review/run.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { Finding, FindingsRecord } from '../../../src/ops/review/findings.js';
@@ -249,3 +250,54 @@ describe('review.address local full cycle', () => {
     }
   });
 });
+
+test.each(['full', 'uncommitted', 'narrow-base', 'matching-narrow-base'] as const)(
+  'actual review.run record gates local clean acceptance: %s',
+  async (mode) => {
+    const f = await fixture();
+    let calls = 0;
+    const drivers: DriverFactory = {
+      resolve: (request) => ({
+        lane: 'ai-sdk',
+        modelSpec: request.modelSpec,
+        driver: {
+          run: async () => {
+            calls++;
+            return {
+              stopReason: 'complete',
+              structuredOutput: { findings: [] },
+              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          },
+        },
+      }),
+    };
+    try {
+      const narrow = mode === 'narrow-base' || mode === 'matching-narrow-base';
+      const head = f.repo.git('rev-parse', 'HEAD').trim();
+      const produced = await makeReviewRun({ drivers })({
+        repoRoot: f.repo.root,
+        ...(narrow ? { base: head } : {}),
+        ...(mode === 'uncommitted' ? { uncommitted: true } : {}),
+      });
+      expect(produced.status).toBe('ok');
+      if (produced.status !== 'ok') return;
+      expect(produced.value.findings).toEqual([]);
+      const result = await makeReviewAddress({ drivers, initialRecord: produced.value })({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+        ...(mode === 'matching-narrow-base' ? { base: head } : {}),
+      });
+      expect(result.status).toBe(
+        mode === 'full' || mode === 'matching-narrow-base' ? 'ok' : 'needs-human',
+      );
+      expect(calls).toBe(1);
+      if (result.status !== 'ok')
+        expect(result.report!.reasons.join(' ')).toContain('reviewed base/scope');
+    } finally {
+      await f.cleanup();
+    }
+  },
+);

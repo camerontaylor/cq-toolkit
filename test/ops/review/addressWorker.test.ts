@@ -938,3 +938,109 @@ test.each(['index', 'worker-snapshot', 'parent'] as const)(
     }
   },
 );
+
+test.each([
+  'src/café.ts',
+  'src/space name.ts',
+  'src/line\nbreak.ts',
+  'src/quote"name.ts',
+  'src/trailing\n',
+] as const)('exact Git path %j can commit without poisoning sibling progress', async (file) => {
+  const f = await fixture(async (input) => {
+    if (input.outputSchema?.name === 'review.address.closure/v1')
+      return { closed: true, reason: 'verified candidate' };
+    if (!input.prompt.startsWith('related-check feedback')) {
+      const selected = input.prompt.includes('Address only src/b.ts') ? 'src/b.ts' : file;
+      await writeFile(join(input.workspace!.path, selected), 'GOOD\n');
+    }
+    return { disposition: 'fixed', reason: 'fixed exact file', evidence: [] };
+  });
+  try {
+    await f.repo.write(file, 'BAD\n');
+    f.repo.commitAll('unusual filename');
+    const results = await Promise.all([
+      f.engine.fix(finding(file), 1),
+      f.engine.fix(finding('src/b.ts'), 1),
+    ]);
+    expect(results.map((result) => result.finding.status)).toEqual(['fixed', 'fixed']);
+    for (const [index, path] of [file, 'src/b.ts'].entries()) {
+      expect(results[index]!.commit).toBeDefined();
+      expect(
+        f.repo.git(
+          'diff-tree',
+          '--no-commit-id',
+          '--name-only',
+          '-r',
+          '-z',
+          results[index]!.commit!,
+        ),
+      ).toBe(path + '\0');
+      expect(await readFile(join(f.repo.root, path), 'utf8')).toBe('GOOD\n');
+    }
+    expect(f.repo.git('diff', '--cached', '--name-only', '-z')).toBe('');
+    expect(f.repo.git('diff', '--name-only', '-z', 'HEAD')).toBe('');
+  } finally {
+    await f.cleanup();
+  }
+});
+test.each(['baseline', 'related', 'broader'] as const)(
+  'parent cancellation terminates the actual running %s check before restore and FIFO release',
+  async (phase) => {
+    const parent = new AbortController();
+    const external = await mkdtemp(join(tmpdir(), 'cq-running-check-'));
+    const marker = join(external, 'ready');
+    // Counts are candidate-owned, not shared worker edits: baseline then related then broader.
+    const wanted = { baseline: 1, related: 2, broader: 3 }[phase];
+    const check = `
+const fs = require('node:fs');
+const countFile = '.cq-check-count';
+const n = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, 'utf8')) + 1 : 1;
+fs.writeFileSync(countFile, String(n));
+if (n === ${wanted}) {
+  fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+  setInterval(() => {}, 1000);
+}
+`;
+    const f = await fixture(undefined, check, { parentSignal: parent.signal });
+    let running: ReturnType<typeof f.engine.fix> | undefined;
+    let pid: number | undefined;
+    try {
+      running = f.engine.fix(finding(), 1);
+      await vi.waitFor(
+        async () => {
+          pid = Number(await readFile(marker, 'utf8'));
+          expect(pid).toBeGreaterThan(0);
+        },
+        { timeout: 3000 },
+      );
+      let settled = false;
+      void running.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      parent.abort();
+      // Independent of the five-second configured check timeout.
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 2000 });
+      const result = await running;
+      expect(result.commit).toBeUndefined();
+      expect(result.reason).toContain('parent cancelled');
+      expect(() => process.kill(pid!, 0)).toThrow();
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+      expect(f.repo.git('diff', '--cached', '--name-only', '-z')).toBe('');
+      expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain('candidate-');
+      const calls = f.calls();
+      expect((await f.engine.fix(finding('src/b.ts'), 1)).reason).toContain('parent cancelled');
+      expect(f.calls()).toBe(calls);
+    } finally {
+      parent.abort();
+      await running;
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  },
+);

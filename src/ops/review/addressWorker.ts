@@ -26,6 +26,7 @@ import {
   type DiffSecretScanner,
 } from '../dev/denylist.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
+import { zList } from '../dev/internal/workState.js';
 import { validateFix, type ValidationVerdict } from '../fix/validate.js';
 import {
   createEscalationState,
@@ -121,7 +122,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     const result = await deps.git(['-C', cwd, ...args]);
     if (result.code !== 0)
       throw new Error(`git ${args[0]} refused: ${result.stderr.slice(0, 500)}`);
-    return result.stdout.trim();
+    return args.includes('-z') ? result.stdout : result.stdout.trim();
   };
   const stop = () => {
     if (fatal) throw new AddressRefusal(fatal, true);
@@ -366,7 +367,18 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               }
             : { ...command, ...relatedCheckCommand(command, files, check.relatedArgs) };
       }
-      const result = await makeCheckRunner(subprocessRunCheck)({ adapter: check.adapter, command });
+      const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
+        (signal): signal is AbortSignal => signal !== undefined,
+      );
+      const signal = signals.length ? AbortSignal.any(signals) : undefined;
+      const result = await makeCheckRunner((cmd) =>
+        subprocessRunCheck(cmd, signal ? { signal } : undefined),
+      )({
+        adapter: check.adapter,
+        command,
+      });
+      // Cancellation is classified only after the actual child has settled.
+      stop();
       if (result.status !== 'ok') throw new Error(`configured check was ${result.status}`);
       results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
     }
@@ -406,9 +418,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           const head = await git(root, ['rev-parse', 'HEAD']);
           if (!verifiedHeads.has(head))
             throw new Error('unexpected HEAD movement; evidence left intact');
-          const indexed = (await git(root, ['diff', '--cached', '--name-only']))
-            .split('\n')
-            .filter(Boolean);
+          const indexed = zList(await git(root, ['diff', '--cached', '--name-only', '-z']));
           if (indexed.some((path) => path !== file))
             fatal = 'worker changed the index outside its scope';
           await git(root, ['add', '--', file]);
@@ -432,13 +442,13 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       try {
         initialization ??= withMutation(async () => {
           if (
-            (await git(root, ['diff', '--name-only', 'HEAD'])) ||
-            (await git(root, ['diff', '--cached', '--name-only']))
+            (await git(root, ['diff', '--name-only', '-z', 'HEAD'])) ||
+            (await git(root, ['diff', '--cached', '--name-only', '-z']))
           )
             throw new Error('review.address requires a clean tracked worker tree');
-          const unknown = (await git(root, ['ls-files', '--others', '--exclude-standard']))
-            .split('\n')
-            .filter((path) => path && !path.startsWith('.cq/'));
+          const unknown = zList(
+            await git(root, ['ls-files', '-z', '--others', '--exclude-standard']),
+          ).filter((path) => path && !path.startsWith('.cq/'));
           if (unknown.length) throw new Error('review.address requires no unknown worker files');
           verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
         }, admitMutation);
@@ -507,15 +517,13 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             const parent = await git(root, ['rev-parse', 'HEAD']);
             if (!verifiedHeads.has(parent))
               throw new AddressRefusal('verified parent changed outside engine', true);
-            const index = await git(root, ['diff', '--cached', '--name-only']);
+            const index = await git(root, ['diff', '--cached', '--name-only', '-z']);
             if (index)
               throw new AddressRefusal('worker changed the index; engine refuses staging', true);
-            const changes = (await git(root, ['diff', '--name-only', 'HEAD']))
-              .split('\n')
-              .filter(Boolean);
-            const untracked = (await git(root, ['ls-files', '--others', '--exclude-standard']))
-              .split('\n')
-              .filter((p) => p && !p.startsWith('.cq/'));
+            const changes = zList(await git(root, ['diff', '--name-only', '-z', 'HEAD']));
+            const untracked = zList(
+              await git(root, ['ls-files', '-z', '--others', '--exclude-standard']),
+            ).filter((p) => p && !p.startsWith('.cq/'));
             if ([...changes, ...untracked].some((p) => !active.has(p)))
               throw new AddressRefusal('unknown or out-of-scope worker edits', true);
             if (
@@ -659,11 +667,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               stop();
               if (
                 (await git(candidate, ['write-tree'])) !== tree ||
-                (await git(candidate, ['diff', '--name-only'])) ||
-                (await git(candidate, ['ls-files', '--others', '--exclude-standard']))
-                  .split('\n')
-                  .filter((path) => path && path !== 'node_modules')
-                  .join('\n')
+                (await git(candidate, ['diff', '--name-only', '-z'])) ||
+                zList(
+                  await git(candidate, ['ls-files', '-z', '--others', '--exclude-standard']),
+                ).filter((path) => path !== 'node_modules').length > 0
               )
                 throw new AddressRefusal('check or feedback mutated candidate', true);
               if ((await git(root, ['rev-parse', 'HEAD'])) !== parent)
@@ -672,9 +679,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 throw new AddressRefusal('worker file changed after candidate snapshot', true);
               await git(root, ['add', '--', file]);
               if (
-                (await git(root, ['diff', '--cached', '--name-only']))
-                  .split('\n')
-                  .some((p) => p !== file)
+                zList(await git(root, ['diff', '--cached', '--name-only', '-z'])).some(
+                  (p) => p !== file,
+                )
               )
                 throw new AddressRefusal('staging absorbed sibling paths', true);
               await git(root, ['commit', '-m', message]);

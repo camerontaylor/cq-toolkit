@@ -1250,3 +1250,36 @@ it.each(['deadline', 'parent'] as const)(
     }
   },
 );
+
+it.each([false, true])(
+  'persists immutable reviewed base and scope for uncommitted=%s',
+  async (uncommitted) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/a.ts', 'export const a = 2;\n');
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, uncommitted });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      const reviewed = {
+        base: uncommitted
+          ? repo.git('rev-parse', 'HEAD').trim()
+          : repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+        scope: uncommitted ? 'uncommitted' : 'full',
+      };
+      expect(result.value.reviewed).toEqual(reviewed);
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [file] = await readdir(folder);
+      expect(JSON.parse(await readFile(join(folder, file!), 'utf8')) as unknown).toMatchObject({
+        reviewed,
+      });
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
