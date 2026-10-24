@@ -549,6 +549,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (record.head !== state.head || record.branch !== state.branch)
                 throw new Error('findings admission head/branch changed');
               await admitHistory(root, state.branch);
+              if (stop()) throw new Error(stop());
               await effects.openLedger(state.branch).mutate((ledger) => {
                 const entry: DevCycleRecord = {
                   kind: 'cycle',
@@ -824,16 +825,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     text: discussionText(item.item.body, item.item.comments),
                     status: 'open',
                   };
-                  if ((await branchName(root)) !== item.worktree.branch)
-                    throw new Error('worker execution branch changed');
-                  await admitRecord(root, {
-                    schemaVersion: 1,
-                    branch: item.worktree.branch,
-                    head: await gitText(root, ['rev-parse', 'HEAD']),
-                    sources: [{ kind: 'pr-threads', status: 'terminal' }],
-                    findings: [finding],
-                  });
-                  const fix = await bindWorker(root).fix(finding, round);
+                  const bound = bindWorker(root);
+                  const admit = async (head: string) => {
+                    if ((await branchName(root)) !== item.worktree.branch)
+                      throw new Error('worker execution branch changed');
+                    await admitRecord(root, {
+                      schemaVersion: 1,
+                      branch: item.worktree.branch,
+                      head,
+                      sources: [{ kind: 'pr-threads', status: 'terminal' }],
+                      findings: [finding],
+                    });
+                  };
+                  if (bound.withVerifiedHead) await bound.withVerifiedHead(admit);
+                  else await admit(await gitText(root, ['rev-parse', 'HEAD']));
+                  const fix = await bound.fix(finding, round);
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
                   remember(fix);
@@ -978,19 +984,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     ...(thread.line && thread.line > 0 ? { line: thread.line } : {}),
                     text: discussionText(thread.body, thread.replies),
                     severity: 'major',
-                    status:
-                      (loop.status === 'ok' &&
-                        fixesById.get(thread.id)?.finding.status === 'rejected') ||
-                      rejectionReasons.has(thread.id)
-                        ? 'rejected'
-                        : 'open',
-                    ...((loop.status === 'ok' &&
-                      fixesById.get(thread.id)?.finding.status === 'rejected') ||
-                    rejectionReasons.has(thread.id)
-                      ? {
-                          reason:
-                            rejectionReasons.get(thread.id) ?? fixesById.get(thread.id)!.reason,
-                        }
+                    status: rejectionReasons.has(thread.id) ? 'rejected' : 'open',
+                    ...(rejectionReasons.has(thread.id)
+                      ? { reason: rejectionReasons.get(thread.id)! }
                       : {}),
                   })),
               };

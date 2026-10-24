@@ -78,6 +78,8 @@ export interface AddressFix {
 export interface AddressWorker {
   fix(finding: Finding, round: number): Promise<AddressFix>;
   escalation(): EscalationState;
+  /** Capture and admit against a verified head without crossing an engine commit. */
+  withVerifiedHead?<T>(action: (head: string) => Promise<T>): Promise<T>;
 }
 export interface AddressWorkerDeps {
   git: GhFn;
@@ -298,12 +300,13 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     editable: boolean,
     prior?: Awaited<ReturnType<typeof addressFailureFeedback>>,
     onDispatch?: (row: AddressAttempt) => void,
+    sources: readonly { path: string; text: string }[] = [],
   ) => {
     stop();
     if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
     if (prior)
       prompt += `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${prior.patch}`;
-    await scan(prompt, prior?.contents);
+    await scan(prompt, [...sources, ...(prior?.contents ?? [])]);
     stop();
     let requestRefusal: AddressRefusal | undefined;
     const resolved = deps.drivers.resolve({
@@ -312,7 +315,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       beforeRequest: async (text, contents = []) => {
         try {
           stop();
-          await scan(text, [...contents, ...(prior?.contents ?? [])]);
+          await scan(text, [...contents, ...sources, ...(prior?.contents ?? [])]);
           stop();
         } catch (error) {
           if (error instanceof AddressRefusal) requestRefusal = error;
@@ -440,8 +443,34 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     }
     return results;
   };
+  const initialize = (admit = stop) =>
+    (initialization ??= withMutation(async () => {
+      if (
+        (await git(root, ['diff', '--name-only', '-z', 'HEAD'])) ||
+        (await git(root, ['diff', '--cached', '--name-only', '-z']))
+      )
+        throw new Error('review.address requires a clean tracked worker tree');
+      const { unknown: callerUnknown } = await inspectUntracked();
+      if (callerUnknown.length) throw new Error('review.address requires no unknown worker files');
+      verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
+    }, admit));
   return {
     escalation: () => state,
+    async withVerifiedHead(action) {
+      await initialize();
+      return withMutation(async () => {
+        const head = await git(root, ['rev-parse', 'HEAD']);
+        stop();
+        if (!verifiedHeads.has(head))
+          throw new AddressRefusal('unexpected admission head outside engine', true);
+        const result = await action(head);
+        stop();
+        const after = await git(root, ['rev-parse', 'HEAD']);
+        stop();
+        if (after !== head) throw new AddressRefusal('admission head changed outside engine', true);
+        return result;
+      }, stop);
+    },
     async fix(finding, round) {
       let observedHead = '';
       const history: AddressFailedAttempt[] = [];
@@ -563,18 +592,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         regression = false;
       let reason = 'initial finding';
       try {
-        initialization ??= withMutation(async () => {
-          if (
-            (await git(root, ['diff', '--name-only', '-z', 'HEAD'])) ||
-            (await git(root, ['diff', '--cached', '--name-only', '-z']))
-          )
-            throw new Error('review.address requires a clean tracked worker tree');
-          const { unknown: callerUnknown } = await inspectUntracked();
-          if (callerUnknown.length)
-            throw new Error('review.address requires no unknown worker files');
-          verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
-        }, admitMutation);
-        await initialization;
+        await initialize(admitMutation);
         await safeFile(root, file);
         const classified = classifyStagePaths([file], undefined, false, false);
         if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
@@ -806,6 +824,13 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   `Verify assigned-finding closure on this exact candidate. Read only. Return closed=true only if the defect described is resolved.\nFinding: ${JSON.stringify(finding)}\nCandidate tree: ${tree}\nPatch: ${diff}`,
                   reviewer,
                   false,
+                  undefined,
+                  undefined,
+                  [
+                    { path: file, text: diff },
+                    { path: file, text: await git(candidate, ['show', `${parent}:${file}`]) },
+                    { path: file, text: await git(candidate, ['show', `${tree}:${file}`]) },
+                  ],
                 ),
               );
               if (!closure.closed)

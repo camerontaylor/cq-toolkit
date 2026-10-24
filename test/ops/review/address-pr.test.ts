@@ -228,7 +228,11 @@ async function world(
         ? { code: 1, stdout: '', stderr: 'missing citation at execution head' }
         : ok(text);
     }
-    if (a[0] === 'write-tree') return ok(treeHash(index));
+    if (a[0] === 'write-tree') {
+      const sha = treeHash(index);
+      trees.set(sha, new Map(index));
+      return ok(sha);
+    }
     if (a[0] === 'stash') return ok('');
     if (a[0] === 'restore') {
       for (const file of a.slice(a.indexOf('--') + 1))

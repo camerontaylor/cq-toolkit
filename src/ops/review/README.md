@@ -145,6 +145,21 @@ editing workers still run concurrently. Any mismatch remains a sticky refusal, r
 changed bytes and verified local commits, and withholds publication, disposition
 proof and further reviewer dispatch.
 
+PR findings capture and ledger admission use the worker's optional runtime
+`withVerifiedHead` callback under the same mutation FIFO and checkout lock as
+commit verification. Initialization completes before admission; callbacks do not
+acquire the mutation FIFO again. Lock order stays mutation, checkout, bookkeeping.
+External HEAD movement and cancellation refuse admission, while existing injected
+workers without the callback retain their previous behavior. Editing and model
+execution remain parallel outside this short admission section.
+
+Closure uploads scan the exact candidate patch, immutable parent leaf and candidate
+tree leaf with their repository-relative file path before invoking the reviewer.
+The same raw source bytes accompany every actual request scan, including retries;
+leading whitespace and final newlines are preserved. A clean current-round
+rejection is retained only when refreshed authenticated discussion/head proof
+still matches its ledger disposition. New reviewer feedback reopens the finding.
+
 ## Bounded agent review
 
 `review.run` and `dev.review` use the configured reviewer role for sequential

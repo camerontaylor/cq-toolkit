@@ -1,3 +1,4 @@
+import { watch } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm, symlink, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -208,6 +209,132 @@ async function fixture(
     },
   };
 }
+
+describe('review.address verified admission fence', () => {
+  test.each(['before', 'during'] as const)(
+    'external HEAD movement %s admission refuses',
+    async (timing) => {
+      const f = await fixture();
+      let admitted = false;
+      const external = async () => {
+        await f.repo.write('README.md', 'external admission movement\n');
+        f.repo.commitAll('outside admission engine');
+      };
+      try {
+        await f.engine.withVerifiedHead!(async (head) => {
+          expect(head).toBe(f.initial);
+        });
+        if (timing === 'before') await external();
+        await expect(
+          f.engine.withVerifiedHead!(async () => {
+            admitted = true;
+            if (timing === 'during') await external();
+          }),
+        ).rejects.toThrow(/admission head.*outside engine/);
+        expect(admitted).toBe(timing === 'during');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('cancellation during admission refuses the result and queued callback', async () => {
+    const parent = new AbortController();
+    const f = await fixture(undefined, '', { parentSignal: parent.signal });
+    let entered!: () => void, release!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let queuedAdmitted = false;
+    const first = f.engine.withVerifiedHead!(async () => {
+      entered();
+      await held;
+    });
+    const firstRefused = expect(first).rejects.toThrow(/parent cancelled/);
+    let queued: Promise<unknown> | undefined;
+    try {
+      await entry;
+      queued = f.engine.withVerifiedHead!(async () => {
+        queuedAdmitted = true;
+      });
+      const queuedRefused = expect(queued).rejects.toThrow(/parent cancelled/);
+      parent.abort();
+      release();
+      await Promise.all([firstRefused, queuedRefused]);
+      expect(queuedAdmitted).toBe(false);
+      expect(f.calls()).toBe(0);
+    } finally {
+      parent.abort();
+      release();
+      await Promise.allSettled([first, ...(queued ? [queued] : [])]);
+      await f.cleanup();
+    }
+  });
+});
+
+describe('review.address closure source provenance', () => {
+  test.each(['clean', 'parent', 'candidate', 'patch'] as const)(
+    'configured path policy scans exact closure sources: %s',
+    async (mode) => {
+      const original = mode === 'parent' ? ' PRIVATE\n' : ' PUBLIC\n';
+      const candidate = mode === 'candidate' || mode === 'patch' ? ' PRIVATE\n' : ' GOOD\n';
+      const scans: Array<Array<{ text: string; path?: string }>> = [];
+      let configured: DiffSecretScanner;
+      let closures = 0;
+      const f = await fixture(
+        async (input) => {
+          if (input.outputSchema?.name === 'review.address.closure/v1') {
+            closures++;
+            return { closed: true, reason: 'verified' };
+          }
+          if (!input.prompt.startsWith('related-check feedback'))
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), candidate);
+          return { disposition: 'fixed', reason: 'fixed', evidence: [] };
+        },
+        '',
+        {
+          providerRequest: true,
+          configure: (config) => {
+            config.review!.denylistPatternsFile = 'patterns.yml';
+          },
+          scanner: async (components) => {
+            if (
+              components.some((part) => part.text.includes('Verify assigned-finding closure')) ||
+              components.filter((part) => part.path === 'src/a.ts').length >= 3
+            )
+              scans.push([...components]);
+            return configured(components);
+          },
+        },
+      );
+      try {
+        await f.repo.write('src/a.ts', original);
+        await f.repo.write(
+          'patterns.yml',
+          `rules:\n  - id: closure-leaf\n    description: closure source\n    regex: '${mode === 'patch' ? '^\\+ PRIVATE' : '^ PRIVATE'}'\n    path: '^src/a\\.ts$'\n    sample: '${mode === 'patch' ? '+ PRIVATE' : ' PRIVATE'}'\nclean_probes:\n  - ' PUBLIC'\n`,
+        );
+        f.repo.commitAll('closure policy and original leaf');
+        configured = makeRepoDiffScanner(f.repo.root, 'patterns.yml');
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.finding.status, result.reason).toBe(mode === 'clean' ? 'fixed' : 'deferred');
+        expect(closures).toBe(mode === 'clean' ? 1 : 0);
+        expect(scans.length).toBeGreaterThan(0);
+        for (const scan of scans) {
+          const sources = scan.filter((part) => part.path === 'src/a.ts').slice(-3);
+          expect(sources.map((part) => part.text).slice(-2)).toEqual([original, candidate]);
+          expect(sources[0]!.text).toMatch(/^diff --git \S+\/src\/a\.ts \S+\/src\/a\.ts\n/);
+        }
+        if (mode === 'clean') expect(scans).toHaveLength(2);
+        else expect(result.reason).toMatch(/upload/);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+});
 
 describe('review.address failed-attempt branches', () => {
   test('SHA256 failure branches are ordinary single-parent commits with create-only identity', async () => {
@@ -1084,6 +1211,7 @@ describe('review.address candidate isolation', () => {
       const held = new Promise<void>((resolve) => {
         releaseSibling = resolve;
       });
+      let candidateEntries = 0;
       const f = await fixture(
         async (input) => {
           if (input.outputSchema?.name === 'review.address.closure/v1') {
@@ -1106,13 +1234,33 @@ describe('review.address candidate isolation', () => {
         gateKind === 'related'
           ? `const fs=require('node:fs'); if(fs.readFileSync('src/a.ts','utf8').includes('GOOD') && !fs.readFileSync('src/b.ts','utf8').includes('GOOD')) {console.log('src/a.ts(1,1): error TS9999: requires sibling');process.exitCode=1;}`
           : 'process.exitCode=0;',
+        {
+          gitHook: async (args, run) => {
+            const result = await run(args);
+            if (
+              args.includes('worktree') &&
+              args.includes('add') &&
+              args.some((arg) => /\/candidate-[^/]+$/.test(arg))
+            ) {
+              candidateEntries++;
+              // A owns acceptance FIFO before B completes its edit invocation.
+              // B acceptance queues behind A's immutable candidate gates.
+              releaseSibling();
+            }
+            return result;
+          },
+        },
       );
       const b = f.engine.fix(finding('src/b.ts'), 1);
       try {
         const a = await f.engine.fix(finding(), 1);
         expect(a.commit).toBeUndefined();
         expect(a.finding.status).toBe('deferred');
-        expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+        expect(candidateEntries).toBeGreaterThanOrEqual(1);
+        expect(a.reason).toMatch(
+          gateKind === 'closure' ? /assigned finding remains open/ : /candidate validation refused/,
+        );
+        expect(f.repo.git('show', 'HEAD:src/a.ts')).toBe('BAD\n');
         expect(await readFile(join(f.repo.root, 'src/b.ts'), 'utf8')).toBe('GOOD\n');
         releaseSibling();
         const fixedB = await b;
@@ -1557,6 +1705,55 @@ test.each([
     await f.cleanup();
   }
 });
+// Observe a complete atomic child receipt; worker completion bounds missing readiness.
+function observeRunningCheck(directory: string) {
+  let resolveReady!: (pid: number) => void, rejectReady!: (error: unknown) => void;
+  const ready = new Promise<number>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  void ready.catch(() => undefined);
+  const watcher = watch(directory, (_event, name) => {
+    if (name?.toString() !== 'ready') return;
+    void readFile(join(directory, 'ready'), 'utf8')
+      .then((text) => {
+        const pid = Number(text);
+        if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('invalid child readiness PID');
+        resolveReady(pid);
+      })
+      .catch(rejectReady);
+  });
+  watcher.on('error', rejectReady);
+  return {
+    wait: (running: Promise<{ reason: string }>) =>
+      Promise.race([
+        ready,
+        running.then((result) => {
+          throw new Error(`worker ended before check readiness: ${result.reason}`);
+        }),
+      ]),
+    close: () => watcher.close(),
+  };
+}
+
+test('missing child readiness fails on the actual completed worker result', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'cq-no-check-readiness-'));
+  const f = await fixture(undefined, 'process.exitCode=1;');
+  const observer = observeRunningCheck(directory);
+  let running: ReturnType<typeof f.engine.fix> | undefined;
+  try {
+    running = f.engine.fix(finding(), 1);
+    await expect(observer.wait(running)).rejects.toThrow(/worker ended before check readiness:/);
+    expect((await running).commit).toBeUndefined();
+    await expect(readFile(join(directory, 'ready'))).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    observer.close();
+    await running;
+    await f.cleanup();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test.each(['baseline', 'related', 'broader'] as const)(
   'parent cancellation terminates the actual running %s check before restore and FIFO release',
   async (phase) => {
@@ -1571,22 +1768,18 @@ const countFile = '.cq-check-count';
 const n = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, 'utf8')) + 1 : 1;
 fs.writeFileSync(countFile, String(n));
 if (n === ${wanted}) {
-  fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+  fs.writeFileSync(${JSON.stringify(marker + '.tmp')}, String(process.pid));
+  fs.renameSync(${JSON.stringify(marker + '.tmp')}, ${JSON.stringify(marker)});
   setInterval(() => {}, 1000);
 }
 `;
     const f = await fixture(undefined, check, { parentSignal: parent.signal });
+    const observer = observeRunningCheck(external);
     let running: ReturnType<typeof f.engine.fix> | undefined;
     let pid: number | undefined;
     try {
       running = f.engine.fix(finding(), 1);
-      await vi.waitFor(
-        async () => {
-          pid = Number(await readFile(marker, 'utf8'));
-          expect(pid).toBeGreaterThan(0);
-        },
-        { timeout: 3000 },
-      );
+      pid = await observer.wait(running);
       let settled = false;
       void running.then(
         () => {
@@ -1611,6 +1804,7 @@ if (n === ${wanted}) {
       expect((await f.engine.fix(finding('src/b.ts'), 1)).reason).toContain('parent cancelled');
       expect(f.calls()).toBe(calls);
     } finally {
+      observer.close();
       parent.abort();
       await running;
       await f.cleanup();

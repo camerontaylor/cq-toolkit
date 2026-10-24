@@ -530,3 +530,99 @@ doc verification exit 0 (54 current). No provider, live, CR, coverage, baseline 
 policy change. Independent delta review and fresh CI remain required. The complete
 current-PR aggregate 60000-token feasibility blocker remains separate; prompt-cap
 fit and focused source checks do not establish operational or whole-PR acceptance.
+
+### Late closure provenance, admission, and refreshed rejection repairs (#460–462)
+
+Parent baseline: `996d8e6bf000aecd1d1cf2ebd75917ab149394c4`.
+The production closure verifier now scans the exact candidate patch and immutable
+parent/candidate leaf bytes under the assigned repository-relative path. The same
+sources accompany both invocation admission and every actual provider-send gate.
+A real configured path policy (`^src/a\.ts$`) with whitespace-anchored rules
+causally refused parent, candidate, and patch-only positives before closure
+invocation; a clean control requires exact trailing newlines at both gates.
+
+The new optional engine-owned `AddressWorker.withVerifiedHead(action)` captures
+HEAD and admits the record inside the existing mutation FIFO and checkout mutex.
+Injected workers without the method retain their previous behavior. Initialization
+uses the same guards as before. Lock order is mutation FIFO → checkout mutex →
+bookkeeping FIFO; bookkeeping does not acquire mutation. Worker execution remains
+parallel. Cancellation is checked before entry and after awaited admission;
+unregistered external HEAD movement before/during admission still refuses.
+
+A deterministic real-Git rendezvous made the old adapter capture HEAD before a
+sibling committed and return that captured value only after the sibling's verified
+commit. The old admission rejected a legitimate transition; fenced admission
+accepts it. Refreshed rejection classification now always requires the existing
+current-head, authenticated author, and complete discussion proof, including for
+current-round fixes. A fresh reviewer follow-up reopens the finding; the unchanged
+positive and persisted carry controls retain strict proof requirements.
+
+Causal before checkpoints (the second run retained the original address.ts seams,
+while the unrelated closure repair was being applied):
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="77/82" failed=5 skipped=0 wait="283.9s" duration="181.3s" nice=5 load="7.8" uptime="549566s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/addressWorker.test.ts"
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="21/23" failed=2 skipped=0 wait="0.0s" duration="166.1s" nice=5 load="7.4" uptime="549759s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+The first checkpoint contains four new provenance failures and one separate
+existing fixture step-budget failure. The second contains the admission race and
+fresh-follow-up false rejection. Durable captured stdout is retained under
+`/home/ctaylor/review-evidence/pr435-{closure,admission-rejection}-before.log`.
+The wrapper intentionally removes its temporary JSON report; these are stdout
+artifacts, not reconstructed JSON.
+
+Fixture-only stability changes preserve the configured engine/step budgets.
+The cancellation fixture registers its watcher before starting the worker, reads
+an atomically published readiness PID, races readiness against actual worker
+completion, and closes the watcher in finally. It retains the two-second post-abort
+child-close/PID-gone/no-later-dispatch checks. A missing-readiness control fails on
+the actual completed worker result. The earlier missing PID does not establish
+that the child started or that host load caused the failure.
+
+The active-sibling fixture releases B's driver at A's actual candidate worktree-add
+inside acceptance FIFO, allowing B to queue acceptance while its owned bytes remain
+active. This avoids spending B's five-second driver budget waiting for A's entire
+validation. It still requires A's refusal/no borrowed commit and B's exact owned
+commit. Cleanup releases and awaits the sibling on failure.
+
+The first after checkpoint was 180/185: four assertions incorrectly assumed Git
+uses a/b diff prefixes (this checkout emits c/i), and the fake forge omitted REST
+root comments, so authenticated reply chains were correctly unattached. The fixture
+now includes real roots and stable timestamps, and accepts the actual raw diff
+prefix without weakening exact leaf-byte assertions or policy rules.
+
+```text
+test:narrow result="fail" exit=1 files=6 projects="pure,process" tests="180/185" failed=5 skipped=0 wait="0.0s" duration="176.7s" nice=5 load="5.9" uptime="550009s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/registry.test.ts"
+```
+
+Final focused worker/real-PR checkpoint after the fixture corrections:
+
+```text
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="107/107" failed=0 skipped=0 wait="0.0s" duration="207.9s" nice=5 load="2.8" uptime="550336s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/addressWorker.test.ts"
+```
+
+All 84 worker and 21 real-PR cases pass, including unchanged rejection, refreshed
+follow-up, persisted proof controls, external HEAD movement, cancellation, actual
+child termination, sibling ownership, and literal paths. The registry/CLI/PR-double
+consumers passed in the earlier 180/185 checkpoint; its failures were confined to
+the corrected worker and real-PR assertions.
+
+Combined downstream lifecycle/actual-driver partition/proof checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=7 projects="pure,process,integration" tests="232/232" failed=0 skipped=0 wait="53.9s" duration="121.3s" nice=5 load="17.5" uptime="550548s" source="explicit" ran="test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address.test.ts,test/ops/review/agentReviewer-partitions.test.ts,test/ops/review/run.test.ts,test/plans/review-loop.test.ts"
+```
+
+Commands were explicit named `pnpm test:narrow` batches; the second explicitly
+included integration. Static reports zero errors against baseline zero; Knip,
+formatting and generated-op-doc verification pass (54 current). Complete paginated
+feedback sweep: 26 threads, three applicable unresolved threads (#460–462), all
+outer and nested cursors exhausted, plus 54 inline comments, 40 reviews and nine
+issue comments. No new applicable feedback appeared in that sweep.
+
+The additive runtime worker callback is the only shared API change; frozen kernel
+and schemas are unchanged. No provider, live, CR, coverage, budget, baseline or
+policy change. Independent exact-delta review and fresh CI are still required.
+The complete current-PR aggregate 60000-token blocker and positive live acceptance
+remain unmet; focused source tests do not certify whole-PR acceptance.

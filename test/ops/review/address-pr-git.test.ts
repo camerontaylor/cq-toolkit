@@ -75,8 +75,10 @@ test.each([
   'local-only',
   'publish',
   'publish-siblings',
+  'publish-admission-transition',
   'publish-siblings-ledger-snapshot',
   'publish-rejection',
+  'publish-rejection-refreshed',
   'caller-file',
   'caller-cq',
   'caller-ledger-temp',
@@ -86,9 +88,12 @@ test.each([
 ] as const)(
   'real PR adapter without cq ignore preserves admission and publication hygiene: %s',
   async (mode) => {
-    const rejection = mode === 'publish-rejection';
+    const refreshedRejection = mode === 'publish-rejection-refreshed';
+    const rejection = mode === 'publish-rejection' || refreshedRejection;
+    const admissionTransition = mode === 'publish-admission-transition';
     const ledgerSnapshot = mode === 'publish-siblings-ledger-snapshot';
-    const siblings = mode === 'publish-siblings' || ledgerSnapshot || rejection;
+    const siblings =
+      mode === 'publish-siblings' || ledgerSnapshot || rejection || admissionTransition;
     const publish = mode === 'publish' || siblings;
     const earlyTamper = mode === 'bookkeeping-before-disposition';
     const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
@@ -135,6 +140,7 @@ test.each([
         user: { login: string };
         created_at: string;
       }> = [];
+      const rootCreatedAt = new Date(Date.now() - 60000).toISOString();
       const remoteHead = () =>
         repo.git('ls-remote', 'origin', 'refs/heads/feature/x').split(/\s+/)[0]!;
       const gh: GhFn = async (args) => {
@@ -199,7 +205,7 @@ test.each([
                             databaseId: 101 + index,
                             author: { login: 'reviewer', __typename: 'User' },
                             body: 'Replace BAD with GOOD',
-                            createdAt: new Date(Date.now() - 60000).toISOString(),
+                            createdAt: rootCreatedAt,
                           },
                         ],
                       },
@@ -213,7 +219,28 @@ test.each([
           });
         const endpoint = args.find((arg) => arg.startsWith('repos/')) ?? '';
         if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remoteHead() } });
-        if (endpoint.includes('/pulls/7/comments')) return ok(replies);
+        if (endpoint.includes('/pulls/7/comments'))
+          return ok([
+            // REST reply chains require their real roots to authenticate discussion proof.
+            ...(siblings ? [101, 102] : [101]).map((id) => ({
+              id,
+              body: 'Replace BAD with GOOD',
+              user: { login: 'reviewer' },
+              created_at: rootCreatedAt,
+            })),
+            ...replies,
+            ...(refreshedRejection && replies.some((reply) => reply.in_reply_to_id === 102)
+              ? [
+                  {
+                    id: 2001,
+                    in_reply_to_id: 102,
+                    body: 'Fresh review feedback: the cited sibling does not settle this finding.',
+                    user: { login: 'reviewer' },
+                    created_at: new Date(Date.now() + 1000).toISOString(),
+                  },
+                ]
+              : []),
+          ]);
         if (endpoint.includes('/comments') || endpoint.includes('/reviews?')) return ok([]);
         throw new Error(`unexpected fake forge command: ${args.join(' ')}`);
       };
@@ -234,6 +261,17 @@ test.each([
       const verified = new Promise<void>((resolve) => {
         firstVerified = resolve;
       });
+      let captureStarted!: () => void;
+      const capturedAdmission = new Promise<void>((resolve) => {
+        captureStarted = resolve;
+      });
+      let firstEditing!: () => void;
+      const firstEdit = new Promise<void>((resolve) => {
+        firstEditing = resolve;
+      });
+      let adapterBranches = 0;
+      let heldAdmission = false;
+      let fencedAdmissions = 0;
       const drivers: DriverFactory = {
         resolve: (request) => ({
           lane: 'ai-sdk',
@@ -273,7 +311,11 @@ test.each([
                       denials: [],
                     };
                   if (rejection) await queued;
-                  if (siblings && !rejection) {
+                  if (admissionTransition && file === 'src/a.ts') {
+                    firstEditing();
+                    await capturedAdmission;
+                  }
+                  if (siblings && !rejection && !admissionTransition) {
                     editing++;
                     enteredEdits++;
                     maximumEditing = Math.max(maximumEditing, editing);
@@ -296,7 +338,7 @@ test.each([
                     join(workerRoot, file),
                     `export const ${file === 'src/a.ts' ? 'a' : 'b'} = "GOOD";\n${rejection ? '// introduced citation\n' : ''}`,
                   );
-                  if (siblings) editing--;
+                  if (siblings && !admissionTransition) editing--;
                 }
                 output = { disposition: 'fixed', reason: 'fixed', evidence: [] };
               }
@@ -357,6 +399,36 @@ test.each([
       const realGit = makeGhRunner({ bin: 'git', cwd: repo.root });
       let inserted = false;
       const git: GhFn = async (args) => {
+        if (
+          admissionTransition &&
+          args.length === 5 &&
+          args[2] === 'symbolic-ref' &&
+          args[3] === '--quiet'
+        ) {
+          if (++adapterBranches === 2 && fencedAdmissions === 0) await firstEdit;
+        }
+        if (
+          admissionTransition &&
+          fencedAdmissions === 0 &&
+          adapterBranches === 2 &&
+          workerRoot &&
+          !heldAdmission &&
+          args.length === 4 &&
+          args[1] === workerRoot &&
+          args[2] === 'rev-parse' &&
+          args[3] === 'HEAD'
+        ) {
+          heldAdmission = true;
+          const captured = await realGit(args);
+          captureStarted();
+          await verified;
+          expect(captured.stdout.trim()).not.toBe(
+            repo.git('-C', workerRoot, 'rev-parse', 'HEAD').trim(),
+          );
+          console.info('held admission captured pre-sibling head:', captured.stdout.trim());
+          return captured;
+        }
+
         if (
           !inserted &&
           (mode === 'caller-file' ||
@@ -449,6 +521,32 @@ test.each([
               },
             }
           : {}),
+        ...(admissionTransition
+          ? {
+              workerFactory: (deps) => {
+                const worker = makeAddressWorker(deps) as ReturnType<typeof makeAddressWorker> & {
+                  withVerifiedHead?<T>(action: (head: string) => Promise<T>): Promise<T>;
+                };
+                return {
+                  ...worker,
+                  ...(worker.withVerifiedHead
+                    ? {
+                        withVerifiedHead: <T>(action: (head: string) => Promise<T>) =>
+                          worker.withVerifiedHead!(async (head) => {
+                            if (++fencedAdmissions === 2) captureStarted();
+                            return action(head);
+                          }),
+                      }
+                    : {}),
+                  fix: async (finding, round) => {
+                    const fix = await worker.fix(finding, round);
+                    if (finding.file === 'src/a.ts') firstVerified();
+                    return fix;
+                  },
+                };
+              },
+            }
+          : {}),
         ...(rejection
           ? {
               workerFactory: (deps) => {
@@ -478,6 +576,13 @@ test.each([
       const report = result.status === 'ok' ? result.value : result.report!;
       if (rejection) {
         expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(1);
+        expect(result.status, JSON.stringify(report.reasons)).toBe(
+          refreshedRejection ? 'needs-human' : 'ok',
+        );
+        expect(report.openBlocking.some((finding) => finding.id === 'T2')).toBe(refreshedRejection);
+        expect(report.findings.find((finding) => finding.id === 'T2')?.status).toBe(
+          refreshedRejection ? 'open' : 'rejected',
+        );
         const fixed = report.fixes.find((fix) => fix.commit)!;
         const rejected = report.fixes.find((fix) => fix.finding.status === 'rejected')!;
         expect(rejected.observedHead).toBe(fixed.commit);
@@ -493,7 +598,11 @@ test.each([
         expect(actions).toEqual([]);
       }
       expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(siblings ? 2 : 1);
-      if (siblings) expect(maximumEditing).toBe(2);
+      if (siblings && !admissionTransition) expect(maximumEditing).toBe(2);
+      if (admissionTransition) {
+        expect(heldAdmission).toBe(false);
+        expect(fencedAdmissions).toBe(2);
+      }
       if (ledgerSnapshot) {
         // A successful run may serialize before capture; unchanged source must
         // expose the real temporary path and refuse instead.
