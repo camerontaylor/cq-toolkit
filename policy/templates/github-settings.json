@@ -139,7 +139,7 @@
       "reviewers": "any",
       "prevent_self_review": false,
       "wait_timer": 0,
-      "secrets": ["Z_AI_API_KEY", "OPENCODE_GO_API_KEY"],
+      "secrets": ["Z_AI_API_KEY", "DEEPSEEK_API_KEY", "OPENCODE_GO_API_KEY"],
       "interimSecrets": []
     }
   },

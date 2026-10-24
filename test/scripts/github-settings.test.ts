@@ -136,7 +136,7 @@ describe('github-settings.json: the committed D13 target', () => {
     expect(settings.environments.automation?.secrets).toContain('OPENCODE_GO_API_KEY');
     expect(settings.environments.automation?.secrets).not.toContain('DEEPSEEK_API_KEY');
     expect(settings.environments.drill?.secrets).toContain('OPENCODE_GO_API_KEY');
-    expect(settings.environments.drill?.secrets).not.toContain('DEEPSEEK_API_KEY');
+    expect(settings.environments.drill?.secrets).toContain('DEEPSEEK_API_KEY');
     expect(settings.classicBranchProtection).toEqual({ main: null, 'merge-queue': null });
     expect(settings.repositorySecrets).toEqual([]);
   });
