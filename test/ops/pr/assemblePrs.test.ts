@@ -301,6 +301,33 @@ describe('PR publication payload scanning', () => {
     expect(fake.edits.size).toBe(0);
   });
 
+  test.each(['missing', 'duplicate', 'wrong-component', 'missing-hits'] as const)(
+    'an incomplete %s scan result prevents publication at both tracker boundaries',
+    async (fault) => {
+      for (const boundary of ['create', 'update'] as const) {
+        const fake = fakeGh();
+        const scanner: DiffSecretScanner = (components) => {
+          const clean = components.map(({ component }) => ({ component, hits: [] }));
+          const isUpdate = components.length === 1 && components[0]?.component === 'pr-body';
+          if ((boundary === 'update') !== isUpdate) return clean;
+          if (fault === 'missing') return [];
+          if (fault === 'duplicate')
+            return components.map(() => ({ component: 'pr-title', hits: [] }));
+          if (fault === 'wrong-component')
+            return components.map(() => ({ component: 'unrelated', hits: [] }));
+          return components.map(({ component }) => ({
+            component,
+          })) as ReturnType<DiffSecretScanner>;
+        };
+
+        const error = await failedAt(makeAssemblePrs(fake.gh, scanner), inputOf());
+        expect(error).toContain('denylist scanner returned an incomplete result');
+        expect(fake.creates).toHaveLength(boundary === 'create' ? 0 : 3);
+        expect(fake.edits.size).toBe(0);
+      }
+    },
+  );
+
   test('a scanner fault on the composed tracker update prevents body upload', async () => {
     const fake = fakeGh();
     const scanner: DiffSecretScanner = (components) => {

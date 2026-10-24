@@ -685,6 +685,182 @@ describe('sweep unit fixer budget enforcement', () => {
 });
 
 describe('optional per-task loop', () => {
+  test.each([false, true])(
+    'propose-only retains a plain local attempt despite pushFailed=%s',
+    async (pushFailed) => {
+      const world = await makeWorld([{ failing: true }, { failing: false }]);
+      const original = world.driverFactory();
+      let invocations = 0;
+      try {
+        const result = await runUnit(world, {
+          taskLoop: { pushFailed },
+          proposeOnly: true,
+          driver: {
+            run: async (...args) => {
+              invocations++;
+              return original.run(...args);
+            },
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') return;
+        const task = result.value.tasks?.[0];
+        expect(task?.outcome).toBe('escalated-to-human');
+        expect(task?.reason).toContain('propose-only worker produced');
+        expect(task?.failedAttempt?.branch).toMatch(/^cq\/unit\/failed\//);
+        expect(task?.rounds).toEqual([
+          expect.objectContaining({
+            gate: 'path-policy',
+            outcome: 'escalated-to-human',
+            failedAttempt: task?.failedAttempt,
+          }),
+        ]);
+        expect(task?.failedAttemptPublished).not.toBe(true);
+        expect(task?.commits).toEqual([]);
+        expect(invocations).toBe(2);
+        expect(world.checks).toHaveLength(2);
+        expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
+        expect(
+          world.gitCalls.some((args) => args.includes('push') || args.includes('commit')),
+        ).toBe(false);
+        expect(world.pushCalls).toEqual([]);
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    ['clean', undefined],
+    ['moved-ref', 'no longer matches its recorded ordinal'],
+    ['merge-parent', 'invalid parentage'],
+    ['wrong-object', 'invalid parentage'],
+    ['oversize-patch', 'patch exceeds the feedback cap'],
+    ['scoped-secret', 'worker upload refused'],
+  ] as const)(
+    'rescue feedback preserves provenance and refuses %s evidence',
+    async (fault, refusal) => {
+      const world = await makeWorld([{ failing: true }, { failing: false }]);
+      const underlying = world.gitFactory();
+      const parent = 'a'.repeat(40);
+      let recordedSha = '';
+      let restores = 0;
+      const prompts: string[] = [];
+      const feedbackContents: Array<ReadonlyArray<{ text: string; path?: string }>> = [];
+      const patch = 'diff --git a/src/a.js b/src/a.js\n-old value\n+rejected value\n';
+      try {
+        const result = await runUnit(world, {
+          taskLoop: {},
+          taskEscalation: {
+            next: (_task, progress) =>
+              progress.workerUsed === 0
+                ? { tier: 'worker', attempt: 1, reason: 'initial task' }
+                : progress.rescueUsed === 0
+                  ? { tier: 'rescue', attempt: 1, reason: 'retry rejected edit' }
+                  : { tier: 'human', attempt: 1, reason: 'rescue exhausted' },
+            verified: () => {},
+          },
+          git: async (args) => {
+            if (args.includes('restore')) restores++;
+            if (args.includes('update-ref'))
+              recordedSha = String(args[args.indexOf('update-ref') + 2]);
+            if (args.includes('rev-parse') && args.some((arg) => arg.startsWith('refs/heads/')))
+              return {
+                code: 0,
+                stdout: fault === 'moved-ref' ? 'e'.repeat(40) : recordedSha,
+                stderr: '',
+              };
+            if (args.includes('rev-list') && args.includes('--parents'))
+              return {
+                code: 0,
+                stdout: `${fault === 'wrong-object' ? 'e'.repeat(40) : recordedSha} ${parent}${fault === 'merge-parent' ? ` ${'d'.repeat(40)}` : ''}`,
+                stderr: '',
+              };
+            if (args.includes('--name-status') && !args.includes('--cached'))
+              return {
+                code: 0,
+                stdout: 'M\0src/a.js\0D\0src/deleted.js\0A\0src/new.js\0',
+                stderr: '',
+              };
+            if (args.includes('show') && !args.includes('-s')) {
+              const object = String(args.at(-1));
+              return {
+                code: 0,
+                stdout: object.startsWith(parent) ? 'old value' : 'rejected value',
+                stderr: '',
+              };
+            }
+            if (args.includes('--binary'))
+              return {
+                code: 0,
+                stdout: fault === 'oversize-patch' ? 'x'.repeat(32 * 1024 * 1024 + 1) : patch,
+                stderr: '',
+              };
+            return underlying(args);
+          },
+          scanPrompt: async (text, contents) => {
+            if (!text.includes('Prior failed-attempt patch')) return;
+            feedbackContents.push(contents ?? []);
+            if (
+              fault === 'scoped-secret' &&
+              contents?.some(({ path }) => path === 'src/deleted.js')
+            )
+              throw new Error('path-scoped rule rejects deleted preimage');
+          },
+          driver: {
+            run: async (invocation) => {
+              prompts.push(invocation.prompt);
+              if (prompts.length === 1)
+                return {
+                  stopReason: 'error',
+                  denials: [],
+                  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                };
+              expect(restores).toBeGreaterThan(0);
+              return {
+                stopReason: 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'code-bug',
+                  summary: 'repair source',
+                  confidence: 0.9,
+                },
+              };
+            },
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') return;
+        const task = result.value.tasks?.[0];
+        expect(task?.rounds?.[0]?.failedAttempt?.sha).toBe(recordedSha);
+        if (refusal === undefined) {
+          expect(task?.outcome).toBe('fixed');
+          expect(task?.commits).toHaveLength(1);
+          expect(prompts).toHaveLength(3);
+          expect(prompts[1]).toContain(patch.trim());
+          expect(feedbackContents).toHaveLength(2);
+          for (const contents of feedbackContents)
+            expect(contents).toEqual([
+              { path: 'src/a.js', text: 'old value' },
+              { path: 'src/a.js', text: 'rejected value' },
+              { path: 'src/deleted.js', text: 'old value' },
+              { path: 'src/new.js', text: 'rejected value' },
+            ]);
+        } else {
+          expect(task?.rounds?.[1]?.reason).toContain(refusal);
+          expect(task?.outcome).toBe('escalated-to-human');
+          expect(task?.commits).toEqual([]);
+          expect(prompts).toHaveLength(1);
+          expect(world.checks).toHaveLength(1);
+          expect(world.pushCalls).toEqual([]);
+        }
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each([
     {
       gate: 'tamper',
@@ -793,6 +969,16 @@ describe('optional per-task loop', () => {
   });
 
   test.each([
+    {
+      refusal: 'unsupported rename record',
+      expectedReason: 'invalid or unsupported path record',
+      scanDiff: 'R100\0src/old.js\0src/new.js\0',
+    },
+    {
+      refusal: 'truncated path record',
+      expectedReason: 'invalid or unsupported path record',
+      scanDiff: 'M\0',
+    },
     {
       refusal: 'path traversal',
       expectedReason: 'path outside the repository',
