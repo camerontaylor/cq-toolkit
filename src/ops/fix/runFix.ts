@@ -20,6 +20,7 @@ import {
   type PlanSweepReport,
 } from '../sweep/planSweep.js';
 import { SweepUnitDispatchInputSchema } from '../sweep/registry.js';
+import { isScopedEslintTemplate } from '../sweep/tasks.js';
 import {
   bindingsFromDispatch,
   makeSweepUnitOp,
@@ -156,12 +157,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           );
         if (
           checks.some(
-            (check) => check.adapter === 'eslint-json' && !check.relatedArgs?.includes('{files}'),
+            (check) =>
+              check.adapter === 'eslint-json' && !isScopedEslintTemplate(check.relatedArgs),
           )
         )
           return await finish(
             'needs-human',
-            'static ESLint requires checks[].relatedArgs with a standalone {files} token replacing the full argv (for example ["{files}", "--format=json"])',
+            'static ESLint requires checks[].relatedArgs with a standalone {files} token replacing the full argv, without broad . or ./ operands (for example ["{files}", "--format=json"])',
           );
       }
       if (

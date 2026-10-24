@@ -232,7 +232,7 @@ test('spawned static CLI clusters real tsc diagnostics and commits each gated fi
     if (process.env.CQ_FIX_STATIC_TRANSCRIPT_PATH) {
       await writeFile(
         process.env.CQ_FIX_STATIC_TRANSCRIPT_PATH,
-        '# fix.run static fixture transcript\n\nFresh repository; real installed TypeScript compiler, scripted driver, real git, hermetic gitleaks executable through production scanner composition. No project denylist, provider credentials, or network. The fixture entry injects only the driver; production CLI parsing and fix engine run unchanged.\n\nChecks select adapter aliases (`tsc`, `eslint`, `vitest`), as one alias or a JSON array; unknown or unavailable aliases refuse. Static ESLint requires explicit `checks[].relatedArgs` replacement argv with standalone `{files}`; `eslint .` must replace the broad target, never append files. Missing scope refuses before worker dispatch. Tsc keeps the full configured project check; final related/broader validation shares one fresh base-owned staged-tree probe, while feedback remains mandatory.\n\nCommand: `node test/fixtures/fix-cli/entry.mjs fix.run --source=static --checks=tsc --repoRoot=<fixture>/repo --selector=\'{"mode":"workspace-all"}\' --journalDir=<fixture>/journal --runPrefix=cq/static-fixture --json`\n\nObserved process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture paths redacted):\n\n```json\n' +
+        '# fix.run static fixture transcript\n\nFresh repository; real installed TypeScript compiler, scripted driver, real git, hermetic gitleaks executable through production scanner composition. No project denylist, provider credentials, or network. The fixture entry injects only the driver; production CLI parsing and fix engine run unchanged.\n\nChecks select adapter aliases (`tsc`, `eslint`, `vitest`), as one alias or a JSON array; unknown or unavailable aliases refuse. Static ESLint requires explicit `checks[].relatedArgs` replacement argv with standalone `{files}`; `eslint .` must replace the broad target, never append files. Missing scope or literal . / ./ operands refuse before worker dispatch. Other wrapper/option semantics remain trusted configuration; arbitrary command scope is not proven. Tsc keeps the full configured project check; final related/broader validation shares one fresh base-owned staged-tree probe, while feedback remains mandatory.\n\nCommand: `node test/fixtures/fix-cli/entry.mjs fix.run --source=static --checks=tsc --repoRoot=<fixture>/repo --selector=\'{"mode":"workspace-all"}\' --journalDir=<fixture>/journal --runPrefix=cq/static-fixture --json`\n\nObserved process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture paths redacted):\n\n```json\n' +
           JSON.stringify(result, null, 2).replaceAll(f.root, '<fixture>') +
           '\n```\n',
       );
@@ -328,41 +328,44 @@ process.exitCode = failed ? 1 : 0;
   }
 });
 
-test.each([undefined, ['.'], ['--files={files}']])(
-  'static ESLint missing or invalid scope refuses before workers: %j',
-  async (relatedArgs) => {
-    const f = await fixture();
-    try {
-      const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as Record<
-        string,
-        unknown
-      >;
-      config.checks = [
-        {
-          kind: 'static',
-          adapter: 'eslint-json',
-          command: { command: process.execPath, args: ['eslint-wrapper.cjs', '.'] },
-          ...(relatedArgs === undefined ? {} : { relatedArgs }),
-        },
-      ];
-      await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
-      await git(f.repo, 'add', 'cq.json');
-      await git(f.repo, 'commit', '-m', 'configure unscoped lint');
-      const resolve = vi.fn(scripted().resolve);
-      const result = await makeFixRun({ drivers: { resolve } })({
-        ...input(f),
-        source: 'static',
-        checks: 'eslint',
-      });
-      expect(result.status, JSON.stringify(result)).toBe('needs-human');
-      expect(JSON.stringify(result)).toContain('relatedArgs');
-      expect(resolve).not.toHaveBeenCalled();
-      expect(reportOf(result).tasks).toEqual([]);
-    } finally {
-      await rm(f.root, { recursive: true, force: true });
-    }
-  },
-);
+test.each([
+  undefined,
+  ['.'],
+  ['--files={files}'],
+  ['.', '{files}', '--format=json'],
+  ['scripts/lint.cjs', './', '{files}'],
+])('static ESLint missing or invalid scope refuses before workers: %j', async (relatedArgs) => {
+  const f = await fixture();
+  try {
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    config.checks = [
+      {
+        kind: 'static',
+        adapter: 'eslint-json',
+        command: { command: process.execPath, args: ['eslint-wrapper.cjs', '.'] },
+        ...(relatedArgs === undefined ? {} : { relatedArgs }),
+      },
+    ];
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', 'cq.json');
+    await git(f.repo, 'commit', '-m', 'configure unscoped lint');
+    const resolve = vi.fn(scripted().resolve);
+    const result = await makeFixRun({ drivers: { resolve } })({
+      ...input(f),
+      source: 'static',
+      checks: 'eslint',
+    });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(JSON.stringify(result)).toContain('relatedArgs');
+    expect(resolve).not.toHaveBeenCalled();
+    expect(reportOf(result).tasks).toEqual([]);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 
 test('unavailable check alias refuses before workers with a persisted report', async () => {
   const f = await fixture();

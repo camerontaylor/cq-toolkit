@@ -63,6 +63,11 @@ export function taskHasFailures(task: FixTask, set: FailureSet, source = 'tests'
   );
 }
 
+/** Require file expansion and refuse the known broad current-directory operands. */
+export function isScopedEslintTemplate(args?: readonly string[]): boolean {
+  return args?.includes('{files}') === true && !args.some((arg) => arg === '.' || arg === './');
+}
+
 /** Static tsc retains its full project argv; ESLint requires an explicit scoped replacement. */
 export function staticRelatedCheckCommand(
   check: CheckCommand,
@@ -71,9 +76,9 @@ export function staticRelatedCheckCommand(
   relatedArgs?: readonly string[],
 ): CheckCommand {
   if (adapter === 'tsc-lines') return { ...check, args: [...check.args] };
-  if (adapter !== 'eslint-json' || files.length === 0 || !relatedArgs?.includes('{files}'))
+  if (adapter !== 'eslint-json' || files.length === 0 || !isScopedEslintTemplate(relatedArgs))
     throw new Error(
-      'static ESLint requires relatedArgs with a standalone {files} token and attributed task files',
+      'static ESLint requires relatedArgs with a standalone {files} token, no broad . or ./ operands, and attributed task files',
     );
   return relatedCheckCommand(check, files, relatedArgs);
 }

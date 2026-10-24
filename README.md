@@ -105,6 +105,9 @@ before any worker runs. For `eslint . --format=json`, use
 `["scripts/lint.cjs","{files}"]`. The replacement must name only task files,
 while broader validation retains the full configured argv. Existing config remains
 parseable without the template; invoking static ESLint reports an actionable refusal.
+Templates retaining literal `.` or `./` operands also refuse before worker dispatch.
+Other wrapper arguments and option semantics remain trusted configuration: the engine
+does not parse arbitrary command grammars or prove that every configured target is scoped.
 Static tsc always runs the full project check, allowing existing sibling clusters
 while requiring the assigned cluster to disappear and failure fingerprints to improve.
 When final related and broader commands are identical, both gates share one fresh

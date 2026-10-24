@@ -62,7 +62,13 @@ test('static related argv uses full tsc and explicit ESLint replacement includin
       ['wrapper.cjs', '{files}'],
     ).args,
   ).toEqual(['wrapper.cjs', 'src/a.ts']);
-  for (const template of [undefined, ['.'], ['--files={files}']])
+  for (const template of [
+    undefined,
+    ['.'],
+    ['--files={files}'],
+    ['.', '{files}'],
+    ['wrapper.cjs', './', '{files}'],
+  ])
     expect(() => staticRelatedCheckCommand(eslint, 'eslint-json', ['a.ts'], template)).toThrow(
       'standalone {files}',
     );

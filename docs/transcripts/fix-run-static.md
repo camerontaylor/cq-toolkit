@@ -2,7 +2,7 @@
 
 Fresh repository; real installed TypeScript compiler, scripted driver, real git, hermetic gitleaks executable through production scanner composition. No project denylist, provider credentials, or network. The fixture entry injects only the driver; production CLI parsing and fix engine run unchanged.
 
-Checks select adapter aliases (`tsc`, `eslint`, `vitest`), as one alias or a JSON array; unknown or unavailable aliases refuse. Static ESLint requires explicit `checks[].relatedArgs` replacement argv with standalone `{files}`; `eslint .` must replace the broad target, never append files. Missing scope refuses before worker dispatch. Tsc keeps the full configured project check; final related/broader validation shares one fresh base-owned staged-tree probe, while feedback remains mandatory.
+Checks select adapter aliases (`tsc`, `eslint`, `vitest`), as one alias or a JSON array; unknown or unavailable aliases refuse. Static ESLint requires explicit `checks[].relatedArgs` replacement argv with standalone `{files}`; `eslint .` must replace the broad target, never append files. Missing scope or literal . / ./ operands refuse before worker dispatch. Other wrapper/option semantics remain trusted configuration; arbitrary command scope is not proven. Tsc keeps the full configured project check; final related/broader validation shares one fresh base-owned staged-tree probe, while feedback remains mandatory.
 
 Command: `node test/fixtures/fix-cli/entry.mjs fix.run --source=static --checks=tsc --repoRoot=<fixture>/repo --selector='{"mode":"workspace-all"}' --journalDir=<fixture>/journal --runPrefix=cq/static-fixture --json`
 
@@ -14,7 +14,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
   "value": {
     "source": "static",
     "runPrefix": "cq/static-fixture",
-    "reportPath": "<fixture>/journal/fix-run-report-3486e15c-d087-48d3-9383-d8c4e5987647.json",
+    "reportPath": "<fixture>/journal/fix-run-report-74daf0b0-a039-409a-9460-1068453900a9.json",
     "verdict": "pass",
     "units": [
       {
@@ -78,7 +78,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
             },
             "prBranch": "cq/static-fixture/static-1/scratch-repo",
             "committed": true,
-            "committedSha": "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0",
+            "committedSha": "77dc1e084a88d6adc6adc3672bbc393dc3196b19",
             "pushed": false,
             "tasks": [
               {
@@ -140,7 +140,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                 "outcome": "fixed",
                 "branch": "cq/static-fixture/static-1/scratch-repo",
                 "commits": [
-                  "7be46f0937886d3da133c1a937d23d72d41850c9"
+                  "b0e424467401a0a866fd98f12b0a52fd5a84cb56"
                 ],
                 "validation": {
                   "verdict": "pass",
@@ -148,7 +148,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     {
                       "gate": "related",
                       "verdict": "pass",
-                      "wallMs": 380
+                      "wallMs": 351
                     },
                     {
                       "gate": "broader",
@@ -164,12 +164,12 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     {
                       "gate": "tamper",
                       "verdict": "pass",
-                      "wallMs": 1
+                      "wallMs": 2
                     },
                     {
                       "gate": "commit",
                       "verdict": "pass",
-                      "wallMs": 1
+                      "wallMs": 0
                     }
                   ],
                   "final": {
@@ -241,7 +241,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       "provider": "fixture",
                       "model": "scripted"
                     },
-                    "wallMs": 0,
+                    "wallMs": 1,
                     "reason": "related-check feedback",
                     "usage": {
                       "input": 1,
@@ -255,7 +255,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                 "outcome": "fixed",
                 "branch": "cq/static-fixture/static-1/scratch-repo",
                 "commits": [
-                  "35fb2ad8af0a721dfb36781a6b68d7e9ec758b1c"
+                  "728fc28307eeb674058dd6532b2a158b78daa754"
                 ],
                 "validation": {
                   "verdict": "pass",
@@ -263,7 +263,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     {
                       "gate": "related",
                       "verdict": "pass",
-                      "wallMs": 339
+                      "wallMs": 344
                     },
                     {
                       "gate": "broader",
@@ -330,7 +330,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       "provider": "fixture",
                       "model": "scripted"
                     },
-                    "wallMs": 0,
+                    "wallMs": 1,
                     "reason": "initial task",
                     "usage": {
                       "input": 1,
@@ -362,7 +362,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                 "outcome": "fixed",
                 "branch": "cq/static-fixture/static-1/scratch-repo",
                 "commits": [
-                  "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0"
+                  "77dc1e084a88d6adc6adc3672bbc393dc3196b19"
                 ],
                 "validation": {
                   "verdict": "pass",
@@ -370,7 +370,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     {
                       "gate": "related",
                       "verdict": "pass",
-                      "wallMs": 350
+                      "wallMs": 349
                     },
                     {
                       "gate": "broader",
@@ -386,7 +386,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     {
                       "gate": "tamper",
                       "verdict": "pass",
-                      "wallMs": 0
+                      "wallMs": 1
                     },
                     {
                       "gate": "commit",
@@ -462,7 +462,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
           },
           "prBranch": "cq/static-fixture/static-1/scratch-repo",
           "committed": true,
-          "committedSha": "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0",
+          "committedSha": "77dc1e084a88d6adc6adc3672bbc393dc3196b19",
           "pushed": false,
           "tasks": [
             {
@@ -524,7 +524,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
               "outcome": "fixed",
               "branch": "cq/static-fixture/static-1/scratch-repo",
               "commits": [
-                "7be46f0937886d3da133c1a937d23d72d41850c9"
+                "b0e424467401a0a866fd98f12b0a52fd5a84cb56"
               ],
               "validation": {
                 "verdict": "pass",
@@ -532,7 +532,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   {
                     "gate": "related",
                     "verdict": "pass",
-                    "wallMs": 380
+                    "wallMs": 351
                   },
                   {
                     "gate": "broader",
@@ -548,12 +548,12 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   {
                     "gate": "tamper",
                     "verdict": "pass",
-                    "wallMs": 1
+                    "wallMs": 2
                   },
                   {
                     "gate": "commit",
                     "verdict": "pass",
-                    "wallMs": 1
+                    "wallMs": 0
                   }
                 ],
                 "final": {
@@ -625,7 +625,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     "provider": "fixture",
                     "model": "scripted"
                   },
-                  "wallMs": 0,
+                  "wallMs": 1,
                   "reason": "related-check feedback",
                   "usage": {
                     "input": 1,
@@ -639,7 +639,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
               "outcome": "fixed",
               "branch": "cq/static-fixture/static-1/scratch-repo",
               "commits": [
-                "35fb2ad8af0a721dfb36781a6b68d7e9ec758b1c"
+                "728fc28307eeb674058dd6532b2a158b78daa754"
               ],
               "validation": {
                 "verdict": "pass",
@@ -647,7 +647,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   {
                     "gate": "related",
                     "verdict": "pass",
-                    "wallMs": 339
+                    "wallMs": 344
                   },
                   {
                     "gate": "broader",
@@ -714,7 +714,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                     "provider": "fixture",
                     "model": "scripted"
                   },
-                  "wallMs": 0,
+                  "wallMs": 1,
                   "reason": "initial task",
                   "usage": {
                     "input": 1,
@@ -746,7 +746,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
               "outcome": "fixed",
               "branch": "cq/static-fixture/static-1/scratch-repo",
               "commits": [
-                "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0"
+                "77dc1e084a88d6adc6adc3672bbc393dc3196b19"
               ],
               "validation": {
                 "verdict": "pass",
@@ -754,7 +754,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   {
                     "gate": "related",
                     "verdict": "pass",
-                    "wallMs": 350
+                    "wallMs": 349
                   },
                   {
                     "gate": "broader",
@@ -770,7 +770,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   {
                     "gate": "tamper",
                     "verdict": "pass",
-                    "wallMs": 0
+                    "wallMs": 1
                   },
                   {
                     "gate": "commit",
@@ -850,7 +850,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
         "outcome": "fixed",
         "branch": "cq/static-fixture/static-1/scratch-repo",
         "commits": [
-          "7be46f0937886d3da133c1a937d23d72d41850c9"
+          "b0e424467401a0a866fd98f12b0a52fd5a84cb56"
         ],
         "validation": {
           "verdict": "pass",
@@ -858,7 +858,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
             {
               "gate": "related",
               "verdict": "pass",
-              "wallMs": 380
+              "wallMs": 351
             },
             {
               "gate": "broader",
@@ -874,12 +874,12 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
             {
               "gate": "tamper",
               "verdict": "pass",
-              "wallMs": 1
+              "wallMs": 2
             },
             {
               "gate": "commit",
               "verdict": "pass",
-              "wallMs": 1
+              "wallMs": 0
             }
           ],
           "final": {
@@ -951,7 +951,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
               "provider": "fixture",
               "model": "scripted"
             },
-            "wallMs": 0,
+            "wallMs": 1,
             "reason": "related-check feedback",
             "usage": {
               "input": 1,
@@ -965,7 +965,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
         "outcome": "fixed",
         "branch": "cq/static-fixture/static-1/scratch-repo",
         "commits": [
-          "35fb2ad8af0a721dfb36781a6b68d7e9ec758b1c"
+          "728fc28307eeb674058dd6532b2a158b78daa754"
         ],
         "validation": {
           "verdict": "pass",
@@ -973,7 +973,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
             {
               "gate": "related",
               "verdict": "pass",
-              "wallMs": 339
+              "wallMs": 344
             },
             {
               "gate": "broader",
@@ -1040,7 +1040,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
               "provider": "fixture",
               "model": "scripted"
             },
-            "wallMs": 0,
+            "wallMs": 1,
             "reason": "initial task",
             "usage": {
               "input": 1,
@@ -1072,7 +1072,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
         "outcome": "fixed",
         "branch": "cq/static-fixture/static-1/scratch-repo",
         "commits": [
-          "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0"
+          "77dc1e084a88d6adc6adc3672bbc393dc3196b19"
         ],
         "validation": {
           "verdict": "pass",
@@ -1080,7 +1080,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
             {
               "gate": "related",
               "verdict": "pass",
-              "wallMs": 350
+              "wallMs": 349
             },
             {
               "gate": "broader",
@@ -1096,7 +1096,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
             {
               "gate": "tamper",
               "verdict": "pass",
-              "wallMs": 0
+              "wallMs": 1
             },
             {
               "gate": "commit",
@@ -1119,9 +1119,9 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
       "cacheRead": 0,
       "cacheWrite": 0
     },
-    "wallMs": 3130,
+    "wallMs": 2884,
     "run": {
-      "runId": "fix-run--mvls4ja5--5e9bb758",
+      "runId": "fix-run--mvlsfqet--94c9447a",
       "stoppedEarly": false,
       "counts": {
         "queued": 0,
@@ -1224,7 +1224,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
               },
               "prBranch": "cq/static-fixture/static-1/scratch-repo",
               "committed": true,
-              "committedSha": "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0",
+              "committedSha": "77dc1e084a88d6adc6adc3672bbc393dc3196b19",
               "pushed": false,
               "tasks": [
                 {
@@ -1286,7 +1286,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   "outcome": "fixed",
                   "branch": "cq/static-fixture/static-1/scratch-repo",
                   "commits": [
-                    "7be46f0937886d3da133c1a937d23d72d41850c9"
+                    "b0e424467401a0a866fd98f12b0a52fd5a84cb56"
                   ],
                   "validation": {
                     "verdict": "pass",
@@ -1294,7 +1294,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       {
                         "gate": "related",
                         "verdict": "pass",
-                        "wallMs": 380
+                        "wallMs": 351
                       },
                       {
                         "gate": "broader",
@@ -1310,12 +1310,12 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       {
                         "gate": "tamper",
                         "verdict": "pass",
-                        "wallMs": 1
+                        "wallMs": 2
                       },
                       {
                         "gate": "commit",
                         "verdict": "pass",
-                        "wallMs": 1
+                        "wallMs": 0
                       }
                     ],
                     "final": {
@@ -1387,7 +1387,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                         "provider": "fixture",
                         "model": "scripted"
                       },
-                      "wallMs": 0,
+                      "wallMs": 1,
                       "reason": "related-check feedback",
                       "usage": {
                         "input": 1,
@@ -1401,7 +1401,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   "outcome": "fixed",
                   "branch": "cq/static-fixture/static-1/scratch-repo",
                   "commits": [
-                    "35fb2ad8af0a721dfb36781a6b68d7e9ec758b1c"
+                    "728fc28307eeb674058dd6532b2a158b78daa754"
                   ],
                   "validation": {
                     "verdict": "pass",
@@ -1409,7 +1409,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       {
                         "gate": "related",
                         "verdict": "pass",
-                        "wallMs": 339
+                        "wallMs": 344
                       },
                       {
                         "gate": "broader",
@@ -1476,7 +1476,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                         "provider": "fixture",
                         "model": "scripted"
                       },
-                      "wallMs": 0,
+                      "wallMs": 1,
                       "reason": "initial task",
                       "usage": {
                         "input": 1,
@@ -1508,7 +1508,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                   "outcome": "fixed",
                   "branch": "cq/static-fixture/static-1/scratch-repo",
                   "commits": [
-                    "f662ca9c1012d93cf5d298a0cfbe71e4233d41c0"
+                    "77dc1e084a88d6adc6adc3672bbc393dc3196b19"
                   ],
                   "validation": {
                     "verdict": "pass",
@@ -1516,7 +1516,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       {
                         "gate": "related",
                         "verdict": "pass",
-                        "wallMs": 350
+                        "wallMs": 349
                       },
                       {
                         "gate": "broader",
@@ -1532,7 +1532,7 @@ Observed process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture pa
                       {
                         "gate": "tamper",
                         "verdict": "pass",
-                        "wallMs": 0
+                        "wallMs": 1
                       },
                       {
                         "gate": "commit",
