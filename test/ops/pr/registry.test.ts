@@ -170,6 +170,99 @@ describe('pr family registry entries', () => {
     },
   );
 
+  test('assemblePrs refuses unreadable cq.json, while absent and configured policies stay active', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-pr-config-read-'));
+    const binDir = join(scratch, 'bin');
+    await mkdir(binDir, { recursive: true });
+    const ghPath = join(binDir, 'gh');
+    const gitleaksPath = join(binDir, 'gitleaks');
+    const ghLog = join(scratch, 'gh.log');
+    await writeFile(
+      ghPath,
+      [
+        '#!/bin/sh',
+        `printf '%s\\n' "$*" >> "$CQ_REGISTRY_GH_LOG"`,
+        'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo "[]"; exit 0; fi',
+        'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then echo "https://github.test/owner/repo/pull/42"; exit 0; fi',
+        'echo "{}"',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      gitleaksPath,
+      [
+        '#!/bin/sh',
+        'report=""',
+        'while [ "$#" -gt 0 ]; do',
+        '  if [ "$1" = "--report-path" ]; then report="$2"; shift; fi',
+        '  shift',
+        'done',
+        'printf "[]\\n" > "$report"',
+        '',
+      ].join('\n'),
+    );
+    await chmod(ghPath, 0o755);
+    await chmod(gitleaksPath, 0o755);
+    const previousPath = process.env['PATH'];
+    const previousLog = process.env['CQ_REGISTRY_GH_LOG'];
+    process.env['PATH'] = `${binDir}:${previousPath ?? ''}`;
+    process.env['CQ_REGISTRY_GH_LOG'] = ghLog;
+
+    const run = async (repoRoot: string, title: string) => {
+      await writeFile(ghLog, '');
+      const importer = await entryByName('pr.assemblePrs').importer();
+      return (importer as (input: unknown) => Promise<{ status: string; error?: string }>)({
+        repoRoot,
+        runPrefix: 'cq/09-16a',
+        base: 'origin/merge-queue',
+        tracker: { title, branch: 'cq/09-16a/tracker' },
+        packages: [],
+      });
+    };
+
+    try {
+      const unreadableRepo = join(scratch, 'unreadable');
+      await mkdir(unreadableRepo, { recursive: true });
+      await mkdir(join(unreadableRepo, 'cq.json'));
+      const unreadable = await run(unreadableRepo, 'ordinary tracker');
+      expect(unreadable.status).toBe('failed');
+      expect(unreadable.error).toMatch(/unable to read cq\.json \(EISDIR\)/);
+      expect(await readFile(ghLog, 'utf8')).toBe('');
+
+      const absentRepo = join(scratch, 'absent');
+      await mkdir(absentRepo, { recursive: true });
+      const absent = await run(absentRepo, 'ordinary tracker');
+      expect(absent.status).toBe('failed'); // the fake gh stops after the tracker create
+      expect(await readFile(ghLog, 'utf8')).toMatch(/pr create/);
+
+      const configuredRepo = join(scratch, 'configured');
+      await mkdir(join(configuredRepo, 'custom'), { recursive: true });
+      await writeFile(
+        join(configuredRepo, 'cq.json'),
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          review: { denylistPatternsFile: 'custom/patterns.yml' },
+        }),
+      );
+      await writeFile(
+        join(configuredRepo, 'custom/patterns.yml'),
+        "rules:\n  - id: class:project-policy\n    description: project fixture\n    regex: 'BLOCKED_BY_PROJECT_POLICY'\n    sample: 'BLOCKED_BY_PROJECT_POLICY'\nclean_probes:\n  - 'safe'\n",
+      );
+      const configured = await run(configuredRepo, 'BLOCKED_BY_PROJECT_POLICY');
+      expect(configured.status).toBe('failed');
+      const configuredCalls = await readFile(ghLog, 'utf8');
+      expect(configuredCalls).toMatch(/pr list/);
+      expect(configuredCalls).not.toMatch(/pr create|pr edit/);
+    } finally {
+      if (previousPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = previousPath;
+      if (previousLog === undefined) delete process.env['CQ_REGISTRY_GH_LOG'];
+      else process.env['CQ_REGISTRY_GH_LOG'] = previousLog;
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   test('runReport dispatched through the full registry wiring over an empty fleet performs ZERO gh calls', async () => {
     // The one hermetic dispatch: empty packages + no tracker → the loop
     // never runs and no tracker edit exists, so the wiring is exercised

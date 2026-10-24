@@ -134,9 +134,22 @@ export const registry: OpRegistryEntry[] = [
         ([m, ghEffects, denylist, devEffects, fs]) =>
           (async (input: AssemblePrsInput) => {
             const dev = devEffects.makeSubprocessDevEffects(input.repoRoot);
-            const configText = await fs
-              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
-              .catch(() => null);
+            let configText: string | null;
+            try {
+              configText = await fs.readFile(`${input.repoRoot}/cq.json`, 'utf8');
+            } catch (err) {
+              const code =
+                typeof err === 'object' && err !== null && 'code' in err
+                  ? (err as { code?: unknown }).code
+                  : undefined;
+              if (code === 'ENOENT') configText = null;
+              else {
+                return {
+                  status: 'failed',
+                  error: `pr.assemblePrs: unable to read cq.json${typeof code === 'string' ? ` (${code})` : ''}; refusing PR publication`,
+                };
+              }
+            }
             const packageText = await fs
               .readFile(`${input.repoRoot}/package.json`, 'utf8')
               .catch(() => '{}');
