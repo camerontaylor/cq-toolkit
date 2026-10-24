@@ -64,6 +64,8 @@ import type { AnalyzeFixInput } from './fix.js';
 import type { AnalyzeInitInput } from './init.js';
 import type { AnalyzeRunInput } from './run.js';
 import { CqConfigSchema } from './cqConfig.js';
+// Pure SDK policy companion: './cqConfigDefaults.js' resolves config + flags;
+// it is a family helper, not an independently dispatched op (gates' helper convention).
 // The Lane C standalone ops' eager imports: the gates family's pure
 // check-runner input mirror (zod + types only) — one definition of a check,
 // shared by `cq.json` (./cqConfig.ts, also zod + types only) and the
