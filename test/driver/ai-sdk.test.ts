@@ -22,6 +22,7 @@ import { mkdtempSync } from 'node:fs';
 import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { MockLanguageModelV4 } from 'ai/test';
+import { bindingsFromDispatch } from '../../src/ops/sweep/unit.js';
 import { APICallError } from '@ai-sdk/provider';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
@@ -2403,7 +2404,6 @@ test.each(['initial', 'read', 'run'] as const)(
       expect(result.stopReason).not.toBe('complete');
       expect(sends).toBe(mode === 'initial' ? 0 : 1);
       expect(scanned.at(-1)).toContain('DO_NOT_UPLOAD');
-      if (mode !== 'initial') expect(scanned.at(-1)).toContain('tool-result');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2429,3 +2429,86 @@ test('upload serialization preserves undefined slots and refuses lossy or cyclic
   ])
     expect(() => serializeRequestForScan(bad)).toThrow();
 });
+
+test.each(['private', 'public', 'newline', 'prompt'] as const)(
+  'configured upload policy preserves source paths and decoded text (%s)',
+  async (mode) => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-path-upload-'));
+    let sends = 0;
+    try {
+      await writeFile(
+        join(root, 'patterns.yml'),
+        [
+          'rules:',
+          '  - id: private-path',
+          '    description: private fixture path',
+          "    regex: '.+'",
+          "    path: '(^|/)private\\.txt$'",
+          "    sample: 'ordinary private bytes'",
+          '  - id: bounded-word',
+          '    description: bounded fixture token',
+          "    regex: '\\bBLOCKEDWORD\\b'",
+          "    sample: 'BLOCKEDWORD'",
+          'clean_probes:',
+          "  - 'ordinary public bytes'",
+          '',
+        ].join('\n'),
+      );
+      const file = mode === 'private' ? 'private.txt' : 'public.txt';
+      await writeFile(
+        join(root, file),
+        mode === 'newline' ? '\nBLOCKEDWORD' : 'ordinary private bytes',
+      );
+      const bindings = bindingsFromDispatch(
+        {
+          repoRoot: root,
+          runPrefix: 'fixture',
+          base: 'HEAD',
+          package: 'fixture',
+          fixer: 'fixture',
+          files: [],
+          mutex: { lockPath: join(root, 'mutex') },
+          driver: { provider: 'mock', model: 'mock-1', budget: { wallClockMs: 10000 } },
+          check: { adapter: 'vitest-json', command: 'node', args: [] },
+          taskLoop: { denylistPatternsFile: 'patterns.yml' },
+        },
+        {
+          resolve: ({ modelSpec }) => ({
+            modelSpec,
+            lane: 'ai-sdk',
+            driver: {
+              run: async () => {
+                throw new Error('unused');
+              },
+            },
+          }),
+        },
+      );
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => {
+          sends++;
+          return sends === 1 && mode !== 'prompt'
+            ? toolCallResult('read', { path: file })
+            : textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        ...(bindings.scanPrompt === undefined ? {} : { beforeRequest: bindings.scanPrompt }),
+      });
+      const result = await driver.run(
+        invocation({
+          prompt: mode === 'prompt' ? '\nBLOCKEDWORD' : 'safe',
+          workspace: { path: root },
+          budget: {},
+        }),
+      );
+      expect(sends).toBe(mode === 'public' ? 2 : mode === 'prompt' ? 0 : 1);
+      expect(result.stopReason === 'complete').toBe(mode === 'public');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

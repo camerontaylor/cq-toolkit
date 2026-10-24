@@ -75,7 +75,7 @@ export interface DriverRequest {
   /** The harness the lane binds its tool surface to (where the lane accepts one). Default: defaultHarnessConfig. */
   harness?: HarnessConfig;
   /** Fail-closed gate for each complete ai-sdk request, including tool results. */
-  beforeRequest?: (text: string) => void | Promise<void>;
+  beforeRequest?: AiSdkDriverOptions['beforeRequest'];
   /**
    * Session-record retention for this run (§2.5): 'keep' (the default) keeps
    * the record; 'reap-on-settle' deletes the FRESH record this run created

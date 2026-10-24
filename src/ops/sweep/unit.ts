@@ -279,7 +279,10 @@ export interface SweepUnitBindings {
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
   runCheck: RunCheck;
   /** Required by taskLoop; refuses before any provider upload. */
-  scanPrompt?: (text: string) => Promise<void>;
+  scanPrompt?: (
+    text: string,
+    contents?: readonly { text: string; path?: string }[],
+  ) => Promise<void>;
   /** Explicit enclosing-job cancellation; verified commits are retained but not published. */
   cancelled?: () => boolean;
   /** The per-package check command, resolved against the unit's worktree. */
@@ -1770,18 +1773,31 @@ export function bindingsFromDispatch(
       ? undefined
       : composeScanners(
           makeGitleaksDefaultsScanner(makeSubprocessDevEffects(input.repoRoot)),
-          makeRepoDiffScanner(input.repoRoot, input.taskLoop.denylistPatternsFile),
+          ...(input.taskLoop.denylistPatternsFile === undefined
+            ? []
+            : [makeRepoDiffScanner(input.repoRoot, input.taskLoop.denylistPatternsFile)]),
         );
   const scanPrompt =
     scanner === undefined
       ? undefined
-      : async (text: string): Promise<void> => {
-          const scans = await scanner([
+      : async (
+          text: string,
+          contents: readonly { text: string; path?: string }[] = [],
+        ): Promise<void> => {
+          const components = [
             { component: 'worker-request', text, path: 'worker-request.json' },
-          ]);
+            ...contents.map((content, index) => ({
+              component: `worker-content-${String(index)}`,
+              text: content.text,
+              path: content.path ?? 'worker-request.json',
+            })),
+          ];
+          const scans = await scanner(components);
           if (
-            scans.length !== 1 ||
-            scans[0]?.component !== 'worker-request' ||
+            scans.length !== components.length ||
+            components.some(
+              (component) => !scans.some((scan) => scan.component === component.component),
+            ) ||
             scans.some((scan) => scan.hits.length > 0)
           )
             throw new Error('worker upload refused by denylist scan');

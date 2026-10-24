@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, readFile, writeFile, unlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { createGovernor, currentJobContext } from '../../../src/kernel/governor.js';
@@ -22,7 +23,7 @@ const git = async (cwd: string, ...args: string[]) =>
   (
     await exec('git', ['-C', cwd, ...args], { env: scrubbedGitEnv(), timeout: 10_000 })
   ).stdout.trim();
-async function fixture(budget: number | undefined = 1000) {
+async function fixture(budget: number | undefined = 1000, configuredDenylist = true) {
   const root = await mkdtemp(join(tmpdir(), 'cq-fix-e2e-'));
   const repo = join(root, 'repo');
   await generateScratchRepo(repo);
@@ -57,7 +58,7 @@ process.exitCode = failed ? 1 : 0;
   );
   const config = {
     schemaVersion: 2,
-    review: { denylistPatternsFile: 'upload-policy.yml' },
+    ...(configuredDenylist ? { review: { denylistPatternsFile: 'upload-policy.yml' } } : {}),
     checks: [
       {
         kind: 'tests',
@@ -120,11 +121,28 @@ const input = (f: Awaited<ReturnType<typeof fixture>>) => ({
 const reportOf = (result: Awaited<ReturnType<ReturnType<typeof makeFixRun>>>) =>
   result.status === 'ok' ? result.value : (result.report as FixRunReport);
 
-test('fresh fixture fixes both tests through real git gates without pushing', async () => {
-  const f = await fixture();
+test('fresh portable fixture CLI fixes both tests without a project denylist and exits zero', async () => {
+  const f = await fixture(1000, false);
   try {
-    const result = await makeFixRun({ drivers: scripted() })(input(f));
-    const report = reportOf(result);
+    const argv = [
+      fileURLToPath(new URL('../../fixtures/fix-cli/entry.mjs', import.meta.url)),
+      'fix.run',
+      '--source=tests',
+      `--repoRoot=${f.repo}`,
+      '--selector={"mode":"workspace-all"}',
+      `--journalDir=${f.journalDir}`,
+      '--runPrefix=cq/fixture',
+      '--json',
+    ];
+    const { stdout, stderr } = await exec(process.execPath, argv, {
+      env: scrubbedGitEnv(),
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    expect(stderr).toBe('');
+    // execFile rejects nonzero exits: reaching this assertion proves CLI exit 0.
+    const result = JSON.parse(stdout) as { status: string; value: FixRunReport };
+    const report = result.value;
     expect(result.status, JSON.stringify(result)).toBe('ok');
     expect(report.fixesPerRun).toBe(2);
     expect(report.tasks.map((task) => task.attempts.length)).toEqual([2, 2]);
@@ -147,22 +165,8 @@ test('fresh fixture fixes both tests through real git gates without pushing', as
       await mkdir(dirname(process.env.CQ_FIX_TRANSCRIPT_PATH), { recursive: true });
       await writeFile(
         process.env.CQ_FIX_TRANSCRIPT_PATH,
-        '# fix.run tests fixture transcript\n\nCaptured by the fresh-fixture scripted-driver acceptance test. Real git, offline checks, no provider calls.\n\nEquivalent CLI input: `cq fix.run --source=tests --selector=\'{"mode":"workspace-all"}\' --json` with fixture repoRoot and journalDir. The SDK factory injects the scripted agent; the production registry uses the configured driver factory.\n\n```json\n' +
-          JSON.stringify(
-            {
-              status: result.status,
-              value: {
-                ...report,
-                run: undefined,
-                units: report.units.map((unit) => ({
-                  jobId: unit.jobId,
-                  result: { status: unit.result.status },
-                })),
-              },
-            },
-            null,
-            2,
-          ).replaceAll(f.root, '<fixture>') +
+        '# fix.run tests fixture transcript\n\nFresh repository, scripted driver, real git and offline checks. The fixture entry injects only the driver through the CLI ops-root seam; production CLI parsing, fix.run schema, fix engine and validation run unchanged.\n\nCommand: `node test/fixtures/fix-cli/entry.mjs fix.run --source=tests --repoRoot=<fixture>/repo --selector=\'{"mode":"workspace-all"}\' --journalDir=<fixture>/journal --runPrefix=cq/fixture --json`\n\nObserved process exit: `0`. Stderr: empty. Stdout (one JSON artifact; fixture paths redacted):\n\n```json\n' +
+          JSON.stringify(result, null, 2).replaceAll(f.root, '<fixture>') +
           '\n```\n',
       );
     }
@@ -459,3 +463,36 @@ test.each(['active', 'entry', 'after-first'] as const)(
     }
   },
 );
+
+test('an explicitly configured missing denylist refuses real scanner composition before worker dispatch', async () => {
+  const f = await fixture();
+  let calls = 0;
+  try {
+    await unlink(join(f.repo, 'upload-policy.yml'));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'remove configured policy');
+    const drivers: DriverFactory = {
+      resolve: (request) => {
+        const resolved = scripted().resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            run: async (invocation, options) => {
+              calls++;
+              return resolved.driver.run(invocation, options);
+            },
+          },
+        };
+      },
+    };
+    const result = await makeFixRun({ drivers })(input(f));
+    expect(result.status).toBe('needs-human');
+    expect(calls).toBe(0);
+    expect(reportOf(result).tasks.every((task) => task.reason?.includes('upload refused'))).toBe(
+      true,
+    );
+    expect(reportOf(result).fixesPerRun).toBe(0);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
