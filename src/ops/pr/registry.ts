@@ -120,21 +120,51 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: AssemblePrsInputSchema,
     // The dispatch seam re-validates input through inputSchema.parseAsync
     // before invoking the op, so the erased op typing is safe here. The
-    // importer resolves the op module AND the real gh subprocess effects
-    // and binds them INPUT-DRIVEN — repoRoot crosses the plain-JSON
-    // boundary from the DISPATCHED input; nothing is wired at registry
-    // module scope, and the effects construction is inert (closure-only).
+    // importer resolves the op module, gh effects, and mandatory portable
+    // publication scanner from the INPUT's plain-JSON repoRoot. Scanner
+    // construction is inert; it runs only at a forge publication boundary.
     importer: () =>
       Promise.all([
         import('./assemblePrs.js'),
         import('../../adapters/forge-github/ghEffects.js'),
+        import('../dev/denylist.js'),
+        import('../dev/effects.js'),
+        import('node:fs/promises'),
       ]).then(
-        ([m, effects]) =>
-          (async (input: AssemblePrsInput) =>
-            m.makeAssemblePrs(effects.makeSubprocessPrEffects(input.repoRoot))(input)) as Op<
-            unknown,
-            unknown
-          >,
+        ([m, ghEffects, denylist, devEffects, fs]) =>
+          (async (input: AssemblePrsInput) => {
+            const dev = devEffects.makeSubprocessDevEffects(input.repoRoot);
+            const configText = await fs
+              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
+              .catch(() => null);
+            const packageText = await fs
+              .readFile(`${input.repoRoot}/package.json`, 'utf8')
+              .catch(() => '{}');
+            let packageName = 'repository';
+            try {
+              const value: unknown = JSON.parse(packageText);
+              if (
+                typeof value === 'object' &&
+                value !== null &&
+                'name' in value &&
+                typeof value.name === 'string'
+              )
+                packageName = value.name;
+            } catch {
+              /* package name is descriptive; scanning remains mandatory */
+            }
+            const scanner = denylist.makePortableReviewScanner(
+              input.repoRoot,
+              dev,
+              configText,
+              packageName,
+            );
+            return m.makeAssemblePrs(
+              ghEffects.makeSubprocessPrEffects(input.repoRoot),
+              undefined,
+              scanner,
+            )(input);
+          }) as Op<unknown, unknown>,
       ),
   },
   {

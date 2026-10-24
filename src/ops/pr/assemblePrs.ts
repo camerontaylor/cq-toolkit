@@ -33,6 +33,7 @@ import { resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import type { GitMutexConfig } from '../../shared/gitMutex.js';
+import type { ComponentScan, DiffSecretScanner } from '../dev/denylist.js';
 
 /**
  * The injected `gh` seam — the ONE place this family touches GitHub. All
@@ -267,10 +268,17 @@ function refnameUnsafeSegment(segment: string): boolean {
 export function makeAssemblePrs(
   gh: PrEffects,
   trackerLock?: TrackerBodyLock,
+  publicationScanner?: DiffSecretScanner,
 ): Op<AssemblePrsInput, AssemblePrsReport> {
   return async (input) => {
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
+    if (publicationScanner === undefined) {
+      return {
+        status: 'failed',
+        error: 'pr: refusing publication because no PR payload denylist scanner is configured',
+      };
+    }
     const draft = input.draft ?? true;
 
     // TRACKER-FIRST (UC row 22): the tracker exists before the first
@@ -301,11 +309,13 @@ export function makeAssemblePrs(
         if (existing.url !== undefined) trackerUrl = existing.url;
         trackerCreated = false;
       } else {
+        const body = manifestSection(input, input.packages.map(pendingRowOf));
+        await scanPublicationForUpload(publicationScanner, input.tracker.title, body);
         const created = await gh.createPr({
           head: input.tracker.branch,
           base: input.base,
           title: input.tracker.title,
-          body: manifestSection(input, input.packages.map(pendingRowOf)),
+          body,
           draft,
         });
         trackerNumber = created.number;
@@ -351,6 +361,7 @@ export function makeAssemblePrs(
           manifestRows.push({ name: pkg.name, branch: pkg.branch, number: existing.number });
           continue;
         }
+        await scanPublicationForUpload(publicationScanner, pkg.title, pkg.body);
         const created = await gh.createPr({
           head: pkg.branch,
           base: input.base,
@@ -391,10 +402,9 @@ export function makeAssemblePrs(
           );
         }
         const current = await gh.getPrBody(trackerNumber);
-        await gh.editPrBody(
-          trackerNumber,
-          composeSection(current, manifestSection(input, manifestRows)),
-        );
+        const body = composeSection(current, manifestSection(input, manifestRows));
+        await scanPublicationForUpload(publicationScanner, undefined, body);
+        await gh.editPrBody(trackerNumber, body);
       });
     } catch (err) {
       const ensured = rows
@@ -419,6 +429,43 @@ export function makeAssemblePrs(
       },
     };
   };
+}
+
+/** Scan the exact title/body pair immediately before a forge publication. */
+async function scanPublicationForUpload(
+  scanner: DiffSecretScanner,
+  title: string | undefined,
+  body: string | undefined,
+): Promise<void> {
+  const components = [
+    ...(title === undefined ? [] : [{ component: 'pr-title', path: 'pr-title.txt', text: title }]),
+    ...(body === undefined ? [] : [{ component: 'pr-body', path: 'pr-body.md', text: body }]),
+  ];
+  let scans: ComponentScan[];
+  try {
+    scans = await scanner(components);
+  } catch {
+    throw new Error('PR publication refused: denylist scan failed');
+  }
+  if (
+    !Array.isArray(scans) ||
+    scans.length !== components.length ||
+    components.some((component) => {
+      const matches = scans.filter((scan) => scan?.component === component.component);
+      return matches.length !== 1 || !Array.isArray(matches[0]?.hits);
+    })
+  ) {
+    throw new Error('PR publication refused: denylist scanner returned an incomplete result');
+  }
+  const hits = scans.flatMap((scan) => scan.hits);
+  if (hits.length > 0) {
+    const evidence = hits
+      .map(
+        (hit) => `${hit.ruleId} at line${hit.lines.length === 1 ? '' : 's'} ${hit.lines.join(',')}`,
+      )
+      .join('; ');
+    throw new Error(`PR publication refused by denylist scan: ${evidence}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

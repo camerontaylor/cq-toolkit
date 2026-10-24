@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
 import {
-  makeAssemblePrs,
+  makeAssemblePrs as makeAssemblePrsWithScanner,
   MANIFEST_SECTION_MARKER,
   READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
@@ -31,6 +31,7 @@ import {
   type PrEffects,
   type PrState,
 } from '../../../src/ops/pr/assemblePrs.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 
 // ---------------------------------------------------------------------------
 // Recording fake PrEffects
@@ -128,6 +129,13 @@ const TRACKER_BRANCH = 'cq/09-16a/tracker';
 const PKG_CORE = 'cq/09-16a/fix/core';
 const PKG_UTIL = 'cq/09-16a/fix/util';
 
+const cleanScanner: DiffSecretScanner = (components) =>
+  components.map(({ component }) => ({ component, hits: [] }));
+
+function makeAssemblePrs(gh: PrEffects, scanner: DiffSecretScanner = cleanScanner) {
+  return makeAssemblePrsWithScanner(gh, undefined, scanner);
+}
+
 // The default tracker-body lock is repo-rooted (review-debt #171), so the op
 // needs a real, writable repo root; a tmpdir keeps the suite hermetic.
 const REPO_ROOT = mkdtempSync(join(tmpdir(), 'pr-assemble-lock-'));
@@ -207,6 +215,105 @@ describe('tracker-first ordering', () => {
     const fake = fakeGh();
     await okReport(makeAssemblePrs(fake.gh), inputOf({ draft: false }));
     expect(fake.creates.every((request) => request.draft === false)).toBe(true);
+  });
+});
+
+describe('PR publication payload scanning', () => {
+  test('missing scanner refuses before any publication', async () => {
+    const fake = fakeGh();
+
+    const error = await failedAt(makeAssemblePrsWithScanner(fake.gh), inputOf());
+    expect(error).toContain('no PR payload denylist scanner');
+    expect(fake.creates).toEqual([]);
+    expect(fake.edits.size).toBe(0);
+  });
+
+  test('scans the exact outgoing titles and bodies before each create and tracker update', async () => {
+    const fake = fakeGh();
+    const seen: string[] = [];
+    const scanner: DiffSecretScanner = (components) => {
+      seen.push(...components.map(({ text }) => text));
+      return components.map(({ component }) => ({ component, hits: [] }));
+    };
+
+    await okReport(makeAssemblePrs(fake.gh, scanner), inputOf());
+
+    for (const request of fake.creates) {
+      expect(seen).toContain(request.title);
+      if (request.body !== undefined) expect(seen).toContain(request.body);
+    }
+    const edited = fake.edits.get(101);
+    expect(edited).toBeDefined();
+    expect(seen).toContain(edited);
+  });
+
+  test('a tracker payload hit prevents tracker creation', async () => {
+    const fake = fakeGh();
+    const scanner: DiffSecretScanner = (components) =>
+      components.map(({ component, text }) => ({
+        component,
+        hits: text.includes('DO_NOT_UPLOAD synthetic')
+          ? [{ ruleId: 'fixture-secret', lines: [1] }]
+          : [],
+      }));
+    const input = inputOf({
+      tracker: { title: 'DO_NOT_UPLOAD synthetic', branch: TRACKER_BRANCH },
+    });
+
+    const error = await failedAt(makeAssemblePrs(fake.gh, scanner), input);
+    expect(error).toContain('fixture-secret');
+    expect(fake.creates).toEqual([]);
+    expect(fake.edits.size).toBe(0);
+  });
+
+  test('a create diagnostic hit in the composed tracker body prevents body update', async () => {
+    const fake = fakeGh({ createFaultOnHead: PKG_CORE });
+    fake.gh.createPr = async (request) => {
+      fake.calls.push(`create:${request.head}`);
+      fake.creates.push(request);
+      if (request.head === PKG_CORE) throw new Error('DO_NOT_UPLOAD synthetic');
+      const number = fake.nextNumber++;
+      return { number };
+    };
+    const scanner: DiffSecretScanner = (components) =>
+      components.map(({ component, text }) => ({
+        component,
+        hits: text.includes('DO_NOT_UPLOAD synthetic')
+          ? [{ ruleId: 'fixture-secret', lines: [1] }]
+          : [],
+      }));
+
+    const error = await failedAt(makeAssemblePrs(fake.gh, scanner), inputOf());
+    expect(error).toContain('fixture-secret');
+    expect(fake.creates.some((request) => request.head === TRACKER_BRANCH)).toBe(true);
+    expect(fake.edits.size).toBe(0);
+  });
+
+  test('a scanner fault prevents the first create', async () => {
+    const fake = fakeGh();
+    const scanner: DiffSecretScanner = () => {
+      throw new Error('synthetic scanner fault');
+    };
+
+    const error = await failedAt(makeAssemblePrs(fake.gh, scanner), inputOf());
+    expect(error).toContain('denylist scan failed');
+    expect(fake.creates).toEqual([]);
+    expect(fake.edits.size).toBe(0);
+  });
+
+  test('a scanner fault on the composed tracker update prevents body upload', async () => {
+    const fake = fakeGh();
+    const scanner: DiffSecretScanner = (components) => {
+      if (components.some(({ text }) => text.includes('`core` — #102'))) {
+        throw new Error('synthetic scanner fault');
+      }
+      return components.map(({ component }) => ({ component, hits: [] }));
+    };
+
+    const error = await failedAt(makeAssemblePrs(fake.gh, scanner), inputOf());
+    expect(error).toContain('denylist scan failed');
+    expect(fake.creates).toHaveLength(3);
+    expect(fake.edits.size).toBe(0);
   });
 });
 
