@@ -72,7 +72,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     [`${worktreePath}:main`, 'base-sha'],
   ]);
   const dirty = { value: false };
-  const staged = { nameStatus: '' };
+  const staged = { nameStatus: 'M\0src/a.js\0' };
 
   const effectsFactory = (): WorktreeEffects => ({
     listWorktrees: async () => worktreeState.map((entry) => ({ ...entry })),
@@ -124,6 +124,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     // The worker always leaves a staged change: `diff --cached --quiet` exits 1.
     if (args.includes('--quiet')) return { code: 1, stdout: '', stderr: '' };
     if (args.includes('--name-status')) return ok(staged.nameStatus);
+    if (args.includes('--name-only')) return ok('src/a.js\0');
     if (args.includes('diff')) return ok('diff --git a/src/a.js b/src/a.js\n');
     return ok();
   };
@@ -490,4 +491,119 @@ describe('sweep unit fixer budget enforcement', () => {
       await rm(world.root, { recursive: true, force: true });
     }
   });
+});
+
+describe('optional per-task loop', () => {
+  test('absolute runner paths become checkout-relative task files', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const runCheck = world.runCheckFactory();
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        runCheck: async (command) => {
+          const output = await runCheck(command);
+          return {
+            ...output,
+            stdout: output.stdout.replaceAll('suite.test.js', `${command.cwd}/suite.test.js`),
+          };
+        },
+        deriveTasks: (baseline) => {
+          expect(baseline.failures[0]?.file).toBe('suite.test.js');
+          return [];
+        },
+      });
+      expect(result.status).toBe('ok');
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+  test('stateless related feedback precedes detached broader gate and a verified task commit', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const prompts: string[] = [];
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        driver: {
+          run: async (invocation) => {
+            prompts.push(invocation.prompt);
+            expect(invocation.sessionRef).toBeUndefined();
+            return {
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair source' },
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.tasks?.[0]?.outcome).toBe('fixed');
+        expect(result.value.tasks?.[0]?.attempts).toHaveLength(2);
+        expect(result.value.tasks?.[0]?.commits).toHaveLength(1);
+      }
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain('Related check:');
+      expect(world.checks.some((path) => path.includes('.cq-sweep-final-'))).toBe(true);
+      expect(world.gitCalls.find((args) => args.includes('commit'))?.at(-1)).toContain(
+        'Outcome: code-bug',
+      );
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+  test('protectTests sends test edits to human and commits nothing', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { protectTests: true },
+        git: async (args) =>
+          args.includes('--name-status')
+            ? { code: 0, stdout: 'M\0suite.test.js\0', stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.outcome).toBe('escalated-to-human');
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+});
+
+test('failed task does not block a passing sibling task', async () => {
+  const world = await makeWorld([
+    { failing: true },
+    { failing: true },
+    { failing: true },
+    { failing: false },
+  ]);
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: (baseline) =>
+        [0, 1].map((id) => ({
+          id: String(id),
+          files: ['suite.test.js'],
+          failures: baseline.failures,
+        })),
+      driver: {
+        run: async () => ({
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'complete',
+          structuredOutput: { outcome: 'code-bug', summary: 'repair source' },
+        }),
+      },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.tasks?.map((task) => task.outcome)).toEqual(['unfixed', 'fixed']);
+      expect(result.value.tasks?.[1]?.commits).toHaveLength(1);
+    }
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
 });
