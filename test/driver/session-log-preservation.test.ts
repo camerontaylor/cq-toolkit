@@ -137,10 +137,8 @@ describe('1.3 job-finished correlation fields', () => {
 
 describe('1.5 native session id + transcript path', () => {
   test('nativeTranscriptPath encodes the workspace like Claude Code', () => {
-    const p = nativeTranscriptPath('abc-123', '/home/ctaylor/repos/demo');
-    expect(p).toBe(
-      join(homedir(), '.claude', 'projects', '-home-ctaylor-repos-demo', 'abc-123.jsonl'),
-    );
+    const p = nativeTranscriptPath('abc-123', '/tmp/demo');
+    expect(p).toBe(join(homedir(), '.claude', 'projects', '-tmp-demo', 'abc-123.jsonl'));
   });
 
   test('no workspace → no path (never a guessed key)', () => {
