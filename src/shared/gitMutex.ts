@@ -24,6 +24,7 @@
 import { mkdirSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { lock } from 'proper-lockfile';
 
 /** The default stale window (ms): an order of magnitude above any realistic git section, matching the ledger store's 30s disposition. */
@@ -81,6 +82,8 @@ export interface GitMutexConfig {
   staleMs?: number;
   /** Acquire retries after the first attempt (integer ≥ 0); default {@link DEFAULT_GIT_MUTEX_RETRIES}. */
   retries?: number;
+  /** Refuse a live owner immediately; stale recovery and held-lock refresh remain enabled. */
+  failFast?: boolean;
   /** Exponential-backoff base in ms (integer ≥ 1); default {@link DEFAULT_GIT_MUTEX_RETRY_BASE_MS}. */
   retryBaseMs?: number;
   /** Optional observability hook (see {@link GitMutexEvent}). */
@@ -94,9 +97,10 @@ export interface GitMutex {
    * result is awaited); the fulfilled value is returned. Concurrent
    * callers — in this process or another — serialize on the artifact; a
    * caller whose retries run out is REJECTED, never run unlocked. fn
-   * throwing releases best-effort and rethrows the fn fault as-is.
+   * throwing releases best-effort and rethrows the fn fault as-is. An optional
+   * signal cancels queued acquisition or admission, never mandatory cleanup.
    */
-  withLock<T>(fn: () => T | Promise<T>): Promise<T>;
+  withLock<T>(fn: () => T | Promise<T>, signal?: AbortSignal): Promise<T>;
 }
 
 /**
@@ -121,10 +125,13 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
       `git-mutex: staleMs (${String(staleMs)}) must be an integer ≥ ${String(MIN_STALE_MS)} — proper-lockfile clamps the stale window to that floor, and a config meaning less than it says is a misconfiguration`,
     );
   }
-  const retries = config.retries ?? DEFAULT_GIT_MUTEX_RETRIES;
-  if (!Number.isInteger(retries) || retries < 0) {
-    throw new RangeError(`git-mutex: retries (${String(retries)}) must be an integer ≥ 0`);
+  const configuredRetries = config.retries ?? DEFAULT_GIT_MUTEX_RETRIES;
+  if (!Number.isInteger(configuredRetries) || configuredRetries < 0) {
+    throw new RangeError(
+      `git-mutex: retries (${String(configuredRetries)}) must be an integer ≥ 0`,
+    );
   }
+  const retries = config.failFast === true ? 0 : configuredRetries;
   const retryBaseMs = config.retryBaseMs ?? DEFAULT_GIT_MUTEX_RETRY_BASE_MS;
   if (!Number.isInteger(retryBaseMs) || retryBaseMs < 1) {
     throw new RangeError(`git-mutex: retryBaseMs (${String(retryBaseMs)}) must be an integer ≥ 1`);
@@ -136,7 +143,7 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
   // stale, so acquire must still be retrying when staleness passes, or a
   // crash wedges the run forever. A caller raising staleMs above the floor
   // breaks that property, so the misconfiguration is rejected, not absorbed.
-  if (budgetMs < staleMs) {
+  if (!config.failFast && budgetMs < staleMs) {
     throw new RangeError(
       `git-mutex: the retry backoff floor (${String(budgetMs)} ms = retryBaseMs ${String(retryBaseMs)} × (2^${String(retries)} − 1)) is below the stale window (${String(staleMs)} ms) — raise retries (or lower staleMs) so a crashed holder's lock goes stale while acquire is still retrying`,
     );
@@ -161,7 +168,8 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
   const artifactPath = `${config.lockPath}.lock`;
 
   return {
-    async withLock<T>(fn: () => T | Promise<T>): Promise<T> {
+    async withLock<T>(fn: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+      signal?.throwIfAborted();
       mkdirSync(dirname(config.lockPath), { recursive: true });
       let steal = false;
       try {
@@ -182,14 +190,37 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
       let compromised: Error | undefined;
       let release: () => Promise<void>;
       try {
-        release = await lock(config.lockPath, {
-          realpath: false,
-          stale: staleMs,
-          retries: { retries, factor: 2, minTimeout: retryBaseMs },
-          onCompromised: (err) => {
-            compromised = err;
-          },
-        });
+        const acquire = () =>
+          lock(config.lockPath, {
+            realpath: false,
+            stale: staleMs,
+            retries: signal === undefined ? { retries, factor: 2, minTimeout: retryBaseMs } : 0,
+            onCompromised: (err) => {
+              compromised = err;
+            },
+          });
+        if (signal === undefined) release = await acquire();
+        else {
+          // Keep the same bounded exponential schedule, but own the wait so
+          // cancellation removes its timer and cannot leave a later acquire.
+          for (let attempt = 0; ; attempt++) {
+            signal.throwIfAborted();
+            try {
+              release = await acquire();
+              break;
+            } catch (err) {
+              signal.throwIfAborted();
+              if (
+                !(err instanceof Error) ||
+                !('code' in err) ||
+                err.code !== 'ELOCKED' ||
+                attempt >= retries
+              )
+                throw err;
+              await delay(retryBaseMs * 2 ** attempt, undefined, { signal });
+            }
+          }
+        }
       } catch (err) {
         throw new Error(
           `git-mutex: could not acquire '${config.lockPath}' — still held after the waiter budget (${String(retries)} retries, ~${String(budgetMs)} ms backoff floor at ${String(retryBaseMs)} ms base, stale window ${String(staleMs)} ms) — ${err instanceof Error ? err.message : String(err)}`,
@@ -199,7 +230,10 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
       emit({ type: 'acquired', lockPath: config.lockPath, steal });
       let value: T;
       try {
-        value = await Promise.resolve().then(fn);
+        value = await Promise.resolve().then(() => {
+          signal?.throwIfAborted();
+          return fn();
+        });
       } catch (fnErr) {
         // fn already failed: its fault is primary; release is best-effort.
         await release().catch(() => undefined);

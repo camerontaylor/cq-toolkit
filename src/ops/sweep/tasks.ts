@@ -131,3 +131,12 @@ export function normalizeFailurePaths(
     }),
   };
 }
+
+/** Translate canonical repository paths only at the related argv boundary. */
+export function relatedFilesRelativeToCheck(
+  files: readonly string[],
+  root: string,
+  cwd: string,
+): string[] {
+  return files.map((file) => relative(cwd, resolve(root, file)));
+}

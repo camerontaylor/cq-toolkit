@@ -104,14 +104,19 @@ export async function readWorkState(
   pin: { target: string; base?: string },
 ): Promise<WorkStateRead> {
   try {
-    const symbolic = await git(effects, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const symbolic = await git(effects, ['symbolic-ref', '--quiet', 'HEAD']);
     if (symbolic.exitCode === 1) {
       return {
         ok: false,
         reason: 'HEAD is detached — dev records are kept per branch; check out a branch and re-run',
       };
     }
-    const branch = gitStdout(symbolic, 'symbolic-ref HEAD').trim();
+    const branchRef = gitStdout(symbolic, 'symbolic-ref HEAD').trim();
+    if (!branchRef.startsWith('refs/heads/') || branchRef.length === 'refs/heads/'.length)
+      return { ok: false, reason: 'HEAD does not name a local branch ref' };
+    // --short may return heads/<name> when refs/<name> also exists.
+    // Branch identity is the exact local ref suffix, never its ambiguous display name.
+    const branch = branchRef.slice('refs/heads/'.length);
     const head = gitStdout(
       await git(effects, ['rev-parse', '--verify', 'HEAD']),
       'rev-parse HEAD',

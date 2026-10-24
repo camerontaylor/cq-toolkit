@@ -27,6 +27,10 @@ entry shapes. Source of truth (start reading here):
   caps: `inFlightCeiling` is separate from `runDispatchQuota`), the
   `JournalEvent` union (discriminated on `type`; `job-finished` carries the
   frozen replay record `opId + inputsHash + result`), `JobState`/`JobStatus`.
+  Result consumers preserve the optional JSON-lossless `report` envelope on
+  every status, including non-ok results nested through `runPlan`. They
+  validate the remaining artifact against the unchanged strict
+  `OpResultSchema`; other unknown keys and lossy reports are rejected.
 - **Registry entries.** `OpRegistryEntry` (`name`, `inputSchema`, lazy
   `importer`) and `PlanRegistryEntry` are runtime-only — function fields,
   never persisted, deliberately no schema mirror.

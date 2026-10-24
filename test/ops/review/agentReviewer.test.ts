@@ -1,8 +1,44 @@
 import { describe, expect, it, vi } from 'vitest';
 import { resolve } from 'node:path';
 import type { DriverFactory } from '../../../src/driver/factory.js';
-import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
+import { runAgentReviewer as runReview } from '../../../src/ops/review/agentReviewer.js';
 import { runLadder } from '../../../src/kernel/governor.js';
+
+// Existing policy fixtures emulate a compliant structured reviewer; receipt failure
+// and real wire behavior are exercised separately in agentReviewer-partitions.test.ts.
+const runAgentReviewer: typeof runReview = (drivers, input) =>
+  runReview(
+    {
+      resolve: (request) => {
+        const resolved = drivers.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            ...resolved.driver,
+            run: async (invocation, options) => {
+              const result = await resolved.driver.run(invocation, options);
+              if (
+                result.structuredOutput &&
+                typeof result.structuredOutput === 'object' &&
+                'findings' in result.structuredOutput
+              )
+                return {
+                  ...result,
+                  structuredOutput: {
+                    ...result.structuredOutput,
+                    receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
+                  },
+                };
+              return result;
+            },
+          },
+        };
+      },
+    } as DriverFactory,
+    input,
+  );
+const cleanScan = (components: readonly { component: string }[]) =>
+  components.map(({ component }) => ({ component, hits: [] }));
 
 describe('runAgentReviewer', () => {
   it('uses a read-only structured invocation and applies cq.json severity mapping', async () => {
@@ -40,6 +76,7 @@ describe('runAgentReviewer', () => {
       repoRoot: '.',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: 'diff',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
@@ -71,6 +108,7 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
@@ -119,6 +157,7 @@ describe('runAgentReviewer', () => {
           repoRoot: '/fixture',
           branch: 'review-fixture',
           head: 'abc123',
+          scanSecrets: cleanScan,
           diff: '',
           role: { provider: 'mock', model: 'mock' },
           maxTokens: 500,
@@ -147,13 +186,14 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
       wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       status: 'needs-human',
       reason: 'agent review could not dispatch: no reviewer role',
     });
@@ -175,13 +215,14 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
       wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       status: 'needs-human',
       reason: 'agent review did not run: provider unavailable',
     });
@@ -201,13 +242,14 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
       wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       status: 'needs-human',
       reason: 'agent review did not run: scripted rejection',
     });
@@ -236,6 +278,7 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
@@ -264,13 +307,14 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
       wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       status: 'failed',
       error: 'agent review returned invalid structured output',
     });
@@ -294,6 +338,7 @@ describe('runAgentReviewer', () => {
       repoRoot: '/fixture',
       branch: 'review-fixture',
       head: 'abc123',
+      scanSecrets: cleanScan,
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
@@ -324,6 +369,7 @@ describe('runAgentReviewer', () => {
           repoRoot: '/fixture',
           branch: 'review-fixture',
           head: 'abc123',
+          scanSecrets: cleanScan,
           diff: '',
           role: { provider: 'mock', model: 'mock' },
           maxTokens: 500,
@@ -338,3 +384,38 @@ describe('runAgentReviewer', () => {
     expect(signal?.aborted).toBe(true);
   });
 });
+
+it.each(['entry', 'running'] as const)(
+  'composition cancellation reaches read-only reviewer: %s',
+  async (mode) => {
+    const controller = new AbortController();
+    let signal: AbortSignal | undefined;
+    const run = vi.fn(async (_invocation: unknown, options: { signal: AbortSignal }) => {
+      signal = options.signal;
+      controller.abort(new Error('composition parent stopped'));
+      return new Promise<never>(() => undefined);
+    });
+    const resolveDriver = vi.fn(() => ({
+      driver: { run },
+      lane: 'ai-sdk',
+      modelSpec: { provider: 'mock', model: 'mock' },
+    }));
+    if (mode === 'entry') controller.abort(new Error('already cancelled'));
+    const result = await runAgentReviewer({ resolve: resolveDriver } as unknown as DriverFactory, {
+      repoRoot: '/fixture',
+      branch: 'fixture',
+      head: 'a'.repeat(40),
+      scanSecrets: cleanScan,
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 10000,
+      severityMap: { high: 'major', medium: 'minor' },
+      signal: controller.signal,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(run).toHaveBeenCalledTimes(mode === 'entry' ? 0 : 1);
+    if (mode === 'entry') expect(resolveDriver).not.toHaveBeenCalled();
+    else expect(signal?.aborted).toBe(true);
+  },
+);

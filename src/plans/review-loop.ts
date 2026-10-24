@@ -73,6 +73,7 @@
 // comes from a registry so the governed runner dispatches it exactly like
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
+import { posix } from 'node:path';
 import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import type { HarnessConfig } from '../harness/config.js';
@@ -258,7 +259,12 @@ export type LoopReplyVerdict =
 
 export const loopReplyVerdict = (
   thread: { id: string; body: string; replies: readonly ThreadComment[] },
-  opts: { signature: string; headSha: string | null; ownLogin: string | null },
+  opts: {
+    signature: string;
+    headSha: string | null;
+    ownLogin: string | null;
+    requireCurrentIdentity?: boolean;
+  },
 ): LoopReplyVerdict => {
   const latest = thread.replies[thread.replies.length - 1];
   if (
@@ -269,6 +275,8 @@ export const loopReplyVerdict = (
     return { kind: 'unproven' };
   }
   const ownLogin = opts.ownLogin?.toLowerCase() ?? null;
+  if (opts.requireCurrentIdentity && (ownLogin === null || opts.headSha === null))
+    return { kind: 'unproven' };
   if (ownLogin !== null && latest.authorLogin?.toLowerCase() !== ownLogin) {
     return { kind: 'unproven' };
   }
@@ -277,6 +285,7 @@ export const loopReplyVerdict = (
     return { kind: 'unproven' };
   }
   if (header.head === null || header.round === null) {
+    if (opts.requireCurrentIdentity) return { kind: 'unproven' };
     // Anyone can type the public signature: a LEGACY reply binds no round or
     // head, so only the known identity's authorship proves it.
     return ownLogin === null ? { kind: 'unproven' } : { kind: 'settled', carryResolve: false };
@@ -390,6 +399,12 @@ export interface ReviewLoopOpts {
    * the default view would spawn a real worker.
    */
   driverRegistryView?: OpRegistryView;
+  /** Explicit engine-only opt-in: file-disjoint jobs, staging/validation/commits owned by the injected op. */
+  engineOwnedConcurrency?: number;
+  /** Legacy loop publishes by default; composition callers can require explicit opt-in. */
+  publish?: boolean;
+  /** Parent cancellation also withholds publication and forge mutations. */
+  signal?: AbortSignal;
   /** Classify tuning (R3 data). Default: defaultClassifyConfig. */
   classifyConfig?: ClassifyConfig;
   /** Batch planning config. Default: defaultPlanBatchConfig (isolated, I6). */
@@ -445,6 +460,27 @@ export interface ReviewLoopOpts {
   dispatchLogPath: string;
   /** Root for the PR worktree (default: resolvePrWorktree's own). */
   worktreeRoot?: string;
+  /**
+   * Forwarded to resolvePrWorktree: fires only on THIS loop's own
+   * engine-verified creation of the per-PR worktree (never on reuse).
+   */
+  onWorktreeCreated?: (info: {
+    path: string;
+    branch: string;
+    head: string;
+  }) => Promise<void> | void;
+  /**
+   * Forwarded to resolvePrWorktree before the non-forced removal of a stale
+   * checkout at a new head: return true only after clearing exactly the
+   * engine-owned obstructions the implementation can attest.
+   */
+  onWorktreeStaleRefresh?: (info: {
+    path: string;
+    branch: string;
+    head: string;
+  }) => Promise<boolean> | boolean;
+  /** Engine-owned exact bookkeeping exemption; must still reject all tracked/caller changes. */
+  publicationTreeClean?(root: string): Promise<boolean>;
   /**
    * Called after the governed fix run with the run's ACCOUNTED spend
    * (`governor.usdSpent`, plus the token rollup total as the second
@@ -891,6 +927,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     registry: opts.registry,
     nowMs: opts.nowMs,
     ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
+    ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
+    ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
   });
 
   // (2) Baseline snapshot, then the pure pipeline. The truncation refusal is
@@ -1031,19 +1069,18 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
   for (const entry of correlated) {
-    const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
-    if (dispatched.has(replyActionId)) {
-      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${entry.source.roundFingerprint}`;
-      if (entry.source.kind === 'thread' && !dispatched.has(resolveActionId)) {
-        carriedResolves.push({
-          kind: 'resolve_thread',
-          actionId: resolveActionId,
-          threadId: entry.source.itemId,
-        });
-      }
+    if (
+      entry.source.kind !== 'thread' &&
+      dispatched.has(
+        `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`,
+      )
+    ) {
       skipped.push({ id: entry.source.itemId, reason: 'already-answered-this-round' });
       continue;
     }
+    // A journaled reply alone is not authorization to resolve or skip. The
+    // authenticated current-head/round settle gate above is the only carry
+    // path. Missing/deleted/stale replies are checked again (#363).
     sources.set(`fix-${fixInputs.length + 1}`, entry.source);
     fixInputs.push({
       repo: `${opts.owner}/${opts.repo}`,
@@ -1059,14 +1096,102 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     });
   }
 
-  // (4) The governed fix run. concurrency is FORCED to 1 (the shared
-  // per-PR-worktree sequencing contract) and stopOnError is false (one bad
-  // item must not orphan the others' replies). No resume in v1: journalDir
-  // is an audit trail only.
+  // (4) Legacy workers remain serial. Engine-owned workers may overlap
+  // disjoint files; ordering waits for settlement, never dependency success.
+  // stopOnError remains false so one human item cannot orphan its siblings.
   const plan = buildReviewLoopPlan(fixInputs);
-  const view = opts.driverRegistryView ?? (await centralRegistryView());
+  if (opts.engineOwnedConcurrency !== undefined) {
+    if (!Number.isSafeInteger(opts.engineOwnedConcurrency) || opts.engineOwnedConcurrency < 1)
+      throw new Error('engineOwnedConcurrency must be positive');
+  }
+  const pending = new Set<Promise<void>>();
+  const priorByFile = new Map<string, Promise<void>>();
+  let barrier = Promise.resolve();
+  const underlyingView = opts.driverRegistryView ?? (await centralRegistryView());
+  const executionHeads = new Map<string, string | null>();
+  const view: OpRegistryView = {
+    get(name) {
+      const entry = underlyingView.get(name);
+      if (entry === undefined || name !== 'review.fixItem') return entry;
+      return {
+        ...entry,
+        importer: async (...args) => {
+          const op = await entry.importer(...args);
+          return async (raw) => {
+            const input = raw as FixReviewItemInput;
+            let release = () => {};
+            let settled: Promise<void> | undefined;
+            let file: string | undefined;
+            let waits: Promise<void>[] = [];
+            if (opts.engineOwnedConcurrency !== undefined) {
+              file = input.item.path ? posix.normalize(input.item.path) : undefined;
+              waits = file ? [barrier, priorByFile.get(file) ?? Promise.resolve()] : [...pending];
+              settled = new Promise<void>((resolve) => {
+                release = resolve;
+              });
+              pending.add(settled);
+              if (file) priorByFile.set(file, settled);
+              else barrier = settled;
+            }
+            try {
+              await Promise.all(waits);
+              const observed = await opts.git([
+                '-C',
+                worktree.path,
+                'rev-parse',
+                '--verify',
+                'HEAD^{commit}',
+              ]);
+              executionHeads.set(
+                input.item.id,
+                observed.code === 0 && COMMIT_SHA_RE.test(observed.stdout.trim())
+                  ? observed.stdout.trim()
+                  : null,
+              );
+              const result = await op(raw);
+              if (opts.engineOwnedConcurrency !== undefined && result.status === 'ok') {
+                const actual = (result.value as FixReviewItemResult).observedHead;
+                if (actual !== undefined) {
+                  const early = executionHeads.get(input.item.id);
+                  if (!COMMIT_SHA_RE.test(actual) || !early)
+                    return { status: 'needs-human', reason: 'engine execution head unavailable' };
+                  // An admission wait may cross verified sibling commits. The
+                  // actual identity must remain inside the observed ancestry;
+                  // it cannot borrow an unrelated tree for a rejection citation.
+                  for (const [parent, child] of [
+                    [early, actual],
+                    [actual, 'HEAD'],
+                  ]) {
+                    const proof = await opts.git([
+                      '-C',
+                      worktree.path,
+                      'merge-base',
+                      '--is-ancestor',
+                      parent!,
+                      child!,
+                    ]);
+                    if (proof.code !== 0)
+                      return {
+                        status: 'needs-human',
+                        reason: 'engine execution head ancestry changed',
+                      };
+                  }
+                  executionHeads.set(input.item.id, actual);
+                }
+              }
+              return result;
+            } finally {
+              release();
+              if (settled) pending.delete(settled);
+              if (file && priorByFile.get(file) === settled) priorByFile.delete(file);
+            }
+          };
+        },
+      };
+    },
+  };
   const runOptions: RunOptions = {
-    concurrency: 1,
+    concurrency: opts.engineOwnedConcurrency ?? 1,
     stopOnError: false,
     ...(opts.runOptions?.journalDir !== undefined
       ? { journalDir: opts.runOptions.journalDir }
@@ -1097,6 +1222,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // through the evidence folds and (W2.3) reservation capacity.
       return await runPlan(plan, runOptions, view, {
         governor,
+        ...(opts.signal ? { signal: opts.signal } : {}),
         allowAdvisory: opts.allowAdvisoryBudget === true,
         ...(opts.allowAdvisoryBudget === true
           ? { allowAdvisoryProvenance: 'product' as const }
@@ -1309,11 +1435,24 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // Publish-time hygiene (round-3 item 2c): a dirty worktree means
   // uncommitted worker side effects — nothing is pushed or resolved.
   const statusAtPublish = await opts.git(['-C', worktree.path, 'status', '--porcelain']);
-  const dirtyWorktree = statusAtPublish.code === 0 && statusAtPublish.stdout.trim() !== '';
+  const dirtyWorktree =
+    statusAtPublish.code !== 0 ||
+    (opts.publicationTreeClean
+      ? !(await opts.publicationTreeClean(worktree.path))
+      : statusAtPublish.stdout.trim() !== '');
   if (dirtyWorktree) {
     reasons.push('dirty-worktree');
   }
-  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree && !headUnreadable;
+  if (opts.signal?.aborted) reasons.push('parent cancelled; publication and replies withheld');
+  if (opts.publish === false && commits.length > 0)
+    reasons.push('verified commits retained locally; publication requires --push');
+  const publishable =
+    opts.publish !== false &&
+    !opts.signal?.aborted &&
+    allRowsOk &&
+    !unreportedCommit &&
+    !dirtyWorktree &&
+    !headUnreadable;
   if (commits.length > 0 && publishable) {
     const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
     if (push.code !== 0) {
@@ -1392,7 +1531,9 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // unchanged row never claims a head a sibling's later commit produced:
     // the next run then sees another head and re-opens the thread once.
     const answeredHead =
-      value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : checkedOutHead;
+      value.changed && value.commits.length > 0
+        ? headAfter.stdout.trim()
+        : (executionHeads.get(source.itemId) ?? null);
     const stampThread =
       source.kind === 'thread'
         ? state.threads.find((candidate) => candidate.id === source.itemId)
@@ -1510,7 +1651,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // Zero actions → nothing to run: a re-run no-op stays a true no-op (no
   // push, no log writes).
   let reply: ReplyAndResolveResult | undefined;
-  if (actions.length > 0) {
+  if (actions.length > 0 && !opts.signal?.aborted && opts.publish !== false) {
     reply = await replyAndResolve(actions, {
       owner: opts.owner,
       repo: opts.repo,
@@ -1522,6 +1663,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           : null,
       dispatchLog: fileDispatchLog(opts.dispatchLogPath),
       nowMs: opts.nowMs,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     for (const failure of reply.failed) {
       reasons.push(
@@ -1541,6 +1683,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     }
   }
 
+  if (opts.signal?.aborted && !reasons.some((reason) => reason.includes('parent cancelled')))
+    reasons.push('parent cancelled; remaining publication and replies withheld');
   // (8) The verdict: clean stages → ok; anything recorded → needs-human.
   return {
     status: reasons.length === 0 ? 'ok' : 'needs-human',
