@@ -27,7 +27,7 @@
 // whether the run passed or failed. A red run maps to `failed` (CLI exit 1);
 // green returns the report. The gates run in the live worktree; the record
 // is bound to the identity read before them (author tier, strategy §2.4).
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
@@ -133,10 +133,23 @@ async function runGate(
   command: string,
   args: readonly string[],
   timeoutMs: number,
+  cwd?: string,
 ): Promise<DevCheckGate> {
   const startedAt = Date.now();
   try {
-    return classifyGate(name, await effects.runCommand(command, args, { timeoutMs }), startedAt);
+    const resolvedCwd = cwd === undefined ? undefined : resolve(cwd);
+    const resolvedExe =
+      resolvedCwd !== undefined && !isAbsolute(command) && /[\\/]/.test(command)
+        ? resolve(resolvedCwd, command)
+        : command;
+    return classifyGate(
+      name,
+      await effects.runCommand(resolvedExe, args, {
+        timeoutMs,
+        ...(resolvedCwd === undefined ? {} : { cwd: resolvedCwd }),
+      }),
+      startedAt,
+    );
   } catch (err) {
     return {
       name,
@@ -265,6 +278,9 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
       /* absent package metadata retains the legacy gate set */
     }
     const config = configText === null ? null : parseCqConfig(configText, input.repoRoot);
+    if (config?.ok === false && packageName !== '@camerontaylor/cq-toolkit') {
+      return { status: 'needs-human', reason: `dev.check: cq.json — ${config.reason}` };
+    }
     // Owner decision 12: configured checks are authoritative for adopters.
     // cq-toolkit keeps the legacy set until #411 adds its test check.
     const configuredChecks =
@@ -280,6 +296,7 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
             check.command.command,
             check.command.args,
             STATIC_GATE_TIMEOUT_MS,
+            join(input.repoRoot, check.command.cwd ?? '.'),
           ),
         );
       }

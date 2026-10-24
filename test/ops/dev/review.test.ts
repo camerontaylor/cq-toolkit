@@ -16,6 +16,8 @@ import {
   type ScanComponentInput,
 } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
+import type { DriverFactory } from '../../../src/driver/factory.js';
+import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
 import {
   makeDevReview,
   SCAN_COMPONENT_CAP_BYTES,
@@ -151,6 +153,69 @@ describe('dev.review pre-upload project scan fails closed', () => {
 });
 
 describe('dev.review cycle', () => {
+  test('agent:reviewer runs the scripted read-only reviewer and records a terminal ledger cycle', async () => {
+    const effects = repoEffects(repo);
+    const run = vi.fn(
+      async (invocation: { toolPolicy: { mode?: string }; outputSchema?: unknown }) => {
+        expect(invocation.toolPolicy.mode).toBe('none');
+        expect(invocation.outputSchema).toBeDefined();
+        return {
+          stopReason: 'complete' as const,
+          structuredOutput: {
+            findings: [
+              {
+                file: 'src/a.ts',
+                line: 1,
+                rule: 'fixture-rule',
+                severity: 'high',
+                text: 'Seeded agent finding',
+              },
+            ],
+          },
+          usage: { input: 12, output: 4, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+        };
+      },
+    );
+    const drivers = {
+      resolve: () => ({
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'scripted', model: 'reviewer' },
+        driver: { run },
+      }),
+    } as unknown as DriverFactory;
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: (input) =>
+        runAgentReviewer(drivers, {
+          ...input,
+          role: { provider: 'scripted', model: 'reviewer' },
+          maxTokens: 500,
+          severityMap: { high: 'major', medium: 'minor' },
+        }),
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.reviewer).toBe('agent:reviewer');
+    expect(result.value.completion).toEqual({ kind: 'terminal' });
+    expect(result.value.findings).toEqual([
+      expect.objectContaining({
+        severity: 'major',
+        fileName: 'src/a.ts',
+        excerpt: 'Seeded agent finding',
+      }),
+    ]);
+    const [cycle] = effects.openLedger('feature/x').load().records;
+    expect(cycle).toMatchObject({
+      kind: 'cycle',
+      reviewer: 'agent:reviewer',
+      completion: { kind: 'terminal' },
+    });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   test('a terminal cycle: ok report with completion, pinned base, recorded ids and log', async () => {
     const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
@@ -345,7 +410,7 @@ describe('dev.review cycle', () => {
     expect(reviewerCalls(effects)).toEqual([]);
   });
 
-  test('the agent fallback is refused by name — never a substitute for the CLI cycle', async () => {
+  test('an agent reviewer is refused when the configured agent runner is unavailable', async () => {
     const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(
       effects,
@@ -355,7 +420,8 @@ describe('dev.review cycle', () => {
       reviewer: 'agent:some/model',
     });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('vendor-down fallback');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('agent reviewer is unavailable');
     expect(effects.calls).toEqual([]);
   });
 

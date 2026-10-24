@@ -28,15 +28,15 @@
 // required CI plus the reviewer bots at the exact head.
 //
 // THE REVIEWER CHOICE IS CONFIGURATION (strategy §2.7): `coderabbit` (the
-// default) or `agent:<provider/model>`, the vendor-down fallback. This build
-// ships no agent runner, so an `agent:` request is a needs-human refusal and
-// can never stand in for the CLI cycle.
+// default) or `agent:<role>`, resolved from cq.json and run with the configured
+// reviewer role.
 //
 // ONE OP, TWO ACTIONS: no action (or `cycle`) runs this module's review
 // cycle; `enroll | status | fallback` runs the author-admission transport
 // (review-transport.ts, unchanged from #332 — same wire shapes, same crq
 // invocation `cq dev.review --action=enroll …`).
 import type { Op, OpResult } from '../../kernel/types.js';
+import type { Finding } from '../review/findings.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
@@ -91,7 +91,7 @@ export interface DevCycleInput {
   target?: string;
   /** Explicit immutable base sha overriding the merge-base pin. */
   base?: string;
-  /** The reviewer choice: `coderabbit` (default) or `agent:<provider/model>`. */
+  /** The reviewer choice: `coderabbit` (default) or `agent:<role>`. */
   reviewer?: string;
   /** Review only staged+unstaged work (the protocol's --uncommitted scope). */
   uncommitted?: boolean;
@@ -110,6 +110,14 @@ export interface DevReviewDeps {
   effects: DevEffects;
   /** The composed pre-upload secret scanner (cycle action only). */
   scanSecrets: DiffSecretScanner;
+  /** The configured, read-only agent reviewer used by `agent:<role>`. */
+  runAgentReviewer?: (input: {
+    repoRoot: string;
+    head: string;
+    branch: string;
+    role: string;
+    diff: string;
+  }) => Promise<OpResult<{ findings: Finding[]; usage: number }>>;
   /**
    * The author-admission transport (admission actions). When omitted, the
    * admission actions report the configuration gap.
@@ -142,7 +150,7 @@ export interface DevReviewReport {
 export function makeDevReview(
   deps: DevReviewDeps,
 ): Op<DevReviewInput, DevReviewReport | AuthorDecision> {
-  const cycle = makeReviewCycle(deps.effects, deps.scanSecrets);
+  const cycle = makeReviewCycle(deps.effects, deps.scanSecrets, deps.runAgentReviewer);
   return async (input) => {
     if (isAdmissionInput(input)) {
       if (deps.transport === undefined) {
@@ -169,16 +177,17 @@ function needsHuman(reason: string): OpResult<never> {
 function makeReviewCycle(
   effects: DevEffects,
   scanSecrets: DiffSecretScanner,
+  runAgentReviewer?: DevReviewDeps['runAgentReviewer'],
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const scope = input.uncommitted === true ? 'uncommitted' : 'full';
     const reviewer = input.reviewer ?? CODERABBIT_REVIEWER;
-    if (reviewer !== CODERABBIT_REVIEWER) {
-      return needsHuman(
-        'the agent reviewer is the vendor-down fallback (D-J) and this build ships no agent runner — the pre-PR reviewer is the CodeRabbit CLI; a fallback never substitutes for a real CLI cycle',
-      );
-    }
+    const isAgent = reviewer.startsWith('agent:');
+    if (reviewer !== CODERABBIT_REVIEWER && !isAgent)
+      return needsHuman(`unsupported reviewer '${reviewer}'`);
+    if (isAgent && runAgentReviewer === undefined)
+      return needsHuman('the configured agent reviewer is unavailable');
 
     const read = await readWorkState(effects, {
       target,
@@ -231,6 +240,56 @@ function makeReviewCycle(
     try {
       span = await effects.withHostLock(async () => {
         await refuseDrift('while waiting for the review lock');
+        if (isAgent) {
+          const role = reviewer.slice('agent:'.length);
+          if (!role) throw new Error('agent reviewer role is empty');
+          const result = await runAgentReviewer!({
+            repoRoot: input.repoRoot,
+            head: state.head,
+            branch: state.branch,
+            diff: collected.components.map((component) => component.text).join('\n'),
+            role,
+          });
+          await refuseDrift('during the agent review run');
+          const completion: DevReviewCompletion =
+            result.status === 'ok'
+              ? { kind: 'terminal' }
+              : {
+                  kind: 'blocked',
+                  reason:
+                    result.status === 'needs-human'
+                      ? result.reason
+                      : result.status === 'failed'
+                        ? result.error
+                        : result.status,
+                };
+          const findings = result.status === 'ok' ? result.value.findings : [];
+          const logPath = await effects.writeReviewLog(
+            state.branch,
+            `${Date.now()}`,
+            [
+              '# dev.review agent cycle log',
+              `reviewer: ${reviewer}`,
+              `base: ${state.base}`,
+              `head: ${state.head}`,
+              `dirtySha256: ${state.dirtySha256}`,
+              `scope: ${scope}`,
+              `completion: ${completion.kind}`,
+              `findings: ${String(findings.length)}`,
+              `at: ${at}`,
+              '',
+            ].join('\n'),
+          );
+          return {
+            completion,
+            logPath,
+            findings: findings.map((finding) => ({
+              severity: finding.severity,
+              ...(finding.file ? { fileName: finding.file } : {}),
+              excerpt: finding.text,
+            })),
+          };
+        }
         const raw = await runReviewer(effects, argv, DEFAULT_REVIEWER_TIMEOUT_MS);
         await refuseDrift(
           'during the review run (content the scan never saw may have been uploaded)',

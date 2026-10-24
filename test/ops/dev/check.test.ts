@@ -5,6 +5,7 @@
 // over the archived tree WITH the working patch applied, and the three
 // diff-checks.
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { knipTrigger, makeDevCheck, rangeFault } from '../../../src/ops/dev/check.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
@@ -64,19 +65,42 @@ describe('dev.check', () => {
       'cq.json',
       JSON.stringify({
         schemaVersion: 2,
-        checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: ['--strict'] } }],
+        checks: [
+          {
+            adapter: 'tsc-lines',
+            command: { command: 'fake-check', args: ['--strict'], cwd: 'packages/app' },
+          },
+        ],
       }),
     );
     repo.commitAll('configure portable check');
     const effects = effectsFor((command) =>
       command === 'fake-check' ? 'configured check passed' : undefined,
     );
+    const originalRunCommand = effects.runCommand;
+    let configuredCwd: string | undefined;
+    effects.runCommand = async (command, args, options) => {
+      if (command === 'fake-check') configuredCwd = options.cwd;
+      return originalRunCommand(command, args, options);
+    };
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
     expect(result.value.gates.map((gate) => gate.name)).toContain('cq.json:1:tsc-lines');
     expect(result.value.gates.map((gate) => gate.name)).not.toContain('check:static');
     expect(effects.calls).toContainEqual({ command: 'fake-check', args: ['--strict'] });
+    expect(configuredCwd).toBe(join(repo.root, 'packages/app'));
+  });
+
+  test('refuses malformed adopter cq.json instead of falling back to legacy gates', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write('cq.json', JSON.stringify({ schemaVersion: 1, checks: [] }));
+    repo.commitAll('add malformed cq config');
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('cq.json');
+    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
   });
 
   test('a green run: ok report, gates in order, the record persisted at the identity', async () => {

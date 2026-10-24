@@ -23,8 +23,8 @@
 // BUILT-IN DEFAULTS (strategy §5): the target default and the reviewer
 // choice vocabulary are the built-in constants from record.js/coderabbit.js
 // until the protected policy/dev-protocol.json consumer batch lands; no
-// provider or model names appear here — the fallback reviewer is an
-// explicit `agent:<provider/model>` flag value.
+// provider or model names appear here — agent reviews select a configured
+// role with the explicit `agent:<role>` flag value.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { CODERABBIT_REVIEWER } from './coderabbit.js';
@@ -34,7 +34,7 @@ import type { DevIdentity } from './record.js';
 import type { DevReadyInput } from './ready.js';
 import type { DevCycleInput, DevReviewInput } from './review.js';
 
-/** The reviewer choice: the shipped CLI reviewer, or the `agent:` fallback spelling. */
+/** The reviewer choice: the shipped CLI reviewer, or a configured `agent:` role. */
 const REVIEWER_PATTERN = new RegExp(
   `^(${CODERABBIT_REVIEWER}|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$`,
 );
@@ -176,8 +176,23 @@ export const registry: OpRegistryEntry[] = [
         import('./review-transport.js'),
         import('./effects.js'),
         import('./denylist.js'),
+        import('../../driver/factory.js'),
+        import('../analyze/cqConfig.js'),
+        import('../analyze/cqConfigDefaults.js'),
+        import('../review/agentReviewer.js'),
+        import('node:fs/promises'),
       ]).then(
-        ([m, admission, effects, denylist]) =>
+        ([
+          m,
+          admission,
+          effects,
+          denylist,
+          driverFactory,
+          cqConfig,
+          cqDefaults,
+          agentReviewer,
+          fs,
+        ]) =>
           (async (input: DevReviewInput) => {
             if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
             const { repoRoot } = input as DevCycleInput;
@@ -190,7 +205,60 @@ export const registry: OpRegistryEntry[] = [
               denylist.makeGitleaksDefaultsScanner(dev),
               denylist.makeRepoDiffScanner(repoRoot),
             );
-            return m.makeDevReview({ effects: dev, scanSecrets })(input);
+            const drivers = driverFactory.createDriverFactory();
+            return m.makeDevReview({
+              effects: dev,
+              scanSecrets,
+              runAgentReviewer: async ({ role, ...reviewInput }) => {
+                if (role !== 'reviewer')
+                  return {
+                    status: 'needs-human',
+                    reason: `unsupported configured reviewer role '${role}'`,
+                  };
+                const configText = await fs
+                  .readFile(`${repoRoot}/cq.json`, 'utf8')
+                  .catch(() => null);
+                if (configText === null)
+                  return { status: 'needs-human', reason: 'agent reviewer requires cq.json' };
+                const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+                if (!parsed.ok)
+                  return {
+                    status: 'needs-human',
+                    reason: `agent reviewer config: ${parsed.reason}`,
+                  };
+                const packageText = await fs
+                  .readFile(`${repoRoot}/package.json`, 'utf8')
+                  .catch(() => '{}');
+                let packageName = 'repository';
+                try {
+                  const data: unknown = JSON.parse(packageText);
+                  if (
+                    typeof data === 'object' &&
+                    data !== null &&
+                    'name' in data &&
+                    typeof data.name === 'string'
+                  )
+                    packageName = data.name;
+                } catch {
+                  /* descriptive fallback only */
+                }
+                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, { packageName });
+                const roleSpec = policy.roles.reviewer;
+                if (roleSpec === undefined)
+                  return {
+                    status: 'needs-human',
+                    reason: 'cq.json roles.reviewer is required for an agent review',
+                  };
+                const budgetStop = cqDefaults.requireAgenticTokenBudget(policy);
+                if (budgetStop !== undefined) return budgetStop;
+                return agentReviewer.runAgentReviewer(drivers, {
+                  ...reviewInput,
+                  role: roleSpec,
+                  maxTokens: policy.budgets.run.maxTokens!,
+                  severityMap: policy.review.agentSeverityMap,
+                });
+              },
+            })(input);
           }) as Op<unknown, unknown>,
       ),
   },

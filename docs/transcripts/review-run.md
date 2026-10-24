@@ -12,12 +12,12 @@ asserted read-only and structured in `test/ops/review/run.test.ts`.
   "branch": "feature/x",
   "head": "<fixture head>",
   "sources": [
-    { "kind": "coderabbit", "status": "blocked", "reason": "fixture CLI is unauthenticated" },
+    { "kind": "coderabbit", "status": "blocked", "reason": "not authenticated" },
     { "kind": "agent", "status": "terminal", "cycleId": "<recorded cycle>" }
   ],
   "findings": [
     {
-      "id": "agent-1",
+      "id": "<recorded cycle>#f1",
       "source": "agent",
       "file": "src/a.ts",
       "line": 1,

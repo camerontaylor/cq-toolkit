@@ -5,6 +5,41 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { repoEffects, makeTestRepo } from '../dev/repo.js';
 
+async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>): Promise<void> {
+  await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+  await repo.write(
+    'cq.json',
+    JSON.stringify({
+      schemaVersion: 2,
+      checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+      roles: { reviewer: { provider: 'mock', model: 'mock' } },
+      budgets: { run: { maxTokens: 500 } },
+      review: { reviewers: ['agent'] },
+    }),
+  );
+  repo.commitAll('fixture agent review setup');
+}
+
+function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
+  return {
+    resolve: vi.fn(() => ({
+      lane: 'ai-sdk',
+      modelSpec: { provider: 'mock', model: 'mock' },
+      driver: {
+        run: async (input: { prompt: string }) => {
+          onRun?.(input);
+          return {
+            stopReason: 'complete' as const,
+            structuredOutput: { findings: [{ severity: 'high', text: 'seeded' }] },
+            usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          };
+        },
+      },
+    })),
+  } as unknown as DriverFactory;
+}
+
 describe('review.run', () => {
   it('persists agent findings and records unauthenticated CodeRabbit as blocked', async () => {
     const repo = await makeTestRepo();
@@ -75,9 +110,182 @@ describe('review.run', () => {
       const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
       const [recordFile] = await readdir(folder);
       const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
-        findings: unknown[];
+        sources: { cycleId?: string }[];
+        findings: { id: string }[];
       };
       expect(persisted.findings).toHaveLength(1);
+      expect(persisted.findings[0]?.id).toBe(
+        `${persisted.sources.find((source) => source.cycleId)?.cycleId}#f1`,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps a diff command rejection to failed', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const effects = repoEffects(repo);
+      const run = effects.runCommand;
+      effects.runCommand = async (command, args, options) => {
+        if (
+          command === 'git' &&
+          args[0] === 'diff' &&
+          args.includes('--no-textconv') &&
+          args.includes('--name-only')
+        )
+          throw new Error('spawn failed');
+        return run(command, args, options);
+      };
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') expect(result.error).toContain('spawn failed');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps an invalid cq.json to needs-human before invoking a reviewer', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write('cq.json', '{ invalid');
+      repo.commitAll('add malformed review config');
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') expect(result.reason).toContain('not valid JSON');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps a denylist scanner rejection to needs-human and refuses the upload', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async () => {
+          throw new Error('scanner unavailable');
+        },
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain('denylist scan failed closed');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('returns indeterminate when the dev ledger mutation fails after the agent review', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const effects = repoEffects(repo);
+      const openLedger = effects.openLedger.bind(effects);
+      effects.openLedger = (branch) => ({
+        ...openLedger(branch),
+        mutate: async () => {
+          throw new Error('ledger locked');
+        },
+      });
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({
+        repoRoot: repo.root,
+      });
+      expect(result.status).toBe('indeterminate');
+      if (result.status === 'indeterminate') expect(result.detail).toContain('ledger locked');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps findings storage preparation failures to failed', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('.cq/review', 'block the findings directory');
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({
+        repoRoot: repo.root,
+      });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') expect(result.error).toContain('prepare findings');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps a findings record persistence failure to indeterminate', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => repoEffects(repo),
+        writeFindingsRecord: async () => {
+          throw new Error('storage unavailable');
+        },
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('indeterminate');
+      if (result.status === 'indeterminate') expect(result.detail).toContain('storage unavailable');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('scans tracked paths separately and includes staged plus unstaged changes without textconv', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/staged.ts', 'export const staged = true;\n');
+      repo.git('add', 'src/staged.ts');
+      await repo.write('src/a.ts', 'export const a = 2;\n');
+      const effects = repoEffects(repo);
+      const scanned: string[] = [];
+      let prompt = '';
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => {
+          prompt = input.prompt;
+        }),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) => {
+          scanned.push(...components.map((component) => component.path));
+          return components.map((component) => ({ component: component.component, hits: [] }));
+        },
+      })({ repoRoot: repo.root, uncommitted: true });
+      expect(result.status).toBe('ok');
+      expect(scanned).toContain('src/staged.ts');
+      expect(scanned).toContain('src/a.ts');
+      expect(prompt).toContain('src/staged.ts');
+      expect(prompt).toContain('src/a.ts');
+      const diffCalls = effects.calls.filter(
+        (call) => call.command === 'git' && call.args[0] === 'diff',
+      );
+      expect(diffCalls.every((call) => call.args.includes('--no-textconv'))).toBe(true);
+      expect(diffCalls.some((call) => call.args.includes('HEAD'))).toBe(true);
     } finally {
       await repo.cleanup();
     }
