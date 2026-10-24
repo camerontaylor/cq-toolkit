@@ -1,6 +1,13 @@
+import { mkdtemp, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from 'vitest';
 import { parseCLI } from 'vitest/node';
-import { relatedCheckCommand, tasksFromFailures } from '../../../src/ops/sweep/tasks.js';
+import {
+  normalizeFailurePaths,
+  relatedCheckCommand,
+  tasksFromFailures,
+} from '../../../src/ops/sweep/tasks.js';
 import type { CheckFailure } from '../../../src/ops/gates/checkRunner.js';
 
 const failure = (file: string | null): CheckFailure => ({
@@ -45,4 +52,43 @@ test('fallback argv reaches Vitest positional filters, including flag-shaped fil
   ]);
   const parsed = parseCLI(['vitest', ...related.args]);
   expect(parsed.filter).toEqual(['chosen.test.ts', './-flag.test.ts']);
+});
+
+test('failure containment resolves workspace aliases and refuses real or symlink escapes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-task-paths-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const alias = join(root, 'alias');
+    const outside = join(root, 'outside');
+    await mkdir(join(workspace, 'packages', 'demo'), { recursive: true });
+    await mkdir(outside);
+    await symlink(workspace, alias, 'dir');
+    await symlink(outside, join(workspace, 'escape'), 'dir');
+    await writeFile(join(workspace, 'packages', 'demo', 'a.test.ts'), 'fixture');
+    const set = (file: string) => ({ tool: 'tests', exitCode: 1, failures: [failure(file)] });
+    for (const repo of [workspace, alias])
+      for (const cwd of [workspace, alias]) {
+        for (const file of [
+          join(workspace, 'packages/demo/a.test.ts'),
+          join(alias, 'packages/demo/a.test.ts'),
+          'a.test.ts',
+          'removed.test.ts',
+        ]) {
+          const normalized = normalizeFailurePaths(set(file), repo, join(cwd, 'packages/demo'));
+          expect(normalized.failures[0]?.file).toBe(
+            'packages/demo/' + (file === 'removed.test.ts' ? file : 'a.test.ts'),
+          );
+        }
+        for (const file of [
+          join(outside, 'missing.test.ts'),
+          '../../../outside/missing.test.ts',
+          join(alias, 'escape/missing.test.ts'),
+        ])
+          expect(() => normalizeFailurePaths(set(file), repo, join(cwd, 'packages/demo'))).toThrow(
+            'escapes the workspace',
+          );
+      }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

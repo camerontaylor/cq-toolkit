@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { CheckCommand, CheckFailure, FailureSet } from '../gates/checkRunner.js';
 
 /** A task owns one failing file; static clustering can supply the same shape. */
@@ -44,17 +45,30 @@ export function relatedCheckCommand(
   };
 }
 
+/** Resolve existing ancestors too: a reporter may name a file removed by the fix. */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const parent = dirname(path);
+    if (parent === path) throw error;
+    return resolve(canonicalPath(parent), basename(path));
+  }
+}
+
 /** Canonical task/fingerprint paths are relative to the checkout, never check.cwd. */
 export function normalizeFailurePaths(
   set: FailureSet,
   workspace: string,
   checkCwd = workspace,
 ): FailureSet {
+  const root = canonicalPath(resolve(workspace));
   return {
     ...set,
     failures: set.failures.map((failure) => {
       if (failure.file === null) return failure;
-      const file = relative(workspace, resolve(checkCwd, failure.file));
+      const file = relative(root, canonicalPath(resolve(checkCwd, failure.file)));
       if (file === '..' || file.startsWith('../') || isAbsolute(file))
         throw new Error('check failure path escapes the workspace');
       return { ...failure, file };

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, writeFile, unlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, unlink, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,6 +186,34 @@ test('fresh portable fixture CLI fixes both tests without a project denylist and
     await rm(f.root, { recursive: true, force: true });
   }
 });
+test('journal symlink alias preserves broader-probe task identity and commits both fixes', async () => {
+  const f = await fixture();
+  try {
+    const alias = join(f.root, 'alias');
+    await symlink(f.root, alias, 'dir');
+    const result = await makeFixRun({ drivers: scripted() })({
+      ...input(f),
+      journalDir: join(alias, 'journal'),
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    const report = reportOf(result);
+    expect(report.tasks.map((task) => task.task.files)).toEqual([
+      ['cases/a.test.cjs'],
+      ['cases/b.test.cjs'],
+    ]);
+    expect(
+      report.tasks.every(
+        (task) =>
+          task.commits.length === 1 &&
+          task.validation?.gates.every((gate) => gate.verdict === 'pass'),
+      ),
+    ).toBe(true);
+    expect(report.fixesPerRun).toBe(2);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('one failing task preserves evidence while a passing sibling remains committed', async () => {
   const f = await fixture();
   try {
