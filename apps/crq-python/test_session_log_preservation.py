@@ -94,6 +94,33 @@ class CodexStreamTest(unittest.TestCase):
             self.assertEqual(lines, ['event-one\n'])
             self.assertNotEqual(rc, 0)
 
+    def test_timeout_kills_a_descendant_that_survives_the_launcher(self):
+        """The launcher dying on SIGTERM is not proof the group stopped: a
+        SIGTERM-ignoring descendant must still be SIGKILLed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log, pidfile = Path(tmp) / 'driver.log', Path(tmp) / 'child.pid'
+            child = ("import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                     "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)")
+            launcher = ("import subprocess, sys, time; "
+                        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
+                        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                        "print('started', flush=True); time.sleep(60)")
+            argv = [sys.executable, '-c', launcher, child, str(pidfile)]
+            _, _, _, timed_out = codex._stream_codex(argv, None, None, 2, log)
+            self.assertTrue(timed_out)
+            pid = int(pidfile.read_text())
+            gone = False
+            for _ in range(100):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    gone = True
+                    break
+                time.sleep(0.05)
+            if not gone:
+                os.kill(pid, 9)
+            self.assertTrue(gone, 'descendant survived the timeout cleanup')
+
     def test_stderr_is_returned_and_logged(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / 'driver.log'
@@ -191,7 +218,7 @@ class RepairCorrelationTest(unittest.TestCase):
 class CqSessionsDirTest(unittest.TestCase):
     """item 2.3: sessionsDir is advertised only once the runner wrote there."""
 
-    def _run(self, write_session):
+    def _run(self, write_session, value_sid=None):
         cqd = _load('crq_cq_driver', ROOT / 'crq_repair' / 'drivers' / 'cq.py')
         config = {'repo': 'o/r', 'repair': {'cq_bin': 'cq.js',
                                             'budget': {'max_tokens': 1, 'wall_clock_min': 1}}}
@@ -205,8 +232,12 @@ class CqSessionsDirTest(unittest.TestCase):
                 self.assertEqual(env['CQ_SESSIONS_DIR'], str(job_dir / 'sessions'))
                 if write_session:
                     Path(env['CQ_SESSIONS_DIR']).mkdir()
-                    (Path(env['CQ_SESSIONS_DIR']) / 's-1.json').write_text('{}')
-                body = {'status': 'ok', 'value': {'sessionId': 's-1', 'changed': False}}
+                    (Path(env['CQ_SESSIONS_DIR']) / 's-1.jsonl').write_text('{}\n')
+                # The real review.fixItem value carries no sessionId.
+                value = {'changed': False}
+                if value_sid:
+                    value['sessionId'] = value_sid
+                body = {'status': 'ok', 'value': value}
                 return mock.Mock(returncode=0, stdout=json.dumps(body), stderr='')
 
             with mock.patch.object(cqd, 'command', fake_command), \
@@ -217,14 +248,20 @@ class CqSessionsDirTest(unittest.TestCase):
 
     def test_written_store_is_advertised(self):
         session, job_dir = self._run(True)
-        self.assertEqual(session['sessionId'], 's-1')
+        self.assertEqual(session['sessionId'], 's-1')  # derived from the store
+        self.assertEqual(session['sessionIds'], ['s-1'])
         self.assertEqual(session['workId'], 'crq:r-1')
         self.assertEqual(session['sessionsDir'], str(job_dir / 'sessions'))
 
     def test_inert_variable_is_not_advertised(self):
         session, _ = self._run(False)
-        self.assertEqual(session['sessionId'], 's-1')
+        self.assertIsNone(session['sessionId'])
+        self.assertEqual(session['sessionIds'], [])
         self.assertIsNone(session['sessionsDir'])
+
+    def test_value_session_id_wins(self):
+        session, _ = self._run(True, value_sid='s-value')
+        self.assertEqual(session['sessionId'], 's-value')
 
 
 class PaseoLabelsTest(unittest.TestCase):

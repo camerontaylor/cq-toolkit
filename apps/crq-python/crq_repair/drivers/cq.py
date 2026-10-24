@@ -47,14 +47,21 @@ def invoke(config, role, job, wt, directory):
         data = json.loads(p.stdout)
     except ValueError:
         return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
-    # The returned sessionId links the cq store file under sessions_dir
-    # (item 2.3). Written even on a non-ok verdict: the session exists.
+    # The session link (item 2.3), written even on a non-ok verdict: the
+    # session exists. `review.fixItem` does not put the worker sessionId in
+    # its JSON value, so the job-local store is the source of truth: it holds
+    # one `<sessionId>.jsonl` per session this job's runner created. A
+    # value-level sessionId (if a later runner returns one) wins.
     result = data.get('value') or data.get('result') or {}
+    stored = sorted(f.stem for f in sessions_dir.glob('*.jsonl')) if sessions_dir.is_dir() else []
     sid = result.get('sessionId') if isinstance(result, dict) else None
+    if not (isinstance(sid, str) and sid) and len(stored) == 1:
+        sid = stored[0]
     from crq_repair import atomic as _atomic
     try:  # best-effort: the session link never outranks the verdict
         _atomic(Path(directory) / 'session.json', {
-            'harness': 'cq', 'sessionId': sid if isinstance(sid, str) else None,
+            'harness': 'cq', 'sessionId': sid if isinstance(sid, str) and sid else None,
+            'sessionIds': stored,
             'sessionsDir': str(sessions_dir) if sessions_dir.is_dir() and any(sessions_dir.iterdir()) else None,
             'workId': os.environ.get('CQ_WORK_ID'),
         })

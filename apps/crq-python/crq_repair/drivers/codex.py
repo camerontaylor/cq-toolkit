@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from crq_repair import atomic
 
@@ -32,6 +33,7 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
     lines: list[str] = []
     err_lines: list[str] = []
     lock = threading.Lock()
+    log_open = [True]  # flipped under `lock` before driver.log closes
     with open(log_path, 'w', encoding='utf-8') as log:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True,
@@ -41,7 +43,7 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
         def pump(stream, sink):
             for raw in stream:
                 with lock:
-                    if not log.closed:  # a straggler after the bounded join
+                    if log_open[0]:  # a straggler after the bounded join
                         log.write(raw)
                         log.flush()
                 sink.append(raw)
@@ -58,14 +60,18 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
                 os.killpg(process.pid, 15)  # SIGTERM, this group only
             except ProcessLookupError:
                 pass
+            # Grace: pipe EOF on both pumps means every group member holding
+            # them has exited. The launcher exiting alone proves nothing (a
+            # codex descendant may survive it), so SIGKILL the group
+            # unconditionally afterwards; ProcessLookupError = group gone.
+            grace = time.monotonic() + 5
+            for t in threads:
+                t.join(timeout=max(0.0, grace - time.monotonic()))
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, 9)  # SIGKILL
-                except ProcessLookupError:
-                    pass
-                process.wait()
+                os.killpg(process.pid, 9)  # SIGKILL, this group only
+            except ProcessLookupError:
+                pass
+            process.wait()
         # A grandchild that escaped the group could still hold a pipe open;
         # bounded joins keep the caller from blocking on it.
         for t, stream in zip(threads, (process.stdout, process.stderr)):
@@ -73,6 +79,7 @@ def _stream_codex(argv, cwd, env, timeout, log_path):
             if not t.is_alive():
                 stream.close()
         with lock:
+            log_open[0] = False
             out, err = list(lines), ''.join(err_lines)
     return process.returncode, out, err, timed_out
 
