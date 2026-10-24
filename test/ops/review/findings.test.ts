@@ -66,6 +66,12 @@ describe('review findings records', () => {
     ).toHaveLength(1);
   });
 
+  it('rejects records for different branch or head', () => {
+    expect(() =>
+      merge([record('agent', 'terminal'), { ...record('coderabbit', 'terminal'), head: 'other' }]),
+    ).toThrow('findings records must describe the same branch and head');
+  });
+
   it('does not count blocked configured sources and exposes open blocking findings', () => {
     const value = record('coderabbit', 'blocked', [
       { id: 'x', source: 'coderabbit', severity: 'critical', text: 'issue', status: 'open' },

@@ -256,6 +256,61 @@ describe('review.run', () => {
     }
   });
 
+  it('records a failed agent response as a blocked source', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const drivers = {
+        resolve: vi.fn(() => ({
+          lane: 'ai-sdk',
+          modelSpec: { provider: 'mock', model: 'mock' },
+          driver: {
+            run: async () => ({
+              stopReason: 'complete' as const,
+              structuredOutput: { unexpected: true },
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            }),
+          },
+        })),
+      } as unknown as DriverFactory;
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        const agent = result.value.sources.find((source) => source.kind === 'agent');
+        expect(agent?.status).toBe('blocked');
+        expect(agent?.reason?.includes('invalid structured output')).toBe(true);
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('chooses the next numeric findings record index and ignores other entries', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      await repo.write('.cq/review/feature%2Fx/3.json', '{}');
+      await repo.write('.cq/review/feature%2Fx/notes.txt', 'not an index');
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('ok');
+      expect(await readdir(folder)).toContain('4.json');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('scans tracked paths separately and includes staged plus unstaged changes without textconv', async () => {
     const repo = await makeTestRepo();
     try {

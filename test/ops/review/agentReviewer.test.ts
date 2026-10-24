@@ -44,4 +44,113 @@ describe('runAgentReviewer', () => {
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.value.findings[0]?.severity).toBe('major');
   });
+
+  it('maps a reviewer dispatch error to needs-human', async () => {
+    const drivers = {
+      resolve: vi.fn(() => {
+        throw new Error('no reviewer role');
+      }),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result).toEqual({
+      status: 'needs-human',
+      reason: 'agent review could not dispatch: no reviewer role',
+    });
+  });
+
+  it('maps driver rejection to needs-human', async () => {
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => {
+            throw new Error('provider unavailable');
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result).toEqual({
+      status: 'needs-human',
+      reason: 'agent review did not run: provider unavailable',
+    });
+  });
+
+  it.each([
+    ['budget', 'budget-exhausted'],
+    ['aborted', 'needs-human'],
+    ['error', 'needs-human'],
+  ] as const)('maps stop reason %s', async (stopReason, expected) => {
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => ({
+            stopReason,
+            structuredOutput: {},
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          })),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result.status).toBe(expected);
+  });
+
+  it('rejects invalid structured output', async () => {
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => ({
+            stopReason: 'complete',
+            structuredOutput: { unexpected: true },
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          })),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result).toEqual({
+      status: 'failed',
+      error: 'agent review returned invalid structured output',
+    });
+  });
 });
