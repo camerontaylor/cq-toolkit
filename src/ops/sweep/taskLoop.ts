@@ -490,12 +490,8 @@ async function runTaskLoopInner(
               gate: 'path-policy',
               outcome: row.outcome,
             });
-            if (config.pushFailed)
-              await git([
-                'push',
-                'origin',
-                `refs/heads/${row.failedAttempt.branch}:refs/heads/${row.failedAttempt.branch}`,
-              ]);
+            // A path-policy refusal must never publish the rejected tree, even
+            // when the caller opted into publishing other failed attempts.
             continue taskLoop;
           }
           throw new Error(pathGate.message ?? 'path refusal');
@@ -593,6 +589,10 @@ async function runTaskLoopInner(
           row.outcome === 'escalated-to-human' || row.validation?.verdict === 'needs-human'
             ? 'escalated-to-human'
             : 'unfixed';
+        const unsafe = row.validation?.gates.some(
+          (gate) => ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
+        );
+        if (unsafe && bindings.taskEscalation) row.outcome = 'escalated-to-human';
         try {
           if (parent === undefined || (await git(['rev-parse', 'HEAD'])) !== parent) {
             row.outcome = 'escalated-to-human';
@@ -610,7 +610,10 @@ async function runTaskLoopInner(
             gate,
             outcome: row.outcome,
           });
-          if (config.pushFailed) {
+          const pathPolicyRefused = row.validation?.gates.some(
+            (gate) => gate.gate === 'paths' && gate.verdict !== 'pass',
+          );
+          if (config.pushFailed && !pathPolicyRefused) {
             await git([
               'push',
               'origin',
@@ -624,10 +627,6 @@ async function runTaskLoopInner(
           break taskLoop;
         }
         regression = row.validation?.regression === true;
-        const unsafe = row.validation?.gates.some(
-          (gate) => ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
-        );
-        if (unsafe && bindings.taskEscalation) row.outcome = 'escalated-to-human';
         if (
           !bindings.taskEscalation ||
           row.outcome === 'escalated-to-human' ||

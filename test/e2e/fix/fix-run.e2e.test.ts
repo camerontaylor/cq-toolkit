@@ -533,6 +533,31 @@ test('pushFailed publishes only the failed-attempt branch with a CI-skip commit 
     await rm(f.root, { recursive: true, force: true });
   }
 });
+test('pushFailed keeps path-policy-refused failed attempts local', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted() })({
+      ...input(f),
+      proposeOnly: true,
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    expect(result.status).toBe('needs-human');
+    const attempts = report.tasks.flatMap(
+      (task) =>
+        task.rounds?.flatMap((round) => (round.failedAttempt ? [round.failedAttempt] : [])) ?? [],
+    );
+    expect(attempts.length).toBeGreaterThan(0);
+    for (const attempt of attempts) {
+      expect(await git(f.repo, 'rev-parse', `refs/heads/${attempt.branch}`)).toBe(attempt.sha);
+      expect(
+        await git(f.repo, 'ls-remote', '--heads', 'origin', `refs/heads/${attempt.branch}`),
+      ).toBe('');
+    }
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 test('budget stop pushes earlier verified commits and retains spend and task evidence', async () => {
   const f = await fixture(6);
   try {

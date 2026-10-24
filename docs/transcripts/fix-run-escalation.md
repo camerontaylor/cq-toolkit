@@ -132,7 +132,7 @@ Observed process exit: `3`. Stderr: empty. Stdout fields selected from the actua
 ```json
 {
   "status": "needs-human",
-  "value": {
+  "report": {
     "verdict": "needs-human",
     "fixesPerRun": 1,
     "usage": {
@@ -282,7 +282,7 @@ Observed process exit: `3`. Stderr: empty. Stdout fields selected from the actua
 ```json
 {
   "status": "needs-human",
-  "value": {
+  "report": {
     "verdict": "needs-human",
     "fixesPerRun": 0,
     "usage": {
@@ -466,7 +466,7 @@ Observed process exit: `3`. Stderr: empty. Stdout fields selected from the actua
 ```json
 {
   "status": "needs-human",
-  "value": {
+  "report": {
     "verdict": "needs-human",
     "fixesPerRun": 1,
     "usage": {
