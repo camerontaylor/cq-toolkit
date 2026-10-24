@@ -165,6 +165,7 @@ export interface DriverFactoryConfig {
    */
   sessionLogs?: {
     enabled?: boolean;
+    /** Session store directory for every lane that does not name its own (beats `sessionsDir`). */
     dir?: string;
     retention?: 'keep' | 'reap-on-settle';
     workRecords?: boolean;
@@ -282,7 +283,17 @@ function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
       : lane === 'acp'
         ? config.lanes?.acp?.sessionsDir
         : config.lanes?.aiSdk?.sessionsDir;
-  return laneDir ?? config.sessionsDir ?? DEFAULT_SESSIONS_DIR();
+  // `sessionLogs.dir` (item 1.6) is the deployment's session-log location:
+  // a lane's own dir still wins, and it beats the legacy factory-level
+  // `sessionsDir`. Used by BOTH lane construction and the reap wrapper, so
+  // the store and its cleanup always agree on one directory.
+  const logsDir = config.sessionLogs?.dir;
+  return (
+    laneDir ??
+    (logsDir !== undefined && logsDir.trim() !== '' ? logsDir : undefined) ??
+    config.sessionsDir ??
+    DEFAULT_SESSIONS_DIR()
+  );
 }
 
 /**

@@ -34,6 +34,7 @@ import type {
   Usage,
   WorkerErrorClass,
   WorkerResult,
+  WorkCorrelation,
   WorkspaceBinding,
 } from './types.js';
 
@@ -136,6 +137,19 @@ export const WorkspaceBindingSchema: z.ZodType<WorkspaceBinding> = z
   })
   .strict();
 
+// Session-log correlation (preservation plan items 1.3–1.5): mirror of the
+// WorkCorrelation interface so a correlated invocation round-trips through
+// the strict OpInvocation mirror.
+const WorkCorrelationSchema: z.ZodType<WorkCorrelation> = z
+  .object({
+    workId: z.string(),
+    role: z.string().exactOptional(),
+    task: z.string().exactOptional(),
+    runId: z.string().exactOptional(),
+    parentWorkId: z.string().exactOptional(),
+  })
+  .strict();
+
 export const OpInvocationSchema: z.ZodType<OpInvocation> = z
   .object({
     prompt: z.string(),
@@ -146,6 +160,7 @@ export const OpInvocationSchema: z.ZodType<OpInvocation> = z
     budget: BudgetSchema,
     outputSchema: OutputSchemaSchema.exactOptional(),
     workspace: WorkspaceBindingSchema.exactOptional(),
+    correlation: WorkCorrelationSchema.exactOptional(),
   })
   .strict();
 

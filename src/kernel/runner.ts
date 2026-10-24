@@ -174,6 +174,7 @@ import type { Usage, WorkCorrelation } from '../driver/types.js';
 import type {
   JobFinishedJournalEvent,
   JobOutcome,
+  JobSessionLink,
   JobState,
   JournalEvent,
   Op,
@@ -278,6 +279,59 @@ function stateFromResult(result: OpResult<unknown>): JobState {
 }
 
 /**
+ * Session-log correlation (preservation plan item 1.3/1.5): the driver
+ * sessions an op result carries, derived defensively like
+ * `workerResultOfValue` — only an ok result whose value carries a
+ * non-empty string `sessionId` yields a link; anything else (ops that map
+ * the driver result into their own value shape, or a failed verdict)
+ * yields undefined, never a fabricated session. `driver` is 'unknown'
+ * here BY DESIGN and callers must not guess: the schema's `driver` field
+ * is required, and the runner does not know which lane served the job —
+ * the journal reader joins that from the op registry.
+ */
+export function sessionsOfResult(result: OpResult<unknown>): JobSessionLink[] | undefined {
+  if (result.status !== 'ok') return undefined;
+  const value = result.value;
+  if (typeof value !== 'object' || value === null) return undefined;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
+  if (typeof sessionId !== 'string' || sessionId === '') return undefined;
+  return [{ driver: 'unknown', sessionId }];
+}
+
+/**
+ * Defensive copy of an op-reported session link (raw op data, like the
+ * reportResult evidence): non-empty strings only, so a malformed report is
+ * dropped instead of failing the journal's strict `sessions[]` schema.
+ */
+function validSessionLink(link: unknown): JobSessionLink | undefined {
+  if (typeof link !== 'object' || link === null) return undefined;
+  const raw = link as Record<string, unknown>;
+  const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v !== '';
+  if (!nonEmpty(raw['sessionId'])) return undefined;
+  return {
+    driver: typeof raw['driver'] === 'string' ? raw['driver'] : 'unknown',
+    sessionId: raw['sessionId'],
+    ...(nonEmpty(raw['nativeSessionId']) ? { nativeSessionId: raw['nativeSessionId'] } : {}),
+    ...(nonEmpty(raw['path']) ? { path: raw['path'] } : {}),
+  };
+}
+
+/** Result-derived links first, then reported ones; first occurrence of a sessionId wins. */
+function mergeSessionLinks(
+  fromResult: JobSessionLink[] | undefined,
+  reported: readonly JobSessionLink[],
+): JobSessionLink[] | undefined {
+  const seen = new Set<string>();
+  const merged: JobSessionLink[] = [];
+  for (const link of [...(fromResult ?? []), ...reported]) {
+    if (seen.has(link.sessionId)) continue;
+    seen.add(link.sessionId);
+    merged.push(link);
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+/**
  * The ONLY op invocation path (frozen Op contract): `inputSchema.parseAsync`,
  * then the lazily imported op. Every failure mode — a throwing registry
  * lookup, a missing registry entry, schema violation, a throwing op or
@@ -297,33 +351,6 @@ function stateFromResult(result: OpResult<unknown>): JobState {
  * deliberately do NOT signal, and neither does a well-formed result whose
  * VALUE the journal refuses (the evidence guard's lying-measurement case).
  */
-/**
- * Session-log correlation (preservation plan item 1.3/1.5): the driver
- * sessions an op result carries, derived defensively like
- * `workerResultOfValue` — only an ok result whose value carries a
- * non-empty string `sessionId` yields a link; anything else (ops that map
- * the driver result into their own value shape, or a failed verdict)
- * yields undefined, never a fabricated session. `driver` is 'unknown'
- * here BY DESIGN and callers must not guess: the schema's `driver` field
- * is required, and the runner does not know which lane served the job —
- * the journal reader joins that from the op registry.
- */
-export type JobSessionLink = {
-  driver: string;
-  sessionId: string;
-  nativeSessionId?: string;
-  path?: string;
-};
-
-export function sessionsOfResult(result: OpResult<unknown>): JobSessionLink[] | undefined {
-  if (result.status !== 'ok') return undefined;
-  const value = result.value;
-  if (typeof value !== 'object' || value === null) return undefined;
-  const sessionId = (value as { sessionId?: unknown }).sessionId;
-  if (typeof sessionId !== 'string' || sessionId === '') return undefined;
-  return [{ driver: 'unknown', sessionId }];
-}
-
 async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
@@ -1234,6 +1261,11 @@ async function runPlanUnderLease(
       let jobUsage: Usage | undefined;
       let jobCostUSD: number | undefined;
       let reportedUsage = false;
+      // Session-log correlation (items 1.3/1.5): driver sessions an op
+      // reported through the job context (reportSession) — the ops that
+      // map the WorkerResult into their own value shape hide its sessionId
+      // from sessionsOfResult. Merged into job-finished.sessions below.
+      const reportedSessions: JobSessionLink[] = [];
       let reportedCost = false;
       const foldIntoJobSums = (
         evidence: { usage?: Usage; costUSD?: number },
@@ -1464,6 +1496,11 @@ async function runPlanUnderLease(
               // after onRung and must remain visible in the recorded event.
               governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
             },
+            onSession: (link) => {
+              if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
+              const sanitized = validSessionLink(link);
+              if (sanitized !== undefined) reportedSessions.push(sanitized);
+            },
             onResult: (evidence) => {
               if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
               // The transitional reportResult channel: sanitize (a lying
@@ -1625,13 +1662,12 @@ async function runPlanUnderLease(
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
       // Session-log correlation (items 1.3/1.5): the minted work id and
-      // role ride the finish event; the sessions list is derived from the
-      // op result's WorkerResult-shaped value when the completion fold saw
-      // one (sessionId is OUR store id; the lane's native id is not visible
-      // here, so `nativeSessionId` stays absent — the lane-side sidecar
-      // remains the native-id source of truth, item 1.5).
+      // role ride the finish event; the sessions list merges the op
+      // result's WorkerResult-shaped value (OUR store id only — the native
+      // id is not visible there) with the links the op reported through
+      // the job context (reportSession — those may carry nativeSessionId).
       const correlation = correlationByJob.get(job.id);
-      const jobSessions = sessionsOfResult(result);
+      const jobSessions = mergeSessionLinks(sessionsOfResult(result), reportedSessions);
       await emit({
         type: 'job-finished',
         runId,
@@ -1705,6 +1741,12 @@ async function runPlanUnderLease(
               opId: prior.opId,
               inputsHash: prior.inputsHash,
               result: prior.result,
+              // Session-log correlation (items 1.3/1.5): the re-attested
+              // finish keeps the prior attempt's work-to-session links, so
+              // a resumed run's journal stays self-contained for them too.
+              ...(prior.workId !== undefined ? { workId: prior.workId } : {}),
+              ...(prior.role !== undefined ? { role: prior.role } : {}),
+              ...(prior.sessions !== undefined ? { sessions: prior.sessions } : {}),
               ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
               ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
             });

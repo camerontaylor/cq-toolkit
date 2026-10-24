@@ -797,6 +797,19 @@ export function makeFixReviewItem(deps: {
     // observeResult) exactly as the fold would. Reported for EVERY stop
     // reason (a failed/aborted worker still spent), before the mapping
     // below. Outside a governed invocation there is no context — a no-op.
+    // SESSION LINK (session-log preservation items 1.3/1.5): the mapping
+    // below drops `worker.sessionId`, so the runner's result-derived
+    // `job-finished.sessions` cannot see it — report it through the job
+    // context instead (a no-op outside a governed dispatch).
+    if (worker.sessionId !== undefined && worker.sessionId !== '') {
+      currentJobContext()?.reportSession?.({
+        driver: resolved.lane,
+        sessionId: worker.sessionId,
+        ...(worker.nativeSessionId !== undefined
+          ? { nativeSessionId: worker.nativeSessionId }
+          : {}),
+      });
+    }
     currentJobContext()?.reportResult({
       usage: worker.usage,
       ...(worker.costUSD !== undefined ? { costUSD: worker.costUSD } : {}),

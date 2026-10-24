@@ -10,7 +10,7 @@
 //   1.6  the sessionLogs switch: CQ_SESSION_LOGS=off or enabled:false
 //        forces reap-on-settle in the factory resolve.
 //   1.7  SessionMessage usage + toolCalls optional fidelity fields.
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { nativeTranscriptPath } from '../../src/driver/claude-code/cli.js';
@@ -21,47 +21,66 @@ import {
   SessionMessageSchema,
 } from '../../src/harness/session.js';
 import { JobFinishedJournalEventSchema } from '../../src/kernel/schema.js';
-import { WorkerResultSchema } from '../../src/driver/schema.js';
+import { OpInvocationSchema, WorkerResultSchema } from '../../src/driver/schema.js';
+import { defaultSessionsDir } from '../../src/driver/sessions-dir.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
 
 describe('1.1 defaultSessionsDir', () => {
+  // The production helper, driven through vi.stubEnv (restored after each
+  // test) so the pin is the real resolution order, not a mirror of it.
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   test('XDG_STATE_HOME wins when set', () => {
-    const dir = defaultSessionsDirAt({ XDG_STATE_HOME: '/state' }, {});
-    expect(dir).toBe('/state/cq/sessions');
+    vi.stubEnv('CQ_SESSIONS_DIR', '');
+    vi.stubEnv('XDG_STATE_HOME', '/state');
+    expect(defaultSessionsDir()).toBe(join('/state', 'cq', 'sessions'));
   });
 
   test('falls back to ~/.local/state/cq/sessions', () => {
-    const dir = defaultSessionsDirAt({}, { home: '/home/u' });
-    expect(dir).toBe('/home/u/.local/state/cq/sessions');
+    vi.stubEnv('CQ_SESSIONS_DIR', '');
+    vi.stubEnv('XDG_STATE_HOME', '');
+    expect(defaultSessionsDir()).toBe(join(homedir(), '.local', 'state', 'cq', 'sessions'));
   });
 
   test('CQ_SESSIONS_DIR overrides both; blank is ignored', () => {
-    expect(defaultSessionsDirAt({ XDG_STATE_HOME: '/state' }, { cq: '/elsewhere' })).toBe(
-      '/elsewhere',
-    );
-    expect(defaultSessionsDirAt({ XDG_STATE_HOME: '/state' }, { cq: '  ' })).toBe(
-      '/state/cq/sessions',
-    );
+    vi.stubEnv('XDG_STATE_HOME', '/state');
+    vi.stubEnv('CQ_SESSIONS_DIR', '/elsewhere');
+    expect(defaultSessionsDir()).toBe('/elsewhere');
+    vi.stubEnv('CQ_SESSIONS_DIR', '  ');
+    expect(defaultSessionsDir()).toBe(join('/state', 'cq', 'sessions'));
   });
 });
 
-// The helper reads process.env directly; these tests go through a tiny
-// indirection so they never mutate the runner's environment. The
-// indirection mirrors the helper's own logic — the pin is the RESOLUTION
-// ORDER, asserted once here.
-function defaultSessionsDirAt(
-  env: { XDG_STATE_HOME?: string },
-  opts: { cq?: string; home?: string },
-): string {
-  const override = opts.cq;
-  if (override !== undefined && override.trim() !== '') return override.trim();
-  const stateHome = env.XDG_STATE_HOME;
-  const base =
-    stateHome !== undefined && stateHome.trim() !== ''
-      ? stateHome
-      : `${opts.home ?? '~'}/.local/state`;
-  return `${base}/cq/sessions`;
-}
+describe('1.3 OpInvocation correlation mirror', () => {
+  const base = {
+    prompt: 'p',
+    modelSpec: { provider: 'anthropic', model: 'm' },
+    toolPolicy: { allow: [] },
+    sandboxPolicy: { level: 'read-only' },
+    budget: {},
+  };
+
+  test('a correlated invocation round-trips through the strict mirror', () => {
+    const correlation = {
+      workId: 'r:j:1',
+      role: 'fixer',
+      runId: 'r',
+      task: 't',
+      parentWorkId: 'p',
+    };
+    const parsed = OpInvocationSchema.safeParse({ ...base, correlation });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.correlation).toEqual(correlation);
+  });
+
+  test('an unknown correlation key is rejected (strict)', () => {
+    expect(
+      OpInvocationSchema.safeParse({ ...base, correlation: { workId: 'w', bogus: 1 } }).success,
+    ).toBe(false);
+  });
+});
 
 describe('1.4 CQ_* correlation env', () => {
   test('the correlation names are allowlisted and inherited', () => {

@@ -506,6 +506,37 @@ describe('fixReviewItem stop reasons', () => {
     expect(reported).toEqual([{ usage, costUSD: 0.07 }]);
   });
 
+  test('the worker session is reported to the job context and the correlation forwarded (session-log 1.3/1.5)', async () => {
+    const { op, invocations } = scriptedOp([
+      completeWorker(
+        { changed: true, summary: 'fixed', commits: ['a'.repeat(40)] },
+        { sessionId: 'store-1', nativeSessionId: 'native-1' },
+      ),
+    ]);
+    const sessions: unknown[] = [];
+    const outcome = await runLadder(
+      () => op(baseInput()),
+      {},
+      {
+        op: 'review.fixItem',
+        jobKey: 'j1',
+        attempt: 1,
+        correlation: { workId: 'run:j1:1', runId: 'run', role: 'review.fixItem' },
+      },
+      { onSession: (link) => sessions.push(link) },
+    );
+    expect(outcome.outcome).toBe('completed');
+    // The mapped value drops sessionId, so the job-context report is the link.
+    expect(sessions).toEqual([
+      { driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'native-1' },
+    ]);
+    expect(invocations[0]?.correlation).toEqual({
+      workId: 'run:j1:1',
+      runId: 'run',
+      role: 'review.fixItem',
+    });
+  });
+
   test('a driver throw with the governed signal aborted → indeterminate (the ladder cancellation, #191 r2)', async () => {
     const scripted = scriptedFactory([]);
     const op = makeFixReviewItem({ drivers: scripted.drivers });
