@@ -33,7 +33,13 @@ import { makeTestRepo, repoEffects, type CommandHandler, type TestRepo } from '.
 const cycleReview = (
   effects: Parameters<typeof makeDevReview>[0]['effects'],
   scanSecrets: DiffSecretScanner,
-) => makeDevReview({ effects, scanSecrets }) as Op<DevCycleInput, DevReviewReport>;
+  patternsFile?: string,
+) =>
+  makeDevReview({
+    effects,
+    scanSecrets,
+    ...(patternsFile === undefined ? {} : { patternsFile }),
+  }) as Op<DevCycleInput, DevReviewReport>;
 
 /** The admission branch: the composed op with the given transport (effects never touched). */
 const admissionReview = (transport: AuthorTransport) =>
@@ -165,12 +171,34 @@ describe('dev.review cycle', () => {
       effects,
       scanSecrets: stubScanner(),
       runAgentReviewer,
+      patternsFile: 'policy/denylist/patterns.yml',
     }) as Op<DevCycleInput, DevReviewReport>;
     const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human')
       expect(result.reason).toContain('excluded from the pre-upload scan');
     expect(runAgentReviewer).not.toHaveBeenCalled();
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
+  });
+
+  test('refuses CodeRabbit uploads when the configured corpus itself changed', async () => {
+    await repo.write('custom/rules.yml', 'rules:\n');
+    repo.commitAll('change configured scanner corpus');
+    let uploads = 0;
+    const effects = repoEffects(repo, (command) => {
+      if (command === 'coderabbit') uploads += 1;
+      return command === 'coderabbit' ? ran(0) : undefined;
+    });
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      'custom/rules.yml',
+    )({
+      repoRoot: repo.root,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('custom/rules.yml');
+    expect(uploads).toBe(0);
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
@@ -290,17 +318,34 @@ describe('dev.review cycle', () => {
     expect(scanner.seen[4]?.text).toBe('KEY=1\n');
   });
 
-  test("the scanner's own corpus file is skipped but still counts as a non-empty scope", async () => {
+  test('a legacy-named file without configured corpus remains in the scanner input', async () => {
     repo.git('reset', '-q', '--hard', 'origin/merge-queue');
-    await repo.write('policy/denylist/patterns.yml', 'rules:\n');
-    repo.commitAll('corpus only');
+    await repo.write('policy/denylist/patterns.yml', 'LEGACY_SECRET_PROBE\n');
+    repo.commitAll('legacy-named secret');
     const scanner = capturingScanner();
+    let uploads = 0;
     const result = await cycleReview(
-      repoEffects(repo, reviewer(ran(0))),
-      scanner,
+      repoEffects(repo, (command) => {
+        if (command === 'coderabbit') uploads += 1;
+        return command === 'coderabbit' ? ran(0) : undefined;
+      }),
+      (components) => {
+        scanner.seen.push(...components);
+        const hit = components.some((component) => component.text.includes('LEGACY_SECRET_PROBE'));
+        return components.map((component) => ({
+          component: component.component,
+          hits:
+            hit && component.path === 'policy/denylist/patterns.yml'
+              ? [{ ruleId: 'fixture:legacy-secret', lines: [1] }]
+              : [],
+        }));
+      },
     )({ repoRoot: repo.root });
-    expect(result.status).toBe('ok');
-    expect(scanner.seen).toEqual([]);
+    expect(result.status).toBe('needs-human');
+    expect(scanner.seen.map((component) => component.path)).toContain(
+      'policy/denylist/patterns.yml',
+    );
+    expect(uploads).toBe(0);
   });
 
   test('THE SCAN GATES THE UPLOAD: a hit or a scanner fault refuses before the reviewer runs', async () => {

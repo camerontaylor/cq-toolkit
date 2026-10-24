@@ -16,7 +16,13 @@ import {
 } from '../dev/denylist.js';
 import { readWorkState } from '../dev/internal/workState.js';
 import { runAgentReviewer } from './agentReviewer.js';
-import { FindingsRecordSchema, merge, type FindingsRecord, type ReviewSource } from './findings.js';
+import {
+  FindingsRecordSchema,
+  isComplete,
+  merge,
+  type FindingsRecord,
+  type ReviewSource,
+} from './findings.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -92,7 +98,13 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
     const agentConfigured = policy.review.reviewers.includes('agent');
     const records: FindingsRecord[] = [];
     if (coderabbitConfigured) {
-      const result = await makeDevReview({ effects, scanSecrets: scanner })({
+      const result = await makeDevReview({
+        effects,
+        scanSecrets: scanner,
+        ...(policy.review.denylistPatternsFile === undefined
+          ? {}
+          : { patternsFile: policy.review.denylistPatternsFile }),
+      })({
         repoRoot: input.repoRoot,
         reviewer: 'coderabbit',
         target,
@@ -409,11 +421,11 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
         detail: `review.run: findings record write outcome is uncertain at '${path}' — ${error instanceof Error ? error.message : String(error)}`,
       };
     }
-    if (!record.sources.some((source) => source.status === 'terminal')) {
+    if (!isComplete(record, policy.review.reviewers)) {
       return {
         status: 'needs-human',
         reason:
-          'review.run: no configured reviewer completed a terminal cycle; the blocked findings record was persisted',
+          'review.run: not every configured reviewer completed a terminal cycle; the findings record, including partial findings, was persisted',
       };
     }
     return { status: 'ok', value: record };

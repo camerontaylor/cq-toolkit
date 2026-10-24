@@ -36,6 +36,7 @@
 // (review-transport.ts, unchanged from #332 — same wire shapes, same crq
 // invocation `cq dev.review --action=enroll …`).
 import type { Op, OpResult } from '../../kernel/types.js';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Finding } from '../review/findings.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
@@ -74,13 +75,6 @@ import {
 /** Per-component scan cap: a bigger file patch or untracked file is refused, never truncated. */
 export const SCAN_COMPONENT_CAP_BYTES = 4 * 1024 * 1024;
 
-/**
- * The authoritative scanner's own intentional corpus (its tree allowlist
- * entry in scripts/denylist-scan): the rule samples are published by
- * design, so neither scanner layer reads this one path.
- */
-const PATTERNS_FILE = 'policy/denylist/patterns.yml';
-
 /** Input of the `dev.review` cycle action (plain JSON; the registry schema mirrors it). */
 export interface DevCycleInput {
   /** Repository the review runs in (the subprocess effects bind to it). */
@@ -110,6 +104,8 @@ export interface DevReviewDeps {
   effects: DevEffects;
   /** The composed pre-upload secret scanner (cycle action only). */
   scanSecrets: DiffSecretScanner;
+  /** Configured rule corpus, excluded from scan input and refused if changed. */
+  patternsFile?: string;
   /** The configured, read-only agent reviewer used by `agent:<role>`. */
   runAgentReviewer?: (input: {
     repoRoot: string;
@@ -150,7 +146,12 @@ export interface DevReviewReport {
 export function makeDevReview(
   deps: DevReviewDeps,
 ): Op<DevReviewInput, DevReviewReport | AuthorDecision> {
-  const cycle = makeReviewCycle(deps.effects, deps.scanSecrets, deps.runAgentReviewer);
+  const cycle = makeReviewCycle(
+    deps.effects,
+    deps.scanSecrets,
+    deps.runAgentReviewer,
+    deps.patternsFile,
+  );
   return async (input) => {
     if (isAdmissionInput(input)) {
       if (deps.transport === undefined) {
@@ -178,6 +179,7 @@ function makeReviewCycle(
   effects: DevEffects,
   scanSecrets: DiffSecretScanner,
   runAgentReviewer?: DevReviewDeps['runAgentReviewer'],
+  patternsFile?: string,
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
@@ -196,11 +198,17 @@ function makeReviewCycle(
     if (!read.ok) return needsHuman(read.reason);
     const state = read.state;
 
-    const collected = await collectScanComponents(effects, state, scope);
+    const collected = await collectScanComponents(
+      effects,
+      state,
+      scope,
+      input.repoRoot,
+      patternsFile,
+    );
     if (!collected.ok) return needsHuman(`review refused — ${collected.reason}`);
-    if (isAgent && collected.excludedPaths.length > 0) {
+    if (collected.excludedPaths.length > 0) {
       return needsHuman(
-        `agent review refused — changed file(s) excluded from the pre-upload scan cannot be included safely: ${collected.excludedPaths.join(', ')}`,
+        `review refused — changed file(s) excluded from the pre-upload scan cannot be uploaded safely: ${collected.excludedPaths.join(', ')}`,
       );
     }
     if (collected.paths === 0) {
@@ -422,6 +430,8 @@ async function collectScanComponents(
   effects: DevEffects,
   state: WorkState,
   scope: 'full' | 'uncommitted',
+  repoRoot: string,
+  patternsFile?: string,
 ): Promise<
   | { ok: true; components: ScanComponentInput[]; paths: number; excludedPaths: string[] }
   | { ok: false; reason: string }
@@ -433,6 +443,17 @@ async function collectScanComponents(
   ];
   const components: ScanComponentInput[] = [];
   const excludedPaths: string[] = [];
+  const configuredPatternsPath =
+    patternsFile === undefined
+      ? undefined
+      : relative(resolve(repoRoot), resolve(repoRoot, patternsFile)).split(sep).join('/');
+  const excludedPath =
+    configuredPatternsPath === undefined ||
+    configuredPatternsPath === '..' ||
+    configuredPatternsPath.startsWith('../') ||
+    isAbsolute(configuredPatternsPath)
+      ? undefined
+      : configuredPatternsPath;
   let paths = 0;
   for (const leg of legs) {
     const names = zList(
@@ -443,7 +464,7 @@ async function collectScanComponents(
     );
     paths += names.length;
     for (const path of names) {
-      if (path === PATTERNS_FILE) {
+      if (path === excludedPath) {
         excludedPaths.push(path);
         continue;
       }

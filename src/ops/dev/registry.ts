@@ -261,10 +261,20 @@ export const registry: OpRegistryEntry[] = [
               configText,
               packageName,
             );
+            let patternsFile: string | undefined;
+            if (configText !== null) {
+              const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+              if (parsed.ok) {
+                patternsFile = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+                  packageName,
+                }).review.denylistPatternsFile;
+              }
+            }
             const drivers = driverFactory.createDriverFactory();
             return m.makeDevReview({
               effects: dev,
               scanSecrets,
+              ...(patternsFile === undefined ? {} : { patternsFile }),
               runAgentReviewer: async ({ role, ...reviewInput }) => {
                 if (role !== 'reviewer')
                   return {

@@ -95,24 +95,28 @@ describe('review.run', () => {
         scannerFactory: () => async (components) =>
           components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
-      expect(result.status).toBe('ok');
-      if (result.status !== 'ok') return;
-      expect(result.value.sources).toContainEqual(
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('not every configured reviewer completed');
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        sources: { kind: string; status: string; cycleId?: string }[];
+        findings: { id: string; source: string; text: string }[];
+      };
+      expect(persisted.sources).toContainEqual(
         expect.objectContaining({ kind: 'coderabbit', status: 'blocked' }),
       );
-      expect(result.value.findings).toContainEqual(
+      expect(persisted.sources).toContainEqual(
+        expect.objectContaining({ kind: 'agent', status: 'terminal' }),
+      );
+      expect(persisted.findings).toContainEqual(
         expect.objectContaining({
           source: 'agent',
           severity: 'major',
           text: 'Seeded fixture finding',
         }),
       );
-      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
-      const [recordFile] = await readdir(folder);
-      const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
-        sources: { kind: string; cycleId?: string }[];
-        findings: { id: string }[];
-      };
       expect(persisted.findings).toHaveLength(1);
       expect(persisted.findings[0]?.id).toBe(
         `${persisted.sources.find((source) => source.kind === 'agent')?.cycleId}#f1`,
@@ -153,12 +157,18 @@ describe('review.run', () => {
         scannerFactory: () => async (components) =>
           components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
-      expect(result.status).toBe('ok');
-      if (result.status !== 'ok') return;
-      const source = result.value.sources.find((item) => item.kind === 'coderabbit');
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        sources: { kind: string; status: string; cycleId?: string }[];
+        findings: { id: string; source: string; severity: string; file?: string; text: string }[];
+      };
+      const source = persisted.sources.find((item) => item.kind === 'coderabbit');
       expect(source).toMatchObject({ kind: 'coderabbit', status: 'blocked' });
       expect(source?.cycleId).toMatch(/^c001-/);
-      expect(result.value.findings).toContainEqual(
+      expect(persisted.findings).toContainEqual(
         expect.objectContaining({
           id: `${source?.cycleId}#f1`,
           source: 'coderabbit',
@@ -399,7 +409,7 @@ describe('review.run', () => {
       })({ repoRoot: repo.root });
       expect(result.status).toBe('needs-human');
       if (result.status === 'needs-human') {
-        expect(result.reason).toContain('no configured reviewer completed');
+        expect(result.reason).toContain('not every configured reviewer completed');
         const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
         expect(await readdir(folder)).toContain('1.json');
       }

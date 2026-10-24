@@ -48,12 +48,12 @@ describe('dev family registry entries', () => {
       await writeFile(join(bin, 'fake-check'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
       await writeFile(
         join(bin, 'gitleaks'),
-        '#!/usr/bin/node\nconst fs=require("node:fs"); const a=process.argv; fs.writeFileSync(a[a.indexOf("--report-path")+1],"[]");\n',
+        `#!${process.execPath}\nconst fs=require("node:fs"); const a=process.argv; fs.writeFileSync(a[a.indexOf("--report-path")+1],"[]");\n`,
         { mode: 0o755 },
       );
       await writeFile(
         join(bin, 'node'),
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CQ_NODE_LOG"\nexec /usr/bin/node "$@"\n',
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CQ_NODE_LOG"\nexit 97\n',
         { mode: 0o755 },
       );
       process.env['PATH'] = `${bin}:${priorPath}`;
