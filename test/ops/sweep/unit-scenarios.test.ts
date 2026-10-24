@@ -630,6 +630,66 @@ describe('optional per-task loop', () => {
     }
   });
 
+  test.each([
+    {
+      refusal: 'path traversal',
+      expectedReason: 'path outside the repository',
+      scanDiff: 'M\0../outside.js\0',
+    },
+    {
+      refusal: 'invalid object size',
+      expectedReason: 'cannot determine failed-attempt size',
+      scanDiff: 'M\0src/a.js\0',
+    },
+    {
+      refusal: 'aggregate content cap',
+      expectedReason: 'contents exceed the total scan cap',
+      scanDiff: Array.from({ length: 5 }, (_, i) => `M\0src/file-${i}.js\0`).join(''),
+    },
+  ])('keeps failed-attempt publication local on $refusal', async ({ expectedReason, scanDiff }) => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+          }),
+        },
+        scanPrompt,
+        git: async (args) => {
+          if (args.includes('diff') && args.includes('--name-status') && !args.includes('--cached'))
+            return { code: 0, stdout: scanDiff, stderr: '' };
+          if (args.includes('cat-file') && args.includes('-s'))
+            return {
+              code: 0,
+              stdout: expectedReason.includes('determine failed-attempt size')
+                ? 'invalid-size'
+                : String(4 * 1024 * 1024),
+              stderr: '',
+            };
+          return underlying(args);
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(JSON.stringify(result.value)).toContain('failed-attempt publication refused');
+        expect(JSON.stringify(result.value)).toContain(expectedReason);
+      }
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('cleanup and publish failures retain task evidence as indeterminate unit reports', async () => {
     for (const fault of ['cleanup', 'publish']) {
       const world = await makeWorld([{ failing: true }, { failing: false }]);
