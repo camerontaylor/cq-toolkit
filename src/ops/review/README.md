@@ -5,8 +5,8 @@ threads, then re-runs review until clean or the configured round cap. Run
 `review.run` first for a local findings record, or provide `--record`.
 
 ```sh
-cq review.address --repoRoot=. --source=local --maxTokens=5000000 --wallMs=14400000
-cq review.address --repoRoot=. --source=pr:123 --maxTokens=5000000 --wallMs=14400000 --push
+cq review.address --repoRoot=. --source=local --maxTokens=25000000 --wallMs=14400000
+cq review.address --repoRoot=. --source=pr:123 --maxTokens=25000000 --wallMs=14400000 --push
 ```
 
 `cq.json` supplies checks, worker/rescue/reviewer roles, review rounds,

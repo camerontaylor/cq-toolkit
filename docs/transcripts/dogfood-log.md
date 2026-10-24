@@ -94,7 +94,7 @@ recorded zero-fix result.
 
 The owner retired the 60000-token, 20-minute, one-round limits used by attempts A
 and B: budgets are runaway guards, not bounds on good-faith work. `cq.json` now
-carries `budgets.run.maxTokens=5000000` and `budgets.run.wallMs=14400000`; unit
+carries `budgets.run.maxTokens=5000000` (raised to 25000000 after attempt D, below) and `budgets.run.wallMs=14400000`; unit
 (1 h) and step (20 min) wall budgets are unchanged and rounds stay at the default 3.
 The ai-sdk tool loop's step cap rises from 8 to 40 for the same reason.
 
@@ -126,3 +126,29 @@ shared validator, including the one bounded repair. Other providers keep the nat
 structured transport. The worker edit prompt now states that a fix must be applied
 with the edit tool. After the repair, the identical probe completed with a real
 one-file edit on both roles (DeepSeek 55 s, GLM 171 s). This is not a dogfood fix.
+
+## S6 attempt D — PR #466
+
+Same PR, budgets and roles as attempt C, from dist at the repair head
+`d6b8e5b9ef8f143dfa848682ac1fa90398d07450`.
+
+```sh
+node dist/cli.js review.address --repoRoot=<checkout> --source=pr:466 --maxTokens=5000000 --wallMs=14400000 --rounds=3 --journalDir=<local-state>/cq-toolkit/dogfood/s6-pr466-20261025-d --push
+```
+
+Observed CLI exit: **3**, `needs-human` (token budget exhausted). `fixesPerRun`:
+**1**. Verified commit `8f78ca91e82cfe170ccc3be35a04830f8d2cb26b` closes the genuine
+Codex finding `PRRT_kwDOUY73E86v3_v3` in `src/driver/factory.ts`: unspecified request
+retention now falls back to the configured `sessionLogs.retention`. The engine
+committed it after related and broader checks and published it to PR #466 (remote
+head `8f78ca91`). Its thread reply was withheld because sibling rows failed.
+
+Reported usage: input **686278**, output **159796**, cache read **4179705**; wall
+**2367799 ms**; 16 attempts. Cache reads count toward the run token budget and
+were most of the 5000000 total, so six later findings stopped at the budget. The
+run budget is therefore raised to **25000000** tokens; it remains a runaway guard.
+Two findings were deferred as multi-file work, two were cancelled with the run, and
+the open human-decision thread stays open.
+
+This is positive measured live acceptance: fixesPerRun over the S6 dogfood runs
+is 1 (A 0, B 0, C 0, D 1).

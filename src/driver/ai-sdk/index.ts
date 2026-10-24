@@ -265,8 +265,9 @@ export type ProviderFactory = (modelId: string, sessionId?: string) => LanguageM
  * The multi-step default for the SDK tool loop (ai@7.0.99). TOOL-CALL LOOPS
  * NEED MULTI-STEP: without an explicit `stopWhen` the SDK's default is
  * `stepCountIs(1)` — the run would return after the FIRST tool-calls step,
- * so tool calls would never be followed up. 8 steps bounds the loop
- * defensively (a misbehaving model cannot loop forever) while remaining a
+ * so tool calls would never be followed up. 40 steps bounds the loop as a
+ * runaway guard (a misbehaving model cannot loop forever; owner 2026-10-25:
+ * budgets stop runaways, not good-faith work) while remaining a
  * pure STEP COUNT, not a scheduling primitive (I8: WHEN to abort on time is
  * still the governor's ladder; Budget.maxTokens is the token-side bound).
  */
