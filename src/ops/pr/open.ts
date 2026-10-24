@@ -104,7 +104,7 @@ export function renderReadinessSection(
     `- target: \`${mdLine(record.target)}\``,
     `- base: \`${mdLine(record.base)}\` (merge-base pin) · head: \`${mdLine(record.head)}\``,
     `- dirty-diff sha256: \`${mdLine(record.dirtySha256)}\``,
-    `- review cycle: \`${mdLine(record.cycleId)}\` (terminal) · check: \`${mdLine(record.checkId)}\` (green)`,
+    `- review cycle: \`${mdLine(record.cycleId)}\` (terminal, reviewer \`${mdLine(record.reviewer)}\`) · check: \`${mdLine(record.checkId)}\` (green)`,
     `- review cycles recorded: ${String(cycles.length)} · dispositions recorded: ${String(dispositions.length)}`,
     '',
     '<details><summary>dev.check gates</summary>',

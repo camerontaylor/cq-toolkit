@@ -28,7 +28,9 @@
 // green returns the report. The gates run in the live worktree; the record
 // is bound to the identity read before them (author tier, strategy §2.4).
 import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
+import { parseCqConfig } from '../analyze/cqConfig.js';
 import type { CommandResult, DevEffects } from './effects.js';
 import { faultText, guardDevOp } from './effects.js';
 import type { DevCheckGate, DevCheckRecord, DevLoadStamp } from './record.js';
@@ -245,61 +247,99 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
     const loadStamp: DevLoadStamp = effects.loadStamp();
     const at = effects.nowIso();
     const gates: DevCheckGate[] = [];
-    gates.push(
-      await runGate(
-        effects,
-        'check:static',
-        'pnpm',
-        ['run', 'check:static'],
-        STATIC_GATE_TIMEOUT_MS,
-      ),
+    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    const packageText = await readFile(join(input.repoRoot, 'package.json'), 'utf8').catch(
+      () => '{}',
     );
-    gates.push(
-      await runGate(
-        effects,
-        'format:check',
-        'pnpm',
-        ['run', 'format:check'],
-        STATIC_GATE_TIMEOUT_MS,
-      ),
-    );
-    gates.push(
-      await runGate(
-        effects,
-        'test:narrow',
-        'pnpm',
-        input.range !== undefined
-          ? ['test:narrow', '--range', `${state.base}..${state.head}`]
-          : ['test:narrow', '--base', state.base],
-        TEST_NARROW_TIMEOUT_MS,
-      ),
-    );
+    let packageName = '';
+    try {
+      const packageData: unknown = JSON.parse(packageText);
+      if (
+        typeof packageData === 'object' &&
+        packageData !== null &&
+        'name' in packageData &&
+        typeof packageData.name === 'string'
+      )
+        packageName = packageData.name;
+    } catch {
+      /* absent package metadata retains the legacy gate set */
+    }
+    const config = configText === null ? null : parseCqConfig(configText, input.repoRoot);
+    // Owner decision 12: configured checks are authoritative for adopters.
+    // cq-toolkit keeps the legacy set until #411 adds its test check.
+    const configuredChecks =
+      config?.ok === true && packageName !== '@camerontaylor/cq-toolkit'
+        ? config.config.checks
+        : null;
+    if (configuredChecks !== null) {
+      for (const [index, check] of configuredChecks.entries()) {
+        gates.push(
+          await runGate(
+            effects,
+            `cq.json:${String(index + 1)}:${check.adapter}`,
+            check.command.command,
+            check.command.args,
+            STATIC_GATE_TIMEOUT_MS,
+          ),
+        );
+      }
+    } else {
+      gates.push(
+        await runGate(
+          effects,
+          'check:static',
+          'pnpm',
+          ['run', 'check:static'],
+          STATIC_GATE_TIMEOUT_MS,
+        ),
+      );
+      gates.push(
+        await runGate(
+          effects,
+          'format:check',
+          'pnpm',
+          ['run', 'format:check'],
+          STATIC_GATE_TIMEOUT_MS,
+        ),
+      );
+      gates.push(
+        await runGate(
+          effects,
+          'test:narrow',
+          'pnpm',
+          input.range !== undefined
+            ? ['test:narrow', '--range', `${state.base}..${state.head}`]
+            : ['test:narrow', '--base', state.base],
+          TEST_NARROW_TIMEOUT_MS,
+        ),
+      );
 
-    // The knip condition reads base → WORKING TREE (committed, staged and
-    // unstaged together) plus the untracked list. An unreadable listing
-    // runs knip (fail-safe toward running).
-    const nameStatus = await git(effects, [
-      'diff',
-      '--name-status',
-      '-z',
-      '--no-renames',
-      state.base,
-    ]);
-    const trigger =
-      nameStatus.exitCode === 0
-        ? knipTrigger(nameStatus.stdout, state.untracked)
-        : 'the diff listing could not be read';
-    gates.push(
-      trigger !== null
-        ? await runGate(effects, 'knip', 'pnpm', ['run', 'knip'], KNIP_TIMEOUT_MS)
-        : {
-            name: 'knip',
-            status: 'skipped',
-            durationMs: 0,
-            evidence:
-              'knip condition not met: the diff only modifies non-code files (no added, deleted or untracked file; no JS/TS, manifest, lockfile, knip or tsconfig change)',
-          },
-    );
+      // The knip condition reads base → WORKING TREE (committed, staged and
+      // unstaged together) plus the untracked list. An unreadable listing
+      // runs knip (fail-safe toward running).
+      const nameStatus = await git(effects, [
+        'diff',
+        '--name-status',
+        '-z',
+        '--no-renames',
+        state.base,
+      ]);
+      const trigger =
+        nameStatus.exitCode === 0
+          ? knipTrigger(nameStatus.stdout, state.untracked)
+          : 'the diff listing could not be read';
+      gates.push(
+        trigger !== null
+          ? await runGate(effects, 'knip', 'pnpm', ['run', 'knip'], KNIP_TIMEOUT_MS)
+          : {
+              name: 'knip',
+              status: 'skipped',
+              durationMs: 0,
+              evidence:
+                'knip condition not met: the diff only modifies non-code files (no added, deleted or untracked file; no JS/TS, manifest, lockfile, knip or tsconfig change)',
+            },
+      );
+    }
 
     gates.push(await denylistGate(effects));
 

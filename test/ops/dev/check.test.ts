@@ -58,6 +58,27 @@ describe('rangeFault and knipTrigger', () => {
 });
 
 describe('dev.check', () => {
+  test('runs cq.json checks for adopter repos without the cq-toolkit legacy set', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: ['--strict'] } }],
+      }),
+    );
+    repo.commitAll('configure portable check');
+    const effects = effectsFor((command) =>
+      command === 'fake-check' ? 'configured check passed' : undefined,
+    );
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.gates.map((gate) => gate.name)).toContain('cq.json:1:tsc-lines');
+    expect(result.value.gates.map((gate) => gate.name)).not.toContain('check:static');
+    expect(effects.calls).toContainEqual({ command: 'fake-check', args: ['--strict'] });
+  });
+
   test('a green run: ok report, gates in order, the record persisted at the identity', async () => {
     const effects = effectsFor();
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });

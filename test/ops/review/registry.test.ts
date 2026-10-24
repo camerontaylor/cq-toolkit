@@ -44,8 +44,9 @@ interface LooseResult {
   error?: string;
 }
 
-/** The six loop entries, in registry order. */
+/** The review producer plus six loop entries, in registry order. */
 const ENTRY_NAMES = [
+  'review.run',
   'review.fixItem',
   'review.fetchReviewState',
   'review.classifyThreads',
@@ -99,6 +100,7 @@ const snapshot = (): Record<string, unknown> => ({
 
 /** One minimal valid input per entry (kept loose — mutation tests widen it). */
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
+  'review.run': () => ({ repoRoot: '/tmp/cq-review-fixture' }),
   'review.fixItem': () => ({
     pr: 1,
     item: { id: 'T1', path: null, line: null, body: 'fix me', comments: [] },
@@ -139,7 +141,7 @@ const minimalInput = (name: string): Record<string, unknown> => {
 // ---------------------------------------------------------------------------
 
 describe('review family registry entries', () => {
-  test('the family carries exactly the six loop entries', () => {
+  test('the family carries the portable review producer and loop entries', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([...ENTRY_NAMES].sort());
   });
 

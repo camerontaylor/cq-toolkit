@@ -24,7 +24,7 @@
 // matched content (inspect locally without printing secret contents).
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { basename, join, win32 } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 
 /** One denylist rule as parsed from the patterns file. */
 export interface DenylistRule {
@@ -486,11 +486,20 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
  * never runs without its secret scan; it just also never reads a file at
  * import-resolution time.
  */
-export function makeRepoDiffScanner(repoRoot: string): DiffSecretScanner {
+export function makeRepoDiffScanner(
+  repoRoot: string,
+  patternsFile = 'policy/denylist/patterns.yml',
+): DiffSecretScanner {
   let scanner: DiffSecretScanner | undefined;
   return (components) => {
     if (scanner === undefined) {
-      const patternsPath = join(repoRoot, 'policy', 'denylist', 'patterns.yml');
+      const patternsPath = resolve(repoRoot, patternsFile);
+      const rel = relative(resolve(repoRoot), patternsPath);
+      if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        throw new Error(
+          `denylist: configured patterns file '${patternsFile}' escapes the repository root`,
+        );
+      }
       let bytes: Buffer;
       try {
         bytes = readFileSync(patternsPath);
@@ -499,10 +508,7 @@ export function makeRepoDiffScanner(repoRoot: string): DiffSecretScanner {
           `denylist: cannot read the patterns file at '${patternsPath}' — ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      const patterns = parseDenylistPatterns(
-        decodePolicyUtf8(bytes, 'policy/denylist/patterns.yml'),
-        'policy/denylist/patterns.yml',
-      );
+      const patterns = parseDenylistPatterns(decodePolicyUtf8(bytes, patternsFile), patternsFile);
       scanner = (given) => scanComponents(given, patterns.rules);
     }
     return scanner(components);

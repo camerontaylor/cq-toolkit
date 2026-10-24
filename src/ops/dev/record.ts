@@ -494,6 +494,8 @@ export interface DevReadinessRecord {
   dirtySha256: string;
   /** The terminal review cycle the readiness rests on. */
   cycleId: string;
+  /** Which configured reviewer supplied the terminal cycle. */
+  reviewer: string;
   /** The green check run the readiness rests on. */
   checkId: string;
   at: string;
@@ -693,6 +695,7 @@ export function assembleReadiness(
     head: identity.head,
     dirtySha256: identity.dirtySha256,
     cycleId: cycle.cycleId,
+    reviewer: cycle.reviewer,
     checkId: check.checkId,
     at: input.nowIso,
   };

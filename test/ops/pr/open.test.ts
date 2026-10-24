@@ -230,6 +230,7 @@ describe('the readiness renderers', () => {
     head: HEAD,
     dirtySha256: 'dirty',
     cycleId: 'c001-aaaaaaaa',
+    reviewer: 'coderabbit',
     checkId: 'k001-aaaaaaaa',
     at: '2026-10-17T00:00:00.000Z',
   };
@@ -274,6 +275,7 @@ describe('the readiness section markdown escaping', () => {
     head: HEAD,
     dirtySha256: 'dirty',
     cycleId: 'c001-aaaaaaaa',
+    reviewer: 'coderabbit',
     checkId: 'k001-aaaaaaaa',
     at: '2026-10-17T00:00:00.000Z',
   };

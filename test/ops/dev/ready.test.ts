@@ -30,10 +30,27 @@ describe('dev.ready', () => {
         target: 'merge-queue',
         head: state.head,
         cycleId: 'c001-aaaaaaaa',
+        reviewer: 'coderabbit',
         checkId: 'k001-aaaaaaaa',
       });
       expect(result.value.caveat).toContain('not verification');
     }
+  });
+
+  test('a terminal configured agent cycle satisfies readiness and is named in the record', async () => {
+    await seed(repo, (state) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        reviewer: 'agent:reviewer',
+        base: state.base,
+        head: state.head,
+        dirtySha256: state.dirtySha256,
+      }),
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok')
+      expect(result.value).toMatchObject({ cycleId: 'c002-bbbbbbbb', reviewer: 'agent:reviewer' });
   });
 
   test('an edit after the records makes both stale; every gap lands in one reason', async () => {
