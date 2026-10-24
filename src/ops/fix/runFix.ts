@@ -40,6 +40,8 @@ import {
 import type { AssemblePrsInput } from '../pr/assemblePrs.js';
 import type { FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
 import type { FixRunInputSchema } from './registry.js';
+import { makePortableReviewScanner, type DiffSecretScanner } from '../dev/denylist.js';
+import { makeSubprocessDevEffects } from '../dev/effects.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
 export interface FixRunReport {
@@ -72,6 +74,28 @@ export type FixRunResult = OpResult<FixRunReport> & { report?: FixRunReport };
 export interface FixRunDeps {
   drivers?: DriverFactory;
   registry?: OpRegistryView;
+  /** Test seam for the mandatory pre-upload scan of each complete PR body. */
+  prBodyScanner?: DiffSecretScanner;
+}
+
+async function scanPrBodyForUpload(scanner: DiffSecretScanner, body: string): Promise<void> {
+  const component = { component: 'fix-pr-body', path: 'pr-body.md', text: body };
+  const scans = await scanner([component]);
+  if (
+    scans.length !== 1 ||
+    scans[0]?.component !== component.component ||
+    !Array.isArray(scans[0].hits)
+  )
+    throw new Error('PR body denylist scanner returned an incomplete result');
+  const hits = scans[0].hits;
+  if (hits.length > 0) {
+    const evidence = hits
+      .map(
+        (hit) => `${hit.ruleId} at line${hit.lines.length === 1 ? '' : 's'} ${hit.lines.join(',')}`,
+      )
+      .join('; ');
+    throw new Error(`PR body upload refused by denylist scan: ${evidence}`);
+  }
 }
 
 const execFileAsync = promisify(execFile);
@@ -215,7 +239,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     try {
       if (parentSignal?.aborted)
         return await finish('needs-human', 'enclosing job cancelled before dispatch');
-      const parsed = parseCqConfig(await readFile(resolve(repoRoot, 'cq.json'), 'utf8'), repoRoot);
+      const configText = await readFile(resolve(repoRoot, 'cq.json'), 'utf8');
+      const parsed = parseCqConfig(configText, repoRoot);
       if (!parsed.ok) return await finish('needs-human', parsed.reason);
       const pkg = JSON.parse(await readFile(resolve(repoRoot, 'package.json'), 'utf8')) as {
         name?: string;
@@ -473,35 +498,56 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           const compareBase = report.tasks.some((task) => task.failedAttemptPublished)
             ? await githubCompareBase(repoRoot, assembly.base)
             : undefined;
-          const packages = assembly.packages
-            .filter((pkg) =>
-              markers.some((marker) => marker.branch === pkg.branch && marker.package === pkg.name),
-            )
-            .map((pkg) => {
-              const unfixed = report.tasks.filter(
-                (task) =>
-                  task.branch === pkg.branch &&
-                  task.outcome !== 'fixed' &&
-                  task.failedAttempt !== undefined,
+          const packages: typeof assembly.packages = [];
+          for (const pkg of assembly.packages.filter((candidate) =>
+            markers.some(
+              (marker) => marker.branch === candidate.branch && marker.package === candidate.name,
+            ),
+          )) {
+            const unfixed = report.tasks.filter(
+              (task) =>
+                task.branch === pkg.branch &&
+                task.outcome !== 'fixed' &&
+                task.failedAttempt !== undefined,
+            );
+            const lines = unfixed.map((task) => {
+              const failed = task.rounds?.find(
+                (round) => round.failedAttempt?.branch === task.failedAttempt?.branch,
               );
-              if (unfixed.length === 0) return pkg;
-              const lines = unfixed.map((task) => {
-                const failed = task.rounds?.find(
-                  (round) => round.failedAttempt?.branch === task.failedAttempt?.branch,
-                );
-                const branch = task.failedAttempt!.branch;
-                const branchRef =
-                  task.failedAttemptPublished && compareBase !== undefined
-                    ? `[compare](${compareBase}${encodeURIComponent(branch).replaceAll('%2F', '/')})`
-                    : `local branch \`${branch}\``;
-                return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: ${(task.reason ?? 'unfixed').replace(/[\r\n]+/g, ' ')}; ${branchRef}`;
-              });
-              const section = `## Unfixed (${String(unfixed.length)})\n\n${lines.join('\n')}`;
-              return {
-                ...pkg,
-                body: `${pkg.body?.trim() ? `${pkg.body.trim()}\n\n` : ''}${section}`,
-              };
+              const branch = task.failedAttempt!.branch;
+              const branchRef =
+                task.failedAttemptPublished && compareBase !== undefined
+                  ? `[compare](${compareBase}${encodeURIComponent(branch).replaceAll('%2F', '/')})`
+                  : `local branch \`${branch}\``;
+              return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: diagnostic retained in local report; ${branchRef}`;
             });
+            const section =
+              unfixed.length === 0
+                ? ''
+                : `## Unfixed (${String(unfixed.length)})\n\n${lines.join('\n')}`;
+            const body = [pkg.body?.trim(), section].filter(Boolean).join('\n\n');
+            const outgoing = {
+              ...pkg,
+              ...(body.length === 0 ? {} : { body }),
+            };
+            const scanner =
+              deps.prBodyScanner ??
+              makePortableReviewScanner(
+                repoRoot,
+                makeSubprocessDevEffects(repoRoot),
+                configText,
+                pkg.name,
+              );
+            try {
+              await scanPrBodyForUpload(scanner, outgoing.body ?? '');
+            } catch (error) {
+              return await finish(
+                'needs-human',
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+            packages.push(outgoing);
+          }
           if (packages.length)
             report.assembly = await runPlan(
               {

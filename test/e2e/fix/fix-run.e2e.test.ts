@@ -933,11 +933,74 @@ test('PR body links pushed failed-attempt evidence in its Unfixed section', asyn
     expect(packageBody).toContain('`cases/b.test.cjs`');
     expect(packageBody).toContain('[compare](https://github.com/example/scratch/compare/');
     expect(packageBody).toContain('...cq/fixture/failed/');
-    expect(packageBody).toContain('validation refused task');
+    expect(packageBody).toContain('diagnostic retained in local report');
+    expect(packageBody).not.toContain('validation refused task');
+    expect((await gitleaks.calls()).length).toBeGreaterThan(0);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test.each(['denylist hit', 'scanner fault'] as const)(
+  'PR body upload is refused on a %s while retaining local failed evidence',
+  async (caseName) => {
+    const f = await fixture();
+    const dispatched: string[] = [];
+    let scannedBody = '';
+    try {
+      if (caseName === 'denylist hit')
+        await writeFile(
+          join(f.repo, 'upload-policy.yml'),
+          "rules:\n  - id: fixture-secret\n    description: PR body fixture secret\n    regex: 'diagnostic retained in local report'\n    sample: 'diagnostic retained in local report'\nclean_probes:\n  - 'safe'\n",
+        );
+      const result = await makeFixRun({
+        drivers: scripted('fail-b-safe-change'),
+        ...(caseName === 'scanner fault'
+          ? {
+              prBodyScanner: async (components) => {
+                expect(components).toHaveLength(1);
+                scannedBody = components[0]?.text ?? '';
+                throw new Error('synthetic PR body scanner fault');
+              },
+            }
+          : {}),
+        registry: {
+          get: (name) => {
+            if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+            return {
+              name,
+              inputSchema: z.unknown(),
+              importer: async () => async () => {
+                dispatched.push(name);
+                return { status: 'ok', value: { offline: true } };
+              },
+            } as unknown as OpRegistryEntry<never, never>;
+          },
+        },
+      })({
+        ...input(f),
+        pr: true,
+      });
+      const report = reportOf(result);
+      const failed = report.tasks.find((task) => task.outcome !== 'fixed');
+      expect(result.status, JSON.stringify(result)).toBe('needs-human');
+      expect(failed?.reason).toContain('validation refused task');
+      expect(failed?.failedAttempt).toBeDefined();
+      expect(report.failed.length).toBeGreaterThan(0);
+      expect(report.assembly).toBeUndefined();
+      expect(dispatched).toEqual([]);
+      if (caseName === 'scanner fault') {
+        expect(scannedBody).toContain('## Unfixed (1)');
+        expect(scannedBody).toContain('diagnostic retained in local report');
+        expect(scannedBody).not.toContain('validation refused task');
+      }
+      if (caseName === 'denylist hit' && result.status === 'needs-human')
+        expect(result.reason).toContain('fixture-secret');
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
 
 test.each(['absolute', 'relative'] as const)(
   'nested check cwd preserves repo-root task identity (%s failure names)',
