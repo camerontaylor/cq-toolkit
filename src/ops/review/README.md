@@ -136,3 +136,35 @@ and fingerprint refresh, including worker bookkeeping reads; disjoint editing
 workers still run concurrently. Any mismatch remains a sticky refusal, retains
 changed bytes and verified local commits, and withholds publication, disposition
 proof and further reviewer dispatch.
+
+## Bounded agent review
+
+`review.run` and `dev.review` use the configured reviewer role for sequential
+partitions of every captured diff component. No content is truncated. Each
+partition carries immutable head/base/scope identity, original path and patch
+line attribution, a hash-bound receipt, and an exact non-overlapping UTF-16
+coverage range. Up to 2,000 preceding characters and the current hunk marker
+are repeated as explicitly separate context; surrogate pairs remain intact.
+The coverage manifest records the SHA-256 of each original component, completed
+ranges and actual request sizes. A missing, replayed or invalid receipt blocks
+completion. Identical findings repeated by overlapping context are deduplicated.
+
+The unchanged harness limit is 20,000 **system-prompt characters**. Partition
+instructions, provenance and context count toward that limit; the driver fits
+its own preamble into the remaining room. This is not a 20,000-character limit
+on the entire invocation or serialized wire request: the supported driver also
+includes the task as a user message. The complete serialized request and decoded
+leaves are scanned before every send and measured separately in the manifest.
+Original unsplit components retain their paths for the mandatory defaults and
+configured scans, including patterns that span a partition boundary.
+
+All partitions share one wall deadline, cancellation signal and remaining token
+allowance. Driver-reported input, output, cache and additive reasoning usage
+consume that allowance; the existing token cap is a post-request bound, not a
+new hard wire reservation. Failures preserve prior validated findings and partial
+coverage in blocked evidence. All configured review sources must still finish,
+and repository drift withholds reusable clean proof.
+
+Complete coverage means every captured character was submitted in a validated
+partition. It does not guarantee semantic completeness: partitions have bounded
+local context, and no reducer or global cross-file analysis is performed.

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 
 /** Normalized finding shared by local and forge review producers. */
 export const FindingSchema = z
@@ -22,6 +23,7 @@ export const ReviewSourceSchema = z
     status: z.enum(['terminal', 'blocked']),
     reason: z.string().optional(),
     cycleId: z.string().optional(),
+    coverage: ReviewCoverageSchema.optional(),
   })
   .strict();
 export type ReviewSource = z.infer<typeof ReviewSourceSchema>;
@@ -132,7 +134,18 @@ export function isComplete(
   configured: readonly ReviewSource['kind'][],
 ): boolean {
   return configured.every((kind) =>
-    record.sources.some((source) => source.kind === kind && source.status === 'terminal'),
+    record.sources.some(
+      (source) =>
+        source.kind === kind &&
+        source.status === 'terminal' &&
+        (!source.coverage ||
+          (ReviewCoverageSchema.safeParse(source.coverage).success &&
+            source.coverage.head === record.head &&
+            source.coverage.partitions.every((part) => part.complete) &&
+            (!record.reviewed ||
+              (source.coverage.base === record.reviewed.base &&
+                source.coverage.scope === record.reviewed.scope)))),
+    ),
   );
 }
 

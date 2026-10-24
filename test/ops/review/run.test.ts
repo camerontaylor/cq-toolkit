@@ -36,7 +36,10 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
           onRun?.(input);
           return {
             stopReason: 'complete' as const,
-            structuredOutput: { findings: [{ severity: 'high', text: 'seeded' }] },
+            structuredOutput: {
+              receipt: /receipt: ([a-f0-9]+)/.exec(input.prompt)?.[1],
+              findings: [{ severity: 'high', text: 'seeded' }],
+            },
             usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
             denials: [],
           };
@@ -164,7 +167,7 @@ describe('review.run', () => {
           `import { makeReviewRun } from ${JSON.stringify(runUrl)};\n` +
           `import { makeSubprocessDevEffects } from ${JSON.stringify(effectsUrl)};\n` +
           `const entry = entries.find((candidate) => candidate.name === 'review.run');\n` +
-          `const drivers = { resolve: () => ({ lane: 'ai-sdk', modelSpec: { provider: 'mock', model: 'mock' }, driver: { run: async () => ({ stopReason: 'complete', structuredOutput: { findings: [{ file: 'src/a.ts', line: 1, rule: 'fixture', severity: 'high', text: 'Seeded fixture finding' }] }, usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, denials: [] }) } }) };\n` +
+          `const drivers = { resolve: () => ({ lane: 'ai-sdk', modelSpec: { provider: 'mock', model: 'mock' }, driver: { run: async (invocation) => ({ stopReason: 'complete', structuredOutput: { receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1], findings: [{ file: 'src/a.ts', line: 1, rule: 'fixture', severity: 'high', text: 'Seeded fixture finding' }] }, usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, denials: [] }) } }) };\n` +
           `export const registry = [{ ...entry, importer: async () => makeReviewRun({ drivers, effectsFactory: makeSubprocessDevEffects, scannerFactory: () => async (components) => components.map((component) => ({ component: component.component, hits: [] })) }) }];\n`,
       );
       process.env['PATH'] = `${bin}:${priorPath}`;
@@ -239,12 +242,17 @@ describe('review.run', () => {
           lane: 'ai-sdk',
           modelSpec: { provider: 'mock', model: 'mock' },
           driver: {
-            run: async (invocation: { toolPolicy: { mode?: string }; outputSchema?: unknown }) => {
+            run: async (invocation: {
+              prompt: string;
+              toolPolicy: { mode?: string };
+              outputSchema?: unknown;
+            }) => {
               expect(invocation.toolPolicy.mode).toBe('none');
               expect(invocation.outputSchema).toBeDefined();
               return {
                 stopReason: 'complete' as const,
                 structuredOutput: {
+                  receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
                   findings: [
                     {
                       file: 'src/a.ts',
@@ -635,7 +643,7 @@ describe('review.run', () => {
       let prompt = '';
       const result = await makeReviewRun({
         drivers: scriptedDrivers((input) => {
-          prompt = input.prompt;
+          prompt += input.prompt;
         }),
         effectsFactory: () => repoEffects(repo),
         scannerFactory: () => async (components) => {
@@ -997,7 +1005,7 @@ describe('review.run', () => {
       let prompt = '';
       const result = await makeReviewRun({
         drivers: scriptedDrivers((input) => {
-          prompt = input.prompt;
+          prompt += input.prompt;
         }),
         effectsFactory: () => effects,
         scannerFactory: () => async (components) => {
@@ -1121,7 +1129,7 @@ describe('review.run', () => {
       expect(scanned).toContain('src/public.txt');
       expect(scanned).toContain('src/public-renamed.txt');
       expect(result.status).toBe('ok');
-      expect(drivers.resolve).toHaveBeenCalledTimes(1);
+      expect(drivers.resolve).toHaveBeenCalledTimes(2);
       const diffCalls = effects.calls.filter(
         (call) => call.command === 'git' && call.args[0] === 'diff',
       );
@@ -1284,3 +1292,38 @@ it.each([false, true])(
     }
   },
 );
+
+it('persists completed findings as blocked when the source changes during the agent review', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    await repo.write('src/a.ts', 'export const a = 2;\n');
+    const drivers = scriptedDrivers(() => {
+      repo.git('checkout', '--', 'src/a.ts');
+    });
+    let persisted: unknown;
+    const result = await makeReviewRun({
+      drivers,
+      effectsFactory: () => repoEffects(repo),
+      scannerFactory: () => async (components) =>
+        components.map(({ component }) => ({ component, hits: [] })),
+      writeFindingsRecord: async (_path, content) => {
+        persisted = JSON.parse(content);
+      },
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    expect(persisted).toMatchObject({
+      sources: [
+        expect.objectContaining({
+          kind: 'agent',
+          status: 'blocked',
+          reason: 'repository state changed during agent review',
+        }),
+      ],
+      findings: [expect.objectContaining({ text: 'seeded' })],
+    });
+    expect(persisted).not.toHaveProperty('reviewed');
+  } finally {
+    await repo.cleanup();
+  }
+});

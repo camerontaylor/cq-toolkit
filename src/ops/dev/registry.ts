@@ -319,6 +319,7 @@ export const registry: OpRegistryEntry[] = [
                 if (budgetStop !== undefined) return budgetStop;
                 return agentReviewer.runAgentReviewer(drivers, {
                   ...reviewInput,
+                  scanSecrets,
                   role: roleSpec,
                   maxTokens: policy.budgets.run.maxTokens!,
                   wallMs: policy.budgets.run.wallMs,
