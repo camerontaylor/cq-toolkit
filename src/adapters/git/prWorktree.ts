@@ -260,6 +260,13 @@ export interface PrWorktreeOpts {
   nowMs: number;
   /** Root for created worktrees; defaults to `<repoRoot>/.git/cq-review-worktrees`. */
   worktreeRoot?: string;
+  /**
+   * Invoked only when THIS call itself created the per-PR worktree (never on
+   * reuse/restore), after the registry records it. The engine-verified
+   * creation signal lets callers rotate per-checkout state that describes
+   * the previous checkout instance; a callback failure fails the resolution.
+   */
+  onCreated?: (info: { path: string; branch: string; head: string }) => Promise<void> | void;
 }
 
 /** Branch-name characters allowed to survive into a directory name. */
@@ -641,6 +648,7 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     // (the update is a per-key load-merge-save: concurrent resolves for other
     // PRs never lose their entries to this write).
     await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
+    await opts.onCreated?.({ path: wtPath, branch: reviewBranch, head: expectedSha });
     return { path: wtPath, reused: false, branch: reviewBranch, foreign };
   });
 }

@@ -986,6 +986,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 engineOwnedConcurrency: policy.review.addressConcurrency,
                 publish: input.push === true,
                 publicationTreeClean,
+                onWorktreeCreated: async () => {
+                  // Engine-verified creation of the per-PR worktree: any
+                  // receipt from a previous checkout instance describes a
+                  // root/head this run did not create. Retire it so the fresh
+                  // checkout can earn its own; a caller-trusted change would
+                  // still refuse inside prepare(). The in-memory fingerprints
+                  // stay empty for the fresh tree; they are earned through the
+                  // normal noteBookkeeping writes.
+                  if (!persistedBookkeeping || !bookkeepingReceiptPath) return;
+                  try {
+                    await rename(bookkeepingReceiptPath, `${bookkeepingReceiptPath}.retired`);
+                  } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                  }
+                },
                 ...(parent ? { signal: parent } : {}),
                 runOptions: {
                   maxTokens: Math.max(1, remainingTokens()),

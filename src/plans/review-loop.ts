@@ -460,6 +460,15 @@ export interface ReviewLoopOpts {
   dispatchLogPath: string;
   /** Root for the PR worktree (default: resolvePrWorktree's own). */
   worktreeRoot?: string;
+  /**
+   * Forwarded to resolvePrWorktree: fires only on THIS loop's own
+   * engine-verified creation of the per-PR worktree (never on reuse).
+   */
+  onWorktreeCreated?: (info: {
+    path: string;
+    branch: string;
+    head: string;
+  }) => Promise<void> | void;
   /** Engine-owned exact bookkeeping exemption; must still reject all tracked/caller changes. */
   publicationTreeClean?(root: string): Promise<boolean>;
   /**
@@ -908,6 +917,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     registry: opts.registry,
     nowMs: opts.nowMs,
     ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
+    ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
   });
 
   // (2) Baseline snapshot, then the pure pipeline. The truncation refusal is
