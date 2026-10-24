@@ -137,8 +137,11 @@ apply the same hygiene boundary; neither broadens the frozen result schema.
 
 Existing bookkeeping fingerprints are checked before admission, disposition and
 reviewer ledger writes. A composition-owned FIFO spans each check, engine write
-and fingerprint refresh, including worker bookkeeping reads; disjoint editing
-workers still run concurrently. Any mismatch remains a sticky refusal, retains
+and fingerprint refresh, including the worker's complete untracked Git snapshot
+and per-path fingerprint classification. A Git subprocess cannot capture a ledger's
+transient publish file and classify that stale path after rename. Names resembling
+ledger temporary files receive no exemption; caller files still refuse. Disjoint
+editing workers still run concurrently. Any mismatch remains a sticky refusal, retains
 changed bytes and verified local commits, and withholds publication, disposition
 proof and further reviewer dispatch.
 

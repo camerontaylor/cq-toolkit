@@ -466,3 +466,67 @@ remaining pages, and all 51 REST inline comments represented in the thread set;
 finding was outstanding at that snapshot. These focused checks do not establish
 whole-PR acceptance. Combined exact-head independent review, fresh required CI
 and positive measured live acceptance remain separate gates. No merge is claimed.
+
+## Ledger publish versus worker snapshot (#459)
+
+Independent combined review at `6820a145` observed 39/40 lifecycle cases: the
+concurrent sibling publication case returned one verified fix, with fix-2
+refused for unknown/out-of-scope edits. The isolated named rerun passed 19/19.
+Neither output captured an offending path, so the original incident's precise
+path remains unknown. Original captured stdout/provenance was recovered under
+`/home/ctaylor/review-evidence/rev435-6820a145/`; wrapper report JSON paths are
+intentionally ephemeral (`scripts/test-narrow.mjs` removes its report directory).
+
+Static investigation found that the worker snapshots Git untracked paths before
+joining the bookkeeping FIFO for per-path classification. A sibling ledger
+writer can create a temporary ordinary file during atomic publish. Real Git may
+capture that path, then classification waits until rename removes it and falsely
+refuses the stale unknown path.
+
+A deterministic real-PR control holds the real disposition operation, starts the
+worker snapshot, and observes the real ledger publisher at rename. A real Git
+command then captures the actual temporary path. On unchanged production source
+it observes `.cq/dev/.cq-review-pr-7-656b93f647df80e2.json.<pid>.0.tmp` and returns
+the same unknown/out-of-scope refusal with one rather than two verified fixes.
+The relative path diagnostic and exact stdout are durably retained locally in
+`/home/ctaylor/review-evidence/pr435-ledger-before2.log`. This proves a causal
+failure mechanism; it does not invent an unrecorded path for the earlier critic
+incident. The first harness attempt timed out because it counted the initial
+snapshot before the fixture knew its worker root; that harness-only scheduling
+mistake was corrected before the causal reproduction and is not repair evidence.
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="19/20" failed=1 skipped=0 wait="0.0s" duration="19.5s" nice=5 load="3.5" uptime="548527s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+The repair adds optional engine-owned `AddressWorkerDeps.inspectUntracked(read)`.
+The composition runs the complete snapshot and exact per-path fingerprint checks
+inside its existing bookkeeping FIFO, returning both all paths and unknown
+paths. The standalone worker retains its old/default per-path behavior. There
+is no filename allowlist or retry-until-green behavior. Mutation FIFO, literal
+paths, caller bytes, fingerprints and sticky tamper refusals remain intact.
+Lock order remains worker mutation → checkout mutex → bookkeeping FIFO; no
+bookkeeping action acquires worker mutation, and classification calls the direct
+fingerprint check rather than recursively joining the FIFO. Execution remains
+parallel; only the existing shared metadata observation boundary is serialized.
+
+The repaired worker/PR/registry checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=6 projects="pure,process" tests="174/174" failed=0 skipped=0 wait="0.0s" duration="106.2s" nice=5 load="5.1" uptime="548577s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/registry.test.ts"
+```
+
+The stronger final control pins disposition-before-snapshot ordering, asserts
+that the real rename completed before the fenced Git read, and requires no stale
+temporary path to be captured. A caller-created ledger-like `.tmp` file still
+blocks publication and retains its bytes. The final local/PR/CLI/plan checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=6 projects="pure,process,integration" tests="192/192" failed=0 skipped=0 wait="0.0s" duration="199.5s" nice=5 load="4.3" uptime="548703s" source="explicit" ran="test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address.test.ts,test/plans/review-loop.test.ts"
+```
+
+Static reports zero errors against baseline zero; formatting, Knip and generated
+doc verification exit 0 (54 current). No provider, live, CR, coverage, baseline or
+policy change. Independent delta review and fresh CI remain required. The complete
+current-PR aggregate 60000-token feasibility blocker remains separate; prompt-cap
+fit and focused source checks do not establish operational or whole-PR acceptance.

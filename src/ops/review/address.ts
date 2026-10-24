@@ -448,6 +448,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               failedAttempts: report.failed,
               isBookkeepingPath: (path) =>
                 withBookkeepingAccess(root, () => untrackedAllowed(root, path)),
+              inspectUntracked: (read) =>
+                withBookkeepingAccess(root, async () => {
+                  // Snapshot inside the write fence: a Git subprocess must not
+                  // retain a ledger's transient atomic-publish path and classify
+                  // it after the writer has renamed it away. Never exempt names.
+                  const paths = await read();
+                  const unknown = [];
+                  for (const path of paths)
+                    if (!(await untrackedAllowed(root, path))) unknown.push(path);
+                  return { paths, unknown };
+                }),
               remainingTokens,
               remainingWallMs,
               account,

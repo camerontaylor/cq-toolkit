@@ -97,6 +97,8 @@ export interface AddressWorkerDeps {
   scanner?: DiffSecretScanner;
   /** Exact untracked bookkeeping paths owned by the enclosing addressing operation. */
   isBookkeepingPath?(path: string): Promise<boolean>;
+  /** Snapshot and classify under the enclosing engine's bookkeeping write fence. */
+  inspectUntracked?(read: () => Promise<string[]>): Promise<{ paths: string[]; unknown: string[] }>;
   parentSignal?: AbortSignal;
 }
 
@@ -154,6 +156,15 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     return args.includes('-z') || args[0] === 'show' || args[0] === 'diff'
       ? result.stdout
       : result.stdout.trim();
+  };
+  const inspectUntracked = async () => {
+    const read = async () =>
+      zList(await git(root, ['ls-files', '-z', '--others', '--exclude-standard']));
+    if (deps.inspectUntracked) return deps.inspectUntracked(read);
+    const paths = await read();
+    const unknown = [];
+    for (const path of paths) if (!(await deps.isBookkeepingPath?.(path))) unknown.push(path);
+    return { paths, unknown };
   };
   const stop = () => {
     if (fatal) throw new AddressRefusal(fatal, true);
@@ -558,12 +569,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             (await git(root, ['diff', '--cached', '--name-only', '-z']))
           )
             throw new Error('review.address requires a clean tracked worker tree');
-          const unknown = zList(
-            await git(root, ['ls-files', '-z', '--others', '--exclude-standard']),
-          );
-          const callerUnknown = [];
-          for (const path of unknown)
-            if (!(await deps.isBookkeepingPath?.(path))) callerUnknown.push(path);
+          const { unknown: callerUnknown } = await inspectUntracked();
           if (callerUnknown.length)
             throw new Error('review.address requires no unknown worker files');
           verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
@@ -661,12 +667,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             if (index)
               throw new AddressRefusal('worker changed the index; engine refuses staging', true);
             const changes = zList(await git(root, ['diff', '--name-only', '-z', 'HEAD']));
-            const untracked = zList(
-              await git(root, ['ls-files', '-z', '--others', '--exclude-standard']),
-            );
-            const callerUntracked = [];
-            for (const path of untracked)
-              if (!(await deps.isBookkeepingPath?.(path))) callerUntracked.push(path);
+            const { paths: untracked, unknown: callerUntracked } = await inspectUntracked();
             if ([...changes, ...callerUntracked].some((p) => !active.has(p)))
               throw new AddressRefusal('unknown or out-of-scope worker edits', true);
             if (

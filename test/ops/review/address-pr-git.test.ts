@@ -22,6 +22,35 @@ import { DEV_LEDGER_VERSION, devLedgerPath } from '../../../src/ops/dev/record.j
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 
+// Hold the real ledger writer at a deterministic shared-checkout rendezvous.
+const ledgerRace = vi.hoisted(() => ({
+  beforeDisposition: undefined as (() => Promise<void>) | undefined,
+  beforeRename: undefined as ((from: string, to: string) => void) | undefined,
+}));
+vi.mock('node:fs', async (original) => {
+  const fs = await original<typeof import('node:fs')>();
+  return {
+    ...fs,
+    renameSync: (from: string, to: string) => {
+      ledgerRace.beforeRename?.(from, to);
+      return fs.renameSync(from, to);
+    },
+  };
+});
+vi.mock('../../../src/ops/dev/disposition.js', async (original) => {
+  const module = await original<typeof import('../../../src/ops/dev/disposition.js')>();
+  return {
+    ...module,
+    makeDevDisposition: (...args: Parameters<typeof module.makeDevDisposition>) => {
+      const op = module.makeDevDisposition(...args);
+      return async (input: Parameters<typeof op>[0]) => {
+        await ledgerRace.beforeDisposition?.();
+        return op(input);
+      };
+    },
+  };
+});
+
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
 beforeEach(async () => {
   scanner = await makeGitleaksFixture();
@@ -36,6 +65,8 @@ beforeEach(async () => {
   vi.stubEnv('GIT_COMMITTER_EMAIL', 'review-fixture@example.invalid');
 });
 afterEach(async () => {
+  ledgerRace.beforeDisposition = undefined;
+  ledgerRace.beforeRename = undefined;
   vi.unstubAllEnvs();
   await rm(scanner.root, { recursive: true, force: true });
 });
@@ -44,9 +75,11 @@ test.each([
   'local-only',
   'publish',
   'publish-siblings',
+  'publish-siblings-ledger-snapshot',
   'publish-rejection',
   'caller-file',
   'caller-cq',
+  'caller-ledger-temp',
   'caller-index',
   'bookkeeping-tamper',
   'bookkeeping-before-disposition',
@@ -54,7 +87,8 @@ test.each([
   'real PR adapter without cq ignore preserves admission and publication hygiene: %s',
   async (mode) => {
     const rejection = mode === 'publish-rejection';
-    const siblings = mode === 'publish-siblings' || rejection;
+    const ledgerSnapshot = mode === 'publish-siblings-ledger-snapshot';
+    const siblings = mode === 'publish-siblings' || ledgerSnapshot || rejection;
     const publish = mode === 'publish' || siblings;
     const earlyTamper = mode === 'bookkeeping-before-disposition';
     const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
@@ -276,6 +310,50 @@ test.each([
           },
         }),
       };
+      let dispositionEntered!: () => void;
+      const dispositionStarted = new Promise<void>((resolve) => {
+        dispositionEntered = resolve;
+      });
+      let ownedDiffs = 0;
+      let ledgerRenames = 0;
+      let fencedSnapshots = 0;
+      let snapshotRequested!: () => void;
+      const snapshotRequest = new Promise<void>((resolve) => {
+        snapshotRequested = resolve;
+      });
+      let capturedSnapshot!: (result: GhResult) => void;
+      let pendingSnapshot = false;
+      let rootSnapshots = 0;
+      const transientPaths: string[] = [];
+      if (ledgerSnapshot) {
+        let first = true;
+        ledgerRace.beforeDisposition = async () => {
+          if (!first) return;
+          first = false;
+          dispositionEntered();
+          await snapshotRequest;
+        };
+        ledgerRace.beforeRename = (from, to) => {
+          if (!workerRoot || to !== devLedgerPath(workerRoot, 'cq-review/pr-7')) return;
+          ledgerRenames++;
+          if (!pendingSnapshot) return;
+          // Git really sees the atomic writer's file before rename. Its result
+          // can arrive after the writer has removed that path.
+          const stdout = repo.git(
+            '-C',
+            workerRoot,
+            'ls-files',
+            '-z',
+            '--others',
+            '--exclude-standard',
+          );
+          transientPaths.push(from.slice(workerRoot.length + 1));
+          console.info('ledger snapshot at atomic rename:', JSON.stringify(transientPaths));
+          expect(stdout.split('\0')).toContain(transientPaths.at(-1));
+          pendingSnapshot = false;
+          capturedSnapshot(ok(stdout));
+        };
+      }
       const realGit = makeGhRunner({ bin: 'git', cwd: repo.root });
       let inserted = false;
       const git: GhFn = async (args) => {
@@ -283,6 +361,7 @@ test.each([
           !inserted &&
           (mode === 'caller-file' ||
             mode === 'caller-cq' ||
+            mode === 'caller-ledger-temp' ||
             mode === 'caller-index' ||
             mode === 'bookkeeping-tamper') &&
           args.includes('status') &&
@@ -298,9 +377,37 @@ test.each([
             const path = devLedgerPath(workerRoot, 'cq-review/pr-7');
             await writeFile(path, `${await readFile(path, 'utf8')}\n`);
           } else {
-            const path = mode === 'caller-cq' ? '.cq/private.txt' : 'private.txt';
+            const path =
+              mode === 'caller-cq'
+                ? '.cq/private.txt'
+                : mode === 'caller-ledger-temp'
+                  ? '.cq/dev/.caller.json.123.0.tmp'
+                  : 'private.txt';
             await mkdir(join(workerRoot, '.cq'), { recursive: true });
             await writeFile(join(workerRoot, path), 'CALLER PRIVATE BYTES\n');
+          }
+        }
+        if (
+          ledgerSnapshot &&
+          args[1] === workerRoot &&
+          args.includes('diff') &&
+          args.includes('--name-only') &&
+          args.includes('HEAD')
+        ) {
+          if (++ownedDiffs === 2) await dispositionStarted;
+        }
+        if (ledgerSnapshot && args[1] === workerRoot && args.includes('ls-files')) {
+          rootSnapshots++;
+          if (rootSnapshots === 2) {
+            snapshotRequested();
+            // Old per-path recognition starts this read while disposition owns
+            // the bookkeeping FIFO. Atomic inspection instead queues the read.
+            if (ledgerRace.beforeDisposition) {
+              pendingSnapshot = true;
+              return new Promise<GhResult>((resolve) => {
+                capturedSnapshot = resolve;
+              });
+            }
           }
         }
         // Fake forge identity maps to this fixture's bare remote; transport is
@@ -317,6 +424,31 @@ test.each([
         gh,
         drivers,
         git,
+        ...(ledgerSnapshot
+          ? {
+              workerFactory: (deps) => {
+                const inspect = deps.inspectUntracked;
+                if (typeof inspect !== 'function') return makeAddressWorker(deps);
+                let inspections = 0;
+                return makeAddressWorker({
+                  ...deps,
+                  inspectUntracked: async (read) => {
+                    if (++inspections === 3) {
+                      snapshotRequested();
+                      ledgerRace.beforeDisposition = undefined;
+                    }
+                    return inspect(async () => {
+                      if (inspections === 3) {
+                        expect(ledgerRenames).toBeGreaterThan(0);
+                        fencedSnapshots++;
+                      }
+                      return read();
+                    });
+                  },
+                });
+              },
+            }
+          : {}),
         ...(rejection
           ? {
               workerFactory: (deps) => {
@@ -362,6 +494,13 @@ test.each([
       }
       expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(siblings ? 2 : 1);
       if (siblings) expect(maximumEditing).toBe(2);
+      if (ledgerSnapshot) {
+        // A successful run may serialize before capture; unchanged source must
+        // expose the real temporary path and refuse instead.
+        expect(pendingSnapshot).toBe(false);
+        expect(fencedSnapshots).toBe(1);
+        expect(transientPaths).toEqual([]);
+      }
       expect(report.fixes[0]?.commit).toBeTruthy();
       expect(
         repo
@@ -444,7 +583,14 @@ test.each([
           } else {
             expect(
               await readFile(
-                join(workerRoot, mode === 'caller-cq' ? '.cq/private.txt' : 'private.txt'),
+                join(
+                  workerRoot,
+                  mode === 'caller-cq'
+                    ? '.cq/private.txt'
+                    : mode === 'caller-ledger-temp'
+                      ? '.cq/dev/.caller.json.123.0.tmp'
+                      : 'private.txt',
+                ),
                 'utf8',
               ),
             ).toBe('CALLER PRIVATE BYTES\n');
