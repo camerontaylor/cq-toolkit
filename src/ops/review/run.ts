@@ -41,6 +41,12 @@ export interface ReviewRunDeps {
   parentSignal?: AbortSignal;
   effectsFactory?: (repoRoot: string) => DevEffects;
   writeFindingsRecord?: (path: string, content: string) => Promise<void>;
+  /**
+   * Observe a completed engine-owned ledger write inside this run, so the
+   * caller can register the new bytes even when the review outcome is
+   * blocked/failed (the write itself already succeeded under its own mutex).
+   */
+  noteLedgerWrite?: (branch: string, repoRoot: string) => Promise<void>;
   scannerFactory?: (
     repoRoot: string,
     effects: DevEffects,
@@ -178,6 +184,13 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                 status: 'indeterminate',
                 detail: `review.run: blocked CodeRabbit cycle ${cycleId} was recorded but its findings could not be read — ${error instanceof Error ? error.message : String(error)}`,
               };
+            }
+            // The blocked cycle's ledger bytes were still written by the
+            // engine: let the caller register them before the refusal.
+            try {
+              await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+            } catch {
+              /* the review outcome below carries the block reason */
             }
           }
           records.push({
@@ -399,6 +412,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                       value: id,
                     };
                   });
+                  await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
                 } catch (error) {
                   return {
                     status: 'indeterminate',

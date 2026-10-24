@@ -302,6 +302,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           };
         },
       };
+      // Bound inside the ownership lock below (it needs the bookkeeping FIFO);
+      // reviews only fire after that lock is held, so the binding is always set.
+      let noteLedgerWriteImpl: ((branch: string, repoRoot: string) => Promise<void>) | undefined;
       const reviewImplementation =
         deps.review ??
         makeReviewRun({
@@ -310,6 +313,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           writeFindingsRecord: async (path, content) => {
             await writeFile(path, content, { flag: 'wx', mode: 0o600 });
             await noteBookkeeping(path);
+          },
+          noteLedgerWrite: async (branch, repoRoot) => {
+            await noteLedgerWriteImpl?.(branch, repoRoot);
           },
         });
       const git =
@@ -458,6 +464,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 await noteBookkeeping(devLedgerPath(request.repoRoot, result.value.branch));
               return result;
             });
+          // Blocked/failed re-reviews still write engine-owned ledger cycles.
+          // reviewImplementation only runs inside review()'s bookkeeping FIFO
+          // slot, so this registration must NOT re-enter that queue (it would
+          // deadlock); running inline keeps check/settle bracketing in the
+          // slot that already owns the mutation.
+          noteLedgerWriteImpl = async (branch, repoRoot) => {
+            const path = await bookkeepingKey(
+              repoRoot,
+              relative(repoRoot, devLedgerPath(repoRoot, branch)),
+            );
+            await noteBookkeeping(path);
+          };
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
               repoRoot: root,
