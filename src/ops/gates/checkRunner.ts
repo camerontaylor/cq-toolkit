@@ -51,8 +51,13 @@ export interface RawCheckOutput {
 /**
  * Injected execution seam — the ONE I/O point of the check-runner lane.
  * Tests inject fakes; production injects {@link subprocessRunCheck}.
+ * Optional runtime-only options let composition cancel a child; they never
+ * cross the JSON CheckCommand/op boundary. Cancellation awaits child exit.
  */
-export type RunCheck = (cmd: CheckCommand) => Promise<RawCheckOutput>;
+export type RunCheck = (
+  cmd: CheckCommand,
+  options?: { signal?: AbortSignal },
+) => Promise<RawCheckOutput>;
 
 /** One typed failure extracted from a tool report. */
 export interface CheckFailure {
@@ -192,20 +197,28 @@ export function makeCheckRunner(run: RunCheck): Op<CheckRunnerInput, FailureSet>
  * misbehaved still produced a RawCheckOutput; only the op-level contract
  * turns a runner-level throw into `failed`.
  */
-export const subprocessRunCheck: RunCheck = (cmd) =>
+export const subprocessRunCheck: RunCheck = (cmd, options) =>
   new Promise((resolve) => {
-    execFile(
+    if (options?.signal?.aborted) {
+      resolve({ stdout: '', stderr: 'check cancelled before dispatch', exitCode: null });
+      return;
+    }
+    const child = execFile(
       cmd.command,
       cmd.args,
       {
         cwd: cmd.cwd,
+        ...(options?.signal ? { signal: options.signal } : {}),
         timeout: cmd.timeoutMs,
         killSignal: 'SIGKILL',
         maxBuffer: CHECK_OUTPUT_MAX_BUFFER_BYTES,
       },
       (error, stdout, stderr) => {
         const exitCode = error === null ? 0 : typeof error.code === 'number' ? error.code : null;
-        resolve({ stdout, stderr, exitCode });
+        const result = { stdout, stderr, exitCode };
+        if (error?.code === 'ABORT_ERR' && child.exitCode === null && child.signalCode === null)
+          child.once('close', () => resolve(result));
+        else resolve(result);
       },
     );
   });

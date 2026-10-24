@@ -38,7 +38,9 @@ const GIT_ENV = {
  * A repo on branch `feature/x` one commit past `origin/merge-queue` (the
  * base commit holds README.md; the feature commit adds src/a.ts).
  */
-export async function makeTestRepo(): Promise<TestRepo> {
+export async function makeTestRepo(
+  options: { objectFormat?: 'sha1' | 'sha256' } = {},
+): Promise<TestRepo> {
   const dir = await mkdtemp(join(tmpdir(), 'cq-dev-repo-'));
   const root = join(dir, 'work');
   const origin = join(dir, 'origin.git');
@@ -54,8 +56,9 @@ export async function makeTestRepo(): Promise<TestRepo> {
     git('commit', '-q', '-m', message);
     return git('rev-parse', 'HEAD').trim();
   };
-  execFileSync('git', ['init', '-q', '--bare', origin], { env: GIT_ENV });
-  git('init', '-q', '-b', 'main');
+  const formatArgs = options.objectFormat ? [`--object-format=${options.objectFormat}`] : [];
+  execFileSync('git', ['init', '-q', ...formatArgs, '--bare', origin], { env: GIT_ENV });
+  git('init', '-q', ...formatArgs, '-b', 'main');
   await write('README.md', '# fixture\n');
   commitAll('base');
   git('remote', 'add', 'origin', origin);

@@ -1193,3 +1193,80 @@ describe('resolve dedupe decision under the log lock (round-1 restructure)', () 
     expect(calls.some((call) => call.label === 'resolve:PRRT_X')).toBe(false);
   });
 });
+
+describe('cancellation admission with landed receipts', () => {
+  test.each(['push', 'reply', 'resolve', 'log-lock'] as const)(
+    'cancellation during held %s withholds every subsequent mutation',
+    async (heldAt) => {
+      const parent = new AbortController();
+      let release!: () => void, entered!: () => void;
+      const held = new Promise<void>((r) => {
+        entered = r;
+      });
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const calls: GhCall[] = [];
+      const log = memLog();
+      const normal = recordingGh(calls);
+      const actions = [
+        mkReply('r1', 1201),
+        mkReply('r2', 1202),
+        mkResolve('s1', 'PRRT_1'),
+        mkResolve('s2', 'PRRT_2'),
+      ];
+      let lockHeld = false;
+      if (heldAt === 'log-lock')
+        log.withLogLock = async (body) => {
+          if (!lockHeld) {
+            lockHeld = true;
+            entered();
+            await gate;
+          }
+          return body();
+        };
+      const pending = replyAndResolve(actions, {
+        ...baseOpts(
+          async (args) => {
+            const result = await normal(args);
+            if (
+              (heldAt === 'reply' && calls.length === 1) ||
+              (heldAt === 'resolve' && calls.length === 3)
+            ) {
+              entered();
+              await gate;
+            }
+            return result;
+          },
+          log,
+          heldAt === 'push'
+            ? {
+                args: ['push', 'origin', 'HEAD'],
+                run: async () => {
+                  entered();
+                  await gate;
+                  return { code: 0, stdout: '', stderr: '' };
+                },
+              }
+            : null,
+        ),
+        signal: parent.signal,
+      });
+      await held;
+      parent.abort();
+      const landed = [...calls];
+      release();
+      const result = await pending;
+      expect(calls).toEqual(landed);
+      expect(log.records.map((record) => record.actionId)).toEqual(
+        heldAt === 'reply' ? ['r1'] : heldAt === 'resolve' ? ['r1', 'r2', 's1'] : [],
+      );
+      expect(result.pushed).toBe(true);
+      const replayCalls: GhCall[] = [];
+      const replay = await replyAndResolve(actions, baseOpts(recordingGh(replayCalls), log));
+      expect(replay.failed).toEqual([]);
+      expect(replayCalls).toHaveLength(4 - landed.length);
+      expect(log.records.map((record) => record.actionId)).toEqual(['r1', 'r2', 's1', 's2']);
+    },
+  );
+});

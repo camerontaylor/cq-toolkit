@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { partitionReview } from '../../../src/ops/review/internal/reviewPartitions.js';
 import {
   isComplete,
   merge,
@@ -189,3 +190,61 @@ describe('review findings records', () => {
     );
   });
 });
+
+it('deferred major findings remain blocking for every shared readiness consumer', () => {
+  const r = record('agent', 'terminal', [
+    {
+      id: 'deferred',
+      source: 'agent',
+      severity: 'major',
+      text: 'known accepted defect',
+      status: 'deferred',
+      reason: 'follow-up',
+    },
+  ]);
+  expect(openBlocking(r, ['critical', 'major']).map((finding) => finding.id)).toEqual(['deferred']);
+});
+
+it('keeps reviewed scope only when every merged source attests the same immutable comparison', () => {
+  const one = {
+    ...record('agent', 'terminal'),
+    reviewed: { base: 'a'.repeat(40), scope: 'full' as const },
+  };
+  const two = { ...record('coderabbit', 'terminal'), reviewed: one.reviewed };
+  expect(merge([one, two]).reviewed).toEqual(one.reviewed);
+  expect(merge([one, record('coderabbit', 'terminal')]).reviewed).toBeUndefined();
+  expect(
+    merge([one, { ...two, reviewed: { ...one.reviewed, base: 'b'.repeat(40) } }]).reviewed,
+  ).toBeUndefined();
+  expect(
+    merge([one, { ...two, reviewed: { ...one.reviewed, scope: 'uncommitted' } }]).reviewed,
+  ).toBeUndefined();
+});
+
+it.each(['partial', 'head', 'base', 'scope', 'gap'] as const)(
+  'refuses terminal clean proof with %s coverage evidence',
+  (mode) => {
+    const { coverage } = partitionReview({
+      head: 'a'.repeat(40),
+      base: 'b'.repeat(40),
+      scope: 'full',
+      components: [{ component: 'tracked:a', path: 'a', text: 'diff' }],
+    });
+    coverage.partitions.forEach((part) => {
+      part.complete = true;
+    });
+    const candidate: FindingsRecord = {
+      ...record('agent', 'terminal'),
+      head: coverage.head,
+      reviewed: { base: coverage.base, scope: 'full' },
+      sources: [{ kind: 'agent', status: 'terminal', coverage }],
+    };
+    expect(isComplete(candidate, ['agent'])).toBe(true);
+    if (mode === 'partial') coverage.partitions[0]!.complete = false;
+    if (mode === 'head') coverage.head = 'c'.repeat(40);
+    if (mode === 'base') coverage.base = 'c'.repeat(40);
+    if (mode === 'scope') coverage.scope = 'uncommitted';
+    if (mode === 'gap') coverage.partitions[0]!.ranges[0]!.start = 1;
+    expect(isComplete(candidate, ['agent'])).toBe(false);
+  },
+);

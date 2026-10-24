@@ -207,82 +207,154 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "type": "object"
     },
     "item": {
-      "additionalProperties": false,
-      "properties": {
-        "body": {
-          "type": "string"
-        },
-        "comments": {
-          "items": {
-            "additionalProperties": false,
-            "properties": {
-              "authorLogin": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "body": {
-                "type": "string"
-              },
-              "createdAt": {
-                "anyOf": [
-                  {
-                    "minLength": 1,
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "comments": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "authorLogin": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "body": {
                     "type": "string"
                   },
-                  {
-                    "type": "null"
+                  "createdAt": {
+                    "anyOf": [
+                      {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
-                ]
-              }
+                },
+                "required": [
+                  "authorLogin",
+                  "body",
+                  "createdAt"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100,
+              "type": "array"
             },
-            "required": [
-              "authorLogin",
-              "body",
-              "createdAt"
-            ],
-            "type": "object"
-          },
-          "maxItems": 100,
-          "type": "array"
-        },
-        "id": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "line": {
-          "anyOf": [
-            {
-              "maximum": 9007199254740991,
-              "minimum": -9007199254740991,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "path": {
-          "anyOf": [
-            {
+            "id": {
               "minLength": 1,
               "type": "string"
             },
-            {
-              "type": "null"
+            "line": {
+              "anyOf": [
+                {
+                  "maximum": 9007199254740991,
+                  "minimum": -9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
-          ]
+          },
+          "required": [
+            "id",
+            "path",
+            "line",
+            "body",
+            "comments"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finding": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "line": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "rule": {
+                  "type": "string"
+                },
+                "severity": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "open",
+                    "fixed",
+                    "rejected",
+                    "deferred"
+                  ],
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "source",
+                "severity",
+                "text",
+                "status"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "finding",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "finding"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "id",
-        "path",
-        "line",
-        "body",
-        "comments"
-      ],
-      "type": "object"
+      ]
     },
     "pr": {
       "exclusiveMinimum": 0,
@@ -317,7 +389,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     }
   },
   "required": [
-    "pr",
     "item",
     "worktree",
     "driver"
