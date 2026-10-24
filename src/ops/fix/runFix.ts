@@ -6,8 +6,10 @@ import {
   type EscalationState,
 } from './escalation.js';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { z } from 'zod';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage } from '../../driver/types.js';
@@ -38,6 +40,8 @@ import {
 import type { AssemblePrsInput } from '../pr/assemblePrs.js';
 import type { FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
 import type { FixRunInputSchema } from './registry.js';
+import { makePortableReviewScanner, type DiffSecretScanner } from '../dev/denylist.js';
+import { makeSubprocessDevEffects } from '../dev/effects.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
 export interface FixRunReport {
@@ -47,6 +51,15 @@ export interface FixRunReport {
   verdict: 'pass' | 'fail' | 'needs-human';
   units: Array<{ jobId: string; result: OpResult<SweepUnitReport>; report?: SweepUnitReport }>;
   tasks: FixTaskReport[];
+  failed: Array<{
+    unit: string;
+    task: string;
+    outcome: 'unfixed' | 'escalated-to-human';
+    gate: import('../sweep/taskLoop.js').FailedAttemptGate;
+    reason: string;
+    branch: string;
+    sha: string;
+  }>;
   fixesPerRun: number;
   usage: Usage;
   wallMs: number;
@@ -61,6 +74,57 @@ export type FixRunResult = OpResult<FixRunReport> & { report?: FixRunReport };
 export interface FixRunDeps {
   drivers?: DriverFactory;
   registry?: OpRegistryView;
+  /** Test seam for the mandatory pre-upload scan of each complete PR body. */
+  prBodyScanner?: DiffSecretScanner;
+}
+
+async function scanPrBodyForUpload(scanner: DiffSecretScanner, body: string): Promise<void> {
+  const component = { component: 'fix-pr-body', path: 'pr-body.md', text: body };
+  const scans = await scanner([component]);
+  if (
+    scans.length !== 1 ||
+    scans[0]?.component !== component.component ||
+    !Array.isArray(scans[0].hits)
+  )
+    throw new Error('PR body denylist scanner returned an incomplete result');
+  const hits = scans[0].hits;
+  if (hits.length > 0) {
+    const evidence = hits
+      .map(
+        (hit) => `${hit.ruleId} at line${hit.lines.length === 1 ? '' : 's'} ${hit.lines.join(',')}`,
+      )
+      .join('; ');
+    throw new Error(`PR body upload refused by denylist scan: ${evidence}`);
+  }
+}
+
+const execFileAsync = promisify(execFile);
+
+async function githubCompareBase(repoRoot: string, base: string): Promise<string | undefined> {
+  try {
+    const [{ stdout: remote }, { stdout: revision }] = await Promise.all([
+      execFileAsync('git', ['-C', repoRoot, 'config', '--get', 'remote.origin.url'], {
+        timeout: 5_000,
+        maxBuffer: 16 * 1024,
+      }),
+      execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--verify', `${base}^{commit}`], {
+        timeout: 5_000,
+        maxBuffer: 16 * 1024,
+      }),
+    ]);
+    return githubCompareBaseUrl(remote.trim(), revision.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+export function githubCompareBaseUrl(remote: string, revision: string): string | undefined {
+  const match =
+    /^(?:https?:\/\/|ssh:\/\/git@)github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(remote) ??
+    /^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/.exec(remote);
+  if (!match?.[1] || !/^[0-9a-f]{40,64}$/.test(revision)) return undefined;
+  const safeRef = (ref: string) => encodeURIComponent(ref).replaceAll('%2F', '/');
+  return `https://github.com/${match[1]}/compare/${safeRef(revision)}...`;
 }
 
 /** Two-phase sweep composition; no kernel policy or taxonomy changes. */
@@ -80,6 +144,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       verdict: 'needs-human',
       units: [],
       tasks: [],
+      failed: [],
       fixesPerRun: 0,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       wallMs: 0,
@@ -94,6 +159,32 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       report.verdict = status === 'ok' ? 'pass' : status === 'failed' ? 'fail' : 'needs-human';
       if (report.tasks.length === 0)
         report.tasks = [...collected.values()].flatMap((unit) => unit.tasks ?? []);
+      report.failed = report.tasks.flatMap((task) => {
+        const attempts = (task.rounds ?? []).filter((round) => round.failedAttempt !== undefined);
+        if (attempts.length > 0)
+          return attempts.map((round) => ({
+            unit: `${task.branch.split('/').at(-2) ?? ''}/${task.branch.split('/').at(-1) ?? ''}`,
+            task: task.task.id,
+            outcome: round.outcome ?? (task.outcome === 'fixed' ? 'unfixed' : task.outcome),
+            gate: round.gate ?? 'none',
+            reason: round.reason,
+            branch: round.failedAttempt!.branch,
+            sha: round.failedAttempt!.sha,
+          }));
+        return task.failedAttempt === undefined
+          ? []
+          : [
+              {
+                unit: `${task.branch.split('/').at(-2) ?? ''}/${task.branch.split('/').at(-1) ?? ''}`,
+                task: task.task.id,
+                outcome: task.outcome === 'fixed' ? 'unfixed' : task.outcome,
+                gate: 'none' as const,
+                reason: task.reason ?? 'failed attempt',
+                branch: task.failedAttempt.branch,
+                sha: task.failedAttempt.sha,
+              },
+            ];
+      });
       report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -148,7 +239,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
     try {
       if (parentSignal?.aborted)
         return await finish('needs-human', 'enclosing job cancelled before dispatch');
-      const parsed = parseCqConfig(await readFile(resolve(repoRoot, 'cq.json'), 'utf8'), repoRoot);
+      const configText = await readFile(resolve(repoRoot, 'cq.json'), 'utf8');
+      const parsed = parseCqConfig(configText, repoRoot);
       if (!parsed.ok) return await finish('needs-human', parsed.reason);
       const pkg = JSON.parse(await readFile(resolve(repoRoot, 'package.json'), 'utf8')) as {
         name?: string;
@@ -248,6 +340,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         unit.check = { adapter: check.adapter, ...check.command };
         unit.taskLoop = {
           source: input.source,
+          pushFailed: input.pushFailed ?? false,
           protectTests: input.protectTests ?? false,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}
@@ -402,9 +495,59 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         const tracker = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch);
         if (template && tracker && markers.length) {
           const assembly = template.input as AssemblePrsInput;
-          const packages = assembly.packages.filter((pkg) =>
-            markers.some((marker) => marker.branch === pkg.branch && marker.package === pkg.name),
-          );
+          const compareBase = report.tasks.some((task) => task.failedAttemptPublished)
+            ? await githubCompareBase(repoRoot, assembly.base)
+            : undefined;
+          const packages: typeof assembly.packages = [];
+          for (const pkg of assembly.packages.filter((candidate) =>
+            markers.some(
+              (marker) => marker.branch === candidate.branch && marker.package === candidate.name,
+            ),
+          )) {
+            const unfixed = report.tasks.filter(
+              (task) =>
+                task.branch === pkg.branch &&
+                task.outcome !== 'fixed' &&
+                task.failedAttempt !== undefined,
+            );
+            const lines = unfixed.map((task) => {
+              const failed = task.rounds?.find(
+                (round) => round.failedAttempt?.branch === task.failedAttempt?.branch,
+              );
+              const branch = task.failedAttempt!.branch;
+              const branchRef =
+                task.failedAttemptPublished && compareBase !== undefined
+                  ? `[compare](${compareBase}${encodeURIComponent(branch).replaceAll('%2F', '/')})`
+                  : `local branch \`${branch}\``;
+              return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: diagnostic retained in local report; ${branchRef}`;
+            });
+            const section =
+              unfixed.length === 0
+                ? ''
+                : `## Unfixed (${String(unfixed.length)})\n\n${lines.join('\n')}`;
+            const body = [pkg.body?.trim(), section].filter(Boolean).join('\n\n');
+            const outgoing = {
+              ...pkg,
+              ...(body.length === 0 ? {} : { body }),
+            };
+            const scanner =
+              deps.prBodyScanner ??
+              makePortableReviewScanner(
+                repoRoot,
+                makeSubprocessDevEffects(repoRoot),
+                configText,
+                pkg.name,
+              );
+            try {
+              await scanPrBodyForUpload(scanner, outgoing.body ?? '');
+            } catch (error) {
+              return await finish(
+                'needs-human',
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+            packages.push(outgoing);
+          }
           if (packages.length)
             report.assembly = await runPlan(
               {

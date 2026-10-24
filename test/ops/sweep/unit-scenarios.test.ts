@@ -116,6 +116,8 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     }
     if (args.includes('write-tree')) return ok(`${TREE}\n`);
     if (args.includes('commit-tree')) return ok(`${PROBE_COMMIT}\n`);
+    if (args.includes('cat-file') && args.includes('-s')) return ok('4\n');
+    if (args.includes('show')) return ok('safe');
     if (args.includes('commit')) {
       commits += 1;
       parent = head;
@@ -197,11 +199,198 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
   };
 }
 
-async function runUnit(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}) {
-  return makeSweepUnitOp(bindingsOf(world, extra))(UNIT);
+async function runUnit(
+  world: FakeWorld,
+  extra: Partial<SweepUnitBindings> = {},
+  unit: WorkUnit = UNIT,
+) {
+  return makeSweepUnitOp(bindingsOf(world, extra))(unit);
 }
 
 describe('sweep unit in-process scenarios', () => {
+  test('failed publication pushes the scanned SHA even if its branch moves during scanning', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    let branchTip = '';
+    let branchRef = '';
+    let pushedSha = '';
+    const retargetedSha = 'e'.repeat(40);
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        stagePathAllowlist: { patterns: ['^src/'] },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'error',
+          }),
+        },
+        scanPrompt: async (text) => {
+          if (text.startsWith('Failed-attempt commit ')) branchTip = retargetedSha;
+        },
+        git: async (args) => {
+          const updateRefIndex = args.indexOf('update-ref');
+          if (updateRefIndex !== -1) {
+            branchRef = String(args[updateRefIndex + 1]);
+            branchTip = String(args[updateRefIndex + 2]);
+          }
+          const pushIndex = args.indexOf('push');
+          if (pushIndex !== -1) {
+            const refspec = String(args[pushIndex + 2]);
+            const source = refspec.split(':')[0];
+            pushedSha = source?.startsWith('refs/heads/') ? branchTip : String(source);
+          }
+          return underlying(args);
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      const failedAttempt = result.value.tasks?.[0]?.failedAttempt;
+      expect(failedAttempt).toBeDefined();
+      expect(branchTip).toBe(retargetedSha);
+      expect(pushedSha).toBe(failedAttempt?.sha);
+      expect(pushedSha).not.toBe(retargetedSha);
+      expect(
+        world.gitCalls.some(
+          (args) => args.includes('push') && args.at(-1) === `${failedAttempt?.sha}:${branchRef}`,
+        ),
+      ).toBe(true);
+      expect(result.value.tasks?.[0]?.failedAttemptPublished).toBe(true);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('an early worker stop cannot publish a failed attempt that adds a suppression', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    const suppressionPatch = [
+      'diff --git a/src/a.js b/src/a.js',
+      'index 1111111..2222222 100644',
+      '--- a/src/a.js',
+      '+++ b/src/a.js',
+      '@@ -1 +1,2 @@',
+      ' safe',
+      '+// @ts-nocheck',
+      '',
+    ].join('\n');
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        stagePathAllowlist: { patterns: ['^src/'] },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'error',
+          }),
+        },
+        scanPrompt,
+        git: async (args) =>
+          args.includes('--binary') && args.includes('--full-index')
+            ? { code: 0, stdout: suppressionPatch, stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.tasks?.[0]?.failedAttempt).toBeDefined();
+        expect(result.value.tasks?.[0]?.failedAttemptPublished).not.toBe(true);
+        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+        expect(JSON.stringify(result.value)).toContain('tamper gate refused publication');
+      }
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['tamper diff read error', 'indeterminate tamper diff'] as const)(
+    'failed-attempt publication retains local evidence and refuses a %s',
+    async (fault) => {
+      const world = await makeWorld([{ failing: true }, { failing: true }]);
+      const underlying = world.gitFactory();
+      const scanPrompt = vi.fn(async (_text: string) => {});
+      try {
+        const result = await runUnit(world, {
+          taskLoop: { pushFailed: true },
+          stagePathAllowlist: { patterns: ['^src/'] },
+          driver: {
+            run: async () => ({
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'error',
+            }),
+          },
+          scanPrompt,
+          git: async (args) => {
+            if (
+              args.includes('diff') &&
+              args.includes('--binary') &&
+              args.includes('--full-index')
+            ) {
+              if (fault === 'tamper diff read error') throw new Error('synthetic diff read error');
+              return { code: 0, stdout: 'synthetic malformed diff', stderr: '' };
+            }
+            return underlying(args);
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') {
+          const failedAttempt = result.value.tasks?.[0]?.failedAttempt;
+          expect(failedAttempt).toBeDefined();
+          expect(result.value.tasks?.[0]?.failedAttemptPublished).not.toBe(true);
+          expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+          expect(
+            world.gitCalls.some(
+              (args) =>
+                args.includes('update-ref') &&
+                args.includes(`refs/heads/${failedAttempt?.branch}`) &&
+                args.includes(failedAttempt?.sha ?? ''),
+            ),
+          ).toBe(true);
+          if (fault === 'tamper diff read error')
+            expect(result.value.indeterminate).toContain('synthetic diff read error');
+          else
+            expect(result.value.indeterminate).toContain(
+              'tamper scan could not complete: indeterminate',
+            );
+        }
+        expect(
+          scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+        ).toBe(false);
+        expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('parent cancellation during failed-attempt scan blocks off-machine publication', async () => {
+    const world = await makeWorld([
+      { failing: true, message: 'baseline' },
+      { failing: true, message: 'related failure' },
+    ]);
+    const cancelled = { value: false };
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        cancelled: () => cancelled.value,
+        scanPrompt: async (text) => {
+          if (text.startsWith('Failed-attempt commit ')) cancelled.value = true;
+        },
+      });
+      expect(result.status).toBe('ok');
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('regression fails before commit and preserves its own dirty worktree for salvage', async () => {
     const world = await makeWorld([
       { failing: true, message: 'baseline' },
@@ -496,6 +685,359 @@ describe('sweep unit fixer budget enforcement', () => {
 });
 
 describe('optional per-task loop', () => {
+  test.each([false, true])(
+    'propose-only retains a plain local attempt despite pushFailed=%s',
+    async (pushFailed) => {
+      const world = await makeWorld([{ failing: true }, { failing: false }]);
+      const original = world.driverFactory();
+      let invocations = 0;
+      try {
+        const result = await runUnit(world, {
+          taskLoop: { pushFailed },
+          proposeOnly: true,
+          driver: {
+            run: async (...args) => {
+              invocations++;
+              return original.run(...args);
+            },
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') return;
+        const task = result.value.tasks?.[0];
+        expect(task?.outcome).toBe('escalated-to-human');
+        expect(task?.reason).toContain('propose-only worker produced');
+        expect(task?.failedAttempt?.branch).toMatch(/^cq\/unit\/failed\//);
+        expect(task?.rounds).toEqual([
+          expect.objectContaining({
+            gate: 'path-policy',
+            outcome: 'escalated-to-human',
+            failedAttempt: task?.failedAttempt,
+          }),
+        ]);
+        expect(task?.failedAttemptPublished).not.toBe(true);
+        expect(task?.commits).toEqual([]);
+        expect(invocations).toBe(2);
+        expect(world.checks).toHaveLength(2);
+        expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
+        expect(
+          world.gitCalls.some((args) => args.includes('push') || args.includes('commit')),
+        ).toBe(false);
+        expect(world.pushCalls).toEqual([]);
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    ['clean', undefined],
+    ['moved-ref', 'no longer matches its recorded ordinal'],
+    ['merge-parent', 'invalid parentage'],
+    ['wrong-object', 'invalid parentage'],
+    ['oversize-patch', 'patch exceeds the feedback cap'],
+    ['scoped-secret', 'worker upload refused'],
+  ] as const)(
+    'rescue feedback preserves provenance and refuses %s evidence',
+    async (fault, refusal) => {
+      const world = await makeWorld([{ failing: true }, { failing: false }]);
+      const underlying = world.gitFactory();
+      const parent = 'a'.repeat(40);
+      let recordedSha = '';
+      let restores = 0;
+      const prompts: string[] = [];
+      const feedbackContents: Array<ReadonlyArray<{ text: string; path?: string }>> = [];
+      const patch = 'diff --git a/src/a.js b/src/a.js\n-old value\n+rejected value\n';
+      try {
+        const result = await runUnit(world, {
+          taskLoop: {},
+          taskEscalation: {
+            next: (_task, progress) =>
+              progress.workerUsed === 0
+                ? { tier: 'worker', attempt: 1, reason: 'initial task' }
+                : progress.rescueUsed === 0
+                  ? { tier: 'rescue', attempt: 1, reason: 'retry rejected edit' }
+                  : { tier: 'human', attempt: 1, reason: 'rescue exhausted' },
+            verified: () => {},
+          },
+          git: async (args) => {
+            if (args.includes('restore')) restores++;
+            if (args.includes('update-ref'))
+              recordedSha = String(args[args.indexOf('update-ref') + 2]);
+            if (args.includes('rev-parse') && args.some((arg) => arg.startsWith('refs/heads/')))
+              return {
+                code: 0,
+                stdout: fault === 'moved-ref' ? 'e'.repeat(40) : recordedSha,
+                stderr: '',
+              };
+            if (args.includes('rev-list') && args.includes('--parents'))
+              return {
+                code: 0,
+                stdout: `${fault === 'wrong-object' ? 'e'.repeat(40) : recordedSha} ${parent}${fault === 'merge-parent' ? ` ${'d'.repeat(40)}` : ''}`,
+                stderr: '',
+              };
+            if (args.includes('--name-status') && !args.includes('--cached'))
+              return {
+                code: 0,
+                stdout: 'M\0src/a.js\0D\0src/deleted.js\0A\0src/new.js\0',
+                stderr: '',
+              };
+            if (args.includes('show') && !args.includes('-s')) {
+              const object = String(args.at(-1));
+              return {
+                code: 0,
+                stdout: object.startsWith(parent) ? 'old value' : 'rejected value',
+                stderr: '',
+              };
+            }
+            if (args.includes('--binary'))
+              return {
+                code: 0,
+                stdout: fault === 'oversize-patch' ? 'x'.repeat(32 * 1024 * 1024 + 1) : patch,
+                stderr: '',
+              };
+            return underlying(args);
+          },
+          scanPrompt: async (text, contents) => {
+            if (!text.includes('Prior failed-attempt patch')) return;
+            feedbackContents.push(contents ?? []);
+            if (
+              fault === 'scoped-secret' &&
+              contents?.some(({ path }) => path === 'src/deleted.js')
+            )
+              throw new Error('path-scoped rule rejects deleted preimage');
+          },
+          driver: {
+            run: async (invocation) => {
+              prompts.push(invocation.prompt);
+              if (prompts.length === 1)
+                return {
+                  stopReason: 'error',
+                  denials: [],
+                  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                };
+              expect(restores).toBeGreaterThan(0);
+              return {
+                stopReason: 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'code-bug',
+                  summary: 'repair source',
+                  confidence: 0.9,
+                },
+              };
+            },
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') return;
+        const task = result.value.tasks?.[0];
+        expect(task?.rounds?.[0]?.failedAttempt?.sha).toBe(recordedSha);
+        if (refusal === undefined) {
+          expect(task?.outcome).toBe('fixed');
+          expect(task?.commits).toHaveLength(1);
+          expect(prompts).toHaveLength(3);
+          expect(prompts[1]).toContain(patch.trim());
+          expect(feedbackContents).toHaveLength(2);
+          for (const contents of feedbackContents)
+            expect(contents).toEqual([
+              { path: 'src/a.js', text: 'old value' },
+              { path: 'src/a.js', text: 'rejected value' },
+              { path: 'src/deleted.js', text: 'old value' },
+              { path: 'src/new.js', text: 'rejected value' },
+            ]);
+        } else {
+          expect(task?.rounds?.[1]?.reason).toContain(refusal);
+          expect(task?.outcome).toBe('escalated-to-human');
+          expect(task?.commits).toEqual([]);
+          expect(prompts).toHaveLength(1);
+          expect(world.checks).toHaveLength(1);
+          expect(world.pushCalls).toEqual([]);
+        }
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    {
+      gate: 'tamper',
+      pkg: 'alpha',
+      diff: 'diff --git a/suite.test.js b/suite.test.js\n+++ b/suite.test.js\n@@ -0,0 +1 @@\n+test.skip("bad", () => {});\n',
+    },
+    { gate: 'commit', pkg: 'alpha)invalid', diff: undefined },
+  ] as const)('records the $gate failed-attempt gate', async ({ gate, pkg, diff }) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    try {
+      const result = await runUnit(
+        world,
+        {
+          taskLoop: {},
+          driver: {
+            run: async () => ({
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+            }),
+          },
+          git: async (args) =>
+            diff !== undefined &&
+            args.includes('diff') &&
+            args.includes('--cached') &&
+            !args.includes('--name-status')
+              ? { code: 0, stdout: diff, stderr: '' }
+              : underlying(args),
+        },
+        { ...UNIT, package: pkg },
+      );
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.rounds?.[0]).toMatchObject({ gate });
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('binary failed-attempt content stays local and never reaches the scanner', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+          }),
+        },
+        scanPrompt,
+        git: async (args) =>
+          args.includes('show') && args.some((arg) => arg.includes(':src/a.js'))
+            ? { code: 0, stdout: 'binary\0content', stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('failed-attempt scan refuses file content over its cap before scanning or pushing', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+          }),
+        },
+        scanPrompt,
+        git: async (args) =>
+          args.includes('cat-file') && args.includes('-s') && args.at(-1)?.endsWith(':src/a.js')
+            ? { code: 0, stdout: String(4 * 1024 * 1024 + 1), stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    {
+      refusal: 'unsupported rename record',
+      expectedReason: 'invalid or unsupported path record',
+      scanDiff: 'R100\0src/old.js\0src/new.js\0',
+    },
+    {
+      refusal: 'truncated path record',
+      expectedReason: 'invalid or unsupported path record',
+      scanDiff: 'M\0',
+    },
+    {
+      refusal: 'path traversal',
+      expectedReason: 'path outside the repository',
+      scanDiff: 'M\0../outside.js\0',
+    },
+    {
+      refusal: 'invalid object size',
+      expectedReason: 'cannot determine failed-attempt size',
+      scanDiff: 'M\0src/a.js\0',
+    },
+    {
+      refusal: 'aggregate content cap',
+      expectedReason: 'contents exceed the total scan cap',
+      scanDiff: Array.from({ length: 5 }, (_, i) => `M\0src/file-${i}.js\0`).join(''),
+    },
+  ])('keeps failed-attempt publication local on $refusal', async ({ expectedReason, scanDiff }) => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+          }),
+        },
+        scanPrompt,
+        git: async (args) => {
+          if (args.includes('diff') && args.includes('--name-status') && !args.includes('--cached'))
+            return { code: 0, stdout: scanDiff, stderr: '' };
+          if (args.includes('cat-file') && args.includes('-s'))
+            return {
+              code: 0,
+              stdout: expectedReason.includes('determine failed-attempt size')
+                ? 'invalid-size'
+                : String(4 * 1024 * 1024),
+              stderr: '',
+            };
+          return underlying(args);
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(JSON.stringify(result.value)).toContain('failed-attempt publication refused');
+        expect(JSON.stringify(result.value)).toContain(expectedReason);
+      }
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('cleanup and publish failures retain task evidence as indeterminate unit reports', async () => {
     for (const fault of ['cleanup', 'publish']) {
       const world = await makeWorld([{ failing: true }, { failing: false }]);
@@ -504,8 +1046,8 @@ describe('optional per-task loop', () => {
         const result = await runUnit(world, {
           taskLoop: {},
           git: async (args) =>
-            args.includes('status') && fault === 'cleanup'
-              ? { code: 0, stdout: ' M src/a.js\n', stderr: '' }
+            args.includes('restore') && fault === 'cleanup'
+              ? { code: 1, stdout: '', stderr: 'restore fault' }
               : underlying(args),
           driver:
             fault === 'cleanup'
@@ -533,7 +1075,7 @@ describe('optional per-task loop', () => {
         if (result.status === 'ok') {
           expect(result.value.tasks).toHaveLength(1);
           expect(result.value.indeterminate).toContain(
-            fault === 'cleanup' ? 'cleanup failed' : 'publish failed',
+            fault === 'cleanup' ? 'failed-task evidence recording failed' : 'publish failed',
           );
           expect(result.value.committed).toBe(fault === 'publish');
         }
@@ -681,7 +1223,6 @@ test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattr
             return { code: 0, stdout: 'd'.repeat(40), stderr: '' };
           if (mode === 'dirty' && args.includes('status'))
             return { code: 0, stdout: ' M src/a.js', stderr: '' };
-          if (args.includes('stash')) return { code: 0, stdout: 'e'.repeat(40), stderr: '' };
           return underlying(args);
         },
         driver: {
@@ -706,7 +1247,8 @@ test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattr
         expect(result.value.tasks?.[0]?.reason).toContain('HEAD changed');
         expect(result.value.tasks?.[1]?.reason).toContain('human review');
       } else if (mode === 'dirty') {
-        expect(result.value.tasks?.[0]?.preservedEdits?.sha).toBe('e'.repeat(40));
+        expect(result.value.tasks?.[0]?.failedAttempt?.branch).toMatch(/^cq\/unit\/failed\//);
+        expect(result.value.tasks?.[0]?.failedAttempt?.sha).toMatch(/^[0-9a-f]{40,64}$/);
         expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
       } else if (mode === 'unattributed') {
         expect(invoked).toBe(false);

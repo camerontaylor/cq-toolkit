@@ -76,6 +76,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "default": false,
       "type": "boolean"
     },
+    "pushFailed": {
+      "default": false,
+      "type": "boolean"
+    },
     "repoRoot": {
       "minLength": 1,
       "type": "string"

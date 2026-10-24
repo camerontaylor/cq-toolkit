@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
 import {
-  makeAssemblePrs,
+  makeAssemblePrs as makeAssemblePrsWithScanner,
   MANIFEST_SECTION_END_MARKER,
   MANIFEST_SECTION_MARKER,
   READINESS_SECTION_END_MARKER,
@@ -29,7 +29,13 @@ import {
   type AssemblePrsInput,
   type PrEffects,
 } from '../../../src/ops/pr/assemblePrs.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeRunReport, type RunReportInput } from '../../../src/ops/pr/runReport.js';
+
+const cleanScanner: DiffSecretScanner = (components) =>
+  components.map(({ component }) => ({ component, hits: [] }));
+
+const makeAssemblePrs = (gh: PrEffects) => makeAssemblePrsWithScanner(gh, undefined, cleanScanner);
 
 const CLEANUP: string[] = [];
 const REPO_ROOT = mkdtempSync(join(tmpdir(), 'pr-tracker-body-lock-'));

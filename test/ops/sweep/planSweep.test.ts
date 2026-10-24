@@ -182,6 +182,15 @@ describe('planSweep selector contract (UC §1 row 16: no default selector)', () 
     await expect(failedPlan(makePlanner(), input)).resolves.toMatch(/selector is required/);
   });
 
+  test.each(['failed', 'track', 'failed!'] as const)(
+    'reserved fixer label %s is refused before branch planning',
+    async (fixer) => {
+      await expect(failedPlan(makePlanner(), baseInput({ fixers: [fixer] }))).resolves.toMatch(
+        /reserved for failed-attempt and tracking branches/,
+      );
+    },
+  );
+
   test('an unknown selector mode is failed — no hardcoded default falls out', async () => {
     const input = baseInput({
       selector: { mode: 'magic' } as unknown as PlanSweepInput['selector'],

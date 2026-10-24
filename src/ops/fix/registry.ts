@@ -15,6 +15,7 @@ export const FixRunInputSchema = z
       .exactOptional(),
     selector: PlanSweepSelectorSchema,
     push: z.boolean().default(false),
+    pushFailed: z.boolean().default(false),
     pr: z.boolean().default(false),
     proposeOnly: z.boolean().default(false),
     protectTests: z.boolean().default(false),
