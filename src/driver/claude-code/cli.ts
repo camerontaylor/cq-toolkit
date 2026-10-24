@@ -175,8 +175,9 @@
 // verdict also POPULATES WorkerResult.error (bounded + secret-redacted,
 // issue #208). Only PRE-DISPATCH validation throws.
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { defaultSessionsDir } from '../sessions-dir.js';
 import { rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
@@ -278,7 +279,7 @@ export interface CliTransportOptions {
   termGraceMs?: number;
   /** SIGKILL→force-resolve grace in ms (default: process.ts's DEFAULT_KILL_GRACE_MS). */
   killGraceMs?: number;
-  /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
+  /** Sessions directory for the backing SessionStore. Default: the shared durable sessions dir (`defaultSessionsDir()` — item 1.1). */
   sessionsDir?: string;
   /** Harness config — the tool surface mapped onto --allowedTools + the temp-workspace root. Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
@@ -401,6 +402,21 @@ export class ClaudeCodeCliTransport implements Driver {
     // spawned and (except routing/key checks) before any session exists.
     const route = resolveRoute(modelSpec, this.routingTable); // unknown provider → the config throw
     const childEnv = this.resolveChildEnv(route); // missing key env → throw
+    // Session-log correlation (preservation plan items 1.3–1.5): the
+    // invocation's work identity rides the child env so the harness (and
+    // anything IT spawns) can link its transcript back to the work. The
+    // names are on DEFAULT_CHILD_ENV_ALLOWLIST for transitive spawns;
+    // here they are composed as explicit overrides, which always win.
+    const correlation = opInvocation.correlation;
+    if (correlation !== undefined) {
+      childEnv['CQ_WORK_ID'] = correlation.workId;
+      if (correlation.role !== undefined) childEnv['CQ_ROLE'] = correlation.role;
+      if (correlation.task !== undefined) childEnv['CQ_TASK'] = correlation.task;
+      if (correlation.runId !== undefined) childEnv['CQ_RUN_ID'] = correlation.runId;
+      if (correlation.parentWorkId !== undefined) {
+        childEnv['CQ_PARENT_WORK_ID'] = correlation.parentWorkId;
+      }
+    }
     if (
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
@@ -751,6 +767,7 @@ export class ClaudeCodeCliTransport implements Driver {
       structured,
       structuredMiss,
       isCodexBinary(this.binary[0] ?? ''),
+      workspace,
     );
   }
 
@@ -806,6 +823,7 @@ export class ClaudeCodeCliTransport implements Driver {
     structured: unknown,
     structuredMiss: string | undefined,
     codexBinary: boolean,
+    workspacePath: string | undefined,
   ): WorkerResult {
     const measuredFrame = measureResultUsage(observation.result);
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
@@ -896,6 +914,24 @@ export class ClaudeCodeCliTransport implements Driver {
       usage,
       ...cost,
       sessionId,
+      // Session-log preservation item 1.5: the harness-native session id
+      // and the transcript path it implies (Claude Code encodes the cwd —
+      // here the run's workspace — as the project dir). The ARCHIVER joins
+      // on these; we never rewrite the transcript (feature R4). Absent
+      // when the CLI never reported a session id.
+      ...(observation.cliSessionId !== undefined
+        ? {
+            nativeSessionId: observation.cliSessionId,
+            ...(nativeTranscriptPath(observation.cliSessionId, workspacePath) !== undefined
+              ? {
+                  nativeSessionPath: nativeTranscriptPath(
+                    observation.cliSessionId,
+                    workspacePath,
+                  ) as string,
+                }
+              : {}),
+          }
+        : {}),
       denials: observation.denials,
       stopReason: effectiveStopReason,
       ...(error !== undefined ? { error } : {}),
@@ -909,15 +945,32 @@ export class ClaudeCodeCliTransport implements Driver {
 // Module-level helpers — pure, exported only where the tests need them
 // ---------------------------------------------------------------------------
 
+/**
+ * The Claude Code transcript path a native session id implies (item 1.5):
+ * `~/.claude/projects/<encoded-workspace>/<sessionId>.jsonl`, where the
+ * encoding replaces every non-alphanumeric char with `-`. Exported for the
+ * driver tests; returns undefined when the workspace is unknown (a
+ * temp-workspace run's key is its own mkdtemp path — the path is still
+ * derivable, but the caller can pass it; unknown in → undefined out, never
+ * a guessed key).
+ */
+export function nativeTranscriptPath(
+  nativeSessionId: string,
+  workspace: string | undefined,
+): string | undefined {
+  if (workspace === undefined || workspace === '') return undefined;
+  const key = workspace.replace(/[^A-Za-z0-9]/g, '-');
+  return join(homedir(), '.claude', 'projects', key, `${nativeSessionId}.jsonl`);
+}
+
 /** ISO-8601 timestamp for session messages. */
 function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** Default sessions dir (sibling of the harness temp-workspace root). */
-export function defaultSessionsDir(): string {
-  return join(tmpdir(), 'cq-harness', 'sessions');
-}
+// The shared default (item 1.1): one helper, durable XDG state location.
+// (Imported above; re-exported so existing importers keep their path.)
+export { defaultSessionsDir };
 
 /**
  * Frozen ToolPolicy → the allowed tool-name subset: 'none' → nothing;

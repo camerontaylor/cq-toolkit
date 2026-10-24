@@ -210,8 +210,7 @@ import type {
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
@@ -253,6 +252,7 @@ import type {
 } from '../types.js';
 import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
+import { defaultSessionsDir } from '../sessions-dir.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -305,7 +305,7 @@ export interface AiSdkDriverOptions {
    * tool is omitted from the model surface.
    */
   sandboxConfig?: SandboxConfig;
-  /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
+  /** Sessions directory for the backing SessionStore. Default: the shared durable sessions dir (`defaultSessionsDir()` — item 1.1). */
   sessionsDir?: string;
   /**
    * Price-lookup override for the derived-only costUSD rule (default:
@@ -610,6 +610,13 @@ export class AiSdkDriver implements Driver {
     // (an error verdict reporting all-zero usage after real work would be
     // dishonest evidence). The fold never feeds a cost figure on this path.
     let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    // Session-log fidelity (item 1.7): the FINAL completed step, so the
+    // persisted assistant turn can carry its own usage and requested tool
+    // calls. Undefined when no step completed (an immediate abort) — the
+    // message then persists without the fidelity fields, exactly as before.
+    let lastStep:
+      | { usage: LanguageModelUsage; toolCalls: readonly unknown[] | undefined }
+      | undefined;
     try {
       let result: Awaited<ReturnType<typeof generateText>>;
       try {
@@ -653,6 +660,10 @@ export class AiSdkDriver implements Driver {
           stopWhen,
           onStepFinish: (step) => {
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
+            lastStep = {
+              usage: step.usage,
+              toolCalls: step.toolCalls as readonly unknown[] | undefined,
+            };
           },
           ...(abortSignal !== undefined ? { abortSignal } : {}),
           // Transport (ADR-0002 §2.3): the SDK's structured output over the
@@ -766,10 +777,21 @@ export class AiSdkDriver implements Driver {
         }
       }
 
-      // Assistant turn persisted in OUR vocabulary before the verdict.
+      // Assistant turn persisted in OUR vocabulary before the verdict —
+      // now with the step's OWN usage (item 1.7: the store answers "what
+      // did this turn spend" without the journal) and the step's requested
+      // tool calls (the role-'tool' lines that follow are the results).
       await store.appendMessage(record.sessionId, {
         role: 'assistant',
         content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
+        ...(lastStep !== undefined
+          ? {
+              usage: usageFromSdk(lastStep.usage),
+              ...(lastStep.toolCalls !== undefined && lastStep.toolCalls.length > 0
+                ? { toolCalls: JSON.stringify(lastStep.toolCalls) }
+                : {}),
+            }
+          : {}),
         at: nowIso(),
       });
 
@@ -1413,11 +1435,6 @@ function nowIso(): string {
  */
 function signalAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
-}
-
-/** Default sessions dir (sibling of the harness temp-workspace root). */
-function defaultSessionsDir(): string {
-  return join(tmpdir(), 'cq-harness', 'sessions');
 }
 
 /**

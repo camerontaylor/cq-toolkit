@@ -207,6 +207,12 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     costUSD: z.number().exactOptional(),
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),
     sessionId: z.string().exactOptional(),
+    // Session-log preservation item 1.5: the harness-native session id and
+    // its expected transcript path, when the lane observed them. Optional —
+    // absent on every pre-existing result; mirror stays permissive-by-key,
+    // strict-by-shape like the rest of the object.
+    nativeSessionId: z.string().min(1).exactOptional(),
+    nativeSessionPath: z.string().min(1).exactOptional(),
     denials: z.array(ToolDenialSchema),
     // Mirror-only tightening: the frozen doc says "message", not "non-empty" — and the producer bound is 500 chars plus the 13-char '… [truncated]' marker from PR-B's error-text.ts, so the mirror allows 513.
     error: z.string().min(1).max(513).exactOptional(),

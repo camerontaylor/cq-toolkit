@@ -274,9 +274,9 @@ describe('fixReviewItem factory request', () => {
   });
 
   test.each([
-    ['retainSessions absent', undefined, 'reap-on-settle'],
-    ['retainSessions false', false, 'reap-on-settle'],
+    ['retainSessions absent', undefined, 'keep'],
     ['retainSessions true', true, 'keep'],
+    ['retainSessions false', false, 'reap-on-settle'],
   ])('%s → sessionRetention %s', async (_name, retainSessions, expected) => {
     const { op, requests } = scriptedOp([completeWorker(UNCHANGED)], retainSessions);
     await op(baseInput());

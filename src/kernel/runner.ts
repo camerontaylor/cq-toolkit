@@ -169,7 +169,7 @@ import {
 import { classifyDispatch } from './lanes.js';
 import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultSchema } from './schema.js';
-import type { Usage } from '../driver/types.js';
+import type { Usage, WorkCorrelation } from '../driver/types.js';
 import type {
   JobFinishedJournalEvent,
   JobOutcome,
@@ -402,6 +402,33 @@ function stateFromResult(result: OpResult<unknown>): JobState {
  * deliberately do NOT signal, and neither does a well-formed result whose
  * VALUE the journal refuses (the evidence guard's lying-measurement case).
  */
+/**
+ * Session-log correlation (preservation plan item 1.3/1.5): the driver
+ * sessions an op result carries, derived defensively like
+ * `workerResultOfValue` — only an ok result whose value carries a
+ * non-empty string `sessionId` yields a link; anything else (ops that map
+ * the driver result into their own value shape, or a failed verdict)
+ * yields undefined, never a fabricated session. `driver` is 'unknown'
+ * here BY DESIGN and callers must not guess: the schema's `driver` field
+ * is required, and the runner does not know which lane served the job —
+ * the journal reader joins that from the op registry.
+ */
+export type JobSessionLink = {
+  driver: string;
+  sessionId: string;
+  nativeSessionId?: string;
+  path?: string;
+};
+
+export function sessionsOfResult(result: OpResult<unknown>): JobSessionLink[] | undefined {
+  if (result.status !== 'ok') return undefined;
+  const value = result.value;
+  if (typeof value !== 'object' || value === null) return undefined;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
+  if (typeof sessionId !== 'string' || sessionId === '') return undefined;
+  return [{ driver: 'unknown', sessionId }];
+}
+
 async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
@@ -1092,6 +1119,13 @@ async function runPlanUnderLease(
     // Governed honest-stop provenance: the runner KNOWS which jobs it
     // admitted this run — attribution needs no marker strings.
     const admittedJobIds = new Set<string>();
+    // Session-log correlation (preservation plan items 1.3/1.4): the
+    // work-unit id minted per governed job attempt, keyed by job id. Read
+    // back at the job-finished emit and exposed to ops through the job
+    // context's info (below), so an op forwards it to its driver
+    // invocation without the runner mutating process.env (concurrent jobs
+    // in a wave must not cross-stain each other's children).
+    const correlationByJob = new Map<string, WorkCorrelation>();
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip
@@ -1286,6 +1320,17 @@ async function runPlanUnderLease(
         op: job.op,
         attempt: admission.attempt,
       });
+
+      // Session-log correlation (preservation plan items 1.3/1.4, 2026-10-24):
+      // mint the work-unit id for THIS job attempt. It rides the
+      // job-finished event below and reaches OPS through the governed job
+      // context (`ctx.info.correlation`), so an op passes it onto its
+      // driver invocation (the lane stamps CQ_* into the child env there —
+      // per-job, never a process.env mutation). Deliberately NOT a
+      // process.env write: concurrent jobs in a wave would cross-stain
+      // each other's children.
+      const workId = `${runId}:${job.id}:${admission.attempt}`;
+      correlationByJob.set(job.id, { workId, runId, role: job.op });
 
       // Per-job ledger sums: everything this invocation's evidence folds
       // actually charged — streamed (reportResult) plus the returned
@@ -1483,7 +1528,7 @@ async function runPlanUnderLease(
       // in-flight op sees the abort through currentJobContext().signal. The
       // ladder removes its listener when it settles (governor.runLadder).
       const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
-        const ladderOutcome = await runLadder(
+        const ladderOutcome = await runLadder<OpResult<unknown>>(
           (context) => {
             dispatchSignal = context.signal;
             dispatchUnknown = false;
@@ -1497,7 +1542,21 @@ async function runPlanUnderLease(
             );
           },
           governor.ladderSpec,
-          { op: job.op, jobKey: job.id, attempt },
+          // LadderContextInfo (with the minted correlation when the job was
+          // admitted). The conditional-spread form keeps exactOptionalPropertyTypes
+          // happy; the ternary's result type has correlation present XOR absent.
+          correlationByJob.get(job.id) !== undefined
+            ? {
+                op: job.op,
+                jobKey: job.id,
+                attempt,
+                // Session-log correlation (items 1.3/1.4): the work id
+                // minted at admission reaches the op through the job
+                // context, so it can forward it onto its driver invocation
+                // (the lane turns it into the child's CQ_* env).
+                correlation: correlationByJob.get(job.id) as WorkCorrelation,
+              }
+            : { op: job.op, jobKey: job.id, attempt },
           {
             // ONE time source: the governor's own clock timestamps the
             // ladder AND every recorded event — an override here would
@@ -1670,6 +1729,14 @@ async function runPlanUnderLease(
       }
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
+      // Session-log correlation (items 1.3/1.5): the minted work id and
+      // role ride the finish event; the sessions list is derived from the
+      // op result's WorkerResult-shaped value when the completion fold saw
+      // one (sessionId is OUR store id; the lane's native id is not visible
+      // here, so `nativeSessionId` stays absent — the lane-side sidecar
+      // remains the native-id source of truth, item 1.5).
+      const correlation = correlationByJob.get(job.id);
+      const jobSessions = sessionsOfResult(result);
       await emit({
         type: 'job-finished',
         runId,
@@ -1678,6 +1745,9 @@ async function runPlanUnderLease(
         opId: job.op,
         inputsHash: job.inputsHash,
         result,
+        ...(correlation !== undefined ? { workId: correlation.workId } : {}),
+        ...(correlation !== undefined ? { role: correlation.role } : {}),
+        ...(jobSessions !== undefined ? { sessions: jobSessions } : {}),
         ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
         ...(jobCostUSD !== undefined ? { costUSD: jobCostUSD } : {}),
         ...(settledCharge !== undefined ? { charged: settledCharge.charged } : {}),

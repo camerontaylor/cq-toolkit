@@ -35,8 +35,6 @@
 //     the run created a record iff it resolved with a sessionId AND the
 //     invocation carried NO sessionRef. A sessionRef-resumed record is
 //     NEVER reaped (it predates the run and may carry later turns).
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { AcpDriver } from './acp/index.js';
 import type { AcpDriverOptions } from './acp/index.js';
 import { AiSdkDriver } from './ai-sdk/index.js';
@@ -44,6 +42,7 @@ import type { AiSdkDriverOptions } from './ai-sdk/index.js';
 import { ClaudeCodeDriver } from './claude-code/index.js';
 import type { ClaudeCodeDriverOptions, ClaudeCodeTransport } from './claude-code/index.js';
 import { DispatchError } from './errors.js';
+import { defaultSessionsDir } from './sessions-dir.js';
 import { assertStrictTokenBudgetSupported } from './common/strict-budget.js';
 import type { PerMillionRates } from './pricing/index.js';
 import { withServedModelAssertion } from './served-model.js';
@@ -151,6 +150,25 @@ export interface DriverFactoryConfig {
   bindings?: Readonly<Record<string, Readonly<Record<string, LaneId>>>>;
   /** Sessions directory for the backing SessionStore, when a lane config does not name its own. */
   sessionsDir?: string;
+  /**
+   * Session-log preservation switch (plan item 1.6, 2026-10-24). ON by
+   * default (feature R1): sessions are recorded in the durable store
+   * (item 1.1) and kept (fixReviewItem's default-keep retention).
+   * `enabled: false` — or the environment override `CQ_SESSION_LOGS=off` —
+   * resolves every lane with sessionRetention 'reap-on-settle', so our own
+   * records are reaped at settle. HONEST OFF SWITCH (feature R7): this
+   * stops CQ's records only; a vendor CLI still writes its own transcript
+   * (~/.claude/projects) — the docs say so, and no code can prevent it.
+   * `retention: 'reap-on-settle'` reaps without disabling recording.
+   * `workRecords: false` skips the task-log writes (Phase 3's producer;
+   * no-op until that lands, accepted now so the schema is final).
+   */
+  sessionLogs?: {
+    enabled?: boolean;
+    dir?: string;
+    retention?: 'keep' | 'reap-on-settle';
+    workRecords?: boolean;
+  };
   /** Price lookup carried into lane construction (every lane accepts one) for the derived-only costUSD rule. */
   pricing?: (spec: ModelSpec) => PerMillionRates | undefined;
   /** Per-lane served-model policy for the assertion wrapper (ADR-0002 §2.6). */
@@ -190,10 +208,24 @@ const DEFAULT_PROVIDERS: readonly string[] = [
 const DEFAULT_LANE: LaneId = 'ai-sdk';
 
 /**
- * Mirrors every lane's private `defaultSessionsDir()` (they all share it):
- * the effective dir when neither the lane config nor the factory names one.
+ * The shared durable default (item 1.1): the lanes' one `defaultSessionsDir()`
+ * helper, read at resolve time so `CQ_SESSIONS_DIR` / XDG_STATE_HOME are
+ * honored without reconstructing the factory.
  */
-const DEFAULT_SESSIONS_DIR = join(tmpdir(), 'cq-harness', 'sessions');
+const DEFAULT_SESSIONS_DIR = () => defaultSessionsDir();
+
+/**
+ * The session-logs OFF probe (item 1.6): config `sessionLogs.enabled:
+ * false` XOR the env override `CQ_SESSION_LOGS=off` (read at resolve time,
+ * like every deployment knob here — a test can flip it per invocation).
+ * Anything else (absent, any other value) is ON: preservation is the
+ * default (feature R1).
+ */
+function sessionLogsOff(config: DriverFactoryConfig): boolean {
+  if (config.sessionLogs?.enabled === false) return true;
+  const env = process.env['CQ_SESSION_LOGS'];
+  return env !== undefined && env.trim().toLowerCase() === 'off';
+}
 
 /**
  * The absent-sink alias notice: byte-for-byte today's one-line stderr write.
@@ -250,7 +282,7 @@ function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
       : lane === 'acp'
         ? config.lanes?.acp?.sessionsDir
         : config.lanes?.aiSdk?.sessionsDir;
-  return laneDir ?? config.sessionsDir ?? DEFAULT_SESSIONS_DIR;
+  return laneDir ?? config.sessionsDir ?? DEFAULT_SESSIONS_DIR();
 }
 
 /**
@@ -423,8 +455,21 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
         lane = laneForRole(request.role, provider, config.bindings);
       }
       const inner = constructLane(lane, request, config);
+      // Session-log preservation switch (item 1.6): `CQ_SESSION_LOGS=off`
+      // or `sessionLogs.enabled: false` forces the reap wrapper ON for
+      // every resolve — our own records are reaped at settle; retention:
+      // 'reap-on-settle' does the same without disabling recording (the
+      // OFF case additionally skips work-record writes when they land).
+      // The request-level flag (the op's explicit choice) still wins when
+      // it asks for MORE retention than the switch ('keep' beats off only
+      // when the switch is not hard-off).
+      const switchOff = sessionLogsOff(config);
+      const retention =
+        switchOff || request.sessionRetention === 'reap-on-settle'
+          ? 'reap-on-settle'
+          : request.sessionRetention;
       const reaping =
-        request.sessionRetention === 'reap-on-settle'
+        retention === 'reap-on-settle'
           ? withReapOnSettle(inner, sessionsDirFor(lane, config))
           : inner;
       return {

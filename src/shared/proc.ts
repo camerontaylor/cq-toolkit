@@ -143,6 +143,18 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
   'XDG_CACHE_HOME',
   'XDG_DATA_HOME',
   'XDG_STATE_HOME',
+  // Session-log correlation (preservation plan item 1.4, 2026-10-24): the
+  // work-unit identity the runner (or a Paseo lane) mints before dispatch.
+  // NON-SECRET by construction — an opaque id, a role/task label, a run id —
+  // and the whole point is that EVERY child harness inherits them so the
+  // session it writes can be linked back to the work. `CQ_SESSIONS_DIR`
+  // rides too: the lanes' shared durable default (item 1.1).
+  'CQ_WORK_ID',
+  'CQ_PARENT_WORK_ID',
+  'CQ_ROLE',
+  'CQ_TASK',
+  'CQ_RUN_ID',
+  'CQ_SESSIONS_DIR',
   // Network egress + TLS trust config (issue #183 r1): a routed CLI on a
   // proxied or TLS-inspecting host cannot reach its endpoint without these.
   // The CA vars are non-secret paths. NOTE the proxy vars MAY embed egress
