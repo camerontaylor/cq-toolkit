@@ -16,7 +16,7 @@ import {
 } from '../dev/denylist.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { startFixerDeadline } from '../sweep/internal/fixerBudget.js';
-import { readWorkState } from '../dev/internal/workState.js';
+import { CLEAN_TREE, driftSince, readWorkState } from '../dev/internal/workState.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import { runAgentReviewer } from './agentReviewer.js';
 import {
@@ -428,12 +428,22 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
             reason: 'review cancelled or wall budget exhausted',
           }));
       }
+      // A full review can see uncommitted repairs. Restoring those bytes later
+      // must not turn that review into clean proof about the unchanged HEAD.
+      const reusableCleanProof =
+        !stopped() &&
+        state.dirtySha256 === CLEAN_TREE &&
+        (await driftSince(effects, state)).length === 0;
       const boundRecords = records.map((record) => ({
         ...record,
-        reviewed: {
-          base: input.uncommitted ? state.head : state.base,
-          scope: input.uncommitted ? ('uncommitted' as const) : ('full' as const),
-        },
+        ...(reusableCleanProof
+          ? {
+              reviewed: {
+                base: input.uncommitted ? state.head : state.base,
+                scope: input.uncommitted ? ('uncommitted' as const) : ('full' as const),
+              },
+            }
+          : {}),
         branch: record.branch || state.branch,
         head: record.head || state.head,
       }));

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { resolve, join, posix } from 'node:path';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
@@ -518,6 +518,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             login: string;
           }
         | undefined;
+      let dispatchLogPath: string | undefined;
       const reviewers = new Set<string>();
       if (input.source !== 'local') {
         const pr = Number(input.source.slice(3));
@@ -563,6 +564,33 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           headRepo: `${meta.headRepositoryOwner.login}/${meta.headRepository.name}`,
           login: loginResult.stdout.trim(),
         };
+        // Publication receipts outlive run-specific reports. A changed target,
+        // fork/branch or authenticated actor cannot borrow another run's log.
+        // The loop still requires fetched authenticated current-head/round proof;
+        // a stored receipt alone never authorizes resolution.
+        const commonDir = await gitText(root, [
+          'rev-parse',
+          '--path-format=absolute',
+          '--git-common-dir',
+        ]);
+        if (!commonDir) return await finish('needs-human', 'Git common directory unavailable');
+        const namespace = createHash('sha256')
+          .update(
+            JSON.stringify([
+              owner.toLowerCase(),
+              repo.toLowerCase(),
+              pr,
+              input.target ?? 'merge-queue',
+              input.base ?? null,
+              prMetadata.headRepo!.toLowerCase(),
+              meta.headRefName,
+              prMetadata.login.toLowerCase(),
+            ]),
+          )
+          .digest('hex');
+        const receiptDir = resolve(root, commonDir, 'cq-review-address', namespace);
+        await mkdir(receiptDir, { recursive: true });
+        dispatchLogPath = resolve(receiptDir, 'dispatch.jsonl');
       }
       if (input.source === 'local') {
         const read = await readWorkState(makeSubprocessDevEffects(root), {
@@ -661,7 +689,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             } as OpRegistryView,
             responderLogin: meta.login,
             nowMs: Date.now(),
-            dispatchLogPath: resolve(journalDir, 'dispatch.jsonl'),
+            dispatchLogPath: dispatchLogPath!,
             allowAdvisoryBudget: true,
             engineOwnedConcurrency: policy.review.addressConcurrency,
             publish: input.push === true,

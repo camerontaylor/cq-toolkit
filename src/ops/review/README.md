@@ -22,7 +22,10 @@ commit and `full` or `uncommitted` review scope. Local clean acceptance requires
 a full review against the addressing run's pinned base, in addition to exact
 branch/head, terminal sources and a clean index/worktree. Older records remain
 readable but lack that proof; run `review.run` again before accepting them as
-clean. An uncommitted-only review cannot certify the full target diff.
+clean. An uncommitted-only review cannot certify the full target diff. The
+producer attaches reusable proof only when it started clean and its exact
+branch/head/dirty identity remained unchanged through review. Reviews of dirty
+content still retain findings, but cannot certify a subsequently restored HEAD.
 
 Workers share one checkout but edit only their assigned literal file.
 Missing scope and overlapping files are refused or serialized. Workers
@@ -69,7 +72,14 @@ open findings and distinct verified commit count (`fixesPerRun`). Unknown
 USD prices remain absent.
 
 PR replies and thread resolution use the current authenticated identity,
-fresh head/round proof and verified publication. A journal receipt without
+fresh head/round proof and verified publication. Successful dispatch receipts
+live under the repository's Git common directory at
+`cq-review-address/<namespace>/dispatch.jsonl`, independently of the run-specific
+report directory. The namespace binds repository, PR, target/base, head
+repository/branch and authenticated actor. A default rerun can recover a landed
+reply whose resolution failed without invoking the editing worker or reposting
+the reply. Fresh terminal reviewer validation remains required and its usage is
+accounted. A stored receipt without
 the fetched authenticated reply cannot authorize a carry-forward resolve.
 Unchanged rejections can post evidence but never resolve a thread. Once
 clean, resolved human thread authors are re-requested once. Bot authors are

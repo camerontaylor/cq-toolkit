@@ -1258,6 +1258,7 @@ it.each([false, true])(
     try {
       await configureAgentRepo(repo);
       await repo.write('src/a.ts', 'export const a = 2;\n');
+      repo.commitAll('reviewed clean candidate');
       const result = await makeReviewRun({
         drivers: scriptedDrivers(),
         effectsFactory: () => repoEffects(repo),

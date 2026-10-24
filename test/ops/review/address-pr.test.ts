@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
@@ -23,6 +23,7 @@ async function world(
     fileless?: 'first' | 'last';
     bot?: boolean;
     discussion?: boolean;
+    recoverResolution?: boolean;
     reviewOutcome?: 'failed' | 'wrong-head' | 'open-finding';
   } = {},
 ) {
@@ -32,6 +33,17 @@ async function world(
   let head = initial,
     remote = initial;
   const resolved = new Set<string>();
+  let failResolve = options.recoverResolution === true;
+  let login = 'responder';
+  let reviewerCalls = 0;
+  const reports: string[] = [];
+  const replies: Array<{
+    id: number;
+    in_reply_to_id: number;
+    body: string;
+    user: { login: string };
+    created_at: string;
+  }> = [];
   const actions: string[] = [];
   const prompts: string[] = [];
   const files = ['src/a.ts', 'src/b.ts'];
@@ -82,13 +94,18 @@ async function world(
         headRepositoryOwner: { login: 'octo' },
         headRepository: { name: 'widget' },
       });
-    if (args.includes('user')) return ok('responder');
+    if (args.includes('user')) return ok(login);
     const endpoint = args.find((a) => a.startsWith('repos/')) ?? '';
     if (args.includes('graphql')) {
       const query = flag(args, 'query');
       if (query.includes('resolveReviewThread')) {
         const id = flag(args, 'threadId');
         if (remote !== fixed) throw new Error('resolve before verified publication');
+        if (failResolve) {
+          failResolve = false;
+          actions.push('resolve-failed');
+          return { code: 1, stdout: '', stderr: 'scripted resolution failure after landed reply' };
+        }
         resolved.add(id);
         actions.push(`resolve:${id}`);
         return ok({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } });
@@ -115,10 +132,29 @@ async function world(
       else {
         if (remote !== fixed) throw new Error('reply before verified publication');
         actions.push('reply');
+        if (options.recoverResolution)
+          replies.push({
+            id: 1001,
+            in_reply_to_id: Number(flag(args, 'in_reply_to')),
+            body: flag(args, 'body'),
+            user: { login },
+            created_at: new Date().toISOString(),
+          });
       }
       return ok({ id: 1001 });
     }
     if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remote } });
+    if (options.recoverResolution && endpoint.includes('/pulls/7/comments'))
+      return ok([
+        ...threads.map((thread) => ({
+          id: thread.comments.nodes[0]!.databaseId,
+          in_reply_to_id: null,
+          body: thread.comments.nodes[0]!.body,
+          user: { login: 'reviewer' },
+          created_at: thread.comments.nodes[0]!.createdAt,
+        })),
+        ...replies,
+      ]);
     if (options.discussion && endpoint.includes('/pulls/7/comments'))
       return ok([
         {
@@ -221,6 +257,7 @@ async function world(
     if (a[0] === 'worktree' && a[1] === 'list')
       return ok(`worktree ${worktree}\nHEAD ${head}\nbranch refs/heads/cq-review/pr-7\n\n`);
     if (a[0] === 'rev-parse') {
+      if (a.includes('--git-common-dir')) return ok(join(root, 'git'));
       if (a[1] === '--absolute-git-dir') return ok(join(root, 'git'));
       if (a[1] === '--abbrev-ref') return ok('cq-review/pr-7');
       if (a[1] === '--verify') {
@@ -304,8 +341,9 @@ async function world(
       escalation: { workerAttempts: 1, rescueBase: 0 },
     },
     disposition: async () => ({ status: 'ok', value: {} }),
-    review: async () =>
-      options.reviewOutcome === 'failed'
+    review: async () => {
+      reviewerCalls++;
+      return options.reviewOutcome === 'failed'
         ? {
             status: 'failed',
             error: 'scripted reviewer could not complete',
@@ -332,7 +370,8 @@ async function world(
                     ]
                   : [],
             },
-          },
+          };
+    },
     workerFactory: (deps) =>
       makeAddressWorker({
         ...deps,
@@ -345,9 +384,29 @@ async function world(
     actions,
     prompts,
     resolved,
-    run: (push = true) =>
-      op({ repoRoot: root, source: 'pr:7', push, journalDir: join(root, 'journal') }),
-    cleanup: () => rm(root, { recursive: true, force: true }),
+    reviewerCalls: () => reviewerCalls,
+    replies,
+    changeLogin: () => {
+      login = 'another-responder';
+    },
+    clearReceipts: () =>
+      rm(join(root, 'git', 'cq-review-address'), { recursive: true, force: true }),
+    run: async (push = true, target?: string) => {
+      const result = await op({
+        repoRoot: root,
+        source: 'pr:7',
+        push,
+        ...(target ? { target } : {}),
+        ...(options.recoverResolution ? {} : { journalDir: join(root, 'journal') }),
+      });
+      reports.push((result.status === 'ok' ? result.value : result.report!).reportPath);
+      return result;
+    },
+    cleanup: async () => {
+      await rm(root, { recursive: true, force: true });
+      if (options.recoverResolution)
+        for (const path of reports) await rm(dirname(path), { recursive: true, force: true });
+    },
   };
 }
 describe('review.address PR phase-one orchestration', () => {
@@ -474,4 +533,55 @@ describe('review.address PR phase-one orchestration', () => {
       await w.cleanup();
     }
   });
+});
+
+test.each([
+  'valid',
+  'missing-receipt',
+  'forged-author',
+  'stale-head',
+  'changed-actor',
+  'changed-target',
+] as const)('default PR rerun recovers only authenticated pending resolution: %s', async (mode) => {
+  const w = await world(false, { recoverResolution: true });
+  try {
+    const first = await w.run();
+    expect(first.status).toBe('needs-human');
+    expect(w.actions).toContain('resolve-failed');
+    expect(w.actions.filter((a) => a === 'reply')).toHaveLength(1);
+    expect(w.resolved.has('T1')).toBe(false);
+    const edits = w.prompts.length;
+    const reviewerCalls = w.reviewerCalls();
+    const actions = w.actions.length;
+    const firstPath = first.report!.reportPath;
+    expect(w.replies[0]?.body).toContain('resolve');
+    if (mode === 'missing-receipt') await w.clearReceipts();
+    if (mode === 'forged-author') w.replies[0]!.user.login = 'forger';
+    if (mode === 'stale-head') w.replies[0]!.body = w.replies[0]!.body.replaceAll(fixed, initial);
+    if (mode === 'changed-actor') w.changeLogin();
+    const second = await w.run(true, mode === 'changed-target' ? 'another-target' : undefined);
+    const report = second.status === 'ok' ? second.value : second.report!;
+    expect(report.reportPath).not.toBe(firstPath);
+    if (mode === 'valid') {
+      expect(
+        second.status,
+        JSON.stringify({
+          reasons: report.reasons,
+          actions: w.actions.slice(actions),
+          replies: w.replies,
+        }),
+      ).toBe('ok');
+      expect(w.actions.slice(actions)).toEqual(['resolve:T1']);
+      expect(w.prompts).toHaveLength(edits); // no editing/feedback/closure provider dispatch
+      expect(w.reviewerCalls()).toBe(reviewerCalls + 1); // fresh mandatory terminal re-review
+      expect(report.fixesPerRun).toBe(0);
+    } else {
+      expect(second.status).toBe('needs-human');
+      expect(w.resolved.has('T1')).toBe(false);
+      expect(w.prompts.length).toBeGreaterThan(edits);
+      expect(w.actions.slice(actions)).not.toContain('resolve:T1');
+    }
+  } finally {
+    await w.cleanup();
+  }
 });

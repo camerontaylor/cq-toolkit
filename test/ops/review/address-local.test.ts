@@ -251,53 +251,77 @@ describe('review.address local full cycle', () => {
   });
 });
 
-test.each(['full', 'uncommitted', 'narrow-base', 'matching-narrow-base'] as const)(
-  'actual review.run record gates local clean acceptance: %s',
-  async (mode) => {
-    const f = await fixture();
-    let calls = 0;
-    const drivers: DriverFactory = {
-      resolve: (request) => ({
-        lane: 'ai-sdk',
-        modelSpec: request.modelSpec,
-        driver: {
-          run: async () => {
-            calls++;
-            return {
-              stopReason: 'complete',
-              structuredOutput: { findings: [] },
-              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
-              denials: [],
-            };
-          },
+test.each([
+  'full',
+  'uncommitted',
+  'narrow-base',
+  'matching-narrow-base',
+  'dirty-restored',
+  'staged-restored',
+  'untracked-restored',
+  'mutated-during-review',
+] as const)('actual review.run record gates local clean acceptance: %s', async (mode) => {
+  const f = await fixture();
+  let calls = 0;
+  const drivers: DriverFactory = {
+    resolve: (request) => ({
+      lane: 'ai-sdk',
+      modelSpec: request.modelSpec,
+      driver: {
+        run: async () => {
+          calls++;
+          if (mode === 'dirty-restored' || mode === 'staged-restored')
+            expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('GOOD');
+          if (mode === 'mutated-during-review')
+            await f.repo.write('src/a.ts', 'export const a = "GOOD";\n');
+          return {
+            stopReason: 'complete',
+            structuredOutput: { findings: [] },
+            usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          };
         },
-      }),
-    };
-    try {
-      const narrow = mode === 'narrow-base' || mode === 'matching-narrow-base';
-      const head = f.repo.git('rev-parse', 'HEAD').trim();
-      const produced = await makeReviewRun({ drivers })({
-        repoRoot: f.repo.root,
-        ...(narrow ? { base: head } : {}),
-        ...(mode === 'uncommitted' ? { uncommitted: true } : {}),
-      });
-      expect(produced.status).toBe('ok');
-      if (produced.status !== 'ok') return;
-      expect(produced.value.findings).toEqual([]);
-      const result = await makeReviewAddress({ drivers, initialRecord: produced.value })({
-        repoRoot: f.repo.root,
-        source: 'local',
-        journalDir: f.journalDir,
-        ...(mode === 'matching-narrow-base' ? { base: head } : {}),
-      });
-      expect(result.status).toBe(
-        mode === 'full' || mode === 'matching-narrow-base' ? 'ok' : 'needs-human',
-      );
-      expect(calls).toBe(1);
-      if (result.status !== 'ok')
-        expect(result.report!.reasons.join(' ')).toContain('reviewed base/scope');
-    } finally {
-      await f.cleanup();
+      },
+    }),
+  };
+  try {
+    const narrow = mode === 'narrow-base' || mode === 'matching-narrow-base';
+    const head = f.repo.git('rev-parse', 'HEAD').trim();
+    const dirty = mode === 'dirty-restored' || mode === 'staged-restored';
+    if (dirty) {
+      await f.repo.write('src/a.ts', 'export const a = "GOOD";\n');
+      if (mode === 'staged-restored') f.repo.git('add', '--', 'src/a.ts');
     }
-  },
-);
+    if (mode === 'untracked-restored')
+      await f.repo.write('src/new.ts', 'export const newFile = 1;\n');
+    const produced = await makeReviewRun({ drivers })({
+      repoRoot: f.repo.root,
+      ...(narrow ? { base: head } : {}),
+      ...(mode === 'uncommitted' ? { uncommitted: true } : {}),
+    });
+    expect(produced.status).toBe('ok');
+    if (produced.status !== 'ok') return;
+    expect(produced.value.findings).toEqual([]);
+    if (dirty || mode === 'mutated-during-review' || mode === 'untracked-restored') {
+      expect(produced.value.reviewed).toBeUndefined();
+      f.repo.git('restore', '--source=HEAD', '--staged', '--worktree', '--', 'src/a.ts');
+      if (mode === 'untracked-restored') await rm(join(f.repo.root, 'src/new.ts'));
+      expect(f.repo.git('status', '--porcelain')).toBe('');
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('BAD');
+    }
+    const result = await makeReviewAddress({ drivers, initialRecord: produced.value })({
+      repoRoot: f.repo.root,
+      source: 'local',
+      journalDir: f.journalDir,
+      ...(mode === 'matching-narrow-base' ? { base: head } : {}),
+    });
+    expect(result.status).toBe(
+      mode === 'full' || mode === 'matching-narrow-base' ? 'ok' : 'needs-human',
+    );
+    expect(calls).toBe(1);
+    if (result.status !== 'ok')
+      expect(result.report!.reasons.join(' ')).toContain('reviewed base/scope');
+  } finally {
+    await f.cleanup();
+  }
+});

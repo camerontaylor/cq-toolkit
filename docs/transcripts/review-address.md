@@ -98,3 +98,33 @@ production dogfood or CodeRabbit invocation.
 test:narrow result="pass" exit=0 files=7 projects="pure,process" tests="179/179" failed=0 skipped=0 wait="0.0s" duration="34.4s" nice=5 load="1.6" uptime="536466s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/gates/adapters.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/findings.test.ts,test/ops/review/run.test.ts"
 test:narrow result="pass" exit=0 files=7 projects="pure,process,integration" tests="198/198" failed=0 skipped=0 wait="0.0s" duration="15.2s" nice=5 load="2.3" uptime="536506s" source="explicit" ran="test/cli/registry-props.test.ts,test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/registry.test.ts"
 ```
+
+### Late producer identity and publication recovery repairs (#448, #449)
+
+A full review of an uncommitted repair cannot prove the restored original HEAD
+clean. The hermetic actual `review.run` → restore → `review.address` fixture
+covers staged and unstaged repairs, deleted untracked additions, and mutations
+during review; all withhold clean reuse. Clean matching-base controls remain
+accepted. No provider or forge network is used.
+
+A separate fake-forge fixture lets the verified fix push and reply succeed,
+then fails thread resolution. Two invocations omit `journalDir` and receive
+different report paths. The second invocation uses the stable Git-common-dir
+publication receipts: its only forge mutation is the pending resolution, it
+performs no editing/feedback/closure worker call, and it still requests one
+fresh terminal reviewer validation. This is not a claim of zero reviewer
+provider use. Missing receipts, a forged reply author, stale head, changed
+actor, and changed target cannot borrow that resolution authorization.
+
+Against the original source at `4c0a55d7`, these new causal cases failed:
+`26/31` passed, with four producer-identity refusals and pending-resolution
+recovery failing. The repaired focused checkpoint passed `67/67`.
+
+Final checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=10 projects="pure,process,integration" tests="292/292" failed=0 skipped=0 wait="0.0s" duration="43.8s" nice=5 load="1.9" uptime="538133s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/replyAndResolve.test.ts,test/ops/review/run.test.ts,test/plans/review-loop.test.ts"
+```
+
+Static, formatting and Knip checks exited 0. Op docs regenerated with no drift.
+Live dogfood acceptance remains unmet; these are hermetic tests.
