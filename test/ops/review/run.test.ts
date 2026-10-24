@@ -1,7 +1,11 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
+import { runCli } from '../../../src/cli/main.js';
+import type { CliIo } from '../../../src/cli/output.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { repoEffects, makeTestRepo } from '../dev/repo.js';
 
@@ -41,6 +45,89 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
 }
 
 describe('review.run', () => {
+  it('dispatches the fresh unauthenticated-CodeRabbit fixture through the CLI', async () => {
+    const repo = await makeTestRepo();
+    const opsRoot = await mkdtemp(join(tmpdir(), 'cq-review-cli-ops-'));
+    const bin = await mkdtemp(join(tmpdir(), 'cq-review-cli-bin-'));
+    const priorPath = process.env['PATH'] ?? '';
+    try {
+      await configureAgentRepo(repo);
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['coderabbit', 'agent'] },
+        }),
+      );
+      repo.commitAll('configure both review sources');
+      await mkdir(join(opsRoot, 'review'));
+      await writeFile(
+        join(bin, 'coderabbit'),
+        '#!/bin/sh\necho "not authenticated" >&2\nexit 1\n',
+        { mode: 0o755 },
+      );
+      const registryUrl = pathToFileURL(join(process.cwd(), 'src/ops/review/registry.ts')).href;
+      const runUrl = pathToFileURL(join(process.cwd(), 'src/ops/review/run.ts')).href;
+      const effectsUrl = pathToFileURL(join(process.cwd(), 'src/ops/dev/effects.ts')).href;
+      await writeFile(
+        join(opsRoot, 'review/registry.js'),
+        `import { registry as entries } from ${JSON.stringify(registryUrl)};\n` +
+          `import { makeReviewRun } from ${JSON.stringify(runUrl)};\n` +
+          `import { makeSubprocessDevEffects } from ${JSON.stringify(effectsUrl)};\n` +
+          `const entry = entries.find((candidate) => candidate.name === 'review.run');\n` +
+          `const drivers = { resolve: () => ({ lane: 'ai-sdk', modelSpec: { provider: 'mock', model: 'mock' }, driver: { run: async () => ({ stopReason: 'complete', structuredOutput: { findings: [{ file: 'src/a.ts', line: 1, rule: 'fixture', severity: 'high', text: 'Seeded fixture finding' }] }, usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, denials: [] }) } }) };\n` +
+          `export const registry = [{ ...entry, importer: async () => makeReviewRun({ drivers, effectsFactory: makeSubprocessDevEffects, scannerFactory: () => async (components) => components.map((component) => ({ component: component.component, hits: [] })) }) }];\n`,
+      );
+      process.env['PATH'] = `${bin}:${priorPath}`;
+      const out: string[] = [];
+      const err: string[] = [];
+      const io: CliIo = { stdout: (chunk) => out.push(chunk), stderr: (chunk) => err.push(chunk) };
+      const code = await runCli(['review.run', `--repoRoot=${repo.root}`, '--json'], io, {
+        opsRoot,
+      });
+      expect(code).toBe(3);
+      expect(err).toEqual([]);
+      const artifact = JSON.parse(out.join('')) as { status: string; reason: string };
+      expect(artifact).toEqual({
+        status: 'needs-human',
+        reason:
+          'review.run: not every configured reviewer completed a terminal cycle; the findings record, including partial findings, was persisted',
+      });
+      const headPrefix = repo.git('rev-parse', 'HEAD').trim().slice(0, 8);
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        sources: { kind: string; status: string; cycleId?: string }[];
+        findings: { id: string; source: string; text: string }[];
+      };
+      expect(persisted.sources).toEqual([
+        {
+          kind: 'coderabbit',
+          status: 'blocked',
+          cycleId: `c001-${headPrefix}`,
+          reason: expect.any(String),
+        },
+        { kind: 'agent', status: 'terminal', cycleId: `c002-${headPrefix}` },
+      ]);
+      expect(persisted.findings).toContainEqual(
+        expect.objectContaining({
+          id: `${persisted.sources[1]?.cycleId}#f1`,
+          source: 'agent',
+          text: 'Seeded fixture finding',
+        }),
+      );
+    } finally {
+      process.env['PATH'] = priorPath;
+      await repo.cleanup();
+      const { rm } = await import('node:fs/promises');
+      await rm(opsRoot, { recursive: true, force: true });
+      await rm(bin, { recursive: true, force: true });
+    }
+  });
+
   it('persists agent findings and records unauthenticated CodeRabbit as blocked', async () => {
     const repo = await makeTestRepo();
     try {

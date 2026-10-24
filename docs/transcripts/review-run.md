@@ -20,7 +20,7 @@ stdout after enforcing the configured-source completion rule:
 
 The CLI exit code for this result is `3` (`needs-human`). The harness then
 read `.cq/review/feature%2Fx/1.json`. It retained the CodeRabbit blocked
-cycle `c001-1f37721d`, the agent terminal cycle `c002-1f37721d`, and the
-seeded major finding `c002-1f37721d#f1` (`src/a.ts:1`, rule `fixture`). The
-partial findings remain available while the incomplete configured reviewer
-set remains a human stop.
+cycle `c001-<head8>`, the agent terminal cycle `c002-<head8>`, and the seeded
+major finding `c002-<head8>#f1` (`src/a.ts:1`, rule `fixture`). The fixture
+asserts each id against its actual commit prefix. The partial findings remain
+available while the incomplete configured reviewer set remains a human stop.
