@@ -875,6 +875,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (!read.ok) return await finish('needs-human', read.reason);
             reviewedBase = read.state.base;
           }
+          if (input.source !== 'local' && !input.base) {
+            // Pin the engine-captured comparison base for this invocation:
+            // every admission and re-review below must review the SAME diff
+            // even if the live target advances mid-run (a stacked parent
+            // landing would otherwise shrink the round-over-round comparison).
+            // Explicit-base invocations keep passing their own base through.
+            const effects = makeSubprocessDevEffects(root);
+            const read = await readWorkState(effects, {
+              target: input.target ?? 'merge-queue',
+            });
+            if (!read.ok) return await finish('needs-human', read.reason);
+            reviewedBase = read.state.base;
+          }
           for (let round = 1; round <= policy.review.rounds; round++) {
             const stopped = stop();
             if (stopped) return await finish('needs-human', stopped);
