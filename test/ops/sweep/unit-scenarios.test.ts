@@ -208,6 +208,107 @@ async function runUnit(
 }
 
 describe('sweep unit in-process scenarios', () => {
+  test('failed publication pushes the scanned SHA even if its branch moves during scanning', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    let branchTip = '';
+    let branchRef = '';
+    let pushedSha = '';
+    const retargetedSha = 'e'.repeat(40);
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        stagePathAllowlist: { patterns: ['^src/'] },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'error',
+          }),
+        },
+        scanPrompt: async (text) => {
+          if (text.startsWith('Failed-attempt commit ')) branchTip = retargetedSha;
+        },
+        git: async (args) => {
+          const updateRefIndex = args.indexOf('update-ref');
+          if (updateRefIndex !== -1) {
+            branchRef = String(args[updateRefIndex + 1]);
+            branchTip = String(args[updateRefIndex + 2]);
+          }
+          const pushIndex = args.indexOf('push');
+          if (pushIndex !== -1) {
+            const refspec = String(args[pushIndex + 2]);
+            const source = refspec.split(':')[0];
+            pushedSha = source?.startsWith('refs/heads/') ? branchTip : String(source);
+          }
+          return underlying(args);
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      const failedAttempt = result.value.tasks?.[0]?.failedAttempt;
+      expect(failedAttempt).toBeDefined();
+      expect(branchTip).toBe(retargetedSha);
+      expect(pushedSha).toBe(failedAttempt?.sha);
+      expect(pushedSha).not.toBe(retargetedSha);
+      expect(
+        world.gitCalls.some(
+          (args) => args.includes('push') && args.at(-1) === `${failedAttempt?.sha}:${branchRef}`,
+        ),
+      ).toBe(true);
+      expect(result.value.tasks?.[0]?.failedAttemptPublished).toBe(true);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('an early worker stop cannot publish a failed attempt that adds a suppression', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    const suppressionPatch = [
+      'diff --git a/src/a.js b/src/a.js',
+      'index 1111111..2222222 100644',
+      '--- a/src/a.js',
+      '+++ b/src/a.js',
+      '@@ -1 +1,2 @@',
+      ' safe',
+      '+// @ts-nocheck',
+      '',
+    ].join('\n');
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        stagePathAllowlist: { patterns: ['^src/'] },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'error',
+          }),
+        },
+        scanPrompt,
+        git: async (args) =>
+          args.includes('--binary') && args.includes('--full-index')
+            ? { code: 0, stdout: suppressionPatch, stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.tasks?.[0]?.failedAttempt).toBeDefined();
+        expect(result.value.tasks?.[0]?.failedAttemptPublished).not.toBe(true);
+        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+        expect(JSON.stringify(result.value)).toContain('tamper gate refused publication');
+      }
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('parent cancellation during failed-attempt scan blocks off-machine publication', async () => {
     const world = await makeWorld([
       { failing: true, message: 'baseline' },

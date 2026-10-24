@@ -23,6 +23,7 @@ import { fixerBudgetBreach, startFixerDeadline } from './internal/fixerBudget.js
 import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
 import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
+import { hackDetector } from '../gates/hackDetector.js';
 
 export interface TaskLoopConfig {
   source?: 'tests' | 'static';
@@ -665,7 +666,7 @@ async function runTaskLoopInner(
               await git([
                 'push',
                 'origin',
-                `refs/heads/${row.failedAttempt.branch}:refs/heads/${row.failedAttempt.branch}`,
+                `${row.failedAttempt.sha}:refs/heads/${row.failedAttempt.branch}`,
               ]);
               row.failedAttemptPublished = true;
             }
@@ -757,6 +758,24 @@ async function scanFailedAttempt(
   const contents = await failedAttemptContents(git, parent, sha);
   const message = await git(['show', '-s', '--format=%B', sha]);
   contents.push({ text: message, path: '.git/cq-failed-commit-message' });
+  const patch = await git([
+    'diff',
+    ...SWEEP_DIFF_FLAGS,
+    '--binary',
+    '--full-index',
+    parent,
+    sha,
+    '--',
+  ]);
+  const tamper = await hackDetector({ diff: patch });
+  if (tamper.status !== 'ok')
+    throw new Error(`failed-attempt tamper scan could not complete: ${tamper.status}`);
+  if (tamper.value.length > 0) {
+    const finding = tamper.value[0];
+    throw new Error(
+      `failed-attempt tamper gate refused publication${finding === undefined ? '' : ` (${finding.kind} at ${finding.file}:${String(finding.line ?? '?')})`}`,
+    );
+  }
   await bindings.scanPrompt(`Failed-attempt commit ${sha} publication scan`, contents);
   const paths = await failedAttemptPaths(git, parent, sha);
   return classifyStagePaths(
