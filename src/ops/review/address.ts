@@ -10,7 +10,7 @@ import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { fetchReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import { requestReviewers } from '../../adapters/forge-github/requestReviewers.js';
 import { fileWorktreeRegistry, type WorktreeRegistry } from '../../adapters/git/prWorktree.js';
-import { runReviewLoop } from '../../plans/review-loop.js';
+import { loopReplyVerdict, replySignature, runReviewLoop } from '../../plans/review-loop.js';
 import { parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
 import { makeDevDisposition } from '../dev/disposition.js';
@@ -150,6 +150,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     };
     let worker: AddressWorker | undefined;
     let publishOnExit: (() => Promise<void>) | undefined;
+    let cleanStop: (() => string | undefined) | undefined;
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -163,6 +164,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           reason = `verified publication failed: ${String(error)}`;
           report.reasons.push(reason);
         }
+      }
+      const stopped = status === 'ok' ? cleanStop?.() : undefined;
+      if (stopped) {
+        status = 'needs-human';
+        reason = stopped;
+        report.reasons.push(stopped);
       }
       report.wallMs = Date.now() - start;
       report.fixesPerRun = new Set(
@@ -225,6 +232,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           : remainingTokens() <= 0 || remainingWallMs() <= 0
             ? 'token or wall budget exhausted'
             : undefined;
+      cleanStop = stop;
       const account = (result: WorkerResult, governed = true) => {
         for (const key of ['input', 'output', 'cacheRead', 'cacheWrite'] as const)
           report.usage[key] += result.usage[key];
@@ -263,7 +271,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           };
         },
       };
-      const review = deps.review ?? makeReviewRun({ drivers: reviewDrivers });
+      const review =
+        deps.review ??
+        makeReviewRun({ drivers: reviewDrivers, ...(parent ? { parentSignal: parent } : {}) });
       const git =
         deps.git ??
         makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: Math.min(cap, 60_000) });
@@ -332,6 +342,26 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       };
       const dispositions = new Map<string, Finding>();
       let bookkeepingFailed = false;
+      const admitCleanRecord = async (root: string, record: FindingsRecord) => {
+        const effects = makeSubprocessDevEffects(root);
+        const read = await readWorkState(effects, {
+          target: input.target ?? 'merge-queue',
+          ...(input.base ? { base: input.base } : {}),
+        });
+        if (!read.ok) throw new Error(read.reason);
+        const state = read.state;
+        if (record.head !== state.head || record.branch !== state.branch)
+          throw new Error('clean findings record does not match current branch/head');
+        if (
+          state.staged ||
+          state.unstaged ||
+          state.untracked.some((path) => path !== '.cq' && !path.startsWith('.cq/'))
+        )
+          throw new Error(
+            'clean findings record cannot prove dirty or untracked worktree content; run review.run again',
+          );
+        if (stop()) throw new Error(stop());
+      };
       const admitRecord = async (root: string, record: FindingsRecord) => {
         if (deps.disposition) return;
         const effects = makeSubprocessDevEffects(root);
@@ -665,10 +695,32 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           }
           if ((await branchName(root)) !== loop.worktree.branch)
             return await finish('needs-human', 'PR worker branch changed');
+          const currentHead = await gitText(root, ['rev-parse', 'HEAD']);
+          const rejectionReasons = new Map<string, string>();
+          const ledger = makeSubprocessDevEffects(root).openLedger(loop.worktree.branch).load();
+          for (const thread of fetched.threads) {
+            const proof = loopReplyVerdict(thread, {
+              signature: replySignature(meta.owner, meta.repo, meta.pr),
+              headSha: currentHead,
+              ownLogin: meta.login,
+              requireCurrentIdentity: true,
+            });
+            const latest = ledger.records
+              .filter((entry) => entry.kind === 'disposition' && entry.findingId === thread.id)
+              .at(-1);
+            if (
+              proof.kind === 'settled' &&
+              !proof.carryResolve &&
+              latest?.kind === 'disposition' &&
+              latest.action === 'rejected' &&
+              latest.head === currentHead
+            )
+              rejectionReasons.set(thread.id, latest.why);
+          }
           const threads: FindingsRecord = {
             schemaVersion: 1,
             branch: loop.worktree.branch,
-            head: await gitText(root, ['rev-parse', 'HEAD']),
+            head: currentHead,
             sources: [{ kind: 'pr-threads', status: 'terminal' }],
             findings: fetched.threads
               .filter(
@@ -685,11 +737,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 text: discussionText(thread.body, thread.replies),
                 severity: 'major',
                 status:
-                  loop.status === 'ok' && fixesById.get(thread.id)?.finding.status === 'rejected'
+                  (loop.status === 'ok' &&
+                    fixesById.get(thread.id)?.finding.status === 'rejected') ||
+                  rejectionReasons.has(thread.id)
                     ? 'rejected'
                     : 'open',
-                ...(loop.status === 'ok' && fixesById.get(thread.id)?.finding.status === 'rejected'
-                  ? { reason: fixesById.get(thread.id)!.reason }
+                ...((loop.status === 'ok' &&
+                  fixesById.get(thread.id)?.finding.status === 'rejected') ||
+                rejectionReasons.has(thread.id)
+                  ? { reason: rejectionReasons.get(thread.id) ?? fixesById.get(thread.id)!.reason }
                   : {}),
               })),
           };
@@ -725,7 +781,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             loop.status === 'ok' &&
             isComplete(previous, ['agent', 'pr-threads'])
           ) {
-            if (parent?.aborted) return await finish('needs-human', 'parent cancelled');
+            if (stop()) return await finish('needs-human', stop());
             if (reviewers.size)
               await requestReviewers({
                 owner: meta.owner,
@@ -777,8 +833,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (!isComplete(previous, policy.review.reviewers))
           return await finish('needs-human', 'review source incomplete');
         const pending = previous.findings.filter((f) => f.status === 'open');
-        if (!pending.length && !report.openBlocking.length && !bookkeepingFailed)
+        if (!pending.length && !report.openBlocking.length && !bookkeepingFailed) {
+          await admitCleanRecord(root, previous);
           return await finish('ok');
+        }
         await dispatchFindings(root, previous, round);
         await publishOnExit();
         if (stop()) return await finish('needs-human', stop());
@@ -804,8 +862,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           isComplete(previous, policy.review.reviewers) &&
           !report.openBlocking.length &&
           !bookkeepingFailed
-        )
+        ) {
+          await admitCleanRecord(root, previous);
           return await finish('ok');
+        }
       }
       return await finish('needs-human', 'review round cap reached with open findings');
     } catch (error) {

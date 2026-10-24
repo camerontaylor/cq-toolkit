@@ -259,7 +259,12 @@ export type LoopReplyVerdict =
 
 export const loopReplyVerdict = (
   thread: { id: string; body: string; replies: readonly ThreadComment[] },
-  opts: { signature: string; headSha: string | null; ownLogin: string | null },
+  opts: {
+    signature: string;
+    headSha: string | null;
+    ownLogin: string | null;
+    requireCurrentIdentity?: boolean;
+  },
 ): LoopReplyVerdict => {
   const latest = thread.replies[thread.replies.length - 1];
   if (
@@ -270,6 +275,8 @@ export const loopReplyVerdict = (
     return { kind: 'unproven' };
   }
   const ownLogin = opts.ownLogin?.toLowerCase() ?? null;
+  if (opts.requireCurrentIdentity && (ownLogin === null || opts.headSha === null))
+    return { kind: 'unproven' };
   if (ownLogin !== null && latest.authorLogin?.toLowerCase() !== ownLogin) {
     return { kind: 'unproven' };
   }
@@ -278,6 +285,7 @@ export const loopReplyVerdict = (
     return { kind: 'unproven' };
   }
   if (header.head === null || header.round === null) {
+    if (opts.requireCurrentIdentity) return { kind: 'unproven' };
     // Anyone can type the public signature: a LEGACY reply binds no round or
     // head, so only the known identity's authorship proves it.
     return ownLogin === null ? { kind: 'unproven' } : { kind: 'settled', carryResolve: false };

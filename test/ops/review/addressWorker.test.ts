@@ -717,3 +717,49 @@ describe('review.address candidate isolation', () => {
     }
   });
 });
+
+test.each(['index', 'worker-snapshot', 'parent'] as const)(
+  'engine-owned acceptance refuses concurrent tampering: %s',
+  async (mode) => {
+    let tamper: () => Promise<void> = async () => undefined;
+    const f = await fixture(async (input) => {
+      if (input.outputSchema?.name === 'review.address.closure/v1') {
+        if (mode !== 'index') await tamper();
+        return { closed: true, reason: 'candidate fixed' };
+      }
+      if (input.prompt.includes('initial finding')) {
+        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+        if (mode === 'index') await tamper();
+      }
+      return { disposition: 'fixed', reason: 'claim', evidence: [] };
+    });
+    tamper = async () => {
+      if (mode === 'index') f.repo.git('add', 'src/a.ts');
+      else if (mode === 'worker-snapshot')
+        await f.repo.write('src/a.ts', 'LATE UNCHECKED CONTENT\n');
+      else {
+        await f.repo.write('README.md', 'external commit');
+        f.repo.commitAll('outside engine');
+      }
+    };
+    try {
+      const fix = await f.engine.fix(finding(), 1);
+      expect(fix.commit).toBeUndefined();
+      expect(fix.finding.status).toBe('deferred');
+      expect(fix.reason).toMatch(
+        mode === 'index'
+          ? /index|staging/
+          : mode === 'worker-snapshot'
+            ? /worker file changed after candidate snapshot/
+            : /unexpected HEAD movement|verified parent changed/,
+      );
+      const calls = f.calls();
+      const sibling = await f.engine.fix(finding('src/b.ts'), 1);
+      expect(sibling.commit).toBeUndefined();
+      expect(f.calls()).toBe(calls);
+      if (mode !== 'parent') expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+    } finally {
+      await f.cleanup();
+    }
+  },
+);

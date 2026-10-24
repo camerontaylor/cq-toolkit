@@ -2537,6 +2537,24 @@ describe('thread settle gate (PR #336 incident)', () => {
     const stale = { kind: 'stale' };
     const unproven = { kind: 'unproven' };
 
+    // Rejection carry is stricter than silence: authenticate current head AND round.
+    expect(verdict([reply(stamped)], { requireCurrentIdentity: true })).toEqual(unproven);
+    expect(
+      verdict([reply(stamped)], {
+        requireCurrentIdentity: true,
+        ownLogin: LOOP_LOGIN,
+        headSha: null,
+      }),
+    ).toEqual(unproven);
+    expect(
+      verdict([reply(`${SIG}\n\nlegacy`)], { requireCurrentIdentity: true, ownLogin: LOOP_LOGIN }),
+    ).toEqual(unproven);
+    expect(
+      verdict([reply(stamped)], { requireCurrentIdentity: true, ownLogin: LOOP_LOGIN }),
+    ).toEqual(settled);
+    expect(
+      verdict([reply(marked)], { requireCurrentIdentity: true, ownLogin: LOOP_LOGIN }),
+    ).toEqual({ kind: 'settled', carryResolve: true });
     expect(verdict([])).toEqual(unproven);
     expect(verdict([reply(stamped)])).toEqual(settled);
     expect(verdict([reply(stamped)], { headSha: BEFORE_SHA.toUpperCase() })).toEqual(settled);

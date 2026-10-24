@@ -2,6 +2,7 @@
 // boundary: git hardening, ran-vs-spawn semantics, fail-closed file reads,
 // the private review-log directory, and every public op mapping a spawn
 // fault into the taxonomy instead of rejecting.
+import { watch } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,4 +95,48 @@ test('a spawn fault on the first read resolves through every public op as needs-
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('ENOENT');
   }
+});
+
+test('subprocess cancellation waits for termination and prevents later child work', async () => {
+  const effects = makeSubprocessDevEffects(dir);
+  const controller = new AbortController();
+  const watcher = watch(dir);
+  const ready = new Promise<void>((resolve) =>
+    watcher.on('change', (_event, name) => {
+      if (name === 'ready') resolve();
+    }),
+  );
+  const pending = effects.runCommand(
+    process.execPath,
+    [
+      '-e',
+      "process.stdout.write('partial evidence'); require('node:fs').writeFileSync('ready', 'ready'); setInterval(() => {}, 1000);",
+    ],
+    { timeoutMs: 10000, signal: controller.signal },
+  );
+  try {
+    await ready;
+    controller.abort(new Error('parent cancelled child'));
+    const result = await pending;
+    expect(result.exitCode).toBeNull();
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout).toContain('partial evidence');
+  } finally {
+    watcher.close();
+    controller.abort();
+    await pending;
+  }
+});
+
+test('already aborted subprocess never executes its body', async () => {
+  const effects = makeSubprocessDevEffects(dir);
+  const controller = new AbortController();
+  controller.abort(new Error('already cancelled'));
+  const result = await effects.runCommand(
+    process.execPath,
+    ['-e', "process.stdout.write('MUST NOT RUN')"],
+    { timeoutMs: 10000, signal: controller.signal },
+  );
+  expect(result.exitCode).toBeNull();
+  expect(result.stdout).toBe('');
 });

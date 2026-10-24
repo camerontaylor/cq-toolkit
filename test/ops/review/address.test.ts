@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -194,4 +194,123 @@ describe('review.address composition', () => {
       await f.cleanup();
     }
   });
+});
+
+test.each(['clean', 'tracked', 'staged', 'untracked'] as const)(
+  'head-only clean findings cannot certify %s content',
+  async (mode) => {
+    const f = await fixture([]);
+    try {
+      const head = f.record().head;
+      if (mode !== 'clean') {
+        await f.repo.write(
+          mode === 'untracked' ? 'unreviewed.ts' : 'src/a.ts',
+          'unreviewed content',
+        );
+        if (mode === 'staged') f.repo.git('add', 'src/a.ts');
+      }
+      const result = await makeReviewAddress(f.deps)(f.input);
+      expect(result.status).toBe(mode === 'clean' ? 'ok' : 'needs-human');
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(head);
+      expect(f.calls).toEqual([]);
+      if (mode !== 'clean') expect(reportOf(result).reasons.join(' ')).toMatch(/dirty|untracked/);
+      expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
+        reportOf(result),
+      );
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
+test('a clean refreshed record cannot return ok after its wall budget expires', async () => {
+  const f = await fixture();
+  const realNow = Date.now;
+  let clock = realNow();
+  try {
+    const deps = {
+      ...f.deps,
+      workerFactory: () => ({
+        escalation: createEscalationState,
+        fix: async (finding: Finding) => {
+          f.calls.push(`fix:${finding.id}`);
+          return {
+            finding: { ...finding, status: 'rejected' as const, reason: 'false positive' },
+            reason: 'false positive',
+            observedHead: f.record().head,
+            validation: [],
+          };
+        },
+      }),
+      review: async () => {
+        clock += 1001;
+        return { status: 'ok' as const, value: { ...f.record(), findings: [] } };
+      },
+    };
+    Date.now = () => clock;
+    const result = await makeReviewAddress(deps)({ ...f.input, wallMs: 1000, rounds: 1 });
+    expect(result.status).toBe('needs-human');
+    expect(reportOf(result).reasons.join(' ')).toMatch(/wall/);
+    expect(f.calls).toContain('fix:a');
+  } finally {
+    Date.now = realNow;
+    await f.cleanup();
+  }
+});
+
+test.each([
+  'explicit',
+  'latest',
+  'head-mismatch',
+  'branch-mismatch',
+  'blocked',
+  'malformed',
+  'missing',
+] as const)('local persisted findings admission is fail closed: %s', async (mode) => {
+  const f = await fixture([]);
+  try {
+    const deps = { ...f.deps };
+    delete deps.initialRecord;
+    const record = f.record();
+    if (mode === 'head-mismatch') record.head = 'a'.repeat(40);
+    if (mode === 'branch-mismatch') record.branch = 'other';
+    if (mode === 'blocked')
+      record.sources = [{ kind: 'agent', status: 'blocked', reason: 'review interrupted' }];
+    const folder = join(f.repo.root, '.cq', 'review', encodeURIComponent(record.branch));
+    await mkdir(folder, { recursive: true });
+    const path =
+      mode === 'latest' || mode === 'missing'
+        ? join(folder, '2.json')
+        : join(f.input.journalDir, 'record.json');
+    if (mode !== 'missing')
+      await writeFile(path, mode === 'malformed' ? '{' : JSON.stringify(record));
+    if (mode === 'latest')
+      await writeFile(join(folder, '1.json'), JSON.stringify({ ...record, head: 'a'.repeat(40) }));
+    const result = await makeReviewAddress(deps)({
+      ...f.input,
+      ...(mode === 'latest' || mode === 'missing' ? {} : { record: path }),
+    });
+    expect(result.status).toBe(mode === 'explicit' || mode === 'latest' ? 'ok' : 'needs-human');
+    expect(f.calls).toEqual([]);
+    expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
+      reportOf(result),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('report storage failure retains the complete non-ok artifact', async () => {
+  const f = await fixture([]);
+  try {
+    const journalFile = join(f.input.journalDir, 'file');
+    await writeFile(journalFile, 'not a directory');
+    const result = await makeReviewAddress(f.deps)({ ...f.input, journalDir: journalFile });
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain('report write failed');
+    expect(reportOf(result).findings).toEqual([]);
+    expect(reportOf(result).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  } finally {
+    await f.cleanup();
+  }
 });

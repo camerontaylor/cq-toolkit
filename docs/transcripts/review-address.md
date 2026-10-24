@@ -54,3 +54,20 @@ mutation still refuse and retain evidence.
 
 Live dogfood is recorded separately in `dogfood-log.md`. `dev.cycle` is
 sequenced after S6 and is unavailable for this slice's initial exercise.
+
+The follow-up causal controls use real Git records and worktrees: a terminal,
+head-only clean record refuses staged, unstaged or untracked source content;
+a stale branch/head or incomplete source never becomes clean. A saved PR
+rejection survives a fresh invocation only with its current-head disposition
+and a fetched reply from the authenticated responder binding the same head
+and discussion round. Missing replies, forged authors, legacy headers, stale
+rounds/heads and positive resolve intent do not establish rejection carry.
+
+CodeRabbit re-review uses the remaining composition wall budget and parent
+cancellation signal through host-lock admission and the subprocess. Waiting
+aborts cancel the retry timer; cancellation between acquisition and callback
+releases the lock without dispatch. An aborted child settles after termination,
+and blocked cycle logs and partial findings remain available. Evidence and
+restore cleanup do not inherit work-admission guards. A reviewer that returns
+terminal output after the deadline cannot produce an exit-0 clean result.
+These controls are hermetic checks, not additional live dogfood runs.

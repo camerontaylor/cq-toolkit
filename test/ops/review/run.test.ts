@@ -1182,3 +1182,71 @@ describe('review.run', () => {
     }
   });
 });
+
+it.each(['deadline', 'parent'] as const)(
+  'remaining review budget stops CodeRabbit and later providers: %s',
+  async (mode) => {
+    const repo = await makeTestRepo();
+    let clock = Date.now();
+    const originalNow = Date.now;
+    try {
+      await configureAgentRepo(repo);
+      const controller = new AbortController();
+      const effects = repoEffects(repo, (command) => {
+        if (command !== 'coderabbit') return undefined;
+        if (mode === 'deadline') clock += 1001;
+        else controller.abort(new Error('parent stopped reviewer'));
+        return {
+          exitCode: 0,
+          stdout: [
+            JSON.stringify({
+              type: 'finding',
+              severity: 'major',
+              fileName: 'src/a.ts',
+              comment: 'partial finding',
+            }),
+            JSON.stringify({ type: 'complete', status: 'review_completed' }),
+          ].join('\n'),
+          stderr: '',
+          timedOut: false,
+        };
+      });
+      const originalRun = effects.runCommand;
+      effects.runCommand = async (command, args, opts) => {
+        if (command === 'coderabbit') {
+          expect(opts.timeoutMs).toBe(1000);
+          expect(opts.signal).toBeDefined();
+        }
+        return originalRun(command, args, opts);
+      };
+      const drivers = scriptedDrivers();
+      let persisted: unknown;
+      Date.now = () => clock;
+      const result = await makeReviewRun({
+        drivers,
+        parentSignal: controller.signal,
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+        writeFindingsRecord: async (_path, content) => {
+          persisted = JSON.parse(content);
+        },
+      })({ repoRoot: repo.root, wallMs: 1000, reviewers: ['coderabbit', 'agent'] });
+      expect(result.status).toBe('needs-human');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+      expect(persisted).toMatchObject({
+        findings: [expect.objectContaining({ text: 'partial finding', status: 'open' })],
+      });
+      const cycles = effects
+        .openLedger('feature/x')
+        .load()
+        .records.filter((entry) => entry.kind === 'cycle');
+      expect(cycles).toHaveLength(1);
+      expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+      expect(cycles[0]?.findings).toHaveLength(1);
+    } finally {
+      Date.now = originalNow;
+      await repo.cleanup();
+    }
+  },
+);

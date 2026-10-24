@@ -102,6 +102,9 @@ export type DevReviewInput = DevCycleInput | DevTransportInput;
 export interface DevReviewDeps {
   /** The subprocess effects (cycle action only). */
   effects: DevEffects;
+  /** Composition-owned cancellation/deadline; cleanup and evidence writes remain enabled. */
+  signal?: AbortSignal;
+  remainingWallMs?: () => number;
   /** The composed pre-upload secret scanner (cycle action only). */
   scanSecrets: DiffSecretScanner;
   /** Configured rule corpus, excluded from scan input and refused if changed. */
@@ -151,6 +154,8 @@ export function makeDevReview(
     deps.scanSecrets,
     deps.runAgentReviewer,
     deps.patternsFile,
+    deps.signal,
+    deps.remainingWallMs,
   );
   return async (input) => {
     if (isAdmissionInput(input)) {
@@ -180,6 +185,8 @@ function makeReviewCycle(
   scanSecrets: DiffSecretScanner,
   runAgentReviewer?: DevReviewDeps['runAgentReviewer'],
   patternsFile?: string,
+  signal?: AbortSignal,
+  remainingWallMs?: () => number,
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
@@ -252,6 +259,7 @@ function makeReviewCycle(
     };
     try {
       span = await effects.withHostLock(async () => {
+        signal?.throwIfAborted();
         await refuseDrift('while waiting for the review lock');
         if (isAgent) {
           const role = reviewer.slice('agent:'.length);
@@ -303,7 +311,9 @@ function makeReviewCycle(
             })),
           };
         }
-        const raw = await runReviewer(effects, argv, DEFAULT_REVIEWER_TIMEOUT_MS);
+        const timeoutMs = Math.min(DEFAULT_REVIEWER_TIMEOUT_MS, remainingWallMs?.() ?? Infinity);
+        if (timeoutMs <= 0) throw new Error('review wall budget exhausted before dispatch');
+        const raw = await runReviewer(effects, argv, timeoutMs, signal);
         await refuseDrift(
           'during the review run (content the scan never saw may have been uploaded)',
         );
@@ -311,14 +321,19 @@ function makeReviewCycle(
         // the kill are still recorded: they stay open until dispositioned.
         const parsed = parseReviewerStream(raw.stdout);
         const completion: DevReviewCompletion =
-          raw.exitCode === null
+          signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
             ? {
                 kind: 'blocked',
-                reason: raw.timedOut
-                  ? `the reviewer CLI timed out after ${String(DEFAULT_REVIEWER_TIMEOUT_MS)}ms and was stopped — no review completed`
-                  : `the reviewer CLI did not run — ${raw.stderr.trim().slice(0, 300)}`,
+                reason: `review cancelled or wall budget exhausted — ${faultText(signal?.reason ?? 'deadline elapsed')}`,
               }
-            : decideCompletion(raw.exitCode, parsed);
+            : raw.exitCode === null
+              ? {
+                  kind: 'blocked',
+                  reason: raw.timedOut
+                    ? `the reviewer CLI timed out after ${String(timeoutMs)}ms and was stopped — no review completed`
+                    : `the reviewer CLI did not run — ${raw.stderr.trim().slice(0, 300)}`,
+                }
+              : decideCompletion(raw.exitCode, parsed);
         const logPath = await effects.writeReviewLog(
           state.branch,
           `${Date.now()}`,
@@ -342,11 +357,18 @@ function makeReviewCycle(
           ].join('\n'),
         );
         return { completion, logPath, findings: parsed.findings };
-      });
+      }, signal);
     } catch (err) {
       // A host-lock, drift, or log-write fault: nothing is recorded, and
       // the author re-runs. The message names the cause.
-      return needsHuman(`the review cycle could not run to a recorded outcome — ${faultText(err)}`);
+      if (!signal?.aborted && (remainingWallMs?.() ?? Infinity) > 0)
+        return needsHuman(
+          `the review cycle could not run to a recorded outcome — ${faultText(err)}`,
+        );
+      const reason = `review cancelled or wall budget exhausted — ${faultText(err)}`;
+      // Cleanup is deliberately outside the cancelled execution effects.
+      const logPath = await effects.writeReviewLog(state.branch, `${Date.now()}`, reason);
+      span = { completion: { kind: 'blocked', reason }, logPath, findings: [] };
     }
 
     // The reviewer quota is ALREADY spent, so a store fault still reports
@@ -500,9 +522,10 @@ async function runReviewer(
   effects: DevEffects,
   argv: readonly string[],
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   return effects
-    .runCommand(CODERABBIT_REVIEWER, argv, { timeoutMs })
+    .runCommand(CODERABBIT_REVIEWER, argv, { timeoutMs, ...(signal ? { signal } : {}) })
     .catch((err: unknown): CommandResult => ({
       exitCode: null,
       stdout: '',

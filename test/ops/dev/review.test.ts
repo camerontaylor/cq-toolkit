@@ -744,3 +744,57 @@ describe('dev.review — one op discriminated on action', () => {
 // Late-thread hardening: exact-byte identity hashing, binary blob scanning,
 // and the post-run drift refusal.
 // ---------------------------------------------------------------------------
+
+test.each(['queued', 'running', 'expired'] as const)(
+  'bounded review persists blocked evidence when %s without a completed review',
+  async (mode) => {
+    const repo = await makeTestRepo();
+    try {
+      const controller = new AbortController();
+      let remaining = 1000;
+      const effects = repoEffects(
+        repo,
+        reviewer(() => {
+          if (mode === 'running') controller.abort(new Error('parent cancelled running reviewer'));
+          if (mode === 'expired') remaining = 0;
+          return ran(0);
+        }),
+      );
+      if (mode === 'queued')
+        effects.withHostLock = async (_fn, signal) => {
+          expect(signal).toBe(controller.signal);
+          controller.abort(new Error('parent cancelled queued review'));
+          signal!.throwIfAborted();
+          throw new Error('unreachable');
+        };
+      const run = effects.runCommand;
+      effects.runCommand = async (command, args, opts) => {
+        if (command === 'coderabbit') {
+          expect(opts.timeoutMs).toBe(1000);
+          expect(opts.signal).toBe(controller.signal);
+        }
+        return run(command, args, opts);
+      };
+      const result = await makeDevReview({
+        effects,
+        scanSecrets: stubScanner(),
+        signal: controller.signal,
+        remainingWallMs: () => remaining,
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      const cycles = effects
+        .openLedger('feature/x')
+        .load()
+        .records.filter((entry) => entry.kind === 'cycle');
+      expect(cycles).toHaveLength(1);
+      expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+      expect(effects.logs.join(' ')).toMatch(mode === 'queued' ? /cancel/ : /stdout/);
+      expect(cycles[0]?.findings).toHaveLength(mode === 'queued' ? 0 : 2);
+      expect(effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(
+        mode === 'queued' ? 0 : 1,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);

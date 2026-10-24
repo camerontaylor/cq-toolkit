@@ -338,3 +338,37 @@ describe('runAgentReviewer', () => {
     expect(signal?.aborted).toBe(true);
   });
 });
+
+it.each(['entry', 'running'] as const)(
+  'composition cancellation reaches read-only reviewer: %s',
+  async (mode) => {
+    const controller = new AbortController();
+    let signal: AbortSignal | undefined;
+    const run = vi.fn(async (_invocation: unknown, options: { signal: AbortSignal }) => {
+      signal = options.signal;
+      controller.abort(new Error('composition parent stopped'));
+      return new Promise<never>(() => undefined);
+    });
+    const resolveDriver = vi.fn(() => ({
+      driver: { run },
+      lane: 'ai-sdk',
+      modelSpec: { provider: 'mock', model: 'mock' },
+    }));
+    if (mode === 'entry') controller.abort(new Error('already cancelled'));
+    const result = await runAgentReviewer({ resolve: resolveDriver } as unknown as DriverFactory, {
+      repoRoot: '/fixture',
+      branch: 'fixture',
+      head: 'a'.repeat(40),
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 10000,
+      severityMap: { high: 'major', medium: 'minor' },
+      signal: controller.signal,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(run).toHaveBeenCalledTimes(mode === 'entry' ? 0 : 1);
+    if (mode === 'entry') expect(resolveDriver).not.toHaveBeenCalled();
+    else expect(signal?.aborted).toBe(true);
+  },
+);

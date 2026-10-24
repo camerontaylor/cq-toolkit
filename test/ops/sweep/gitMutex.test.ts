@@ -20,7 +20,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lock } from 'proper-lockfile';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { makeGitMutex } from '../../../src/shared/gitMutex.js';
 import type { GitMutexEvent } from '../../../src/shared/gitMutex.js';
 
@@ -308,4 +308,77 @@ describe('gitMutex compromise surfacing', () => {
     });
     await expect(section).rejects.toThrow(/release of/);
   });
+});
+
+test('queued cancellation stops acquisition and never releases the active holder', async () => {
+  const lockPath = join(newDir(), 'cancel.lock');
+  const mutex = makeGitMutex({ lockPath });
+  let releaseHolder!: () => void;
+  let enteredHolder!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enteredHolder = resolve;
+  });
+  const held = mutex.withLock(async () => {
+    enteredHolder();
+    await new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+  });
+  await entered;
+  const controller = new AbortController();
+  let called = false;
+  let waiting!: () => void;
+  const retryWait = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  const originalAdd = controller.signal.addEventListener.bind(controller.signal);
+  const listener = vi.spyOn(controller.signal, 'addEventListener').mockImplementation((...args) => {
+    originalAdd(...args);
+    if (args[0] === 'abort') waiting();
+  });
+  const queued = mutex.withLock(() => {
+    called = true;
+  }, controller.signal);
+  const rejected = expect(queued).rejects.toThrow(/abort|cancel/i);
+  await retryWait;
+  controller.abort(new Error('queued cancellation'));
+  listener.mockRestore();
+  await rejected;
+  expect(called).toBe(false);
+  // The aborted peer cannot steal or release the holder.
+  const peer = new AbortController();
+  peer.abort(new Error('still cancelled'));
+  await expect(
+    mutex.withLock(() => {
+      called = true;
+    }, peer.signal),
+  ).rejects.toThrow('still cancelled');
+  releaseHolder();
+  await held;
+  await mutex.withLock(() => {
+    called = true;
+  });
+  expect(called).toBe(true);
+});
+
+test('cancellation between acquisition and callback releases the acquired lock', async () => {
+  const controller = new AbortController();
+  const lockPath = join(newDir(), 'acquired-cancel.lock');
+  const mutex = makeGitMutex({
+    lockPath,
+    onEvent(event) {
+      if (event.type === 'acquired') controller.abort(new Error('acquired cancellation'));
+    },
+  });
+  let called = false;
+  await expect(
+    mutex.withLock(() => {
+      called = true;
+    }, controller.signal),
+  ).rejects.toThrow('acquired cancellation');
+  expect(called).toBe(false);
+  await makeGitMutex({ lockPath }).withLock(() => {
+    called = true;
+  });
+  expect(called).toBe(true);
 });

@@ -32,6 +32,7 @@ export interface AgentReviewerInput {
   role: { provider: string; model: string };
   maxTokens: number;
   wallMs: number;
+  signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
 
@@ -40,6 +41,8 @@ export async function runAgentReviewer(
   drivers: DriverFactory,
   input: AgentReviewerInput,
 ): Promise<OpResult<{ findings: Finding[]; usage: number }>> {
+  if (input.signal?.aborted || currentJobContext()?.signal.aborted)
+    return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   let resolved: ReturnType<DriverFactory['resolve']>;
   try {
     resolved = drivers.resolve({ role: 'reviewer', modelSpec: input.role });
@@ -60,7 +63,10 @@ export async function runAgentReviewer(
   };
   let result: Awaited<ReturnType<typeof resolved.driver.run>>;
   const controller = new AbortController();
-  const parentSignal = currentJobContext()?.signal;
+  const signals = [input.signal, currentJobContext()?.signal].filter(
+    (value): value is AbortSignal => value !== undefined,
+  );
+  const parentSignal = signals.length ? AbortSignal.any(signals) : undefined;
   const relayAbort = () => controller.abort(parentSignal?.reason);
   const rejectCancelled = () => new Error('agent review cancelled by parent job');
   let cancelReview: (() => void) | undefined;

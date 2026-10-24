@@ -8,6 +8,17 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
+import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
+import {
+  replySignature,
+  replyHeadStamp,
+  settleRound,
+  REPLY_RESOLVE_MARKER,
+} from '../../../src/plans/review-loop.js';
+import { cycleRecord } from '../dev/fakes.js';
+import { DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
+import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
@@ -206,3 +217,196 @@ test('real PR adapter ref collision preserves admission and fresh re-review iden
     await rm(journal, { recursive: true, force: true });
   }
 });
+
+test.each([
+  'proven',
+  'missing-record',
+  'record-other-head',
+  'wrong-author',
+  'missing-reply',
+  'legacy',
+  'stale-round',
+  'resolve-intent',
+] as const)(
+  'real persisted rejection carry requires current authenticated proof: %s',
+  async (mode) => {
+    const repo = await makeTestRepo();
+    const journal = await mkdtemp(join(tmpdir(), 'cq-address-rejection-'));
+    try {
+      await repo.write('.gitignore', '.cq/\n');
+      repo.commitAll('ignore engine state');
+      const head = repo.git('rev-parse', 'HEAD').trim();
+      repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+      const registry = fileWorktreeRegistry(join(journal, 'worktrees.json'));
+      const worktree = await resolvePrWorktree({
+        repoRoot: repo.root,
+        pr: 7,
+        headRefName: 'feature/x',
+        registry,
+        run: makeGhRunner({ bin: 'git' }),
+        nowMs: Date.now(),
+      });
+      const effects = makeSubprocessDevEffects(worktree.path);
+      effects.openLedger(worktree.branch).save({
+        version: DEV_LEDGER_VERSION,
+        branch: worktree.branch,
+        records: [
+          cycleRecord({
+            head,
+            findings: [{ id: 'T1', severity: 'major', excerpt: 'False positive' }],
+          }),
+          ...(mode === 'missing-record'
+            ? []
+            : [
+                {
+                  kind: 'disposition' as const,
+                  findingId: 'T1',
+                  action: 'rejected' as const,
+                  why: 'Verified false positive',
+                  head: mode === 'record-other-head' ? 'a'.repeat(40) : head,
+                  at: new Date().toISOString(),
+                },
+              ]),
+        ],
+      });
+      const body = 'False positive';
+      const round = settleRound({ id: 'T1', body }, []);
+      const reply =
+        mode === 'legacy'
+          ? replySignature('octo', 'widget', 7)
+          : `${replySignature('octo', 'widget', 7)}\n${replyHeadStamp(head, mode === 'stale-round' ? '00000000' : round)}${mode === 'resolve-intent' ? `\n${REPLY_RESOLVE_MARKER}` : ''}\n\nRejected with evidence`;
+      const ok = (value: unknown): GhResult => ({
+        code: 0,
+        stdout: typeof value === 'string' ? value : JSON.stringify(value),
+        stderr: '',
+      });
+      const gh: GhFn = async (args) => {
+        if (args[0] === 'repo') return ok({ nameWithOwner: 'octo/widget' });
+        if (args[0] === 'pr')
+          return ok({
+            headRefName: 'feature/x',
+            headRepositoryOwner: { login: 'octo' },
+            headRepository: { name: 'widget' },
+          });
+        if (args.includes('user')) return ok('author');
+        if (args.includes('POST')) throw new Error('test forbids forge writes');
+        if (args.includes('graphql'))
+          return ok({
+            data: {
+              repository: {
+                pullRequest: {
+                  author: { login: 'author' },
+                  headRefName: 'feature/x',
+                  headRefOid: head,
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: 'T1',
+                        isResolved: false,
+                        isOutdated: false,
+                        path: 'src/a.ts',
+                        line: 1,
+                        comments: {
+                          nodes: [
+                            {
+                              databaseId: 101,
+                              author: { login: 'reviewer', __typename: 'User' },
+                              body,
+                              createdAt: new Date(Date.now() - 60000).toISOString(),
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                  reviews: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+                },
+              },
+            },
+          });
+        const endpoint = args.find((arg) => arg.startsWith('repos/')) ?? '';
+        if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: head } });
+        if (endpoint.startsWith('repos/octo/widget/pulls/7/comments?'))
+          return ok(
+            mode === 'missing-reply'
+              ? [
+                  {
+                    id: 101,
+                    user: { login: 'reviewer' },
+                    body,
+                    created_at: new Date(Date.now() - 60000).toISOString(),
+                  },
+                ]
+              : [
+                  {
+                    id: 101,
+                    user: { login: 'reviewer' },
+                    body,
+                    created_at: new Date(Date.now() - 60000).toISOString(),
+                  },
+                  {
+                    id: 102,
+                    in_reply_to_id: 101,
+                    user: { login: mode === 'wrong-author' ? 'mallory' : 'author' },
+                    body: reply,
+                    created_at: new Date(Date.now() - 30000).toISOString(),
+                  },
+                ],
+          );
+        if (endpoint.includes('/comments') || endpoint.includes('/reviews?')) return ok([]);
+        throw new Error(`unexpected fake forge: ${args.join(' ')}`);
+      };
+      let attempts = 0;
+      const role = { provider: 'scripted', model: 'worker' };
+      const result = await makeReviewAddress({
+        gh,
+        worktreeRegistry: registry,
+        config: {
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+          roles: { worker: role, reviewer: role },
+          budgets: { run: { maxTokens: 10000 } },
+          review: { reviewers: ['agent'], rounds: 1 },
+        },
+        review: async () => ({
+          status: 'ok',
+          value: {
+            schemaVersion: 1,
+            branch: worktree.branch,
+            head,
+            sources: [{ kind: 'agent', status: 'terminal' }],
+            findings: [],
+          },
+        }),
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (finding) => {
+            attempts++;
+            return {
+              finding: { ...finding, status: 'deferred', reason: 'needs investigation' },
+              reason: 'needs investigation',
+              observedHead: head,
+              validation: [],
+            };
+          },
+        }),
+      })({ repoRoot: repo.root, source: 'pr:7', journalDir: journal, rounds: 1 });
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(result.status, JSON.stringify(report.reasons)).toBe(
+        mode === 'proven' ? 'ok' : 'needs-human',
+      );
+      if (mode === 'proven')
+        expect(report.findings.find((finding) => finding.id === 'T1')?.status).toBe('rejected');
+      else
+        expect(report.findings.find((finding) => finding.id === 'T1')?.status).not.toBe('rejected');
+      if (mode === 'proven') {
+        expect(attempts).toBe(0);
+        expect(report.openBlocking).toEqual([]);
+      } else expect(report.openBlocking.some((finding) => finding.id === 'T1')).toBe(true);
+    } finally {
+      await repo.cleanup();
+      await rm(journal, { recursive: true, force: true });
+    }
+  },
+);
