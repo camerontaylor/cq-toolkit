@@ -42,18 +42,25 @@ afterEach(async () => {
 test.each([
   'local-only',
   'publish',
+  'publish-siblings',
   'caller-file',
   'caller-cq',
   'caller-index',
   'bookkeeping-tamper',
+  'bookkeeping-before-disposition',
 ] as const)(
   'real PR adapter without cq ignore preserves admission and publication hygiene: %s',
   async (mode) => {
+    const siblings = mode === 'publish-siblings';
+    const publish = mode === 'publish' || siblings;
+    const earlyTamper = mode === 'bookkeeping-before-disposition';
+    const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
     const repo = await makeTestRepo();
     const journal = await mkdtemp(join(tmpdir(), 'cq-address-pr-git-'));
     const role = { provider: 'scripted', model: 'worker' };
     try {
       await repo.write('src/a.ts', 'export const a = "BAD";\n');
+      if (siblings) await repo.write('src/b.ts', 'export const b = "BAD";\n');
       await repo.write('scripts/check.cjs', 'process.exitCode=0;\n');
       await repo.write(
         'cq.json',
@@ -82,7 +89,7 @@ test.each([
         stdout: typeof value === 'string' ? value : JSON.stringify(value),
         stderr: '',
       });
-      let resolved = false;
+      const resolvedThreads = new Set<string>();
       const actions: string[] = [];
       const replies: Array<{
         id: number;
@@ -105,28 +112,34 @@ test.each([
         const flag = (key: string) =>
           args.find((arg) => arg.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
         if (args.some((arg) => arg.includes('mutation') && arg.includes('resolveReviewThread'))) {
-          expect(mode).toBe('publish');
+          expect(publish).toBe(true);
           expect(remoteHead()).not.toBe(initial);
-          expect(actions).toEqual(['reply']);
-          resolved = true;
+          expect(
+            replies.some(
+              (reply) => reply.in_reply_to_id === (flag('threadId') === 'T1' ? 101 : 102),
+            ),
+          ).toBe(true);
+          resolvedThreads.add(flag('threadId'));
           actions.push('resolve');
-          return ok({ data: { resolveReviewThread: { thread: { id: 'T1', isResolved: true } } } });
+          return ok({
+            data: { resolveReviewThread: { thread: { id: flag('threadId'), isResolved: true } } },
+          });
         }
         if (args.includes('POST')) {
-          expect(mode).toBe('publish');
+          expect(publish).toBe(true);
           expect(remoteHead()).not.toBe(initial);
           if (args.some((arg) => arg.endsWith('requested_reviewers'))) actions.push('rerequest');
           else {
             actions.push('reply');
             replies.push({
-              id: 1001,
+              id: 1001 + replies.length,
               in_reply_to_id: Number(flag('in_reply_to')),
               body: flag('body'),
               user: { login: 'author' },
               created_at: new Date().toISOString(),
             });
           }
-          return ok({ id: 1001 });
+          return ok({ id: replies.at(-1)?.id ?? 1001 });
         }
         if (args.includes('graphql'))
           return ok({
@@ -137,25 +150,23 @@ test.each([
                   headRefName: 'feature/x',
                   headRefOid: remoteHead(),
                   reviewThreads: {
-                    nodes: [
-                      {
-                        id: 'T1',
-                        isResolved: resolved,
-                        isOutdated: false,
-                        path: 'src/a.ts',
-                        line: 1,
-                        comments: {
-                          nodes: [
-                            {
-                              databaseId: 101,
-                              author: { login: 'reviewer', __typename: 'User' },
-                              body: 'Replace BAD with GOOD',
-                              createdAt: new Date(Date.now() - 60000).toISOString(),
-                            },
-                          ],
-                        },
+                    nodes: (siblings ? ['T1', 'T2'] : ['T1']).map((id, index) => ({
+                      id,
+                      isResolved: resolvedThreads.has(id),
+                      isOutdated: false,
+                      path: index === 0 ? 'src/a.ts' : 'src/b.ts',
+                      line: 1,
+                      comments: {
+                        nodes: [
+                          {
+                            databaseId: 101 + index,
+                            author: { login: 'reviewer', __typename: 'User' },
+                            body: 'Replace BAD with GOOD',
+                            createdAt: new Date(Date.now() - 60000).toISOString(),
+                          },
+                        ],
                       },
-                    ],
+                    })),
                     pageInfo: { hasNextPage: false, endCursor: null },
                   },
                   reviews: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
@@ -171,12 +182,19 @@ test.each([
       };
       const invocations: string[] = [];
       let workerRoot = '';
+      let editing = 0,
+        maximumEditing = 0,
+        enteredEdits = 0;
+      let releaseEdits!: () => void;
+      const editGate = new Promise<void>((resolve) => {
+        releaseEdits = resolve;
+      });
       const drivers: DriverFactory = {
         resolve: (request) => ({
           lane: 'ai-sdk',
           modelSpec: request.modelSpec,
           driver: {
-            run: async (input) => {
+            run: async (input, options) => {
               const schema = input.outputSchema!.name;
               invocations.push(schema);
               let output: unknown;
@@ -185,12 +203,40 @@ test.each([
                   'GOOD',
                 );
                 output = { findings: [] };
-              } else if (schema === 'review.address.closure/v1')
+              } else if (schema === 'review.address.closure/v1') {
+                if (earlyTamper) {
+                  const path = devLedgerPath(workerRoot, 'cq-review/pr-7');
+                  await writeFile(path, `${await readFile(path, 'utf8')}\n`);
+                }
                 output = { closed: true, reason: 'verified candidate' };
-              else {
+              } else {
                 if (!input.prompt.startsWith('related-check feedback')) {
                   workerRoot = input.workspace!.path;
-                  await writeFile(join(workerRoot, 'src/a.ts'), 'export const a = "GOOD";\n');
+                  const file = input.prompt.includes('"file":"src/b.ts"') ? 'src/b.ts' : 'src/a.ts';
+                  if (siblings) {
+                    editing++;
+                    enteredEdits++;
+                    maximumEditing = Math.max(maximumEditing, editing);
+                    if (enteredEdits === 2) releaseEdits();
+                    await new Promise<void>((resolve, reject) => {
+                      const aborted = () =>
+                        reject(options?.signal?.reason ?? new Error('editing cancelled'));
+                      if (options?.signal?.aborted) {
+                        aborted();
+                        return;
+                      }
+                      options?.signal?.addEventListener('abort', aborted, { once: true });
+                      void editGate.then(() => {
+                        options?.signal?.removeEventListener('abort', aborted);
+                        resolve();
+                      }, reject);
+                    });
+                  }
+                  await writeFile(
+                    join(workerRoot, file),
+                    `export const ${file === 'src/a.ts' ? 'a' : 'b'} = "GOOD";\n`,
+                  );
+                  if (siblings) editing--;
                 }
                 output = { disposition: 'fixed', reason: 'fixed', evidence: [] };
               }
@@ -249,7 +295,12 @@ test.each([
         push: mode !== 'local-only',
       });
       const report = result.status === 'ok' ? result.value : result.report!;
-      expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(1);
+      if (earlyTamper) {
+        expect(remoteHead(), 'tampered ledger must never authorize a push').toBe(initial);
+        expect(actions).toEqual([]);
+      }
+      expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(siblings ? 2 : 1);
+      if (siblings) expect(maximumEditing).toBe(2);
       expect(report.fixes[0]?.commit).toBeTruthy();
       expect(
         repo
@@ -265,27 +316,35 @@ test.each([
       ).toBe(
         'Review fixture <review-fixture@example.invalid>|Review fixture <review-fixture@example.invalid>',
       );
-      expect(report.rounds).toHaveLength(mode === 'bookkeeping-tamper' ? 0 : 1);
-      if (mode !== 'bookkeeping-tamper')
-        expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
-      expect(report.reasons.join('\n')).not.toMatch(
-        /identity changed|admission|branch changed|unknown finding|disposition persistence|could not be persisted/,
-      );
+      expect(report.rounds).toHaveLength(tampered ? 0 : 1);
+      if (!tampered) expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
+      if (!earlyTamper)
+        expect(report.reasons.join('\n')).not.toMatch(
+          /identity changed|admission|branch changed|unknown finding|disposition persistence|could not be persisted/,
+        );
       const ledger = makeSubprocessDevEffects(workerRoot).openLedger('cq-review/pr-7').load();
-      expect(ledger.records.filter((entry) => entry.kind === 'disposition')).toEqual([
-        expect.objectContaining({
-          kind: 'disposition',
-          findingId: 'T1',
-          action: 'fixed',
-          head: report.fixes[0]?.commit,
-        }),
-      ]);
-      expect(invocations).toEqual([
-        'review.address.outcome/v1',
-        'review.address.outcome/v1',
-        'review.address.closure/v1',
-        ...(mode === 'bookkeeping-tamper' ? [] : ['review.agent/v1']),
-      ]);
+      const dispositions = ledger.records.filter((entry) => entry.kind === 'disposition');
+      expect(dispositions).toHaveLength(earlyTamper ? 0 : siblings ? 2 : 1);
+      for (const disposition of dispositions) expect(disposition.head).toMatch(/^[a-f0-9]{40}$/);
+      for (const id of earlyTamper ? [] : siblings ? ['T1', 'T2'] : ['T1'])
+        expect(dispositions).toContainEqual(
+          expect.objectContaining({
+            kind: 'disposition',
+            findingId: id,
+            action: 'fixed',
+          }),
+        );
+      if (siblings) {
+        expect(invocations.filter((name) => name === 'review.address.outcome/v1')).toHaveLength(4);
+        expect(invocations.filter((name) => name === 'review.address.closure/v1')).toHaveLength(2);
+        expect(invocations.filter((name) => name === 'review.agent/v1')).toHaveLength(1);
+      } else
+        expect(invocations).toEqual([
+          'review.address.outcome/v1',
+          'review.address.outcome/v1',
+          'review.address.closure/v1',
+          ...(tampered ? [] : ['review.agent/v1']),
+        ]);
       // The real adapter, not the test, creates both colliding refs.
       expect(repo.git('-C', workerRoot, 'symbolic-ref', '--short', 'HEAD').trim()).toBe(
         'heads/cq-review/pr-7',
@@ -294,14 +353,18 @@ test.each([
         target: 'merge-queue',
       });
       expect(state.ok && state.state.branch).toBe('cq-review/pr-7');
-      expect(state.ok && state.state.head).toBe(report.fixes[0]?.commit);
+      expect(report.fixes.map((fix) => fix.commit)).toContain(state.ok && state.state.head);
       const scanCount = (await scanner.calls()).length;
-      if (mode === 'bookkeeping-tamper') expect(scanCount).toBe(3);
+      if (tampered) expect(scanCount).toBe(3);
       else expect(scanCount).toBeGreaterThan(3);
-      if (mode === 'publish') {
+      if (publish) {
         expect(result.status, JSON.stringify(report.reasons)).toBe('ok');
-        expect(actions).toEqual(['reply', 'resolve', 'rerequest']);
-        expect(remoteHead()).toBe(report.fixes[0]?.commit);
+        expect(actions).toEqual(
+          siblings
+            ? ['reply', 'reply', 'resolve', 'resolve', 'rerequest']
+            : ['reply', 'resolve', 'rerequest'],
+        );
+        expect(remoteHead()).toBe(state.ok && state.state.head);
         expect(repo.git('-C', workerRoot, 'status', '--porcelain')).toContain('.cq/');
       } else {
         expect(result.status).toBe('needs-human');
@@ -312,7 +375,7 @@ test.each([
           if (mode === 'caller-index') {
             expect(repo.git('-C', workerRoot, 'show', ':README.md')).toBe('CALLER STAGED BYTES\n');
             expect(await readFile(join(workerRoot, 'README.md'), 'utf8')).toBe('# fixture\n');
-          } else if (mode === 'bookkeeping-tamper') {
+          } else if (tampered) {
             expect(await readFile(devLedgerPath(workerRoot, 'cq-review/pr-7'), 'utf8')).toMatch(
               /\n\n$/,
             );

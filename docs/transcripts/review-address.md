@@ -169,3 +169,62 @@ test:narrow result="pass" exit=0 files=10 projects="pure,process,integration" te
 
 No new live run or CodeRabbit invocation was made. Positive live measured-fix
 acceptance and settled failed-branch API reconciliation remain outstanding.
+
+An earlier timing regression appends a newline to the real PR ledger from the
+candidate closure callback, before returning `closed: true`. On eca769cc this
+laundered the changed bytes through disposition and advanced the fixture's bare
+origin; the test failed its unchanged-remote assertion:
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="16/17" failed=1 skipped=0 wait="0.0s" duration="10.3s" nice=5 load="0.5" uptime="540557s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+Admission, disposition and reviewer ledger writes now check all existing owned
+fingerprints first. A composition FIFO serializes check/write/hash refresh and
+worker bookkeeping reads. The real two-file PR control holds both editing calls
+until both have entered (maximum concurrency 2), then verifies both commits,
+both durable dispositions, checked publication, both replies/resolutions and
+terminal review. The closure-tamper control retains the verified local commit
+and changed ledger bytes, with no push, reply, resolution, false disposition or
+new reviewer dispatch. This delta adds no shared API or kernel/schema change.
+
+Final prewrite checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=10 projects="pure,process,integration" tests="296/296" failed=0 skipped=0 wait="1.8s" duration="60.2s" nice=5 load="1.5" uptime="540935s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/sweep/gitMutex.test.ts,test/plans/review-loop.test.ts"
+```
+
+The fixture rendezvous cancellation uses the driver runtime options signal.
+After that test-harness typing correction, the affected file passed again:
+
+```text
+test:narrow result="pass" exit=0 files=2 projects="pure,process" tests="18/18" failed=0 skipped=0 wait="0.0s" duration="11.4s" nice=5 load="1.3" uptime="541038s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+The macOS `eca769cc` CI rejection (`addressWorker.ts:110`, checkout index
+identity unavailable) came from eager asynchronous lock setup. An unused worker
+or an unanchored/unsafe finding could finish before setup rejected, allowing
+checkout cleanup to race its Git command. The new injected-identity-failure
+controls reproduce this on Linux before the worker repair: three lifetime
+assertions fail and Vitest reports four unhandled rejections.
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="57/60" failed=3 skipped=0 wait="0.0s" duration="18.9s" nice=5 load="0.3" uptime="541693s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/addressWorker.test.ts"
+```
+
+Lock identity now initializes lazily within the awaited mutation FIFO. It remains
+canonical and fail-closed: unavailable identity defers both concurrent findings,
+dispatches no driver, changes no index/file/HEAD, and makes one identity request.
+Unused and early-refused workers perform no identity lookup. The combined final
+checkpoint includes the early closure-tamper and parallel PR publication controls:
+
+```text
+test:narrow result="pass" exit=0 files=10 projects="pure,process,integration" tests="300/300" failed=0 skipped=0 wait="0.0s" duration="78.9s" nice=5 load="0.9" uptime="541738s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/sweep/gitMutex.test.ts,test/plans/review-loop.test.ts"
+```
+
+Static (zero errors against baseline zero), formatting and Knip exited 0 on
+triton. These are hermetic source/CLI checks; macOS confirmation and full-suite
+numeric evidence remain CI's responsibility. No new live or CodeRabbit run was
+made. Positive live measured-fix acceptance, #438 and settled #440 failed-branch
+API reconciliation remain outstanding; this repair does not claim whole-PR
+acceptance or authorize merging.

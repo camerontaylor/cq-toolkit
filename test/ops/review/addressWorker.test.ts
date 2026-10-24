@@ -41,6 +41,7 @@ async function fixture(
     configure?: (config: CqConfig) => void;
     scanner?: DiffSecretScanner;
     providerRequest?: boolean;
+    indexIdentityUnavailable?: boolean;
   } = {},
 ) {
   const repo = await makeTestRepo();
@@ -140,8 +141,17 @@ async function fixture(
     }),
   };
   options.configure?.(config);
+  const git = makeGhRunner({ bin: 'git', cwd: repo.root });
+  let identityRequests = 0;
   const engine = makeAddressWorker({
-    git: makeGhRunner({ bin: 'git', cwd: repo.root }),
+    git: async (args) => {
+      if (args.includes('--absolute-git-dir')) {
+        identityRequests++;
+        if (options.indexIdentityUnavailable)
+          return { code: 1, stdout: '', stderr: 'identity unavailable' };
+      }
+      return git(args);
+    },
     drivers,
     repoRoot: options.aliasRoot ? alias : repo.root,
     ...(options.installedDependencies ? { dependencyRoot } : {}),
@@ -167,6 +177,7 @@ async function fixture(
     attempts,
     initial,
     calls: () => calls,
+    identityRequests: () => identityRequests,
     cleanup: async () => {
       await repo.cleanup();
       await rm(journal, { recursive: true, force: true });
@@ -175,6 +186,49 @@ async function fixture(
 }
 
 describe('review.address candidate isolation', () => {
+  test.each(['unused', 'unanchored', 'unsafe'] as const)(
+    'an %s worker leaves no asynchronous lock setup beyond its lifetime',
+    async (mode) => {
+      const f = await fixture(undefined, '', { indexIdentityUnavailable: true });
+      try {
+        if (mode !== 'unused') {
+          const item = finding(mode === 'unsafe' ? '../outside.ts' : undefined);
+          if (mode === 'unanchored') delete item.file;
+          const fix = await f.engine.fix(item, 1);
+          expect(fix.finding.status).toBe('deferred');
+          expect(fix.commit).toBeUndefined();
+        }
+        // Let constructor-started I/O settle before the fixture is disposed.
+        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        expect(f.identityRequests()).toBe(0);
+        expect(f.calls()).toBe(0);
+        expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('unavailable checkout identity refuses every mutation and worker dispatch', async () => {
+    const f = await fixture(undefined, '', { indexIdentityUnavailable: true });
+    try {
+      const results = await Promise.all([
+        f.engine.fix(finding(), 1),
+        f.engine.fix(finding('src/b.ts'), 1),
+      ]);
+      for (const result of results) {
+        expect(result.finding.status).toBe('deferred');
+        expect(result.reason).toContain('checkout index identity unavailable');
+        expect(result.commit).toBeUndefined();
+      }
+      expect(f.identityRequests()).toBe(1);
+      expect(f.calls()).toBe(0);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(f.repo.git('status', '--porcelain')).toBe('');
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+    } finally {
+      await f.cleanup();
+    }
+  });
   test.each(['tracked', 'untracked'] as const)(
     'pre-existing %s edits are never adopted as worker output or erased',
     async (mode) => {

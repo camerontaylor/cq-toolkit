@@ -104,14 +104,18 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const { policy } = deps;
   let state = createEscalationState();
   const root = resolve(deps.repoRoot);
-  const mutex = realpath(root).then(async (canonicalRoot) => {
-    const result = await deps.git(['-C', canonicalRoot, 'rev-parse', '--absolute-git-dir']);
-    if (result.code !== 0 || !result.stdout.trim())
-      throw new Error('checkout index identity unavailable');
-    return makeGitMutex({
-      lockPath: resolve(await realpath(result.stdout.trim()), 'cq-review-address-mutation'),
-    });
-  });
+  // Resolve identity only inside an awaited mutation. Unused or early-refused
+  // workers must not leave rejected setup promises racing checkout cleanup.
+  let mutex: Promise<ReturnType<typeof makeGitMutex>> | undefined;
+  const checkoutMutex = () =>
+    (mutex ??= realpath(root).then(async (canonicalRoot) => {
+      const result = await deps.git(['-C', canonicalRoot, 'rev-parse', '--absolute-git-dir']);
+      if (result.code !== 0 || !result.stdout.trim())
+        throw new Error('checkout index identity unavailable');
+      return makeGitMutex({
+        lockPath: resolve(await realpath(result.stdout.trim()), 'cq-review-address-mutation'),
+      });
+    }));
   const active = new Set<string>();
   const verifiedHeads = new Set<string>();
   let initialization: Promise<void> | undefined;
@@ -147,7 +151,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const withMutation = <T>(action: () => Promise<T>, admit?: () => void): Promise<T> => {
     const pending = mutations.then(async () => {
       admit?.();
-      return (await mutex).withLock(async () => {
+      return (await checkoutMutex()).withLock(async () => {
         // A different process may have held the lock until our budget expired.
         admit?.();
         return action();

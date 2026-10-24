@@ -395,17 +395,36 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (ancestor.code === 0) await noteBookkeeping(path);
             }
           };
-          const review = async (request: ReviewRunInput) => {
-            // Review.run legitimately appends to the same ledger. Check ownership
-            // before its write, then register only that engine-produced revision.
-            for (const path of bookkeeping.keys())
-              if (!(await untrackedAllowed(request.repoRoot, path)))
-                throw new Error('engine bookkeeping changed; worker tree is dirty');
-            const result = await reviewImplementation(request);
-            if (!deps.review && result.status === 'ok')
-              await noteBookkeeping(devLedgerPath(request.repoRoot, result.value.branch));
-            return result;
+          const assertBookkeeping = async (root: string) => {
+            try {
+              if (bookkeepingTampered) throw new Error('prior bookkeeping mismatch');
+              for (const path of bookkeeping.keys())
+                if (!(await untrackedAllowed(root, path))) throw new Error('bookkeeping mismatch');
+            } catch (error) {
+              bookkeepingTampered = true;
+              throw new Error('engine bookkeeping changed; worker tree is dirty', { cause: error });
+            }
           };
+          // Parallel PR workers share the ledger. Keep the fingerprint check,
+          // engine write and replacement fingerprint in one composition-owned FIFO.
+          let bookkeepingWrites: Promise<unknown> = Promise.resolve();
+          const withBookkeepingAccess = <T>(root: string, action: () => Promise<T>): Promise<T> => {
+            const pending = bookkeepingWrites.then(async () => {
+              await assertBookkeeping(root);
+              return action();
+            });
+            bookkeepingWrites = pending.catch(() => undefined);
+            return pending;
+          };
+          const review = (request: ReviewRunInput) =>
+            withBookkeepingAccess(request.repoRoot, async () => {
+              // Review.run legitimately appends to the same ledger. Check ownership
+              // before its write, then register only that engine-produced revision.
+              const result = await reviewImplementation(request);
+              if (!deps.review && result.status === 'ok')
+                await noteBookkeeping(devLedgerPath(request.repoRoot, result.value.branch));
+              return result;
+            });
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
               repoRoot: root,
@@ -415,7 +434,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               git,
               drivers,
               attempts: report.attempts,
-              isBookkeepingPath: (path) => untrackedAllowed(root, path),
+              isBookkeepingPath: (path) =>
+                withBookkeepingAccess(root, () => untrackedAllowed(root, path)),
               remainingTokens,
               remainingWallMs,
               account,
@@ -495,72 +515,82 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           };
           const admitRecord = async (root: string, record: FindingsRecord) => {
             if (deps.disposition) return;
-            const effects = makeSubprocessDevEffects(root);
-            const read = await readWorkState(effects, {
-              target: input.target ?? 'merge-queue',
-              ...(input.base ? { base: input.base } : {}),
-            });
-            if (!read.ok) throw new Error(read.reason);
-            const state = read.state;
-            if (record.head !== state.head || record.branch !== state.branch)
-              throw new Error('findings admission head/branch changed');
-            await admitHistory(root, state.branch);
-            await effects.openLedger(state.branch).mutate((ledger) => {
-              const entry: DevCycleRecord = {
-                kind: 'cycle',
-                cycleId: `address-${randomUUID()}`,
-                reviewer: 'review.address:import',
-                scope: 'full',
+            return withBookkeepingAccess(root, async () => {
+              const effects = makeSubprocessDevEffects(root);
+              const read = await readWorkState(effects, {
                 target: input.target ?? 'merge-queue',
-                base: state.base,
-                head: state.head,
-                dirtySha256: state.dirtySha256,
-                completion: { kind: 'terminal' },
-                findings: record.findings.map((finding) => ({
-                  id: finding.id,
-                  severity: finding.severity,
-                  ...(finding.file ? { fileName: finding.file } : {}),
-                  excerpt: finding.text,
-                })),
-                logPath: report.reportPath,
-                untracked: state.untracked,
-                at: effects.nowIso(),
-              };
-              return {
-                ledger: {
-                  version: DEV_LEDGER_VERSION,
-                  branch: ledger.branch,
-                  records: [...ledger.records, entry],
-                },
-                value: undefined,
-              };
+                ...(input.base ? { base: input.base } : {}),
+              });
+              if (!read.ok) throw new Error(read.reason);
+              const state = read.state;
+              if (record.head !== state.head || record.branch !== state.branch)
+                throw new Error('findings admission head/branch changed');
+              await admitHistory(root, state.branch);
+              await effects.openLedger(state.branch).mutate((ledger) => {
+                const entry: DevCycleRecord = {
+                  kind: 'cycle',
+                  cycleId: `address-${randomUUID()}`,
+                  reviewer: 'review.address:import',
+                  scope: 'full',
+                  target: input.target ?? 'merge-queue',
+                  base: state.base,
+                  head: state.head,
+                  dirtySha256: state.dirtySha256,
+                  completion: { kind: 'terminal' },
+                  findings: record.findings.map((finding) => ({
+                    id: finding.id,
+                    severity: finding.severity,
+                    ...(finding.file ? { fileName: finding.file } : {}),
+                    excerpt: finding.text,
+                  })),
+                  logPath: report.reportPath,
+                  untracked: state.untracked,
+                  at: effects.nowIso(),
+                };
+                return {
+                  ledger: {
+                    version: DEV_LEDGER_VERSION,
+                    branch: ledger.branch,
+                    records: [...ledger.records, entry],
+                  },
+                  value: undefined,
+                };
+              });
+              await noteBookkeeping(
+                await bookkeepingKey(root, relative(root, devLedgerPath(root, state.branch))),
+              );
             });
-            await noteBookkeeping(
-              await bookkeepingKey(root, relative(root, devLedgerPath(root, state.branch))),
-            );
           };
           const recordDisposition = async (root: string, finding: Finding) => {
-            const recorded = deps.disposition
-              ? await deps.disposition(root, finding)
-              : await makeDevDisposition(makeSubprocessDevEffects(root))({
-                  repoRoot: root,
-                  findingId: finding.id,
-                  action: finding.status as 'fixed' | 'rejected' | 'deferred',
-                  why: finding.reason ?? 'engine validated fix',
-                });
-            if (recorded.status !== 'ok') {
+            try {
+              return await withBookkeepingAccess(root, async () => {
+                const recorded = deps.disposition
+                  ? await deps.disposition(root, finding)
+                  : await makeDevDisposition(makeSubprocessDevEffects(root))({
+                      repoRoot: root,
+                      findingId: finding.id,
+                      action: finding.status as 'fixed' | 'rejected' | 'deferred',
+                      why: finding.reason ?? 'engine validated fix',
+                    });
+                if (recorded.status !== 'ok') {
+                  bookkeepingFailed = true;
+                  report.reasons.push(`disposition ${finding.id}: ${issue(recorded)}`);
+                  return false;
+                }
+                if (!deps.disposition) {
+                  const branch = await branchName(root);
+                  await noteBookkeeping(
+                    await bookkeepingKey(root, relative(root, devLedgerPath(root, branch))),
+                  );
+                }
+                dispositions.set(identity(finding), finding);
+                return true;
+              });
+            } catch (error) {
               bookkeepingFailed = true;
-              report.reasons.push(`disposition ${finding.id}: ${issue(recorded)}`);
+              report.reasons.push(`disposition ${finding.id}: ${String(error)}`);
               return false;
             }
-            if (!deps.disposition) {
-              const branch = await branchName(root);
-              await noteBookkeeping(
-                await bookkeepingKey(root, relative(root, devLedgerPath(root, branch))),
-              );
-            }
-            dispositions.set(identity(finding), finding);
-            return true;
           };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
             if (

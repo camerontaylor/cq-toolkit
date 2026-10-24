@@ -105,3 +105,10 @@ ordinary untracked bookkeeping files. Tracked changes, other untracked files
 still withhold publication and replies. The optional runtime
 `publicationTreeClean` review-loop hook and worker `isBookkeepingPath` predicate
 apply the same hygiene boundary; neither broadens the frozen result schema.
+
+Existing bookkeeping fingerprints are checked before admission, disposition and
+reviewer ledger writes. A composition-owned FIFO spans each check, engine write
+and fingerprint refresh, including worker bookkeeping reads; disjoint editing
+workers still run concurrently. Any mismatch remains a sticky refusal, retains
+changed bytes and verified local commits, and withholds publication, disposition
+proof and further reviewer dispatch.
