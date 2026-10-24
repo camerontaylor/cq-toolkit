@@ -462,12 +462,17 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
       // OFF case additionally skips work-record writes when they land).
       // The request-level flag (the op's explicit choice) still wins when
       // it asks for MORE retention than the switch ('keep' beats off only
-      // when the switch is not hard-off).
+      // when the switch is not hard-off). When the request leaves retention
+      // UNSPECIFIED, the deployment's `sessionLogs.retention` is the
+      // fallback — otherwise a configured 'reap-on-settle' policy could
+      // never take effect (every unspecified request would keep), which is
+      // exactly the cleanup promise the config documents. Absent both, the
+      // default is 'keep' (session records are worker evidence).
       const switchOff = sessionLogsOff(config);
-      const retention =
-        switchOff || request.sessionRetention === 'reap-on-settle'
-          ? 'reap-on-settle'
-          : request.sessionRetention;
+      const requestedRetention = request.sessionRetention ?? config.sessionLogs?.retention;
+      const retention: 'keep' | 'reap-on-settle' = switchOff
+        ? 'reap-on-settle'
+        : (requestedRetention ?? 'keep');
       const reaping =
         retention === 'reap-on-settle'
           ? withReapOnSettle(inner, sessionsDirFor(lane, config))
