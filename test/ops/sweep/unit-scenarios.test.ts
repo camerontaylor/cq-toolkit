@@ -607,3 +607,67 @@ test('failed task does not block a passing sibling task', async () => {
     await rm(world.root, { recursive: true, force: true });
   }
 });
+
+test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattributed'] as const)(
+  'task-loop refusal retains evidence for %s',
+  async (mode) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    let invoked = false;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        deriveTasks: (baseline) =>
+          [0, 1].map((id) => ({
+            id: String(id),
+            files: mode === 'unattributed' ? [] : ['suite.test.js'],
+            failures: baseline.failures,
+          })),
+        git: async (args) => {
+          if (
+            mode === 'moved-head' &&
+            invoked &&
+            args.includes('rev-parse') &&
+            args.includes('HEAD')
+          )
+            return { code: 0, stdout: 'd'.repeat(40), stderr: '' };
+          if (mode === 'dirty' && args.includes('status'))
+            return { code: 0, stdout: ' M src/a.js', stderr: '' };
+          if (args.includes('stash')) return { code: 0, stdout: 'e'.repeat(40), stderr: '' };
+          return underlying(args);
+        },
+        driver: {
+          run: async () => {
+            invoked = true;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: mode === 'budget' ? 'budget' : mode === 'stopped' ? 'error' : 'complete',
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.value.committed).toBe(false);
+      expect(result.value.tasks).toHaveLength(2);
+      if (mode === 'budget') {
+        expect(result.value.budgetStopped).toBe(true);
+        expect(result.value.tasks?.[1]?.attempts).toHaveLength(0);
+      } else if (mode === 'moved-head') {
+        expect(result.value.tasks?.[0]?.reason).toContain('HEAD changed');
+        expect(result.value.tasks?.[1]?.reason).toContain('human review');
+      } else if (mode === 'dirty') {
+        expect(result.value.tasks?.[0]?.preservedEdits?.sha).toBe('e'.repeat(40));
+        expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
+      } else if (mode === 'unattributed') {
+        expect(invoked).toBe(false);
+        expect(result.value.tasks?.every((task) => task.outcome === 'escalated-to-human')).toBe(
+          true,
+        );
+      } else expect(result.value.tasks?.[0]?.outcome).toBe('unfixed');
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);

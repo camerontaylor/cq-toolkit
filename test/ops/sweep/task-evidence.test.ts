@@ -43,9 +43,37 @@ test('concurrent units preserve tracked and new files under independent refs wit
       expect(await git(root)(['show', `${evidence.ref}:source.ts`])).toBe(text);
       expect(await git(cwd)(['status', '--porcelain'])).toBe('');
       expect(await readFile(join(cwd, 'source.ts'), 'utf8')).toBe('baseline');
+      await expect(readFile(join(cwd, 'new.ts'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     }
     expect(await git(root)(['for-each-ref', '--format=%(refname)', 'refs/stash'])).toBe('');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('snapshot failures never pin an invalid object or restore away evidence', async () => {
+  const calls: string[][] = [];
+  await expect(
+    preserveTaskEdits(async (args) => {
+      calls.push(args);
+      return '';
+    }, 'run/failed'),
+  ).rejects.toThrow('could not snapshot');
+  expect(calls.map((args) => args[0])).toEqual(['add', 'stash']);
+});
+test('a restore failure leaves the unique evidence ref pinned for recovery', async () => {
+  const calls: string[][] = [];
+  await expect(
+    preserveTaskEdits(async (args) => {
+      calls.push(args);
+      if (args[0] === 'stash') return 'a'.repeat(40);
+      if (args[0] === 'restore') throw new Error('restore unavailable');
+      return '';
+    }, 'run/restore'),
+  ).rejects.toThrow('restore unavailable');
+  expect(calls[2]?.slice(0, 2)).toEqual([
+    'update-ref',
+    expect.stringContaining('refs/cq/fix-run/run/restore/'),
+  ]);
+  expect(calls.at(-1)).toEqual(['restore', '--source=HEAD', '--staged', '--worktree', '--', '.']);
 });

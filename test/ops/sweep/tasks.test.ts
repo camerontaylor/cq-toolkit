@@ -28,3 +28,11 @@ test('argv template replaces full args and expands files without shell interpret
   expect(relatedCheckCommand(check, ['a.ts']).args).toEqual(['full', 'a.ts']);
   expect(() => relatedCheckCommand(check, ['a.ts'], ['embedded-{files}'])).toThrow('standalone');
 });
+
+test('clean runs derive no tasks; an empty related argv cannot hide the required marker', () => {
+  expect(tasksFromFailures({ tool: 'tests', exitCode: 0, failures: [] })).toEqual([]);
+  expect(() => relatedCheckCommand({ command: 'runner', args: [] }, [], [])).toThrow('standalone');
+  expect(
+    relatedCheckCommand({ command: 'runner', args: [] }, [], ['{files}', '--json']).args,
+  ).toEqual(['--json']);
+});

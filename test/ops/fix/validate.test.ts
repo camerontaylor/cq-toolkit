@@ -83,3 +83,33 @@ test('related failure stops broader; tamper and invalid outcome stop commit', as
     'fail',
   );
 });
+
+test.each(['related', 'broader'] as const)(
+  'records a thrown %s check as a failed gate',
+  async (gate) => {
+    const report = await validateFix(
+      input({
+        [gate]: async () => {
+          throw new Error('check unavailable');
+        },
+      }),
+    );
+    expect(report.verdict).toBe('fail');
+    expect(report.gates.at(-1)).toMatchObject({
+      gate,
+      verdict: 'fail',
+      detail: 'Error: check unavailable',
+    });
+    expect(report.gates.at(-1)?.wallMs).toBeGreaterThanOrEqual(0);
+  },
+);
+test('scope refusal records fail; review validation can accept unchanged existing failures', async () => {
+  const scoped = await validateFix(
+    input({ stagedPaths: ['other/source.ts'], allowlist: { patterns: ['src/**'] } }),
+  );
+  expect(scoped.verdict).toBe('fail');
+  expect(scoped.gates.at(-1)?.gate).toBe('paths');
+  expect(
+    (await validateFix(input({ broader: async () => baseline, requireProgress: false }))).verdict,
+  ).toBe('pass');
+});
