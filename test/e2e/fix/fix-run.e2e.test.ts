@@ -661,7 +661,7 @@ test('pushFailed scans edits captured by an early worker failure before path cla
     await rm(f.root, { recursive: true, force: true });
   }
 });
-test('pushFailed applies protected-path policy after an early worker failure', async () => {
+test('pushFailed applies tamper gate before path policy after an early worker failure', async () => {
   const f = await fixture();
   try {
     const result = await makeFixRun({ drivers: scripted('throw-after-protected') })({
@@ -671,7 +671,7 @@ test('pushFailed applies protected-path policy after an early worker failure', a
     const report = reportOf(result);
     const failed = report.tasks.find((task) => task.failedAttempt !== undefined)!;
     expect(result.status).toBe('needs-human');
-    expect(failed.reason).toContain('protected path(s) changed by a worker');
+    expect(failed.reason).toContain('failed-attempt tamper gate refused publication');
     expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:package.json`)).toContain(
       '"name":"edited"',
     );
@@ -756,6 +756,13 @@ test('pushFailed keeps path-policy-refused failed attempts local', async () => {
         task.rounds?.flatMap((round) => (round.failedAttempt ? [round.failedAttempt] : [])) ?? [],
     );
     expect(attempts.length).toBeGreaterThan(0);
+    expect(
+      report.tasks.some((task) =>
+        task.rounds?.some(
+          (round) => round.gate === 'path-policy' && round.reason.includes('propose-only worker'),
+        ),
+      ),
+    ).toBe(true);
     for (const attempt of attempts) {
       expect(await git(f.repo, 'rev-parse', `refs/heads/${attempt.branch}`)).toBe(attempt.sha);
       expect(
