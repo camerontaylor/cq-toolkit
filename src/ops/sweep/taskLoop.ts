@@ -536,10 +536,7 @@ async function runTaskLoopInner(
           ...(row.validation === undefined ? {} : { validation: row.validation }),
           ...(row.preservedEdits === undefined ? {} : { preservedEdits: row.preservedEdits }),
         });
-        regression =
-          row.validation?.gates.some(
-            (gate) => gate.gate === 'broader' && gate.verdict === 'fail',
-          ) ?? false;
+        regression = row.validation?.regression === true;
         const unsafe = row.validation?.gates.some(
           (gate) => ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
         );

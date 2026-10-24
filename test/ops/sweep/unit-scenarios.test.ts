@@ -1,6 +1,7 @@
 // In-process sweep.unit decision coverage. Plan-level rescue, assembly, prep,
 // and fleet claims remain in the real runSweepPlan contracts because those
 // decisions live in the e2e composition helper rather than production.
+import { createEscalationState, nextEscalation } from '../../../src/ops/fix/escalation.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1051,3 +1052,60 @@ test('task invocation cost preserves its basis and shared accounting observes bo
     await rm(world.root, { recursive: true, force: true });
   }
 });
+
+test.each(['probe-fault', 'no-progress'] as const)(
+  'broader %s preserves the next configured worker round without consuming rescue',
+  async (fault) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const runCheck = world.runCheckFactory();
+    const prompts: string[] = [];
+    let probes = 0;
+    let state = createEscalationState();
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        taskEscalation: {
+          next: (task, progress) => {
+            const transition = nextEscalation(
+              state,
+              { workerAttempts: 2, rescueBase: 1, rescuePerFixed: 10, rescuePerPackageCap: 1 },
+              { ...progress, package: 'alpha', task: task.id, canRescue: true },
+            );
+            state = transition.state;
+            return transition.decision;
+          },
+          verified: () => {},
+        },
+        runCheck: async (command) => {
+          if (command.cwd?.includes('.cq-sweep-final-') && probes++ === 0) {
+            if (fault === 'probe-fault') throw new Error('temporary broader probe fault');
+            return { stdout: vitestOutput(true), stderr: '', exitCode: 1 };
+          }
+          return runCheck(command);
+        },
+        driver: {
+          run: async (invocation) => {
+            prompts.push(invocation.prompt);
+            return {
+              stopReason: 'complete',
+              denials: [],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      expect(state.perRunUsed).toBe(0);
+      expect(prompts).toHaveLength(4);
+      expect(prompts[2]).toContain('Tier: worker; attempt: 2');
+      if (result.status === 'ok') {
+        expect(result.value.tasks?.[0]?.outcome).toBe('fixed');
+        expect(result.value.tasks?.[0]?.commits).toHaveLength(1);
+        expect(result.value.tasks?.[0]?.rounds?.[0]?.validation?.regression).toBeUndefined();
+      }
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);

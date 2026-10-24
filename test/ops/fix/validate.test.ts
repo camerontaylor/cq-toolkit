@@ -95,6 +95,7 @@ test.each(['related', 'broader'] as const)(
       }),
     );
     expect(report.verdict).toBe('fail');
+    expect(report.regression).toBeUndefined();
     expect(report.gates.at(-1)).toMatchObject({
       gate,
       verdict: 'fail',
@@ -112,4 +113,19 @@ test('scope refusal records fail; review validation can accept unchanged existin
   expect(
     (await validateFix(input({ broader: async () => baseline, requireProgress: false }))).verdict,
   ).toBe('pass');
+});
+
+test('only affirmative regression evidence bypasses worker retries, not unchanged or indeterminate broader results', async () => {
+  expect((await validateFix(input({ broader: async () => baseline }))).regression).toBeUndefined();
+  expect(
+    (await validateFix(input({ broader: async () => ({ ...baseline, exitCode: null }) })))
+      .regression,
+  ).toBeUndefined();
+  const novel = {
+    ...baseline,
+    failures: baseline.failures.map((f) => ({ ...f, file: 'newly-broken.test.ts' })),
+  };
+  expect((await validateFix(input({ broader: async () => novel }))).regression).toBe(true);
+  const increased = { ...baseline, failures: [...baseline.failures, ...baseline.failures] };
+  expect((await validateFix(input({ broader: async () => increased }))).regression).toBe(true);
 });

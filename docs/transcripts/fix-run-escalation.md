@@ -71,7 +71,7 @@ Observed process exit: `0`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "related-check feedback",
               "usage": {
                 "input": 1,
@@ -98,7 +98,7 @@ Observed process exit: `0`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "worker retry: Error: validation refused task",
               "usage": {
                 "input": 1,
@@ -161,7 +161,7 @@ Observed process exit: `0`.
                 "provider": "fixture",
                 "model": "rescue-fixes"
               },
-              "wallMs": 0,
+              "wallMs": 1,
               "reason": "related-check feedback",
               "usage": {
                 "input": 1,
@@ -179,7 +179,7 @@ Observed process exit: `0`.
       {
         "outcome": "fixed",
         "commits": [
-          "cc14f043e4705be07a922cbeb6a70adbd95f36c0"
+          "67e911ac44ce56687061623bc25d09bec4225d26"
         ],
         "files": [
           "cases/a.test.cjs"
@@ -274,7 +274,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fixes-b"
               },
-              "wallMs": 0,
+              "wallMs": 1,
               "reason": "worker retry: Error: validation refused task",
               "usage": {
                 "input": 1,
@@ -372,7 +372,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fixes-b"
               },
-              "wallMs": 0,
+              "wallMs": 1,
               "reason": "initial task",
               "usage": {
                 "input": 1,
@@ -416,7 +416,7 @@ Observed process exit: `3`.
       {
         "outcome": "fixed",
         "commits": [
-          "3ff64fc12d81bd002dd6b0c002c9b2794ccd2520"
+          "090977dcadad4842240965afe6f7b73724cdc1a3"
         ],
         "files": [
           "cases/b.test.cjs"
@@ -482,7 +482,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "related-check feedback",
               "usage": {
                 "input": 1,
@@ -509,7 +509,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "worker retry: Error: validation refused task",
               "usage": {
                 "input": 1,
@@ -647,7 +647,7 @@ Observed process exit: `0`.
                 "provider": "fixture",
                 "model": "rescue-fixes"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "related-check feedback",
               "usage": {
                 "input": 1,
@@ -665,7 +665,7 @@ Observed process exit: `0`.
       {
         "outcome": "fixed",
         "commits": [
-          "55bfa1c2c262b3b179ac6fe36254b2ff83663009"
+          "9179fb32ca47548b176f5932b7d340240875c303"
         ],
         "files": [
           "cases/a.test.cjs"
@@ -681,15 +681,16 @@ Observed process exit: `0`.
                 {
                   "gate": "related",
                   "verdict": "pass",
-                  "wallMs": 49
+                  "wallMs": 53
                 },
                 {
                   "gate": "broader",
                   "verdict": "fail",
-                  "wallMs": 70,
+                  "wallMs": 67,
                   "detail": "novel failures or test-total regression"
                 }
               ],
+              "regression": true,
               "final": {
                 "tool": "vitest",
                 "failures": [
@@ -707,8 +708,8 @@ Observed process exit: `0`.
               }
             },
             "preservedEdits": {
-              "ref": "refs/cq/fix-run/cq/escalation-fixture/tests-1/scratch-repo/cda92e42-0b21-44e1-8762-db899c9b5a51",
-              "sha": "9b771c5542be0ad32291fc6a57468360cc6c8fb6"
+              "ref": "refs/cq/fix-run/cq/escalation-fixture/tests-1/scratch-repo/d8580439-5154-4a4c-8703-9feb81b7f651",
+              "sha": "da7d0f8bb3124a1b9f325b4bd20fbba6272fe256"
             }
           },
           {
@@ -721,12 +722,12 @@ Observed process exit: `0`.
                 {
                   "gate": "related",
                   "verdict": "pass",
-                  "wallMs": 53
+                  "wallMs": 52
                 },
                 {
                   "gate": "broader",
                   "verdict": "pass",
-                  "wallMs": 60
+                  "wallMs": 65
                 },
                 {
                   "gate": "paths",
@@ -816,7 +817,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "related-check feedback",
               "usage": {
                 "input": 1,
@@ -843,7 +844,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 2,
+              "wallMs": 0,
               "reason": "initial task",
               "usage": {
                 "input": 1,
@@ -888,7 +889,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 0,
+              "wallMs": 1,
               "reason": "worker retry: Error: validation refused task",
               "usage": {
                 "input": 1,
@@ -951,7 +952,7 @@ Observed process exit: `3`.
                 "provider": "fixture",
                 "model": "worker-fails"
               },
-              "wallMs": 1,
+              "wallMs": 0,
               "reason": "related-check feedback",
               "usage": {
                 "input": 1,
@@ -1022,7 +1023,7 @@ Observed process exit: `3`.
       {
         "outcome": "fixed",
         "commits": [
-          "dd012a8f8cc0de2fdc5aa9278f400357f1c9d576"
+          "7b96e2ebf40cf5fb795fd76ced579a0dec8c8de2"
         ],
         "files": [
           "cases/a.test.cjs"
