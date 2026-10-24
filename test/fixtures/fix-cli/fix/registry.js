@@ -11,7 +11,13 @@ const drivers = {
       run: async (invocation) => {
         const line = invocation.prompt.split('\n').find((text) => text.startsWith('Task: '));
         const task = JSON.parse(line?.slice(6) ?? '{}');
-        for (const file of task.files) {
+        const edits =
+          modelSpec.model === 'worker-regression' ||
+          modelSpec.model === 'scripted' ||
+          modelSpec.model === 'rescue-fixes' ||
+          (modelSpec.model === 'worker-fixes-b' &&
+            task.files.every((file) => file.includes('b.test')));
+        for (const file of edits ? task.files : []) {
           const path = join(invocation.workspace.path, file);
           if (file.endsWith('.ts')) {
             const text = await readFile(path, 'utf8');
@@ -26,6 +32,11 @@ const drivers = {
             await writeFile(path, 'module.exports = { actual: 1, expected: 1 };\n');
           }
         }
+        if (modelSpec.model === 'worker-regression')
+          await writeFile(
+            join(invocation.workspace.path, 'cases/b.test.cjs'),
+            'module.exports = { actual: 1, expected: 3 };\n',
+          );
         return {
           stopReason: 'complete',
           denials: [],

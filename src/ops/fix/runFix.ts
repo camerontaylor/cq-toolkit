@@ -1,3 +1,10 @@
+import {
+  createEscalationState,
+  nextEscalation,
+  recordFixedFailures,
+  rescueAllocation,
+  type EscalationState,
+} from './escalation.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -29,7 +36,7 @@ import {
   type SweepUnitReport,
 } from '../sweep/unit.js';
 import type { AssemblePrsInput } from '../pr/assemblePrs.js';
-import type { FixTaskReport } from '../sweep/taskLoop.js';
+import type { FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
 import type { FixRunInputSchema } from './registry.js';
 
 export type FixRunInput = z.input<typeof FixRunInputSchema>;
@@ -45,6 +52,10 @@ export interface FixRunReport {
   wallMs: number;
   run?: RunReport;
   assembly?: RunReport;
+  escalation?: Omit<EscalationState, 'events'> & {
+    rescuePool: number;
+    events: Array<EscalationState['events'][number] & { attempts: TaskAttempt[] }>;
+  };
 }
 export type FixRunResult = OpResult<FixRunReport> & { report?: FixRunReport };
 export interface FixRunDeps {
@@ -73,6 +84,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       wallMs: 0,
     };
+    let escalation = createEscalationState();
+    let escalationPolicy: Parameters<typeof rescueAllocation>[1] | undefined;
     const collected = new Map<string, SweepUnitReport>();
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
@@ -94,6 +107,26 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           if (attempt.usage.reasoning !== undefined)
             report.usage.reasoning = (report.usage.reasoning ?? 0) + attempt.usage.reasoning;
         }
+      if (escalationPolicy)
+        report.escalation = {
+          ...escalation,
+          events: escalation.events.map((event) => ({
+            ...event,
+            attempts: [...collected.values()]
+              .filter((unit) => unit.package === event.package)
+              .flatMap((unit) =>
+                (unit.tasks ?? []).filter(
+                  (row) => `${unit.fixer}:${row.task.signature ?? row.task.id}` === event.task,
+                ),
+              )
+              .flatMap((row) =>
+                row.attempts.filter(
+                  (attempt) => attempt.tier === event.tier && attempt.attempt === event.attempt,
+                ),
+              ),
+          })),
+          rescuePool: rescueAllocation(escalation, escalationPolicy),
+        };
       report.wallMs = Date.now() - start;
       try {
         await mkdir(dirname(report.reportPath), { recursive: true });
@@ -124,6 +157,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         packageName: pkg.name ?? 'root',
         ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
       });
+      escalationPolicy = policy.escalation;
+      let sharedTokens = 0;
+      const remainingWallMs = () => policy.budgets.run.wallMs - (Date.now() - start);
       const refusal = requireAgenticTokenBudget(policy);
       if (refusal) return await finish('needs-human', refusal.reason);
       const maxTokens = policy.budgets.run.maxTokens;
@@ -261,6 +297,37 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                 reason: 'enclosing job cancelled before unit dispatch',
               };
             const bindings = bindingsFromDispatch(unit, drivers);
+            bindings.taskRunBudget = {
+              remainingWallMs,
+              remainingTokens: () => maxTokens - sharedTokens,
+              reportResult: (worker) => {
+                sharedTokens +=
+                  worker.usage.input +
+                  worker.usage.output +
+                  worker.usage.cacheRead +
+                  worker.usage.cacheWrite +
+                  (worker.usage.reasoning ?? 0);
+              },
+            };
+            bindings.taskEscalation = {
+              ...(policy.roles.rescue === undefined ? {} : { rescueModel: policy.roles.rescue }),
+              next: (task, progress) => {
+                const transition = nextEscalation(escalation, policy.escalation, {
+                  ...progress,
+                  package: unit.package,
+                  task: `${unit.fixer}:${task.signature ?? task.id}`,
+                  canRescue: policy.roles.rescue !== undefined,
+                  ...(remainingWallMs() <= 0 || sharedTokens >= maxTokens
+                    ? { stopReason: 'run token or wall budget exhausted' }
+                    : {}),
+                });
+                escalation = transition.state;
+                return transition.decision;
+              },
+              verified: (before, after) => {
+                escalation = recordFixedFailures(escalation, before, after);
+              },
+            };
             if (parentSignal !== undefined) bindings.cancelled = () => parentSignal.aborted;
             const result = await makeSweepUnitOp(bindings)(unit);
             if (result.status === 'ok')
@@ -280,7 +347,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       const abort = new AbortController();
       const runSignal =
         parentSignal === undefined ? abort.signal : AbortSignal.any([parentSignal, abort.signal]);
-      const timer = setTimeout(() => abort.abort(), policy.budgets.run.wallMs);
+      const timer = setTimeout(() => abort.abort(), Math.max(0, remainingWallMs()));
       try {
         report.run = await runPlan(
           plan,

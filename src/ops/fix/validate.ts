@@ -15,6 +15,8 @@ export interface ValidationVerdict {
   verdict: 'pass' | 'fail' | 'needs-human';
   gates: FixGateRecord[];
   final?: FailureSet;
+  /** Affirmative novel-failure/count/test-total regression, never a probe fault or lack of progress. */
+  regression?: true;
 }
 export interface ValidationInput {
   baseline: FailureSet;
@@ -40,9 +42,11 @@ export async function validateFix(input: ValidationInput): Promise<ValidationVer
   const gates: FixGateRecord[] = [];
   let final: FailureSet | undefined;
   let related: FailureSet | undefined;
+  let regression = false;
   const finish = (verdict: ValidationVerdict['verdict']): ValidationVerdict => ({
     verdict,
     gates,
+    ...(regression ? { regression: true as const } : {}),
     ...(final === undefined ? {} : { final }),
   });
   const step = async (gate: FixGate, run: () => Promise<string | undefined>, human = false) => {
@@ -77,8 +81,14 @@ export async function validateFix(input: ValidationInput): Promise<ValidationVer
         input.reuseRelatedForBroader && related !== undefined ? related : await input.broader();
       const compared = await regressionGate({ base: input.baseline, final });
       if (compared.status !== 'ok') return `regression gate: ${compared.status}`;
-      if (compared.value.verdict === 'regression') return 'novel failures or test-total regression';
-      if (final.failures.length > input.baseline.failures.length) return 'failure count increased';
+      if (compared.value.verdict === 'regression') {
+        regression = true;
+        return 'novel failures or test-total regression';
+      }
+      if (final.failures.length > input.baseline.failures.length) {
+        regression = true;
+        return 'failure count increased';
+      }
       if (input.requireProgress && final.failures.length >= input.baseline.failures.length)
         return 'no failure count reduction';
       return undefined;

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { OpRegistryEntry } from '../../kernel/types.js';
 import { PlanSweepSelectorSchema } from '../sweep/registry.js';
 import type { FixRunInput } from './runFix.js';
-// Shared validation protocol companion: './validate.js'.
+// Shared validation protocol companions: './validate.js', './escalation.js'.
 export const FixRunInputSchema = z
   .object({
     repoRoot: z.string().min(1),

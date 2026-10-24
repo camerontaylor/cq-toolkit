@@ -113,6 +113,29 @@ while requiring the assigned cluster to disappear and failure fingerprints to im
 When final related and broader commands are identical, both gates share one fresh
 base-owned staged-tree probe. The stateless feedback invocation still runs per task.
 
+`fix.run` retries a task with `roles.worker` up to `escalation.workerAttempts`
+(default 2), then uses `roles.rescue`. A broader regression routes directly to rescue.
+Each round uses separate stateless edit and related-check feedback invocations; feedback
+is mandatory even when it only confirms the edit. Failed edits are pinned under unique
+refs and restored before retrying. Protected-path, tamper, cancellation and budget refusals
+retain their gates; retries never bypass validation. Exhausted or unavailable rescue sends
+that task to human review while siblings continue committing verified fixes.
+
+Every fresh run starts with `initialFixedFailures = 0` and the configured `rescueBase`
+(default 20). It earns `floor(distinct newly verified failure reductions / rescuePerFixed)`
+additional rescue attempts (default one per 10). Unresolved baseline failures earn nothing;
+repeated sibling rows and feedback calls earn nothing. Fingerprint occurrence reductions
+are credited once, only after commit verification. The pure SDK allocator can accept an
+explicit initial fixed-failure count for deterministic allocation math; fix.run has no
+historical state or input for that count. Run and per-package rescue reservations are
+shared atomically across units; the package cap defaults to 10. Run tokens and wall time
+are shared across every tier. Token limits remain landing gates for concurrently in-flight
+calls: their usage is reported when they settle, and no new invocation starts after exhaustion.
+Explicit parent cancellation prevents publication; a local budget stop may still publish
+previously verified commits with `--push`. Reports retain decisions, reasons, model identity,
+per-invocation tokens, wall time and available cost with its modeled/billed basis. Unknown
+cost stays absent. Full JSON evidence is persisted on every exit.
+
 `analyze.init` writes only the version and detected checks unless optional fields are
 explicitly supplied as flags (for example `--budgets='{"run":{"maxTokens":100000}}'`).
 No model is selected by the generated starter config. New agentic compositions use the
