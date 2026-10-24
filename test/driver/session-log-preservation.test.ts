@@ -23,7 +23,7 @@ import {
 import { JobFinishedJournalEventSchema } from '../../src/kernel/schema.js';
 import { OpInvocationSchema, WorkerResultSchema } from '../../src/driver/schema.js';
 import { defaultSessionsDir } from '../../src/driver/sessions-dir.js';
-import { applyCorrelationEnv } from '../../src/driver/correlation-env.js';
+import { applyCorrelationEnv, correlationEnvRemovals } from '../../src/driver/correlation-env.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
 
 describe('1.1 defaultSessionsDir', () => {
@@ -93,6 +93,12 @@ describe('1.4 CQ_* correlation env', () => {
     };
     applyCorrelationEnv(env, { workId: 'w1', runId: 'r1' });
     expect(env).toEqual({ PATH: '/bin', CQ_WORK_ID: 'w1', CQ_RUN_ID: 'r1' });
+    expect(correlationEnvRemovals({ workId: 'w1', runId: 'r1' })).toEqual([
+      'CQ_ROLE',
+      'CQ_TASK',
+      'CQ_PARENT_WORK_ID',
+    ]);
+    expect(correlationEnvRemovals(undefined)).toEqual([]);
     const untouched = { CQ_ROLE: 'kept' };
     expect(applyCorrelationEnv(untouched, undefined)).toEqual({ CQ_ROLE: 'kept' });
   });

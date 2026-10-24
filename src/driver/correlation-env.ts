@@ -31,3 +31,16 @@ export function applyCorrelationEnv(
   }
   return env;
 }
+
+/**
+ * The CQ_* names a present correlation leaves UNSET — for a spawn boundary
+ * that composes the final env itself from the parent (spawnManaged's
+ * `envRemove`), where deleting from an overrides-only map has no effect.
+ */
+export function correlationEnvRemovals(correlation: WorkCorrelation | undefined): string[] {
+  if (correlation === undefined) return [];
+  return FIELDS.filter(([field]) => {
+    const value = correlation[field];
+    return value === undefined || value === '';
+  }).map(([, name]) => name);
+}

@@ -178,7 +178,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultSessionsDir } from '../sessions-dir.js';
-import { applyCorrelationEnv } from '../correlation-env.js';
+import { applyCorrelationEnv, correlationEnvRemovals } from '../correlation-env.js';
 import { rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
@@ -552,6 +552,12 @@ export class ClaudeCodeCliTransport implements Driver {
         args: [...this.binary.slice(1), ...argv],
         cwd: workspace,
         env: childEnv,
+        // Session-log correlation: childEnv holds only overrides, and the
+        // spawn composes the final env from the parent — so a correlated
+        // invocation's absent CQ_* fields are removed there, not here.
+        ...(opInvocation.correlation !== undefined
+          ? { envRemove: correlationEnvRemovals(opInvocation.correlation) }
+          : {}),
         stdin: prompt,
         // Default-deny parent-env pass-through (issue #183); undefined keeps
         // spawnManaged's shipped allowlist alone.
