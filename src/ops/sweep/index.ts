@@ -111,3 +111,7 @@ export {
 // is a root-barrel collision (TS2308 at build; ESM would silently drop one
 // at runtime). `sweepRegistry` keeps both families reachable by name; the
 // central registry does not consume barrels — it scans src/ops/*/registry.ts.
+
+export { tasksFromFailures, relatedCheckCommand } from './tasks.js';
+export type { FixTask } from './tasks.js';
+export type { TaskLoopConfig, FixTaskReport, TaskAttempt, TaskWorker } from './taskLoop.js';

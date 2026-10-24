@@ -278,6 +278,26 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       ],
       "type": "object"
     },
+    "taskLoop": {
+      "additionalProperties": false,
+      "properties": {
+        "protectTests": {
+          "type": "boolean"
+        },
+        "relatedArgs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "wallMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "worktreesDir": {
       "minLength": 1,
       "type": "string"

@@ -251,6 +251,14 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     kind: z.string().min(1).exactOptional(),
     slug: z.string().min(1).exactOptional(),
     mode: z.enum(['fix', 'prep']).exactOptional(),
+    taskLoop: z
+      .object({
+        relatedArgs: z.array(z.string()).exactOptional(),
+        protectTests: z.boolean().exactOptional(),
+        wallMs: z.number().int().positive().exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
     proposeOnly: z.boolean().exactOptional(),
     mutex: GitMutexBindingSchema.exactOptional(),
     sandboxPolicy: SandboxPolicySchema.exactOptional(),
@@ -439,3 +447,5 @@ export const registry: OpRegistryEntry[] = [
       ),
   },
 ];
+
+// Shared task and stage-path helpers: './tasks.js', './stagePaths.js', './taskLoop.js'.
