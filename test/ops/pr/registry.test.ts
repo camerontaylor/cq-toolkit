@@ -251,6 +251,7 @@ describe('pr family registry entries', () => {
       );
       const configured = await run(configuredRepo, 'BLOCKED_BY_PROJECT_POLICY');
       expect(configured.status).toBe('failed');
+      expect(configured.error).toContain('class:project-policy');
       const configuredCalls = await readFile(ghLog, 'utf8');
       expect(configuredCalls).toMatch(/pr list/);
       expect(configuredCalls).not.toMatch(/pr create|pr edit/);

@@ -309,6 +309,67 @@ describe('sweep unit in-process scenarios', () => {
     }
   });
 
+  test.each(['tamper diff read error', 'indeterminate tamper diff'] as const)(
+    'failed-attempt publication retains local evidence and refuses a %s',
+    async (fault) => {
+      const world = await makeWorld([{ failing: true }, { failing: true }]);
+      const underlying = world.gitFactory();
+      const scanPrompt = vi.fn(async (_text: string) => {});
+      try {
+        const result = await runUnit(world, {
+          taskLoop: { pushFailed: true },
+          stagePathAllowlist: { patterns: ['^src/'] },
+          driver: {
+            run: async () => ({
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'error',
+            }),
+          },
+          scanPrompt,
+          git: async (args) => {
+            if (
+              args.includes('diff') &&
+              args.includes('--binary') &&
+              args.includes('--full-index')
+            ) {
+              if (fault === 'tamper diff read error') throw new Error('synthetic diff read error');
+              return { code: 0, stdout: 'synthetic malformed diff', stderr: '' };
+            }
+            return underlying(args);
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') {
+          const failedAttempt = result.value.tasks?.[0]?.failedAttempt;
+          expect(failedAttempt).toBeDefined();
+          expect(result.value.tasks?.[0]?.failedAttemptPublished).not.toBe(true);
+          expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+          expect(
+            world.gitCalls.some(
+              (args) =>
+                args.includes('update-ref') &&
+                args.includes(`refs/heads/${failedAttempt?.branch}`) &&
+                args.includes(failedAttempt?.sha ?? ''),
+            ),
+          ).toBe(true);
+          if (fault === 'tamper diff read error')
+            expect(result.value.indeterminate).toContain('synthetic diff read error');
+          else
+            expect(result.value.indeterminate).toContain(
+              'tamper scan could not complete: indeterminate',
+            );
+        }
+        expect(
+          scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+        ).toBe(false);
+        expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test('parent cancellation during failed-attempt scan blocks off-machine publication', async () => {
     const world = await makeWorld([
       { failing: true, message: 'baseline' },
