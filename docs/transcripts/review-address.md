@@ -128,3 +128,44 @@ test:narrow result="pass" exit=0 files=10 projects="pure,process,integration" te
 
 Static, formatting and Knip checks exited 0. Op docs regenerated with no drift.
 Live dogfood acceptance remains unmet; these are hermetic tests.
+
+The required #450/#451 controls hold a real editing worker open while a second
+invocation with a distinct default UUID journal targets the same checkout,
+a symlink alias, or a linked worktree. The peer returns needs-human before any
+editing dispatch or commit; the original provider tree remains intact. After
+release the original fix commits and a later clean invocation succeeds. The
+repository-wide exclusion conservatively serializes linked worktree runs;
+within-run disjoint worker concurrency remains covered by the candidate tests.
+
+The real PR adapter fixture now omits `.cq` ignore rules. Its scripted edit
+passes related, feedback, broader, staged-tree closure and commit gates; a real
+Git push to the fixture's bare origin precedes the fake-forge reply and resolve,
+then actual terminal re-review and the human reviewer re-request complete.
+Untracked caller bytes at `private.txt` or `.cq/private.txt` withhold push and
+all replies/resolution while retaining the verified local commit and original
+bytes. A file-only Git protocol guard prevents fixture network access; its fake
+forge URL maps explicitly to the temporary bare repository. This is hermetic
+acceptance evidence, not positive live dogfood.
+
+The same no-ignore fixture also refuses an index entry whose working-tree bytes
+were restored, and changed ledger bytes remain intact while publication and
+further reviewer dispatch stop. Legitimate reviewer ledger revisions support a
+second verified fix round. Historical numbered findings records qualify only
+with a strict schema, matching branch and real ancestor commit; malformed,
+wrong-branch and unknown-head neighbors withhold clean acceptance.
+
+Causal old-source check (only address/addressWorker restored temporarily, then
+all working changes restored):
+
+```text
+test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="23/29" failed=6 skipped=0 wait="0.0s" duration="17.9s" nice=5 load="0.8" uptime="539532s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+Final required checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=10 projects="pure,process,integration" tests="294/294" failed=0 skipped=0 wait="1.8s" duration="55.5s" nice=5 load="1.8" uptime="540111s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressWorker.test.ts,test/ops/sweep/gitMutex.test.ts,test/plans/review-loop.test.ts"
+```
+
+No new live run or CodeRabbit invocation was made. Positive live measured-fix
+acceptance and settled failed-branch API reconciliation remain outstanding.

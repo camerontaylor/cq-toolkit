@@ -329,6 +329,9 @@ test('a clean refreshed record cannot return ok after its wall budget expires', 
 test.each([
   'explicit',
   'latest',
+  'latest-unknown-head',
+  'latest-other-branch',
+  'latest-malformed-history',
   'head-mismatch',
   'branch-mismatch',
   'blocked',
@@ -346,17 +349,30 @@ test.each([
       record.sources = [{ kind: 'agent', status: 'blocked', reason: 'review interrupted' }];
     const folder = join(f.repo.root, '.cq', 'review', encodeURIComponent(record.branch));
     await mkdir(folder, { recursive: true });
+    const latest = mode.startsWith('latest');
     const path =
-      mode === 'latest' || mode === 'missing'
+      latest || mode === 'missing'
         ? join(folder, '2.json')
         : join(f.input.journalDir, 'record.json');
     if (mode !== 'missing')
       await writeFile(path, mode === 'malformed' ? '{' : JSON.stringify(record));
-    if (mode === 'latest')
-      await writeFile(join(folder, '1.json'), JSON.stringify({ ...record, head: 'a'.repeat(40) }));
+    if (latest)
+      await writeFile(
+        join(folder, '1.json'),
+        mode === 'latest-malformed-history'
+          ? '{'
+          : JSON.stringify({
+              ...record,
+              head:
+                mode === 'latest-unknown-head'
+                  ? 'a'.repeat(40)
+                  : f.repo.git('rev-parse', 'origin/merge-queue').trim(),
+              ...(mode === 'latest-other-branch' ? { branch: 'other' } : {}),
+            }),
+      );
     const result = await makeReviewAddress(deps)({
       ...f.input,
-      ...(mode === 'latest' || mode === 'missing' ? {} : { record: path }),
+      ...(latest || mode === 'missing' ? {} : { record: path }),
     });
     expect(result.status).toBe(mode === 'explicit' || mode === 'latest' ? 'ok' : 'needs-human');
     expect(f.calls).toEqual([]);

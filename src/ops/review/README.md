@@ -87,3 +87,21 @@ excluded from the human reviewer API and recorded as an advisory skipped
 re-request; the report never claims a bot re-request succeeded. Forge
 failures retain the report and return needs-human. Current thread replies
 are included in both worker and candidate closure review inputs.
+
+Addressing owns a canonical Git common-directory lock from admission through
+worker edits, cleanup and publication. A second invocation refuses immediately
+and writes its own needs-human report without entering the worker tree. Linked
+worktrees share this conservative exclusion domain; disjoint workers within one
+invocation retain configured parallelism. Index mutations use a separate stable
+canonical checkout lock and the existing in-process FIFO. The optional Git mutex
+`failFast` setting changes ownership admission only; default waiter, stale-lock
+recovery, heartbeat, cancellation and release behavior remain intact.
+
+Adopted repositories need no `.cq/` ignore rule for verified publication.
+Addressing registers exact ledger and findings-record paths only after validated
+admission/engine writes, fingerprints their bytes, and exempts only unchanged
+ordinary untracked bookkeeping files. Tracked changes, other untracked files
+(including other `.cq/` paths), replaced bookkeeping and changed index entries
+still withhold publication and replies. The optional runtime
+`publicationTreeClean` review-loop hook and worker `isBookkeepingPath` predicate
+apply the same hygiene boundary; neither broadens the frozen result schema.

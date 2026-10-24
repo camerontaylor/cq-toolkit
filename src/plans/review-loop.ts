@@ -460,6 +460,8 @@ export interface ReviewLoopOpts {
   dispatchLogPath: string;
   /** Root for the PR worktree (default: resolvePrWorktree's own). */
   worktreeRoot?: string;
+  /** Engine-owned exact bookkeeping exemption; must still reject all tracked/caller changes. */
+  publicationTreeClean?(root: string): Promise<boolean>;
   /**
    * Called after the governed fix run with the run's ACCOUNTED spend
    * (`governor.usdSpent`, plus the token rollup total as the second
@@ -1381,7 +1383,11 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // Publish-time hygiene (round-3 item 2c): a dirty worktree means
   // uncommitted worker side effects — nothing is pushed or resolved.
   const statusAtPublish = await opts.git(['-C', worktree.path, 'status', '--porcelain']);
-  const dirtyWorktree = statusAtPublish.code === 0 && statusAtPublish.stdout.trim() !== '';
+  const dirtyWorktree =
+    statusAtPublish.code !== 0 ||
+    (opts.publicationTreeClean
+      ? !(await opts.publicationTreeClean(worktree.path))
+      : statusAtPublish.stdout.trim() !== '');
   if (dirtyWorktree) {
     reasons.push('dirty-worktree');
   }

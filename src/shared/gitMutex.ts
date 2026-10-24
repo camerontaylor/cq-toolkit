@@ -82,6 +82,8 @@ export interface GitMutexConfig {
   staleMs?: number;
   /** Acquire retries after the first attempt (integer ≥ 0); default {@link DEFAULT_GIT_MUTEX_RETRIES}. */
   retries?: number;
+  /** Refuse a live owner immediately; stale recovery and held-lock refresh remain enabled. */
+  failFast?: boolean;
   /** Exponential-backoff base in ms (integer ≥ 1); default {@link DEFAULT_GIT_MUTEX_RETRY_BASE_MS}. */
   retryBaseMs?: number;
   /** Optional observability hook (see {@link GitMutexEvent}). */
@@ -123,10 +125,13 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
       `git-mutex: staleMs (${String(staleMs)}) must be an integer ≥ ${String(MIN_STALE_MS)} — proper-lockfile clamps the stale window to that floor, and a config meaning less than it says is a misconfiguration`,
     );
   }
-  const retries = config.retries ?? DEFAULT_GIT_MUTEX_RETRIES;
-  if (!Number.isInteger(retries) || retries < 0) {
-    throw new RangeError(`git-mutex: retries (${String(retries)}) must be an integer ≥ 0`);
+  const configuredRetries = config.retries ?? DEFAULT_GIT_MUTEX_RETRIES;
+  if (!Number.isInteger(configuredRetries) || configuredRetries < 0) {
+    throw new RangeError(
+      `git-mutex: retries (${String(configuredRetries)}) must be an integer ≥ 0`,
+    );
   }
+  const retries = config.failFast === true ? 0 : configuredRetries;
   const retryBaseMs = config.retryBaseMs ?? DEFAULT_GIT_MUTEX_RETRY_BASE_MS;
   if (!Number.isInteger(retryBaseMs) || retryBaseMs < 1) {
     throw new RangeError(`git-mutex: retryBaseMs (${String(retryBaseMs)}) must be an integer ≥ 1`);
@@ -138,7 +143,7 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
   // stale, so acquire must still be retrying when staleness passes, or a
   // crash wedges the run forever. A caller raising staleMs above the floor
   // breaks that property, so the misconfiguration is rejected, not absorbed.
-  if (budgetMs < staleMs) {
+  if (!config.failFast && budgetMs < staleMs) {
     throw new RangeError(
       `git-mutex: the retry backoff floor (${String(budgetMs)} ms = retryBaseMs ${String(retryBaseMs)} × (2^${String(retries)} − 1)) is below the stale window (${String(staleMs)} ms) — raise retries (or lower staleMs) so a crashed holder's lock goes stale while acquire is still retrying`,
     );

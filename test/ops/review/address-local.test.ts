@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -122,6 +122,7 @@ async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 100
     journalDir,
     record,
     models,
+    drivers,
     op: makeReviewAddress({ drivers, initialRecord: record }),
     cleanup: async () => {
       await repo.cleanup();
@@ -321,6 +322,157 @@ test.each([
     expect(calls).toBe(1);
     if (result.status !== 'ok')
       expect(result.report!.reasons.join(' ')).toContain('reviewed base/scope');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test.each(['same checkout', 'aliased checkout', 'linked checkout'] as const)(
+  'distinct default-journal invocations cannot overlap worker ownership: %s',
+  async (mode) => {
+    const f = await fixture();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const owned = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let edits = 0;
+    const drivers: DriverFactory = {
+      resolve: (request) => {
+        const resolved = f.drivers.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            ...resolved.driver,
+            run: async (input) => {
+              if (
+                input.outputSchema?.name === 'review.address.outcome/v1' &&
+                !input.prompt.startsWith('related-check feedback')
+              ) {
+                edits++;
+                if (edits > 1) throw new Error('overlapping provider dispatch');
+                entered();
+                await gate;
+              }
+              return resolved.driver.run(input);
+            },
+          },
+        };
+      },
+    };
+    let otherRoot = f.repo.root;
+    if (mode === 'aliased checkout') {
+      otherRoot = join(f.journalDir, 'alias');
+      await symlink(f.repo.root, otherRoot, 'dir');
+    } else if (mode === 'linked checkout') {
+      otherRoot = join(f.journalDir, 'linked');
+      f.repo.git('worktree', 'add', '-q', '-b', 'other', otherRoot, 'HEAD');
+    }
+    const invoke = makeReviewAddress({ drivers, initialRecord: f.record });
+    const first = invoke({ repoRoot: f.repo.root, source: 'local' });
+    try {
+      await Promise.race([
+        owned,
+        first.then((result) => {
+          throw new Error(`first worker did not enter: ${JSON.stringify(result)}`);
+        }),
+      ]);
+      // Even disjoint file claims from another worker instance must not use
+      // the shared mutable checkout while this provider owns its tree.
+      const other = await invoke({ repoRoot: otherRoot, source: 'local' });
+      expect(other.status, JSON.stringify(other)).toBe('needs-human');
+      expect(other.report?.reasons.join(' ')).toContain('could not acquire');
+      expect(edits).toBe(1);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.record.head);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('BAD');
+      release();
+      const completed = await first;
+      expect(completed.status, JSON.stringify(completed)).toBe('ok');
+      const fresh = completed.status === 'ok' ? completed.value : completed.report!;
+      const clean = fresh.rounds.at(-1)!.record;
+      const later = await makeReviewAddress({ drivers, initialRecord: clean })({
+        repoRoot: f.repo.root,
+        source: 'local',
+      });
+      expect(later.status, JSON.stringify(later)).toBe('ok');
+      expect(edits).toBe(1);
+    } finally {
+      release();
+      await first;
+      await f.cleanup();
+    }
+  },
+);
+
+test('adopted no-ignore repository can re-review ledger revisions and commit a second round', async () => {
+  const f = await fixture();
+  try {
+    await f.repo.write('.gitignore', '');
+    f.repo.commitAll('adopted repository');
+    const record = { ...f.record, head: f.repo.git('rev-parse', 'HEAD').trim() };
+    let reviews = 0;
+    const drivers: DriverFactory = {
+      resolve(request) {
+        const resolved = f.drivers.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            ...resolved.driver,
+            run: async (input) => {
+              if (input.outputSchema?.name === 'review.agent/v1') {
+                reviews++;
+                return {
+                  stopReason: 'complete',
+                  usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+                  denials: [],
+                  structuredOutput: {
+                    findings:
+                      reviews === 1
+                        ? [
+                            {
+                              file: 'src/a.ts',
+                              line: 1,
+                              severity: 'high',
+                              text: 'Replace GOOD with FINAL',
+                            },
+                          ]
+                        : [],
+                  },
+                };
+              }
+              if (
+                reviews === 1 &&
+                input.outputSchema?.name === 'review.address.outcome/v1' &&
+                !input.prompt.startsWith('related-check feedback')
+              ) {
+                const path = join(input.workspace!.path, 'src/a.ts');
+                await writeFile(path, (await readFile(path, 'utf8')).replace('GOOD', 'FINAL'));
+              }
+              const result = await resolved.driver.run(input);
+              if (reviews === 1 && input.outputSchema?.name === 'review.address.closure/v1')
+                return {
+                  ...result,
+                  structuredOutput: { closed: true, reason: 'FINAL candidate checked' },
+                };
+              return result;
+            },
+          },
+        };
+      },
+    };
+    const result = await makeReviewAddress({ drivers, initialRecord: record })({
+      repoRoot: f.repo.root,
+      source: 'local',
+      journalDir: f.journalDir,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    const report = result.status === 'ok' ? result.value : result.report!;
+    expect(report.fixesPerRun).toBe(2);
+    expect(reviews).toBe(2);
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('FINAL');
+    expect(f.repo.git('status', '--porcelain')).toContain('.cq/');
   } finally {
     await f.cleanup();
   }

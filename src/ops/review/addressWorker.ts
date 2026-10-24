@@ -84,6 +84,8 @@ export interface AddressWorkerDeps {
   remainingWallMs(): number;
   account(result: WorkerResult): void;
   scanner?: DiffSecretScanner;
+  /** Exact untracked bookkeeping paths owned by the enclosing addressing operation. */
+  isBookkeepingPath?(path: string): Promise<boolean>;
   parentSignal?: AbortSignal;
 }
 
@@ -102,7 +104,14 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const { policy } = deps;
   let state = createEscalationState();
   const root = resolve(deps.repoRoot);
-  const mutex = makeGitMutex({ lockPath: resolve(deps.journalDir, 'commit-mutex') });
+  const mutex = realpath(root).then(async (canonicalRoot) => {
+    const result = await deps.git(['-C', canonicalRoot, 'rev-parse', '--absolute-git-dir']);
+    if (result.code !== 0 || !result.stdout.trim())
+      throw new Error('checkout index identity unavailable');
+    return makeGitMutex({
+      lockPath: resolve(await realpath(result.stdout.trim()), 'cq-review-address-mutation'),
+    });
+  });
   const active = new Set<string>();
   const verifiedHeads = new Set<string>();
   let initialization: Promise<void> | undefined;
@@ -138,7 +147,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const withMutation = <T>(action: () => Promise<T>, admit?: () => void): Promise<T> => {
     const pending = mutations.then(async () => {
       admit?.();
-      return mutex.withLock(async () => {
+      return (await mutex).withLock(async () => {
         // A different process may have held the lock until our budget expired.
         admit?.();
         return action();
@@ -448,8 +457,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             throw new Error('review.address requires a clean tracked worker tree');
           const unknown = zList(
             await git(root, ['ls-files', '-z', '--others', '--exclude-standard']),
-          ).filter((path) => path && !path.startsWith('.cq/'));
-          if (unknown.length) throw new Error('review.address requires no unknown worker files');
+          );
+          const callerUnknown = [];
+          for (const path of unknown)
+            if (!(await deps.isBookkeepingPath?.(path))) callerUnknown.push(path);
+          if (callerUnknown.length)
+            throw new Error('review.address requires no unknown worker files');
           verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
         }, admitMutation);
         await initialization;
@@ -523,8 +536,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             const changes = zList(await git(root, ['diff', '--name-only', '-z', 'HEAD']));
             const untracked = zList(
               await git(root, ['ls-files', '-z', '--others', '--exclude-standard']),
-            ).filter((p) => p && !p.startsWith('.cq/'));
-            if ([...changes, ...untracked].some((p) => !active.has(p)))
+            );
+            const callerUntracked = [];
+            for (const path of untracked)
+              if (!(await deps.isBookkeepingPath?.(path))) callerUntracked.push(path);
+            if ([...changes, ...callerUntracked].some((p) => !active.has(p)))
               throw new AddressRefusal('unknown or out-of-scope worker edits', true);
             if (
               classifyStagePaths([...changes, ...untracked], undefined, false, false).kind !==
