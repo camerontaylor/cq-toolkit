@@ -18,8 +18,10 @@ THE I1 CLI CONTRACT (landed):
   --ops-root remains a run-plan flag (a plan subcommand rejects it with exit
   2; embedders inject an ops root through the runCli DI).
   Op names win on a name collision (the op registry is consulted first).
-- stdout = exactly ONE JSON artifact per invocation (an OpResult, or a
-  RunReport for run-plan); the plain-text `--help` surface is the one
+- stdout = one JSON artifact: the OpResult, optionally with a `report` field
+  carrying the op's run report on any status (or a RunReport for run-plan).
+  The report must be JSON-lossless; other extension keys are rejected.
+  The plain-text `--help` surface is the one
   sanctioned exception. In human mode an invocation that fails before any
   result exists (usage error, invalid input, thrown) leaves stdout empty.
 - stderr = `cq:`-prefixed narration, failures-only by default; `--json`

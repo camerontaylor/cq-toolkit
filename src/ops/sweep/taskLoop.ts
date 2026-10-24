@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { unlink } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -61,6 +63,7 @@ export async function runTaskLoop(
   let accepted = baseline;
   let lastSha: string | undefined;
   let budgetStopped = false;
+  let indeterminate: string | undefined;
   let spentTokens = 0;
   const unitStart = Date.now();
   const git = async (args: string[]) => {
@@ -78,10 +81,22 @@ export async function runTaskLoop(
       ...command,
       timeoutMs: Math.min(command.timeoutMs ?? 600_000, remainingWall),
     };
-    const parsed = parseCheckOutput(
-      adapterByName(bindings.adapter),
-      await bindings.runCheck(boundedCommand),
-    );
+    const untracked = async () =>
+      new Set(
+        (await git(['ls-files', '--others', '--exclude-standard', '-z']))
+          .split('\0')
+          .filter(Boolean),
+      );
+    const before = await untracked();
+    let raw;
+    try {
+      raw = await bindings.runCheck(boundedCommand);
+    } finally {
+      for (const path of await untracked()) {
+        if (!before.has(path)) await unlink(resolve(worktree.path, path));
+      }
+    }
+    const parsed = parseCheckOutput(adapterByName(bindings.adapter), raw);
     if (parsed.verdict !== 'parsed') throw new Error(parsed.reason);
     return parsed.set;
   };
@@ -102,19 +117,29 @@ export async function runTaskLoop(
       row.reason = 'failure has no attributed file';
       continue;
     }
-    const parent = await git(['rev-parse', 'HEAD']);
-    const related = relatedCheckCommand(
-      bindings.checkCommand(unit, worktree.path),
-      task.files,
-      config.relatedArgs,
-    );
+    if (
+      !accepted.failureSet.failures.some(
+        (failure) => failure.file !== null && task.files.includes(failure.file),
+      )
+    ) {
+      row.outcome = 'fixed';
+      row.reason = 'earlier verified task resolved this file';
+      continue;
+    }
+    let parent: string | undefined;
     let finalTree: { final: UnitProbe; treeSha: string } | undefined;
     try {
+      parent = await git(['rev-parse', 'HEAD']);
+      const related = relatedCheckCommand(
+        bindings.checkCommand(unit, worktree.path),
+        task.files,
+        config.relatedArgs,
+      );
       const resolved = bindings.taskWorker?.(task, related) ?? {
         driver: bindings.driver,
         modelSpec: bindings.modelSpec,
       };
-      const prompt = `${bindings.prompt(unit, worktree)}\nTask: ${JSON.stringify(task)}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo) and summary as structured output.`;
+      const prompt = `${bindings.prompt(unit, worktree)}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
       const invoke = async (
         invocation: TaskAttempt['invocation'],
         text: string,
@@ -141,7 +166,12 @@ export async function runTaskLoop(
               modelSpec: resolved.modelSpec,
               workspace: { path: worktree.path },
               budget: { ...bindings.budget, wallClockMs: remainingWall },
-              toolPolicy: { allow: ['read', 'edit', 'run'], mode: 'allowlist' },
+              toolPolicy: {
+                allow: (bindings.toolPolicy?.allow ?? ['read', 'edit', 'run']).filter(
+                  (tool) => tool !== 'run' || bindings.taskWorker !== undefined,
+                ),
+                mode: 'allowlist',
+              },
               sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
               outputSchema: {
                 name: 'fix.task/v1',
@@ -151,8 +181,9 @@ export async function runTaskLoop(
                   properties: {
                     outcome: { enum: ['broken-test', 'code-bug', 'todo'] },
                     summary: { type: 'string' },
+                    confidence: { type: 'number', minimum: 0, maximum: 1 },
                   },
-                  required: ['outcome', 'summary'],
+                  required: ['outcome', 'summary', 'confidence'],
                 },
               },
             },
@@ -220,17 +251,22 @@ export async function runTaskLoop(
         if (bindings.proposeOnly) {
           row.outcome = 'escalated-to-human';
           row.reason = pathGate.message ?? 'propose-only';
-          break;
+          row.preservedEdits = await preserveTaskEdits(git, branch);
+          continue;
         }
         throw new Error(pathGate.message ?? 'path refusal');
       }
       const output = second.structuredOutput as
-        | { outcome?: unknown; summary?: unknown }
+        | { outcome?: unknown; summary?: unknown; confidence?: unknown }
         | undefined;
       if (
         !output ||
         !['broken-test', 'code-bug', 'todo'].includes(String(output.outcome)) ||
-        typeof output.summary !== 'string'
+        typeof output.summary !== 'string' ||
+        typeof output.confidence !== 'number' ||
+        !Number.isFinite(output.confidence) ||
+        output.confidence < 0 ||
+        output.confidence > 1
       )
         throw new Error('worker returned no valid outcome');
       const subject =
@@ -239,11 +275,12 @@ export async function runTaskLoop(
           : output.outcome === 'todo'
             ? 'chore(test)'
             : `fix(${unit.package})`;
-      const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: 1\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}`;
+      const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: ${String(output.confidence)}\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}`;
       const validation = await validateFix({
         baseline: accepted.failureSet,
         related: () => check(related),
         broader: async () => {
+          if (parent === undefined) throw new Error('missing task parent');
           finalTree = await effects.broader(parent);
           return finalTree.final.failureSet;
         },
@@ -268,13 +305,20 @@ export async function runTaskLoop(
     } catch (error) {
       row.reason = String(error);
       row.outcome = row.validation?.verdict === 'needs-human' ? 'escalated-to-human' : 'unfixed';
-      if ((await git(['rev-parse', 'HEAD'])) !== parent) {
+      try {
+        if (parent === undefined || (await git(['rev-parse', 'HEAD'])) !== parent) {
+          row.outcome = 'escalated-to-human';
+          row.reason += '; HEAD changed; remaining tasks stopped for human review';
+          break;
+        }
+        if (await git(['status', '--porcelain'])) {
+          row.preservedEdits = await preserveTaskEdits(git, branch);
+        }
+      } catch (cleanupError) {
+        indeterminate = `failed-task evidence cleanup failed: ${String(cleanupError)}`;
+        row.reason += `; ${indeterminate}`;
         row.outcome = 'escalated-to-human';
-        row.reason += '; HEAD changed; remaining tasks stopped for human review';
         break;
-      }
-      if (await git(['status', '--porcelain'])) {
-        row.preservedEdits = await preserveTaskEdits(git, branch);
       }
     }
   }
@@ -292,11 +336,15 @@ export async function runTaskLoop(
   if (
     lastSha &&
     bindings.pushBranch &&
-    !budgetStopped &&
+    !indeterminate &&
     !reports.some((row) => row.reason?.includes('HEAD changed'))
   ) {
-    await effects.publish(lastSha);
-    pushed = true;
+    try {
+      await effects.publish(lastSha);
+      pushed = true;
+    } catch (error) {
+      indeterminate = `publish failed: ${String(error)}`;
+    }
   }
   return {
     status: 'ok',
@@ -313,6 +361,7 @@ export async function runTaskLoop(
       pushed,
       tasks: reports,
       budgetStopped,
+      ...(indeterminate === undefined ? {} : { indeterminate }),
     },
   };
 }

@@ -355,6 +355,7 @@ export interface UnitProbe {
 export interface SweepUnitReport {
   tasks?: FixTaskReport[];
   budgetStopped?: boolean;
+  indeterminate?: string;
   package: string;
   fixer: string;
   /** The worktree the unit ran in (create or I7 reuse). */
@@ -1271,7 +1272,10 @@ async function probeLeg(
               ...failure,
               file:
                 failure.file !== null && isAbsolute(failure.file)
-                  ? relative(worktree.path, failure.file)
+                  ? relative(
+                      bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
+                      failure.file,
+                    )
                   : failure.file,
             })),
           },
@@ -1493,6 +1497,8 @@ export interface SweepUnitDriverConfig {
 
 /** The JSON-serializable probe binding of a dispatch input. */
 export interface SweepUnitCheckConfig {
+  /** Repository-relative working directory, resolved anew in every checkout. */
+  cwd?: string;
   /** The probe's wire-format adapter. */
   adapter: AdapterName;
   /** The check command (executed with cwd = the unit's worktree). */
@@ -1819,7 +1825,7 @@ export function bindingsFromDispatch(
       // item 7): `$&`, `` $` `` and `$'` in a package name would otherwise be
       // reinterpreted as replacement tokens.
       args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', () => unit.package)),
-      cwd: worktreePath,
+      cwd: resolve(worktreePath, input.check?.cwd ?? '.'),
       ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
     }),
     driver: resolved.driver,

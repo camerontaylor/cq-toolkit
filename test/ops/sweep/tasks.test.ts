@@ -25,7 +25,7 @@ test('argv template replaces full args and expands files without shell interpret
     relatedCheckCommand(check, ['a space.ts', '$(literal).ts'], ['related', '{files}', '--json'])
       .args,
   ).toEqual(['related', 'a space.ts', '$(literal).ts', '--json']);
-  expect(relatedCheckCommand(check, ['a.ts']).args).toEqual(['full', 'a.ts']);
+  expect(relatedCheckCommand(check, ['-x.ts']).args).toEqual(['full', '--', '-x.ts']);
   expect(() => relatedCheckCommand(check, ['a.ts'], ['embedded-{files}'])).toThrow('standalone');
 });
 

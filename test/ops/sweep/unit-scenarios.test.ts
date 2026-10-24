@@ -494,6 +494,52 @@ describe('sweep unit fixer budget enforcement', () => {
 });
 
 describe('optional per-task loop', () => {
+  test('cleanup and publish failures retain task evidence as indeterminate unit reports', async () => {
+    for (const fault of ['cleanup', 'publish']) {
+      const world = await makeWorld([{ failing: true }, { failing: false }]);
+      const underlying = world.gitFactory();
+      try {
+        const result = await runUnit(world, {
+          taskLoop: {},
+          git: async (args) =>
+            args.includes('status') && fault === 'cleanup'
+              ? { code: 0, stdout: ' M src/a.js\n', stderr: '' }
+              : underlying(args),
+          driver:
+            fault === 'cleanup'
+              ? world.driverFactory()
+              : {
+                  run: async (invocation) => {
+                    expect(invocation.toolPolicy.allow).not.toContain('run');
+                    return {
+                      stopReason: 'complete',
+                      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                      denials: [],
+                      structuredOutput: {
+                        outcome: 'code-bug',
+                        summary: 'repair source',
+                        confidence: 0.9,
+                      },
+                    };
+                  },
+                },
+          pushBranch: async () => {
+            throw new Error('offline push fault');
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') {
+          expect(result.value.tasks).toHaveLength(1);
+          expect(result.value.indeterminate).toContain(
+            fault === 'cleanup' ? 'cleanup failed' : 'publish failed',
+          );
+          expect(result.value.committed).toBe(fault === 'publish');
+        }
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    }
+  });
   test('absolute runner paths become checkout-relative task files', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     const runCheck = world.runCheckFactory();
@@ -531,7 +577,7 @@ describe('optional per-task loop', () => {
               usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
               denials: [],
               stopReason: 'complete',
-              structuredOutput: { outcome: 'code-bug', summary: 'repair source' },
+              structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
             };
           },
         },
@@ -594,7 +640,7 @@ test('failed task does not block a passing sibling task', async () => {
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           denials: [],
           stopReason: 'complete',
-          structuredOutput: { outcome: 'code-bug', summary: 'repair source' },
+          structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
         }),
       },
     });

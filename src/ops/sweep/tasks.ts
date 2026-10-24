@@ -32,13 +32,13 @@ export function relatedCheckCommand(
   relatedArgs?: readonly string[],
 ): CheckCommand {
   if (relatedArgs !== undefined && !relatedArgs.includes('{files}')) {
-    throw new Error('checks[].relatedArgs must include a standalone {files} token');
+    throw new Error('relatedArgs must include a standalone {files} token');
   }
   return {
     ...check,
     args:
       relatedArgs === undefined
-        ? [...check.args, ...files]
+        ? [...check.args, '--', ...files]
         : relatedArgs.flatMap((arg) => (arg === '{files}' ? [...files] : [arg])),
   };
 }
