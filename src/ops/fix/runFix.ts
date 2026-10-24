@@ -6,8 +6,10 @@ import {
   type EscalationState,
 } from './escalation.js';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { z } from 'zod';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage } from '../../driver/types.js';
@@ -70,6 +72,35 @@ export type FixRunResult = OpResult<FixRunReport> & { report?: FixRunReport };
 export interface FixRunDeps {
   drivers?: DriverFactory;
   registry?: OpRegistryView;
+}
+
+const execFileAsync = promisify(execFile);
+
+async function githubCompareBase(repoRoot: string, base: string): Promise<string | undefined> {
+  try {
+    const [{ stdout: remote }, { stdout: revision }] = await Promise.all([
+      execFileAsync('git', ['-C', repoRoot, 'remote', 'get-url', 'origin'], {
+        timeout: 5_000,
+        maxBuffer: 16 * 1024,
+      }),
+      execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--verify', `${base}^{commit}`], {
+        timeout: 5_000,
+        maxBuffer: 16 * 1024,
+      }),
+    ]);
+    return githubCompareBaseUrl(remote.trim(), revision.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+export function githubCompareBaseUrl(remote: string, revision: string): string | undefined {
+  const match =
+    /^(?:https?:\/\/|ssh:\/\/git@)github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(remote) ??
+    /^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/.exec(remote);
+  if (!match?.[1] || !/^[0-9a-f]{40,64}$/.test(revision)) return undefined;
+  const safeRef = (ref: string) => encodeURIComponent(ref).replaceAll('%2F', '/');
+  return `https://github.com/${match[1]}/compare/${safeRef(revision)}...`;
 }
 
 /** Two-phase sweep composition; no kernel policy or taxonomy changes. */
@@ -439,6 +470,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         const tracker = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch);
         if (template && tracker && markers.length) {
           const assembly = template.input as AssemblePrsInput;
+          const compareBase = report.tasks.some((task) => task.failedAttemptPublished)
+            ? await githubCompareBase(repoRoot, assembly.base)
+            : undefined;
           const packages = assembly.packages
             .filter((pkg) =>
               markers.some((marker) => marker.branch === pkg.branch && marker.package === pkg.name),
@@ -456,7 +490,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                   (round) => round.failedAttempt?.branch === task.failedAttempt?.branch,
                 );
                 const branch = task.failedAttempt!.branch;
-                return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: ${(task.reason ?? 'unfixed').replace(/[\r\n]+/g, ' ')}; branch \`${branch}\``;
+                const branchRef =
+                  task.failedAttemptPublished && compareBase !== undefined
+                    ? `[compare](${compareBase}${encodeURIComponent(branch).replaceAll('%2F', '/')})`
+                    : `local branch \`${branch}\``;
+                return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: ${(task.reason ?? 'unfixed').replace(/[\r\n]+/g, ' ')}; ${branchRef}`;
               });
               const section = `## Unfixed (${String(unfixed.length)})\n\n${lines.join('\n')}`;
               return {

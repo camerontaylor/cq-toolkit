@@ -90,7 +90,9 @@ process.exitCode = failed ? 1 : 0;
   await git(repo, 'remote', 'add', 'origin', origin);
   return { root, repo, origin, journalDir: join(root, 'journal') };
 }
-function scripted(mode: 'fix' | 'fail-b' | 'none' = 'fix'): DriverFactory {
+function scripted(
+  mode: 'fix' | 'fail-b' | 'none' | 'private-change' | 'safe-change' | 'scan-fault' = 'fix',
+): DriverFactory {
   return {
     resolve: ({ modelSpec }) => ({
       modelSpec,
@@ -108,6 +110,21 @@ function scripted(mode: 'fix' | 'fail-b' | 'none' = 'fix'): DriverFactory {
                 'module.exports = { actual: 1, expected: 1 };\n',
               );
             }
+          if (mode === 'private-change')
+            await writeFile(
+              join(invocation.workspace.path, '.env.config'),
+              'DO_NOT_UPLOAD=synthetic\n',
+            );
+          if (mode === 'scan-fault')
+            await writeFile(
+              join(invocation.workspace.path, '.env.config'),
+              'SCANNER_FAULT=synthetic\n',
+            );
+          if (mode === 'safe-change')
+            await writeFile(
+              join(invocation.workspace.path, 'public-note.txt'),
+              'safe public content\n',
+            );
           return {
             stopReason: 'complete',
             usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
@@ -533,6 +550,88 @@ test('pushFailed publishes only the failed-attempt branch with a CI-skip commit 
     await rm(f.root, { recursive: true, force: true });
   }
 });
+test('pushFailed scans the refused failed commit contents and keeps secret paths local', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted('private-change') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    expect(result.status).toBe('needs-human');
+    const failed = report.tasks.find((task) => task.failedAttempt !== undefined)!;
+    expect(failed.reason).toContain('failed-attempt publication refused');
+    expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:.env.config`)).toContain(
+      'DO_NOT_UPLOAD',
+    );
+    expect(
+      await git(
+        f.repo,
+        'ls-remote',
+        '--heads',
+        'origin',
+        `refs/heads/${failed.failedAttempt!.branch}`,
+      ),
+    ).toBe('');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+test('pushFailed keeps a failed branch local when its upload scan faults', async () => {
+  const f = await fixture();
+  vi.stubEnv('CQ_TEST_GITLEAKS_FAIL_ON', 'SCANNER_FAULT');
+  try {
+    const result = await makeFixRun({ drivers: scripted('scan-fault') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    const failed = report.tasks.find((task) => task.failedAttempt !== undefined)!;
+    expect(result.status).toBe('needs-human');
+    expect(failed.reason).toContain('failed-attempt publication refused');
+    expect(await git(f.repo, 'rev-parse', `refs/heads/${failed.failedAttempt!.branch}`)).toBe(
+      failed.failedAttempt!.sha,
+    );
+    expect(
+      await git(
+        f.repo,
+        'ls-remote',
+        '--heads',
+        'origin',
+        `refs/heads/${failed.failedAttempt!.branch}`,
+      ),
+    ).toBe('');
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+test('pushFailed publishes a clean public failed-attempt change', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted('safe-change') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const failed = reportOf(result).tasks.find((task) => task.failedAttempt !== undefined)!;
+    expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:public-note.txt`)).toContain(
+      'safe public content',
+    );
+    expect(
+      (
+        await git(
+          f.repo,
+          'ls-remote',
+          '--heads',
+          'origin',
+          `refs/heads/${failed.failedAttempt!.branch}`,
+        )
+      ).split(/\s+/)[0],
+    ).toBe(failed.failedAttempt!.sha);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 test('pushFailed keeps path-policy-refused failed attempts local', async () => {
   const f = await fixture();
   try {
@@ -715,7 +814,7 @@ test('PR body carries an Unfixed section for tasks with local failed-attempt evi
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
     expect(packageBody).toContain('## Unfixed (1)');
     expect(packageBody).toContain('`cases/b.test.cjs`');
-    expect(packageBody).toContain('branch `cq/fixture/failed/');
+    expect(packageBody).toContain('local branch `cq/fixture/failed/');
     expect(packageBody).toContain('validation refused task');
   } finally {
     await rm(f.root, { recursive: true, force: true });
@@ -895,8 +994,9 @@ test.each([
   'budget-stop',
   'regression-rescue',
   'concurrent-shared',
+  'rescue-tainted-patch',
 ] as const)('spawned escalation CLI %s retains honest tier and commit evidence', async (mode) => {
-  const f = await fixture(mode === 'budget-stop' ? 5 : 1000, false);
+  const f = await fixture(mode === 'budget-stop' ? 5 : 1000, mode === 'rescue-tainted-patch');
   try {
     const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as CqConfig;
     config.roles = {
@@ -907,7 +1007,9 @@ test.each([
             ? 'worker-fixes-b'
             : mode === 'regression-rescue'
               ? 'worker-regression'
-              : 'worker-fails',
+              : mode === 'rescue-tainted-patch'
+                ? 'worker-tainted'
+                : 'worker-fails',
       },
       rescue: {
         provider: 'fixture',
@@ -1006,6 +1108,10 @@ test.each([
       expect(report.tasks.map((task) => task.outcome)).toEqual(['escalated-to-human', 'fixed']);
       expect(report.tasks[1]?.commits).toHaveLength(1);
       expect(report.escalation?.perRunUsed).toBe(1);
+    } else if (mode === 'rescue-tainted-patch') {
+      expect(report.tasks[0]?.attempts.every((attempt) => attempt.tier === 'worker')).toBe(true);
+      expect(report.tasks[0]?.reason).toContain('upload refused');
+      expect(report.tasks[0]?.failedAttempt).toBeDefined();
     } else {
       expect(report.tasks.flatMap((task) => task.commits)).toEqual([]);
       expect(report.usage.input + report.usage.output).toBe(6);

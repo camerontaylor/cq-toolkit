@@ -3,6 +3,20 @@ import { z } from 'zod';
 import { createGovernor, currentJobContext } from '../../../src/kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../../../src/kernel/runner.js';
 import type { Op, OpRegistryEntry } from '../../../src/kernel/types.js';
+import { githubCompareBaseUrl } from '../../../src/ops/fix/runFix.js';
+
+describe('failed-attempt compare links', () => {
+  test('builds an encoded GitHub comparison URL from a remote and pinned base revision', () => {
+    expect(githubCompareBaseUrl('git@github.com:example/scratch.git', 'a'.repeat(40))).toBe(
+      `https://github.com/example/scratch/compare/${'a'.repeat(40)}...`,
+    );
+  });
+
+  test('does not invent a GitHub link for a non-GitHub remote or invalid revision', () => {
+    expect(githubCompareBaseUrl('/tmp/origin.git', 'a'.repeat(40))).toBeUndefined();
+    expect(githubCompareBaseUrl('https://github.com/example/scratch.git', 'HEAD')).toBeUndefined();
+  });
+});
 
 describe('fix.run composition context', () => {
   test('a CLI-style direct invocation gives the inner worker plan its own governed job context', async () => {

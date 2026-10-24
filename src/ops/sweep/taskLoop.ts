@@ -52,6 +52,7 @@ export interface FixTaskReport {
   validation?: ValidationVerdict;
   reason?: string;
   failedAttempt?: { branch: string; sha: string };
+  failedAttemptPublished?: boolean;
   rounds?: Array<{
     tier: 'worker' | 'rescue';
     attempt: number;
@@ -88,6 +89,8 @@ export interface FailedAttemptInput {
   reason: string;
   pushFailed: boolean;
 }
+const FAILED_ATTEMPT_SCAN_FILE_CAP_BYTES = 4 * 1024 * 1024;
+const FAILED_ATTEMPT_SCAN_TOTAL_CAP_BYTES = 32 * 1024 * 1024;
 export interface TaskEscalation {
   rescueModel?: ModelSpec;
   next: (
@@ -246,8 +249,12 @@ async function runTaskLoopInner(
       if (decision.tier === 'worker') workerUsed++;
       else rescueUsed++;
       const priorRound = row.rounds?.at(-1);
+      let priorFailedFeedback:
+        | { patch: string; contents: Array<{ text: string; path: string }> }
+        | undefined;
       delete row.validation;
       delete row.failedAttempt;
+      delete row.failedAttemptPublished;
       let parent: string | undefined;
       let failedModel: ModelSpec = bindings.modelSpec;
       let finalTree: { final: UnitProbe; treeSha: string } | undefined;
@@ -303,16 +310,20 @@ async function runTaskLoopInner(
           modelSpec: bindings.modelSpec,
         };
         failedModel = resolved.modelSpec;
-        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(priorRound ?? null)}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
+        if (decision.tier === 'rescue' && priorRound?.failedAttempt !== undefined) {
+          priorFailedFeedback = await failedAttemptFeedback(git, priorRound.failedAttempt);
+        }
+        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(priorRound ?? null)}${priorFailedFeedback === undefined ? '' : `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${priorFailedFeedback.patch}`}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
         const invoke = async (
           invocation: TaskAttempt['invocation'],
           text: string,
+          contents?: Array<{ text: string; path: string }>,
         ): Promise<WorkerResult> => {
           try {
             if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
             if (bindings.scanPrompt === undefined)
               throw new Error('worker upload scanner is required');
-            await bindings.scanPrompt(text);
+            await bindings.scanPrompt(text, contents);
           } catch {
             row.outcome = 'escalated-to-human';
             throw new Error('worker upload refused: missing, failed or positive denylist scan');
@@ -423,7 +434,7 @@ async function runTaskLoopInner(
             deadline.dispose();
           }
         };
-        const first = await invoke('edit', prompt);
+        const first = await invoke('edit', prompt, priorFailedFeedback?.contents);
         // Stage and classify BEFORE executing any check on worker-controlled bytes.
         if ((await git(['rev-parse', 'HEAD'])) !== parent)
           throw new Error('worker moved HEAD; unscanned self-commit');
@@ -449,6 +460,7 @@ async function runTaskLoopInner(
         const second = await invoke(
           'feedback',
           `${prompt}\nPrior output: ${JSON.stringify(first.structuredOutput)}\nRelated check: ${JSON.stringify(feedback)}\nUse this feedback to finish the task.`,
+          priorFailedFeedback?.contents,
         );
         if ((await git(['rev-parse', 'HEAD'])) !== parent)
           throw new Error('worker moved HEAD; unscanned self-commit');
@@ -610,21 +622,38 @@ async function runTaskLoopInner(
             gate,
             outcome: row.outcome,
           });
-          const pathPolicyRefused = row.validation?.gates.some(
-            (gate) => gate.gate === 'paths' && gate.verdict !== 'pass',
-          );
-          if (config.pushFailed && !pathPolicyRefused) {
-            await git([
-              'push',
-              'origin',
-              `refs/heads/${row.failedAttempt.branch}:refs/heads/${row.failedAttempt.branch}`,
-            ]);
-          }
         } catch (cleanupError) {
           indeterminate = `failed-task evidence recording failed: ${String(cleanupError)}`;
           row.reason += `; ${indeterminate}`;
           row.outcome = 'escalated-to-human';
           break taskLoop;
+        }
+        if (config.pushFailed && row.failedAttempt !== undefined) {
+          try {
+            await scanFailedAttempt(git, bindings, parent, row.failedAttempt.sha);
+            const unsafeRefusal = row.validation?.gates.some(
+              (gate) =>
+                ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
+            );
+            if (!unsafeRefusal) {
+              await git([
+                'push',
+                'origin',
+                `refs/heads/${row.failedAttempt.branch}:refs/heads/${row.failedAttempt.branch}`,
+              ]);
+              row.failedAttemptPublished = true;
+            }
+          } catch (publishError) {
+            indeterminate = `failed-attempt publication refused: ${String(publishError)}`;
+            row.reason = `${row.reason ?? 'failed attempt'}; ${indeterminate}`;
+            row.outcome = 'escalated-to-human';
+            const recordedRound = row.rounds?.at(-1);
+            if (recordedRound?.failedAttempt?.branch === row.failedAttempt.branch) {
+              recordedRound.reason = row.reason;
+              recordedRound.outcome = row.outcome;
+            }
+            break taskLoop;
+          }
         }
         regression = row.validation?.regression === true;
         if (
@@ -689,6 +718,91 @@ export type TaskWorker = (
   related: CheckCommand,
   modelSpec?: ModelSpec,
 ) => { driver: Driver; modelSpec: ModelSpec };
+
+async function scanFailedAttempt(
+  git: (args: string[]) => Promise<string>,
+  bindings: SweepUnitBindings,
+  parent: string,
+  sha: string,
+): Promise<void> {
+  if (bindings.scanPrompt === undefined)
+    throw new Error('failed-attempt publication requires the configured denylist scanner');
+  const contents = await failedAttemptContents(git, parent, sha);
+  await bindings.scanPrompt(`Failed-attempt commit ${sha} publication scan`, contents);
+}
+
+async function failedAttemptFeedback(
+  git: (args: string[]) => Promise<string>,
+  attempt: FailedAttempt,
+): Promise<{ patch: string; contents: Array<{ text: string; path: string }> }> {
+  if ((await git(['rev-parse', '--verify', `refs/heads/${attempt.branch}`])) !== attempt.sha)
+    throw new Error('prior failed-attempt branch no longer matches its recorded ordinal');
+  const commitLine = await git(['rev-list', '--parents', '-n', '1', attempt.sha]);
+  const [sha, parent, extra] = commitLine.split(/\s+/);
+  if (sha !== attempt.sha || parent === undefined || extra !== undefined)
+    throw new Error('prior failed-attempt commit has invalid parentage');
+  const contents = await failedAttemptContents(git, parent, attempt.sha);
+  const patch = await git([
+    'diff',
+    ...SWEEP_DIFF_FLAGS,
+    '--binary',
+    '--full-index',
+    parent,
+    attempt.sha,
+    '--',
+  ]);
+  if (Buffer.byteLength(patch, 'utf8') > FAILED_ATTEMPT_SCAN_TOTAL_CAP_BYTES)
+    throw new Error('prior failed-attempt patch exceeds the feedback cap');
+  return { patch, contents };
+}
+
+async function failedAttemptContents(
+  git: (args: string[]) => Promise<string>,
+  parent: string,
+  sha: string,
+): Promise<Array<{ text: string; path: string }>> {
+  const capture = await git([
+    'diff',
+    ...SWEEP_DIFF_FLAGS,
+    '--name-status',
+    '-z',
+    parent,
+    sha,
+    '--',
+  ]);
+  const tokens = capture.split('\0').filter((token) => token !== '');
+  const contents: Array<{ text: string; path: string }> = [];
+  let totalBytes = 0;
+  for (let index = 0; index < tokens.length;) {
+    const status = tokens[index++];
+    const path = tokens[index++];
+    if (status === undefined || path === undefined || !['A', 'D', 'M', 'T'].includes(status))
+      throw new Error('failed-attempt diff has an invalid or unsupported path record');
+    if (path.startsWith('/') || path.split(/[\\/]/).some((segment) => segment === '..'))
+      throw new Error('failed-attempt diff contains a path outside the repository');
+    const revisions = status === 'A' ? [sha] : status === 'D' ? [parent] : [parent, sha];
+    for (const revision of revisions) {
+      const sizeText = await git(['cat-file', '-s', `${revision}:${path}`]);
+      if (!/^\d+$/.test(sizeText))
+        throw new Error(`cannot determine failed-attempt size for ${path}`);
+      const size = Number(sizeText);
+      if (!Number.isSafeInteger(size) || size > FAILED_ATTEMPT_SCAN_FILE_CAP_BYTES)
+        throw new Error(`failed-attempt file exceeds the scan cap: ${path}`);
+      totalBytes += size;
+      if (totalBytes > FAILED_ATTEMPT_SCAN_TOTAL_CAP_BYTES)
+        throw new Error('failed-attempt contents exceed the total scan cap');
+      const text = await git(['show', `${revision}:${path}`]);
+      if (
+        Buffer.byteLength(text, 'utf8') > FAILED_ATTEMPT_SCAN_FILE_CAP_BYTES ||
+        text.includes('\0') ||
+        text.includes('\uFFFD')
+      )
+        throw new Error(`failed-attempt file is too large or not safely scannable text: ${path}`);
+      contents.push({ text, path });
+    }
+  }
+  return contents;
+}
 
 /** Pin a failed attempt as an inspectable commit without moving the unit branch. */
 export async function commitFailedAttempt(

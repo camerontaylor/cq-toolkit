@@ -37,6 +37,23 @@ const drivers = {
             join(invocation.workspace.path, 'cases/b.test.cjs'),
             'module.exports = { actual: 1, expected: 3 };\n',
           );
+        if (modelSpec.model === 'worker-fails' || modelSpec.model === 'worker-tainted') {
+          for (const file of task.files)
+            if (file.endsWith('.test.cjs'))
+              await writeFile(
+                join(invocation.workspace.path, file),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+          if (modelSpec.model === 'worker-tainted')
+            await writeFile(join(invocation.workspace.path, 'public-note.txt'), 'DO_NOT_UPLOAD\n');
+        }
+        if (
+          modelSpec.model === 'rescue-fixes' &&
+          invocation.prompt.includes('Prior failed-attempt patch')
+        ) {
+          if (!invocation.prompt.includes('expected: 3'))
+            throw new Error('rescue prompt omitted prior failed-attempt source patch');
+        }
         return {
           stopReason: 'complete',
           denials: [],
