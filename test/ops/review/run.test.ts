@@ -6,8 +6,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runCli } from '../../../src/cli/main.js';
 import type { CliIo } from '../../../src/cli/output.js';
+import { assembleReadiness, DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
-import { repoEffects, makeTestRepo } from '../dev/repo.js';
+import { cycleRecord } from '../dev/fakes.js';
+import { repoEffects, makeTestRepo, seed } from '../dev/repo.js';
 
 async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>): Promise<void> {
   await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
@@ -100,18 +102,18 @@ describe('review.run', () => {
       const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
       const [recordFile] = await readdir(folder);
       const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
-        sources: { kind: string; status: string; cycleId?: string }[];
+        sources: { kind: string; status: string; cycleId?: string; reason?: string }[];
         findings: { id: string; source: string; text: string }[];
       };
-      expect(persisted.sources).toEqual([
+      expect(persisted.sources).toMatchObject([
         {
           kind: 'coderabbit',
           status: 'blocked',
           cycleId: `c001-${headPrefix}`,
-          reason: expect.any(String),
         },
         { kind: 'agent', status: 'terminal', cycleId: `c002-${headPrefix}` },
       ]);
+      expect(persisted.sources[0]?.reason).toContain('BLOCKED');
       expect(persisted.findings).toContainEqual(
         expect.objectContaining({
           id: `${persisted.sources[1]?.cycleId}#f1`,
@@ -474,6 +476,17 @@ describe('review.run', () => {
     const repo = await makeTestRepo();
     try {
       await configureAgentRepo(repo);
+      const state = await seed(repo, (current) => [
+        cycleRecord({
+          cycleId: `c002-${current.head.slice(0, 8)}`,
+          reviewer: 'agent:reviewer',
+          base: current.base,
+          head: current.head,
+          dirtySha256: current.dirtySha256,
+          target: 'merge-queue',
+          at: '2026-10-24T00:00:00.000Z',
+        }),
+      ]);
       const drivers = {
         resolve: vi.fn(() => ({
           lane: 'ai-sdk',
@@ -503,13 +516,48 @@ describe('review.run', () => {
       const stored = JSON.parse(
         await readFile(join(repo.root, '.cq', 'review', 'feature%2Fx', '1.json'), 'utf8'),
       ) as {
-        sources: { kind: string; status: string; reason?: string }[];
+        sources: { kind: string; status: string; reason?: string; cycleId?: string }[];
       };
       {
         const agent = stored.sources.find((source) => source.kind === 'agent');
         expect(agent?.status).toBe('blocked');
         expect(agent?.reason?.includes('invalid structured output')).toBe(true);
       }
+      const ledger = repoEffects(repo).openLedger(state.branch).load();
+      const latestAgent = ledger.records
+        .filter((record) => record.kind === 'cycle' && record.reviewer === 'agent:reviewer')
+        .at(-1);
+      expect(latestAgent).toMatchObject({
+        kind: 'cycle',
+        completion: { kind: 'blocked', reason: 'agent review returned invalid structured output' },
+        base: state.base,
+        head: state.head,
+        dirtySha256: state.dirtySha256,
+        target: 'merge-queue',
+        scope: 'full',
+      });
+      if (!latestAgent || latestAgent.kind !== 'cycle') throw new Error('missing agent cycle');
+      const readiness = assembleReadiness({
+        branch: state.branch,
+        target: 'merge-queue',
+        identity: {
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
+        },
+        ledger: { version: DEV_LEDGER_VERSION, branch: state.branch, records: ledger.records },
+        untracked: state.untracked,
+        configuredReviewers: ['agent'],
+        nowIso: '2026-10-24T00:00:00.000Z',
+      });
+      expect(readiness.ready).toBe(false);
+      if (!readiness.ready)
+        expect(
+          readiness.gaps.find((gap) => gap.field === 'latest-review-blocked')?.detail,
+        ).toContain(latestAgent.cycleId);
+      expect(stored.sources.find((source) => source.kind === 'agent')?.cycleId).toBe(
+        latestAgent.cycleId,
+      );
     } finally {
       await repo.cleanup();
     }

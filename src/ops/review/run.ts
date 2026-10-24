@@ -41,12 +41,12 @@ export interface ReviewRunDeps {
   ) => DiffSecretScanner;
 }
 
-function blocked(kind: ReviewSource['kind'], reason: string): FindingsRecord {
+function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
   return {
     schemaVersion: 1,
     branch: '',
     head: '',
-    sources: [{ kind, status: 'blocked', reason }],
+    sources: [{ kind, status: 'blocked', reason, ...(cycleId ? { cycleId } : {}) }],
     findings: [],
   };
 }
@@ -299,82 +299,88 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                 wallMs: policy.budgets.run.wallMs,
                 severityMap: policy.review.agentSeverityMap,
               });
+              const blockedReason =
+                agent.status === 'needs-human'
+                  ? agent.reason
+                  : agent.status === 'failed'
+                    ? agent.error
+                    : agent.status === 'ok'
+                      ? undefined
+                      : `agent review did not complete (${agent.status})`;
+              const at = effects.nowIso();
+              const agentFindings = agent.status === 'ok' ? agent.value.findings : [];
+              let logPath: string;
+              try {
+                logPath = await effects.writeReviewLog(
+                  state.branch,
+                  `agent-${Date.now()}`,
+                  `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\n`,
+                );
+              } catch (error) {
+                return {
+                  status: 'indeterminate',
+                  detail: `review.run: agent review attempt was dispatched but its log outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
+                };
+              }
+              let cycleId: string;
+              try {
+                cycleId = await effects.openLedger(state.branch).mutate((ledger) => {
+                  const count = ledger.records.filter((entry) => entry.kind === 'cycle').length;
+                  const id = `c${String(count + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
+                  const entry: DevCycleRecord = {
+                    kind: 'cycle',
+                    cycleId: id,
+                    reviewer: 'agent:reviewer',
+                    scope: input.uncommitted ? 'uncommitted' : 'full',
+                    target,
+                    base: state.base,
+                    head: state.head,
+                    dirtySha256: state.dirtySha256,
+                    completion:
+                      blockedReason === undefined
+                        ? { kind: 'terminal' }
+                        : { kind: 'blocked', reason: blockedReason },
+                    findings: agentFindings.map((finding, index) => ({
+                      id: `${id}#f${String(index + 1)}`,
+                      severity: finding.severity,
+                      ...(finding.file ? { fileName: finding.file } : {}),
+                      excerpt: finding.text,
+                    })),
+                    logPath,
+                    untracked: state.untracked,
+                    at,
+                  };
+                  return {
+                    ledger: {
+                      version: DEV_LEDGER_VERSION,
+                      branch: ledger.branch,
+                      records: [...ledger.records, entry],
+                    },
+                    value: id,
+                  };
+                });
+              } catch (error) {
+                return {
+                  status: 'indeterminate',
+                  detail: `review.run: agent review attempt was dispatched but its dev ledger outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
+                };
+              }
               if (agent.status === 'ok') {
-                const at = effects.nowIso();
-                let logPath: string;
-                try {
-                  logPath = await effects.writeReviewLog(
-                    state.branch,
-                    `agent-${Date.now()}`,
-                    `agent reviewer: reviewer\nhead: ${state.head}\nfindings: ${agent.value.findings.length}\n`,
-                  );
-                } catch (error) {
-                  return {
-                    status: 'indeterminate',
-                    detail: `review.run: agent review completed but its log outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
-                  };
-                }
-                let terminal: string;
-                try {
-                  terminal = await effects.openLedger(state.branch).mutate((ledger) => {
-                    const count = ledger.records.filter((entry) => entry.kind === 'cycle').length;
-                    const cycleId = `c${String(count + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
-                    const entry = {
-                      kind: 'cycle' as const,
-                      cycleId,
-                      reviewer: 'agent:reviewer',
-                      scope: input.uncommitted ? ('uncommitted' as const) : ('full' as const),
-                      target,
-                      base: state.base,
-                      head: state.head,
-                      dirtySha256: state.dirtySha256,
-                      completion: { kind: 'terminal' as const },
-                      findings: agent.value.findings.map((finding, index) => ({
-                        id: `${cycleId}#f${String(index + 1)}`,
-                        severity: finding.severity,
-                        ...(finding.file ? { fileName: finding.file } : {}),
-                        excerpt: finding.text,
-                      })),
-                      logPath,
-                      untracked: state.untracked,
-                      at,
-                    };
-                    return {
-                      ledger: {
-                        version: DEV_LEDGER_VERSION,
-                        branch: ledger.branch,
-                        records: [...ledger.records, entry],
-                      },
-                      value: cycleId,
-                    };
-                  });
-                } catch (error) {
-                  return {
-                    status: 'indeterminate',
-                    detail: `review.run: agent review completed but its dev ledger outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
-                  };
-                }
                 records.push({
                   schemaVersion: 1,
                   branch: state.branch,
                   head: state.head,
-                  sources: [{ kind: 'agent', status: 'terminal', cycleId: terminal }],
+                  sources: [{ kind: 'agent', status: 'terminal', cycleId }],
                   findings: agent.value.findings.map((finding, index) => ({
                     ...finding,
-                    id: `${terminal}#f${String(index + 1)}`,
+                    id: `${cycleId}#f${String(index + 1)}`,
                   })),
                 });
-              } else
+              } else {
                 records.push(
-                  blocked(
-                    'agent',
-                    agent.status === 'needs-human'
-                      ? agent.reason
-                      : agent.status === 'failed'
-                        ? agent.error
-                        : agent.status,
-                  ),
+                  blocked('agent', blockedReason ?? 'agent review did not complete', cycleId),
                 );
+              }
             }
           }
         }
