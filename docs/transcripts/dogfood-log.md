@@ -75,3 +75,17 @@ Full retained artifact:
 stdout/stderr/exit captures: `/tmp/s6-dogfood-b.*` on triton. Both attempts are
 zero-fix runs. Positive measured acceptance remains unmet; no third live attempt
 has been authorized. Hermetic fixtures do not substitute for that acceptance.
+
+## Direct repair after attempt B
+
+The candidate mutex contention defect is repaired directly by the implementation
+owner, tracked in [#439](https://github.com/camerontaylor/cq-toolkit/issues/439).
+Initialization, candidate gates and restoration join one in-process FIFO before
+acquiring the existing cross-process git mutex. A healthy sibling's long gate
+therefore consumes no cross-process acquisition retries. Admission checks
+parent cancellation and remaining unit/run budgets; cleanup still serializes
+and retains owned failure evidence. Deterministic regressions explicitly hold
+the first validation, exercise a simulated exhausted retry seam without minute
+sleeps, and verify queued cancellation/budget cleanup and exact commit scope.
+This direct repair is not a positive dogfood fix and does not change either
+recorded zero-fix result.

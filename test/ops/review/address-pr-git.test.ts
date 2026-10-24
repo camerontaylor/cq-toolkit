@@ -14,6 +14,13 @@ let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
 beforeEach(async () => {
   scanner = await makeGitleaksFixture();
   vi.stubEnv('PATH', scanner.path);
+  // Real PR/candidate checkouts must not inherit the host's global Git identity.
+  vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+  vi.stubEnv('GIT_AUTHOR_NAME', 'Review fixture');
+  vi.stubEnv('GIT_AUTHOR_EMAIL', 'review-fixture@example.invalid');
+  vi.stubEnv('GIT_COMMITTER_NAME', 'Review fixture');
+  vi.stubEnv('GIT_COMMITTER_EMAIL', 'review-fixture@example.invalid');
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -149,6 +156,20 @@ test('real PR adapter ref collision preserves admission and fresh re-review iden
     const report = result.status === 'ok' ? result.value : result.report!;
     expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(1);
     expect(report.fixes[0]?.commit).toBeTruthy();
+    expect(
+      repo
+        .git(
+          '-C',
+          workerRoot,
+          'show',
+          '-s',
+          '--format=%an <%ae>|%cn <%ce>',
+          report.fixes[0]!.commit!,
+        )
+        .trim(),
+    ).toBe(
+      'Review fixture <review-fixture@example.invalid>|Review fixture <review-fixture@example.invalid>',
+    );
     expect(report.rounds).toHaveLength(1);
     expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
     expect(report.reasons.join('\n')).not.toMatch(

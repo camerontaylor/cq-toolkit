@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, writeFile, rm, symlink, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
+import * as gitMutex from '../../../src/shared/gitMutex.js';
 import { makeAddressWorker, type AddressAttempt } from '../../../src/ops/review/addressWorker.js';
 import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaults.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
@@ -33,6 +34,8 @@ async function fixture(
     aliasRoot?: boolean;
     installedDependencies?: 'matching' | 'mismatched';
     firstStopReason?: 'budget' | 'aborted';
+    remainingWallMs?: () => number;
+    unitWallMs?: number;
   } = {},
 ) {
   const repo = await makeTestRepo();
@@ -83,6 +86,7 @@ async function fixture(
     budgets: {
       run: { maxTokens: options.maxTokens ?? 10000, wallMs: 20000 },
       step: { wallMs: 5000 },
+      ...(options.unitWallMs === undefined ? {} : { unit: { wallMs: options.unitWallMs } }),
     },
     escalation: {
       workerAttempts: options.workerAttempts ?? 1,
@@ -134,7 +138,7 @@ async function fixture(
     policy: resolveCqConfigDefaults(config, { packageName: 'fixture' }),
     attempts,
     remainingTokens: () => config.budgets!.run!.maxTokens! - spent,
-    remainingWallMs: () => 20000,
+    remainingWallMs: options.remainingWallMs ?? (() => 20000),
     account: (r) => {
       spent += r.usage.input + r.usage.output;
     },
@@ -566,6 +570,122 @@ describe('review.address candidate isolation', () => {
       await f.cleanup();
     }
   });
+  test.each(['success', 'cancel', 'budget', 'unit'] as const)(
+    'queued candidate %s does not exhaust sibling mutex retries; cleanup stays serial',
+    async (outcome) => {
+      const parent = new AbortController();
+      let wallRemaining = 20000;
+      let held!: () => void, release!: () => void;
+      const firstHeld = new Promise<void>((resolve) => {
+        held = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let holding = 0,
+        maximum = 0,
+        contention = 0;
+      const actualMutex = gitMutex.makeGitMutex;
+      const spy = vi.spyOn(gitMutex, 'makeGitMutex').mockImplementation((config) => {
+        const real = actualMutex(config);
+        return {
+          withLock: async (fn) => {
+            // Model the old exhausted retry seam immediately, with no minute sleep.
+            // The real filesystem mutex still protects every admitted section.
+            if (holding) {
+              contention++;
+              throw new Error('simulated cross-process mutex waiter budget exhausted');
+            }
+            holding++;
+            maximum = Math.max(maximum, holding);
+            try {
+              return await real.withLock(fn);
+            } finally {
+              holding--;
+            }
+          },
+        };
+      });
+      const f = await fixture(
+        async (input) => {
+          if (input.outputSchema?.name === 'review.address.closure/v1')
+            return { closed: true, reason: 'candidate closure' };
+          if (input.prompt.startsWith('related-check feedback')) {
+            if (input.prompt.includes('src/a.ts')) {
+              held();
+              await gate;
+            }
+          } else {
+            const file = input.prompt.includes('Address only src/b.ts') ? 'src/b.ts' : 'src/a.ts';
+            await writeFile(join(input.workspace!.path, file), 'GOOD\n');
+          }
+          return { disposition: 'fixed', reason: 'candidate fixed', evidence: [] };
+        },
+        '',
+        { parentSignal: parent.signal, remainingWallMs: () => wallRemaining, unitWallMs: 5000 },
+      );
+      let first: ReturnType<typeof f.engine.fix> | undefined;
+      let second: ReturnType<typeof f.engine.fix> | undefined;
+      try {
+        first = f.engine.fix(finding(), 1);
+        await firstHeld;
+        second = f.engine.fix(finding('src/b.ts'), 1);
+        await vi.waitFor(() =>
+          expect(
+            f.attempts.find((row) => row.finding === 'src/b.ts' && row.invocation === 'edit')
+              ?.usage,
+          ).toBeDefined(),
+        );
+        // Its invocation has settled; drain its promise continuations to the queue.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(contention).toBe(0);
+        expect(holding).toBe(1);
+        expect(f.attempts.filter((row) => row.finding === 'src/b.ts')).toHaveLength(1);
+        if (outcome === 'cancel') parent.abort();
+        if (outcome === 'budget') wallRemaining = 0;
+        if (outcome === 'unit') {
+          const expired = Date.now() + 6000;
+          vi.spyOn(Date, 'now').mockReturnValue(expired);
+        }
+        const callsBeforeRelease = f.calls();
+        release();
+        const results = await Promise.all([first, second]);
+        expect(contention).toBe(0);
+        expect(maximum).toBe(1);
+        expect(holding).toBe(0);
+        expect(f.repo.git('diff', '--cached', '--name-only')).toBe('');
+        expect(f.repo.git('diff', '--name-only', 'HEAD')).toBe('');
+        expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain('candidate-');
+        if (outcome === 'success') {
+          expect(results.map((result) => result.finding.status)).toEqual(['fixed', 'fixed']);
+          expect(f.repo.git('rev-parse', `${results[1]!.commit}^`).trim()).toBe(results[0]!.commit);
+          expect(f.repo.git('show', '--format=', '--name-only', results[0]!.commit!).trim()).toBe(
+            'src/a.ts',
+          );
+          expect(f.repo.git('show', '--format=', '--name-only', results[1]!.commit!).trim()).toBe(
+            'src/b.ts',
+          );
+        } else {
+          expect(results.every((result) => !result.commit)).toBe(true);
+          expect(results.map((result) => result.reason).join('\n')).toMatch(
+            outcome === 'cancel' ? /parent cancelled/ : /budget exhausted/,
+          );
+          expect(f.calls()).toBe(callsBeforeRelease);
+          expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+          for (const file of ['src/a.ts', 'src/b.ts']) {
+            expect(await readFile(join(f.repo.root, file), 'utf8')).toBe('BAD\n');
+            expect(f.attempts.some((row) => row.finding === file && row.evidenceSha)).toBe(true);
+          }
+        }
+      } finally {
+        release();
+        await Promise.allSettled([first, second]);
+        spy.mockRestore();
+        vi.restoreAllMocks();
+        await f.cleanup();
+      }
+    },
+  );
   test('same-file overlap is refused while its original worker is active', async () => {
     let release!: () => void, entered!: () => void;
     const pending = new Promise<void>((r) => {
