@@ -99,6 +99,7 @@ function scripted(
     | 'private-change'
     | 'throw-after-protected'
     | 'throw-after-secret'
+    | 'throw-sensitive-diagnostic'
     | 'safe-change'
     | 'scan-fault' = 'fix',
 ): DriverFactory {
@@ -142,6 +143,10 @@ function scripted(
           if (mode === 'throw-after-protected') {
             await writeFile(join(invocation.workspace.path, 'package.json'), '{"name":"edited"}\n');
             throw new Error('scripted worker failure after protected edit');
+          }
+          if (mode === 'throw-sensitive-diagnostic') {
+            await writeFile(join(invocation.workspace.path, 'public-note.txt'), 'safe content\n');
+            throw new Error('DO_NOT_UPLOAD synthetic diagnostic');
           }
           if (mode === 'safe-change' || mode === 'fail-b-safe-change')
             await writeFile(
@@ -669,6 +674,33 @@ test('pushFailed applies protected-path policy after an early worker failure', a
     expect(failed.reason).toContain('protected path(s) changed by a worker');
     expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:package.json`)).toContain(
       '"name":"edited"',
+    );
+    expect(
+      await git(
+        f.repo,
+        'ls-remote',
+        '--heads',
+        'origin',
+        `refs/heads/${failed.failedAttempt!.branch}`,
+      ),
+    ).toBe('');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+test('pushFailed scans refusal diagnostics embedded in the failed commit message', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted('throw-sensitive-diagnostic') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    const failed = report.tasks.find((task) => task.failedAttempt !== undefined)!;
+    expect(result.status).toBe('needs-human');
+    expect(failed.reason).toContain('failed-attempt publication refused');
+    expect(await git(f.repo, 'show', '-s', '--format=%B', failed.failedAttempt!.sha)).toContain(
+      'DO_NOT_UPLOAD synthetic diagnostic',
     );
     expect(
       await git(

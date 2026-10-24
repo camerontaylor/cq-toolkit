@@ -755,6 +755,8 @@ async function scanFailedAttempt(
   if (bindings.scanPrompt === undefined)
     throw new Error('failed-attempt publication requires the configured denylist scanner');
   const contents = await failedAttemptContents(git, parent, sha);
+  const message = await git(['show', '-s', '--format=%B', sha]);
+  contents.push({ text: message, path: '.git/cq-failed-commit-message' });
   await bindings.scanPrompt(`Failed-attempt commit ${sha} publication scan`, contents);
   const paths = await failedAttemptPaths(git, parent, sha);
   return classifyStagePaths(
