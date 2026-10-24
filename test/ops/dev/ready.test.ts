@@ -190,6 +190,29 @@ describe('dev.disposition', () => {
     expect(effects.commands).toEqual([]);
   });
 
+  test.each(['refs/tags/not-a-branch', 'refs/heads/'])(
+    'refuses non-local or empty branch identity %s before opening a ledger',
+    async (ref) => {
+      const effects = makeFakeEffects((_command, args) =>
+        args.includes('symbolic-ref') ? `${ref}\n` : undefined,
+      );
+      effects.openLedger = () => {
+        throw new Error('must not open a ledger for an invalid branch ref');
+      };
+      expect(
+        await makeDevDisposition(effects)({
+          repoRoot: repo.root,
+          findingId: 'c001-aaaaaaaa#f1',
+          action: 'fixed',
+          why: 'done',
+        }),
+      ).toEqual({
+        status: 'needs-human',
+        reason: 'dev.disposition: HEAD does not name a local branch ref',
+      });
+    },
+  );
+
   test('a detached head is needs-human', async () => {
     repo.git('checkout', '-q', '--detach');
     const result = await makeDevDisposition(repoEffects(repo))({

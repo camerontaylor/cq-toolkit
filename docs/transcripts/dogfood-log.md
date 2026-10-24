@@ -40,3 +40,38 @@ worktree adapter regression covers admission and fresh re-review identity.
 The metric counts distinct verified commit SHAs, not model claims or review
 rows. The existing #419 failure-count accounting follow-up remains scoped
 separately; this zero result is unambiguous under either interpretation.
+
+## S6 attempt B — PR #435
+
+Same explicit token/wall/round bounds, roles, production scanners and PR source
+as attempt A, at implementation head
+`13c9a27eb2d20d1cee32eaee02c65e9c1de51e37`. No prompt truncation, policy bypass,
+or budget expansion was used.
+
+```sh
+node dist/cli.js review.address --repoRoot=<checkout> --source=pr:435 --maxTokens=60000 --wallMs=1200000 --rounds=1 --journalDir=<local-state>/cq-toolkit/dogfood/s6-pr435-20261024-b --push
+```
+
+Observed CLI exit: **3**, `needs-human`. `fixesPerRun`: **0**, verified commits:
+**0**. Reported usage: input **18861**, output **8110**, cache read **448**,
+cache write **0**. The report recorded **USD 0.00689759**, with wall time
+**111698 ms** across four provider edit invocations. The remote
+feature head remained `13c9a27eb2d20d1cee32eaee02c65e9c1de51e37`.
+
+The model's first mutex response requested further inspection instead of an
+edit. The duplicate mutex response declined a concurrency-control change:
+it described a proposed shared-mutex file outside the assigned one-file scope
+and could not run commands under the worker policy. Those are model refusals,
+not proof that the engine rejected a candidate for those reasons. The registry
+feedback correctly found that the earlier claimed fix had made no edit and
+left the finding open. No verified mutation or passing commit resulted.
+Separately, the engine's disposition step failed with `unknown finding` because
+it still read an ambiguous short branch name; the regression now requires a
+durable disposition on the canonical admission ledger. Final full-PR re-review
+remained incomplete, including the existing prompt-size limitation in #438.
+
+Full retained artifact:
+`<local-state>/cq-toolkit/dogfood/s6-pr435-20261024-b/review-address-report.json`;
+stdout/stderr/exit captures: `/tmp/s6-dogfood-b.*` on triton. Both attempts are
+zero-fix runs. Positive measured acceptance remains unmet; no third live attempt
+has been authorized. Hermetic fixtures do not substitute for that acceptance.

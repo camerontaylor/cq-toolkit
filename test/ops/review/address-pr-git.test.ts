@@ -151,7 +151,18 @@ test('real PR adapter ref collision preserves admission and fresh re-review iden
     expect(report.fixes[0]?.commit).toBeTruthy();
     expect(report.rounds).toHaveLength(1);
     expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
-    expect(report.reasons.join('\n')).not.toMatch(/identity changed|admission|branch changed/);
+    expect(report.reasons.join('\n')).not.toMatch(
+      /identity changed|admission|branch changed|unknown finding|disposition persistence|could not be persisted/,
+    );
+    const ledger = makeSubprocessDevEffects(workerRoot).openLedger('cq-review/pr-7').load();
+    expect(ledger.records.filter((entry) => entry.kind === 'disposition')).toEqual([
+      expect.objectContaining({
+        kind: 'disposition',
+        findingId: 'T1',
+        action: 'fixed',
+        head: report.fixes[0]?.commit,
+      }),
+    ]);
     expect(invocations).toEqual([
       'review.address.outcome/v1',
       'review.address.outcome/v1',

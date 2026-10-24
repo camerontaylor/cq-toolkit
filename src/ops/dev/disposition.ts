@@ -41,7 +41,7 @@ export function makeDevDisposition(
   effects: DevEffects,
 ): Op<DevDispositionInput, DevDispositionReport> {
   return guardDevOp('dev.disposition', DevDispositionInputSchema, async (input) => {
-    const symbolic = await git(effects, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const symbolic = await git(effects, ['symbolic-ref', '--quiet', 'HEAD']);
     if (symbolic.exitCode === 1) {
       return {
         status: 'needs-human',
@@ -49,7 +49,14 @@ export function makeDevDisposition(
           'dev.disposition: HEAD is detached — dev records are kept per branch; check out a branch and re-run',
       };
     }
-    const branch = gitStdout(symbolic, 'symbolic-ref HEAD').trim();
+    const branchRef = gitStdout(symbolic, 'symbolic-ref HEAD').trim();
+    if (!branchRef.startsWith('refs/heads/') || branchRef.length === 'refs/heads/'.length)
+      return {
+        status: 'needs-human',
+        reason: 'dev.disposition: HEAD does not name a local branch ref',
+      };
+    // Match admission and re-review identity even when refs/<branch> makes --short ambiguous.
+    const branch = branchRef.slice('refs/heads/'.length);
     const head = gitStdout(
       await git(effects, ['rev-parse', '--verify', 'HEAD']),
       'rev-parse HEAD',
