@@ -5,7 +5,7 @@ import { runPlan, type OpRegistryView } from '../../../src/kernel/runner.js';
 import type { Op, OpRegistryEntry } from '../../../src/kernel/types.js';
 
 describe('fix.run composition context', () => {
-  test('a direct op can run a governed worker plan without inheriting an outer job', async () => {
+  test('a CLI-style direct invocation gives the inner worker plan its own governed job context', async () => {
     let seenJob: string | undefined;
     const worker: Op<unknown, unknown> = async () => {
       seenJob = currentJobContext()?.info.jobKey;

@@ -570,9 +570,18 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
 
     if (bindings.taskLoop !== undefined) {
       return runTaskLoop(bindings, unit, worktree, baseline, segments.branch, {
-        broader: async (parent) => {
+        broader: async (parent, remainingWallMs) => {
+          const expiresAt = Date.now() + remainingWallMs;
+          const boundedProbe = makeBaselineProbe(async (command) => {
+            const remaining = expiresAt - Date.now();
+            if (remaining <= 0) throw new Error('unit wall budget exhausted before broader check');
+            return bindings.runCheck({
+              ...command,
+              timeoutMs: Math.min(command.timeoutMs ?? 600_000, remaining),
+            });
+          });
           const result = await withBaseOwnedFinalTree(bindings, unit, worktree, parent, (clean) =>
-            probeLeg(probe, bindings, unit, worktreeFor, 'final', clean),
+            probeLeg(boundedProbe, bindings, unit, worktreeFor, 'final', clean),
           );
           if (result.fault !== null || result.probe === undefined || result.treeSha === undefined) {
             throw new Error(result.fault ?? 'final probe returned no evidence');
@@ -590,6 +599,40 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         verify: async (sha, parent) => {
           const fault = await verifyScannedTip(bindings, unit, worktree.path, sha, parent);
           if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
+        },
+        pendingPublish: async () => {
+          const counted = await bindings.git([
+            '-C',
+            worktree.path,
+            'rev-list',
+            '--count',
+            `${bindings.base}..HEAD`,
+          ]);
+          if (counted.code !== 0 || !/^\d+$/.test(counted.stdout.trim()))
+            throw new Error('cannot read pending commit count');
+          const ahead = Number(counted.stdout.trim()) > 0;
+          if (bindings.runStateDir === undefined) {
+            if (ahead) throw new Error('pending publish requires explicit runStateDir');
+            return undefined;
+          }
+          const sha = await readScannedCommitSha(bindings, segments);
+          // A relative base such as HEAD follows the reused branch tip. The
+          // trusted scanned record still identifies a previous failed publish.
+          if (sha === null) {
+            if (ahead) throw new Error('pending publish has no verified scanned commit');
+            return undefined;
+          }
+          const parent = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD^']);
+          if (parent.code !== 0) throw new Error('cannot read pending commit parent');
+          const fault = await verifyScannedTip(
+            bindings,
+            unit,
+            worktree.path,
+            sha,
+            parent.stdout.trim(),
+          );
+          if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
+          return sha;
         },
         publish: async (sha) => {
           const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);

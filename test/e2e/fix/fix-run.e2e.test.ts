@@ -1,14 +1,19 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, unlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+import { z } from 'zod';
+import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { makeFixRun, type FixRunReport } from '../../../src/ops/fix/runFix.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runCli } from '../../../src/cli/main.js';
 import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
 import { scrubbedGitEnv } from '../../helpers/git-env.js';
+import { readCommittedMarkers } from '../../../src/ops/sweep/unit.js';
+
+vi.setConfig({ testTimeout: 30_000 });
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) =>
@@ -243,6 +248,77 @@ test.each(['needs-human', 'failed'] as const)(
       expect(JSON.parse(await readFile(artifact.report.reportPath, 'utf8'))).toEqual(
         artifact.report,
       );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test('rerun retries a failed publish of verified multi-task commits without new workers', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.origin, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const first = await makeFixRun({ drivers: scripted() })({ ...input(f), push: true });
+    const report = reportOf(first);
+    expect(first.status).toBe('failed');
+    expect(report.fixesPerRun).toBe(2);
+    expect(report.units[0]?.report?.indeterminate).toContain('publish failed');
+    await unlink(join(f.origin, 'hooks', 'pre-receive'));
+    await git(f.repo, 'config', 'remote.origin.url', f.origin);
+    const second = await makeFixRun({ drivers: scripted('none') })({ ...input(f), push: true });
+    const resumed = reportOf(second);
+    expect(second.status, JSON.stringify(second)).toBe('ok');
+    expect(resumed.tasks).toEqual([]);
+    expect(resumed.usage.input).toBe(0);
+    expect(resumed.units[0]?.report?.pushed).toBe(true);
+    const markers = await readCommittedMarkers(
+      f.repo,
+      join(f.journalDir, 'worktrees'),
+      'cq/fixture',
+      join(f.journalDir, 'state'),
+    );
+    expect(markers.map((marker) => marker.branch)).toContain(report.tasks[0]?.branch);
+    expect(resumed.units[0]?.report?.committedSha).toBe(report.tasks.at(-1)?.commits[0]);
+    expect(await git(f.origin, 'rev-parse', report.tasks[0]?.branch ?? '')).toBe(
+      report.tasks.at(-1)?.commits[0],
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test.each([false, true])(
+  'opt-in PR assembly uses only committed markers and records forge failure (%s)',
+  async (fail) => {
+    const f = await fixture();
+    const called: string[] = [];
+    try {
+      const result = await makeFixRun({
+        drivers: scripted(),
+        registry: {
+          get: (name) => {
+            if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+            return {
+              name,
+              inputSchema: z.unknown(),
+              importer: async () => async (raw: unknown) => {
+                called.push(name);
+                if (name === 'pr.assemblePrs') {
+                  expect((raw as { packages: unknown[] }).packages).toHaveLength(1);
+                  if (fail) return { status: 'failed', error: 'fixture forge refused' };
+                }
+                return { status: 'ok', value: { offline: true } };
+              },
+            } as unknown as OpRegistryEntry<never, never>;
+          },
+        },
+      })({ ...input(f), pr: true });
+      const report = reportOf(result);
+      expect(result.status, JSON.stringify(result)).toBe(fail ? 'failed' : 'ok');
+      expect(called).toEqual(['pr.ensureTrackerBranch', 'pr.assemblePrs']);
+      expect(report.assembly?.jobs).toHaveLength(2);
+      expect(report.fixesPerRun).toBe(2);
+      expect(report.units[0]?.report?.pushed).toBe(true);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

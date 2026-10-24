@@ -42,13 +42,32 @@ export interface FixTaskReport {
 }
 /** Existing sweep owns detached-tree validation and verified commits. */
 export interface TaskLoopEffects {
-  broader: (parent: string) => Promise<{ final: UnitProbe; treeSha: string }>;
+  broader: (
+    parent: string,
+    remainingWallMs: number,
+  ) => Promise<{ final: UnitProbe; treeSha: string }>;
   commit: (message: string, treeSha: string) => Promise<string>;
   verify: (sha: string, parent: string) => Promise<void>;
   publish: (sha: string) => Promise<void>;
+  pendingPublish?: () => Promise<string | undefined>;
 }
 
 export async function runTaskLoop(
+  bindings: SweepUnitBindings,
+  unit: WorkUnit,
+  worktree: SweepWorkspace,
+  baseline: UnitProbe,
+  branch: string,
+  effects: TaskLoopEffects,
+): Promise<OpResult<SweepUnitReport>> {
+  try {
+    return await runTaskLoopInner(bindings, unit, worktree, baseline, branch, effects);
+  } catch (error) {
+    return { status: 'failed', error: `[INFRA] task loop failed: ${String(error)}` };
+  }
+}
+
+async function runTaskLoopInner(
   bindings: SweepUnitBindings,
   unit: WorkUnit,
   worktree: SweepWorkspace,
@@ -167,10 +186,15 @@ export async function runTaskLoop(
               workspace: { path: worktree.path },
               budget: { ...bindings.budget, wallClockMs: remainingWall },
               toolPolicy: {
-                allow: (bindings.toolPolicy?.allow ?? ['read', 'edit', 'run']).filter(
-                  (tool) => tool !== 'run' || bindings.taskWorker !== undefined,
-                ),
-                mode: 'allowlist',
+                allow:
+                  bindings.toolPolicy?.mode === 'none'
+                    ? []
+                    : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'run']).filter(
+                        (tool) =>
+                          ['read', 'edit', 'run'].includes(tool) &&
+                          (tool !== 'run' || bindings.taskWorker !== undefined),
+                      ),
+                mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
               },
               sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
               outputSchema: {
@@ -217,6 +241,27 @@ export async function runTaskLoop(
         }
       };
       const first = await invoke('edit', prompt);
+      // Stage and classify BEFORE executing any check on worker-controlled bytes.
+      if ((await git(['rev-parse', 'HEAD'])) !== parent)
+        throw new Error('worker moved HEAD; unscanned self-commit');
+      await git(['add', '-A', '--', '.']);
+      const earlyPaths = stagedPathsOf(
+        await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--name-status', '-z']),
+      );
+      const earlyGate = classifyStagePaths(
+        earlyPaths,
+        bindings.stagePathAllowlist,
+        false,
+        config.protectTests ?? false,
+      );
+      if (earlyGate.kind !== 'clean') {
+        const verdict = earlyGate.kind === 'protected' ? 'needs-human' : 'fail';
+        row.validation = {
+          verdict,
+          gates: [{ gate: 'paths', verdict, wallMs: 0, detail: earlyGate.message }],
+        };
+        throw new Error(earlyGate.message);
+      }
       const feedback = await check(related);
       const second = await invoke(
         'feedback',
@@ -281,7 +326,12 @@ export async function runTaskLoop(
         related: () => check(related),
         broader: async () => {
           if (parent === undefined) throw new Error('missing task parent');
-          finalTree = await effects.broader(parent);
+          const remainingWall = (config.wallMs ?? 3_600_000) - (Date.now() - unitStart);
+          if (remainingWall <= 0) {
+            budgetStopped = true;
+            throw new Error('unit wall budget exhausted');
+          }
+          finalTree = await effects.broader(parent, remainingWall);
           return finalTree.final.failureSet;
         },
         stagedPaths: paths,
@@ -303,6 +353,7 @@ export async function runTaskLoop(
       lastSha = sha;
       accepted = finalTree.final;
     } catch (error) {
+      if (Date.now() - unitStart >= (config.wallMs ?? 3_600_000)) budgetStopped = true;
       row.reason = String(error);
       row.outcome = row.validation?.verdict === 'needs-human' ? 'escalated-to-human' : 'unfixed';
       try {
@@ -334,14 +385,16 @@ export async function runTaskLoop(
     });
   let pushed = false;
   if (
-    lastSha &&
     bindings.pushBranch &&
     !indeterminate &&
     !reports.some((row) => row.reason?.includes('HEAD changed'))
   ) {
     try {
-      await effects.publish(lastSha);
-      pushed = true;
+      lastSha ??= await effects.pendingPublish?.();
+      if (lastSha !== undefined) {
+        await effects.publish(lastSha);
+        pushed = true;
+      }
     } catch (error) {
       indeterminate = `publish failed: ${String(error)}`;
     }

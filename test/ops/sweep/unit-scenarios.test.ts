@@ -4,7 +4,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { Driver, WorkerResult } from '../../../src/driver/types.js';
 import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
@@ -717,3 +717,202 @@ test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattr
     }
   },
 );
+
+test.each(['edit', 'feedback'] as const)(
+  'protected config edits from %s are refused before another check executes',
+  async (phase) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    let invocations = 0;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        git: async (args) =>
+          args.includes('--name-status') && invocations >= (phase === 'edit' ? 1 : 2)
+            ? { code: 0, stdout: 'M\0vitest.config.ts\0', stderr: '' }
+            : underlying(args),
+        driver: {
+          run: async () => {
+            invocations++;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.outcome).toBe('escalated-to-human');
+      expect(world.checks).toHaveLength(phase === 'edit' ? 1 : 2);
+      expect(invocations).toBe(phase === 'edit' ? 1 : 2);
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test.each(['none', 'edit-only'] as const)(
+  'task-specific harness never widens explicit %s policy',
+  async (mode) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const seen: unknown[] = [];
+    try {
+      const driver: Driver = {
+        run: async (invocation) => {
+          seen.push(invocation.toolPolicy);
+          return {
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+          };
+        },
+      };
+      await runUnit(world, {
+        taskLoop: {},
+        driver,
+        taskWorker: () => ({ driver, modelSpec: { provider: 'test', model: 'fake' } }),
+        toolPolicy:
+          mode === 'none'
+            ? { mode: 'none', allow: ['read', 'edit', 'run'] }
+            : { mode: 'allowlist', allow: ['edit'] },
+      });
+      expect(seen).toHaveLength(2);
+      expect(
+        seen.every(
+          (policy) =>
+            JSON.stringify(policy) ===
+            JSON.stringify(
+              mode === 'none'
+                ? { allow: [], mode: 'none' }
+                : { allow: ['edit'], mode: 'allowlist' },
+            ),
+        ),
+      ).toBe(true);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test.each([false, true])(
+  'broader timeout uses remaining unit wall and bounds retries (bail=%s)',
+  async (bail) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const original = world.runCheckFactory();
+    let broaderCalls = 0;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { wallMs: 1000 },
+        runCheck: async (command) => {
+          if (command.cwd?.includes('.cq-sweep-final-')) {
+            broaderCalls++;
+            expect(command.timeoutMs).toBeGreaterThan(0);
+            expect(command.timeoutMs).toBeLessThanOrEqual(200);
+            if (bail) {
+              now += 201;
+              return { stdout: '', stderr: 'test run aborted', exitCode: null };
+            }
+          }
+          return original(command);
+        },
+        driver: {
+          run: async () => {
+            now += 400;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(broaderCalls).toBe(1);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.outcome).toBe(bail ? 'unfixed' : 'fixed');
+    } finally {
+      clock.mockRestore();
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test('a sibling-resolved task consumes no worker invocation or duplicate commit', async () => {
+  const world = await makeWorld([{ failing: true }, { failing: false }]);
+  let invocations = 0;
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: (baseline) =>
+        [0, 1].map((id) => ({
+          id: String(id),
+          files: ['suite.test.js'],
+          failures: baseline.failures,
+        })),
+      driver: {
+        run: async () => {
+          invocations++;
+          return {
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+          };
+        },
+      },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.tasks?.map((task) => task.outcome)).toEqual(['fixed', 'fixed']);
+      expect(result.value.tasks?.[1]?.attempts).toEqual([]);
+      expect(result.value.tasks?.[1]?.commits).toEqual([]);
+    }
+    expect(invocations).toBe(2);
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+test('task derivation throws become a failed OpResult', async () => {
+  const world = await makeWorld([{ failing: true }]);
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: () => {
+        throw new Error('bad task derivation');
+      },
+    });
+    expect(result).toEqual({
+      status: 'failed',
+      error: '[INFRA] task loop failed: Error: bad task derivation',
+    });
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+
+test('an unrecorded ahead commit cannot be republished on a no-task rerun', async () => {
+  const world = await makeWorld([{ failing: false }]);
+  const original = world.gitFactory();
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: () => [],
+      runStateDir: join(world.root, 'state'),
+      git: async (args) =>
+        args.includes('rev-list') ? { code: 0, stdout: '1', stderr: '' } : original(args),
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.pushed).toBe(false);
+      expect(result.value.indeterminate).toContain('no verified scanned commit');
+    }
+    expect(world.pushCalls).toEqual([]);
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
