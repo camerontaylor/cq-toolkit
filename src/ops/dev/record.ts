@@ -605,9 +605,11 @@ export function assembleReadiness(
     for (const record of ledger.records) {
       if (record.kind === 'disposition') closed.set(record.findingId, record.action);
     }
+    // Configuration chooses which reviewer may satisfy the readiness anchor;
+    // it does not erase findings already recorded by a reviewer that was later
+    // removed from cq.json. Every cycle remains subject to disposition.
     const adjudicable = ledger.records.filter(
-      (record): record is DevCycleRecord =>
-        record.kind === 'cycle' && isConfigured(record.reviewer),
+      (record): record is DevCycleRecord => record.kind === 'cycle',
     );
     const open: string[] = [];
     for (const entry of adjudicable) {

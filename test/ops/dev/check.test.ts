@@ -166,6 +166,33 @@ describe('dev.check', () => {
     expect(effects.calls.some((call) => call.command === 'gitleaks')).toBe(false);
   });
 
+  test('portable scan excludes its configured denylist corpus and still scans source files', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: [] } }],
+        review: { denylistPatternsFile: 'policy/denylist/patterns.yml' },
+      }),
+    );
+    await repo.write(
+      'policy/denylist/patterns.yml',
+      'rules:\n  - id: synthetic\n    regex: example\n',
+    );
+    await repo.write('src/checked.ts', 'export const checked = true;\n');
+    repo.commitAll('configure portable scan corpus');
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
+    let scanned: string[] = [];
+    const result = await makeDevCheck(effects, async (components) => {
+      scanned = components.map(({ path }) => path);
+      return components.map(({ component }) => ({ component, hits: [] }));
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(scanned).not.toContain('policy/denylist/patterns.yml');
+    expect(scanned).toContain('src/checked.ts');
+  });
+
   test('preserves absolute configured check working directories', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(

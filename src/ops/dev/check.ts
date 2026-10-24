@@ -27,7 +27,7 @@
 // whether the run passed or failed. A red run maps to `failed` (CLI exit 1);
 // green returns the report. The gates run in the live worktree; the record
 // is bound to the identity read before them (author tier, strategy §2.4).
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readdir, readFile, readlink } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
 import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
@@ -194,12 +194,17 @@ async function runGate(
  * construction, and a newly staged file is included. Any step failing
  * faults the gate (never a silently green scan).
  */
-async function treeComponents(tree: string): Promise<ScanComponentInput[]> {
+async function treeComponents(
+  tree: string,
+  excludedPaths: readonly string[] = [],
+): Promise<ScanComponentInput[]> {
+  const excluded = new Set(excludedPaths);
   const components: ScanComponentInput[] = [];
   const visit = async (directory: string, prefix: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
       const absolute = join(directory, entry.name);
+      if (excluded.has(path)) continue;
       if (entry.isDirectory()) {
         await visit(absolute, path);
       } else if (entry.isFile()) {
@@ -234,6 +239,7 @@ function scanVerdict(scans: readonly ComponentScan[], startedAt: number): DevChe
 async function denylistGate(
   effects: DevEffects,
   scanSecrets?: DiffSecretScanner,
+  excludedPaths: readonly string[] = [],
 ): Promise<DevCheckGate> {
   const startedAt = Date.now();
   let scratch: string | undefined;
@@ -262,7 +268,7 @@ async function denylistGate(
       'apply the staged+unstaged patch over the archived tree',
     );
     if (scanSecrets !== undefined) {
-      return scanVerdict(await scanSecrets(await treeComponents(tree)), startedAt);
+      return scanVerdict(await scanSecrets(await treeComponents(tree, excludedPaths)), startedAt);
     }
     const result = await effects.runCommand('node', [join(tree, 'scripts', 'denylist-scan')], {
       timeoutMs: DENYLIST_TIMEOUT_MS,
@@ -361,6 +367,21 @@ export function makeDevCheck(
       packageName !== '@camerontaylor/cq-toolkit'
         ? config.config.checks
         : null;
+    const configuredPatternsFile =
+      configuredChecks !== null ? config?.config.review?.denylistPatternsFile : undefined;
+    const configuredPatternsPath =
+      configuredPatternsFile === undefined
+        ? undefined
+        : relative(resolve(input.repoRoot), resolve(input.repoRoot, configuredPatternsFile))
+            .split(sep)
+            .join('/');
+    const excludedScanPaths =
+      configuredPatternsPath === undefined ||
+      configuredPatternsPath === '..' ||
+      configuredPatternsPath.startsWith('../') ||
+      isAbsolute(configuredPatternsPath)
+        ? []
+        : [configuredPatternsPath];
     if (configuredChecks !== null) {
       for (const [index, check] of configuredChecks.entries()) {
         gates.push(
@@ -433,7 +454,13 @@ export function makeDevCheck(
       );
     }
 
-    gates.push(await denylistGate(effects, configuredChecks === null ? undefined : scanSecrets));
+    gates.push(
+      await denylistGate(
+        effects,
+        configuredChecks === null ? undefined : scanSecrets,
+        excludedScanPaths,
+      ),
+    );
 
     const committedLeg = [state.base, state.head];
     for (const [name, args] of [
