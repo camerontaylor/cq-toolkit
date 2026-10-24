@@ -52,11 +52,14 @@ def invoke(config, role, job, wt, directory):
     result = data.get('value') or data.get('result') or {}
     sid = result.get('sessionId') if isinstance(result, dict) else None
     from crq_repair import atomic as _atomic
-    _atomic(Path(directory) / 'session.json', {
-        'harness': 'cq', 'sessionId': sid if isinstance(sid, str) else None,
-        'sessionsDir': str(sessions_dir) if sessions_dir.is_dir() and any(sessions_dir.iterdir()) else None,
-        'workId': os.environ.get('CQ_WORK_ID'),
-    })
+    try:  # best-effort: the session link never outranks the verdict
+        _atomic(Path(directory) / 'session.json', {
+            'harness': 'cq', 'sessionId': sid if isinstance(sid, str) else None,
+            'sessionsDir': str(sessions_dir) if sessions_dir.is_dir() and any(sessions_dir.iterdir()) else None,
+            'workId': os.environ.get('CQ_WORK_ID'),
+        })
+    except OSError:
+        pass
     if p.returncode or data.get('status') != 'ok':
         signals = data.get('providerSignals') or {}
         error = str(data.get('error') or '')

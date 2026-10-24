@@ -55,7 +55,10 @@ def append_work_record(record: Dict[str, Any]) -> None:
         with WORK_RECORDS.open("a") as f:
             f.write(json.dumps(record) + "\n")
     except OSError as exc:  # a full disk must not fail a review
-        event("work_record_failed", error=str(exc)[:200])
+        try:
+            event("work_record_failed", error=str(exc)[:200])
+        except OSError:
+            pass  # same disk; the record stays best-effort
 
 
 CLONE = Path(CONFIG["clone"])

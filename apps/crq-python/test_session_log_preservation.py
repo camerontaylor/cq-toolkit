@@ -169,20 +169,23 @@ class RepairCorrelationTest(unittest.TestCase):
 
         def fake_invoke(config, role, job, wt, directory, judge=False):
             seen.update({k: os.environ.get(k) for k in
-                         ('CQ_WORK_ID', 'CQ_RUN_ID', 'CQ_ROLE', 'CQ_TASK')})
+                         ('CQ_WORK_ID', 'CQ_RUN_ID', 'CQ_ROLE', 'CQ_TASK', 'CQ_PARENT_WORK_ID')})
             return {'stop': 'ok'}
 
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.object(svc, 'source_snapshot', return_value={}), \
              mock.patch.object(svc.codex, 'invoke', fake_invoke), \
-             mock.patch.dict(os.environ, {'CQ_WORK_ID': 'shell-work'}):
+             mock.patch.dict(os.environ, {'CQ_WORK_ID': 'shell-work',
+                                          'CQ_PARENT_WORK_ID': 'stale-parent'}):
             os.environ.pop('CQ_RUN_ID', None)
             svc.dispatch({}, {'driver': 'codex'}, {'run': 'r-1', 'job': 'crq-r-1-F2'},
                          Path(tmp), Path(tmp) / 'a', judge=True)
-            after = (os.environ.get('CQ_WORK_ID'), os.environ.get('CQ_RUN_ID'))
+            after = (os.environ.get('CQ_WORK_ID'), os.environ.get('CQ_RUN_ID'),
+                     os.environ.get('CQ_PARENT_WORK_ID'))
         self.assertEqual(seen, {'CQ_WORK_ID': 'crq:r-1', 'CQ_RUN_ID': 'crq-r-1-F2',
-                                'CQ_ROLE': 'judge', 'CQ_TASK': 'crq-repair'})
-        self.assertEqual(after, ('shell-work', None))
+                                'CQ_ROLE': 'judge', 'CQ_TASK': 'crq-repair',
+                                'CQ_PARENT_WORK_ID': None})
+        self.assertEqual(after, ('shell-work', None, 'stale-parent'))
 
 
 class CqSessionsDirTest(unittest.TestCase):

@@ -45,7 +45,10 @@ def correlation(job, judge):
     exit so serial jobs never inherit each other's identity."""
     values = {'CQ_WORK_ID': 'crq:' + str(job['run']), 'CQ_RUN_ID': str(job['job']),
               'CQ_ROLE': 'judge' if judge else 'fixer', 'CQ_TASK': 'crq-repair'}
-    saved = {k: os.environ.get(k) for k in values}
+    # The repair job IS the review's work, so no parent: a stale shell
+    # CQ_PARENT_WORK_ID must not leak into the drivers.
+    saved = {k: os.environ.get(k) for k in (*values, 'CQ_PARENT_WORK_ID')}
+    os.environ.pop('CQ_PARENT_WORK_ID', None)
     os.environ.update(values)
     try:
         yield
