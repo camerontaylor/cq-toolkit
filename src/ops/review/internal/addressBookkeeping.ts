@@ -66,6 +66,42 @@ export function makeAddressBookkeepingReceipt(deps: {
   };
   return {
     assertUnchanged,
+    /**
+     * Strictly validate an existing receipt against the checkout it
+     * describes (identity/root/branch/head, path allowlist, exact bytes) and
+     * return the absolute paths it owns — the engine-owned file set a caller
+     * may retire when this engine itself refreshes the checkout. Throws on
+     * any mismatch; a missing receipt yields an empty list.
+     */
+    async ownedFiles(): Promise<string[]> {
+      let bytes: Buffer;
+      try {
+        bytes = await ordinaryBytes(deps.path);
+      } catch (error) {
+        if (missing(error)) return [];
+        throw error;
+      }
+      const receipt = receiptSchema.parse(JSON.parse(bytes.toString('utf8')));
+      const canonical = await realpath(receipt.root);
+      const current = await state(canonical);
+      if (
+        receipt.identity !== deps.identity ||
+        receipt.root !== canonical ||
+        receipt.branch !== current.branch ||
+        receipt.head !== current.head
+      )
+        throw new Error('bookkeeping receipt identity/head mismatch');
+      const paths: string[] = [];
+      for (const row of receipt.files) {
+        const path = resolve(canonical, row.path);
+        if (relative(canonical, path) !== row.path || !allowed(canonical, current.branch, path))
+          throw new Error('bookkeeping receipt path mismatch');
+        if (digest(await ordinaryBytes(path)) !== row.sha256)
+          throw new Error('bookkeeping receipt bytes changed');
+        paths.push(path);
+      }
+      return paths;
+    },
     async prepare(root: string) {
       const canonical = await realpath(root);
       if (preparedRoot) {

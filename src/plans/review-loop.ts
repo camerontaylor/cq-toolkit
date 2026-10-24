@@ -469,6 +469,16 @@ export interface ReviewLoopOpts {
     branch: string;
     head: string;
   }) => Promise<void> | void;
+  /**
+   * Forwarded to resolvePrWorktree before the non-forced removal of a stale
+   * checkout at a new head: return true only after clearing exactly the
+   * engine-owned obstructions the implementation can attest.
+   */
+  onWorktreeStaleRefresh?: (info: {
+    path: string;
+    branch: string;
+    head: string;
+  }) => Promise<boolean> | boolean;
   /** Engine-owned exact bookkeeping exemption; must still reject all tracked/caller changes. */
   publicationTreeClean?(root: string): Promise<boolean>;
   /**
@@ -918,6 +928,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     nowMs: opts.nowMs,
     ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
     ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
+    ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
   });
 
   // (2) Baseline snapshot, then the pure pipeline. The truncation refusal is

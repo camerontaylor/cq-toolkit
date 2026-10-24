@@ -986,6 +986,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 engineOwnedConcurrency: policy.review.addressConcurrency,
                 publish: input.push === true,
                 publicationTreeClean,
+                onWorktreeStaleRefresh: async () => {
+                  // The refresh removal refused on untracked files. Clear
+                  // ONLY what the existing receipt strictly attests as
+                  // engine-owned (identity/root/branch/head, path allowlist
+                  // and exact bytes re-validated by the receipt's own
+                  // machinery); any other dirt keeps the strict refusal.
+                  // onCreated still performs the receipt rotation afterwards.
+                  if (!persistedBookkeeping) return false;
+                  const owned = await persistedBookkeeping.ownedFiles();
+                  for (const path of owned) await unlink(path);
+                  return true;
+                },
                 onWorktreeCreated: async () => {
                   // Engine-verified creation of the per-PR worktree: any
                   // receipt from a previous checkout instance describes a
