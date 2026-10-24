@@ -5,6 +5,7 @@
 // over the archived tree WITH the working patch applied, and the three
 // diff-checks.
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { knipTrigger, makeDevCheck, rangeFault } from '../../../src/ops/dev/check.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
@@ -58,6 +59,188 @@ describe('rangeFault and knipTrigger', () => {
 });
 
 describe('dev.check', () => {
+  test('runs cq.json checks for adopter repos without the cq-toolkit legacy set', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [
+          {
+            adapter: 'tsc-lines',
+            command: {
+              command: 'fake-check',
+              args: ['--strict'],
+              cwd: 'packages/app',
+              timeoutMs: 12_345,
+            },
+          },
+        ],
+      }),
+    );
+    repo.commitAll('configure portable check');
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
+    const originalRunCommand = effects.runCommand;
+    let configuredCwd: string | undefined;
+    let configuredTimeout: number | undefined;
+    effects.runCommand = async (command, args, options) => {
+      if (command === 'fake-check') {
+        configuredCwd = options.cwd;
+        configuredTimeout = options.timeoutMs;
+      }
+      return originalRunCommand(command, args, options);
+    };
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.gates.map((gate) => gate.name)).toContain('cq.json:1:tsc-lines');
+    expect(result.value.gates.map((gate) => gate.name)).not.toContain('check:static');
+    expect(effects.calls).toContainEqual({ command: 'fake-check', args: ['--strict'] });
+    expect(configuredCwd).toBe(join(repo.root, 'packages/app'));
+    expect(configuredTimeout).toBe(12_345);
+  });
+
+  test.each([
+    ['malformed JSON', 'not json'],
+    [
+      'a failing assertion behind exit zero',
+      JSON.stringify({
+        success: false,
+        numTotalTests: 1,
+        testResults: [
+          {
+            name: 'src/a.test.ts',
+            assertionResults: [{ status: 'failed', fullName: 'fails', failureMessages: ['bad'] }],
+          },
+        ],
+      }),
+    ],
+  ])(
+    'rejects %s from an adopter JSON check even when the process exits zero',
+    async (_label, stdout) => {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'vitest-json', command: { command: 'fake-check', args: [] } }],
+        }),
+      );
+      repo.commitAll('configure JSON check');
+      const effects = effectsFor((command) =>
+        command === 'fake-check' ? { exitCode: 0, stdout, stderr: '', timedOut: false } : undefined,
+      );
+      const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+      expect(result.status).toBe('failed');
+      const record = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'check');
+      expect(record?.kind === 'check' && record.gates[0]).toMatchObject({
+        name: 'cq.json:1:vitest-json',
+        status: 'fail',
+      });
+    },
+  );
+
+  test('fresh adopter scans the archived tree portably without a toolkit denylist script', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: [] } }],
+      }),
+    );
+    await repo.write('src/checked.ts', 'export const checked = true;\n');
+    repo.commitAll('configure fresh adopter');
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
+    const seen: string[] = [];
+    const result = await makeDevCheck(effects, async (components) => {
+      seen.push(...components.map(({ path, text }) => `${path}:${text}`));
+      return components.map(({ component }) => ({ component, hits: [] }));
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(seen).toContain('src/checked.ts:export const checked = true;\n');
+    expect(effects.calls.some((call) => call.command === 'node')).toBe(false);
+    expect(effects.calls.some((call) => call.command === 'gitleaks')).toBe(false);
+  });
+
+  test('portable scan excludes its configured denylist corpus and still scans source files', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: [] } }],
+        review: { denylistPatternsFile: 'policy/denylist/patterns.yml' },
+      }),
+    );
+    await repo.write(
+      'policy/denylist/patterns.yml',
+      'rules:\n  - id: synthetic\n    regex: example\n',
+    );
+    await repo.write('src/checked.ts', 'export const checked = true;\n');
+    repo.commitAll('configure portable scan corpus');
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
+    let scanned: string[] = [];
+    const result = await makeDevCheck(effects, async (components) => {
+      scanned = components.map(({ path }) => path);
+      return components.map(({ component }) => ({ component, hits: [] }));
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(scanned).not.toContain('policy/denylist/patterns.yml');
+    expect(scanned).toContain('src/checked.ts');
+  });
+
+  test('preserves absolute configured check working directories', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [
+          {
+            adapter: 'tsc-lines',
+            command: { command: 'fake-check', args: [], cwd: '/external/check' },
+          },
+        ],
+      }),
+    );
+    repo.commitAll('configure absolute check directory');
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
+    let configuredCwd: string | undefined;
+    const originalRunCommand = effects.runCommand;
+    effects.runCommand = async (command, args, options) => {
+      if (command === 'fake-check') configuredCwd = options.cwd;
+      return originalRunCommand(command, args, options);
+    };
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(configuredCwd).toBe('/external/check');
+  });
+
+  test('refuses malformed adopter cq.json instead of falling back to legacy gates', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write('cq.json', JSON.stringify({ schemaVersion: 1, checks: [] }));
+    repo.commitAll('add malformed cq config');
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('cq.json');
+    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+  });
+
+  test('refuses malformed cq.json for cq-toolkit too', async () => {
+    await repo.write('package.json', JSON.stringify({ name: '@camerontaylor/cq-toolkit' }));
+    await repo.write('cq.json', JSON.stringify({ schemaVersion: 1, checks: [] }));
+    repo.commitAll('malformed toolkit config');
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+  });
+
   test('a green run: ok report, gates in order, the record persisted at the identity', async () => {
     const effects = effectsFor();
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });

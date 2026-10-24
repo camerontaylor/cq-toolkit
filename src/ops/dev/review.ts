@@ -28,15 +28,16 @@
 // required CI plus the reviewer bots at the exact head.
 //
 // THE REVIEWER CHOICE IS CONFIGURATION (strategy §2.7): `coderabbit` (the
-// default) or `agent:<provider/model>`, the vendor-down fallback. This build
-// ships no agent runner, so an `agent:` request is a needs-human refusal and
-// can never stand in for the CLI cycle.
+// default) or `agent:<role>`, resolved from cq.json and run with the configured
+// reviewer role.
 //
 // ONE OP, TWO ACTIONS: no action (or `cycle`) runs this module's review
 // cycle; `enroll | status | fallback` runs the author-admission transport
 // (review-transport.ts, unchanged from #332 — same wire shapes, same crq
 // invocation `cq dev.review --action=enroll …`).
 import type { Op, OpResult } from '../../kernel/types.js';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import type { Finding } from '../review/findings.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
@@ -74,13 +75,6 @@ import {
 /** Per-component scan cap: a bigger file patch or untracked file is refused, never truncated. */
 export const SCAN_COMPONENT_CAP_BYTES = 4 * 1024 * 1024;
 
-/**
- * The authoritative scanner's own intentional corpus (its tree allowlist
- * entry in scripts/denylist-scan): the rule samples are published by
- * design, so neither scanner layer reads this one path.
- */
-const PATTERNS_FILE = 'policy/denylist/patterns.yml';
-
 /** Input of the `dev.review` cycle action (plain JSON; the registry schema mirrors it). */
 export interface DevCycleInput {
   /** Repository the review runs in (the subprocess effects bind to it). */
@@ -91,7 +85,7 @@ export interface DevCycleInput {
   target?: string;
   /** Explicit immutable base sha overriding the merge-base pin. */
   base?: string;
-  /** The reviewer choice: `coderabbit` (default) or `agent:<provider/model>`. */
+  /** The reviewer choice: `coderabbit` (default) or `agent:<role>`. */
   reviewer?: string;
   /** Review only staged+unstaged work (the protocol's --uncommitted scope). */
   uncommitted?: boolean;
@@ -110,6 +104,16 @@ export interface DevReviewDeps {
   effects: DevEffects;
   /** The composed pre-upload secret scanner (cycle action only). */
   scanSecrets: DiffSecretScanner;
+  /** Configured rule corpus, excluded from scan input and refused if changed. */
+  patternsFile?: string;
+  /** The configured, read-only agent reviewer used by `agent:<role>`. */
+  runAgentReviewer?: (input: {
+    repoRoot: string;
+    head: string;
+    branch: string;
+    role: string;
+    diff: string;
+  }) => Promise<OpResult<{ findings: Finding[]; usage: number }>>;
   /**
    * The author-admission transport (admission actions). When omitted, the
    * admission actions report the configuration gap.
@@ -142,7 +146,12 @@ export interface DevReviewReport {
 export function makeDevReview(
   deps: DevReviewDeps,
 ): Op<DevReviewInput, DevReviewReport | AuthorDecision> {
-  const cycle = makeReviewCycle(deps.effects, deps.scanSecrets);
+  const cycle = makeReviewCycle(
+    deps.effects,
+    deps.scanSecrets,
+    deps.runAgentReviewer,
+    deps.patternsFile,
+  );
   return async (input) => {
     if (isAdmissionInput(input)) {
       if (deps.transport === undefined) {
@@ -169,16 +178,18 @@ function needsHuman(reason: string): OpResult<never> {
 function makeReviewCycle(
   effects: DevEffects,
   scanSecrets: DiffSecretScanner,
+  runAgentReviewer?: DevReviewDeps['runAgentReviewer'],
+  patternsFile?: string,
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const scope = input.uncommitted === true ? 'uncommitted' : 'full';
     const reviewer = input.reviewer ?? CODERABBIT_REVIEWER;
-    if (reviewer !== CODERABBIT_REVIEWER) {
-      return needsHuman(
-        'the agent reviewer is the vendor-down fallback (D-J) and this build ships no agent runner — the pre-PR reviewer is the CodeRabbit CLI; a fallback never substitutes for a real CLI cycle',
-      );
-    }
+    const isAgent = reviewer.startsWith('agent:');
+    if (reviewer !== CODERABBIT_REVIEWER && !isAgent)
+      return needsHuman(`unsupported reviewer '${reviewer}'`);
+    if (isAgent && runAgentReviewer === undefined)
+      return needsHuman('the configured agent reviewer is unavailable');
 
     const read = await readWorkState(effects, {
       target,
@@ -187,8 +198,19 @@ function makeReviewCycle(
     if (!read.ok) return needsHuman(read.reason);
     const state = read.state;
 
-    const collected = await collectScanComponents(effects, state, scope);
+    const collected = await collectScanComponents(
+      effects,
+      state,
+      scope,
+      input.repoRoot,
+      patternsFile,
+    );
     if (!collected.ok) return needsHuman(`review refused — ${collected.reason}`);
+    if (collected.excludedPaths.length > 0) {
+      return needsHuman(
+        `review refused — changed file(s) excluded from the pre-upload scan cannot be uploaded safely: ${collected.excludedPaths.join(', ')}`,
+      );
+    }
     if (collected.paths === 0) {
       return needsHuman(
         'no diff to review — the selected scope is empty (stage or commit the work first, or pass the right scope)',
@@ -231,6 +253,56 @@ function makeReviewCycle(
     try {
       span = await effects.withHostLock(async () => {
         await refuseDrift('while waiting for the review lock');
+        if (isAgent) {
+          const role = reviewer.slice('agent:'.length);
+          if (!role) throw new Error('agent reviewer role is empty');
+          const result = await runAgentReviewer!({
+            repoRoot: input.repoRoot,
+            head: state.head,
+            branch: state.branch,
+            diff: collected.components.map((component) => component.text).join('\n'),
+            role,
+          });
+          await refuseDrift('during the agent review run');
+          const completion: DevReviewCompletion =
+            result.status === 'ok'
+              ? { kind: 'terminal' }
+              : {
+                  kind: 'blocked',
+                  reason:
+                    result.status === 'needs-human'
+                      ? result.reason
+                      : result.status === 'failed'
+                        ? result.error
+                        : result.status,
+                };
+          const findings = result.status === 'ok' ? result.value.findings : [];
+          const logPath = await effects.writeReviewLog(
+            state.branch,
+            `${Date.now()}`,
+            [
+              '# dev.review agent cycle log',
+              `reviewer: ${reviewer}`,
+              `base: ${state.base}`,
+              `head: ${state.head}`,
+              `dirtySha256: ${state.dirtySha256}`,
+              `scope: ${scope}`,
+              `completion: ${completion.kind}`,
+              `findings: ${String(findings.length)}`,
+              `at: ${at}`,
+              '',
+            ].join('\n'),
+          );
+          return {
+            completion,
+            logPath,
+            findings: findings.map((finding) => ({
+              severity: finding.severity,
+              ...(finding.file ? { fileName: finding.file } : {}),
+              excerpt: finding.text,
+            })),
+          };
+        }
         const raw = await runReviewer(effects, argv, DEFAULT_REVIEWER_TIMEOUT_MS);
         await refuseDrift(
           'during the review run (content the scan never saw may have been uploaded)',
@@ -358,8 +430,11 @@ async function collectScanComponents(
   effects: DevEffects,
   state: WorkState,
   scope: 'full' | 'uncommitted',
+  repoRoot: string,
+  patternsFile?: string,
 ): Promise<
-  { ok: true; components: ScanComponentInput[]; paths: number } | { ok: false; reason: string }
+  | { ok: true; components: ScanComponentInput[]; paths: number; excludedPaths: string[] }
+  | { ok: false; reason: string }
 > {
   const legs: { name: string; args: string[] }[] = [
     ...(scope === 'full' ? [{ name: 'committed', args: [state.base, state.head] }] : []),
@@ -367,6 +442,18 @@ async function collectScanComponents(
     { name: 'unstaged', args: [] },
   ];
   const components: ScanComponentInput[] = [];
+  const excludedPaths: string[] = [];
+  const configuredPatternsPath =
+    patternsFile === undefined
+      ? undefined
+      : relative(resolve(repoRoot), resolve(repoRoot, patternsFile)).split(sep).join('/');
+  const excludedPath =
+    configuredPatternsPath === undefined ||
+    configuredPatternsPath === '..' ||
+    configuredPatternsPath.startsWith('../') ||
+    isAbsolute(configuredPatternsPath)
+      ? undefined
+      : configuredPatternsPath;
   let paths = 0;
   for (const leg of legs) {
     const names = zList(
@@ -377,7 +464,10 @@ async function collectScanComponents(
     );
     paths += names.length;
     for (const path of names) {
-      if (path === PATTERNS_FILE) continue;
+      if (path === excludedPath) {
+        excludedPaths.push(path);
+        continue;
+      }
       const text = gitStdout(
         await git(effects, ['diff', ...HARDENED_DIFF_FLAGS, ...leg.args, '--', path]),
         `diff (${leg.name}) -- ${path}`,
@@ -402,7 +492,7 @@ async function collectScanComponents(
     }
     components.push({ component: `untracked:${path}`, text: file.text, path });
   }
-  return { ok: true, components, paths };
+  return { ok: true, components, paths, excludedPaths };
 }
 
 /** Run one reviewer invocation; a spawn fault becomes a synthetic killed result. */

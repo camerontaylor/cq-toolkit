@@ -1,4 +1,6 @@
-// Review family registry — E4 slices 1 + 1b: the SIX review-loop op entries
+// Review family registry. Companion modules: './findings.js' and './agentReviewer.js'.
+// It also carries the S5 portable findings producer alongside review-loop ops.
+// Existing E4 slices 1 + 1b entries
 // (`review.fixItem`, `review.fetchReviewState`, `review.classifyThreads`,
 // `review.planReviewBatch`, `review.replyAndResolve`,
 // `review.verifyReviewOutcome`), typed against the FROZEN OpRegistryEntry
@@ -67,6 +69,7 @@ import type { PlanBatchConfig } from './planReviewBatch.js';
 import type { ReviewAction } from './replyAndResolve.js';
 import type { RestComment, ReviewSummary, ReviewThread, ThreadComment } from './threads.js';
 import type { PrSnapshot } from '../../adapters/forge-github/snapshotPrState.js';
+import type { ReviewRunInput } from './run.js';
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
@@ -393,6 +396,18 @@ export const VerifyReviewOutcomeOpInputSchema = z
   })
   .strict();
 
+export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    uncommitted: z.boolean().exactOptional(),
+    target: z.string().min(1).exactOptional(),
+    base: z
+      .string()
+      .regex(/^[0-9a-fA-F]{7,64}$/)
+      .exactOptional(),
+  })
+  .strict();
+
 // ---------------------------------------------------------------------------
 // Inferred op-input aliases (the adapters' input types)
 // ---------------------------------------------------------------------------
@@ -500,6 +515,21 @@ export const FixReviewItemInputSchema: z.ZodType<FixReviewItemInput> = z
 
 /** Review family op registry (E4: the full fetch → classify → plan → fix → reply/resolve → verify loop). */
 export const registry: OpRegistryEntry[] = [
+  {
+    name: 'review.run',
+    inputSchema: ReviewRunInputSchema,
+    importer: (wiring) =>
+      import('./run.js').then(
+        (m) =>
+          m.makeReviewRun({
+            drivers: createDriverFactory(
+              wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {},
+            ),
+          }) as Op<unknown, unknown>,
+      ),
+  },
   {
     name: 'review.fixItem',
     inputSchema: FixReviewItemInputSchema,

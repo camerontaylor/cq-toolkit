@@ -426,6 +426,33 @@ describe('assembleReadiness', () => {
     expect(closed.ready).toBe(true);
   });
 
+  test('findings from a reviewer removed from cq.json still require disposition', () => {
+    const removedReviewer = cycleRecord({
+      cycleId: 'c000-aaaaaaaa',
+      reviewer: 'agent:reviewer',
+      findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'critical' }],
+    });
+    const currentReviewer = cycleRecord({ findings: [] });
+    const result = assembleReadiness({
+      branch: BRANCH,
+      target: 'merge-queue',
+      identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
+      ledger: {
+        version: DEV_LEDGER_VERSION,
+        branch: BRANCH,
+        records: [removedReviewer, currentReviewer, checkRecord()],
+      },
+      untracked: [],
+      configuredReviewers: ['coderabbit'],
+      nowIso: '2026-10-17T01:00:00.000Z',
+    });
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const gap = result.gaps.find((entry) => entry.field === 'open-blocking-findings');
+      expect(gap?.detail).toContain('c000-aaaaaaaa#f1');
+    }
+  });
+
   test('untracked files are a gap with the names listed', () => {
     const result = assemble([cycleRecord(), checkRecord()], ['scratch/new.ts']);
     expect(result.ready).toBe(false);

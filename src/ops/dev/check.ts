@@ -27,8 +27,13 @@
 // whether the run passed or failed. A red run maps to `failed` (CLI exit 1);
 // green returns the report. The gates run in the live worktree; the record
 // is bound to the identity read before them (author tier, strategy §2.4).
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { readdir, readFile, readlink } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
+import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
+import type { AdapterName } from '../gates/checkRunner.js';
+import { parseCqConfig } from '../analyze/cqConfig.js';
+import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
 import type { CommandResult, DevEffects } from './effects.js';
 import { faultText, guardDevOp } from './effects.js';
 import type { DevCheckGate, DevCheckRecord, DevLoadStamp } from './record.js';
@@ -131,10 +136,46 @@ async function runGate(
   command: string,
   args: readonly string[],
   timeoutMs: number,
+  cwd?: string,
+  adapter?: AdapterName,
 ): Promise<DevCheckGate> {
   const startedAt = Date.now();
   try {
-    return classifyGate(name, await effects.runCommand(command, args, { timeoutMs }), startedAt);
+    const resolvedCwd = cwd === undefined ? undefined : resolve(cwd);
+    const resolvedExe =
+      resolvedCwd !== undefined && !isAbsolute(command) && /[\\/]/.test(command)
+        ? resolve(resolvedCwd, command)
+        : command;
+    const result = await effects.runCommand(resolvedExe, args, {
+      timeoutMs,
+      ...(resolvedCwd === undefined ? {} : { cwd: resolvedCwd }),
+    });
+    if (adapter !== undefined) {
+      const parsed = parseCheckOutput(adapterByName(adapter), {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+      });
+      if (parsed.verdict === 'indeterminate') {
+        return {
+          name,
+          status: 'fail',
+          ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+          durationMs: Date.now() - startedAt,
+          evidence: `no trustworthy adapter result — ${parsed.reason}; ${evidenceTail(result)}`,
+        };
+      }
+      if (parsed.set.failures.length > 0) {
+        return {
+          name,
+          status: 'fail',
+          ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+          durationMs: Date.now() - startedAt,
+          evidence: `${String(parsed.set.failures.length)} failure(s) reported by ${adapter}; ${evidenceTail(result)}`,
+        };
+      }
+    }
+    return classifyGate(name, result, startedAt);
   } catch (err) {
     return {
       name,
@@ -153,7 +194,53 @@ async function runGate(
  * construction, and a newly staged file is included. Any step failing
  * faults the gate (never a silently green scan).
  */
-async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
+async function treeComponents(
+  tree: string,
+  excludedPaths: readonly string[] = [],
+): Promise<ScanComponentInput[]> {
+  const excluded = new Set(excludedPaths);
+  const components: ScanComponentInput[] = [];
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const absolute = join(directory, entry.name);
+      if (excluded.has(path)) continue;
+      if (entry.isDirectory()) {
+        await visit(absolute, path);
+      } else if (entry.isFile()) {
+        components.push({
+          component: `tracked:${path}`,
+          path,
+          text: await readFile(absolute, 'utf8'),
+        });
+      } else if (entry.isSymbolicLink()) {
+        components.push({ component: `tracked:${path}`, path, text: await readlink(absolute) });
+      } else {
+        throw new Error(`denylist: unsupported tracked tree entry '${path}'`);
+      }
+    }
+  };
+  await visit(tree, '');
+  return components;
+}
+
+function scanVerdict(scans: readonly ComponentScan[], startedAt: number): DevCheckGate {
+  const hits = scans.flatMap((scan) =>
+    scan.hits.map((hit) => `${scan.component}:${hit.ruleId}:${hit.lines.join(',')}`),
+  );
+  return {
+    name: 'denylist-scan',
+    status: hits.length === 0 ? 'pass' : 'fail',
+    durationMs: Date.now() - startedAt,
+    evidence: hits.length === 0 ? 'tracked tree clean' : `secret findings: ${hits.join('; ')}`,
+  };
+}
+
+async function denylistGate(
+  effects: DevEffects,
+  scanSecrets?: DiffSecretScanner,
+  excludedPaths: readonly string[] = [],
+): Promise<DevCheckGate> {
   const startedAt = Date.now();
   let scratch: string | undefined;
   try {
@@ -180,6 +267,9 @@ async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
       await git(effects, ['-C', tree, 'apply', '--whitespace=nowarn', '--allow-empty', workPatch]),
       'apply the staged+unstaged patch over the archived tree',
     );
+    if (scanSecrets !== undefined) {
+      return scanVerdict(await scanSecrets(await treeComponents(tree, excludedPaths)), startedAt);
+    }
     const result = await effects.runCommand('node', [join(tree, 'scripts', 'denylist-scan')], {
       timeoutMs: DENYLIST_TIMEOUT_MS,
     });
@@ -201,7 +291,10 @@ async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
  * identity (pin the immutable base), run the gates in sequence, persist the
  * record, and return ok/failed per the verdict.
  */
-export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckReport> {
+export function makeDevCheck(
+  effects: DevEffects,
+  scanSecrets?: DiffSecretScanner,
+): Op<DevCheckInput, DevCheckReport> {
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
@@ -245,63 +338,129 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
     const loadStamp: DevLoadStamp = effects.loadStamp();
     const at = effects.nowIso();
     const gates: DevCheckGate[] = [];
-    gates.push(
-      await runGate(
-        effects,
-        'check:static',
-        'pnpm',
-        ['run', 'check:static'],
-        STATIC_GATE_TIMEOUT_MS,
-      ),
+    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    const packageText = await readFile(join(input.repoRoot, 'package.json'), 'utf8').catch(
+      () => '{}',
     );
-    gates.push(
-      await runGate(
-        effects,
-        'format:check',
-        'pnpm',
-        ['run', 'format:check'],
-        STATIC_GATE_TIMEOUT_MS,
-      ),
-    );
-    gates.push(
-      await runGate(
-        effects,
-        'test:narrow',
-        'pnpm',
-        input.range !== undefined
-          ? ['test:narrow', '--range', `${state.base}..${state.head}`]
-          : ['test:narrow', '--base', state.base],
-        TEST_NARROW_TIMEOUT_MS,
-      ),
-    );
+    let packageName = '';
+    try {
+      const packageData: unknown = JSON.parse(packageText);
+      if (
+        typeof packageData === 'object' &&
+        packageData !== null &&
+        'name' in packageData &&
+        typeof packageData.name === 'string'
+      )
+        packageName = packageData.name;
+    } catch {
+      /* absent package metadata retains the legacy gate set */
+    }
+    const config = configText === null ? null : parseCqConfig(configText, input.repoRoot);
+    if (config?.ok === false) {
+      return { status: 'needs-human', reason: `dev.check: cq.json — ${config.reason}` };
+    }
+    // Owner decision 12: configured checks are authoritative for adopters.
+    // cq-toolkit keeps the legacy set until #411 adds its test check.
+    const configuredChecks =
+      config?.ok === true &&
+      config.config.checks.length > 0 &&
+      packageName !== '@camerontaylor/cq-toolkit'
+        ? config.config.checks
+        : null;
+    const configuredPatternsFile =
+      configuredChecks !== null ? config?.config.review?.denylistPatternsFile : undefined;
+    const configuredPatternsPath =
+      configuredPatternsFile === undefined
+        ? undefined
+        : relative(resolve(input.repoRoot), resolve(input.repoRoot, configuredPatternsFile))
+            .split(sep)
+            .join('/');
+    const excludedScanPaths =
+      configuredPatternsPath === undefined ||
+      configuredPatternsPath === '..' ||
+      configuredPatternsPath.startsWith('../') ||
+      isAbsolute(configuredPatternsPath)
+        ? []
+        : [configuredPatternsPath];
+    if (configuredChecks !== null) {
+      for (const [index, check] of configuredChecks.entries()) {
+        gates.push(
+          await runGate(
+            effects,
+            `cq.json:${String(index + 1)}:${check.adapter}`,
+            check.command.command,
+            check.command.args,
+            check.command.timeoutMs ?? STATIC_GATE_TIMEOUT_MS,
+            resolve(input.repoRoot, check.command.cwd ?? '.'),
+            check.adapter,
+          ),
+        );
+      }
+    } else {
+      gates.push(
+        await runGate(
+          effects,
+          'check:static',
+          'pnpm',
+          ['run', 'check:static'],
+          STATIC_GATE_TIMEOUT_MS,
+        ),
+      );
+      gates.push(
+        await runGate(
+          effects,
+          'format:check',
+          'pnpm',
+          ['run', 'format:check'],
+          STATIC_GATE_TIMEOUT_MS,
+        ),
+      );
+      gates.push(
+        await runGate(
+          effects,
+          'test:narrow',
+          'pnpm',
+          input.range !== undefined
+            ? ['test:narrow', '--range', `${state.base}..${state.head}`]
+            : ['test:narrow', '--base', state.base],
+          TEST_NARROW_TIMEOUT_MS,
+        ),
+      );
 
-    // The knip condition reads base → WORKING TREE (committed, staged and
-    // unstaged together) plus the untracked list. An unreadable listing
-    // runs knip (fail-safe toward running).
-    const nameStatus = await git(effects, [
-      'diff',
-      '--name-status',
-      '-z',
-      '--no-renames',
-      state.base,
-    ]);
-    const trigger =
-      nameStatus.exitCode === 0
-        ? knipTrigger(nameStatus.stdout, state.untracked)
-        : 'the diff listing could not be read';
-    gates.push(
-      trigger !== null
-        ? await runGate(effects, 'knip', 'pnpm', ['run', 'knip'], KNIP_TIMEOUT_MS)
-        : {
-            name: 'knip',
-            status: 'skipped',
-            durationMs: 0,
-            evidence:
-              'knip condition not met: the diff only modifies non-code files (no added, deleted or untracked file; no JS/TS, manifest, lockfile, knip or tsconfig change)',
-          },
-    );
+      // The knip condition reads base → WORKING TREE (committed, staged and
+      // unstaged together) plus the untracked list. An unreadable listing
+      // runs knip (fail-safe toward running).
+      const nameStatus = await git(effects, [
+        'diff',
+        '--name-status',
+        '-z',
+        '--no-renames',
+        state.base,
+      ]);
+      const trigger =
+        nameStatus.exitCode === 0
+          ? knipTrigger(nameStatus.stdout, state.untracked)
+          : 'the diff listing could not be read';
+      gates.push(
+        trigger !== null
+          ? await runGate(effects, 'knip', 'pnpm', ['run', 'knip'], KNIP_TIMEOUT_MS)
+          : {
+              name: 'knip',
+              status: 'skipped',
+              durationMs: 0,
+              evidence:
+                'knip condition not met: the diff only modifies non-code files (no added, deleted or untracked file; no JS/TS, manifest, lockfile, knip or tsconfig change)',
+            },
+      );
+    }
 
-    gates.push(await denylistGate(effects));
+    gates.push(
+      await denylistGate(
+        effects,
+        configuredChecks === null ? undefined : scanSecrets,
+        excludedScanPaths,
+      ),
+    );
 
     const committedLeg = [state.base, state.head];
     for (const [name, args] of [

@@ -103,6 +103,35 @@ async function ready(withDisposition = false) {
 const effects = () => repoEffects(repo);
 
 describe('pr.open', () => {
+  test('applies configured readiness severities before opening a PR', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        review: { blockingSeverities: ['critical', 'major', 'minor'] },
+      }),
+    );
+    repo.commitAll('configure adopter readiness policy');
+    repo.git('push', '-q', 'origin', 'feature/x');
+    const state = await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-minor01',
+        head: current.head,
+        base: current.base,
+        dirtySha256: current.dirtySha256,
+        findings: [{ id: 'c002-minor01#f1', severity: 'minor' }],
+      }),
+    ]);
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    expect(state.dirtySha256).toBe('clean-tree');
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('open-blocking-findings');
+    expect(calls).toEqual([]);
+  });
+
   test('creates the PR from a ready record: managed section body, dispositions comment', async () => {
     const state = await ready(true);
     const { gh, calls } = ghFake();
@@ -230,6 +259,7 @@ describe('the readiness renderers', () => {
     head: HEAD,
     dirtySha256: 'dirty',
     cycleId: 'c001-aaaaaaaa',
+    reviewer: 'coderabbit',
     checkId: 'k001-aaaaaaaa',
     at: '2026-10-17T00:00:00.000Z',
   };
@@ -274,6 +304,7 @@ describe('the readiness section markdown escaping', () => {
     head: HEAD,
     dirtySha256: 'dirty',
     cycleId: 'c001-aaaaaaaa',
+    reviewer: 'coderabbit',
     checkId: 'k001-aaaaaaaa',
     at: '2026-10-17T00:00:00.000Z',
   };

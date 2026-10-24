@@ -23,8 +23,8 @@
 // BUILT-IN DEFAULTS (strategy §5): the target default and the reviewer
 // choice vocabulary are the built-in constants from record.js/coderabbit.js
 // until the protected policy/dev-protocol.json consumer batch lands; no
-// provider or model names appear here — the fallback reviewer is an
-// explicit `agent:<provider/model>` flag value.
+// provider or model names appear here — agent reviews select a configured
+// role with the explicit `agent:<role>` flag value.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { CODERABBIT_REVIEWER } from './coderabbit.js';
@@ -34,7 +34,7 @@ import type { DevIdentity } from './record.js';
 import type { DevReadyInput } from './ready.js';
 import type { DevCycleInput, DevReviewInput } from './review.js';
 
-/** The reviewer choice: the shipped CLI reviewer, or the `agent:` fallback spelling. */
+/** The reviewer choice: the shipped CLI reviewer, or a configured `agent:` role. */
 const REVIEWER_PATTERN = new RegExp(
   `^(${CODERABBIT_REVIEWER}|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$`,
 );
@@ -156,10 +156,47 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       import('./check.js').then(
         (m) =>
-          (async (input: DevCheckInput) =>
-            m.makeDevCheck((await import('./effects.js')).makeSubprocessDevEffects(input.repoRoot))(
-              input,
-            )) as Op<unknown, unknown>,
+          (async (input: DevCheckInput) => {
+            const [effects, denylist, cqConfig, fs] = await Promise.all([
+              import('./effects.js'),
+              import('./denylist.js'),
+              import('../analyze/cqConfig.js'),
+              import('node:fs/promises'),
+            ]);
+            const dev = effects.makeSubprocessDevEffects(input.repoRoot);
+            const configText = await fs
+              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
+              .catch(() => null);
+            const packageText = await fs
+              .readFile(`${input.repoRoot}/package.json`, 'utf8')
+              .catch(() => '{}');
+            let packageName = '';
+            try {
+              const data: unknown = JSON.parse(packageText);
+              if (
+                typeof data === 'object' &&
+                data !== null &&
+                'name' in data &&
+                typeof data.name === 'string'
+              )
+                packageName = data.name;
+            } catch {
+              /* malformed package metadata retains legacy behavior */
+            }
+            let scanSecrets;
+            if (configText !== null && packageName !== '@camerontaylor/cq-toolkit') {
+              const parsed = cqConfig.parseCqConfig(configText, input.repoRoot);
+              if (parsed.ok && parsed.config.checks.length > 0) {
+                scanSecrets = denylist.makePortableReviewScanner(
+                  input.repoRoot,
+                  dev,
+                  configText,
+                  packageName,
+                );
+              }
+            }
+            return m.makeDevCheck(dev, scanSecrets)(input);
+          }) as Op<unknown, unknown>,
       ),
   },
   {
@@ -176,21 +213,119 @@ export const registry: OpRegistryEntry[] = [
         import('./review-transport.js'),
         import('./effects.js'),
         import('./denylist.js'),
+        import('../../driver/factory.js'),
+        import('../analyze/cqConfig.js'),
+        import('../analyze/cqConfigDefaults.js'),
+        import('../review/agentReviewer.js'),
+        import('node:fs/promises'),
       ]).then(
-        ([m, admission, effects, denylist]) =>
+        ([
+          m,
+          admission,
+          effects,
+          denylist,
+          driverFactory,
+          cqConfig,
+          cqDefaults,
+          agentReviewer,
+          fs,
+        ]) =>
           (async (input: DevReviewInput) => {
             if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
             const { repoRoot } = input as DevCycleInput;
             const dev = effects.makeSubprocessDevEffects(repoRoot);
-            // THE PRE-UPLOAD NET IS TWO-LAYERED: gitleaks DEFAULT rules AND
-            // the repo's project denylist classes — either firing refuses
-            // the upload (the protected scripts/denylist-scan is untouched;
-            // this binds its rule FILE read-only).
-            const scanSecrets = denylist.composeScanners(
-              denylist.makeGitleaksDefaultsScanner(dev),
-              denylist.makeRepoDiffScanner(repoRoot),
+            // Portable default: gitleaks' built-in rules apply everywhere.
+            // A repo-specific scanner is added only when cq.json configures
+            // its optional patterns file; missing toolkit policy is never a
+            // prerequisite for an adopter review.
+            const configText = await fs.readFile(`${repoRoot}/cq.json`, 'utf8').catch(() => null);
+            const packageText = await fs
+              .readFile(`${repoRoot}/package.json`, 'utf8')
+              .catch(() => '{}');
+            let packageName = 'repository';
+            try {
+              const data: unknown = JSON.parse(packageText);
+              if (
+                typeof data === 'object' &&
+                data !== null &&
+                'name' in data &&
+                typeof data.name === 'string'
+              )
+                packageName = data.name;
+            } catch {
+              /* descriptive fallback only */
+            }
+            const scanSecrets = denylist.makePortableReviewScanner(
+              repoRoot,
+              dev,
+              configText,
+              packageName,
             );
-            return m.makeDevReview({ effects: dev, scanSecrets })(input);
+            let patternsFile: string | undefined;
+            if (configText !== null) {
+              const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+              if (parsed.ok) {
+                patternsFile = cqDefaults.resolveCqConfigDefaults(parsed.config, {
+                  packageName,
+                }).review.denylistPatternsFile;
+              }
+            }
+            const drivers = driverFactory.createDriverFactory();
+            return m.makeDevReview({
+              effects: dev,
+              scanSecrets,
+              ...(patternsFile === undefined ? {} : { patternsFile }),
+              runAgentReviewer: async ({ role, ...reviewInput }) => {
+                if (role !== 'reviewer')
+                  return {
+                    status: 'needs-human',
+                    reason: `unsupported configured reviewer role '${role}'`,
+                  };
+                const configText = await fs
+                  .readFile(`${repoRoot}/cq.json`, 'utf8')
+                  .catch(() => null);
+                if (configText === null)
+                  return { status: 'needs-human', reason: 'agent reviewer requires cq.json' };
+                const parsed = cqConfig.parseCqConfig(configText, repoRoot);
+                if (!parsed.ok)
+                  return {
+                    status: 'needs-human',
+                    reason: `agent reviewer config: ${parsed.reason}`,
+                  };
+                const packageText = await fs
+                  .readFile(`${repoRoot}/package.json`, 'utf8')
+                  .catch(() => '{}');
+                let packageName = 'repository';
+                try {
+                  const data: unknown = JSON.parse(packageText);
+                  if (
+                    typeof data === 'object' &&
+                    data !== null &&
+                    'name' in data &&
+                    typeof data.name === 'string'
+                  )
+                    packageName = data.name;
+                } catch {
+                  /* descriptive fallback only */
+                }
+                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, { packageName });
+                const roleSpec = policy.roles.reviewer;
+                if (roleSpec === undefined)
+                  return {
+                    status: 'needs-human',
+                    reason: 'cq.json roles.reviewer is required for an agent review',
+                  };
+                const budgetStop = cqDefaults.requireAgenticTokenBudget(policy);
+                if (budgetStop !== undefined) return budgetStop;
+                return agentReviewer.runAgentReviewer(drivers, {
+                  ...reviewInput,
+                  role: roleSpec,
+                  maxTokens: policy.budgets.run.maxTokens!,
+                  wallMs: policy.budgets.run.wallMs,
+                  severityMap: policy.review.agentSeverityMap,
+                });
+              },
+            })(input);
           }) as Op<unknown, unknown>,
       ),
   },

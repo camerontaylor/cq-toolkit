@@ -24,7 +24,9 @@
 // matched content (inspect locally without printing secret contents).
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { basename, resolve, join, win32 } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
+import { parseCqConfig } from '../analyze/cqConfig.js';
+import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 
 /** One denylist rule as parsed from the patterns file. */
 export interface DenylistRule {
@@ -476,6 +478,27 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
   };
 }
 
+/** Portable review scanner: always gitleaks defaults, plus project rules only when configured. */
+export function makePortableReviewScanner(
+  repoRoot: string,
+  effects: GitleaksEffects,
+  configText: string | null,
+  packageName = 'repository',
+): DiffSecretScanner {
+  const defaults = makeGitleaksDefaultsScanner(effects);
+  if (configText === null) return defaults;
+  const parsed = parseCqConfig(configText, repoRoot);
+  if (!parsed.ok) {
+    return async () => {
+      throw new Error(`review config invalid: ${parsed.reason}`);
+    };
+  }
+  const policy = resolveCqConfigDefaults(parsed.config, { packageName });
+  return policy.review.denylistPatternsFile === undefined
+    ? defaults
+    : composeScanners(defaults, makeRepoDiffScanner(repoRoot, policy.review.denylistPatternsFile));
+}
+
 /**
  * The production scanner factory: binds `<repoRoot>/policy/denylist/
  * patterns.yml` and returns a scanner over that rule set. CONSTRUCTION IS
@@ -494,6 +517,12 @@ export function makeRepoDiffScanner(
   return (components) => {
     if (scanner === undefined) {
       const patternsPath = resolve(repoRoot, patternsFile);
+      const rel = relative(resolve(repoRoot), patternsPath);
+      if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        throw new Error(
+          `denylist: configured patterns file '${patternsFile}' escapes the repository root`,
+        );
+      }
       let bytes: Buffer;
       try {
         bytes = readFileSync(patternsPath);
@@ -502,10 +531,7 @@ export function makeRepoDiffScanner(
           `denylist: cannot read the patterns file at '${patternsPath}' — ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      const patterns = parseDenylistPatterns(
-        decodePolicyUtf8(bytes, 'policy/denylist/patterns.yml'),
-        'policy/denylist/patterns.yml',
-      );
+      const patterns = parseDenylistPatterns(decodePolicyUtf8(bytes, patternsFile), patternsFile);
       scanner = (given) => scanComponents(given, patterns.rules);
     }
     return scanner(components);

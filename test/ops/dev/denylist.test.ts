@@ -13,6 +13,7 @@ import {
   decodePolicyUtf8,
   makeRepoDiffScanner,
   makeGitleaksDefaultsScanner,
+  makePortableReviewScanner,
   parseDenylistPatterns,
   scanComponents,
   scanText,
@@ -280,6 +281,27 @@ describe('makeGitleaksDefaultsScanner', () => {
   test('any other exit code is a run fault (never uploaded unscanned)', async () => {
     const effects = gitleaksEffects(2, []);
     await expect(makeGitleaksDefaultsScanner(effects)(components)).rejects.toThrow(/failed to run/);
+  });
+
+  test('fresh adopter needs no legacy patterns file; configured optional path remains enforced', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'fresh-adopter-'));
+    try {
+      const effects = gitleaksEffects(0, []);
+      const plain = makePortableReviewScanner(root, effects, null);
+      expect(await plain(components)).toHaveLength(2);
+      const configured = makePortableReviewScanner(
+        root,
+        effects,
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          review: { denylistPatternsFile: 'custom/patterns.yml' },
+        }),
+      );
+      await expect(configured(components)).rejects.toThrow(/cannot read the patterns file/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

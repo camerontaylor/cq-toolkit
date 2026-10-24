@@ -49,7 +49,7 @@ const GATE_OUTPUT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 export type RunCommand = (
   command: string,
   args: readonly string[],
-  opts: { timeoutMs: number },
+  opts: { timeoutMs: number; cwd?: string },
 ) => Promise<CommandResult>;
 
 /** The injected effects seam of the dev family. */
@@ -175,7 +175,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
         command,
         command === 'git' ? [...GIT_HARDEN, ...args] : [...args],
         {
-          cwd: repoRoot,
+          cwd: opts.cwd ?? repoRoot,
           env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
           maxBuffer: GATE_OUTPUT_MAX_BUFFER_BYTES,
           timeout: opts.timeoutMs,

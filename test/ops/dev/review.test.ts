@@ -16,6 +16,8 @@ import {
   type ScanComponentInput,
 } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
+import type { DriverFactory } from '../../../src/driver/factory.js';
+import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
 import {
   makeDevReview,
   SCAN_COMPONENT_CAP_BYTES,
@@ -31,7 +33,13 @@ import { makeTestRepo, repoEffects, type CommandHandler, type TestRepo } from '.
 const cycleReview = (
   effects: Parameters<typeof makeDevReview>[0]['effects'],
   scanSecrets: DiffSecretScanner,
-) => makeDevReview({ effects, scanSecrets }) as Op<DevCycleInput, DevReviewReport>;
+  patternsFile?: string,
+) =>
+  makeDevReview({
+    effects,
+    scanSecrets,
+    ...(patternsFile === undefined ? {} : { patternsFile }),
+  }) as Op<DevCycleInput, DevReviewReport>;
 
 /** The admission branch: the composed op with the given transport (effects never touched). */
 const admissionReview = (transport: AuthorTransport) =>
@@ -151,6 +159,113 @@ describe('dev.review pre-upload project scan fails closed', () => {
 });
 
 describe('dev.review cycle', () => {
+  test('refuses agent cycles when a changed policy file is excluded from the upload scan', async () => {
+    await repo.write('policy/denylist/patterns.yml', 'rules: []\n');
+    repo.commitAll('change scanner policy');
+    const effects = repoEffects(repo);
+    const runAgentReviewer = vi.fn(async () => ({
+      status: 'ok' as const,
+      value: { findings: [], usage: 1 },
+    }));
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer,
+      patternsFile: 'policy/denylist/patterns.yml',
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('excluded from the pre-upload scan');
+    expect(runAgentReviewer).not.toHaveBeenCalled();
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
+  });
+
+  test('refuses CodeRabbit uploads when the configured corpus itself changed', async () => {
+    await repo.write('custom/rules.yml', 'rules:\n');
+    repo.commitAll('change configured scanner corpus');
+    let uploads = 0;
+    const effects = repoEffects(repo, (command) => {
+      if (command === 'coderabbit') uploads += 1;
+      return command === 'coderabbit' ? ran(0) : undefined;
+    });
+    const result = await cycleReview(
+      effects,
+      stubScanner(),
+      'custom/rules.yml',
+    )({
+      repoRoot: repo.root,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('custom/rules.yml');
+    expect(uploads).toBe(0);
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
+  });
+
+  test('agent:reviewer runs the scripted read-only reviewer and records a terminal ledger cycle', async () => {
+    const effects = repoEffects(repo);
+    const run = vi.fn(
+      async (invocation: { toolPolicy: { mode?: string }; outputSchema?: unknown }) => {
+        expect(invocation.toolPolicy.mode).toBe('none');
+        expect(invocation.outputSchema).toBeDefined();
+        return {
+          stopReason: 'complete' as const,
+          structuredOutput: {
+            findings: [
+              {
+                file: 'src/a.ts',
+                line: 1,
+                rule: 'fixture-rule',
+                severity: 'high',
+                text: 'Seeded agent finding',
+              },
+            ],
+          },
+          usage: { input: 12, output: 4, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+        };
+      },
+    );
+    const drivers = {
+      resolve: () => ({
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'scripted', model: 'reviewer' },
+        driver: { run },
+      }),
+    } as unknown as DriverFactory;
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: (input) =>
+        runAgentReviewer(drivers, {
+          ...input,
+          role: { provider: 'scripted', model: 'reviewer' },
+          maxTokens: 500,
+          wallMs: 1000,
+          severityMap: { high: 'major', medium: 'minor' },
+        }),
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.reviewer).toBe('agent:reviewer');
+    expect(result.value.completion).toEqual({ kind: 'terminal' });
+    expect(result.value.findings).toEqual([
+      expect.objectContaining({
+        severity: 'major',
+        fileName: 'src/a.ts',
+        excerpt: 'Seeded agent finding',
+      }),
+    ]);
+    const [cycle] = effects.openLedger('feature/x').load().records;
+    expect(cycle).toMatchObject({
+      kind: 'cycle',
+      reviewer: 'agent:reviewer',
+      completion: { kind: 'terminal' },
+    });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   test('a terminal cycle: ok report with completion, pinned base, recorded ids and log', async () => {
     const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
@@ -203,17 +318,34 @@ describe('dev.review cycle', () => {
     expect(scanner.seen[4]?.text).toBe('KEY=1\n');
   });
 
-  test("the scanner's own corpus file is skipped but still counts as a non-empty scope", async () => {
+  test('a legacy-named file without configured corpus remains in the scanner input', async () => {
     repo.git('reset', '-q', '--hard', 'origin/merge-queue');
-    await repo.write('policy/denylist/patterns.yml', 'rules:\n');
-    repo.commitAll('corpus only');
+    await repo.write('policy/denylist/patterns.yml', 'LEGACY_SECRET_PROBE\n');
+    repo.commitAll('legacy-named secret');
     const scanner = capturingScanner();
+    let uploads = 0;
     const result = await cycleReview(
-      repoEffects(repo, reviewer(ran(0))),
-      scanner,
+      repoEffects(repo, (command) => {
+        if (command === 'coderabbit') uploads += 1;
+        return command === 'coderabbit' ? ran(0) : undefined;
+      }),
+      (components) => {
+        scanner.seen.push(...components);
+        const hit = components.some((component) => component.text.includes('LEGACY_SECRET_PROBE'));
+        return components.map((component) => ({
+          component: component.component,
+          hits:
+            hit && component.path === 'policy/denylist/patterns.yml'
+              ? [{ ruleId: 'fixture:legacy-secret', lines: [1] }]
+              : [],
+        }));
+      },
     )({ repoRoot: repo.root });
-    expect(result.status).toBe('ok');
-    expect(scanner.seen).toEqual([]);
+    expect(result.status).toBe('needs-human');
+    expect(scanner.seen.map((component) => component.path)).toContain(
+      'policy/denylist/patterns.yml',
+    );
+    expect(uploads).toBe(0);
   });
 
   test('THE SCAN GATES THE UPLOAD: a hit or a scanner fault refuses before the reviewer runs', async () => {
@@ -345,7 +477,7 @@ describe('dev.review cycle', () => {
     expect(reviewerCalls(effects)).toEqual([]);
   });
 
-  test('the agent fallback is refused by name — never a substitute for the CLI cycle', async () => {
+  test('an agent reviewer is refused when the configured agent runner is unavailable', async () => {
     const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(
       effects,
@@ -355,7 +487,8 @@ describe('dev.review cycle', () => {
       reviewer: 'agent:some/model',
     });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('vendor-down fallback');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('agent reviewer is unavailable');
     expect(effects.calls).toEqual([]);
   });
 
