@@ -20,9 +20,25 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "pattern": "^[0-9a-fA-F]{7,64}$",
       "type": "string"
     },
+    "maxTokens": {
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
+    },
     "repoRoot": {
       "minLength": 1,
       "type": "string"
+    },
+    "reviewers": {
+      "items": {
+        "enum": [
+          "agent",
+          "coderabbit"
+        ],
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "target": {
       "minLength": 1,
@@ -30,6 +46,11 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     },
     "uncommitted": {
       "type": "boolean"
+    },
+    "wallMs": {
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
     }
   },
   "required": [

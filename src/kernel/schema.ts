@@ -23,6 +23,7 @@
 // (RunReportSchema, RunFinishedJournalEventSchema) and `attempt` is 1-based
 // (JobStartedJournalEventSchema).
 import { z } from 'zod';
+import { assertJsonLossless } from '../shared/jsonLossless.js';
 import type {
   GovernanceRecord,
   Job,
@@ -87,6 +88,35 @@ export function opResultSchema<R>(value: z.ZodType<R>): z.ZodType<OpResult<R>> {
 }
 
 export const OpResultSchema: z.ZodType<OpResult<unknown>> = opResultSchema(z.unknown());
+
+/** Consumer envelope only; the frozen base taxonomy remains strict and unchanged. */
+export const OpResultArtifactSchema = z.unknown().transform((raw, ctx): OpResult<unknown> => {
+  let base = raw;
+  const hasReport = typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'report');
+  if (hasReport) {
+    const { report: _report, ...rest } = raw as Record<string, unknown>;
+    base = rest;
+  }
+  const parsed = OpResultSchema.safeParse(base);
+  if (!parsed.success) {
+    ctx.addIssue({ code: 'custom', message: 'invalid strict OpResult base' });
+    return z.NEVER;
+  }
+  if (hasReport) {
+    try {
+      const report = (raw as Record<string, unknown>).report;
+      JSON.stringify(report, (_key, value: unknown) => {
+        if (value === undefined) throw new Error('undefined member in report');
+        return value;
+      });
+      assertJsonLossless(report);
+    } catch (error) {
+      ctx.addIssue({ code: 'custom', message: `non-lossless report: ${String(error)}` });
+      return z.NEVER;
+    }
+  }
+  return raw as OpResult<unknown>;
+});
 
 // ---------------------------------------------------------------------------
 // Kernel: jobs, plans, run options, limits, reports
@@ -235,7 +265,7 @@ export const JobOutcomeSchema: z.ZodType<JobOutcome> = z
   .object({
     jobId: z.string(),
     op: z.string(),
-    result: OpResultSchema,
+    result: OpResultArtifactSchema,
     usage: UsageSchema.exactOptional(),
     costUSD: z.number().exactOptional(),
   })
@@ -361,7 +391,7 @@ export const JobFinishedJournalEventSchema = z
     // Replay record (frozen verbatim): opId + inputsHash + result.
     opId: z.string(),
     inputsHash: z.string(),
-    result: OpResultSchema,
+    result: OpResultArtifactSchema,
     // Per-job usage rollup for resumed runs (USD stays derived-only downstream).
     usage: UsageSchema.exactOptional(),
     // v1.1 journal v2 (ADR-0003 annex §2): the job's modeled USD rollup,

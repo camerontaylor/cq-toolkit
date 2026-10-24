@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 
 /** Normalized finding shared by local and forge review producers. */
 export const FindingSchema = z
@@ -22,6 +23,7 @@ export const ReviewSourceSchema = z
     status: z.enum(['terminal', 'blocked']),
     reason: z.string().optional(),
     cycleId: z.string().optional(),
+    coverage: ReviewCoverageSchema.optional(),
   })
   .strict();
 export type ReviewSource = z.infer<typeof ReviewSourceSchema>;
@@ -30,6 +32,14 @@ export const FindingsRecordSchema = z
     schemaVersion: z.literal(1),
     branch: z.string(),
     head: z.string(),
+    /** Immutable comparison and coverage attested by the review producer. Legacy records lack proof. */
+    reviewed: z
+      .object({
+        base: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+        scope: z.enum(['full', 'uncommitted']),
+      })
+      .strict()
+      .optional(),
     sources: z.array(ReviewSourceSchema),
     findings: z.array(FindingSchema),
   })
@@ -105,6 +115,14 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
     schemaVersion: 1,
     branch: first.branch,
     head: first.head,
+    ...(first.reviewed &&
+    records.every(
+      (record) =>
+        record.reviewed?.base === first.reviewed!.base &&
+        record.reviewed.scope === first.reviewed!.scope,
+    )
+      ? { reviewed: first.reviewed }
+      : {}),
     sources: [...sources.values()],
     findings: [...findings.values()],
   };
@@ -116,7 +134,18 @@ export function isComplete(
   configured: readonly ReviewSource['kind'][],
 ): boolean {
   return configured.every((kind) =>
-    record.sources.some((source) => source.kind === kind && source.status === 'terminal'),
+    record.sources.some(
+      (source) =>
+        source.kind === kind &&
+        source.status === 'terminal' &&
+        (!source.coverage ||
+          (ReviewCoverageSchema.safeParse(source.coverage).success &&
+            source.coverage.head === record.head &&
+            source.coverage.partitions.every((part) => part.complete) &&
+            (!record.reviewed ||
+              (source.coverage.base === record.reviewed.base &&
+                source.coverage.scope === record.reviewed.scope)))),
+    ),
   );
 }
 
@@ -126,6 +155,8 @@ export function openBlocking(
 ): Finding[] {
   const blocking = new Set(severities.map((severity) => severity.toLowerCase()));
   return record.findings.filter(
-    (finding) => finding.status === 'open' && blocking.has(finding.severity.toLowerCase()),
+    (finding) =>
+      (finding.status === 'open' || finding.status === 'deferred') &&
+      blocking.has(finding.severity.toLowerCase()),
   );
 }

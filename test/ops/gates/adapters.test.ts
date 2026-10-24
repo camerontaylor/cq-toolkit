@@ -5,7 +5,10 @@
 // injected runner — ok, indeterminate, and runner-throws paths, with zero
 // subprocesses spawned.
 import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'vitest';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { describe, expect, test, vi } from 'vitest';
 import {
   adapterByName,
   makeCheckRunner,
@@ -531,4 +534,54 @@ describe('gates registry entry', () => {
     const op = await entry.importer();
     expect(typeof op).toBe('function');
   });
+});
+
+test('an already-aborted check never dispatches a child', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const result = await subprocessRunCheck(
+    { command: process.execPath, args: ['-e', 'console.log("must not run")'] },
+    { signal: controller.signal },
+  );
+  expect(result).toEqual({ stdout: '', stderr: 'check cancelled before dispatch', exitCode: null });
+});
+test('running check cancellation settles only after child exit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cq-check-cancel-'));
+  const marker = join(dir, 'ready');
+  const controller = new AbortController();
+  const running = subprocessRunCheck(
+    {
+      command: process.execPath,
+      args: [
+        '-e',
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000)`,
+      ],
+      timeoutMs: 5000,
+    },
+    { signal: controller.signal },
+  );
+  let pid: number | undefined;
+  try {
+    await vi.waitFor(async () => {
+      pid = Number(await readFile(marker, 'utf8'));
+      expect(pid).toBeGreaterThan(0);
+    });
+    let settled = false;
+    void running.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    controller.abort();
+    await vi.waitFor(() => expect(settled).toBe(true), { timeout: 2000 });
+    expect((await running).exitCode).toBeNull();
+    expect(() => process.kill(pid!, 0)).toThrow();
+  } finally {
+    controller.abort();
+    await running;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

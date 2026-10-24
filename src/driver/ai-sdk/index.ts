@@ -265,12 +265,13 @@ export type ProviderFactory = (modelId: string, sessionId?: string) => LanguageM
  * The multi-step default for the SDK tool loop (ai@7.0.99). TOOL-CALL LOOPS
  * NEED MULTI-STEP: without an explicit `stopWhen` the SDK's default is
  * `stepCountIs(1)` — the run would return after the FIRST tool-calls step,
- * so tool calls would never be followed up. 8 steps bounds the loop
- * defensively (a misbehaving model cannot loop forever) while remaining a
+ * so tool calls would never be followed up. 40 steps bounds the loop as a
+ * runaway guard (a misbehaving model cannot loop forever; owner 2026-10-25:
+ * budgets stop runaways, not good-faith work) while remaining a
  * pure STEP COUNT, not a scheduling primitive (I8: WHEN to abort on time is
  * still the governor's ladder; Budget.maxTokens is the token-side bound).
  */
-export const DEFAULT_MAX_STEPS = 8;
+export const DEFAULT_MAX_STEPS = 40;
 
 /**
  * Per-request wall-clock bound for EACH step of the SDK tool loop
@@ -602,6 +603,11 @@ export class AiSdkDriver implements Driver {
     // schema source; it normalizes to the same plain-data OutputSchema the
     // shared validator judges.
     const outputSchema = opInvocation.outputSchema;
+    const prompted = outputSchema !== undefined && promptedSchemaProvider(modelSpec.provider);
+    const messages: ModelMessage[] =
+      prompted && outputSchema !== undefined
+        ? [...transcript, { role: 'user', content: schemaContract(outputSchema) }]
+        : transcript;
 
     // --- The one SDK call. -------------------------------------------------
     // Per-step usage accumulation (DD-2 evidence): onStepFinish fires for
@@ -623,7 +629,7 @@ export class AiSdkDriver implements Driver {
         result = await generateText({
           model,
           system,
-          messages: transcript,
+          messages,
           // ONE retry per step request (bounded; ≤ DEFAULT_MAX_STEPS per run)
           // (#210 Ask 1): the SDK retries ONLY its
           // retryable transient class (endpoint header timeout / network),
@@ -672,7 +678,7 @@ export class AiSdkDriver implements Driver {
           // no `validate`, so the SDK's own parse is parse-level; the schema
           // judgment is `validateStructured` after settle, the same shared
           // validator every lane runs over the same stripped document.
-          ...(outputSchema !== undefined
+          ...(outputSchema !== undefined && !prompted
             ? {
                 output: Output.object({
                   schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
@@ -741,7 +747,7 @@ export class AiSdkDriver implements Driver {
         let rejection: string | undefined;
         let parsed: unknown;
         try {
-          parsed = result.output;
+          parsed = prompted ? parseReplyJson(text) : result.output;
         } catch (err) {
           rejection = `the reply carried no parseable object — ${describeError(err)}`;
         }
@@ -1090,9 +1096,13 @@ export class AiSdkDriver implements Driver {
         },
         // Tool-free: NO tools key at all.
         ...(abortSignal !== undefined ? { abortSignal } : {}),
-        output: Output.object({
-          schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
-        }),
+        ...(promptedSchemaProvider(modelSpec.provider)
+          ? {}
+          : {
+              output: Output.object({
+                schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
+              }),
+            }),
       });
       const totalUsage = addUsage(mainUsage, usageFromSdk(repair.usage));
       // The repair is a REAL model call with its OWN served-id observation,
@@ -1173,7 +1183,10 @@ export class AiSdkDriver implements Driver {
       let repairRejection: string | undefined;
       let repairedValue: unknown;
       try {
-        const validated = validateStructured(outputSchema, repair.output);
+        const validated = validateStructured(
+          outputSchema,
+          promptedSchemaProvider(modelSpec.provider) ? parseReplyJson(repair.text) : repair.output,
+        );
         if (validated.ok) repairedValue = validated.value;
         else repairRejection = validated.reason;
       } catch (err) {
@@ -1420,6 +1433,43 @@ const SYSTEM_PREAMBLE =
   'You are a cq-toolkit worker executing one task. ' +
   'Work inside the provided workspace directory; use the available tools to read, edit, and run. ' +
   'Tool refusals arrive as denial text — adapt instead of retrying the same call.';
+
+/**
+ * Providers whose chat route cannot carry `response_format: json_schema`
+ * (live probe 2026-10-25): the OpenCode Go gateway answers 400 to any
+ * json_schema request, and the Z.ai provider drops the schema with a
+ * warning, so the model never sees it. On these routes the schema rides a
+ * trailing user turn, the reply text is parsed as JSON, and the shared
+ * validator judges it exactly as it judges a native structured object.
+ */
+const PROMPTED_SCHEMA_PROVIDERS: ReadonlySet<string> = new Set(['opencode-go', 'zai', 'ai-sdk']);
+
+function promptedSchemaProvider(provider: string): boolean {
+  return PROMPTED_SCHEMA_PROVIDERS.has(provider);
+}
+
+function schemaContract(outputSchema: OutputSchema): string {
+  return (
+    `Use the tools to complete the task first. When you are done, reply with ONLY one JSON ` +
+    `object — no prose, no code fences — that validates against this JSON Schema ` +
+    `(draft 2020-12):\n${JSON.stringify(outputSchema.schema)}`
+  );
+}
+
+/** Parse a prompted-schema reply: bare JSON, one fenced block, or the outermost object. */
+export function parseReplyJson(text: string): unknown {
+  const trimmed = text.trim();
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
+  const body = fenced?.[1] ?? trimmed;
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    const start = body.indexOf('{');
+    const end = body.lastIndexOf('}');
+    if (start === -1 || end <= start) throw error;
+    return JSON.parse(body.slice(start, end + 1));
+  }
+}
 
 /** ISO-8601 timestamp for session messages. */
 function nowIso(): string {

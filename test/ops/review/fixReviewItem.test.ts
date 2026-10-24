@@ -951,3 +951,43 @@ describe('attribution requirement under promptOverride (slice 9 item 1)', () => 
     );
   });
 });
+
+test('local finding input is additive: no PR required, strict finding schema, old thread shape retained', async () => {
+  const entry = registry.find((item) => item.name === 'review.fixItem')!;
+  const old = baseInput();
+  const { pr: _pr, ...local } = old;
+  const input = {
+    ...local,
+    item: {
+      kind: 'finding' as const,
+      finding: {
+        id: 'local-1',
+        source: 'agent',
+        file: 'src/a.ts',
+        line: 3,
+        severity: 'major',
+        text: 'Local defect',
+        status: 'open' as const,
+      },
+    },
+  };
+  expect(entry.inputSchema.safeParse(old).success).toBe(true);
+  expect(entry.inputSchema.safeParse(input).success).toBe(true);
+  expect(
+    entry.inputSchema.safeParse({ ...input, item: { ...input.item, unknown: true } }).success,
+  ).toBe(false);
+  const scripted = scriptedOp([
+    completeWorker(
+      JSON.stringify({
+        disposition: 'unchanged_with_reason',
+        summary: 'already correct',
+        commits: [],
+        evidence: [{ path: 'src/a.ts', line: 3 }],
+      }),
+    ),
+  ]);
+  const result = await scripted.op(input);
+  expect(result.status).toBe('ok');
+  expect(scripted.invocations[0]?.prompt).toContain('Local defect');
+  expect(scripted.invocations[0]?.prompt).not.toContain('Pull request: #undefined');
+});
