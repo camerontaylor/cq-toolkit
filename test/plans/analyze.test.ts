@@ -16,7 +16,9 @@
 //      (`analyze.run` over '.') run verbatim in a directory without cq.json
 //      fails naming `analyze.init`, and NOTHING is written into the working
 //      directory.
-import { readdir } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
@@ -180,7 +182,7 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
   });
 
   // The floor's honesty claim, pinned through the REAL runner and the REAL
-  // op: run verbatim in a directory WITHOUT cq.json (this repository), the
+  // op: run verbatim in a scratch directory WITHOUT cq.json, the
   // analyze.run job fails naming analyze.init, and NOTHING is written (no
   // report directory is created before the checks resolve).
   test('the floor run verbatim without cq.json fails naming analyze.init and writes NOTHING', async () => {
@@ -192,14 +194,21 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
         return entry as OpRegistryEntry<never, never> | undefined;
       },
     };
-    const before = new Set(await readdir(process.cwd()));
-    const floor = await plan.importer();
-    const report = await runPlan(floor, { concurrency: 1, stopOnError: true }, view);
-    const row = report.jobs.find((job) => job.jobId === ANALYZE_RUN_JOB_ID);
-    expect(row?.result.status).toBe('failed');
-    if (row?.result.status === 'failed') expect(row.result.error).toContain('analyze.init');
-    const after = await readdir(process.cwd());
-    expect(after.filter((name) => !before.has(name))).toEqual([]);
+    const dir = await mkdtemp(join(tmpdir(), 'cq-analyze-unconfigured-'));
+    try {
+      const floor = await plan.importer();
+      const job = floor.jobs[0];
+      if (job === undefined) throw new Error('missing run job');
+      // Bind the shipped floor's relative project directory without changing process.cwd().
+      job.input = { dir };
+      const report = await runPlan(floor, { concurrency: 1, stopOnError: true }, view);
+      const row = report.jobs.find((job) => job.jobId === ANALYZE_RUN_JOB_ID);
+      expect(row?.result.status).toBe('failed');
+      if (row?.result.status === 'failed') expect(row.result.error).toContain('analyze.init');
+      expect(await readdir(dir)).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 60_000);
 });
 

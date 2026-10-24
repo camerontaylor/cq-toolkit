@@ -19,7 +19,8 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { CheckCommand, RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import { parseAnalysisSidecar } from '../../../src/ops/analyze/renderAnalysisReport.js';
 import { AnalyzeRunInputSchema } from '../../../src/ops/analyze/registry.js';
-import { makeAnalyzeRun } from '../../../src/ops/analyze/run.js';
+import { makeAnalyzeRun, resolveChecks } from '../../../src/ops/analyze/run.js';
+import { CheckRunnerInputSchema } from '../../../src/ops/gates/registry.js';
 
 const dirs: string[] = [];
 function project(files: Record<string, string>): string {
@@ -39,7 +40,7 @@ const TSC_CHECK = {
   adapter: 'tsc-lines' as const,
   command: { command: 'node_modules/.bin/tsc', args: ['--noEmit', '--pretty', 'false'], cwd: '.' },
 };
-const CONFIG = JSON.stringify({ schemaVersion: 1, checks: [TSC_CHECK] });
+const CONFIG = JSON.stringify({ schemaVersion: 2, checks: [TSC_CHECK] });
 const TS2322 =
   "src/index.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n";
 
@@ -171,6 +172,21 @@ describe('analyze.run — the dataflow', () => {
 });
 
 describe('analyze.run — refusals keep the taxonomy', () => {
+  test('v1 names the lossless migration with the project directory and never --force', async () => {
+    const text = JSON.stringify({ schemaVersion: 1, checks: [TSC_CHECK] });
+    const dir = project({ 'cq.json': text });
+    const run = scripted([]);
+    const result = await makeAnalyzeRun(run)({ dir });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain(`cq analyze.init --migrate --dir='${dir}'`);
+      expect(result.error).not.toContain('--force');
+    }
+    expect(run.calls).toEqual([]);
+    expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe(text);
+    expect(existsSync(join(dir, '.cq'))).toBe(false);
+  });
+
   test('missing cq.json → failed naming analyze.init; nothing written', async () => {
     const dir = project({ 'src/index.ts': 'x\n' });
     const run = scripted([]);
@@ -183,7 +199,7 @@ describe('analyze.run — refusals keep the taxonomy', () => {
 
   test('invalid cq.json → failed naming the defect and analyze.init --force', async () => {
     const dir = project({
-      'cq.json': JSON.stringify({ schemaVersion: 1, checks: [{ adapter: 'ruff' }] }),
+      'cq.json': JSON.stringify({ schemaVersion: 2, checks: [{ adapter: 'ruff' }] }),
     });
     const result = await makeAnalyzeRun(scripted([]))({ dir });
     expect(result.status).toBe('failed');
@@ -259,4 +275,25 @@ describe('analyze.run — refusals keep the taxonomy', () => {
     expect(AnalyzeRunInputSchema.safeParse({ dir: '.', checks: [TSC_CHECK] }).success).toBe(true);
     expect(AnalyzeRunInputSchema.safeParse({ dir: '.', bogus: 1 }).success).toBe(false);
   });
+});
+
+test('cq.json v2 metadata is not forwarded to the strict checkRunner input', async () => {
+  const dir = project({
+    'cq.json': JSON.stringify({
+      schemaVersion: 2,
+      checks: [{ ...TSC_CHECK, kind: 'static', relatedArgs: ['{files}'] }],
+      roles: { worker: { provider: 'fixture', model: 'fixture' } },
+    }),
+  });
+  const resolved = resolveChecks(dir, {});
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) return;
+  expect(resolved.checks).toHaveLength(1);
+  expect(CheckRunnerInputSchema.safeParse(resolved.checks[0]).success).toBe(true);
+  expect(resolved.checks[0]).not.toHaveProperty('kind');
+  expect(resolved.checks[0]).not.toHaveProperty('relatedArgs');
+  const run = scripted([{ stdout: '', exitCode: 0 }]);
+  const result = await makeAnalyzeRun(run)({ dir });
+  expect(result.status).toBe('ok');
+  expect(run.calls).toHaveLength(1);
 });

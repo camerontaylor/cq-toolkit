@@ -67,6 +67,8 @@
   "test/ops/analyze/clusterErrors.test.ts": "pure",
   "test/ops/analyze/codemod/astGrep.test.ts": "pure",
   "test/ops/analyze/collectFailures.test.ts": "pure",
+  "test/ops/analyze/cqConfig.test.ts": "pure",
+  "test/ops/analyze/cqConfigDefaults.test.ts": "pure",
   "test/ops/analyze/fix.test.ts": "process",
   "test/ops/analyze/init.test.ts": "pure",
   "test/ops/analyze/playbooks/format.test.ts": "pure",

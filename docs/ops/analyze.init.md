@@ -16,12 +16,266 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "budgets": {
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "additionalProperties": false,
+          "properties": {
+            "maxTokens": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            "wallMs": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "step": {
+          "additionalProperties": false,
+          "properties": {
+            "wallMs": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "unit": {
+          "additionalProperties": false,
+          "properties": {
+            "wallMs": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "dir": {
       "minLength": 1,
       "type": "string"
     },
+    "escalation": {
+      "additionalProperties": false,
+      "properties": {
+        "rescueBase": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rescuePerFixed": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "rescuePerPackageCap": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workerAttempts": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "force": {
       "type": "boolean"
+    },
+    "migrate": {
+      "type": "boolean"
+    },
+    "packages": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "review": {
+      "additionalProperties": false,
+      "properties": {
+        "addressConcurrency": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "agentSeverityMap": {
+          "additionalProperties": false,
+          "properties": {
+            "high": {
+              "enum": [
+                "critical",
+                "major",
+                "minor",
+                "trivial",
+                "info",
+                "none"
+              ],
+              "type": "string"
+            },
+            "low": {
+              "enum": [
+                "critical",
+                "major",
+                "minor",
+                "trivial",
+                "info",
+                "none"
+              ],
+              "type": "string"
+            },
+            "medium": {
+              "enum": [
+                "critical",
+                "major",
+                "minor",
+                "trivial",
+                "info",
+                "none"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "blockingSeverities": {
+          "items": {
+            "enum": [
+              "critical",
+              "major",
+              "minor",
+              "trivial",
+              "info",
+              "none"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "bulk": {
+          "additionalProperties": false,
+          "properties": {
+            "concurrency": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            "query": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "denylistPatternsFile": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reviewers": {
+          "items": {
+            "enum": [
+              "coderabbit",
+              "agent"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "rounds": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "roles": {
+      "additionalProperties": false,
+      "properties": {
+        "rescue": {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "provider": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "model"
+          ],
+          "type": "object"
+        },
+        "reviewer": {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "provider": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "model"
+          ],
+          "type": "object"
+        },
+        "worker": {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "provider": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "model"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "object"
     }
   },
   "required": [

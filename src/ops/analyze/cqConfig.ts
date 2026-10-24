@@ -1,67 +1,163 @@
-// Analyze lane — the `cq.json` project config (Lane C, S1/S2): the one file
-// `analyze.init` writes and `analyze.run` reads when the caller passes no
-// checks. PURE module (zod + types + the gates family's pure input schema),
-// so the analyze registry may import it eagerly for its input mirrors.
-//
-// Shape, version 1:
-//   { "schemaVersion": 1,
-//     "checks": [ { "adapter": "tsc-lines",
-//                   "command": { "command": "node_modules/.bin/tsc",
-//                                "args": ["--noEmit", "--pretty", "false"],
-//                                "cwd": "." } } ] }
-// Commands in `cq.json` run with YOUR privileges, like package.json scripts:
-// treat the file as code. They are executed as argv (no shell, no globbing).
-// Each check is exactly a `gates.checkRunner` input. Relative `cwd` values
-// resolve against the config's project directory; a relative `command` that
-// contains a path separator resolves against the check's cwd.
+// cq.json v2: pure schema shared by config readers and op input mirrors.
+// Commands are argv, never shell text; review this file like package.json scripts.
 import { z } from 'zod';
 import type { CheckRunnerInput } from '../gates/checkRunner.js';
-import { CheckRunnerInputSchema } from '../gates/registry.js';
+import { CheckRunnerInputObject } from '../gates/registry.js';
 
-/** The config file name `analyze.init` writes and `analyze.run` reads. */
 export const CQ_CONFIG_FILE = 'cq.json';
+export const CQ_CONFIG_SCHEMA_VERSION = 2;
 
-/** The only config schema version this toolkit reads or writes. */
-export const CQ_CONFIG_SCHEMA_VERSION = 1;
+const PositiveInteger = z.number().int().positive();
+const SeveritySchema = z.enum(['critical', 'major', 'minor', 'trivial', 'info', 'none']);
+const RoleSchema = z.object({ provider: z.string().min(1), model: z.string().min(1) }).strict();
 
-/** The `cq.json` project config. */
-export interface CqConfig {
-  schemaVersion: typeof CQ_CONFIG_SCHEMA_VERSION;
-  /** The checks `analyze.run` executes, in order. At least one. */
-  checks: CheckRunnerInput[];
-}
+/** Config-only metadata is removed before dispatch to gates.checkRunner. */
+export const CqCheckSchema = CheckRunnerInputObject.extend({
+  kind: z.enum(['tests', 'static']).exactOptional(),
+  // Each standalone {files} token expands to separate argv entries, not shell text.
+  relatedArgs: z.array(z.string()).exactOptional(),
+});
 
-/** The strict zod form of {@link CqConfig}: unknown keys fail loudly. */
-export const CqConfigSchema: z.ZodType<CqConfig> = z
+export const CqConfigSchema = z
   .object({
     schemaVersion: z.literal(CQ_CONFIG_SCHEMA_VERSION),
-    checks: z.array(CheckRunnerInputSchema).min(1),
+    checks: z.array(CqCheckSchema).min(1),
+    packages: z
+      .array(z.object({ name: z.string().min(1), path: z.string().min(1) }).strict())
+      .min(1)
+      .exactOptional(),
+    roles: z
+      .object({
+        worker: RoleSchema.exactOptional(),
+        rescue: RoleSchema.exactOptional(),
+        reviewer: RoleSchema.exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
+    budgets: z
+      .object({
+        run: z
+          .object({
+            maxTokens: PositiveInteger.exactOptional(),
+            wallMs: PositiveInteger.exactOptional(),
+          })
+          .strict()
+          .exactOptional(),
+        unit: z.object({ wallMs: PositiveInteger.exactOptional() }).strict().exactOptional(),
+        step: z.object({ wallMs: PositiveInteger.exactOptional() }).strict().exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
+    review: z
+      .object({
+        rounds: PositiveInteger.exactOptional(),
+        blockingSeverities: z.array(SeveritySchema).exactOptional(),
+        agentSeverityMap: z
+          .object({
+            high: SeveritySchema.exactOptional(),
+            medium: SeveritySchema.exactOptional(),
+            low: SeveritySchema.exactOptional(),
+          })
+          .strict()
+          .exactOptional(),
+        reviewers: z
+          .array(z.enum(['coderabbit', 'agent']))
+          .min(1)
+          .exactOptional(),
+        addressConcurrency: PositiveInteger.exactOptional(),
+        denylistPatternsFile: z.string().min(1).exactOptional(),
+        bulk: z
+          .object({
+            concurrency: PositiveInteger.exactOptional(),
+            query: z.string().min(1).exactOptional(),
+          })
+          .strict()
+          .exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
+    escalation: z
+      .object({
+        workerAttempts: PositiveInteger.exactOptional(),
+        rescueBase: z.number().int().nonnegative().exactOptional(),
+        rescuePerFixed: PositiveInteger.exactOptional(),
+        rescuePerPackageCap: z.number().int().nonnegative().exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
   })
   .strict();
 
-/**
- * Parse `cq.json` text. Returns the config, or a one-line reason naming the
- * defect (invalid JSON, or the first schema issues) — never throws.
- */
+/** Library callers may omit the check command's boundary timeout default. */
+export type CqConfig = Omit<z.input<typeof CqConfigSchema>, 'checks'> & { checks: CqCheck[] };
+export type CqCheck = CheckRunnerInput &
+  Pick<z.input<typeof CqCheckSchema>, 'kind' | 'relatedArgs'>;
+export type CqSeverity = z.output<typeof SeveritySchema>;
+
+function schemaReason(error: z.ZodError): string {
+  const issues = error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+    .join('; ');
+  return `does not match the cq.json schema (${issues})`.replace(/\s+/g, ' ');
+}
+
+/** Parse without migration or filesystem effects; unknown keys fail at every level. */
 export function parseCqConfig(
   text: string,
-): { ok: true; config: CqConfig } | { ok: false; reason: string } {
+  dir = '.',
+): { ok: true; config: CqConfig } | { ok: false; reason: string; migrationRequired?: true } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (err) {
     return {
       ok: false,
-      reason: `not valid JSON (${err instanceof Error ? err.message : String(err)})`,
+      reason: `not valid JSON (${err instanceof Error ? err.message : String(err)})`.replace(
+        /\s+/g,
+        ' ',
+      ),
+    };
+  }
+  if (
+    typeof raw === 'object' &&
+    raw !== null &&
+    'schemaVersion' in raw &&
+    raw.schemaVersion === 1
+  ) {
+    return {
+      ok: false,
+      migrationRequired: true,
+      reason: `cq.json schemaVersion 1 is unsupported; run \`cq analyze.init --migrate --dir='${dir.replace(/'/g, "'\\''")}'\` to upgrade to schemaVersion 2`,
     };
   }
   const parsed = CqConfigSchema.safeParse(raw);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .slice(0, 5)
-      .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
-      .join('; ');
-    return { ok: false, reason: `does not match the cq.json schema (${issues})` };
-  }
+  if (!parsed.success) return { ok: false, reason: schemaReason(parsed.error) };
   return { ok: true, config: parsed.data };
+}
+
+/** Validate and preserve raw JSON without injecting defaults; v2 is already migrated. */
+export function migrateCqConfig(
+  text: string,
+): { ok: true; config: CqConfig; changed: boolean } | { ok: false; reason: string } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: 'not valid JSON' };
+  }
+  if (CqConfigSchema.safeParse(raw).success) {
+    return { ok: true, config: raw as CqConfig, changed: false };
+  }
+  const legacy = z
+    .object({ schemaVersion: z.literal(1), checks: z.array(CheckRunnerInputObject).min(1) })
+    .strict()
+    .safeParse(raw);
+  if (!legacy.success) return { ok: false, reason: schemaReason(legacy.error) };
+  // Use the raw checks: parsing adds timeoutMs, which migration must not invent.
+  const original = raw as { schemaVersion: 1; checks: CqCheck[] };
+  const config: CqConfig = { ...original, schemaVersion: CQ_CONFIG_SCHEMA_VERSION };
+  const validated = CqConfigSchema.safeParse(config);
+  if (!validated.success) return { ok: false, reason: schemaReason(validated.error) };
+  return { ok: true, config, changed: true };
 }

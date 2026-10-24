@@ -27,7 +27,7 @@ const RULE = JSON.stringify({
 const CHECKS = [
   { adapter: 'tsc-lines' as const, command: { command: 'tsc', args: ['--noEmit'], cwd: '.' } },
 ];
-const CONFIG = JSON.stringify({ schemaVersion: 1, checks: CHECKS });
+const CONFIG = JSON.stringify({ schemaVersion: 2, checks: CHECKS });
 
 /** The scripted runner: tsc from the file bytes; ast-grep by literal pattern. */
 function scriptedRunner(hooks: { onTsc?: () => void } = {}): RunCheck & { calls: CheckCommand[] } {

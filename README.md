@@ -79,6 +79,45 @@ configured checks are re-run to report the failure count before and after. The c
 `cq.json` run with your privileges, like package.json scripts (as argv, never through a shell),
 so review the file like code.
 
+`cq.json` uses `schemaVersion: 2`. Upgrade a v1 file with
+`cq analyze.init --dir=. --migrate`; this preserves its checks and argv and changes only
+the version. Migration validates the result and replaces the file atomically; running
+`--migrate` on a valid v2 file is a no-op. Reading v1 otherwise fails with the migration hint. `--force` regenerates
+checks from detection; `--migrate` upgrades the existing file.
+Policy options cannot accompany `--migrate`; a usage error names any supplied policy keys.
+
+The v2 config also accepts `packages` (`name`, `path`), check `kind` (`tests` or `static`),
+check `relatedArgs`, `roles` (`worker`, `rescue`, `reviewer`, each with `provider` and
+`model`), `budgets`, `review`, and `escalation`. Unknown keys fail, including nested keys.
+`relatedArgs` is the complete replacement argument vector for a related check: each
+standalone `{files}` argument expands into individual file arguments; omitted means append
+files to the configured command's args. The command executable stays the same.
+
+`analyze.init` writes only the version and detected checks unless optional fields are
+explicitly supplied as flags (for example `--budgets='{"run":{"maxTokens":100000}}'`).
+No model is selected by the generated starter config. New agentic compositions use the
+pure SDK helper `resolveCqConfigDefaults(config, { packageName, ...flags })`, with the
+actual `package.json` name supplied by the caller. Flags override config field by field;
+packages default to that name at `.` and check kinds default by adapter (`vitest-json`
+means tests, the other adapters mean static).
+
+Effective defaults are run/step wall budgets of 20 minutes, a unit wall budget of 60
+minutes, 3 review rounds, blocking critical/major findings, agent high→major and
+medium→minor, CodeRabbit then agent reviewers, address concurrency 2, bulk concurrency 3,
+and escalation worker attempts 2, rescue base 20, one rescue earned per 10 fixed failures,
+per-package rescue cap 10. There is no token budget default:
+`requireAgenticTokenBudget(policy)` returns a `needs-human` result naming
+`budgets.run.maxTokens` when absent. Bulk query defaults are computed by the forge consumer
+from the current user and repository at run time.
+
+This repository's root config declares the compiler check as argv.
+Lint is omitted: Oxlint 1.83 has no ESLint-format output; an `oxlint-json` adapter is a follow-up.
+Tests are omitted until a config check can honour the `test:narrow` host-wide lock and file selection.
+Consequently `cq analyze` / `analyze.run --dir=.`
+here runs the compiler; local development still follows `pnpm test:narrow`
+and the focused-check policy below. The root role choices are experiment configuration,
+with no token budget baked in.
+
 ```sh
 cq --help                                        # global help
 cq analyze.run --help                            # per-op input schema

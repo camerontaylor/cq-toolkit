@@ -42,7 +42,7 @@ import {
 // analyze boundary re-mirrors it LOCALLY with one ledger-domain bound added
 // (see AnalyzeCheckFailureSchema), so a collect→cluster chain can never
 // pass a failure the cluster boundary would reject.
-import type { CheckFailure, FailureSet } from '../gates/checkRunner.js';
+import type { CheckFailure, CheckRunnerInput, FailureSet } from '../gates/checkRunner.js';
 // Runtime import of the ledger's field-bound constants — pulled from ONE
 // definition (the ledger record boundary) so a parse here rejects exactly
 // what a record could produce. Safe at module scope: the pure ledger
@@ -63,7 +63,9 @@ import type { RenderAnalysisReportInput } from './renderAnalysisReport.js';
 import type { AnalyzeFixInput } from './fix.js';
 import type { AnalyzeInitInput } from './init.js';
 import type { AnalyzeRunInput } from './run.js';
-import type { CqConfig } from './cqConfig.js';
+import { CqConfigSchema } from './cqConfig.js';
+// Pure SDK policy companion: './cqConfigDefaults.js' resolves config + flags;
+// it is a family helper, not an independently dispatched op (gates' helper convention).
 // The Lane C standalone ops' eager imports: the gates family's pure
 // check-runner input mirror (zod + types only) — one definition of a check,
 // shared by `cq.json` (./cqConfig.ts, also zod + types only) and the
@@ -371,15 +373,19 @@ export const PlaybookQuarantineListInputSchema: z.ZodType<PlaybookQuarantineList
  * Registry-time mirror of {@link AnalyzeInitInput}: the project directory and
  * the overwrite opt-in. Strict.
  */
-export const AnalyzeInitInputSchema: z.ZodType<AnalyzeInitInput> = z
-  .object({
+export const AnalyzeInitInputSchema: z.ZodType<AnalyzeInitInput> = CqConfigSchema.omit({
+  schemaVersion: true,
+  checks: true,
+})
+  .extend({
     dir: z.string().min(1),
     force: z.boolean().exactOptional(),
+    migrate: z.boolean().exactOptional(),
   })
   .strict();
 
-/** A non-empty check list: exactly `cq.json`'s `checks` (./cqConfig.ts). */
-const ChecksSchema: z.ZodType<CqConfig['checks']> = z.array(CheckRunnerInputSchema).min(1);
+/** Explicit op checks contain only the checkRunner dispatch fields. */
+const ChecksSchema: z.ZodType<CheckRunnerInput[]> = z.array(CheckRunnerInputSchema).min(1);
 
 /**
  * Registry-time mirror of {@link AnalyzeRunInput}. `checks` (when given)

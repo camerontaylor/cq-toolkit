@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "checks": [
+    {
+      "adapter": "tsc-lines",
+      "kind": "static",
+      "command": {
+        "command": "node_modules/.bin/tsc",
+        "args": ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"],
+        "cwd": "."
+      },
+      "relatedArgs": ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"]
+    }
+  ],
+  "roles": {
+    "worker": {
+      "provider": "zai",
+      "model": "glm-5.3-flash"
+    },
+    "rescue": {
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash"
+    },
+    "reviewer": {
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash"
+    }
+  },
+  "review": {
+    "reviewers": ["coderabbit", "agent"],
+    "denylistPatternsFile": "policy/denylist/patterns.yml"
+  }
+}
