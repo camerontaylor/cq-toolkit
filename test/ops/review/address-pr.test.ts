@@ -290,6 +290,11 @@ async function world(
     if (a[0] === 'merge-base') {
       const from = a[2],
         to = a[3] === 'HEAD' ? head : a[3];
+      // The read form (with --end-of-options, four args) returns the actual
+      // base sha: the composition's base capture consumes the stdout. The
+      // fake models every origin target's merge-base with HEAD as the head's
+      // parent, so downstream guards (e.g. changed-target) stay in charge.
+      if (a[1] === '--end-of-options') return ok(commits.get(head)?.parent ?? initial);
       return {
         code: from === to || commits.get(to!)?.parent === from ? 0 : 1,
         stdout: '',

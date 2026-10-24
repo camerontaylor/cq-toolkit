@@ -881,12 +881,22 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             // even if the live target advances mid-run (a stacked parent
             // landing would otherwise shrink the round-over-round comparison).
             // Explicit-base invocations keep passing their own base through.
-            const effects = makeSubprocessDevEffects(root);
-            const read = await readWorkState(effects, {
-              target: input.target ?? 'merge-queue',
-            });
-            if (!read.ok) return await finish('needs-human', read.reason);
-            reviewedBase = read.state.base;
+            // The read rides THIS invocation's own injected git transport, so
+            // fakes answer it exactly like every other PR-path git read.
+            const target = input.target ?? 'merge-queue';
+            const result = await git([
+              'merge-base',
+              '--end-of-options',
+              `origin/${target}`,
+              'HEAD',
+            ]);
+            const base = result.stdout.trim();
+            if (result.code !== 0 || !base)
+              return await finish(
+                'needs-human',
+                `cannot pin the merge-base: 'origin/${target}' did not resolve — fetch the target and re-run`,
+              );
+            reviewedBase = base;
           }
           for (let round = 1; round <= policy.review.rounds; round++) {
             const stopped = stop();
