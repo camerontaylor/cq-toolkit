@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Detached repair drain. Never writes queue.json or calls GitHub/push."""
 import argparse
+import contextlib
 import copy
 import datetime as dt
 import fcntl
 import json
+import os
 from pathlib import Path
 import random
 from zoneinfo import ZoneInfo
@@ -33,7 +35,37 @@ def mechanical(config, wt, base, commits, job, directory):
     return {'verify': 'ok', 'hack': 'ok', 'tests': 'suspended'}
 
 
+@contextlib.contextmanager
+def correlation(job, judge):
+    """Session-log preservation (item 2.5): pin the drivers' CQ_* identity
+    to the SELECTED job, not the invoking shell. The work id is the review
+    run's (`crq:<run_id>`, the same value launch() writes into meta.json), so
+    every repair/judge session links back to the review that produced its
+    finding even on the standalone `crq_repair.py --job ...` path. Restored on
+    exit so serial jobs never inherit each other's identity."""
+    values = {'CQ_WORK_ID': 'crq:' + str(job['run']), 'CQ_RUN_ID': str(job['job']),
+              'CQ_ROLE': 'judge' if judge else 'fixer', 'CQ_TASK': 'crq-repair'}
+    # The repair job IS the review's work, so no parent: a stale shell
+    # CQ_PARENT_WORK_ID must not leak into the drivers.
+    saved = {k: os.environ.get(k) for k in (*values, 'CQ_PARENT_WORK_ID')}
+    os.environ.pop('CQ_PARENT_WORK_ID', None)
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+
 def dispatch(config, role, job, wt, directory, judge=False):
+    with correlation(job, judge):
+        return _dispatch(config, role, job, wt, directory, judge)
+
+
+def _dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     job = copy.deepcopy(job)
     job['source_snapshot'] = source_snapshot(config, job)
