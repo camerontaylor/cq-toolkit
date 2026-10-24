@@ -47,6 +47,15 @@ export interface FixRunReport {
   verdict: 'pass' | 'fail' | 'needs-human';
   units: Array<{ jobId: string; result: OpResult<SweepUnitReport>; report?: SweepUnitReport }>;
   tasks: FixTaskReport[];
+  failed: Array<{
+    unit: string;
+    task: string;
+    outcome: 'unfixed' | 'escalated-to-human';
+    gate: import('../sweep/taskLoop.js').FailedAttemptGate;
+    reason: string;
+    branch: string;
+    sha: string;
+  }>;
   fixesPerRun: number;
   usage: Usage;
   wallMs: number;
@@ -80,6 +89,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       verdict: 'needs-human',
       units: [],
       tasks: [],
+      failed: [],
       fixesPerRun: 0,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       wallMs: 0,
@@ -94,6 +104,32 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       report.verdict = status === 'ok' ? 'pass' : status === 'failed' ? 'fail' : 'needs-human';
       if (report.tasks.length === 0)
         report.tasks = [...collected.values()].flatMap((unit) => unit.tasks ?? []);
+      report.failed = report.tasks.flatMap((task) => {
+        const attempts = (task.rounds ?? []).filter((round) => round.failedAttempt !== undefined);
+        if (attempts.length > 0)
+          return attempts.map((round) => ({
+            unit: `${task.branch.split('/').at(-2) ?? ''}/${task.branch.split('/').at(-1) ?? ''}`,
+            task: task.task.id,
+            outcome: round.outcome ?? (task.outcome === 'fixed' ? 'unfixed' : task.outcome),
+            gate: round.gate ?? 'none',
+            reason: round.reason,
+            branch: round.failedAttempt!.branch,
+            sha: round.failedAttempt!.sha,
+          }));
+        return task.failedAttempt === undefined
+          ? []
+          : [
+              {
+                unit: `${task.branch.split('/').at(-2) ?? ''}/${task.branch.split('/').at(-1) ?? ''}`,
+                task: task.task.id,
+                outcome: task.outcome === 'fixed' ? 'unfixed' : task.outcome,
+                gate: 'none' as const,
+                reason: task.reason ?? 'failed attempt',
+                branch: task.failedAttempt.branch,
+                sha: task.failedAttempt.sha,
+              },
+            ];
+      });
       report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -248,6 +284,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         unit.check = { adapter: check.adapter, ...check.command };
         unit.taskLoop = {
           source: input.source,
+          pushFailed: input.pushFailed ?? false,
           protectTests: input.protectTests ?? false,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}
@@ -402,9 +439,31 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         const tracker = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch);
         if (template && tracker && markers.length) {
           const assembly = template.input as AssemblePrsInput;
-          const packages = assembly.packages.filter((pkg) =>
-            markers.some((marker) => marker.branch === pkg.branch && marker.package === pkg.name),
-          );
+          const packages = assembly.packages
+            .filter((pkg) =>
+              markers.some((marker) => marker.branch === pkg.branch && marker.package === pkg.name),
+            )
+            .map((pkg) => {
+              const unfixed = report.tasks.filter(
+                (task) =>
+                  task.branch === pkg.branch &&
+                  task.outcome !== 'fixed' &&
+                  task.failedAttempt !== undefined,
+              );
+              if (unfixed.length === 0) return pkg;
+              const lines = unfixed.map((task) => {
+                const failed = task.rounds?.find(
+                  (round) => round.failedAttempt?.branch === task.failedAttempt?.branch,
+                );
+                const branch = task.failedAttempt!.branch;
+                return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: ${(task.reason ?? 'unfixed').replace(/[\r\n]+/g, ' ')}; branch \`${branch}\``;
+              });
+              const section = `## Unfixed (${String(unfixed.length)})\n\n${lines.join('\n')}`;
+              return {
+                ...pkg,
+                body: `${pkg.body?.trim() ? `${pkg.body.trim()}\n\n` : ''}${section}`,
+              };
+            });
           if (packages.length)
             report.assembly = await runPlan(
               {

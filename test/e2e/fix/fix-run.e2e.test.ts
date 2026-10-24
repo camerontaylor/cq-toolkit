@@ -466,7 +466,7 @@ test('journal symlink alias preserves broader-probe task identity and commits bo
   }
 });
 
-test('one failing task preserves evidence while a passing sibling remains committed', async () => {
+test('one failing task has a failed-attempt commit while a passing sibling remains committed', async () => {
   const f = await fixture();
   try {
     const result = await makeFixRun({ drivers: scripted('fail-b') })(input(f));
@@ -476,7 +476,13 @@ test('one failing task preserves evidence while a passing sibling remains commit
       'escalated-to-human',
     ]);
     expect(reportOf(result).fixesPerRun).toBe(1);
-    expect(reportOf(result).tasks[1]?.preservedEdits).toBeUndefined();
+    expect(reportOf(result).tasks[1]?.failedAttempt?.branch).toMatch(
+      /^cq\/fixture\/failed\/tests-1\/scratch-repo\/.*\/a\d+$/,
+    );
+    expect(reportOf(result).failed.map((attempt) => attempt.branch.split('/').at(-1))).toEqual([
+      'a1',
+      'a2',
+    ]);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -491,7 +497,7 @@ test.each(['protectTests', 'proposeOnly'] as const)(
       expect(reportOf(result).tasks).toHaveLength(2);
       expect(
         reportOf(result).tasks.every(
-          (task) => task.commits.length === 0 && task.preservedEdits?.ref,
+          (task) => task.commits.length === 0 && task.failedAttempt?.branch,
         ),
       ).toBe(true);
       expect(reportOf(result).tasks.every((task) => task.outcome === 'escalated-to-human')).toBe(
@@ -502,6 +508,31 @@ test.each(['protectTests', 'proposeOnly'] as const)(
     }
   },
 );
+test('pushFailed publishes only the failed-attempt branch with a CI-skip commit subject', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted('fail-b') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    const failed = report.tasks.find((task) => task.outcome !== 'fixed');
+    expect(failed?.failedAttempt?.branch).toMatch(/^cq\/fixture\/failed\//);
+    const remote = await git(
+      f.repo,
+      'ls-remote',
+      '--heads',
+      'origin',
+      `refs/heads/${failed!.failedAttempt!.branch}`,
+    );
+    expect(remote.split(/\s+/)[0]).toBe(failed!.failedAttempt!.sha);
+    expect(await git(f.repo, 'show', '-s', '--format=%s', failed!.failedAttempt!.sha)).toContain(
+      '[skip ci]',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 test('budget stop pushes earlier verified commits and retains spend and task evidence', async () => {
   const f = await fixture(6);
   try {
@@ -630,6 +661,41 @@ test.each([false, true])(
     }
   },
 );
+
+test('PR body carries an Unfixed section for tasks with local failed-attempt evidence', async () => {
+  const f = await fixture();
+  let packageBody = '';
+  try {
+    const result = await makeFixRun({
+      drivers: scripted('fail-b'),
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (raw as { packages: Array<{ body?: string }> }).packages;
+                expect(packages).toHaveLength(1);
+                packageBody = packages[0]?.body ?? '';
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true });
+
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(packageBody).toContain('## Unfixed (1)');
+    expect(packageBody).toContain('`cases/b.test.cjs`');
+    expect(packageBody).toContain('branch `cq/fixture/failed/');
+    expect(packageBody).toContain('validation refused task');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 
 test.each(['absolute', 'relative'] as const)(
   'nested check cwd preserves repo-root task identity (%s failure names)',
@@ -878,6 +944,12 @@ test.each([
       expect(report.tasks[0]?.commits).toHaveLength(1);
       expect(report.tasks[0]?.attempts.at(-1)?.model.model).toBe('rescue-fixes');
       expect(report.escalation?.fixedFingerprints).toHaveLength(1);
+      expect(
+        report.tasks[0]?.rounds
+          ?.flatMap((round) => round.failedAttempt?.branch.split('/').at(-1) ?? [])
+          .toSorted(),
+      ).toEqual(['a1', 'a2']);
+      expect(report.failed).toHaveLength(2);
     } else if (mode === 'regression-rescue') {
       expect(report.tasks[0]?.attempts.map((a) => [a.tier, a.attempt])).toEqual([
         ['worker', 1],
@@ -888,9 +960,9 @@ test.each([
       expect(report.tasks[0]?.rounds?.[0]?.validation?.gates).toEqual(
         expect.arrayContaining([expect.objectContaining({ gate: 'broader', verdict: 'fail' })]),
       );
-      const evidence = report.tasks[0]?.rounds?.[0]?.preservedEdits;
-      expect(evidence?.ref).toMatch(/^refs\/cq\/fix-run\//);
-      expect(await git(f.repo, 'rev-parse', evidence!.ref)).toBe(evidence!.sha);
+      const evidence = report.tasks[0]?.rounds?.[0]?.failedAttempt;
+      expect(evidence?.branch).toMatch(/^cq\/escalation-fixture\/failed\//);
+      expect(await git(f.repo, 'rev-parse', `refs/heads/${evidence!.branch}`)).toBe(evidence!.sha);
       expect(report.escalation?.events.find((e) => e.tier === 'rescue')?.reason).toContain(
         'broader regression',
       );

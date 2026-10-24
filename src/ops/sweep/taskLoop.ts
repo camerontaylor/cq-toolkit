@@ -1,5 +1,4 @@
 import type { EscalationDecision } from '../fix/escalation.js';
-import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
@@ -30,6 +29,7 @@ export interface TaskLoopConfig {
   denylistPatternsFile?: string;
   protectTests?: boolean;
   wallMs?: number;
+  pushFailed?: boolean;
 }
 export interface TaskAttempt {
   tier: 'worker' | 'rescue';
@@ -51,14 +51,42 @@ export interface FixTaskReport {
   commits: string[];
   validation?: ValidationVerdict;
   reason?: string;
-  preservedEdits?: { ref: string; sha: string };
+  failedAttempt?: { branch: string; sha: string };
   rounds?: Array<{
     tier: 'worker' | 'rescue';
     attempt: number;
     reason: string;
     validation?: ValidationVerdict;
-    preservedEdits?: { ref: string; sha: string };
+    failedAttempt?: { branch: string; sha: string };
+    gate?: FailedAttemptGate;
+    outcome?: 'unfixed' | 'escalated-to-human';
   }>;
+}
+export type FailedAttemptGate =
+  | 'related'
+  | 'broader'
+  | 'path-policy'
+  | 'tamper'
+  | 'commit'
+  | 'budget'
+  | 'none';
+export interface FailedAttempt {
+  branch: string;
+  sha: string;
+}
+export interface FailedAttemptInput {
+  runPrefix: string;
+  kind: string;
+  slug: string;
+  task: string;
+  parent: string;
+  firstAttempt: number;
+  tier: 'worker' | 'rescue';
+  model: ModelSpec;
+  gate: FailedAttemptGate;
+  outcome: 'unfixed' | 'escalated-to-human';
+  reason: string;
+  pushFailed: boolean;
 }
 export interface TaskEscalation {
   rescueModel?: ModelSpec;
@@ -219,9 +247,38 @@ async function runTaskLoopInner(
       else rescueUsed++;
       const priorRound = row.rounds?.at(-1);
       delete row.validation;
-      delete row.preservedEdits;
+      delete row.failedAttempt;
       let parent: string | undefined;
+      let failedModel: ModelSpec = bindings.modelSpec;
       let finalTree: { final: UnitProbe; treeSha: string } | undefined;
+      const recordFailedAttempt = async (
+        gate: FailedAttemptGate,
+        reason: string,
+      ): Promise<FailedAttempt> => {
+        if (parent === undefined) throw new Error('failed attempt has no pre-attempt HEAD');
+        const segment = (raw: string) => raw.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const kind = bindings.segments?.kind ?? segment(unit.fixer);
+        const slug = bindings.segments?.slug ?? segment(unit.package);
+        if (!kind || !slug || !segment(task.id))
+          throw new Error('failed attempt identity has an empty branch segment');
+        await git(['add', '-A', '--', '.']);
+        const failedAttempt = await commitFailedAttempt(git, {
+          runPrefix: bindings.runPrefix,
+          kind,
+          slug,
+          task: task.id,
+          parent,
+          firstAttempt: Math.max(1, (row.rounds?.length ?? 0) + 1),
+          tier,
+          model: failedModel,
+          gate,
+          outcome: row.outcome === 'fixed' ? 'unfixed' : row.outcome,
+          reason,
+          pushFailed: config.pushFailed ?? false,
+        });
+        await git(['restore', '--source=HEAD', '--staged', '--worktree', '--', '.']);
+        return failedAttempt;
+      };
       try {
         parent = await git(['rev-parse', 'HEAD']);
         const fullCheck = bindings.checkCommand(unit, worktree.path);
@@ -245,6 +302,7 @@ async function runTaskLoopInner(
           driver: bindings.driver,
           modelSpec: bindings.modelSpec,
         };
+        failedModel = resolved.modelSpec;
         const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(priorRound ?? null)}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
         const invoke = async (
           invocation: TaskAttempt['invocation'],
@@ -422,7 +480,22 @@ async function runTaskLoopInner(
           if (bindings.proposeOnly) {
             row.outcome = 'escalated-to-human';
             row.reason = pathGate.message ?? 'propose-only';
-            row.preservedEdits = await preserveTaskEdits(git, branch);
+            row.failedAttempt = await recordFailedAttempt('path-policy', row.reason);
+            (row.rounds ??= []).push({
+              tier,
+              attempt: decision.attempt,
+              reason: row.reason,
+              validation: row.validation,
+              ...(row.failedAttempt === undefined ? {} : { failedAttempt: row.failedAttempt }),
+              gate: 'path-policy',
+              outcome: row.outcome,
+            });
+            if (config.pushFailed)
+              await git([
+                'push',
+                'origin',
+                `refs/heads/${row.failedAttempt.branch}:refs/heads/${row.failedAttempt.branch}`,
+              ]);
             continue taskLoop;
           }
           throw new Error(pathGate.message ?? 'path refusal');
@@ -507,6 +580,12 @@ async function runTaskLoopInner(
         });
         break;
       } catch (error) {
+        if (row.failedAttempt !== undefined && config.pushFailed) {
+          indeterminate = `failed-attempt push failed: ${String(error)}`;
+          row.reason = `${String(error)}; ${indeterminate}`;
+          row.outcome = 'escalated-to-human';
+          break taskLoop;
+        }
         if (!bindings.cancelled?.() && Date.now() - unitStart >= (config.wallMs ?? 3_600_000))
           budgetStopped = true;
         row.reason = String(error);
@@ -520,22 +599,30 @@ async function runTaskLoopInner(
             row.reason += '; HEAD changed; remaining tasks stopped for human review';
             break taskLoop;
           }
-          if (await git(['status', '--porcelain'])) {
-            row.preservedEdits = await preserveTaskEdits(git, branch);
+          const gate = failedGateOf(row.validation, row.reason);
+          row.failedAttempt = await recordFailedAttempt(gate, row.reason);
+          (row.rounds ??= []).push({
+            tier,
+            attempt: decision.attempt,
+            reason: row.reason ?? 'attempt failed',
+            ...(row.validation === undefined ? {} : { validation: row.validation }),
+            ...(row.failedAttempt === undefined ? {} : { failedAttempt: row.failedAttempt }),
+            gate,
+            outcome: row.outcome,
+          });
+          if (config.pushFailed) {
+            await git([
+              'push',
+              'origin',
+              `refs/heads/${row.failedAttempt.branch}:refs/heads/${row.failedAttempt.branch}`,
+            ]);
           }
         } catch (cleanupError) {
-          indeterminate = `failed-task evidence cleanup failed: ${String(cleanupError)}`;
+          indeterminate = `failed-task evidence recording failed: ${String(cleanupError)}`;
           row.reason += `; ${indeterminate}`;
           row.outcome = 'escalated-to-human';
           break taskLoop;
         }
-        (row.rounds ??= []).push({
-          tier,
-          attempt: decision.attempt,
-          reason: row.reason ?? 'attempt failed',
-          ...(row.validation === undefined ? {} : { validation: row.validation }),
-          ...(row.preservedEdits === undefined ? {} : { preservedEdits: row.preservedEdits }),
-        });
         regression = row.validation?.regression === true;
         const unsafe = row.validation?.gates.some(
           (gate) => ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
@@ -604,16 +691,68 @@ export type TaskWorker = (
   modelSpec?: ModelSpec,
 ) => { driver: Driver; modelSpec: ModelSpec };
 
-/** No refs/stash mutation: sibling worktrees retain independent evidence refs. */
-export async function preserveTaskEdits(
+/** Pin a failed attempt as an inspectable commit without moving the unit branch. */
+export async function commitFailedAttempt(
   git: (args: string[]) => Promise<string>,
-  branch: string,
-): Promise<{ ref: string; sha: string }> {
-  await git(['add', '-A', '--', '.']);
-  const sha = await git(['stash', 'create']);
-  if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error('could not snapshot failed task');
-  const ref = `refs/cq/fix-run/${branch}/${randomUUID()}`;
-  await git(['update-ref', ref, sha]);
-  await git(['restore', '--source=HEAD', '--staged', '--worktree', '--', '.']);
-  return { ref, sha };
+  input: FailedAttemptInput,
+): Promise<FailedAttempt> {
+  const taskSlug = input.task.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!taskSlug) throw new Error('failed attempt identity has an empty task segment');
+  const tree = await git(['write-tree']);
+  if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new Error('could not write failed-attempt tree');
+  let attempt = Math.max(1, input.firstAttempt);
+  for (;;) {
+    const branch = `${input.runPrefix}/failed/${input.kind}/${input.slug}/${taskSlug}/a${String(attempt)}`;
+    const reasonLine = input.reason.replace(/[\r\n]+/g, ' ').trim() || 'task attempt refused';
+    const taskLine = input.task.replace(/[\r\n]+/g, ' ');
+    const subject = `cq-failed(${input.outcome}): ${taskLine}${input.pushFailed ? ' [skip ci]' : ''}`;
+    const message = `${subject}\n\n${reasonLine}\n\nCq-Run: ${input.runPrefix}\nCq-Unit: ${input.kind}/${input.slug}\nCq-Task: ${taskLine}\nCq-Attempt: ${String(attempt)}\nCq-Tier: ${input.tier}\nCq-Model: ${input.model.provider}/${input.model.model}\nCq-Gate: ${input.gate}\nCq-Outcome: ${input.outcome}`;
+    const sha = await git([
+      '-c',
+      'user.name=CQ fix engine',
+      '-c',
+      'user.email=cq-fix-engine@invalid',
+      'commit-tree',
+      tree,
+      '-p',
+      input.parent,
+      '-m',
+      message,
+    ]);
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error('could not create failed-attempt commit');
+    try {
+      await git([
+        'update-ref',
+        `refs/heads/${branch}`,
+        sha,
+        '0000000000000000000000000000000000000000',
+      ]);
+      return { branch, sha };
+    } catch (error) {
+      try {
+        await git(['rev-parse', '--verify', `refs/heads/${branch}`]);
+        attempt++;
+      } catch {
+        throw error;
+      }
+    }
+  }
+}
+
+function failedGateOf(
+  validation: ValidationVerdict | undefined,
+  reason: string,
+): FailedAttemptGate {
+  if (validation?.gates.some((gate) => gate.gate === 'tamper' && gate.verdict !== 'pass'))
+    return 'tamper';
+  if (validation?.gates.some((gate) => gate.gate === 'commit' && gate.verdict !== 'pass'))
+    return 'commit';
+  if (validation?.gates.some((gate) => gate.gate === 'paths' && gate.verdict !== 'pass'))
+    return 'path-policy';
+  if (validation?.gates.some((gate) => gate.gate === 'broader' && gate.verdict !== 'pass'))
+    return 'broader';
+  if (validation?.gates.some((gate) => gate.gate === 'related' && gate.verdict !== 'pass'))
+    return 'related';
+  if (/budget/i.test(reason)) return 'budget';
+  return 'none';
 }

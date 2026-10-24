@@ -494,6 +494,15 @@ function inputFaultOf(input: PlanSweepInput): string | null {
   if (input.fixers.some((fixer) => typeof fixer !== 'string' || fixer === '')) {
     return 'sweep: every requested fixer label must be a non-empty string';
   }
+  const reserved = input.fixers.find((fixer) => {
+    const normalized = fixer
+      .replace(/[^A-Za-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase();
+    return normalized === 'failed' || normalized === 'track';
+  });
+  if (reserved !== undefined)
+    return `sweep: fixer label '${reserved}' is reserved for failed-attempt and tracking branches`;
   if (input.baselineSignatures !== undefined) {
     if (!Array.isArray(input.baselineSignatures)) {
       return 'sweep: baselineSignatures must be an array of {package, signature} entries';

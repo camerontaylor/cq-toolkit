@@ -264,6 +264,7 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
           .exactOptional(),
         protectTests: z.boolean().exactOptional(),
         wallMs: z.number().int().positive().exactOptional(),
+        pushFailed: z.boolean().exactOptional(),
       })
       .strict()
       .exactOptional(),

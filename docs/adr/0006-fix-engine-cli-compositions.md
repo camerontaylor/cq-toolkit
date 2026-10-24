@@ -43,6 +43,12 @@ scripted drivers and fake forges.
 ## Consequences
 
 - `sweep.unit` gains an optional task loop.
+- Every task round ends in one verified commit on its unit branch or one
+  engine-authored failed-attempt commit under
+  `<runPrefix>/failed/<kind>/<slug>/<task>/a<n>`. Failed branches remain local
+  unless `fix.run --push-failed` is explicit; the task report and run-level
+  `failed[]` index point to those commits, and the shared unit worktree is
+  restored clean before the next task.
 - The `review.fixItem` schema widens additively.
 - `dev.ready` accepts any configured reviewer's terminal cycle.
 - `cq.json` becomes the policy file for all commands (schemaVersion 2, migrated in

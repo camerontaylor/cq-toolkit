@@ -504,8 +504,8 @@ describe('optional per-task loop', () => {
         const result = await runUnit(world, {
           taskLoop: {},
           git: async (args) =>
-            args.includes('status') && fault === 'cleanup'
-              ? { code: 0, stdout: ' M src/a.js\n', stderr: '' }
+            args.includes('restore') && fault === 'cleanup'
+              ? { code: 1, stdout: '', stderr: 'restore fault' }
               : underlying(args),
           driver:
             fault === 'cleanup'
@@ -533,7 +533,7 @@ describe('optional per-task loop', () => {
         if (result.status === 'ok') {
           expect(result.value.tasks).toHaveLength(1);
           expect(result.value.indeterminate).toContain(
-            fault === 'cleanup' ? 'cleanup failed' : 'publish failed',
+            fault === 'cleanup' ? 'failed-task evidence recording failed' : 'publish failed',
           );
           expect(result.value.committed).toBe(fault === 'publish');
         }
@@ -681,7 +681,6 @@ test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattr
             return { code: 0, stdout: 'd'.repeat(40), stderr: '' };
           if (mode === 'dirty' && args.includes('status'))
             return { code: 0, stdout: ' M src/a.js', stderr: '' };
-          if (args.includes('stash')) return { code: 0, stdout: 'e'.repeat(40), stderr: '' };
           return underlying(args);
         },
         driver: {
@@ -706,7 +705,8 @@ test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattr
         expect(result.value.tasks?.[0]?.reason).toContain('HEAD changed');
         expect(result.value.tasks?.[1]?.reason).toContain('human review');
       } else if (mode === 'dirty') {
-        expect(result.value.tasks?.[0]?.preservedEdits?.sha).toBe('e'.repeat(40));
+        expect(result.value.tasks?.[0]?.failedAttempt?.branch).toMatch(/^cq\/unit\/failed\//);
+        expect(result.value.tasks?.[0]?.failedAttempt?.sha).toMatch(/^[0-9a-f]{40,64}$/);
         expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
       } else if (mode === 'unattributed') {
         expect(invoked).toBe(false);
