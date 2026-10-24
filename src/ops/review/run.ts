@@ -15,6 +15,7 @@ import {
   composeScanners,
 } from '../dev/denylist.js';
 import { readWorkState } from '../dev/internal/workState.js';
+import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import { runAgentReviewer } from './agentReviewer.js';
 import {
   FindingsRecordSchema,
@@ -194,7 +195,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
         try {
           listing = await effects.runCommand(
             'git',
-            ['diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', comparison],
+            ['diff', '--name-only', '-z', ...HARDENED_DIFF_FLAGS, comparison],
             { timeoutMs: 60_000 },
           );
         } catch (error) {
@@ -215,7 +216,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
             try {
               patch = await effects.runCommand(
                 'git',
-                ['diff', '--no-ext-diff', '--no-textconv', '--text', comparison, '--', path],
+                ['diff', ...HARDENED_DIFF_FLAGS, comparison, '--', path],
                 { timeoutMs: 60_000 },
               );
             } catch (error) {
