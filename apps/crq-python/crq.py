@@ -38,6 +38,26 @@ EVENTS = STATE / "events.jsonl"
 LOCK = STATE / "tick.lock"
 CONFIG = json.loads((ROOT / "config.json").read_text())
 
+# Session-log preservation (plan items 2.1/2.5, 2026-10-24): the task log.
+# One append-only JSONL in cq's shared vocabulary — one `work-started` line
+# per review/repair job, so telemetry-ingest can tag every session this run
+# produced with `cq.work:*`. Best-effort BY CONTRACT: a work-record write
+# failure is logged and swallowed; the work's verdict outranks the record
+# (feature R5). Path overridable for tests via CQ_WORK_RECORDS.
+WORK_RECORDS = Path(os.environ.get("CQ_WORK_RECORDS", "") or
+                    (STATE / "work.jsonl"))
+
+
+def append_work_record(record: Dict[str, Any]) -> None:
+    """Best-effort append of one work-record line (never fails the work)."""
+    try:
+        WORK_RECORDS.parent.mkdir(parents=True, exist_ok=True)
+        with WORK_RECORDS.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError as exc:  # a full disk must not fail a review
+        event("work_record_failed", error=str(exc)[:200])
+
+
 CLONE = Path(CONFIG["clone"])
 WT_ROOT = Path(CONFIG["worktree_root"])
 WT_PREFIX = CONFIG["worktree_prefix"]
@@ -728,6 +748,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # natural argv is deliberately unchanged.
         cli_cmd.append("--committed")
     meta = {"run_id": run_id, "item_id": item["id"], "pr": item["pr"], "kind": item["kind"],
+            "workId": f"crq:{run_id}",
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
@@ -750,6 +771,24 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             remove_worktree(wt, wbranch)
             raise
     repair_tick.atomic(rdir / "meta.json", meta)
+    # Session-log preservation (item 2.1): one work-started line per review,
+    # linking the run to its workId. Best-effort (R5) — a failed append never
+    # fails the launch; telemetry-ingest's crq-run adapter reads either this
+    # or meta.json's workId.
+    append_work_record({
+        "type": "work-started",
+        "workId": meta["workId"],
+        "at": meta["started_at"],
+        "source": "crq",
+        "role": "reviewer",
+        "task": f"pr{item['pr']}",
+        "runId": run_id,
+        "host": os.uname().nodename,
+        "harness": "coderabbit",
+        "repo": REPO,
+        "pr": item["pr"],
+        "head": plan["head"],
+    })
     item["state"] = "reviewing"
     item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "launch_pending": True}
     item["wait_reason"] = None

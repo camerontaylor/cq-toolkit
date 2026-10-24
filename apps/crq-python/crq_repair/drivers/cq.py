@@ -26,6 +26,17 @@ def invoke(config, role, job, wt, directory):
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
+    # Session-log preservation (item 2.3): the cq runner's own session store
+    # lives UNDER THE JOB DIR and is kept — the CQ runner's default-keep
+    # retention (cq-toolkit #466 item 1.2) applies since nothing passes
+    # retainSessions=false. `session.json` records the returned session id.
+    sessions_dir = Path(directory) / 'sessions'
+    env['CQ_SESSIONS_DIR'] = str(sessions_dir)
+    # Correlation (item 2.5): the launcher's CQ_* identity rides to the cq
+    # runner (whose allowlist passes it to every harness it spawns).
+    for key in ('CQ_WORK_ID', 'CQ_PARENT_WORK_ID', 'CQ_ROLE', 'CQ_TASK', 'CQ_RUN_ID'):
+        if key in os.environ:
+            env[key] = os.environ[key]
     argv = ['node', config['repair']['cq_bin'], 'review.fixItem', '--json']
     argv += ['--' + k + '=' + json.dumps(v) for k, v in payload.items()]
     p = command(argv, cwd=wt, env=env, timeout=config['repair']['budget']['wall_clock_min'] * 60)
@@ -34,6 +45,16 @@ def invoke(config, role, job, wt, directory):
         data = json.loads(p.stdout)
     except ValueError:
         return {'stop': 'error', 'changed': False, 'summary': 'invalid cq output', 'commits': []}
+    # The returned sessionId links the cq store file under sessions_dir
+    # (item 2.3). Written even on a non-ok verdict: the session exists.
+    result = data.get('value') or data.get('result') or {}
+    sid = result.get('sessionId') if isinstance(result, dict) else None
+    from crq_repair import atomic as _atomic
+    _atomic(Path(directory) / 'session.json', {
+        'harness': 'cq', 'sessionId': sid if isinstance(sid, str) else None,
+        'sessionsDir': str(sessions_dir),
+        'workId': os.environ.get('CQ_WORK_ID'),
+    })
     if p.returncode or data.get('status') != 'ok':
         signals = data.get('providerSignals') or {}
         error = str(data.get('error') or '')
@@ -41,7 +62,7 @@ def invoke(config, role, job, wt, directory):
         return {'stop': 'rate-limit' if throttled else 'budget' if data.get('status') == 'budget-exhausted' else 'error',
                 'changed': False, 'summary': str(data.get('reason') or error or data.get('status')), 'commits': []}
     result = data.get('value') or data.get('result') or {}
-    return {**result, 'stop': 'ok'}
+    return {**result, 'stop': 'ok'}  # session.json already written above
 
 
 def judge(config, role, job, wt, directory):
