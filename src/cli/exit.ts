@@ -7,9 +7,12 @@
 //   1 — definitive failure: a `failed`/`indeterminate` result or row, or an
 //       uncaught exception ("thrown"). With the opt-in `--fail-on-verdict`
 //       flag, ALSO an `ok` result (or an ok row) whose `value` is an object
-//       carrying `verdict: 'fail'` — a regression gate's "ok" status means
-//       the op ran, its verdict says whether the gate passed. Without the
-//       flag such a result stays 0 (the status taxonomy is the default
+//       carrying a FAILING `verdict` string: 'fail' (the generic gate
+//       convention, e.g. ratchet.checkRatchet) or 'regression' (the
+//       regression gate's failing decision — gates.regressionGate returns
+//       `status:'ok'` in both verdict cases and puts the decision in
+//       `value.verdict`, so without the flag a regression exits 0). Without
+//       the flag such results stay 0 (the status taxonomy is the default
 //       contract); the stdout artifact is identical either way.
 //   2 — usage: arg-shaped errors the CLI ITSELF detects (unknown subcommand,
 //       bad flag syntax, duplicate flag, positional tokens, schema-invalid
@@ -39,24 +42,41 @@ export interface ExitCodeOptions {
 }
 
 /**
- * True when `value` is an object whose `verdict` property is exactly the
- * string 'fail' (the regression-gate convention). Anything else — a missing
- * verdict, 'pass', a non-string, a non-object value — is not a failing verdict.
+ * The verdict strings that count as a failing decision under
+ * `--fail-on-verdict` (an `ok` result's `value.verdict`). 'fail' is the
+ * generic convention (e.g. ratchet.checkRatchet); 'regression' is the
+ * regression gate's failing decision ({@link RegressionVerdict}). Its
+ * passing twin 'no-regression' — and every other 'pass'/'ok'-style verdict
+ * — is deliberately NOT in the set, so a passing gate keeps exit 0.
+ *
+ * Deliberately unmapped: gates.policyDiff's verdict carries 'needs-human'
+ * (exit stays 0 under the flag — that taxonomy value belongs to the status
+ * plane, not a failing decision), gates.commitGate reports `ok: boolean`
+ * (no `verdict`), and probes report 'clean'/'failing'/'bail' ('bail' is an
+ * exhausted attempt budget, a needs-human-class stop, not a failing
+ * decision).
+ */
+const FAILING_VERDICTS: readonly string[] = ['fail', 'regression'];
+
+/**
+ * True when `value` is an object whose `verdict` property is exactly one of
+ * the failing strings ({@link FAILING_VERDICTS}). Anything else — a missing
+ * verdict, a passing verdict ('pass', 'no-regression'), a non-string, a
+ * non-object value — is not a failing verdict.
  */
 export function hasFailVerdict(value: unknown): boolean {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.hasOwn(value, 'verdict') &&
-    (value as { verdict?: unknown }).verdict === 'fail'
-  );
+  if (typeof value !== 'object' || value === null || !Object.hasOwn(value, 'verdict')) {
+    return false;
+  }
+  const verdict = (value as { verdict?: unknown }).verdict;
+  return typeof verdict === 'string' && FAILING_VERDICTS.includes(verdict);
 }
 
 /**
  * Map one op result's frozen status to the process exit code:
- * 'ok' → 0 (1 under `failOnVerdict` when its value has `verdict: 'fail'`);
- * 'failed' | 'indeterminate' → 1; 'needs-human' | 'budget-exhausted' → 3.
- * Mechanical — no interpretation.
+ * 'ok' → 0 (1 under `failOnVerdict` when its value has a failing verdict:
+ * 'fail' or 'regression'); 'failed' | 'indeterminate' → 1;
+ * 'needs-human' | 'budget-exhausted' → 3. Mechanical — no interpretation.
  */
 export function exitCodeForOpResult(
   r: OpResult<unknown>,
@@ -87,8 +107,8 @@ export function exitCodeForOpResult(
  * OR (r.stoppedEarly && the earlyStopReason is a stop-class reason —
  * 'budget' or, since the v1.1 widening, the governed runner's cancel
  * 'signal') → 3; else if any row is 'failed' or 'indeterminate' → 1; else
- * (under `failOnVerdict` only) if any ok row's value has `verdict: 'fail'` → 1;
- * else 0.
+ * (under `failOnVerdict` only) if any ok row's value has a failing verdict
+ * ('fail' or 'regression') → 1; else 0.
  *
  * The row scan is the PRIMARY evidence: rows come from runPlan, and the
  * governed runner re-marks transitively budget-caused rows as

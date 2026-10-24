@@ -6,6 +6,15 @@ import { z } from 'zod';
 const empty = () => z.object({}).strict();
 const ok = (value) => async () => async () => ({ status: 'ok', value });
 export const registry = [
+  // 'regression' — the regression gate's failing decision (#371/S0): the
+  // exact input shape gates.regressionGate returns on a novel failure.
+  {
+    name: 'verdictregression',
+    inputSchema: empty(),
+    importer: ok({ verdict: 'regression', novel: 1 }),
+  },
+  // The gate's PASSING twin: must stay exit 0 even with the flag.
+  { name: 'verdictnoregression', inputSchema: empty(), importer: ok({ verdict: 'no-regression' }) },
   { name: 'verdictfail', inputSchema: empty(), importer: ok({ verdict: 'fail', n: 1 }) },
   { name: 'verdictpass', inputSchema: empty(), importer: ok({ verdict: 'pass' }) },
   { name: 'verdictnone', inputSchema: empty(), importer: ok({ n: 1 }) },
