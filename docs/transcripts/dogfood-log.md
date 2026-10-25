@@ -156,3 +156,54 @@ the open human-decision thread stays open.
 
 This is positive measured live acceptance: fixesPerRun over the S6 dogfood runs
 is 1 (A 0, B 0, C 0, D 1).
+
+## S7 dogfood — dev.cycle on fix/s7-dogfood-address-469
+
+First live `dev.cycle` run (the composition's own first run against a real
+diff; #470's evidence was fixture-only). Code work landed first as commit
+`24aba328e32d0a35eba40bba813e6c27ddb30c33` on `fix/s7-dogfood-address-469`
+(from `origin/merge-queue` @ `7cac1ec2`): #469 report truth (loop-side row +
+engine-settled `exit-published` / exit-failed / publication-off row states),
+verdict P2 #1 (a scripted push fault through the real engine's `finish()`,
+pinning the `verified publication failed` rewrite and the `report.stop`
+clearing) and P2 #2 (test:narrow's gated-file refusal names the re-run).
+Evidence: `test:narrow result="pass" exit=0 files=5 projects="pure,process"
+tests="227/227" failed=0 skipped=0 wait="0.0s" duration="21.3s" nice=5
+load="3.8" uptime="646004s" source="explicit"
+ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/plans/review-loop.test.ts,test/scripts/test-narrow.test.ts"`,
+plus `address-pr-git`/`address-local`/`addressBlockedRereview`/`addressPinBase`/
+`addressReceiptRotate`/`addressRerequestPersist`/`addressStaleClean`/`cycle`
+narrow runs green (312/312 across the day), `pnpm lint` exit 0, `pnpm
+format:check` clean.
+
+```sh
+node dist/cli.js dev.cycle --repoRoot=$PWD --push --target=merge-queue \
+  --title="fix(review.address): report exact publication state (#469) + verdict P2s"
+```
+
+Observed CLI exit: **1**, `failed` after 61 s wall — the FIRST leg
+(`dev.check`) went red, so no review/address/open legs ran and no PR was
+opened. The deterministic statics passed; the `test:narrow` gate was
+REFUSED, not failed:
+
+> test:narrow result="refused" exit=2 … source="base:7cac1ec2…" ran=-
+> reason="gated test files cover the change: test/e2e/review/live.test.ts
+> (integration), test/e2e/sweep/sweep.e2e.test.ts (integration); pass
+> --include-integration to run them (an opt-in gate, not a refusal — re-run
+> with --include-integration)"
+
+Root cause (structural, a dev.cycle defect candidate): dev.check invokes the
+wrapper as `pnpm test:narrow --base <sha>` with NO include flags (pinned at
+test/ops/dev/check.test.ts:269), and the `--base` selector's closure maps
+src/plans/review-loop.ts + src/ops/review/address.ts to the e2e files above.
+Two independent blocks follow: (a) the refusal — the exact gate this slice's
+P2 #2 clarified — cannot be satisfied from inside dev.check; and (b) even
+WITH `--include-integration` the run could never execute hermetically:
+`test/e2e/review/live.test.ts` is `describe.skipIf(!process.env.LIVE_GH)`
+opt-in, and a skipped file fails runVerdict's "no tests executed" rule. So
+no change touching the review-loop/address family can pass dev.cycle as
+shipped. The red record (`k001-24aba328`) persists in the branch dev-record;
+artifacts under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025/`.
+Per the lane protocol the failure itself is the finding: no `gh pr create`
+fallback, no gate-policy improvisation; the branch keeps commit `24aba328`
+for review through the normal path.
