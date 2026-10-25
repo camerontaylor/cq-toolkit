@@ -207,3 +207,53 @@ artifacts under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025/`.
 Per the lane protocol the failure itself is the finding: no `gh pr create`
 fallback, no gate-policy improvisation; the branch keeps commit `24aba328`
 for review through the normal path.
+
+## S7 dogfood attempt B — dev.cycle with --includeIntegration=true
+
+The chancellor's fix for attempt A landed as `4f8e494c` (dev.check gains an
+optional `includeIntegration` input appending `--include-integration` to the
+gate's `--base`/`--range` argv, recorded as `includeIntegration: true` in the
+check record; dev.cycle forwards it to both check legs; RED-first tests,
+statics, knip and regenerated op docs). Evidence: `test:narrow result="pass"
+exit=0 files=7 projects="pure,process" tests="180/180" failed=0` (check,
+cycle, both registries, review, pr-open), `pnpm lint` 0 errors,
+`format:check` clean, `knip` clean.
+
+```sh
+node dist/cli.js dev.cycle --repoRoot=$PWD --push --target=merge-queue \
+  --includeIntegration=true \
+  --title="fix(review.address): report exact publication state (#469) + verdict P2s; dev.cycle includeIntegration"
+```
+
+Observed CLI exit: **1**, `failed` after 45 s — again the first leg
+(`dev.check`), no review/address/open legs, no PR. The opt-in WORKED (record
+`k002-4f8e494c` carries `includeIntegration: true`; the integration gate
+refusal is gone), but the gate then refused on the FILE CAP:
+
+> test:narrow result="refused" exit=2 files=78 …
+> reason="78 test files selected, the cap is 10; name the files that cover
+> your change explicitly"
+
+Root cause (second structural defect, a dev.cycle defect candidate):
+dev.check selects with `--base`, and the full closure for any
+dev/registry-touching branch is far over the wrapper's owner-set 10-file
+cap. Reproduced and decomposed on triton: the vitest import-graph query
+returns **51** related test files for the branch's 8 src/scripts changes
+(`src/ops/dev/registry.ts` reaches the central registry barrel, so CLI
+conformance, smoke, driver, plans and e2e suites all import it), and the
+reviewed NON_IMPORT_MAP adds **27** more from four fan-out rows
+(`docs/ops/*` → test/scripts/*; `scripts/lib/test-narrow.mjs` →
+test/scripts/* + test/workflows/* + policyDiff; `src/ops/**` →
+cli/registry+conformance+served-model-sites; any `src/**/*.ts` →
+protectedPaths). 51 ∪ 27 = 78. Named-file selection (the wrapper's designed
+escape) is unavailable inside dev.check's automated `--base` call.
+
+The focused-checks contract reserves exactly this refusal as an ESCALATION
+TRIGGER (docs/focused-checks-contract.md §2 step 4: "the selection exceeds
+its file cap. That refusal is the escalation trigger … Do not launch another
+owner's gate"), so no local widening was improvised. The branch keeps both
+commits (`24aba328`, `4f8e494c`) plus this entry at `HEAD`; artifacts under
+`~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025-b/`; both red
+records (`k001-24aba328`, `k002-4f8e494c`) persist in the branch dev-record.
+Per the lane protocol: no `gh pr create` fallback; the failure is reported
+for an owner/coordinator decision on the cap-vs-closure policy.
