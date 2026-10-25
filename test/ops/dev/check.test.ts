@@ -289,6 +289,64 @@ describe('dev.check', () => {
     expect(pnpmArgs(effects).every((args) => !args.includes('--include-integration'))).toBe(true);
   });
 
+  test('testFiles names the exact files: flags first, then the files; the record says named', async () => {
+    const effects = effectsFor();
+    const files = ['test/ops/dev/check.test.ts', 'test/scripts/test-narrow.test.ts'];
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root, testFiles: files });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(pnpmArgs(effects)).toContainEqual(['test:narrow', ...files]);
+    // The record must DISCLOSE the narrowed selection, never let a reader
+    // mistake it for the automatic diff selection.
+    const [record] = effects.openLedger('feature/x').load().records;
+    expect(record?.kind === 'check' && record.testSelection).toEqual({
+      mode: 'named',
+      files,
+    });
+  });
+
+  test('testFiles composes with includeIntegration and beats --base/--range', async () => {
+    const effects = effectsFor();
+    const files = ['test/ops/dev/check.test.ts'];
+    const result = await makeDevCheck(effects)({
+      repoRoot: repo.root,
+      testFiles: files,
+      includeIntegration: true,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(pnpmArgs(effects)).toContainEqual(['test:narrow', '--include-integration', ...files]);
+    // A named selection replaces the range form too.
+    const ranged = await makeDevCheck(effects)({
+      repoRoot: repo.root,
+      range: 'HEAD~1..HEAD',
+      testFiles: files,
+    });
+    expect(ranged.status, JSON.stringify(ranged)).toBe('ok');
+    expect(pnpmArgs(effects)).toContainEqual(['test:narrow', ...files]);
+    const records = effects.openLedger('feature/x').load().records;
+    expect(records.every((r) => r.kind === 'check' && r.testSelection?.mode === 'named')).toBe(
+      true,
+    );
+  });
+
+  test('a dash-prefixed test file is refused before any gate runs', async () => {
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({
+      repoRoot: repo.root,
+      testFiles: ['test/-evil.test.ts'],
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('-evil.test.ts');
+    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+  });
+
+  test('the automatic forms record their selection mode honestly', async () => {
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    const [record] = effects.openLedger('feature/x').load().records;
+    expect(record?.kind === 'check' && record.testSelection).toEqual({ mode: 'base' });
+  });
+
   test('includeIntegration=true adds --include-integration to the --base argv and records it', async () => {
     const effects = effectsFor();
     const result = await makeDevCheck(effects)({ repoRoot: repo.root, includeIntegration: true });
@@ -296,9 +354,9 @@ describe('dev.check', () => {
     const base = repo.git('rev-parse', 'origin/merge-queue').trim();
     expect(pnpmArgs(effects)).toContainEqual([
       'test:narrow',
+      '--include-integration',
       '--base',
       base,
-      '--include-integration',
     ]);
     const [record] = effects.openLedger('feature/x').load().records;
     expect(record?.kind === 'check' && record.includeIntegration).toBe(true);
@@ -316,10 +374,12 @@ describe('dev.check', () => {
     expect(result.status, JSON.stringify(result)).toBe('ok');
     expect(pnpmArgs(effects)).toContainEqual([
       'test:narrow',
+      '--include-integration',
       '--range',
       `${start}..${head}`,
-      '--include-integration',
     ]);
+    const [record] = effects.openLedger('feature/x').load().records;
+    expect(record?.kind === 'check' && record.includeIntegration).toBe(true);
   });
 
   test('a refused test:narrow keeps the refusal reason in the gate row evidence', async () => {
@@ -377,6 +437,9 @@ describe('dev.check', () => {
     const result = await makeDevCheck(effects)({ repoRoot: repo.root, range: 'HEAD~1..HEAD' });
     expect(result.status === 'ok' && result.value.base).toBe(start);
     expect(pnpmArgs(effects)).toContainEqual(['test:narrow', '--range', `${start}..${head}`]);
+    // The record names its selection mode: the automatic range form.
+    const [record] = effects.openLedger('feature/x').load().records;
+    expect(record?.kind === 'check' && record.testSelection).toEqual({ mode: 'range' });
 
     const behind = await makeDevCheck(effectsFor())({
       repoRoot: repo.root,

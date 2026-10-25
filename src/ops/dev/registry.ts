@@ -52,6 +52,7 @@ export const DevCheckInputSchema: z.ZodType<DevCheckInput> = z
       .regex(/^[^-\s.][^\s]*\.\.[^-\s.][^\s]*$/, "range must be '<ref>..<ref>'")
       .exactOptional(),
     includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(z.string().min(1)).min(1).exactOptional(),
   })
   .strict();
 
@@ -67,6 +68,7 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
     reviewer: z.string().regex(REVIEWER_PATTERN).exactOptional(),
     uncommitted: z.boolean().exactOptional(),
     includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(z.string().min(1)).min(1).exactOptional(),
   })
   .strict();
 
@@ -142,6 +144,7 @@ export const DevCycleCompositionInputSchema: z.ZodType<DevCycleCompositionInput>
     push: z.boolean().exactOptional(),
     title: z.string().min(1).exactOptional(),
     includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(z.string().min(1)).min(1).exactOptional(),
   })
   .strict();
 

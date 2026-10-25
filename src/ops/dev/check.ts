@@ -65,6 +65,16 @@ export interface DevCheckInput {
    * choice (includeIntegration: true) so readers can see the opt-in.
    */
   includeIntegration?: boolean;
+  /**
+   * Name the EXACT test files the gate runs (the wrapper's own escape for
+   * a too-broad automatic selection, S7 dogfood attempt B): replaces the
+   * `--base`/`--range` selection entirely. The names ride argv positionals
+   * after the flags, so a dash-prefixed value is refused here (option
+   * injection); the record discloses the narrowing as
+   * `testSelection: { mode: 'named', files }` — a reader must be able to
+   * tell a named gate from an automatic one.
+   */
+  testFiles?: string[];
 }
 
 /** The dev.check report — the ok value and the persisted check record's evidence. */
@@ -307,6 +317,17 @@ export function makeDevCheck(
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
+    // Named files ride argv as positionals AFTER the flags, so any
+    // dash-leading segment ("-x" or "test/-evil.test.ts" — a basename
+    // starting with '-' reaches getopt once the shell expands it) could be
+    // read as an option there. The wrapper refuses option-shaped values for
+    // the same reason. Refused BEFORE any gate runs.
+    const dashNamed = input.testFiles?.find((file) => /(^|\/)\-/.test(file));
+    if (dashNamed !== undefined)
+      return {
+        status: 'failed',
+        error: `dev.check: testFiles entries are file names, not options — refused: ${dashNamed}`,
+      };
     const target = input.target ?? DEFAULT_DEV_TARGET;
 
     // A range is resolved to commit shas; its end must BE HEAD, because the
@@ -438,10 +459,12 @@ export function makeDevCheck(
           'pnpm',
           [
             'test:narrow',
-            ...(input.range !== undefined
-              ? ['--range', `${state.base}..${state.head}`]
-              : ['--base', state.base]),
             ...(input.includeIntegration === true ? ['--include-integration'] : []),
+            ...(input.testFiles !== undefined
+              ? input.testFiles
+              : input.range !== undefined
+                ? ['--range', `${state.base}..${state.head}`]
+                : ['--base', state.base]),
           ],
           TEST_NARROW_TIMEOUT_MS,
         ),
@@ -509,6 +532,12 @@ export function makeDevCheck(
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
           ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
+          testSelection:
+            input.testFiles !== undefined
+              ? { mode: 'named', files: [...input.testFiles] }
+              : input.range !== undefined
+                ? { mode: 'range' }
+                : { mode: 'base' },
           passed,
           gates,
           loadStamp,
