@@ -189,12 +189,14 @@ export function parsePrList(text: string): PrSearchResult[] {
       url?: unknown;
       state?: unknown;
       isCrossRepository?: unknown;
+      isDraft?: unknown;
     };
     const url = typeof numbered.url === 'string' && numbered.url !== '' ? numbered.url : undefined;
     const base: PrSearchResult = {
       number: numbered.number,
       state: prStateOf(numbered.state),
       isCrossRepository: numbered.isCrossRepository === true,
+      ...(typeof numbered.isDraft === 'boolean' ? { isDraft: numbered.isDraft } : {}),
     };
     return url === undefined ? base : { ...base, url };
   });
@@ -462,7 +464,7 @@ export function makeSubprocessPrEffects(
               '--limit',
               GH_PR_LIST_LIMIT,
               '--json',
-              'number,url,state,isCrossRepository',
+              'number,url,state,isCrossRepository,isDraft',
             ],
             repoRoot,
             timeoutMs,

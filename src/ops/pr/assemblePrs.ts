@@ -92,6 +92,12 @@ export interface PrSearchResult {
    * PR must never be adopted as this fleet's member — final jNTyU).
    */
   isCrossRepository: boolean;
+  /**
+   * The forge's draft flag, when the transport reported it (the production
+   * gh transport queries it; fakes may omit). The adopt path uses it to
+   * refuse riding a NON-draft PR with a not-ready branch (#472 seam).
+   */
+  isDraft?: boolean;
 }
 
 /** Request of {@link PrEffects.createPr}: open one PR head onto base. */

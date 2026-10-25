@@ -139,6 +139,16 @@ const discussionText = (
     ? `${body}\n\nFollow-up discussion (chronological):\n${comments.map((comment) => `Author: ${comment.authorLogin ?? 'unknown'}; at: ${comment.createdAt ?? 'unknown'}\n${comment.body}`).join('\n\n')}`
     : body;
 
+/**
+ * The address leg's ROUND-CAP stop reason, exported verbatim: the ONE
+ * terminal outcome a pre-PR composition may publish a draft for (the spec's
+ * "draft PR with the open findings at the round cap"). Every other refusal
+ * — budget exhaustion, a blocked re-review, an admission failure, a parent
+ * cancel — carries a report too, but publishing over it would turn a failed
+ * run into needs-human-with-PR; callers must propagate those verbatim.
+ */
+export const REVIEW_ADDRESS_ROUNDCAP_REASON = 'review round cap reached with open findings';
+
 /** SDK-first fix/disposition/re-review composition; kernel dispatch itself remains retry-free. */
 export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
   return async (input: ReviewAddressInput): Promise<ReviewAddressResult> => {
@@ -1311,7 +1321,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return await finish('ok');
             }
           }
-          return await finish('needs-human', 'review round cap reached with open findings');
+          return await finish('needs-human', REVIEW_ADDRESS_ROUNDCAP_REASON);
         } catch (error) {
           return await finish(
             'needs-human',

@@ -13,6 +13,7 @@ import {
   renderFindingsSection,
 } from '../../../src/ops/dev/cycle.js';
 import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
+import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -234,7 +235,7 @@ describe('dev.cycle', () => {
     expect(result.value.branch).toBe('feature/x');
     expect(result.value.head).toBe(state.head);
     expect(result.value.pushed).toBe(true);
-    expect(result.value.followUp).toBe(followUpCommand(42));
+    expect(result.value.followUp).toBe(followUpCommand(42, repo.root));
     expect(result.value.pr.number).toBe(42);
     expect(result.value.pr.ready).toBe(true);
     // TWO check legs: before the review and after the address.
@@ -332,7 +333,7 @@ describe('dev.cycle', () => {
     if (result.status !== 'needs-human') return;
     expect(result.reason).toContain('NOT READY');
     expect(result.reason).toContain('review round cap reached with open findings');
-    expect(result.reason).toContain(`follow-up: ${followUpCommand(43)}`);
+    expect(result.reason).toContain(`follow-up: ${followUpCommand(43, repo.root)}`);
     expect(result.reason).toContain('draft PR #43');
     // The branch was published BEFORE the draft opened (pr.open's rule).
     expect(opens).toEqual([
@@ -449,6 +450,241 @@ describe('dev.cycle', () => {
     expect(opens).toEqual([]);
   });
 
+  // ---- BEFORE controls (P1 thread 7kNb + 7lxL): report presence is NOT
+  // round-cap. Budget stops, blocked re-reviews and admission failures all
+  // carry a report; only the round-cap stop publishes a draft.
+
+  /** An address leg that stopped on the BUDGET with a report attached. */
+  function budgetStopAddress(state: WorkState): AddressLeg {
+    return async () => ({
+      status: 'needs-human',
+      reason: 'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      report: addressReport(state, [capFinding], []),
+    });
+  }
+
+  test('BEFORE (P1): an address BUDGET stop with a report propagates verbatim — NO push, NO PR, no draft', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    let pushCalls = 0;
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: budgetStopAddress(state),
+      open: openFake(opens),
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('token or wall budget exhausted');
+    expect(result.reason).not.toContain('NOT READY');
+    expect(pushCalls).toBe(0);
+    expect(opens).toEqual([]);
+  });
+
+  test('BEFORE (P1): a BLOCKED RE-REVIEW with a report propagates verbatim — NO push, NO PR', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    let pushCalls = 0;
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: async () => ({
+        status: 'needs-human',
+        reason:
+          'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
+        report: addressReport(state, [capFinding], []),
+      }),
+      open: openFake(opens),
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('not every configured reviewer completed');
+    expect(pushCalls).toBe(0);
+    expect(opens).toEqual([]);
+  });
+
+  test('BEFORE (P1): an ADMISSION FAILURE with a report propagates verbatim — NO push, NO PR', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    let pushCalls = 0;
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: async () => ({
+        status: 'needs-human',
+        reason:
+          'review.address: engine bookkeeping changed; worker tree is dirty; report: /tmp/r.json',
+        report: addressReport(state, [capFinding], []),
+      }),
+      open: openFake(opens),
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('engine bookkeeping changed');
+    expect(pushCalls).toBe(0);
+    expect(opens).toEqual([]);
+  });
+
+  test('BEFORE (P2 7kNi): the injected driver factory reaches the address leg', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    // The address leg reads cq.json and the LATEST findings record before
+    // resolving any driver role; give the fixture a minimal config and a
+    // seeded record at the CURRENT head so the leg gets past both to its
+    // first factory resolve.
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'probe-check', args: [] } }],
+        roles: {
+          worker: { provider: 'fixture', model: 'probe-worker' },
+          reviewer: { provider: 'fixture', model: 'probe-reviewer' },
+        },
+        budgets: { run: { maxTokens: 1000, wallMs: 20000 }, step: { wallMs: 5000 } },
+        review: { reviewers: ['agent'], rounds: 1 },
+      }),
+    );
+    await repo.write(
+      '.cq/review/feature%2Fx/1.json',
+      JSON.stringify({
+        schemaVersion: 1,
+        branch: state.branch,
+        head: 'FRESH_HEAD',
+        reviewed: { base: state.base, scope: 'full' },
+        sources: [{ kind: 'agent', status: 'terminal' }],
+        // One OPEN blocking finding: an empty record short-circuits to
+        // admitCleanRecord BEFORE any worker resolves, which would never
+        // reach the injected factory.
+        findings: [
+          {
+            id: 'probe-f1',
+            source: 'agent',
+            file: 'src/a.ts',
+            severity: 'major',
+            text: 'probe: the factory must resolve the worker',
+            status: 'open',
+          },
+        ],
+      }),
+    );
+    repo.commitAll('probe config');
+    repo.git('push', '-q', 'origin', 'feature/x');
+    await seedReadyLedger(state);
+    // The record must name the CURRENT head (the config commit moved it).
+    const finalHead = repo.git('rev-parse', 'HEAD').trim();
+    const recordText = await import('node:fs/promises').then((fs) =>
+      fs.readFile(`${repo.root}/.cq/review/feature%2Fx/1.json`, 'utf8'),
+    );
+    await repo.write('.cq/review/feature%2Fx/1.json', recordText.replace('FRESH_HEAD', finalHead));
+    // Probe: the injected factory is FORWARDED into the address leg's own
+    // review construction (reviewDrivers wraps deps.drivers). The probe
+    // factory RESOLVES with a driver whose run throws a marker; the re-review
+    // inside the address leg therefore fails with 'agent review did not run:
+    // <marker>' — the leg used the caller's wiring, not a real provider
+    // factory. (Without forwarding, the default construction would resolve a
+    // real provider and fail with a config error instead.)
+    let resolveCalls = 0;
+    const observingFactory: DriverFactory = {
+      resolve: (request) => {
+        resolveCalls++;
+        void request;
+        return {
+          lane: 'ai-sdk' as const,
+          modelSpec: { provider: 'probe', model: 'probe' },
+          driver: {
+            run: async () => {
+              throw new Error('probe: the address leg ran the injected factory');
+            },
+          },
+        };
+      },
+    };
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      open: openFake([]),
+      drivers: observingFactory,
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status === 'failed' || result.status === 'needs-human').toBe(true);
+    // The wiring observable: the injected factory's resolve() was CALLED by
+    // the address leg's own review construction (reviewDrivers wraps the
+    // forwarded factory). Without the forward, the leg would construct a
+    // real provider factory and this probe would never resolve.
+    expect(resolveCalls).toBeGreaterThan(0);
+    // The leg's own re-review ran through the probe and failed honestly (the
+    // marker lands in the blocked findings record's source reason, which
+    // review.run summarizes); the composition surfaced that re-review
+    // refusal verbatim instead of a provider-config error.
+    expect(result.status === 'needs-human' && result.reason).toContain('re-review');
+  });
+
+  test('BEFORE (P2 7kNl): the follow-up command carries the quoted repoRoot', () => {
+    expect(followUpCommand(7, '/tmp/my repo')).toBe(
+      `cq review.address --repoRoot='${'/tmp/my repo'}' --source=pr:7`,
+    );
+    expect(followUpCommand(7, '/plain/path')).toBe(
+      "cq review.address --repoRoot='/plain/path' --source=pr:7",
+    );
+  });
+
+  test('BEFORE (P1 7kNb-delta): the FINAL deterministic gates run BEFORE round-cap publication — a red gate refuses verbatim with NO push and NO PR', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    let pushCalls = 0;
+    let checkRuns = 0;
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        checkRuns++;
+        if (checkRuns === 1) return greenCheck()({ ...input });
+        // The final gates (run after the round-cap stop, before any
+        // publication) went red — a fix that breaks format must not
+        // publish as a draft.
+        return { status: 'failed', error: 'dev.check: the addressed head broke format:check' };
+      },
+      review: cleanReview(state),
+      address: roundCapAddress(state),
+      open: openFake(opens),
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toBe(
+        'dev.cycle (dev.check (final)): dev.check: the addressed head broke format:check',
+      );
+    expect(pushCalls).toBe(0);
+    expect(opens).toEqual([]);
+  });
+
   test('a push failure after a clean loop is needs-human naming the branch (nothing opens)', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
@@ -518,7 +754,7 @@ describe('dev.cycle', () => {
     if (result.status === 'needs-human') {
       expect(result.reason).toContain('NOT READY');
       expect(result.reason).toContain('untracked non-ignored files');
-      expect(result.reason).toContain(followUpCommand(44));
+      expect(result.reason).toContain(followUpCommand(44, repo.root));
     }
     expect(opens).toEqual([
       { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
@@ -540,7 +776,7 @@ describe('dev.cycle', () => {
 
 describe('followUpCommand and renderFindingsSection', () => {
   test('the follow-up command spells the PR-side address source', () => {
-    expect(followUpCommand(7)).toBe('cq review.address --source=pr:7');
+    expect(followUpCommand(7, '/repo')).toBe("cq review.address --repoRoot='/repo' --source=pr:7");
   });
 
   test('the findings section is markdown-safe and carries every attempt', () => {

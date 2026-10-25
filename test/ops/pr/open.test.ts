@@ -28,6 +28,7 @@ interface GhExisting {
   number?: number;
   state?: 'open' | 'closed' | 'merged';
   isCrossRepository?: boolean;
+  isDraft?: boolean;
 }
 
 /** A gh fake implementing the PrEffects seam with a recording list. */
@@ -41,6 +42,7 @@ function ghFake(existing: GhExisting | null = null) {
         number: existing.number ?? 41,
         state: existing.state ?? 'open',
         isCrossRepository: existing.isCrossRepository ?? false,
+        ...(existing.isDraft === undefined ? {} : { isDraft: existing.isDraft }),
       };
     },
     createPr: async (request) => {
@@ -343,6 +345,23 @@ describe('pr.open', () => {
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('terminal-review-cycle');
     expect(calls).toEqual([]);
+  });
+
+  test('BEFORE (P2 7kNe): adopting a NON-DRAFT PR while not ready refuses naming the transition (#472 seam)', async () => {
+    const { gh, calls } = ghFake({ number: 41, isDraft: false });
+    // The existing OPEN PR is NOT a draft; the not-ready branch must not
+    // ride it as a submission.
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('not a draft');
+    expect(calls.filter((call) => call.effect === 'editPrBody')).toEqual([]);
   });
 
   test('a ready branch under draftWhenNotReady passes its explicit draft through, ready:true', async () => {

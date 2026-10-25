@@ -54,7 +54,7 @@ import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.j
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
 import { makePrOpen } from '../pr/open.js';
 import type { ReviewAddressInput, ReviewAddressReport } from '../review/address.js';
-import { makeReviewAddress } from '../review/address.js';
+import { makeReviewAddress, REVIEW_ADDRESS_ROUNDCAP_REASON } from '../review/address.js';
 import type { FindingsRecord } from '../review/findings.js';
 import type { ReviewRunInput } from '../review/run.js';
 import { makeReviewRun } from '../review/run.js';
@@ -99,8 +99,10 @@ export interface DevCycleReport {
 }
 
 /** The follow-up command dev.cycle reports after publishing a PR. */
-export function followUpCommand(prNumber: number): string {
-  return `cq review.address --source=pr:${String(prNumber)}`;
+export function followUpCommand(prNumber: number, repoRoot: string): string {
+  // Safely single-quoted for the shell: an embedded quote ends the quoting.
+  const quoted = `'${repoRoot.replaceAll("'", `'\\''`)}'`;
+  return `cq review.address --repoRoot=${quoted} --source=pr:${String(prNumber)}`;
 }
 
 /** The managed body section's START marker for the open-findings + attempts section. */
@@ -226,7 +228,16 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       deps.review ??
       ((step: ReviewRunInput) =>
         makeReviewRun({ drivers: deps.drivers ?? createDriverFactory() })(step));
-    const address = deps.address ?? ((step: ReviewAddressInput) => makeReviewAddress()(step));
+    // The default address leg is CONSTRUCTED with the caller's injected
+    // driver factory: the whole cycle honours one wiring — test transports
+    // injected here must not be replaced by real provider factories inside
+    // the address leg's own default construction.
+    const address =
+      deps.address ??
+      ((step: ReviewAddressInput) =>
+        deps.drivers === undefined
+          ? makeReviewAddress()(step)
+          : makeReviewAddress({ drivers: deps.drivers })(step));
     const gh = deps.gh ?? makeSubprocessPrEffects(input.repoRoot);
     const open = deps.open ?? ((step: PrOpenInput) => makePrOpen(deps.effects, gh)(step));
     const git =
@@ -329,11 +340,25 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       ...(run.value.reviewed === undefined ? {} : { base: run.value.reviewed.base }),
     });
     if (addressResult.status !== 'ok') {
-      // The pipeline's honest stop with a report (the round cap, or another
-      // needs-human that still dispatched work) publishes the DRAFT below.
-      // Any other refusal is surfaced verbatim and stops the cycle.
-      if (addressResult.report === undefined) return stepResult('review.address', addressResult);
-      return await finishNotReady(issue(addressResult), addressResult.report);
+      // ROUND CAP ONLY: the address leg's designed stop names itself
+      // (REVIEW_ADDRESS_ROUNDCAP_REASON). Budget exhaustion, blocked
+      // re-reviews and admission failures ALSO carry a report — publishing
+      // over them would turn a failed run into needs-human-with-PR — so
+      // report presence is never the trigger; the reason is, verbatim.
+      // Any other refusal propagates verbatim and stops the cycle.
+      const roundCap =
+        addressResult.status === 'needs-human' &&
+        addressResult.reason === REVIEW_ADDRESS_ROUNDCAP_REASON &&
+        addressResult.report !== undefined;
+      if (!roundCap) return stepResult('review.address', addressResult);
+
+      // The FINAL deterministic gates run BEFORE the round-cap publication
+      // (the same gates the clean path re-runs at the addressed head): a fix
+      // that broke format/knip must not publish, even as a draft. A red gate
+      // propagates verbatim — no push, no PR.
+      const capCheck = await check({ repoRoot: input.repoRoot, target });
+      if (capCheck.status !== 'ok') return stepResult('dev.check (final)', capCheck);
+      return await finishNotReady(REVIEW_ADDRESS_ROUNDCAP_REASON, addressResult.report);
     }
 
     // ------------------- 4. the FINAL dev.check --------------------------
@@ -351,7 +376,8 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // NOT READY past a clean address run: the recorded evidence is behind
       // the state (untracked files, an earlier blocked attempt) or the
       // findings came back open. The DRAFT with the gaps verbatim is the
-      // honest publication — never a bypass.
+      // honest publication — never a bypass. The gates are already green
+      // (the final check above); publication goes straight out.
       return await finishNotReady(readiness.reason, addressResult.report);
     }
 
@@ -374,7 +400,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         target,
         pr: openResult.value,
         pushed,
-        followUp: followUpCommand(openResult.value.number),
+        followUp: followUpCommand(openResult.value.number, input.repoRoot),
       },
     };
 
@@ -429,7 +455,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       }
       return {
         status: 'needs-human',
-        reason: `dev.cycle: NOT READY — ${readinessReason} — draft PR #${String(pr.number)} published with the gaps and the attempt log; follow-up: ${followUpCommand(pr.number)}`,
+        reason: `dev.cycle: NOT READY — ${readinessReason} — draft PR #${String(pr.number)} published with the gaps and the attempt log; follow-up: ${followUpCommand(pr.number, input.repoRoot)}`,
       };
     }
   });

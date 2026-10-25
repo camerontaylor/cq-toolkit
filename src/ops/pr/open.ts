@@ -346,6 +346,17 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
             error: `pr.open: a PR for branch '${branch}' already exists (PR #${String(existing.number)}, state '${existing.state}'${existing.isCrossRepository ? ', foreign fork' : ''}) — a landed record is never rewritten and a fork's PR is never adopted`,
           };
         }
+        // The not-ready adopt must not ride a NON-draft PR (#472 seam): a
+        // submission that looks ready while the gaps say otherwise is a
+        // fabricated state. When the forge reports the existing PR as a
+        // non-draft, refuse naming the transition; a converted draft would
+        // be an unverified forge write this op does not own.
+        if (gaps !== undefined && existing.isDraft === false) {
+          return {
+            status: 'needs-human',
+            reason: `pr.open: the branch is NOT READY (open-blocking gaps) and the existing PR #${String(existing.number)} is not a draft — a not-ready cycle must never ride a submission that looks ready; convert PR #${String(existing.number)} to a draft (or close it) and re-run`,
+          };
+        }
         ({ number, url } = existing);
         created = false;
         await gh.editPrBody(number, composeSection(await gh.getPrBody(number), section));
