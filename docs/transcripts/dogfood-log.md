@@ -242,8 +242,8 @@ returns **51** related test files for the branch's 8 src/scripts changes
 (`src/ops/dev/registry.ts` reaches the central registry barrel, so CLI
 conformance, smoke, driver, plans and e2e suites all import it), and the
 reviewed NON_IMPORT_MAP adds **27** more from four fan-out rows
-(`docs/ops/*` → test/scripts/*; `scripts/lib/test-narrow.mjs` →
-test/scripts/* + test/workflows/* + policyDiff; `src/ops/**` →
+(`docs/ops/*` → test/scripts/_; `scripts/lib/test-narrow.mjs` →
+test/scripts/_ + test/workflows/* + policyDiff; `src/ops/**` →
 cli/registry+conformance+served-model-sites; any `src/**/*.ts` →
 protectedPaths). 51 ∪ 27 = 78. Named-file selection (the wrapper's designed
 escape) is unavailable inside dev.check's automated `--base` call.

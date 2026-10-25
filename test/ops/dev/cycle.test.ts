@@ -15,7 +15,7 @@ import {
 } from '../../../src/ops/dev/cycle.js';
 import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
-import type { DevCheckReport } from '../../../src/ops/dev/check.js';
+import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -39,7 +39,7 @@ afterEach(async () => {
 
 const effects: () => DevEffects = () => repoEffects(repo);
 
-type CheckLeg = (input: { repoRoot: string; target?: string }) => Promise<OpResult<DevCheckReport>>;
+type CheckLeg = (input: DevCheckInput) => Promise<OpResult<DevCheckReport>>;
 type ReviewLeg = (input: ReviewRunInput) => Promise<OpResult<FindingsRecord>>;
 type AddressLeg = (
   input: ReviewAddressInput,
@@ -69,6 +69,12 @@ function greenCheck(calls: string[] = []): CheckLeg {
         target: input.target ?? 'merge-queue',
         ...at,
         passed: true,
+        testSelection:
+          input.testFiles !== undefined
+            ? { mode: 'named' as const, files: [...input.testFiles] }
+            : input.range !== undefined
+              ? ({ mode: 'range' } as const)
+              : ({ mode: 'base' } as const),
         gates: [
           { name: 'check:static', status: 'pass', exitCode: 0, durationMs: 5, evidence: 'ok' },
         ],
@@ -288,6 +294,31 @@ describe('dev.cycle', () => {
     const result = await op({ repoRoot: repo.root, includeIntegration: true });
     expect(result.status, JSON.stringify(result)).toBe('ok');
     expect(seen).toEqual([true, true]);
+  });
+
+  test('testFiles reaches BOTH check legs; absent keeps them automatic', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: Array<string[] | undefined> = [];
+    const files = ['test/ops/dev/cycle.test.ts', 'test/ops/dev/check.test.ts'];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.testFiles);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const named = await op({ repoRoot: repo.root, testFiles: files });
+    expect(named.status, JSON.stringify(named)).toBe('ok');
+    expect(seen).toEqual([files, files]);
+    seen.length = 0;
+    const bare = await op({ repoRoot: repo.root });
+    expect(bare.status, JSON.stringify(bare)).toBe('ok');
+    expect(seen).toEqual([undefined, undefined]);
   });
 
   test('includeIntegration absent keeps the check legs bare', async () => {
