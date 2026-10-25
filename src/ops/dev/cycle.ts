@@ -92,6 +92,13 @@ export interface DevCycleCompositionInput {
    * Default off.
    */
   includeIntegration?: boolean;
+  /**
+   * Name the EXACT test files BOTH dev.check legs run (the wrapper's own
+   * escape for a too-broad automatic selection): replaces their `--base`
+   * selection; every check record discloses the narrowing via
+   * `testSelection: { mode: 'named', files }`.
+   */
+  testFiles?: string[];
 }
 
 /** The dev.cycle report — the ok value (a ready, published branch). */
@@ -354,6 +361,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       repoRoot: input.repoRoot,
       target,
       ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
+      ...(input.testFiles !== undefined ? { testFiles: input.testFiles } : {}),
     };
     const firstCheck = await check(checkStep);
     if (firstCheck.status !== 'ok') return stepResult('dev.check', firstCheck);
