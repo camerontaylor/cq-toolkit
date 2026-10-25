@@ -30,6 +30,8 @@ async function world(
     discussion?: boolean;
     recoverResolution?: boolean;
     reviewOutcome?: 'failed' | 'wrong-head' | 'open-finding';
+    /** A second thread whose worker crashes: the row genuinely FAILS. */
+    failer?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
@@ -53,6 +55,7 @@ async function world(
   const actions: string[] = [];
   const prompts: string[] = [];
   const reviewInputs: ReviewRunInput[] = [];
+  let pushFault: (() => string) | undefined;
   const files = ['src/a.ts', 'src/b.ts'];
   await mkdir(join(worktree, 'src'), { recursive: true });
   for (const file of files) await writeFile(join(worktree, file), 'BAD\n');
@@ -65,10 +68,15 @@ async function world(
       .update(JSON.stringify([...tree].sort()))
       .digest('hex');
   const commits = new Map<string, { parent: string; message: string; tree: string }>();
-  const order =
-    options.sameFile || options.fileless === 'first'
+  const order = options.sameFile
+    ? ['T2', 'T1']
+    : options.fileless === 'first'
       ? ['T2', 'T1']
-      : ['T1', ...(human ? ['T2'] : [])];
+      : options.fileless === 'last'
+        ? ['T1', 'T2']
+        : options.failer
+          ? ['T1', 'T3']
+          : ['T1', ...(human ? ['T2'] : [])];
   const threads = order.map((id, i) => ({
     id,
     isResolved: false,
@@ -76,7 +84,9 @@ async function world(
     path:
       options.fileless && id === 'T2'
         ? null
-        : `src/${!options.sameFile && id === 'T2' ? 'b' : 'a'}.ts`,
+        : id === 'T3'
+          ? `src/${i === 0 ? 'a' : 'b'}.ts`
+          : `src/${!options.sameFile && id === 'T2' ? 'b' : 'a'}.ts`,
     line: 1,
     comments: {
       nodes: [
@@ -314,6 +324,10 @@ async function world(
     if (a[0] === 'log') return ok(commits.get(a[3]!)?.message ?? '');
     if (a[0] === 'diff' && a[1] === '--quiet') return { code: 1, stdout: '', stderr: '' };
     if (a[0] === 'push') {
+      if (pushFault !== undefined) {
+        const stderr = pushFault();
+        return { code: 1, stdout: '', stderr };
+      }
       remote = head;
       actions.push('push');
       return ok('');
@@ -419,6 +433,11 @@ async function world(
             throw new Error('scripted admission ownership changed');
           return worker.withVerifiedHead!(action);
         },
+        fix: async (finding, round) => {
+          if (options.failer && finding.id === 'T3')
+            throw new Error('worker crash: scripted T3 fault');
+          return worker.fix(finding, round);
+        },
       };
     },
   });
@@ -430,6 +449,14 @@ async function world(
     resolved,
     reviewerCalls: () => reviewerCalls,
     replies,
+    /**
+     * Arm a one-shot git-push fault (the scripted stderr is returned with
+     * exit 1). Used to drive publishOnExit's failure through the real
+     * engine's finish() (PR #470 verdict P2 #1).
+     */
+    failNextPush: (script: () => string) => {
+      pushFault = script;
+    },
     changeLogin: () => {
       login = 'another-responder';
     },
@@ -657,6 +684,92 @@ describe('review.address PR phase-one orchestration', () => {
       expect(result.status).toBe('needs-human');
       expect(w.actions).toEqual([]);
       expect(result.report?.fixesPerRun).toBe(1);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  // Verdict P2 #1 (PR #470): no test drove a publishOnExit throw through
+  // the real engine's finish(). The catch rewrites the outcome to
+  // "verified publication failed" and clears the report.stop marker; this
+  // pins the rewrite on production (a scripted push fault, not a stub
+  // engine), so a composition can never draft over a failed verified push.
+  // One committed fix makes publication non-idle; the scripted git seam
+  // fails the push that carries the verified commit — the same push
+  // finish()'s publishOnExit fork reaches, so the outcome rewrite under
+  // test is the engine's.
+  test('a scripted push fault through the real engine rewrites the outcome to verified publication failed', async () => {
+    const w = await world();
+    try {
+      let exitPushSeen = false;
+      // The happy path publishes through the loop's stage-5 push (the
+      // composition's own publication is idle after it); the scripted fault
+      // rides THE push that carries the verified commit, and finish()
+      // reaches the same fault through publishOnExit when the loop already
+      // rewrote its own outcome. Either way the ONLY rewrite left is the
+      // engine's.
+      w.failNextPush(() => {
+        exitPushSeen = true;
+        return 'exit push: disk quota exceeded (scripted)';
+      });
+      const result = await w.run();
+      expect(exitPushSeen, 'the fault must hit a push carrying verified work').toBe(true);
+      expect(result.status).toBe('needs-human');
+      const reason = result.status === 'needs-human' ? result.reason : '';
+      expect(reason).toContain('verified publication failed');
+      expect(reason).toContain('disk quota exceeded');
+      const report = result.report!;
+      expect(report.stop).toBeUndefined();
+      expect(w.actions).not.toContain('resolve:T1');
+      // The persisted artifact agrees with the rewritten envelope.
+      expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  // #469: when the mixed-worktree guard withheld inside the loop but the
+  // run allows a push, the composition's exit publication settles the row's
+  // truth: the verified commit IS published (the exact verified range),
+  // only this item's reply and resolve stay withheld. The per-item reason
+  // must not keep telling the human "the local commit is not published"
+  // after the engine itself pushed it (S6 attempt D, commit 8f78ca91).
+  test('the withhold row settles to exit-published when the engine pushed the verified range', async () => {
+    const w = await world(false, { failer: true });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(w.actions).toContain('push');
+      const row = report.reasons.find((reason) =>
+        reason.includes('publish-withheld-mixed-worktree'),
+      );
+      expect(row).toBeDefined();
+      expect(row).toContain('exit-published');
+      expect(row).not.toContain('pushed nothing');
+      // The settled truth is inside the persisted artifact too.
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        reasons: string[];
+      };
+      expect(persisted.reasons).toContain(row!);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test('a withheld row without --push settles to publication-off, the one truly-unpublished state', async () => {
+    const w = await world(false, { failer: true });
+    try {
+      const result = await w.run(false);
+      expect(result.status).toBe('needs-human');
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(w.actions).not.toContain('push');
+      const row = report.reasons.find((reason) =>
+        reason.includes('publish-withheld-mixed-worktree'),
+      );
+      expect(row).toBeDefined();
+      expect(row).toContain('publication is off for this run');
+      expect(row).toContain('stays unpublished');
     } finally {
       await w.cleanup();
     }
