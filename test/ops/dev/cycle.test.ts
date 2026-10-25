@@ -729,6 +729,126 @@ describe('dev.cycle', () => {
     );
   });
 
+  test('P2 v9bK7: the follow-up command carries a NON-DEFAULT target, quoted; the default is omitted', () => {
+    expect(followUpCommand(7, '/repo', 'main')).toBe(
+      "cq review.address --repoRoot='/repo' --target='main' --source=pr:7",
+    );
+    expect(followUpCommand(7, '/repo', "o'brien-queue")).toBe(
+      "cq review.address --repoRoot='/repo' --target='o'\\''brien-queue' --source=pr:7",
+    );
+    // The default target changes nothing about the comparison: omit it.
+    expect(followUpCommand(7, '/repo', 'merge-queue')).toBe(
+      "cq review.address --repoRoot='/repo' --source=pr:7",
+    );
+    expect(followUpCommand(7, '/repo')).toBe("cq review.address --repoRoot='/repo' --source=pr:7");
+  });
+
+  test('P2 v9bK7 (e2e): a non-default --target flows into the published report and the cap reason', async () => {
+    await seed(repo);
+    repo.git('push', '-q', 'origin', 'origin/merge-queue:refs/heads/main');
+    repo.git('fetch', '-q', 'origin');
+    repo.git('push', '-q', 'origin', 'feature/x');
+    // Records must be pinned to the MAIN target (readiness refuses records
+    // recorded for another target). The open leg captures the target it was
+    // called with; the clean address leg ends ok, so the READY path runs.
+    const opens: PrOpenInput[] = [];
+    const state2 = await seed(repo, () => []);
+    const at = { base: state2.base, head: state2.head, dirtySha256: state2.dirtySha256 };
+    const records = [
+      cycleRecord({ ...at, target: 'main' }),
+      checkRecord({ ...at, target: 'main' }),
+    ];
+    repoEffects(repo)
+      .openLedger(state2.branch)
+      .save({ version: seedLedgerVersion, branch: state2.branch, records });
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state2),
+      address: cleanAddress(state2),
+      open: openFake(opens, 46),
+      git: async () => ({ code: 0, stdout: `${state2.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root, target: 'main' });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(opens[0]?.target).toBe('main');
+      expect(result.value.followUp).toBe(followUpCommand(46, repo.root, 'main'));
+      expect(result.value.followUp).toContain("--target='main'");
+    }
+  });
+
+  test('P2 v9bK8: the cap path PRESERVES a failed publication (never converted to needs-human)', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: roundCapAddress(state),
+      open: async () => ({
+        status: 'failed',
+        error: 'pr.open: the PR could not be opened — gh: 502',
+      }),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    // The same forge failure must produce the same status as on the clean
+    // path: failed (exit 1), not needs-human (exit 3).
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toBe(
+        'dev.cycle (pr.open): pr.open: the PR could not be opened — gh: 502',
+      );
+  });
+
+  test('P2 v9bK8: the cap path PRESERVES an indeterminate publication (never erased)', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: roundCapAddress(state),
+      open: async () => ({
+        status: 'indeterminate',
+        detail: 'pr.open: the creation outcome is uncertain — the forge answered 529',
+      }),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('indeterminate');
+    if (result.status === 'indeterminate')
+      expect(result.detail).toContain('the creation outcome is uncertain');
+  });
+
+  test('P2 v9bK9: with an injected open and NO gh, the cap path performs NO production-gh body edit (the injected leg owns the forge)', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    // The production gh effects would run `gh` against input.repoRoot; the
+    // fixture repo has no remote/gh config, so any production call would
+    // fail loudly. Assert instead on the pure structural fact: the compose
+    // never runs (no getPrBody possible), and the op still publishes the
+    // draft reason.
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: roundCapAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+      // NO gh injected: the injected open owns the forge.
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('NOT READY');
+      expect(result.reason).toContain('draft PR #42');
+      // No '(pr body)' fault: the composition never touched a forge.
+      expect(result.reason).not.toContain('pr body');
+    }
+  });
+
   test('BEFORE (P1 7kNb-delta): the FINAL deterministic gates run BEFORE round-cap publication — a red gate refuses verbatim with NO push and NO PR', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);

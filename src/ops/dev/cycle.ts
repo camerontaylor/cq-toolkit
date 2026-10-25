@@ -99,10 +99,17 @@ export interface DevCycleReport {
 }
 
 /** The follow-up command dev.cycle reports after publishing a PR. */
-export function followUpCommand(prNumber: number, repoRoot: string): string {
+export function followUpCommand(prNumber: number, repoRoot: string, target?: string): string {
   // Safely single-quoted for the shell: an embedded quote ends the quoting.
   const quoted = `'${repoRoot.replaceAll("'", `'\\''`)}'`;
-  return `cq review.address --repoRoot=${quoted} --source=pr:${String(prNumber)}`;
+  // A non-default target changes the PR-side comparison (the address leg
+  // pins its base against the cycle's target); the default is omitted so
+  // the plain command stays the common case.
+  const targetPart =
+    target === undefined || target === DEFAULT_DEV_TARGET
+      ? ''
+      : ` --target='${target.replaceAll("'", `'\\''`)}'`;
+  return `cq review.address --repoRoot=${quoted}${targetPart} --source=pr:${String(prNumber)}`;
 }
 
 /** The managed body section's START marker for the open-findings + attempts section. */
@@ -206,9 +213,12 @@ export interface DevCycleDeps {
   /** The publication leg (default: the production pr.open over the effects). */
   open?: (input: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
   /**
-   * The gh effects the DEFAULT publication leg binds and the findings
-   * section compose uses (production: makeSubprocessPrEffects). Ignored
-   * when `open` is injected — an injected open owns its own forge.
+   * The forge effects the DEFAULT publication leg binds and the findings
+   * section compose uses (production: makeSubprocessPrEffects). When `open`
+   * is injected WITHOUT `gh`, the injected leg OWNS the forge — the
+   * composition performs no direct body edit at all (a production-gh
+   * fallback could edit an unrelated PR), so the injected leg is
+   * responsible for publishing the findings section itself.
    */
   gh?: PrEffects;
   /** The secret scanner the default check leg binds (registry parity with dev.check). */
@@ -238,8 +248,17 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         deps.drivers === undefined
           ? makeReviewAddress()(step)
           : makeReviewAddress({ drivers: deps.drivers })(step));
-    const gh = deps.gh ?? makeSubprocessPrEffects(input.repoRoot);
-    const open = deps.open ?? ((step: PrOpenInput) => makePrOpen(deps.effects, gh)(step));
+    // The forge effects for the findings-section compose: the DEFAULT
+    // publication leg's own effects. When deps.open is injected WITHOUT
+    // deps.gh, the injected leg owns the forge — no effects are constructed
+    // (production gh against input.repoRoot could edit an unrelated PR), so
+    // the composition skips the direct body edit entirely (v9bK9).
+    const ownForge = deps.open === undefined || deps.gh !== undefined;
+    const gh = ownForge ? (deps.gh ?? makeSubprocessPrEffects(input.repoRoot)) : undefined;
+    const open =
+      deps.open ??
+      ((step: PrOpenInput) =>
+        makePrOpen(deps.effects, gh ?? makeSubprocessPrEffects(input.repoRoot))(step));
     const git =
       deps.git ?? makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: 10 * 60 * 1000 });
 
@@ -406,7 +425,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         target,
         pr: openResult.value,
         pushed,
-        followUp: followUpCommand(openResult.value.number, input.repoRoot),
+        followUp: followUpCommand(openResult.value.number, input.repoRoot, target),
       },
     };
 
@@ -416,7 +435,12 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     async function finishNotReady(
       readinessReason: string,
       addressReport: ReviewAddressReport | undefined,
-    ): Promise<Extract<OpResult<never>, { status: 'needs-human' }>> {
+    ): Promise<
+      | Extract<OpResult<never>, { status: 'needs-human' }>
+      | Extract<OpResult<never>, { status: 'failed' }>
+      | Extract<OpResult<never>, { status: 'indeterminate' }>
+      | Extract<OpResult<never>, { status: 'budget-exhausted' }>
+    > {
       // The branch/head the draft publishes: the CURRENT state, re-read —
       // the address leg's commits are the head the gaps describe.
       const current = await readWorkState(deps.effects, { target });
@@ -433,19 +457,23 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         draftWhenNotReady: true,
         ...(input.title === undefined ? {} : { title: input.title }),
       });
-      if (openResult.status !== 'ok') {
-        const refused = stepResult('pr.open', openResult);
-        if (refused.status !== 'needs-human')
-          return { status: 'needs-human', reason: `dev.cycle (pr.open): ${issue(openResult)}` };
-        return refused;
-      }
+      // Publication status is PRESERVED: the same forge failure must produce
+      // the same status/exit whether addressing finished cleanly or hit the
+      // cap. A `failed` creation (makePrOpen's forge-throw fold) stays
+      // failed; an `indeterminate` (outcome uncertain — the PR may exist)
+      // stays indeterminate; only a needs-human refusal stays needs-human.
+      if (openResult.status !== 'ok') return stepResult('pr.open', openResult);
       const pr = openResult.value;
       // The findings section: composed onto the body AFTER the draft exists
       // (the readiness/gaps section is pr.open's own managed section; the
-      // findings ride the same protocol under their own marker). A fault
-      // here fails the op — the PR is open, its body is missing the round
-      // cap's evidence, and the reason says so.
-      if (addressReport !== undefined) {
+      // findings ride the same protocol under their own marker). The body
+      // update goes through the SAME forge effects the publication leg was
+      // built from — when deps.open is injected WITHOUT deps.gh, the
+      // injected leg owns the forge and the composition NEVER falls back to
+      // production gh (which would edit an unrelated PR). A fault here
+      // fails the op — the PR is open, its body is missing the round cap's
+      // evidence, and the reason says so.
+      if (addressReport !== undefined && gh !== undefined) {
         try {
           const composed = composeSection(
             await gh.getPrBody(pr.number),
@@ -461,7 +489,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       }
       return {
         status: 'needs-human',
-        reason: `dev.cycle: NOT READY — ${readinessReason} — draft PR #${String(pr.number)} published with the gaps and the attempt log; follow-up: ${followUpCommand(pr.number, input.repoRoot)}`,
+        reason: `dev.cycle: NOT READY — ${readinessReason} — draft PR #${String(pr.number)} published with the gaps and the attempt log; follow-up: ${followUpCommand(pr.number, input.repoRoot, target)}`,
       };
     }
   });
