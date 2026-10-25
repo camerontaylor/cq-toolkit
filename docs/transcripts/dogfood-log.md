@@ -257,3 +257,62 @@ commits (`24aba328`, `4f8e494c`) plus this entry at `HEAD`; artifacts under
 records (`k001-24aba328`, `k002-4f8e494c`) persist in the branch dev-record.
 Per the lane protocol: no `gh pr create` fallback; the failure is reported
 for an owner/coordinator decision on the cap-vs-closure policy.
+
+## S7 dogfood attempt C — dev.cycle with testFiles (named selection)
+
+Attempt B exposed the second blocker: the `--base` closure for any
+dev/registry-touching branch exceeds the owner's 10-file cap (decomposition:
+the vitest import-graph query returns **51** related test files for this
+branch's 8 src/scripts changes — `src/ops/dev/registry.ts` reaches the
+central registry barrel, dragging CLI conformance, smoke, driver, plans and
+e2e suites in — and the reviewed NON_IMPORT_MAP adds **27** more from four
+fan-out rows: `docs/ops/*` → test/scripts/*; `scripts/lib/test-narrow.mjs` →
+test/scripts/* + test/workflows/* + policyDiff; `src/ops/**` →
+cli/registry + conformance + served-model-sites; any `src/**/*.ts` →
+protectedPaths. 51 ∪ 27 = 78). Per the chancellor's ruling the cap stays;
+the policy's own escape ("name a narrower set of files") is now exposed
+through the ops as `0b72de61`: dev.check gains `testFiles: string[]`
+(replaces the `--base`/`--range` selection, flags-first argv, dash-leading
+segments refused before any gate), the record discloses the narrowing as
+`testSelection: { mode: 'named', files }` vs `{ mode: 'base' | 'range' }`,
+and dev.cycle forwards it to every check leg. `ae669f3d` fixed the follow-on
+ledger-evolution defect attempt C-1 exposed (a REQUIRED new schema field
+made pre-existing records unloadable — all gates green, record unpersisted);
+`testSelection` is optional on read, always written. Evidence:
+`test:narrow result="pass" exit=0 files=9 projects="pure,process"
+tests="231/231" failed=0`, lint 0, format clean, knip clean.
+
+Named files for this branch (10, at the cap): test/plans/review-loop.test.ts,
+test/ops/review/address-pr.test.ts, test/ops/review/address.test.ts,
+test/e2e/review/review-address.e2e.test.ts, test/ops/dev/check.test.ts,
+test/ops/dev/cycle.test.ts, test/ops/dev/registry.test.ts,
+test/cli/registry.test.ts, test/scripts/test-narrow.test.ts,
+test/driver/process-inventory.test.ts.
+
+```sh
+node dist/cli.js dev.cycle --repoRoot=$PWD --push --target=merge-queue \
+  --includeIntegration=true --testFiles='[...the 10 files above...]' \
+  --title="fix(review.address): report exact publication state (#469) + verdict P2s; dev.cycle includeIntegration"
+```
+
+Observed CLI exit: **3**, `needs-human` after 275 s — PAST dev.check this
+time: the named-selection gate ran GREEN and persisted
+(`k003-6e3baf9f`, `testSelection.mode: 'named'`, all 10 files recorded,
+`includeIntegration: true`), then failed at leg 2 (`review.run`):
+
+> dev.cycle (review.run): review.run: not every configured reviewer
+> completed a terminal cycle; the findings record, including partial
+> findings, was persisted
+
+The ledger shows CodeRabbit TERMINAL (3 findings, coverage receipt logged)
+and the agent reviewer BLOCKED: `agent review did not complete (error)`,
+usage 0, first partition failed after 2 serialized requests — the OpenCode
+Go wire (`roles.reviewer`: `opencode-go`/`deepseek-v4.1-flash`) erroring at
+dispatch, consistent with the 5-hour quota 429 the lane was pre-warned
+about. Per protocol cq.json was NOT touched. Failure time: 2026-10-25
+~23:17:20 +1100. No push, no PR (remote head still `35de807d`; the branch
+carries `24aba328`, `4f8e494c`, `0b72de61`, `ae669f3d`, `6e3baf9f` + this
+entry). Artifacts: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025-c/`,
+agent log `~/.jcode/scratch/cq-dev-review/fix_s7-dogfood-address-469-…-agent-…log`.
+Defect candidate from C-1 (fixed in-branch): required-field ledger evolution.
+Remaining: rerun when the Go key's quota window resets.
