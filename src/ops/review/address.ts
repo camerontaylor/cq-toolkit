@@ -215,6 +215,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           status = 'needs-human';
           reason = `verified publication failed: ${String(error)}`;
           report.reasons.push(reason);
+          // The outcome is now the publication failure, not the round cap: a
+          // composition must not publish a draft over it.
+          structuredStop = undefined;
         }
       }
       const stopped = status === 'ok' ? cleanStop?.() : undefined;
