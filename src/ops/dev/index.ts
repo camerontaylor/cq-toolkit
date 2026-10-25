@@ -23,6 +23,7 @@ export type {
 export type { DevCheckInput, DevCheckReport } from './check.js';
 export type { DevDispositionInput } from './disposition.js';
 export type { DevReadyInput, ReadinessRead } from './ready.js';
+export type { DevCycleCompositionInput, DevCycleDeps, DevCycleReport } from './cycle.js';
 export type { DevCycleInput, DevReviewDeps, DevReviewInput, DevReviewReport } from './review.js';
 export type { WorkState, WorkStateRead } from './internal/workState.js';
 export { CLEAN_TREE, dirtyIdentity, readWorkState } from './internal/workState.js';
@@ -73,13 +74,20 @@ export {
 export { knipTrigger, makeDevCheck, rangeFault } from './check.js';
 export { isAdmissionInput, makeDevReview } from './review.js';
 export { makeDevDisposition } from './disposition.js';
-export { makeDevReady, readReadiness } from './ready.js';
+export { makeDevReady, readReadiness, readReadinessWithGaps } from './ready.js';
+export {
+  DEV_FINDINGS_SECTION_MARKER,
+  followUpCommand,
+  makeDevCycle,
+  renderFindingsSection,
+} from './cycle.js';
 export {
   DevIdentitySchema,
   registry as devRegistry,
   DevCheckInputSchema,
   DevDispositionInputSchema,
   DevReadyInputSchema,
+  DevCycleCompositionInputSchema,
   DevReviewInputSchema,
   DevTransportInputSchema,
 } from './registry.js';

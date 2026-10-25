@@ -80,8 +80,21 @@ export interface ReviewAddressReport {
   wallMs: number;
   reasons: string[];
   escalation?: ReturnType<AddressWorker['escalation']>;
+  /**
+   * The leg's STRUCTURED terminal outcome, set on the round-cap stop only
+   * ('round-cap'): the machine-checkable discriminator a composition uses
+   * to decide the spec's draft-at-cap publication. Deliberately NOT parsed
+   * out of `reason` — finish() appends '; report: <path>' to every
+   * needs-human reason, so string-matching the reason can never be exact.
+   * Rides the report envelope (the kernel-sanctioned extension, stripped
+   * before the strict OpResultSchema base parse) — a top-level result field
+   * would be an unrecognized key and trip the frozen taxonomy.
+   */
+  stop?: 'round-cap';
 }
-export type ReviewAddressResult = OpResult<ReviewAddressReport> & { report?: ReviewAddressReport };
+export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
+  report?: ReviewAddressReport;
+};
 export interface ReviewAddressDeps {
   drivers?: DriverFactory;
   git?: GhFn;
@@ -139,6 +152,16 @@ const discussionText = (
     ? `${body}\n\nFollow-up discussion (chronological):\n${comments.map((comment) => `Author: ${comment.authorLogin ?? 'unknown'}; at: ${comment.createdAt ?? 'unknown'}\n${comment.body}`).join('\n\n')}`
     : body;
 
+/**
+ * The address leg's ROUND-CAP stop reason, exported verbatim: the ONE
+ * terminal outcome a pre-PR composition may publish a draft for (the spec's
+ * "draft PR with the open findings at the round cap"). Every other refusal
+ * — budget exhaustion, a blocked re-review, an admission failure, a parent
+ * cancel — carries a report too, but publishing over it would turn a failed
+ * run into needs-human-with-PR; callers must propagate those verbatim.
+ */
+export const REVIEW_ADDRESS_ROUNDCAP_REASON = 'review round cap reached with open findings';
+
 /** SDK-first fix/disposition/re-review composition; kernel dispatch itself remains retry-free. */
 export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
   return async (input: ReviewAddressInput): Promise<ReviewAddressResult> => {
@@ -185,6 +208,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
+      structuredStop?: 'round-cap',
     ): Promise<ReviewAddressResult> => {
       if (reason) report.reasons.push(reason);
       if (publishOnExit && !parent?.aborted) {
@@ -194,6 +218,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           status = 'needs-human';
           reason = `verified publication failed: ${String(error)}`;
           report.reasons.push(reason);
+          // The outcome is now the publication failure, not the round cap: a
+          // composition must not publish a draft over it.
+          structuredStop = undefined;
         }
       }
       const stopped = status === 'ok' ? cleanStop?.() : undefined;
@@ -202,6 +229,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         reason = stopped;
         report.reasons.push(stopped);
       }
+      // The structured round-cap marker rides the report envelope — the
+      // kernel-sanctioned extension the CLI strips before the strict
+      // OpResultSchema parse. It must be assigned BEFORE the report is
+      // persisted below so the written artifact agrees with the returned
+      // envelope (and the publication-failure clearing above, which erases
+      // the marker, is included in both).
+      if (structuredStop !== undefined) report.stop = structuredStop;
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
       report.findings = report.findings.map((finding) => {
@@ -1311,7 +1345,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return await finish('ok');
             }
           }
-          return await finish('needs-human', 'review round cap reached with open findings');
+          return await finish('needs-human', REVIEW_ADDRESS_ROUNDCAP_REASON, 'round-cap');
         } catch (error) {
           return await finish(
             'needs-human',

@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { DEV_LEDGER_VERSION, type DevLedgerFile } from '../../../src/ops/dev/record.js';
 import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
 import {
+  DEV_READINESS_GAPS_SECTION_MARKER,
   DEV_READINESS_SECTION_MARKER,
   makePrOpen,
   renderDispositionsComment,
+  renderReadinessGapsSection,
   renderReadinessSection,
 } from '../../../src/ops/pr/open.js';
 import {
@@ -26,6 +28,7 @@ interface GhExisting {
   number?: number;
   state?: 'open' | 'closed' | 'merged';
   isCrossRepository?: boolean;
+  isDraft?: boolean;
 }
 
 /** A gh fake implementing the PrEffects seam with a recording list. */
@@ -39,6 +42,7 @@ function ghFake(existing: GhExisting | null = null) {
         number: existing.number ?? 41,
         state: existing.state ?? 'open',
         isCrossRepository: existing.isCrossRepository ?? false,
+        ...(existing.isDraft === undefined ? {} : { isDraft: existing.isDraft }),
       };
     },
     createPr: async (request) => {
@@ -146,6 +150,7 @@ describe('pr.open', () => {
         head: state.head,
         branch: 'feature/x',
         evidenceClass: 'author',
+        ready: true,
       },
     });
     const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
@@ -239,6 +244,167 @@ describe('pr.open', () => {
     });
   });
 
+  test('draftWhenNotReady (with draft): a not-ready branch opens the DRAFT with the gaps section, ready:false', async () => {
+    // No seed: the fresh branch has no terminal cycle and no check, so the
+    // gaps are real and the flag must publish them instead of refusing.
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.ready).toBe(false);
+    const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
+      draft: boolean;
+      body: string;
+    };
+    expect(create.draft).toBe(true);
+    expect(create.body.startsWith(DEV_READINESS_GAPS_SECTION_MARKER)).toBe(true);
+    expect(create.body).toContain('NOT READY');
+    expect(create.body).toContain('terminal-review-cycle');
+    expect(create.body).toContain('green-check');
+    // The round-cap body's SECOND spec section: dispositions (here, the
+    // explicit none-note — the fresh branch has none yet).
+    expect(create.body).toContain('finding dispositions: 0');
+    expect(create.body).toContain('(none recorded)');
+    expect(create.body).not.toContain(DEV_READINESS_SECTION_MARKER);
+  });
+
+  test('an ADOPTED not-ready re-run refreshes the gaps AND dispositions sections in place', async () => {
+    // First pass: open the not-ready draft.
+    const first = ghFake();
+    const opened = await makePrOpen(
+      effects(),
+      first.gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(opened.status).toBe('ok');
+    if (opened.status !== 'ok') return;
+    // Dispositions land in the ledger AFTER the draft exists. The seed
+    // REPLACES the (empty) ledger with a terminal cycle + green check at
+    // the same identity, so on the re-read the branch IS ready — the
+    // adopt path runs the standard readiness section, which carries the
+    // dispositions (the one-time comment never duplicated them). The
+    // section refreshes in place inside its span; the gaps section of the
+    // first draft stays as history prose.
+    await seed(repo, () => [
+      dispositionRecord({
+        findingId: 'c005-aaaaaaaa#f1',
+        action: 'deferred',
+        why: 'owner decision needed',
+      }),
+    ]);
+    // Second pass: same branch, the OPEN PR is adopted and its managed
+    // section refreshed in place — the dispositions appear inside the
+    // refreshed span, nothing duplicates, and the one-time comment stays a
+    // creation-time artifact.
+    const second = ghFake({ number: 41 });
+    const adopted = await makePrOpen(
+      effects(),
+      second.gh,
+    )({
+      repoRoot: repo.root,
+    });
+    expect(adopted.status).toBe('ok');
+    if (adopted.status !== 'ok') return;
+    expect(adopted.value.ready).toBe(true);
+    const edit = second.calls.find((call) => call.effect === 'editPrBody');
+    const body = String(edit?.args[1]);
+    // The READY section carries the dispositions inside its managed span
+    // (its own details block) — refreshed in place, no duplicate comment.
+    expect(body).toContain('dispositions recorded: 1');
+    expect(body).toContain('`c005-aaaaaaaa#f1` — **deferred**: owner decision needed');
+    expect(body.match(/c005-aaaaaaaa#f1/g)?.length).toBe(1);
+    expect(body).toContain(DEV_READINESS_SECTION_MARKER);
+    expect(second.calls.map((call) => call.effect)).toEqual([
+      'searchPrByHead',
+      'getPrBody',
+      'editPrBody',
+    ]);
+  });
+
+  test('draftWhenNotReady never has an effect without draft:true (a not-ready branch is still refused)', async () => {
+    // No seed: the fresh branch is not ready, and without draft:true the
+    // flag must change nothing — the refusal names the gaps.
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('terminal-review-cycle');
+    expect(calls).toEqual([]);
+  });
+
+  test('BEFORE (P2 7kNe): adopting a NON-DRAFT PR while not ready refuses naming the transition (#472 seam)', async () => {
+    const { gh, calls } = ghFake({ number: 41, isDraft: false });
+    // The existing OPEN PR is NOT a draft; the not-ready branch must not
+    // ride it as a submission.
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('not a draft');
+    expect(calls.filter((call) => call.effect === 'editPrBody')).toEqual([]);
+  });
+
+  test('a ready branch under draftWhenNotReady passes its explicit draft through, ready:true', async () => {
+    await ready();
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.ready).toBe(true);
+    const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
+      draft: boolean;
+      body: string;
+    };
+    // A ready branch under the flag: the explicit draft passes through
+    // (the caller asked for one), and the body is the standard readiness
+    // section — never the NOT-READY gaps.
+    expect(create.draft).toBe(true);
+    expect(create.body.startsWith(DEV_READINESS_SECTION_MARKER)).toBe(true);
+  });
+
+  test('an unreadable state under draftWhenNotReady is a refusal, never a draft', async () => {
+    await seed(repo);
+    repo.git('checkout', '-q', '--detach', 'HEAD');
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(calls).toEqual([]);
+  });
+
   test('a schema-bypassing input fails before any effect', async () => {
     const dev = makeFakeEffects();
     const { gh, calls } = ghFake();
@@ -322,5 +488,71 @@ describe('the readiness section markdown escaping', () => {
     const section = renderReadinessSection(baseRecord, ledger, []);
     expect(section).not.toContain('<script>');
     expect(section).toContain('scriptalert(1)/script');
+  });
+});
+
+describe('the NOT-READY gaps section renderer', () => {
+  const state = { branch: BRANCH, head: HEAD, base: BASE };
+  const gaps = [
+    { field: 'terminal-review-cycle', detail: 'no terminal full-scope review cycle recorded' },
+    { field: 'open-blocking-findings', detail: 'open blocking findings: c001|x (major)' },
+  ];
+
+  test('the section renders start and end markers and every gap verbatim', () => {
+    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'merge-queue', gaps);
+    expect(section.startsWith(DEV_READINESS_GAPS_SECTION_MARKER)).toBe(true);
+    expect(section).toContain('<!-- /cq:dev-readiness-gaps -->');
+    expect(section).toContain(
+      '**terminal-review-cycle**: no terminal full-scope review cycle recorded',
+    );
+    expect(section).toContain('blocking gaps: 2');
+  });
+
+  test('the branch ledger dispositions render inside the managed span (the round-cap body lists them)', () => {
+    const section = renderReadinessGapsSection(
+      state,
+      ledgerWith(
+        [
+          dispositionRecord({
+            findingId: 'c000-aaaaaaaa#f1',
+            action: 'rejected',
+            why: 'false positive: x',
+          }),
+          dispositionRecord({
+            findingId: 'c000-aaaaaaaa#f2',
+            action: 'fixed',
+            why: 'addressed in the diff',
+          }),
+        ],
+        BRANCH,
+      ),
+      'merge-queue',
+      gaps,
+    );
+    expect(section).toContain('finding dispositions: 2');
+    expect(section).toContain('`c000-aaaaaaaa#f1` — **rejected**: false positive: x');
+    expect(section).toContain('`c000-aaaaaaaa#f2` — **fixed**: addressed in the diff');
+    // Inside the span: an adopted re-run replaces, never duplicates.
+    expect(section.indexOf('finding dispositions')).toBeLessThan(
+      section.indexOf('<!-- /cq:dev-readiness-gaps -->'),
+    );
+  });
+
+  test('an empty disposition list renders the explicit none-note', () => {
+    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'merge-queue', gaps);
+    expect(section).toContain('finding dispositions: 0');
+    expect(section).toContain('(none recorded)');
+  });
+
+  test('pipes and angle brackets in gap details and disposition reasons cannot fabricate table or markup syntax', () => {
+    const section = renderReadinessGapsSection(
+      state,
+      ledgerWith([dispositionRecord({ why: 'a|b <script>x</script>' })], BRANCH),
+      'merge-queue',
+      [{ field: 'a|b', detail: '<script>y</script>' }],
+    );
+    expect(section).toContain('**a\\|b**:');
+    expect(section).toContain('a\\|b scriptx/script');
+    expect(section).not.toContain('<script>');
   });
 });
