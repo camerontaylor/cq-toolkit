@@ -81,7 +81,17 @@ export interface ReviewAddressReport {
   reasons: string[];
   escalation?: ReturnType<AddressWorker['escalation']>;
 }
-export type ReviewAddressResult = OpResult<ReviewAddressReport> & { report?: ReviewAddressReport };
+export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
+  report?: ReviewAddressReport;
+  /**
+   * The leg's STRUCTURED terminal outcome, set on the round-cap stop only
+   * ('round-cap'): the machine-checkable discriminator a composition uses
+   * to decide the spec's draft-at-cap publication. Deliberately NOT parsed
+   * out of `reason` — finish() appends '; report: <path>' to every
+   * needs-human reason, so string-matching the reason can never be exact.
+   */
+  stop?: 'round-cap';
+};
 export interface ReviewAddressDeps {
   drivers?: DriverFactory;
   git?: GhFn;
@@ -195,6 +205,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
+      structuredStop?: 'round-cap',
     ): Promise<ReviewAddressResult> => {
       if (reason) report.reasons.push(reason);
       if (publishOnExit && !parent?.aborted) {
@@ -238,8 +249,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (status === 'ok') return { status, value: report };
       const detail = `${reason || report.reasons.join('; ') || 'open blocking findings or incomplete review'}; report: ${report.reportPath}`;
       return status === 'failed'
-        ? { status, error: detail, report }
-        : { status, reason: detail, report };
+        ? { status, error: detail, report, ...(structuredStop ? { stop: structuredStop } : {}) }
+        : {
+            status,
+            reason: detail,
+            report,
+            ...(structuredStop ? { stop: structuredStop } : {}),
+          };
     };
     try {
       if (parent?.aborted) return await finish('needs-human', 'parent cancelled');
@@ -1321,7 +1337,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return await finish('ok');
             }
           }
-          return await finish('needs-human', REVIEW_ADDRESS_ROUNDCAP_REASON);
+          return await finish('needs-human', REVIEW_ADDRESS_ROUNDCAP_REASON, 'round-cap');
         } catch (error) {
           return await finish(
             'needs-human',

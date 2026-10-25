@@ -54,7 +54,7 @@ import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.j
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
 import { makePrOpen } from '../pr/open.js';
 import type { ReviewAddressInput, ReviewAddressReport } from '../review/address.js';
-import { makeReviewAddress, REVIEW_ADDRESS_ROUNDCAP_REASON } from '../review/address.js';
+import { makeReviewAddress } from '../review/address.js';
 import type { FindingsRecord } from '../review/findings.js';
 import type { ReviewRunInput } from '../review/run.js';
 import { makeReviewRun } from '../review/run.js';
@@ -202,7 +202,7 @@ export interface DevCycleDeps {
   /** The address leg (default: the production review.address). */
   address?: (
     input: ReviewAddressInput,
-  ) => Promise<OpResult<unknown> & { report?: ReviewAddressReport }>;
+  ) => Promise<OpResult<unknown> & { report?: ReviewAddressReport; stop?: 'round-cap' }>;
   /** The publication leg (default: the production pr.open over the effects). */
   open?: (input: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
   /**
@@ -340,15 +340,18 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       ...(run.value.reviewed === undefined ? {} : { base: run.value.reviewed.base }),
     });
     if (addressResult.status !== 'ok') {
-      // ROUND CAP ONLY: the address leg's designed stop names itself
-      // (REVIEW_ADDRESS_ROUNDCAP_REASON). Budget exhaustion, blocked
-      // re-reviews and admission failures ALSO carry a report — publishing
-      // over them would turn a failed run into needs-human-with-PR — so
-      // report presence is never the trigger; the reason is, verbatim.
-      // Any other refusal propagates verbatim and stops the cycle.
+      // ROUND CAP ONLY: the address leg marks its designed stop with the
+      // STRUCTURED `stop: 'round-cap'` field (set by its own finish(),
+      // which appends '; report: <path>' to every needs-human reason — a
+      // reason string can never be matched exactly). Budget exhaustion,
+      // blocked re-reviews and admission failures ALSO carry a report —
+      // publishing over them would turn a failed run into
+      // needs-human-with-PR — so report presence is never the trigger;
+      // the structured stop is. Any other refusal propagates verbatim and
+      // stops the cycle.
       const roundCap =
         addressResult.status === 'needs-human' &&
-        addressResult.reason === REVIEW_ADDRESS_ROUNDCAP_REASON &&
+        addressResult.stop === 'round-cap' &&
         addressResult.report !== undefined;
       if (!roundCap) return stepResult('review.address', addressResult);
 
@@ -358,7 +361,10 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // propagates verbatim — no push, no PR.
       const capCheck = await check({ repoRoot: input.repoRoot, target });
       if (capCheck.status !== 'ok') return stepResult('dev.check (final)', capCheck);
-      return await finishNotReady(REVIEW_ADDRESS_ROUNDCAP_REASON, addressResult.report);
+      return await finishNotReady(
+        'review round cap reached with open findings',
+        addressResult.report,
+      );
     }
 
     // ------------------- 4. the FINAL dev.check --------------------------

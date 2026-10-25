@@ -43,7 +43,7 @@ type CheckLeg = (input: { repoRoot: string; target?: string }) => Promise<OpResu
 type ReviewLeg = (input: ReviewRunInput) => Promise<OpResult<FindingsRecord>>;
 type AddressLeg = (
   input: ReviewAddressInput,
-) => Promise<OpResult<unknown> & { report?: ReviewAddressReport }>;
+) => Promise<OpResult<unknown> & { report?: ReviewAddressReport; stop?: 'round-cap' }>;
 type OpenLeg = (input: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
 type GitLeg = (
   args: readonly string[],
@@ -148,8 +148,30 @@ function roundCapAddress(state: WorkState): AddressLeg {
   return async () => ({
     status: 'needs-human',
     reason: 'review round cap reached with open findings',
+    stop: 'round-cap' as const,
     report: addressReport(state, [capFinding], attempts),
   });
+}
+
+/**
+ * A scripted address leg returning EXACTLY what makeReviewAddress's
+ * finish() produces for the round-cap stop: the reason carries the
+ * '; report: <path>' suffix (address.ts finish appends it to every
+ * needs-human reason) AND the structured stop:'round-cap' field rides
+ * the result. The production-shape test pins that the composition's
+ * discriminator survives the suffixed reason; the bare-constant fake
+ * above cannot catch a discriminator that never matches production.
+ */
+function roundCapAddressProductionShape(state: WorkState): AddressLeg {
+  const base = roundCapAddress(state);
+  return async () => {
+    const result = await base({ repoRoot: '/s7-production-shape', source: 'local' });
+    if (result.status !== 'needs-human') return result;
+    return {
+      ...result,
+      reason: `${result.reason}; report: /tmp/s7-fixture/journal/review-address-report.json`,
+    };
+  };
 }
 
 /** A scripted pr.open leg recording its inputs and returning a fixed PR. */
@@ -359,6 +381,42 @@ describe('dev.cycle', () => {
     expect(body0.indexOf(DEV_FINDINGS_SECTION_MARKER)).toBeGreaterThan(
       body0.indexOf('finding dispositions'),
     );
+  });
+
+  test('RED-AT-6db637da (v9K4q): the round cap publishes through the PRODUCTION finish() shape (reason carries the "; report:" suffix)', async () => {
+    const state = await seed(repo);
+    repo.git('push', '-q', 'origin', 'feature/x');
+    await seedReadyLedger(state);
+    const { gh, bodies } = ghFake();
+    const opens: PrOpenInput[] = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: roundCapAddressProductionShape(state),
+      open: openFake(opens, 45, false),
+      gh,
+      git: async (args) =>
+        args.includes('push')
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
+    });
+    const result = await op({ repoRoot: repo.root });
+    // The production finish() appends '; report: <path>' to every needs-human
+    // reason; the discriminator MUST still recognize the round cap through
+    // the suffix and publish the draft (the spec's draft-at-cap). A prefix
+    // match that never fires would surface this as a verbatim
+    // 'review.address' refusal with zero publication instead.
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('NOT READY');
+    expect(result.reason).toContain('review round cap reached with open findings');
+    expect(result.reason).toContain(`follow-up: ${followUpCommand(45, repo.root)}`);
+    expect(opens).toEqual([
+      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+    ]);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
   });
 
   test('a red FIRST check stops verbatim before any review leg', async () => {
