@@ -266,8 +266,8 @@ the vitest import-graph query returns **51** related test files for this
 branch's 8 src/scripts changes — `src/ops/dev/registry.ts` reaches the
 central registry barrel, dragging CLI conformance, smoke, driver, plans and
 e2e suites in — and the reviewed NON_IMPORT_MAP adds **27** more from four
-fan-out rows: `docs/ops/*` → test/scripts/*; `scripts/lib/test-narrow.mjs` →
-test/scripts/* + test/workflows/* + policyDiff; `src/ops/**` →
+fan-out rows: `docs/ops/*` → `test/scripts/*`; `scripts/lib/test-narrow.mjs`
+→ `test/scripts/*` + `test/workflows/*` + policyDiff; `src/ops/**` →
 cli/registry + conformance + served-model-sites; any `src/**/*.ts` →
 protectedPaths. 51 ∪ 27 = 78). Per the chancellor's ruling the cap stays;
 the policy's own escape ("name a narrower set of files") is now exposed
