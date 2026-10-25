@@ -30,6 +30,14 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minLength": 1,
       "type": "string"
     },
+    "testFiles": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
     "title": {
       "minLength": 1,
       "type": "string"
