@@ -273,6 +273,47 @@ describe('dev.cycle', () => {
     expect(opens).toEqual([{ repoRoot: repo.root, target: 'merge-queue' }]);
   });
 
+  test('includeIntegration=true reaches BOTH check legs', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: boolean[] = [];
+    const opens: PrOpenInput[] = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.includeIntegration === true);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake(opens),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root, includeIntegration: true });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(seen).toEqual([true, true]);
+  });
+
+  test('includeIntegration absent keeps the check legs bare', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: boolean[] = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.includeIntegration === true);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(seen).toEqual([false, false]);
+  });
+
   test('push:false skips the verified push (the branch stays local; pr.open still runs)', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
