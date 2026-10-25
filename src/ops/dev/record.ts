@@ -143,6 +143,13 @@ export interface DevCheckRecord {
   dirtySha256: string;
   /** The explicit `a..b` range, when the run was scoped to one. */
   range?: string;
+  /**
+   * The test:narrow gate ran with `--include-integration` (the caller's
+   * explicit opt-in): integration suites executed inside this check, so a
+   * reader knows the gate's scope was widened (skipped LIVE_GH tests still
+   * count as not-executed for the wrapper's own verdict).
+   */
+  includeIntegration?: boolean;
   /** true only when every gate that ran is green. */
   passed: boolean;
   gates: DevCheckGate[];
@@ -244,6 +251,7 @@ const DevCheckRecordSchema = z
     head: z.string().min(1),
     dirtySha256: z.string().min(1),
     range: z.string().min(1).exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
     passed: z.boolean(),
     gates: z.array(DevCheckGateSchema),
     loadStamp: DevLoadStampSchema,

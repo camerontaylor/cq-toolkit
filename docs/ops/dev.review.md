@@ -26,6 +26,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "pattern": "^[0-9a-fA-F]{7,64}$",
           "type": "string"
         },
+        "includeIntegration": {
+          "type": "boolean"
+        },
         "repoRoot": {
           "minLength": 1,
           "type": "string"
