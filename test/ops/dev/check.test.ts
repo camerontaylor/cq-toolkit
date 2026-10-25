@@ -341,6 +341,32 @@ describe('dev.check', () => {
     expect(record?.kind === 'check' && record.testSelection).toEqual({ mode: 'base' });
   });
 
+  test('a ledger written before testSelection existed still loads (field evolution)', async () => {
+    // Attempt C: making the new field REQUIRED re-validated pre-existing
+    // records on every load and the whole store refused — schema fields the
+    // code stops writing must stay optional on read.
+    const effects = effectsFor();
+    const first = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(first.status, JSON.stringify(first)).toBe('ok');
+    const [legacy] = effects.openLedger('feature/x').load().records;
+    if (legacy?.kind !== 'check') throw new Error('fixture: expected a check record');
+    const { testSelection: _dropped, ...withoutSelection } = legacy;
+    void _dropped;
+    effects.openLedger('feature/x').save({
+      version: 2,
+      branch: 'feature/x',
+      records: [withoutSelection],
+    });
+    const reloaded = effects.openLedger('feature/x').load().records;
+    expect(reloaded[0]?.kind === 'check' && reloaded[0].testSelection).toBeUndefined();
+    // And a new run still WRITES the field on top of the legacy ledger.
+    const next = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(next.status, JSON.stringify(next)).toBe('ok');
+    const records = effects.openLedger('feature/x').load().records;
+    expect(records).toHaveLength(2);
+    expect(records[1]?.kind === 'check' && records[1].testSelection).toEqual({ mode: 'base' });
+  });
+
   test('includeIntegration=true adds --include-integration to the --base argv and records it', async () => {
     const effects = effectsFor();
     const result = await makeDevCheck(effects)({ repoRoot: repo.root, includeIntegration: true });
