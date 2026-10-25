@@ -43,7 +43,7 @@ type CheckLeg = (input: { repoRoot: string; target?: string }) => Promise<OpResu
 type ReviewLeg = (input: ReviewRunInput) => Promise<OpResult<FindingsRecord>>;
 type AddressLeg = (
   input: ReviewAddressInput,
-) => Promise<OpResult<unknown> & { report?: ReviewAddressReport; stop?: 'round-cap' }>;
+) => Promise<OpResult<unknown> & { report?: ReviewAddressReport }>;
 type OpenLeg = (input: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
 type GitLeg = (
   args: readonly string[],
@@ -130,7 +130,7 @@ const capFinding = {
   status: 'open' as const,
 };
 
-/** A scripted ROUND-CAP address leg: needs-human WITH the report attached. */
+/** A scripted ROUND-CAP address leg: needs-human WITH the report attached (stop marker inside the report). */
 function roundCapAddress(state: WorkState): AddressLeg {
   const attempts: ReviewAddressReport['attempts'] = [
     {
@@ -148,8 +148,7 @@ function roundCapAddress(state: WorkState): AddressLeg {
   return async () => ({
     status: 'needs-human',
     reason: 'review round cap reached with open findings',
-    stop: 'round-cap' as const,
-    report: addressReport(state, [capFinding], attempts),
+    report: { ...addressReport(state, [capFinding], attempts), stop: 'round-cap' as const },
   });
 }
 
@@ -157,10 +156,12 @@ function roundCapAddress(state: WorkState): AddressLeg {
  * A scripted address leg returning EXACTLY what makeReviewAddress's
  * finish() produces for the round-cap stop: the reason carries the
  * '; report: <path>' suffix (address.ts finish appends it to every
- * needs-human reason) AND the structured stop:'round-cap' field rides
- * the result. The production-shape test pins that the composition's
- * discriminator survives the suffixed reason; the bare-constant fake
- * above cannot catch a discriminator that never matches production.
+ * needs-human reason) AND the structured stop:'round-cap' marker rides
+ * INSIDE the report envelope (the kernel-sanctioned extension stripped
+ * pre-parse — a top-level field would trip the strict OpResultSchema).
+ * The production-shape test pins that the composition's discriminator
+ * survives the suffixed reason; the bare-constant fake above cannot catch a
+ * discriminator that never matches production.
  */
 function roundCapAddressProductionShape(state: WorkState): AddressLeg {
   const base = roundCapAddress(state);

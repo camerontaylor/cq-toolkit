@@ -207,8 +207,10 @@ describe('review.address composition', () => {
       expect(f.calls.filter((call) => call === 'fix:a')).toHaveLength(1);
       expect(f.calls).toContain('disposition:deferred');
       expect(reportOf(result).reasons).toContain('review round cap reached with open findings');
-      // The production round cap carries the structured marker compositions key on.
-      expect(result.stop).toBe('round-cap');
+      // The production round cap carries the structured marker compositions
+      // key on — inside the report envelope (the kernel-sanctioned extension),
+      // never a top-level field (the strict OpResultSchema would reject it).
+      expect(reportOf(result).stop).toBe('round-cap');
     } finally {
       await f.cleanup();
     }

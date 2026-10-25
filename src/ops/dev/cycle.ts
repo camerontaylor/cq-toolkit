@@ -209,7 +209,7 @@ export interface DevCycleDeps {
   /** The address leg (default: the production review.address). */
   address?: (
     input: ReviewAddressInput,
-  ) => Promise<OpResult<unknown> & { report?: ReviewAddressReport; stop?: 'round-cap' }>;
+  ) => Promise<OpResult<unknown> & { report?: ReviewAddressReport }>;
   /** The publication leg (default: the production pr.open over the effects). */
   open?: (input: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
   /**
@@ -360,9 +360,12 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     });
     if (addressResult.status !== 'ok') {
       // ROUND CAP ONLY: the address leg marks its designed stop with the
-      // STRUCTURED `stop: 'round-cap'` field (set by its own finish(),
-      // which appends '; report: <path>' to every needs-human reason — a
-      // reason string can never be matched exactly). Budget exhaustion,
+      // structured `stop: 'round-cap'` marker riding the report envelope
+      // (set by its own finish(); the report is the kernel-sanctioned
+      // extension, stripped before the strict OpResultSchema parse — a
+      // top-level result field would be an unrecognized key). The leg's
+      // own finish() appends '; report: <path>' to every needs-human reason
+      // — a reason string can never be matched exactly. Budget exhaustion,
       // blocked re-reviews and admission failures ALSO carry a report —
       // publishing over them would turn a failed run into
       // needs-human-with-PR — so report presence is never the trigger;
@@ -370,7 +373,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // stops the cycle.
       const roundCap =
         addressResult.status === 'needs-human' &&
-        addressResult.stop === 'round-cap' &&
+        addressResult.report?.stop === 'round-cap' &&
         addressResult.report !== undefined;
       if (!roundCap) return stepResult('review.address', addressResult);
 
