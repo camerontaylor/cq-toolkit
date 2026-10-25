@@ -145,17 +145,20 @@ describe('planRun', () => {
       ok: false,
       reason:
         'gated test files cover the change: test/i.test.ts (integration), ' +
-        'test/l.test.ts (live); pass --include-integration --include-live to run them',
+        'test/l.test.ts (live); pass --include-integration --include-live to run them ' +
+        '(an opt-in gate, not a refusal — re-run with --include-integration --include-live)',
       candidates: [],
     });
     // Only gated files selected (a change covered by integration tests alone)
     // is a refusal too, never an empty `result=nothing` success.
     const only = planRun({ selection: selection(['test/i.test.ts']), manifest, include: [] });
     expect(!only.ok && only.reason).toContain('pass --include-integration to run them');
+    expect(!only.ok && only.reason).toContain('re-run with --include-integration');
     // One opted-in class still refuses the other.
     const half = planRun({ selection: selection(files), manifest, include: ['integration'] });
     expect(!half.ok && half.reason).toBe(
-      'gated test files cover the change: test/l.test.ts (live); pass --include-live to run them',
+      'gated test files cover the change: test/l.test.ts (live); pass --include-live to run them ' +
+        '(an opt-in gate, not a refusal — re-run with --include-live)',
     );
   });
 
