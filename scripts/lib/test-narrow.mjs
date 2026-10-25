@@ -174,7 +174,12 @@ export function planRun({ selection, manifest, include }) {
     const listed = gated.map((g) => `${g.file} (${g.project})`).join(', ');
     return {
       ok: false,
-      reason: `gated test files cover the change: ${listed}; pass ${flags.join(' ')} to run them`,
+      // The flag IS the way through: this is the opt-in gate, not a policy
+      // refusal — one line names the exact re-run so a caller never detours
+      // into hand-running files (#470 verdict P2 #2).
+      reason:
+        `gated test files cover the change: ${listed}; pass ${flags.join(' ')} to run them ` +
+        `(an opt-in gate, not a refusal — re-run with ${flags.join(' ')})`,
       candidates: [],
     };
   }

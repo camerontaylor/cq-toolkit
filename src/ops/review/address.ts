@@ -214,6 +214,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     let worker: AddressWorker | undefined;
     let publishOnExit: (() => Promise<void>) | undefined;
     let cleanStop: (() => string | undefined) | undefined;
+    /**
+     * The exit publication's terminal state, settled by the wrapper below:
+     * 'published' once a push left this process, 'failed' with its error
+     * otherwise. #469's report-truth rule consumes it — the engine, not a
+     * loop-side guess, is the only witness of what was actually pushed.
+     */
+    let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -224,8 +231,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         try {
           await publishOnExit();
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          exitPublication = { state: 'failed', error: message };
           status = 'needs-human';
-          reason = `verified publication failed: ${String(error)}`;
+          reason = `verified publication failed: ${message}`;
           report.reasons.push(reason);
           // The outcome is now the publication failure, not the round cap: a
           // composition must not publish a draft over it.
@@ -249,6 +258,44 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (structuredStop === 'rereview-blocked' && (parent?.aborted || cleanStop?.() !== undefined))
         structuredStop = undefined;
       if (structuredStop !== undefined) report.stop = structuredStop;
+      // #469: settle the mixed-worktree withhold rows with the engine's own
+      // publication truth. The loop wrote them BEFORE the exit publication
+      // ran ("the loop pushed nothing … may still happen at engine exit");
+      // only the engine knows what its exit push actually did. Amend each
+      // row IN PLACE (a separate appended reason cannot be tied to its item
+      // and would leave the stale claim standing):
+      //   - a settled push → "exit-published": the exact verified range is
+      //     out; only the reply/resolve stay withheld (S6 attempt D's
+      //     8f78ca91 read "not published" while remote head already had it);
+      //   - a failed exit publication → the row names the failure and that
+      //     the commit stays local (the outcome reason carries it too);
+      //   - a run with no push → "publication is off": the commit truly is
+      //     unpublished (the one state where the old text was right).
+      const settleWithholdRows = (tail: string) => {
+        for (const [index, row] of report.reasons.entries()) {
+          if (row.includes('publish-withheld-mixed-worktree')) {
+            // Keep only the shared item prefix ("item …: " + the label); the
+            // loop-side clauses after it describe the pre-publication state
+            // and are REPLACED by the settled tail, never appended to.
+            const label = 'publish-withheld-mixed-worktree';
+            const at = row.indexOf(label);
+            report.reasons[index] = `${row.slice(0, at + label.length)}${tail}`;
+          }
+        }
+      };
+      if (exitPublication?.state === 'published') {
+        settleWithholdRows(
+          "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
+        );
+      } else if (exitPublication?.state === 'failed') {
+        settleWithholdRows(
+          `; exit publication failed (${exitPublication.error}) — the verified commit stays local`,
+        );
+      } else if (input.push !== true) {
+        settleWithholdRows(
+          '; publication is off for this run (no --push) — the verified commit stays unpublished in the worktree',
+        );
+      }
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
       report.findings = report.findings.map((finding) => {
@@ -634,7 +681,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             report.fixes.push(fix);
             if (fix.commit) unpublished.add(fix.commit);
           };
-          publishOnExit = async () => {
+          const publishOnExitInner = async (): Promise<void> => {
             if (!input.push || unpublished.size === 0 || parent?.aborted) return;
             if (!publishedBase) throw new Error('publication baseline unavailable');
             const range = (await gitText(workerRoot, ['rev-list', `${publishedBase}..HEAD`]))
@@ -652,8 +699,28 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const branch = publishBranch ?? (await branchName(workerRoot));
             if (parent?.aborted) throw new Error('parent cancelled');
             await gitText(workerRoot, ['push', publishRemote, `HEAD:refs/heads/${branch}`]);
+            // The engine's own witness: a push actually left the process, so
+            // the withhold rows' commit is out (#469). Set ONLY here — an
+            // early return (no push run, nothing unpublished) never counts
+            // as published.
+            exitPublication = { state: 'published' };
             publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
             unpublished.clear();
+          };
+          // The engine witnesses its own exit publication so the report can
+          // state the truth about what was pushed (#469): the inner sets
+          // 'published' only after a real push; a failure is recorded and
+          // rethrown for finish()'s outcome rewrite.
+          publishOnExit = async () => {
+            try {
+              await publishOnExitInner();
+            } catch (error) {
+              exitPublication = {
+                state: 'failed',
+                error: error instanceof Error ? error.message : String(error),
+              };
+              throw error;
+            }
           };
           const dispositions = new Map<string, Finding>();
           let bookkeepingFailed = false;
