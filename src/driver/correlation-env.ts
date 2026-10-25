@@ -44,3 +44,26 @@ export function correlationEnvRemovals(correlation: WorkCorrelation | undefined)
     return value === undefined || value === '';
   }).map(([, name]) => name);
 }
+
+/**
+ * The parent work id a governed run's jobs inherit from the env cq was
+ * launched in (minted into every job's correlation by the runner). An
+ * explicit CQ_* identity always wins: the launcher's own `CQ_WORK_ID` (the
+ * run is a unit of that work), else a passed-through `CQ_PARENT_WORK_ID`.
+ * With neither, a run launched inside a Paseo agent links to that agent as
+ * `paseo:<PASEO_AGENT_ID>` (the id shape telemetry-ingest uses for Paseo
+ * agents). Only the derived id rides on; `PASEO_AGENT_ID` itself is not
+ * forwarded. Blank values count as absent.
+ */
+export function inboundParentWorkId(
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const pick = (name: string): string | undefined => {
+    const value = env[name]?.trim();
+    return value === undefined || value === '' ? undefined : value;
+  };
+  const explicit = pick('CQ_WORK_ID') ?? pick('CQ_PARENT_WORK_ID');
+  if (explicit !== undefined) return explicit;
+  const paseoAgentId = pick('PASEO_AGENT_ID');
+  return paseoAgentId === undefined ? undefined : `paseo:${paseoAgentId}`;
+}

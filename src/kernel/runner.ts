@@ -171,6 +171,7 @@ import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultArtifactSchema } from './schema.js';
 import { assertJsonLossless } from '../shared/jsonLossless.js';
 import type { Usage, WorkCorrelation } from '../driver/types.js';
+import { inboundParentWorkId } from '../driver/correlation-env.js';
 import type {
   JobFinishedJournalEvent,
   JobOutcome,
@@ -1066,6 +1067,10 @@ async function runPlanUnderLease(
     // invocation without the runner mutating process.env (concurrent jobs
     // in a wave must not cross-stain each other's children).
     const correlationByJob = new Map<string, WorkCorrelation>();
+    // The parent every job's correlation names: the launcher's CQ_* identity,
+    // else the enclosing Paseo agent (`paseo:<PASEO_AGENT_ID>`). Read once,
+    // never written — see inboundParentWorkId.
+    const parentWorkId = inboundParentWorkId(process.env);
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip
@@ -1270,7 +1275,12 @@ async function runPlanUnderLease(
       // process.env write: concurrent jobs in a wave would cross-stain
       // each other's children.
       const workId = `${runId}:${job.id}:${admission.attempt}`;
-      correlationByJob.set(job.id, { workId, runId, role: job.op });
+      correlationByJob.set(job.id, {
+        workId,
+        runId,
+        role: job.op,
+        ...(parentWorkId !== undefined ? { parentWorkId } : {}),
+      });
 
       // Per-job ledger sums: everything this invocation's evidence folds
       // actually charged — streamed (reportResult) plus the returned
