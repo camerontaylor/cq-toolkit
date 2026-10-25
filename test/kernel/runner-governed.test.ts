@@ -35,7 +35,7 @@
 import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { GovernanceOptInRefusedError } from '../../src/kernel/errors.js';
 import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
@@ -1853,6 +1853,40 @@ describe('governed journal v2 + resume', () => {
       expect(jobFinishes(events2)).toMatchObject([expectedLinks]);
     },
     journalEnclosure(2),
+  );
+
+  test(
+    'job correlation names the launching Paseo agent as parent; explicit CQ_* wins (session-log 1.3)',
+    async () => {
+      const seen: (string | undefined)[] = [];
+      const probe = async (): Promise<OpResult<unknown>> => {
+        seen.push(currentJobContext()?.info.correlation?.parentWorkId);
+        return { status: 'ok', value: {} };
+      };
+      const run = async (planId: string) =>
+        runPlan(
+          independentPlan(planId, 1, 'probe'),
+          { concurrency: 1, stopOnError: false, journalDir: dir },
+          viewWith(entry('probe', probe)),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        );
+      try {
+        vi.stubEnv('CQ_WORK_ID', '');
+        vi.stubEnv('CQ_PARENT_WORK_ID', '');
+        vi.stubEnv('PASEO_AGENT_ID', '');
+        await run('plan-gov-parent-none');
+        vi.stubEnv('PASEO_AGENT_ID', 'agent-7');
+        await run('plan-gov-parent-paseo');
+        vi.stubEnv('CQ_PARENT_WORK_ID', 'outer-parent');
+        await run('plan-gov-parent-explicit');
+        vi.stubEnv('CQ_WORK_ID', 'crq:r-1');
+        await run('plan-gov-parent-work');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      expect(seen).toEqual([undefined, 'paseo:agent-7', 'outer-parent', 'crq:r-1']);
+    },
+    journalEnclosure(4),
   );
 
   test(

@@ -23,7 +23,11 @@ import {
 import { JobFinishedJournalEventSchema } from '../../src/kernel/schema.js';
 import { OpInvocationSchema, WorkerResultSchema } from '../../src/driver/schema.js';
 import { defaultSessionsDir } from '../../src/driver/sessions-dir.js';
-import { applyCorrelationEnv, correlationEnvRemovals } from '../../src/driver/correlation-env.js';
+import {
+  applyCorrelationEnv,
+  correlationEnvRemovals,
+  inboundParentWorkId,
+} from '../../src/driver/correlation-env.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
 
 describe('1.1 defaultSessionsDir', () => {
@@ -114,6 +118,24 @@ describe('1.4 CQ_* correlation env', () => {
     ]) {
       expect(DEFAULT_CHILD_ENV_ALLOWLIST).toContain(name);
     }
+  });
+
+  test('inboundParentWorkId: explicit CQ_* wins, else paseo:<PASEO_AGENT_ID>', () => {
+    expect(inboundParentWorkId({})).toBeUndefined();
+    expect(inboundParentWorkId({ PASEO_AGENT_ID: 'a1' })).toBe('paseo:a1');
+    expect(inboundParentWorkId({ PASEO_AGENT_ID: 'a1', CQ_PARENT_WORK_ID: 'p' })).toBe('p');
+    expect(inboundParentWorkId({ PASEO_AGENT_ID: 'a1', CQ_WORK_ID: 'crq:r-1' })).toBe('crq:r-1');
+    expect(inboundParentWorkId({ CQ_WORK_ID: 'w', CQ_PARENT_WORK_ID: 'p' })).toBe('w');
+    // Blank values count as absent.
+    expect(
+      inboundParentWorkId({ CQ_WORK_ID: ' ', CQ_PARENT_WORK_ID: '', PASEO_AGENT_ID: 'a1' }),
+    ).toBe('paseo:a1');
+    expect(inboundParentWorkId({ PASEO_AGENT_ID: '  ' })).toBeUndefined();
+  });
+
+  test('PASEO_AGENT_ID itself is not forwarded to children', () => {
+    expect(DEFAULT_CHILD_ENV_ALLOWLIST).not.toContain('PASEO_AGENT_ID');
+    expect('PASEO_AGENT_ID' in buildChildEnv({ PATH: '/bin', PASEO_AGENT_ID: 'a1' })).toBe(false);
   });
 
   test('buildChildEnv copies a set CQ_WORK_ID; absent stays absent', () => {
