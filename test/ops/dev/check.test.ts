@@ -271,6 +271,69 @@ describe('dev.check', () => {
     expect(records.map((r) => r.kind)).toEqual(['check']);
   });
 
+  test('includeIntegration=false (default) keeps the argv bare and the record silent', async () => {
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    expect(pnpmArgs(effects)).toContainEqual(['test:narrow', '--base', base]);
+    // No gated run happened, so no gate row or record field may claim one.
+    const [record] = effects.openLedger('feature/x').load().records;
+    expect(record?.kind === 'check' && record.includeIntegration).toBeUndefined();
+    expect(pnpmArgs(effects).every((args) => !args.includes('--include-integration'))).toBe(true);
+  });
+
+  test('includeIntegration=true adds --include-integration to the --base argv and records it', async () => {
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root, includeIntegration: true });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    expect(pnpmArgs(effects)).toContainEqual([
+      'test:narrow',
+      '--base',
+      base,
+      '--include-integration',
+    ]);
+    const [record] = effects.openLedger('feature/x').load().records;
+    expect(record?.kind === 'check' && record.includeIntegration).toBe(true);
+  });
+
+  test('includeIntegration=true also reaches the --range argv form', async () => {
+    const start = repo.git('rev-parse', 'HEAD~1').trim();
+    const head = repo.git('rev-parse', 'HEAD').trim();
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({
+      repoRoot: repo.root,
+      range: 'HEAD~1..HEAD',
+      includeIntegration: true,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(pnpmArgs(effects)).toContainEqual([
+      'test:narrow',
+      '--range',
+      `${start}..${head}`,
+      '--include-integration',
+    ]);
+  });
+
+  test('a refused test:narrow keeps the refusal reason in the gate row evidence', async () => {
+    const effects = effectsFor((command, args) =>
+      command === 'pnpm' && args[0] === 'test:narrow'
+        ? failResult(
+            2,
+            '',
+            'gated test files cover the change: test/e2e/review/live.test.ts (integration); pass --include-integration to run them (an opt-in gate, not a refusal — re-run with --include-integration)',
+          )
+        : undefined,
+    );
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    const [record] = effects.openLedger('feature/x').load().records;
+    const row =
+      record?.kind === 'check' ? record.gates.find((g) => g.name === 'test:narrow') : undefined;
+    expect(row?.evidence).toContain('pass --include-integration to run them');
+  });
+
   test('a red gate maps to failed, names the gate, and STILL persists the record', async () => {
     const effects = effectsFor((command, args) =>
       command === 'pnpm' && args[1] === 'check:static' ? failResult(1, '', 'TS2322') : undefined,

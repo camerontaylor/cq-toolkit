@@ -56,6 +56,15 @@ export interface DevCheckInput {
   target?: string;
   /** Explicit `a..b` commit range replacing the default merge-base pin; `b` must be HEAD. */
   range?: string;
+  /**
+   * Opt the automated test:narrow gate INTO the integration suite
+   * (`--include-integration`), for both the --base and --range forms. The
+   * selector's closure can name e2e files for plain src changes, and the
+   * gate refusal can never be satisfied from inside dev.check — the caller
+   * must opt in (S7 dogfood attempt A). Default off; the record carries the
+   * choice (includeIntegration: true) so readers can see the opt-in.
+   */
+  includeIntegration?: boolean;
 }
 
 /** The dev.check report — the ok value and the persisted check record's evidence. */
@@ -420,9 +429,13 @@ export function makeDevCheck(
           effects,
           'test:narrow',
           'pnpm',
-          input.range !== undefined
-            ? ['test:narrow', '--range', `${state.base}..${state.head}`]
-            : ['test:narrow', '--base', state.base],
+          [
+            'test:narrow',
+            ...(input.range !== undefined
+              ? ['--range', `${state.base}..${state.head}`]
+              : ['--base', state.base]),
+            ...(input.includeIntegration === true ? ['--include-integration'] : []),
+          ],
           TEST_NARROW_TIMEOUT_MS,
         ),
       );
@@ -488,6 +501,7 @@ export function makeDevCheck(
           head: state.head,
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
+          ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
           passed,
           gates,
           loadStamp,

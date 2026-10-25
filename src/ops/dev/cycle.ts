@@ -83,6 +83,15 @@ export interface DevCycleCompositionInput {
   push?: boolean;
   /** PR title; default is the head commit's subject (pr.open's rule). */
   title?: string;
+  /**
+   * Opt BOTH dev.check legs' test:narrow gate into the integration suite
+   * (`--include-integration`); the choice is recorded in each check record.
+   * The `--base`/`--range` selector's closure can name gated e2e files for
+   * plain src changes, and the wrapper's refusal cannot be satisfied from
+   * inside dev.check — the caller opts in explicitly (S7 dogfood attempt A).
+   * Default off.
+   */
+  includeIntegration?: boolean;
 }
 
 /** The dev.cycle report — the ok value (a ready, published branch). */
@@ -350,7 +359,12 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     }
 
     // --------------------------- 1. dev.check ----------------------------
-    const firstCheck = await check({ repoRoot: input.repoRoot, target });
+    const checkStep: DevCheckInput = {
+      repoRoot: input.repoRoot,
+      target,
+      ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
+    };
+    const firstCheck = await check(checkStep);
     if (firstCheck.status !== 'ok') return stepResult('dev.check', firstCheck);
 
     // --------------------------- 2. review.run ---------------------------
@@ -402,7 +416,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // (the same gates the clean path re-runs at the addressed head): a fix
       // that broke format/knip must not publish, even as a draft. A red gate
       // propagates verbatim — no push, no PR.
-      const capCheck = await check({ repoRoot: input.repoRoot, target });
+      const capCheck = await check(checkStep);
       if (capCheck.status !== 'ok') return stepResult('dev.check (final)', capCheck);
       return await finishNotReady(
         stop === 'rereview-blocked'
@@ -416,7 +430,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // The address leg's commits moved HEAD: re-run the deterministic gates
     // so the readiness record rests on a green check at the head the PR is
     // opened from. A red gate is surfaced verbatim (never a draft).
-    const finalCheck = await check({ repoRoot: input.repoRoot, target });
+    const finalCheck = await check(checkStep);
     if (finalCheck.status !== 'ok') return stepResult('dev.check (final)', finalCheck);
 
     // ------------------------- 5. readiness ------------------------------
