@@ -5,7 +5,8 @@
 // section and resolves needs-human with the follow-up command; every other
 // refusal surfaces verbatim and never bypasses its leg. No provider, no
 // network, no credentials.
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { rm } from 'node:fs/promises';
 import {
   DEV_FINDINGS_SECTION_MARKER,
   followUpCommand,
@@ -26,6 +27,7 @@ import type { ReviewRunInput } from '../../../src/ops/review/run.js';
 import { cycleRecord, checkRecord, dispositionRecord } from './fakes.js';
 import { DEV_LEDGER_VERSION as seedLedgerVersion } from '../../../src/ops/dev/record.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
+import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 
 let repo: TestRepo;
 beforeEach(async () => {
@@ -547,99 +549,117 @@ describe('dev.cycle', () => {
   });
 
   test('BEFORE (P2 7kNi): the injected driver factory reaches the address leg', async () => {
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    // The address leg reads cq.json and the LATEST findings record before
-    // resolving any driver role; give the fixture a minimal config and a
-    // seeded record at the CURRENT head so the leg gets past both to its
-    // first factory resolve.
-    await repo.write(
-      'cq.json',
-      JSON.stringify({
-        schemaVersion: 2,
-        checks: [{ adapter: 'tsc-lines', command: { command: 'probe-check', args: [] } }],
-        roles: {
-          worker: { provider: 'fixture', model: 'probe-worker' },
-          reviewer: { provider: 'fixture', model: 'probe-reviewer' },
-        },
-        budgets: { run: { maxTokens: 1000, wallMs: 20000 }, step: { wallMs: 5000 } },
-        review: { reviewers: ['agent'], rounds: 1 },
-      }),
-    );
-    await repo.write(
-      '.cq/review/feature%2Fx/1.json',
-      JSON.stringify({
-        schemaVersion: 1,
-        branch: state.branch,
-        head: 'FRESH_HEAD',
-        reviewed: { base: state.base, scope: 'full' },
-        sources: [{ kind: 'agent', status: 'terminal' }],
-        // One OPEN blocking finding: an empty record short-circuits to
-        // admitCleanRecord BEFORE any worker resolves, which would never
-        // reach the injected factory.
-        findings: [
-          {
-            id: 'probe-f1',
-            source: 'agent',
-            file: 'src/a.ts',
-            severity: 'major',
-            text: 'probe: the factory must resolve the worker',
-            status: 'open',
+    // The address leg runs its fail-closed denylist scan BEFORE resolving
+    // any driver role; CI's coverage runner has no gitleaks binary, so the
+    // probe binds the SAME hermetic gitleaks fixture the e2e address tests
+    // use (process-backed clean scanner, never a production override).
+    const scanner = await makeGitleaksFixture();
+    vi.stubEnv('PATH', scanner.path);
+    try {
+      await runProbe();
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(scanner.root, { recursive: true, force: true });
+    }
+
+    async function runProbe(): Promise<void> {
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      // The address leg reads cq.json and the LATEST findings record before
+      // resolving any driver role; give the fixture a minimal config and a
+      // seeded record at the CURRENT head so the leg gets past both to its
+      // first factory resolve.
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'probe-check', args: [] } }],
+          roles: {
+            worker: { provider: 'fixture', model: 'probe-worker' },
+            reviewer: { provider: 'fixture', model: 'probe-reviewer' },
           },
-        ],
-      }),
-    );
-    repo.commitAll('probe config');
-    repo.git('push', '-q', 'origin', 'feature/x');
-    await seedReadyLedger(state);
-    // The record must name the CURRENT head (the config commit moved it).
-    const finalHead = repo.git('rev-parse', 'HEAD').trim();
-    const recordText = await import('node:fs/promises').then((fs) =>
-      fs.readFile(`${repo.root}/.cq/review/feature%2Fx/1.json`, 'utf8'),
-    );
-    await repo.write('.cq/review/feature%2Fx/1.json', recordText.replace('FRESH_HEAD', finalHead));
-    // Probe: the injected factory is FORWARDED into the address leg's own
-    // review construction (reviewDrivers wraps deps.drivers). The probe
-    // factory RESOLVES with a driver whose run throws a marker; the re-review
-    // inside the address leg therefore fails with 'agent review did not run:
-    // <marker>' — the leg used the caller's wiring, not a real provider
-    // factory. (Without forwarding, the default construction would resolve a
-    // real provider and fail with a config error instead.)
-    let resolveCalls = 0;
-    const observingFactory: DriverFactory = {
-      resolve: (request) => {
-        resolveCalls++;
-        void request;
-        return {
-          lane: 'ai-sdk' as const,
-          modelSpec: { provider: 'probe', model: 'probe' },
-          driver: {
-            run: async () => {
-              throw new Error('probe: the address leg ran the injected factory');
+          budgets: { run: { maxTokens: 1000, wallMs: 20000 }, step: { wallMs: 5000 } },
+          review: { reviewers: ['agent'], rounds: 1 },
+        }),
+      );
+      await repo.write(
+        '.cq/review/feature%2Fx/1.json',
+        JSON.stringify({
+          schemaVersion: 1,
+          branch: state.branch,
+          head: 'FRESH_HEAD',
+          reviewed: { base: state.base, scope: 'full' },
+          sources: [{ kind: 'agent', status: 'terminal' }],
+          // One OPEN blocking finding: an empty record short-circuits to
+          // admitCleanRecord BEFORE any worker resolves, which would never
+          // reach the injected factory.
+          findings: [
+            {
+              id: 'probe-f1',
+              source: 'agent',
+              file: 'src/a.ts',
+              severity: 'major',
+              text: 'probe: the factory must resolve the worker',
+              status: 'open',
             },
-          },
-        };
-      },
-    };
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(),
-      review: cleanReview(state),
-      open: openFake([]),
-      drivers: observingFactory,
-    });
-    const result = await op({ repoRoot: repo.root });
-    expect(result.status === 'failed' || result.status === 'needs-human').toBe(true);
-    // The wiring observable: the injected factory's resolve() was CALLED by
-    // the address leg's own review construction (reviewDrivers wraps the
-    // forwarded factory). Without the forward, the leg would construct a
-    // real provider factory and this probe would never resolve.
-    expect(resolveCalls).toBeGreaterThan(0);
-    // The leg's own re-review ran through the probe and failed honestly (the
-    // marker lands in the blocked findings record's source reason, which
-    // review.run summarizes); the composition surfaced that re-review
-    // refusal verbatim instead of a provider-config error.
-    expect(result.status === 'needs-human' && result.reason).toContain('re-review');
+          ],
+        }),
+      );
+      repo.commitAll('probe config');
+      repo.git('push', '-q', 'origin', 'feature/x');
+      await seedReadyLedger(state);
+      // The record must name the CURRENT head (the config commit moved it).
+      const finalHead = repo.git('rev-parse', 'HEAD').trim();
+      const recordText = await import('node:fs/promises').then((fs) =>
+        fs.readFile(`${repo.root}/.cq/review/feature%2Fx/1.json`, 'utf8'),
+      );
+      await repo.write(
+        '.cq/review/feature%2Fx/1.json',
+        recordText.replace('FRESH_HEAD', finalHead),
+      );
+      // Probe: the injected factory is FORWARDED into the address leg's own
+      // review construction (reviewDrivers wraps deps.drivers). The probe
+      // factory RESOLVES with a driver whose run throws a marker; the re-review
+      // inside the address leg therefore fails with 'agent review did not run:
+      // <marker>' — the leg used the caller's wiring, not a real provider
+      // factory. (Without forwarding, the default construction would resolve a
+      // real provider and fail with a config error instead.)
+      let resolveCalls = 0;
+      const observingFactory: DriverFactory = {
+        resolve: (request) => {
+          resolveCalls++;
+          void request;
+          return {
+            lane: 'ai-sdk' as const,
+            modelSpec: { provider: 'probe', model: 'probe' },
+            driver: {
+              run: async () => {
+                throw new Error('probe: the address leg ran the injected factory');
+              },
+            },
+          };
+        },
+      };
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(),
+        review: cleanReview(state),
+        open: openFake([]),
+        drivers: observingFactory,
+      });
+      const result = await op({ repoRoot: repo.root });
+      expect(result.status === 'failed' || result.status === 'needs-human').toBe(true);
+      // The wiring observable: the injected factory's resolve() was CALLED by
+      // the address leg's own review construction (reviewDrivers wraps the
+      // forwarded factory). Without the forward, the leg would construct a
+      // real provider factory and this probe would never resolve.
+      expect(resolveCalls).toBeGreaterThan(0);
+      // The leg's own re-review ran through the probe and failed honestly (the
+      // marker lands in the blocked findings record's source reason, which
+      // review.run summarizes); the composition surfaced that re-review
+      // refusal verbatim instead of a provider-config error.
+      expect(result.status === 'needs-human' && result.reason).toContain('re-review');
+    }
   });
 
   test('BEFORE (P2 7kNl): the follow-up command carries the quoted repoRoot', () => {
