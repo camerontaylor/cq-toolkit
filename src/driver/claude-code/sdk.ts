@@ -288,6 +288,14 @@ export class ClaudeCodeSdkTransport implements Driver {
         `claude-code driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }
+    if (
+      budget.maxSteps !== undefined &&
+      (!Number.isInteger(budget.maxSteps) || budget.maxSteps <= 0)
+    ) {
+      throw new Error(
+        `claude-code driver: budget.maxSteps must be a positive integer, got ${String(budget.maxSteps)}`,
+      );
+    }
     // Workspace binding (ADR-0002 §2.4): validated + realpathed BEFORE any
     // session state exists — a bad binding is a pre-dispatch config throw.
     const boundWorkspace =
@@ -403,6 +411,7 @@ export class ClaudeCodeSdkTransport implements Driver {
     // `RunOptions` parameter (the cancellation SIGNAL lives there; this is
     // the assembled query surface).
     const queryOptions: Record<string, unknown> = {
+      ...(budget.maxSteps !== undefined ? { maxTurns: budget.maxSteps } : {}),
       // The model rides UNCHECKED (owner override 2026-09-14, header): any
       // id the endpoint can reach is permitted; the OBSERVED id is the
       // defence (WorkerResult.model).

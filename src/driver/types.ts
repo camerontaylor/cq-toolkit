@@ -127,7 +127,7 @@ export interface Budget {
   maxTokens?: number;
   wallClockMs?: number;
   maxAttempts?: number;
-  /** Maximum number of completed SDK steps for lanes that enforce this bound. */
+  /** Main-loop completed-step cap; an optional one-step structured-output repair may exceed it. */
   maxSteps?: number;
   /**
    * Opt-in binding pre-request token ceiling (strict). Absent = the legacy

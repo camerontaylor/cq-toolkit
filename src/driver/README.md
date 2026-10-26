@@ -55,12 +55,14 @@ parts live in `src/driver/schema.ts` and are re-exported by
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `ai-sdk`          | Yes. Main-loop cap is `min(maxSteps, 40)`; absent means 40. A structured-output repair remains its existing single bounded step and can make the total exceed the main-loop cap. | Yes. Counts each completed main and repair SDK step via `onStepFinish`, including partial/error verdicts. |
 | `claude-code` CLI | No. No direct invocation-level CLI turn-limit mapping is used.                                                                                                                   | No. The stream does not expose a reliable completed SDK-step count.                                       |
-| `claude-code` SDK | No. No direct invocation-level SDK turn-limit mapping is used.                                                                                                                   | No. The result usage aggregates worker activity and is not a count of completed SDK turns.                |
+| `claude-code` SDK | Yes. Maps `maxSteps` directly to the pinned Agent SDK `Options.maxTurns` (0.3.270).                                                                                              | No. Result usage aggregates worker activity, not completed SDK turns.                                     |
 | `acp`             | No. ACP has no direct supported turn-limit mapping in this driver.                                                                                                               | No. Protocol observations do not provide a reliable completed SDK-step count.                             |
 
-`maxTokens` and governed wall-clock cancellation remain independent hard
-guards. Unenforced lanes do not imply enforcement or synthesize a `steps`
-value.
+The existing `maxTokens` token-guard and governed wall-clock cancellation
+semantics are independent of `maxSteps` and unchanged. In particular,
+`maxTokens` remains a post-step usage check on `ai-sdk`, not a strict
+pre-request guarantee. Unenforced lanes do not imply enforcement or
+synthesize a `steps` value.
 
 ## Freeze rule
 
