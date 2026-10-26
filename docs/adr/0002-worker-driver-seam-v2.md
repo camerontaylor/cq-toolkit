@@ -185,7 +185,7 @@ When no schema is requested, `structuredOutput` MUST be absent.
 **Per-lane transport and repair.** The _verdict_ is uniform; the transport stays native.
 
 - **ai-sdk:** `Output.object` over the JSON Schema, keeping the step-7 tool cutoff. It MUST make **one** bounded
-  repair request before giving up: tool-free, over the session transcript, schema restated, `maxRetries: 0`, inside
+  repair request before giving up: no tool execution, over the session transcript, schema restated, `maxRetries: 0`, inside
   `budget` and `signal`.
 - **claude-agent:** native `outputFormat` `json_schema` (the SDK validates and retries).
 - **subprocess:** `--json-schema` (the CLI validates and retries).
@@ -501,3 +501,16 @@ differs from `inv` only in `budget.maxUsd`.
 - [Annex B — configuration keys](0002-annex-b-config.md): the factory bindings (including the `solo-maintainer`
   profile), served-model policy, session retention and lane knobs, under P7 precedence and P8
   blank-means-conservative; no key disables the served-model comparison.
+
+## Amendment 2026-10-27: the ai-sdk tool set is fixed per session (#502)
+
+Owner direction: change tools per session, not per turn. The ai-sdk lane sends the same tool definitions,
+`toolChoice` and system prompt on every request of a session, including the forced final step and the repair:
+
+- The **final step** adds one trailing user turn ("this is your final step: reply with only the JSON"). A tool call
+  the model makes anyway is denied and not executed.
+- The **repair** carries the session's definitions without executors. "Tool-free" in §2.3 now means no tool
+  execution, not "no tools in the request".
+
+Why: the Step 4 eval (cq-toolkit #483) showed that removing the definitions (`activeTools: []`) and forcing
+`toolChoice: 'none'` mid-session both made DeepSeek reply with DSML tool-call markup instead of JSON.

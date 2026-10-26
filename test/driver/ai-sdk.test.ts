@@ -141,14 +141,16 @@ function mockUsage(): LanguageModelV4GenerateResult['usage'] {
 }
 
 /**
- * Tools the model may call on this request: the forced final step keeps the
- * definitions but sets `toolChoice: 'none'` (#502), so it offers none.
+ * Tools the model is still invited to call on this request. The tool set is
+ * fixed per session (#502): the forced final step and the repair carry the same
+ * definitions and differ only by their trailing instruction turn.
  */
-function offeredToolCount(options: {
-  tools?: readonly unknown[];
-  toolChoice?: { type: string };
-}): number {
-  return options.toolChoice?.type === 'none' ? 0 : (options.tools?.length ?? 0);
+function offeredToolCount(options: { tools?: readonly unknown[]; prompt?: unknown }): number {
+  const promptText = JSON.stringify(options.prompt ?? '');
+  const answerTurn =
+    promptText.includes('This is your final step') ||
+    promptText.includes('did not satisfy the required JSON contract');
+  return answerTurn ? 0 : (options.tools?.length ?? 0);
 }
 
 function textResult(text: string): LanguageModelV4GenerateResult {
@@ -824,12 +826,20 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('the forced final step keeps tool definitions and sends toolChoice none (#502)', async () => {
-    const requests: { tools: number; choice: string | undefined }[] = [];
+  test('the session request is fixed: the final step and the repair keep tools, toolChoice and system (#502)', async () => {
+    const requests: { tools: number; choice: string | undefined; system: string; tail: string }[] =
+      [];
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
-        requests.push({ tools: options.tools?.length ?? 0, choice: options.toolChoice?.type });
+        const system = options.prompt.find((message) => message.role === 'system');
+        const last = options.prompt.at(-1);
+        requests.push({
+          tools: options.tools?.length ?? 0,
+          choice: options.toolChoice?.type,
+          system: typeof system?.content === 'string' ? system.content : '',
+          tail: last?.role === 'user' ? JSON.stringify(last.content) : String(last?.role),
+        });
         if (offeredToolCount(options) > 0) return toolCallResult('read', { path: 'absent.txt' });
         // The final step's text misses the schema, so the repair call runs too.
         return requests.length === 3
@@ -837,7 +847,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
           : textResult('{"fixed":true,"notes":"ok"}');
       },
     });
-    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-choice-'));
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-fixed-'));
     try {
       const driver = new AiSdkDriver({
         providers: { mock: () => mock },
@@ -848,33 +858,37 @@ describe('ai-sdk driver specifics (mock model)', () => {
           budget: { maxSteps: 3 },
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           outputSchema: toOutputSchema(
-            'test/final-choice/v1',
+            'test/final-fixed/v1',
             z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
           ),
         }),
       );
       expect(result.stopReason).toBe('complete');
       expect(requests).toHaveLength(4);
-      expect(requests[0]?.choice).not.toBe('none');
-      expect(requests[1]?.choice).not.toBe('none');
-      // The final step: the history's tool calls still have their definitions.
-      expect(requests[2]).toEqual({ tools: 1, choice: 'none' });
-      // The repair stays a tool-free request.
-      expect(requests[3]?.tools).toBe(0);
+      // Every request, final step and repair included, has the same shape.
+      for (const request of requests) {
+        expect(request.tools).toBe(1);
+        expect(request.choice).toBe('auto');
+        expect(request.system).toBe(requests[0]?.system);
+      }
+      expect(requests[0]?.system).toContain('use the available tools');
+      // Only the trailing instruction turn differs.
+      expect(requests[2]?.tail).toContain('This is your final step');
+      expect(requests[3]?.tail).toContain('did not satisfy the required JSON contract');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
   });
 
-  test('a tool call on the final step is denied, not executed, when a provider ignores toolChoice none (#502)', async () => {
+  test('a tool call on the final step is denied, not executed (#502)', async () => {
     let calls = 0;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
-        // Ignores toolChoice 'none': the final step answers with a tool call too.
+        // Ignores the final-step instruction and calls a tool anyway.
         if (calls <= 2) return toolCallResult('read', { path: 'absent.txt' });
-        if (options.tools !== undefined && options.tools.length > 0) {
+        if (JSON.stringify(options.prompt).includes('This is your final step') && calls === 3) {
           return toolCallResult('read', { path: 'final.txt' });
         }
         return textResult('{"fixed":true,"notes":"ok"}');
@@ -1000,13 +1014,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
       );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
-      // tool step, schema-invalid final text, one tool-free repair
+      // tool step, schema-invalid final text, one repair (same tools and system, #502)
       expect(formats).toHaveLength(3);
       expect(formats.every((format) => format === undefined)).toBe(true);
       expect(promptCopies).toEqual(formats.map(() => 1));
       const promptedArgs = lastGenerateTextArgs();
       expect(promptedArgs.system).toBe(
-        'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.',
+        'You are a cq-toolkit worker executing one task. Work inside the provided workspace directory; use the available tools to read, edit, and run. Tool refusals arrive as denial text — adapt instead of retrying the same call.',
       );
       expect(promptedArgs.system).not.toContain('driver-specific run');
       expect(
@@ -1014,7 +1028,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
           (message) => message.role === 'user' && message.content === 'driver-specific run',
         ),
       ).toHaveLength(1);
-      expect(contracts).toEqual([true, true, false]);
+      expect(contracts).toEqual([true, true, false]); // the repair turn carries its own JSON contract
       expect(scans.some((text) => text.includes('Use the tools to complete the task first'))).toBe(
         true,
       );
@@ -1116,9 +1130,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
         expect(result.stopReason).toBe('complete');
         expect(calls).toBe(3);
         const args = lastGenerateTextArgs();
-        expect(args.tools).toBeUndefined();
+        // The repair keeps the session's definitions, without executors (#502).
+        expect(Object.keys(args.tools ?? {})).toEqual(['read']);
+        expect(
+          (args.tools as Record<string, { execute?: unknown }> | undefined)?.read?.execute,
+        ).toBeUndefined();
         expect(args.system).toBe(
-          'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.',
+          'You are a cq-toolkit worker executing one task. Work inside the provided workspace directory; use the available tools to read, edit, and run. Tool refusals arrive as denial text — adapt instead of retrying the same call.',
         );
         expect(args.system).not.toContain('driver-specific run');
         const messages = args.messages ?? [];
@@ -1221,7 +1239,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('forced final step restates the tool-free contract (#468)', async () => {
+  test('forced final step keeps the request and adds the final-step turn (#468, #502)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
     const hookKinds: string[] = [];
     let calls = 0;
@@ -1235,9 +1253,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
           expect(text).toContain('Use the tools to complete the task first');
           return toolCallResult('read', { path: 'evidence.txt' });
         }
-        expect(text).toContain('You have no tools:');
-        expect(text).not.toContain('Use the tools to complete the task first');
-        expect(text.match(/no prose, no code fences, no tool calls/g)).toHaveLength(1);
+        expect(options.tools?.length).toBe(1);
+        expect(text).not.toContain('You have no tools:');
+        expect(text).toContain('Use the tools to complete the task first');
+        expect(text.match(/This is your final step: do not call any more tools/g)).toHaveLength(1);
+        expect(text).toContain('validates against this JSON Schema');
         return textResult('{"answer":"ok"}');
       },
     });
