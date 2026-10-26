@@ -279,8 +279,16 @@ and dev.cycle forwards it to every check leg. `ae669f3d` fixed the follow-on
 ledger-evolution defect attempt C-1 exposed (a REQUIRED new schema field
 made pre-existing records unloadable — all gates green, record unpersisted);
 `testSelection` is optional on read, always written. Evidence:
-`test:narrow result="pass" exit=0 files=9 projects="pure,process"
-tests="231/231" failed=0`, lint 0, format clean, knip clean.
+`test:narrow result="pass" exit=0 files=10 projects="pure,process,integration"
+tests="231/231" failed=0` — the named selection IS the gate input, so the
+row's own numbers follow from the ten files above and reconcile with the
+record: all ten are selected (`planRun` puts a gated file in the run because
+`includeIntegration` covers its class, so the e2e file is not filtered out),
+`files` counts that run, `projects` names every project it uses
+(`integration` for test/e2e/review/review-address.e2e.test.ts), and a pass
+means every selected file executed at least one test — `runVerdict` fails a
+selected file that runs none, so nine files, an unrun file or an all-skipped
+file can never carry a green row. lint 0, format clean, knip clean.
 
 Named files for this branch (10, at the cap): test/plans/review-loop.test.ts,
 test/ops/review/address-pr.test.ts, test/ops/review/address.test.ts,
