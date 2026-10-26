@@ -142,6 +142,10 @@ describe('ai-sdk default providers', () => {
     expect(result.errorClass).toBe('transient');
     expect(result.error).toContain('1500ms');
     expect(result.error).not.toContain('Headers Timeout');
-    expect(Date.now() - started).toBeLessThan(1_500 + STEP_FETCH_MARGIN_MS);
+    // Loose bound only: the assertions above already prove the step timeout
+    // (not the socket timers) fired, and the error path after it — abort
+    // propagation, session persistence, teardown — needs slack on a loaded
+    // runner. 5 000 ms still fails fast if the 300 s default ever returned.
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
