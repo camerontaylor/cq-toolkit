@@ -893,6 +893,86 @@ describe('ai-sdk driver specifics (mock model)', () => {
     },
   );
 
+  test('read upload scanning uses normalized executor provenance for file_path', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-read-provenance-'));
+    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { file_path: 'secret.ts', offset: 1, limit: 1 });
+        }
+        return textResult('read complete');
+      },
+    });
+    const guarded: { text: string; path?: string }[] = [];
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { mode: 'allowlist', allow: ['read'] },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(guarded).toContainEqual({
+        text: expect.stringContaining('fixture-secret'),
+        path: 'secret.ts',
+      });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('grep upload scanning uses normalized executor provenance for matched files', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
+    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('grep', { pattern: 'fixture-secret' });
+        }
+        return textResult('search complete');
+      },
+    });
+    const guarded: { text: string; path?: string }[] = [];
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { mode: 'allowlist', allow: ['grep'] },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(guarded).toContainEqual({
+        text: expect.stringContaining('fixture-secret'),
+        path: 'secret.ts',
+      });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('forced final step restates the tool-free contract (#468)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
     let calls = 0;

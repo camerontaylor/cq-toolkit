@@ -2,13 +2,16 @@
 // (read/edit/write/bash, per-op allowlists). The pre-F1 `run` name and the
 // pre-F1 edit arguments are accepted as one-release aliases; see
 // canonicalToolName/toolAliases and the edit input schema below.
+// Search/read ergonomics follow OpenCode v1.19.4 (MIT), especially
+// packages/opencode/src/tool/{read,grep,glob}.ts; binary/UTF-8 handling also
+// follows jcode v0.99.1 (MIT), crates/jcode-app-core/src/tool/read.rs.
+// Pinned notices and source revisions: THIRD_PARTY_NOTICES.md.
 //
-// R4: the tool surface and its budgets are PER-OP CONFIG (data from
-// config.ts), never hardcoded constants. What IS fixed here is the minimal
-// tool DEFINITIONS themselves — names, descriptions, input schemas — the
-// harness's small plain-data surface every driver adapter can map onto its
-// own SDK tool format. Driver-agnostic by construction: NO vendor imports
-// in src/harness/**; the ai-sdk driver (slice 2) adapts these descriptors.
+// R4: existing tool surface and budgets are PER-OP CONFIG (data from
+// config.ts). New search tools use fixed safety ceilings in this experiment
+// (candidate count/bytes, matches, output/line chars, timeout); these are
+// documented below and are not claimed to be per-op knobs. Tool descriptors
+// remain driver-agnostic plain data with no vendor imports in src/harness/**.
 //
 // THE SHARED RUN GATE (W1.11 / D14): every surface that builds these tools —
 // the ai-sdk driver, the subprocess driver's harness surface, the MCP harness
@@ -89,6 +92,14 @@
 // not bless its target's location (pattern 'src/**', link src/link →
 // ../secret.txt). Denies when either check misses.
 //
+// SEARCH TOCTOU (same partial-hardening limit): grep/glob enumerate names,
+// then apply these lexical/realpath/.git/path-pattern gates before reading
+// any allowed file. `rg` later opens the gated realpath strings; a file or
+// ancestor replaced after its check can still redirect or change that open.
+// This is the same check-then-use window as read/edit, not an fd-pinned or
+// OS-level sandbox. Cancellation is checked during enumeration/gating and
+// before success, but it does not close this filesystem race.
+//
 // PATH PATTERN SEMANTICS (the read/edit allowlist): glob-ish strings matched
 // against the workspace-relative POSIX path ('/' separators), FULL match:
 //   - '**' spans whole path segments (zero or more; as the last segment it
@@ -157,12 +168,67 @@ import type { HarnessConfig } from './config.js';
  * unbounded memory (the old `exec` path capped at its 1 MiB maxBuffer).
  */
 const UNCAPPED_RETENTION_BYTES = 1_048_576;
+const DEFAULT_READ_LIMIT = 2_000;
+const MAX_READ_LINE_CHARS = 2_000;
+const SEARCH_CANDIDATE_LIMIT = 1_000;
+const SEARCH_CANDIDATE_OUTPUT_BYTES = 4 * 1_024 * 1_024;
+const SEARCH_BYTES_LIMIT = 20 * 1_024 * 1_024;
+const SEARCH_MATCH_LIMIT = 100;
+const SEARCH_OUTPUT_CHARS = 50_000;
+const SEARCH_LINE_CHARS = 2_000;
+const SEARCH_PROCESS_OUTPUT_BYTES = 2 * 1_024 * 1_024;
+const SEARCH_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
 // ---------------------------------------------------------------------------
 
-export const ReadToolInputSchema = z.object({ path: z.string().min(1) }).strict();
+export const ReadToolInputSchema = z
+  .object({
+    file_path: z.string().min(1).optional(),
+    path: z.string().min(1).optional(),
+    offset: z.number().int().positive().optional(),
+    limit: z.number().int().positive().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.file_path === undefined && value.path === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'read requires file_path (or path)',
+        path: ['file_path'],
+      });
+    }
+    if (value.file_path !== undefined && value.path !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'read accepts file_path or the path alias, not both',
+        path: ['path'],
+      });
+    }
+  });
+
+export const GrepToolInputSchema = z
+  .object({
+    pattern: z.string().min(1),
+    path: z.string().min(1).optional(),
+    glob: z.string().min(1).optional(),
+    include: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.glob !== undefined && value.include !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'grep accepts glob or the include alias, not both',
+        path: ['include'],
+      });
+    }
+  });
+
+export const GlobToolInputSchema = z
+  .object({ pattern: z.string().min(1), path: z.string().min(1).optional() })
+  .strict();
 
 /**
  * The canonical edit arguments (the convention shared by Claude Code, jcode
@@ -300,6 +366,8 @@ export const BashToolInputSchema = z
 export const RunToolInputSchema = BashToolInputSchema;
 
 export type ReadToolInput = z.infer<typeof ReadToolInputSchema>;
+export type GrepToolInput = z.infer<typeof GrepToolInputSchema>;
+export type GlobToolInput = z.infer<typeof GlobToolInputSchema>;
 export type CanonicalEditToolInput = z.infer<typeof CanonicalEditToolInputSchema>;
 export type LegacyEditToolInput = z.infer<typeof LegacyEditToolInputSchema>;
 export type EditToolInput = z.infer<typeof EditToolInputSchema>;
@@ -308,8 +376,8 @@ export type BashToolInput = z.infer<typeof BashToolInputSchema>;
 /** The pre-F1 name for {@link BashToolInput} — accepted for one release. */
 export type RunToolInput = BashToolInput;
 
-/** The four canonical toolkit tool names — the fixed minimal surface. */
-export type ToolkitToolName = 'read' | 'edit' | 'write' | 'bash';
+/** The read-only search tools join the canonical toolkit surface for read-only ops. */
+export type ToolkitToolName = 'read' | 'edit' | 'write' | 'bash' | 'grep' | 'glob';
 
 /** The pre-F1 model-facing tool name — accepted for one release. */
 export type LegacyToolName = 'run';
@@ -339,6 +407,8 @@ export type ToolkitToolResult =
       ok: true;
       output: string;
       truncated: boolean;
+      /** Source text and workspace-relative path provenance for the upload guard. */
+      sourceContents?: readonly { text: string; path: string }[];
       /** `bash` only: 0–nonzero on a normal exit, null when signal-killed. */
       exitCode?: number | null;
       /** `bash` only: true when the process was killed by a signal (timeout). */
@@ -391,6 +461,18 @@ export type ToolkitTool =
       execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
       /** `run` — the pre-F1 name, accepted for one release. */
       aliases?: readonly string[];
+    }
+  | {
+      name: 'grep';
+      description: string;
+      inputSchema: typeof GrepToolInputSchema;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
+    }
+  | {
+      name: 'glob';
+      description: string;
+      inputSchema: typeof GlobToolInputSchema;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     };
 
 // ---------------------------------------------------------------------------
@@ -576,6 +658,36 @@ function capOutput(
   return { output: text.slice(0, maxChars), truncated: true };
 }
 
+/** Cap tool output without making the reason for truncation invisible. */
+function capOutputWithMarker(
+  text: string,
+  maxChars: number | undefined,
+  marker: string,
+): { output: string; truncated: boolean } {
+  if (maxChars === undefined || text.length <= maxChars) {
+    return { output: text, truncated: false };
+  }
+  const truncationLines = text
+    .split('\n')
+    .filter((line) => line.startsWith('[truncated:') || line.startsWith('… (truncated;'));
+  const uniqueMarkers = [...new Set([...truncationLines, marker])];
+  const suffix = uniqueMarkers.join('\n');
+  const visibleMarker = `\n${suffix}`;
+  return {
+    output: `${text.slice(0, Math.max(0, maxChars - visibleMarker.length))}${visibleMarker}`,
+    truncated: true,
+  };
+}
+
+function truncateLine(line: string, maxChars: number): { text: string; truncated: boolean } {
+  if (line.length <= maxChars) return { text: line, truncated: false };
+  const marker = `… [line truncated at ${maxChars} chars]`;
+  return {
+    text: `${line.slice(0, Math.max(0, maxChars - marker.length))}${marker}`,
+    truncated: true,
+  };
+}
+
 /** Head-truncate a tool description to the prompt-budget cap, ellipsis-marked. */
 function capDescription(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 1))}…`;
@@ -667,7 +779,10 @@ export function buildTools(
   const workspaceAbs = resolve(workspace);
   const { promptBudget } = cfg;
 
-  const deny = (tool: ToolkitToolName, reason: string): ToolkitToolResult => ({
+  const deny = (
+    tool: ToolkitToolName,
+    reason: string,
+  ): Extract<ToolkitToolResult, { ok: false }> => ({
     ok: false,
     denial: { tool, reason },
   });
@@ -738,7 +853,10 @@ export function buildTools(
       root !== undefined && isInside(effective, root) && hasGitSegment(relative(root, effective))
     );
   };
-  const gitDenial = (tool: ToolkitToolName, abs: string): ToolkitToolResult =>
+  const gitDenial = (
+    tool: ToolkitToolName,
+    abs: string,
+  ): Extract<ToolkitToolResult, { ok: false }> =>
     deny(tool, `path not allowed: '${relOf(abs)}' is inside a .git directory (toolkit invariant)`);
 
   const pathAllowed = (patterns: readonly string[], abs: string): boolean =>
@@ -773,6 +891,147 @@ export function buildTools(
 
   const invalidInput = (tool: ToolkitToolName, err: z.ZodError): ToolkitToolResult =>
     deny(tool, `invalid input: ${messageOf(err)}`);
+
+  type SearchFile = {
+    lexicalPath: string;
+    effectivePath: string;
+    lexicalRel: string;
+    resolvedRel: string;
+    size: number;
+  };
+  const isAborted = (signal: AbortSignal | undefined): boolean => signal?.aborted === true;
+  type SearchFileResult =
+    | { ok: true; files: SearchFile[]; markers: string[] }
+    | { ok: false; denial: Extract<ToolkitToolResult, { ok: false }> };
+
+  /** Enumerate first, gate every bounded candidate, and return only safe files. */
+  const collectSearchFiles = async (
+    tool: 'grep' | 'glob',
+    requestedPath: string | undefined,
+    fileGlob: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<SearchFileResult> => {
+    const cancelled = (): SearchFileResult => ({
+      ok: false,
+      denial: deny(tool, 'cancelled: search was aborted or timed out'),
+    });
+    if (isAborted(signal)) return cancelled();
+    const requested = requestedPath ?? '.';
+    const scope = resolveInside(requested);
+    if (scope === undefined) {
+      return {
+        ok: false,
+        denial: deny(tool, `path escape: '${requested}' resolves outside the workspace`),
+      };
+    }
+    const effectiveScope = await resolveRealInside(scope);
+    if (isAborted(signal)) return cancelled();
+    if (effectiveScope === undefined) {
+      return {
+        ok: false,
+        denial: deny(tool, `path escape: '${requested}' escapes the workspace through a symlink`),
+      };
+    }
+    if (await touchesGit(scope, effectiveScope)) {
+      return { ok: false, denial: gitDenial(tool, scope) };
+    }
+    const scopeInfo = await stat(effectiveScope).catch(() => undefined);
+    if (isAborted(signal)) return cancelled();
+    if (scopeInfo === undefined) {
+      return { ok: false, denial: deny(tool, `path not found: '${relOf(scope)}'`) };
+    }
+
+    const scopeArg = relOf(scope) || '.';
+    const enumerateArgs = [
+      '--files',
+      '--no-config',
+      '--hidden',
+      '--color=never',
+      '--null',
+      ...(fileGlob === undefined ? [] : ['--glob', fileGlob]),
+      '--',
+      scopeArg,
+    ];
+    const listing = await runArgvCommand('rg', enumerateArgs, {
+      env: buildChildEnv(process.env),
+      cwd: workspaceAbs,
+      maxBytes: SEARCH_CANDIDATE_OUTPUT_BYTES,
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (listing.kind === 'killed') {
+      return cancelled();
+    }
+    if (listing.kind === 'spawn-error') {
+      return { ok: false, denial: deny(tool, `search failed: ${messageOf(listing.error)}`) };
+    }
+    if (listing.overflowed) {
+      return {
+        ok: false,
+        denial: deny(tool, 'search denied: candidate enumeration output cap exceeded'),
+      };
+    }
+    if (listing.code !== 0 && listing.code !== 1) {
+      return {
+        ok: false,
+        denial: deny(tool, `search failed: rg candidate enumeration exited ${listing.code}`),
+      };
+    }
+    if (isAborted(signal)) return cancelled();
+
+    const rawPaths = listing.stdout
+      .split('\0')
+      .filter((candidate) => candidate.length > 0)
+      .sort();
+    const markers: string[] = [];
+    const boundedPaths = rawPaths.slice(0, SEARCH_CANDIDATE_LIMIT);
+    if (rawPaths.length > SEARCH_CANDIDATE_LIMIT) {
+      markers.push(`[truncated: candidate files cap ${SEARCH_CANDIDATE_LIMIT}]`);
+    }
+
+    const allowed: SearchFile[] = [];
+    for (const rawPath of boundedPaths) {
+      if (isAborted(signal)) return cancelled();
+      const lexicalPath = resolveInside(rawPath);
+      if (lexicalPath === undefined) continue;
+      const effectivePath = await resolveRealInside(lexicalPath);
+      if (isAborted(signal)) return cancelled();
+      if (effectivePath === undefined) continue;
+      if (await touchesGit(lexicalPath, effectivePath)) continue;
+      if (!(await pathAllowedEverywhere(cfg.tools.read.pathPatterns, lexicalPath, effectivePath))) {
+        continue;
+      }
+      const fileInfo = await stat(effectivePath).catch(() => undefined);
+      if (isAborted(signal)) return cancelled();
+      if (fileInfo === undefined || !fileInfo.isFile()) continue;
+      const realRoot = await workspaceRealRoot();
+      const resolvedRel =
+        realRoot !== undefined && isInside(effectivePath, realRoot)
+          ? relative(realRoot, effectivePath).split(sep).join('/')
+          : relOf(effectivePath);
+      allowed.push({
+        lexicalPath,
+        effectivePath,
+        lexicalRel: relOf(lexicalPath),
+        resolvedRel,
+        size: fileInfo.size,
+      });
+    }
+
+    const files: SearchFile[] = [];
+    let searchedBytes = 0;
+    for (const file of allowed) {
+      if (isAborted(signal)) return cancelled();
+      if (file.size > SEARCH_BYTES_LIMIT - searchedBytes) {
+        markers.push(`[truncated: searched bytes cap ${SEARCH_BYTES_LIMIT}]`);
+        break;
+      }
+      files.push(file);
+      searchedBytes += file.size;
+    }
+    if (isAborted(signal)) return cancelled();
+    return { ok: true, files, markers };
+  };
 
   /**
    * The prior-read ledger for edit/write staleness. Keyed by the resolved
@@ -830,23 +1089,24 @@ export function buildTools(
     tools.push({
       name: 'read',
       description: capDescription(
-        'Read a text file from the workspace and return its contents. ' +
-          'Input: { path } — a path inside the workspace, resolved against the workspace root.',
+        'Read a text file from the workspace. Input: { file_path, offset?, limit? }. ' +
+          'offset is 1-based; limit defaults to 2000 lines. Use the path alias if needed.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: ReadToolInputSchema,
       execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
         const parsed = ReadToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('read', parsed.error);
-        const abs = resolveInside(parsed.data.path);
+        const requested = (parsed.data.file_path ?? parsed.data.path) as string;
+        const abs = resolveInside(requested);
         if (abs === undefined) {
-          return deny('read', `path escape: '${parsed.data.path}' resolves outside the workspace`);
+          return deny('read', `path escape: '${requested}' resolves outside the workspace`);
         }
         const effective = await resolveRealInside(abs);
         if (effective === undefined) {
           return deny(
             'read',
-            `path escape: '${parsed.data.path}' escapes the workspace through a symlink`,
+            `path escape: '${requested}' escapes the workspace through a symlink`,
           );
         }
         if (await touchesGit(abs, effective)) return gitDenial('read', abs);
@@ -864,12 +1124,298 @@ export function buildTools(
                 : `read failed: ${messageOf(err)}`;
             return deny('read', reason);
           }
-          // Record the exact bytes the model saw (the output cap does not
-          // change the staleness identity: the whole file was read).
+          if (isBinary(bytes)) {
+            return deny('read', `read refused: '${relOf(abs)}' is a binary file`);
+          }
+          const text = decodeUtf8(bytes);
+          if (text === undefined) {
+            return deny('read', `read refused: '${relOf(abs)}' is not valid UTF-8`);
+          }
+          // Keep the F1 SHA-256 ledger tied to the whole file, even when the
+          // model receives only a line window.
           await rememberRead(effective, bytes);
-          const capped = capOutput(bytes.toString('utf8'), fileCfg.maxOutputChars);
-          return { ok: true, ...capped };
+          const lines = text.split(/\r\n|\n|\r/);
+          if (lines.at(-1) === '') lines.pop();
+          const offset = parsed.data.offset ?? 1;
+          const limit = parsed.data.limit ?? DEFAULT_READ_LIMIT;
+          const selected = lines.slice(offset - 1, offset - 1 + limit);
+          let lineTruncated = false;
+          const numbered = selected.map((line, index) => {
+            const cappedLine = truncateLine(line, MAX_READ_LINE_CHARS);
+            lineTruncated ||= cappedLine.truncated;
+            return `${String(offset + index).padStart(6)}: ${cappedLine.text}`;
+          });
+          const nextOffset = offset + selected.length;
+          const windowTruncated = nextOffset <= lines.length;
+          const parts = [`--- ${relOf(abs)} ---`, ...numbered];
+          if (windowTruncated) {
+            parts.push(`… (truncated; use offset=${nextOffset} to continue)`);
+          }
+          const capped = capOutputWithMarker(
+            parts.join('\n'),
+            fileCfg.maxOutputChars,
+            `[truncated: output chars cap ${fileCfg.maxOutputChars}]`,
+          );
+          const output = capped.output;
+          const root = await workspaceRealRoot();
+          const resolvedRel =
+            root !== undefined && isInside(effective, root)
+              ? relative(root, effective).split(sep).join('/')
+              : relOf(effective);
+          const sourceContents = [...new Set([relOf(abs), resolvedRel])].map((path) => ({
+            text: output,
+            path,
+          }));
+          return {
+            ok: true,
+            output,
+            truncated: lineTruncated || windowTruncated || capped.truncated,
+            sourceContents,
+          };
         });
+      },
+    });
+  }
+
+  // Search is exposed only in a read-only sandbox. The per-op ToolPolicy is
+  // still the authority that selects these descriptors for a model request.
+  if (cfg.tools.read.enabled && sandbox === 'read-only') {
+    tools.push({
+      name: 'grep',
+      description: capDescription(
+        'Search workspace text for a regex. Input: { pattern, path?, glob? }. ' +
+          'Use include as an alias for glob. Search is bounded and respects .gitignore.',
+        promptBudget.maxToolDescriptionChars,
+      ),
+      inputSchema: GrepToolInputSchema,
+      execute: async (
+        rawInput: unknown,
+        options?: ToolExecuteOptions,
+      ): Promise<ToolkitToolResult> => {
+        const parsed = GrepToolInputSchema.safeParse(rawInput);
+        if (!parsed.success) return invalidInput('grep', parsed.error);
+        const files = await collectSearchFiles(
+          'grep',
+          parsed.data.path,
+          parsed.data.glob ?? parsed.data.include,
+          options?.signal,
+        );
+        if (!files.ok) return files.denial;
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+        }
+        const markers = [...files.markers];
+        if (files.files.length === 0) {
+          const output = ['No matches', ...markers].join('\n');
+          const capped = capOutputWithMarker(
+            output,
+            SEARCH_OUTPUT_CHARS,
+            `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+          );
+          if (isAborted(options?.signal)) {
+            return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+          }
+          return { ok: true, ...capped, truncated: markers.length > 0 || capped.truncated };
+        }
+
+        const args = [
+          '--json',
+          '--no-config',
+          '--hidden',
+          '--color=never',
+          '--max-count',
+          String(SEARCH_MATCH_LIMIT + 1),
+          '-e',
+          parsed.data.pattern,
+          '--',
+          ...files.files.map((file) => file.effectivePath),
+        ];
+        const result = await runArgvCommand('rg', args, {
+          env: buildChildEnv(process.env),
+          cwd: workspaceAbs,
+          maxBytes: SEARCH_PROCESS_OUTPUT_BYTES,
+          timeoutMs: SEARCH_TIMEOUT_MS,
+          ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        });
+        if (result.kind === 'killed') {
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: 'cancelled: grep was aborted or timed out' },
+          };
+        }
+        if (result.kind === 'spawn-error') {
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: `grep failed: ${messageOf(result.error)}` },
+          };
+        }
+        if (result.code !== 0 && result.code !== 1) {
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: `grep failed: rg exited ${result.code}` },
+          };
+        }
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+        }
+
+        const byPath = new Map<string, { file: SearchFile; lines: string[] }>();
+        const fileByPath = new Map(files.files.map((file) => [resolve(file.effectivePath), file]));
+        let truncatedLine = false;
+        let sawMalformedTail = false;
+        const jsonLines = result.stdout.split('\n');
+        for (const [index, line] of jsonLines.entries()) {
+          if (line.length === 0) continue;
+          let event: unknown;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            if (result.overflowed && index === jsonLines.length - 1) {
+              sawMalformedTail = true;
+              continue;
+            }
+            return {
+              ok: false,
+              denial: { tool: 'grep', reason: 'grep denied: rg returned malformed JSON output' },
+            };
+          }
+          if (typeof event !== 'object' || event === null || !('type' in event)) continue;
+          const typed = event as {
+            type?: unknown;
+            data?: {
+              path?: { text?: unknown; bytes?: unknown };
+              lines?: { text?: unknown; bytes?: unknown };
+              line_number?: unknown;
+            };
+          };
+          if (typed.type !== 'match') continue;
+          const data = typed.data;
+          if (
+            data === undefined ||
+            typeof data.path?.text !== 'string' ||
+            typeof data.lines?.text !== 'string' ||
+            typeof data.line_number !== 'number'
+          ) {
+            return {
+              ok: false,
+              denial: {
+                tool: 'grep',
+                reason: 'grep denied: rg returned non-text path or match data',
+              },
+            };
+          }
+          const file = fileByPath.get(resolve(workspaceAbs, data.path.text));
+          if (file === undefined) {
+            return {
+              ok: false,
+              denial: {
+                tool: 'grep',
+                reason: 'grep denied: rg returned a path outside the allowed file list',
+              },
+            };
+          }
+          const key = resolve(file.effectivePath);
+          const group = byPath.get(key) ?? { file, lines: [] };
+          const rawLine = data.lines.text.replace(/\r?\n$/, '');
+          const cappedLine = truncateLine(rawLine, SEARCH_LINE_CHARS);
+          truncatedLine ||= cappedLine.truncated;
+          group.lines.push(`${data.line_number}: ${cappedLine.text}`);
+          byPath.set(key, group);
+        }
+
+        if (result.overflowed) {
+          markers.push(`[truncated: rg process output bytes cap ${SEARCH_PROCESS_OUTPUT_BYTES}]`);
+        }
+        if (sawMalformedTail) {
+          markers.push('[truncated: rg process output ended mid-record]');
+        }
+        const groups = [...byPath.values()].sort((left, right) =>
+          left.file.lexicalRel.localeCompare(right.file.lexicalRel),
+        );
+        const allMatches = groups.reduce((count, group) => count + group.lines.length, 0);
+        const keptGroups: { file: SearchFile; lines: string[] }[] = [];
+        let remaining = SEARCH_MATCH_LIMIT;
+        for (const group of groups) {
+          if (remaining <= 0) break;
+          const lines = group.lines.slice(0, remaining);
+          keptGroups.push({ file: group.file, lines });
+          remaining -= lines.length;
+        }
+        if (allMatches > SEARCH_MATCH_LIMIT) {
+          markers.push(`[truncated: matches cap ${SEARCH_MATCH_LIMIT}]`);
+        }
+        if (truncatedLine) markers.push(`[truncated: per-line chars cap ${SEARCH_LINE_CHARS}]`);
+
+        const outputParts = keptGroups.flatMap(({ file, lines }) => [
+          `--- ${file.lexicalRel} ---`,
+          ...lines,
+        ]);
+        if (outputParts.length === 0) outputParts.push('No matches');
+        outputParts.push(...markers);
+        const outputBeforeCap = outputParts.join('\n');
+        const capped = capOutputWithMarker(
+          outputBeforeCap,
+          SEARCH_OUTPUT_CHARS,
+          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+        );
+        const sourceContents = keptGroups.flatMap(({ file, lines }) =>
+          [...new Set([file.lexicalRel, file.resolvedRel])].map((path) => ({
+            path,
+            text: lines.join('\n'),
+          })),
+        );
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+        }
+        return {
+          ok: true,
+          output: capped.output,
+          truncated: markers.length > 0 || truncatedLine || capped.truncated,
+          sourceContents,
+        };
+      },
+    });
+
+    tools.push({
+      name: 'glob',
+      description: capDescription(
+        'List workspace files matching a glob. Input: { pattern, path? }. ' +
+          'Search is bounded and respects .gitignore.',
+        promptBudget.maxToolDescriptionChars,
+      ),
+      inputSchema: GlobToolInputSchema,
+      execute: async (
+        rawInput: unknown,
+        options?: ToolExecuteOptions,
+      ): Promise<ToolkitToolResult> => {
+        const parsed = GlobToolInputSchema.safeParse(rawInput);
+        if (!parsed.success) return invalidInput('glob', parsed.error);
+        const files = await collectSearchFiles(
+          'glob',
+          parsed.data.path,
+          parsed.data.pattern,
+          options?.signal,
+        );
+        if (!files.ok) return files.denial;
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
+        }
+        const outputParts = files.files.map((file) => file.lexicalRel);
+        if (outputParts.length === 0) outputParts.push('No files found');
+        outputParts.push(...files.markers);
+        const capped = capOutputWithMarker(
+          outputParts.join('\n'),
+          SEARCH_OUTPUT_CHARS,
+          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+        );
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
+        }
+        return {
+          ok: true,
+          ...capped,
+          truncated: files.markers.length > 0 || capped.truncated,
+        };
       },
     });
   }

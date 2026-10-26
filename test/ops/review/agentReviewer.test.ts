@@ -49,7 +49,10 @@ describe('runAgentReviewer', () => {
         workspace: { path: string };
         outputSchema?: unknown;
       }) => {
-        expect(invocation.toolPolicy).toEqual({ mode: 'none', allow: [] });
+        expect(invocation.toolPolicy).toEqual({
+          mode: 'allowlist',
+          allow: ['read', 'grep', 'glob'],
+        });
         expect(invocation.sandboxPolicy.level).toBe('read-only');
         expect(invocation.workspace.path).toBe(resolve('.'));
         expect(invocation.outputSchema).toBeDefined();
@@ -85,6 +88,37 @@ describe('runAgentReviewer', () => {
     });
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.value.findings[0]?.severity).toBe('major');
+  });
+
+  it('keeps read available while explicitly disabling search tools', async () => {
+    const run = vi.fn(async (invocation: { toolPolicy: { allow: string[]; mode?: string } }) => {
+      expect(invocation.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read'] });
+      return {
+        stopReason: 'complete' as const,
+        structuredOutput: { findings: [] },
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+      };
+    });
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: { run },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    await runAgentReviewer(drivers, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 1000,
+      searchTools: false,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
   });
 
   it('uses the minor fallback for unmapped severities and omits absent location fields', async () => {

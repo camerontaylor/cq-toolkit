@@ -187,6 +187,16 @@ describe('buildManifest', () => {
     });
   });
 
+  test('records the read-only search tool selection in the strict manifest', async () => {
+    const built = await buildManifest({
+      workspace: scratch(),
+      sandbox: 'read-only',
+      toolPolicy: { allow: ['read', 'grep', 'glob'] },
+      harness: defaultHarnessConfig,
+    });
+    expect(built?.tools).toEqual(['read', 'grep', 'glob']);
+  });
+
   test('an empty selection yields no manifest (and touches no filesystem)', async () => {
     await expect(
       buildManifest({

@@ -24,6 +24,7 @@ const full = {
   },
   review: {
     rounds: 4,
+    searchTools: false,
     blockingSeverities: ['critical', 'major'],
     agentSeverityMap: { high: 'major', medium: 'minor', low: 'info' },
     reviewers: ['coderabbit', 'agent'],

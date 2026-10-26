@@ -39,6 +39,7 @@ export interface AgentReviewerInput {
   role: { provider: string; model: string };
   maxTokens: number;
   wallMs: number;
+  searchTools?: boolean;
   signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
@@ -86,7 +87,10 @@ async function runPartition(
   const invocation: OpInvocation = {
     prompt: input.diff,
     modelSpec: resolved.modelSpec,
-    toolPolicy: { mode: 'none', allow: [] },
+    toolPolicy: {
+      mode: 'allowlist',
+      allow: input.searchTools === false ? ['read'] : ['read', 'grep', 'glob'],
+    },
     sandboxPolicy: { level: 'read-only' },
     workspace: { path: resolve(input.repoRoot) },
     budget: { maxTokens: input.maxTokens },

@@ -346,6 +346,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                   role,
                   maxTokens: policy.budgets.run.maxTokens!,
                   wallMs: Math.max(1, remainingWallMs()),
+                  searchTools: policy.review.searchTools,
                   ...(deadline.signal ? { signal: deadline.signal } : {}),
                   severityMap: policy.review.agentSeverityMap,
                 });

@@ -244,10 +244,13 @@ describe('review.run', () => {
           driver: {
             run: async (invocation: {
               prompt: string;
-              toolPolicy: { mode?: string };
+              toolPolicy: { mode?: string; allow: string[] };
               outputSchema?: unknown;
             }) => {
-              expect(invocation.toolPolicy.mode).toBe('none');
+              expect(invocation.toolPolicy).toEqual({
+                mode: 'allowlist',
+                allow: ['read', 'grep', 'glob'],
+              });
               expect(invocation.outputSchema).toBeDefined();
               return {
                 stopReason: 'complete' as const,
