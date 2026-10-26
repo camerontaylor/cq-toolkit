@@ -324,6 +324,34 @@ export interface WorkerResult {
   nativeSessionPath?: string;
   denials: ToolDenial[];
   /**
+   * Tool-capability evidence for the run (rg seam): populated ONLY by a lane
+   * that actually observed the probe — today the ai-sdk lane; every other
+   * lane leaves the field undefined (the conformance suite accepts the
+   * absent field). `rg` records the once-per-run ripgrep probe shared by
+   * manifest build and descriptor selection: search tools were WITHHELD
+   * when `available` is false, offered when true. The resolved binary path
+   * is never reported — only the boolean, the observed version, the
+   * documented minimum, and the probe outcome.
+   */
+  capabilities?: {
+    rg?: {
+      available: boolean;
+      /** The observed version on a successful probe (absent on 'absent'). */
+      version?: string;
+      minimum: string;
+      probe: 'ok' | 'absent' | 'old';
+      /** The too-old observed version, on probe 'old' only. */
+      found?: string;
+    };
+  };
+  /**
+   * Non-fatal run notes a consumer may surface (e.g. "search tools
+   * unavailable: ripgrep not found"). Evidence-adjacent, never a verdict
+   * change; the reviewer folds these after the settled result. Optional;
+   * lanes that observe nothing report nothing.
+   */
+  advisories?: string[];
+  /**
    * Underlying failure cause, when the driver caught one. Present only on a
    * driver-level failure verdict (stopReason 'error'), as a NON-EMPTY message.
    * Drivers truncate the cause to a bounded length (500 chars plus a
