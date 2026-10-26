@@ -1,17 +1,18 @@
 import type { DriverFactory } from '../../driver/factory.js';
-import type { ModelSpec, Usage } from '../../driver/types.js';
+import type { ModelSpec } from '../../driver/types.js';
 import { boundedErrorText } from '../../driver/error-text.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import type { OpResult } from '../../kernel/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../dev/denylist.js';
 import type { Finding } from './findings.js';
+import { REVIEW_SESSION_DEFAULTS } from '../analyze/cqConfig.js';
 import { createReviewPlan } from './internal/reviewPlan.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from './internal/reviewCoverageV2.js';
-import { runReviewSession, scanReviewUpload } from './internal/reviewSession.js';
+import { runReviewSession, scanReviewUpload, totalUsage } from './internal/reviewSession.js';
 
 export interface AgentReviewerInput {
   repoRoot: string;
@@ -24,7 +25,7 @@ export interface AgentReviewerInput {
   intent?: string;
   fileList?: string;
   priorFindings?: readonly Finding[];
-  session?: { maxInputChars?: number; maxSteps?: number };
+  session?: { maxInputChars?: number; maxSteps?: number; concurrency?: number };
   size?: {
     small?: { maxChangedLines?: number; maxFiles?: number };
     medium?: { maxChangedLines?: number; maxFiles?: number };
@@ -47,9 +48,6 @@ export interface AgentReviewReport {
   limitations: string[];
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
-
-const totalUsage = (usage: Usage): number =>
-  usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 
 /** Fold engine delivery into component states. Failed sessions never prove completion. */
 function updatePieces(coverage: ReviewCoverageV2): void {
@@ -104,7 +102,7 @@ export async function runAgentReviewer(
     if (Date.now() >= deadline) throw new Error('agent review wall budget exhausted');
   };
   let report: AgentReviewReport | undefined;
-  let activeSession: ReviewCoverageV2['sessions'][number] | undefined;
+  const active = new Set<ReviewCoverageV2['sessions'][number]>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled: (() => void) | undefined;
   const snapshot = (): AgentReviewReport | undefined => {
@@ -162,20 +160,41 @@ export async function runAgentReviewer(
         ),
       );
       ensureActive();
+      // Partition sessions are independent, so up to `concurrency` run at once.
+      // Results are merged by plan index (deterministic coverage and finding
+      // order). The token allowance is split across the concurrent slots so
+      // in-flight sessions cannot jointly overspend the remainder.
+      const sessions = plan.sessions;
+      const concurrency = Math.max(
+        1,
+        Math.min(
+          input.session?.concurrency ?? REVIEW_SESSION_DEFAULTS.concurrency,
+          sessions.length,
+        ),
+      );
+      const outcomes: (Finding[] | undefined)[] = sessions.map(() => undefined);
       let firstFailure: string | undefined;
       let consecutiveFailures = 0;
-      for (const session of plan.sessions) {
+      let nextIndex = 0;
+      let halted = false;
+      let budgetStop: 'before' | 'during' | undefined;
+      const runOne = async (index: number): Promise<void> => {
+        const session = sessions[index]!;
         ensureActive();
-        if (report.usage >= input.maxTokens)
-          return { status: 'budget-exhausted', report: snapshot()! };
-        activeSession = {
+        if (report!.usage >= input.maxTokens) {
+          budgetStop ??= 'before';
+          halted = true;
+          return;
+        }
+        const evidence: ReviewCoverageV2['sessions'][number] = {
           id: session.id,
           status: 'error',
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           deliveries: [],
           requests: [],
         };
-        report.coverage.sessions.push(activeSession);
+        active.add(evidence);
+        report!.coverage.sessions.push(evidence);
         await scanReviewUpload(input.scanSecrets, [
           { component: 'review-prompt', path: 'review-request.txt', text: session.prompt },
         ]);
@@ -184,14 +203,17 @@ export async function runAgentReviewer(
           repoRoot: input.repoRoot,
           role: input.role,
           severityMap: input.severityMap,
-          maxTokens: input.maxTokens - report.usage,
-          maxSteps: input.session?.maxSteps ?? 15,
-          maxPromptChars: Math.max(20_000, input.session?.maxInputChars ?? 60_000),
+          maxTokens: Math.max(1, Math.floor((input.maxTokens - report!.usage) / concurrency)),
+          maxSteps: input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps,
+          maxPromptChars: Math.max(
+            20_000,
+            input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars,
+          ),
           signal: controller.signal,
           scanSecrets: input.scanSecrets,
           components,
           plan: session,
-          evidence: activeSession,
+          evidence,
           onUsage: (usage) => {
             report!.usage += totalUsage(usage);
           },
@@ -201,58 +223,70 @@ export async function runAgentReviewer(
           searchTools: input.searchTools ?? true,
         });
         ensureActive();
-        if (report.usage > input.maxTokens) activeSession.status = 'budget';
-        updatePieces(report.coverage);
-        activeSession = undefined;
+        if (report!.usage > input.maxTokens) evidence.status = 'budget';
+        updatePieces(report!.coverage);
+        active.delete(evidence);
+        if (result.status === 'budget-exhausted') {
+          budgetStop ??= 'during';
+          halted = true;
+          return;
+        }
         if (result.status !== 'ok') {
-          const reason = incompleteReason(report.coverage);
-          if (result.status === 'budget-exhausted')
-            return {
-              status: 'needs-human',
-              reason: `agent review budget exhausted; ${reason}`,
-              report: snapshot()!,
-            };
           const detail =
             result.status === 'needs-human'
               ? result.reason
               : result.status === 'failed'
                 ? result.error
                 : result.status;
-          // Sessions are independent: one failed session must not leave the
-          // rest unattempted (the blocked result then carries the most
-          // findings and coverage). Two consecutive failures mean the
-          // provider itself is unhealthy, so stop rather than burn budget.
+          // One failed session must not leave the rest unattempted, but two
+          // failures in a row (completion order, no success between) mean the
+          // provider itself is unhealthy: dispatch nothing further. In-flight
+          // sessions finish and keep their evidence.
           firstFailure ??= detail;
           consecutiveFailures += 1;
-          if (consecutiveFailures >= 2)
-            return {
-              status: 'needs-human',
-              reason: `${firstFailure}; ${reason}`,
-              report: snapshot()!,
-            };
-          continue;
+          if (consecutiveFailures >= 2) halted = true;
+          return;
         }
         consecutiveFailures = 0;
-        for (const finding of result.value) {
-          if (
-            !report.findings.some(
-              (other) =>
-                other.file === finding.file &&
-                other.line === finding.line &&
-                other.rule === finding.rule &&
-                other.text === finding.text &&
-                other.severity === finding.severity,
-            )
-          )
-            report.findings.push(finding);
+        outcomes[index] = result.value;
+        if (report!.usage > input.maxTokens) {
+          budgetStop ??= 'during';
+          halted = true;
         }
-        if (report.usage > input.maxTokens)
-          return {
-            status: 'needs-human',
-            reason: `agent review budget exhausted; ${incompleteReason(report.coverage)}`,
-            report: snapshot()!,
-          };
+      };
+      const worker = async (): Promise<void> => {
+        while (!halted) {
+          const index = nextIndex++;
+          if (index >= sessions.length) return;
+          await runOne(index);
+        }
+      };
+      // Settle every worker before reading state: an abort rejects them all,
+      // and none may mutate the report after the outer snapshot.
+      const settled = await Promise.allSettled(Array.from({ length: concurrency }, worker));
+      const rejected = settled.find((entry) => entry.status === 'rejected');
+      if (rejected !== undefined) throw (rejected as PromiseRejectedResult).reason;
+      for (const finding of outcomes.flatMap((found) => found ?? [])) {
+        if (
+          !report.findings.some(
+            (other) =>
+              other.file === finding.file &&
+              other.line === finding.line &&
+              other.rule === finding.rule &&
+              other.text === finding.text &&
+              other.severity === finding.severity,
+          )
+        )
+          report.findings.push(finding);
       }
+      updatePieces(report.coverage);
+      if (budgetStop === 'before') return { status: 'budget-exhausted', report: snapshot()! };
+      if (budgetStop === 'during')
+        return {
+          status: 'needs-human',
+          reason: `agent review budget exhausted; ${incompleteReason(report.coverage)}`,
+          report: snapshot()!,
+        };
       ReviewCoverageV2Schema.parse(report.coverage);
       if (firstFailure !== undefined)
         return {
@@ -278,8 +312,8 @@ export async function runAgentReviewer(
     });
     return await Promise.race([work(), stopped]);
   } catch (error) {
-    if (activeSession !== undefined)
-      activeSession.status = controller.signal.aborted ? 'aborted' : 'error';
+    for (const evidence of active)
+      evidence.status = controller.signal.aborted ? 'aborted' : 'error';
     const partial = snapshot();
     return {
       status: 'needs-human',

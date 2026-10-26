@@ -64,7 +64,7 @@ export interface CreateReviewPlanInput {
   intent?: string;
   fileList?: string;
   priorFindings?: readonly Finding[];
-  session?: { maxInputChars?: number; maxSteps?: number };
+  session?: { maxInputChars?: number; maxSteps?: number; concurrency?: number };
   size?: { small?: ReviewPlanSizeTier; medium?: ReviewPlanSizeTier };
   exclude?: readonly { pattern: string; assuredBy?: string }[];
 }
