@@ -623,3 +623,112 @@ describe('runAgentReviewer output contract', () => {
     expect(doc.properties.findings.items.required).toEqual(['severity', 'text']);
   });
 });
+
+describe('runAgentReviewer partition retry (S7 attempt I)', () => {
+  type Outcome =
+    | { stopReason: 'complete' }
+    | { stopReason: 'error'; errorClass: string; error: string }
+    | { stopReason: 'budget' }
+    | { stopReason: 'aborted' };
+  /** Two partitions; the driver answers the scripted outcomes in call order, then complete. */
+  const reviewWith = async (script: Outcome[]) => {
+    const prompts: string[] = [];
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async (invocation: { prompt: string }) => {
+            prompts.push(invocation.prompt);
+            const outcome = script.shift() ?? { stopReason: 'complete' as const };
+            return {
+              ...outcome,
+              ...(outcome.stopReason === 'complete' ? { structuredOutput: { findings: [] } } : {}),
+              usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      components: [
+        { component: 'tracked:src/a.ts', path: 'src/a.ts', text: 'a change' },
+        { component: 'tracked:test/b.test.ts', path: 'test/b.test.ts', text: 'b change' },
+      ],
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 60_000,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    return { result, prompts };
+  };
+  const transient = {
+    stopReason: 'error' as const,
+    errorClass: 'transient',
+    error: 'Step timeout of 3600000ms exceeded',
+  };
+  const invalid = {
+    stopReason: 'error' as const,
+    errorClass: 'output-invalid',
+    error: 'structured output invalid after the repair attempt',
+  };
+
+  it.each([
+    ['transient', transient],
+    ['output-invalid', invalid],
+  ] as const)('retries a %s partition once and completes the review', async (cls, failure) => {
+    const { result, prompts } = await reviewWith([{ stopReason: 'complete' }, failure]);
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    // Partition 1, partition 2, partition 2 again: the SAME partition retried.
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toBe(prompts[1]);
+    expect(result.value.coverage.partitions.every((part) => part.complete)).toBe(true);
+    expect(result.value.retries).toEqual([
+      { partition: 2, of: 2, path: 'test/b.test.ts', errorClass: cls, outcome: 'ok' },
+    ]);
+    // The failed attempt's usage counts: three requests at 15 tokens.
+    expect(result.value.usage).toBe(45);
+  });
+
+  it('blocks when the retry fails too, naming both attempts', async () => {
+    const { result, prompts } = await reviewWith([{ stopReason: 'complete' }, transient, invalid]);
+    expect(prompts).toHaveLength(3);
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('output-invalid');
+    expect(result.reason).toContain('first attempt: error: transient');
+    expect(result.reason).toMatch(/\[partition 2\/2: test\/b\.test\.ts\]$/);
+    expect(result.report?.retries).toEqual([
+      { partition: 2, of: 2, path: 'test/b.test.ts', errorClass: 'transient', outcome: 'failed' },
+    ]);
+  });
+
+  it.each([
+    ['budget', { stopReason: 'budget' as const }],
+    ['aborted', { stopReason: 'aborted' as const }],
+    [
+      'a non-retryable class',
+      { stopReason: 'error' as const, errorClass: 'auth', error: 'credentials rejected' },
+    ],
+    [
+      'an unclassified error',
+      {
+        stopReason: 'error' as const,
+        errorClass: 'unknown',
+        error: 'worker upload refused by scan',
+      },
+    ],
+  ])('does not retry %s', async (_label, failure) => {
+    const { result, prompts } = await reviewWith([failure]);
+    expect(prompts).toHaveLength(1);
+    expect(result.status).not.toBe('ok');
+    expect(result.report?.retries ?? []).toEqual([]);
+  });
+});

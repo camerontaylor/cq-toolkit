@@ -18,7 +18,7 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { startFixerDeadline } from '../sweep/internal/fixerBudget.js';
 import { CLEAN_TREE, driftSince, readWorkState } from '../dev/internal/workState.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
-import { runAgentReviewer } from './agentReviewer.js';
+import { runAgentReviewer, type PartitionRetry } from './agentReviewer.js';
 import {
   FindingsRecordSchema,
   isComplete,
@@ -77,6 +77,21 @@ function strippedLine(stripped: Readonly<Record<string, number>> | undefined): s
     : `stripped extra finding keys: ${entries
         .map(([key, count]) => `${encodeURIComponent(key)}×${String(count)}`)
         .join(', ')}\n`;
+}
+
+/**
+ * The review-log line naming the agent reviewer's partition retries (none →
+ * empty). Paths are URI-encoded like the stripped keys above: a control
+ * character in a repository path cannot forge an extra log line.
+ */
+function retriesLine(retries: readonly PartitionRetry[] | undefined): string {
+  if (retries === undefined || retries.length === 0) return '';
+  return `partition retries: ${retries
+    .map(
+      (retry) =>
+        `${String(retry.partition)}/${String(retry.of)} ${encodeURI(retry.path)} (${retry.errorClass}) → ${retry.outcome}`,
+    )
+    .join(', ')}\n`;
 }
 
 /** Produce a single normalized record from the configured sources. */
@@ -383,7 +398,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                   logPath = await effects.writeReviewLog(
                     state.branch,
                     `agent-${Date.now()}`,
-                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\ncoverage: ${JSON.stringify(report?.coverage)}\nusage: ${report?.usage ?? 0}\n${strippedLine(report?.strippedKeys)}`,
+                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\ncoverage: ${JSON.stringify(report?.coverage)}\nusage: ${report?.usage ?? 0}\n${strippedLine(report?.strippedKeys)}${retriesLine(report?.retries)}`,
                   );
                 } catch (error) {
                   return {

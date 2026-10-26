@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import type { DriverFactory } from '../../driver/factory.js';
-import type { OpInvocation } from '../../driver/types.js';
+import type { OpInvocation, WorkerErrorClass } from '../../driver/types.js';
 import type { OpResult } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import type { Finding } from './findings.js';
@@ -65,6 +65,36 @@ function oneLine(text: string): string {
 }
 const ERROR_DETAIL_CHARS = 500;
 
+/**
+ * Driver error classes a partition is retried on, once (S7 attempt I: one
+ * partition's failure cost the whole review). `transient`: network reset,
+ * timeout (incl. the per-request step bound), 5xx — retry may succeed.
+ * `output-invalid`: the model's object was missing or schema-invalid even
+ * after the driver's repair — a fresh run may answer correctly. NOT retried:
+ * `rate-limit` (wants backoff, not an immediate retry), `quota`, `auth`,
+ * `provider-error`, `served-model-mismatch`, `harness`, `unknown` (which
+ * includes a refused upload scan), and every non-error stop — `budget`,
+ * `aborted`, the wall deadline and cancellation.
+ */
+const RETRYABLE_CLASSES = new Set<WorkerErrorClass>(['transient', 'output-invalid']);
+type RetryableClass = 'transient' | 'output-invalid';
+
+/** One partition retry, as the report and review log record it. */
+export interface PartitionRetry {
+  partition: number;
+  of: number;
+  path: string;
+  errorClass: RetryableClass;
+  outcome: 'ok' | 'failed';
+}
+
+/** A partition's outcome; a not-complete stop names its attempt and whether it may be retried. */
+type PartitionResult = OpResult<{
+  findings: Finding[];
+  usage: number;
+  strippedKeys: Record<string, number>;
+}> & { attempt?: string; retryable?: RetryableClass };
+
 /** Read-only structured review through the configured reviewer role. */
 async function runPartition(
   drivers: DriverFactory,
@@ -73,7 +103,7 @@ async function runPartition(
     onUsage: (usage: number) => void;
     onRequest: (serializedChars: number, decodedChars: number) => void;
   },
-): Promise<OpResult<{ findings: Finding[]; usage: number; strippedKeys: Record<string, number> }>> {
+): Promise<PartitionResult> {
   if (input.signal?.aborted || currentJobContext()?.signal.aborted)
     return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   let resolved: ReturnType<DriverFactory['resolve']>;
@@ -181,9 +211,16 @@ async function runPartition(
     const detail = [result.errorClass, result.error && oneLine(result.error)]
       .filter((part): part is string => part !== undefined && part !== '')
       .join(' — ');
+    const attempt = `${result.stopReason}${detail === '' ? '' : `: ${detail}`}`;
     return {
       status: 'needs-human',
-      reason: `agent review did not complete (${result.stopReason}${detail === '' ? '' : `: ${detail}`})`,
+      reason: `agent review did not complete (${attempt})`,
+      attempt,
+      ...(result.stopReason === 'error' &&
+      result.errorClass !== undefined &&
+      RETRYABLE_CLASSES.has(result.errorClass)
+        ? { retryable: result.errorClass as RetryableClass }
+        : {}),
     };
   }
   const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
@@ -221,6 +258,8 @@ export interface AgentReviewReport {
   coverage: ReviewCoverage;
   /** Extra finding keys stripped from replies (key → count); absent when none. */
   strippedKeys?: Record<string, number>;
+  /** Partitions retried after a retryable driver failure; absent when none. */
+  retries?: PartitionRetry[];
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
 
@@ -287,8 +326,10 @@ export async function runAgentReviewer(
       await scanComplete(input.scanSecrets, components);
       for (const [index, part] of plan.partitions.entries()) {
         const component = plan.coverage.partitions[index]?.ranges[0]?.component;
+        const path =
+          component === undefined ? undefined : (plan.coverage.components[component]?.path ?? '?');
         where = ` [partition ${String(index + 1)}/${String(plan.partitions.length)}${
-          component === undefined ? '' : `: ${plan.coverage.components[component]?.path ?? '?'}`
+          path === undefined ? '' : `: ${path}`
         }]`;
         ensureActive();
         if (report.usage >= input.maxTokens) return { status: 'budget-exhausted', report };
@@ -296,28 +337,55 @@ export async function runAgentReviewer(
           { component: 'partition', path: 'review-request.txt', text: part.prompt },
         ]);
         ensureActive();
-        const result = await runPartition(drivers, {
-          ...input,
-          components,
-          diff: part.prompt,
-          receipt: part.receipt,
-          signal: controller.signal,
-          maxTokens: input.maxTokens - report.usage,
-          wallMs: Math.max(1, deadline - Date.now()),
-          onUsage: (usage) => {
-            report!.usage += usage;
-          },
-          onRequest: (serializedChars, decodedChars) => {
-            report!.coverage.partitions[index]!.requests.push({ serializedChars, decodedChars });
-          },
-        });
+        // Each attempt is bounded by what is left of the review's wall and
+        // tokens; a retry's usage counts like any request.
+        const attempt = () =>
+          runPartition(drivers, {
+            ...input,
+            components,
+            diff: part.prompt,
+            receipt: part.receipt,
+            signal: controller.signal,
+            maxTokens: input.maxTokens - report!.usage,
+            wallMs: Math.max(1, deadline - Date.now()),
+            onUsage: (usage) => {
+              report!.usage += usage;
+            },
+            onRequest: (serializedChars, decodedChars) => {
+              report!.coverage.partitions[index]!.requests.push({ serializedChars, decodedChars });
+            },
+          });
+        let result = await attempt();
         ensureActive();
-        if (result.status !== 'ok') {
+        if (result.status === 'needs-human' && result.retryable !== undefined) {
+          // ONE retry of THIS partition on a retryable driver class, then on
+          // to the rest; a second failure blocks, naming both attempts.
+          const first = result;
+          const errorClass = result.retryable;
+          if (report.usage >= input.maxTokens) return { status: 'budget-exhausted', report };
+          result = await attempt();
+          ensureActive();
+          (report.retries ??= []).push({
+            partition: index + 1,
+            of: plan.partitions.length,
+            path: path ?? '?',
+            errorClass,
+            outcome: result.status === 'ok' ? 'ok' : 'failed',
+          });
           if (result.status === 'needs-human')
-            return { ...result, reason: `${result.reason}${where}`, report };
+            result = {
+              ...result,
+              reason: `${result.reason}; first attempt: ${first.attempt ?? '?'}`,
+            };
+        }
+        if (result.status !== 'ok') {
+          // Only the op-result fields leave: `attempt`/`retryable` are internal.
+          if (result.status === 'needs-human')
+            return { status: 'needs-human', reason: `${result.reason}${where}`, report };
           if (result.status === 'failed')
-            return { ...result, error: `${result.error}${where}`, report };
-          return { ...result, report };
+            return { status: 'failed', error: `${result.error}${where}`, report };
+          const { attempt: _attempt, retryable: _retryable, ...rest } = result;
+          return { ...rest, report };
         }
         for (const finding of result.value.findings) {
           const same = (other: Finding) =>
