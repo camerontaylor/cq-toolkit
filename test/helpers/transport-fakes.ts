@@ -25,11 +25,14 @@ export async function runFakeTool(
 ): Promise<{ ok: boolean; text: string }> {
   const value = input as {
     path?: unknown;
+    file_path?: unknown;
     oldText?: unknown;
+    old_string?: unknown;
     newText?: unknown;
+    new_string?: unknown;
     command?: unknown;
   };
-  if (tool === 'run' && typeof value.command === 'string') {
+  if ((tool === 'bash' || tool === 'run') && typeof value.command === 'string') {
     const match = /^echo\s+(.+?)\s+>\s+(.+)$/.exec(value.command);
     if (match === null) return { ok: false, text: 'run refused: unsupported command' };
     const target = resolve(cwd, match[2] as string);
@@ -37,11 +40,27 @@ export async function runFakeTool(
     await writeFile(target, `${match[1] as string}\n`, 'utf8');
     return { ok: true, text: 'command completed' };
   }
-  if (tool === 'edit' && typeof value.path === 'string') {
-    const target = resolve(cwd, value.path);
+  const editPath =
+    typeof value.file_path === 'string'
+      ? value.file_path
+      : typeof value.path === 'string'
+        ? value.path
+        : undefined;
+  if (tool === 'edit' && editPath !== undefined) {
+    const target = resolve(cwd, editPath);
     if (isOutside(cwd, target)) return { ok: false, text: 'path escape: outside workspace' };
-    const oldText = typeof value.oldText === 'string' ? value.oldText : '';
-    const newText = typeof value.newText === 'string' ? value.newText : '';
+    const oldText =
+      typeof value.old_string === 'string'
+        ? value.old_string
+        : typeof value.oldText === 'string'
+          ? value.oldText
+          : '';
+    const newText =
+      typeof value.new_string === 'string'
+        ? value.new_string
+        : typeof value.newText === 'string'
+          ? value.newText
+          : '';
     try {
       const current = await readFile(target, 'utf8');
       if (!current.includes(oldText))
@@ -49,7 +68,7 @@ export async function runFakeTool(
       await writeFile(target, current.replace(oldText, newText), 'utf8');
       return { ok: true, text: 'edit completed' };
     } catch {
-      return { ok: false, text: `file not found: ${value.path}` };
+      return { ok: false, text: `file not found: ${editPath}` };
     }
   }
   if (tool === 'read' && typeof value.path === 'string') {

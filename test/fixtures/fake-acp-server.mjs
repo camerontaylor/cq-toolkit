@@ -371,7 +371,8 @@ function offeredOptions() {
 function toolKind(name) {
   if (name === 'read') return 'read';
   if (name === 'edit') return 'edit';
-  if (name === 'run') return 'execute';
+  // `bash` is the canonical harness name; `run` is its one-release alias.
+  if (name === 'bash' || name === 'run') return 'execute';
   return 'other';
 }
 
@@ -607,14 +608,15 @@ async function executeTool(name, input) {
     }
     return { ok: true, text: `edited '${path_}': replaced 1 occurrence` };
   }
-  if (name === 'run') {
+  if (name === 'bash' || name === 'run') {
     const command = typeof input?.command === 'string' ? input.command : '';
     if (command === '')
       return { ok: false, text: 'invalid input: command must be a non-empty string' };
     return await new Promise((done) => {
       exec(command, { cwd: process.cwd() }, (err_, stdout, stderr) => {
         if (err_ && err_.code === undefined) {
-          done({ ok: false, text: `run failed: ${messageOf(err_)}` }); // spawn-level failure
+          const prefix = name === 'bash' ? 'bash failed' : 'run failed';
+          done({ ok: false, text: `${prefix}: ${messageOf(err_)}` }); // spawn-level failure
           return;
         }
         const parts = [`exit ${err_ ? err_.code : 0}`];
@@ -824,7 +826,8 @@ async function neverAsksFlow() {
 
 function toolInput() {
   if (process.env.FAKE_ACP_INPUT === undefined) {
-    if (TOOL === 'run') return { command: `echo fake-acp-marker > ${TOOL}-marker.txt` };
+    if (TOOL === 'bash' || TOOL === 'run')
+      return { command: `echo fake-acp-marker > ${TOOL}-marker.txt` };
     if (TOOL === 'edit') return { path: 'x.txt', oldText: 'a', newText: 'b' };
     return { path: process.env.FAKE_ACP_PATH ?? 'note.txt' };
   }
