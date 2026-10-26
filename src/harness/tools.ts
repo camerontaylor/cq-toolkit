@@ -620,28 +620,71 @@ function toLf(text: string): string {
   return text.replace(/\r\n/g, '\n');
 }
 
-/** The file's dominant line ending: CRLF when any CRLF is present, else LF. */
-function lineEndingOf(text: string): '\n' | '\r\n' {
-  return text.includes('\r\n') ? '\r\n' : '\n';
+/**
+ * The file's DOMINANT line ending: the style used for NEW lines. Mixed
+ * files keep their existing bytes (edit replaces spans in place); only
+ * inserted text adopts the majority style.
+ */
+function dominantLineEnding(text: string): '\n' | '\r\n' {
+  const crlf = text.match(/\r\n/g)?.length ?? 0;
+  const totalLf = text.match(/\n/g)?.length ?? 0;
+  return crlf > totalLf - crlf ? '\r\n' : '\n';
 }
 
-/** Restore a file's BOM and dominant line ending after an LF-space edit. */
+/** Restore a file's BOM and dominant line ending for a whole-file write. */
 function restoreTextStyle(text: string, bom: boolean, ending: '\n' | '\r\n'): string {
   const body = ending === '\r\n' ? text.replace(/\n/g, '\r\n') : text;
   return `${bom ? BOM : ''}${body}`;
 }
 
-/** Non-overlapping occurrence count of `needle` in `haystack`. */
-function countOccurrences(haystack: string, needle: string): number {
-  if (needle === '') return 0;
-  let count = 0;
-  let index = 0;
-  for (;;) {
-    const found = haystack.indexOf(needle, index);
-    if (found === -1) return count;
-    count += 1;
-    index = found + needle.length;
+/** One match in the ORIGINAL text (offsets are byte-for-byte string indices). */
+interface MatchSpan {
+  start: number;
+  end: number;
+}
+
+/**
+ * Find `needle` (already LF-normalised) in `haystack` while tolerating CRLF
+ * in the haystack for each `\n` in the needle. `overlapping` advances one
+ * character after a match (so `aaa`/`aa` finds BOTH starts); the
+ * non-overlapping pass advances past the match (the replacement semantics).
+ * Returns spans in the ORIGINAL string, so untouched bytes stay untouched.
+ */
+function findMatches(haystack: string, needle: string, overlapping: boolean): MatchSpan[] {
+  if (needle === '') return [];
+  const spans: MatchSpan[] = [];
+  let start = 0;
+  while (start <= haystack.length - 1) {
+    let h = start;
+    let n = 0;
+    while (n < needle.length && h < haystack.length) {
+      if (needle[n] === '\n' && haystack[h] === '\r' && haystack[h + 1] === '\n') {
+        n += 1;
+        h += 2;
+      } else if (haystack[h] === needle[n]) {
+        n += 1;
+        h += 1;
+      } else {
+        break;
+      }
+    }
+    if (n === needle.length) {
+      spans.push({ start, end: h });
+      start = overlapping ? start + 1 : h;
+    } else {
+      start += 1;
+    }
   }
+  return spans;
+}
+
+/** Apply replacement spans in place, right-to-left (offsets stay valid). */
+function applySpans(text: string, spans: readonly MatchSpan[], replacement: string): string {
+  let out = text;
+  for (const span of [...spans].reverse()) {
+    out = out.slice(0, span.start) + replacement + out.slice(span.end);
+  }
+  return out;
 }
 
 /**
@@ -941,34 +984,41 @@ export function buildTools(
             );
           }
           const bom = text.startsWith(BOM);
-          const ending = lineEndingOf(text);
-          const normalized = toLf(stripBom(text));
+          const body = stripBom(text);
           const needle = toLf(oldString);
-          const replacement = toLf(newString);
-          const count = countOccurrences(normalized, needle);
-          if (count === 0) {
+          const ending = dominantLineEnding(body);
+          const replacementLf = toLf(newString);
+          // New text follows the file's dominant convention; existing bytes
+          // outside the replaced spans are never normalised or rewritten.
+          const replacement =
+            ending === '\r\n' ? replacementLf.replace(/\n/g, '\r\n') : replacementLf;
+          const overlapping = findMatches(body, needle, true);
+          if (overlapping.length === 0) {
             return deny('edit', `edit refused: target text not found in '${label}'`);
           }
-          if (count > 1 && !replaceAll) {
+          if (overlapping.length > 1 && !replaceAll) {
             return deny(
               'edit',
-              `edit refused: target text is not unique in '${label}' (${count} occurrences); ` +
-                'pass replace_all: true to replace every occurrence',
+              `edit refused: target text is not unique in '${label}' ` +
+                `(${overlapping.length} possible matches, overlapping included); ` +
+                'pass replace_all: true to replace every non-overlapping occurrence',
             );
           }
-          // String search + function replacer: literal matching, and `$`
-          // sequences in newString stay literal (no $&/$1 substitution).
-          const edited = replaceAll
-            ? normalized.split(needle).join(replacement)
-            : normalized.replace(needle, () => replacement);
-          const output = restoreTextStyle(edited, bom, ending);
+          // replace_all uses the standard NON-overlapping semantics and
+          // reports how many spans it actually replaced; a single edit takes
+          // the first non-overlapping span. Literal replacement: no
+          // `$&`/`$1` substitution.
+          const nonOverlapping = findMatches(body, needle, false);
+          const spans = replaceAll ? nonOverlapping : nonOverlapping.slice(0, 1);
+          const edited = applySpans(body, spans, replacement);
+          const output = `${bom ? BOM : ''}${edited}`;
           try {
             await writeFile(effective, output, 'utf8');
           } catch (err) {
             return deny('edit', `edit failed: ${messageOf(err)}`);
           }
           await rememberRead(effective, Buffer.from(output, 'utf8'));
-          const replaced = replaceAll ? count : 1;
+          const replaced = spans.length;
           const capped = capOutput(
             `edited '${label}': replaced ${replaced} ${replaced === 1 ? 'occurrence' : 'occurrences'}`,
             fileCfg.maxOutputChars,
@@ -1045,7 +1095,7 @@ export function buildTools(
             output = restoreTextStyle(
               toLf(stripBom(content)),
               text.startsWith(BOM),
-              lineEndingOf(text),
+              dominantLineEnding(text),
             );
           }
           try {

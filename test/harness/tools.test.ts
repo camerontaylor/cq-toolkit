@@ -592,6 +592,53 @@ describe('F1 edit correctness', () => {
     });
   });
 
+  test('overlapping matches count as ambiguous; replace_all uses non-overlapping spans', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'overlap.txt'), 'aaa\n', 'utf8');
+      await tools.read.execute({ path: 'overlap.txt' });
+
+      // `aa` starts at 0 AND 1: unique-match refusal must see both.
+      const refused = await tools.edit.execute({
+        file_path: 'overlap.txt',
+        old_string: 'aa',
+        new_string: 'b',
+      });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) {
+        expect(refused.denial.reason).toContain('2 possible matches');
+      }
+      await expect(readFile(join(scratchDir, 'overlap.txt'), 'utf8')).resolves.toBe('aaa\n');
+
+      // replace_all keeps standard non-overlapping semantics: one span.
+      const replaced = await tools.edit.execute({
+        file_path: 'overlap.txt',
+        old_string: 'aa',
+        new_string: 'b',
+        replace_all: true,
+      });
+      expect(replaced).toMatchObject({ ok: true });
+      if (replaced.ok) expect(replaced.output).toContain('replaced 1 occurrence');
+      await expect(readFile(join(scratchDir, 'overlap.txt'), 'utf8')).resolves.toBe('ba\n');
+    });
+  });
+
+  test('mixed line endings keep their untouched bytes', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'mixed.txt'), 'a\r\nb\nc\r\n', 'utf8');
+      await tools.read.execute({ path: 'mixed.txt' });
+      const result = await tools.edit.execute({
+        file_path: 'mixed.txt',
+        old_string: 'b',
+        new_string: 'B',
+      });
+      expect(result).toMatchObject({ ok: true });
+      // The lone LF between b and c is NOT rewritten to CRLF.
+      await expect(readFile(join(scratchDir, 'mixed.txt'), 'utf8')).resolves.toBe('a\r\nB\nc\r\n');
+    });
+  });
+
   test('the pre-F1 path/oldText/newText arguments are still accepted', async () => {
     await withScratch(async (scratchDir) => {
       const tools = defaultTools(scratchDir);
