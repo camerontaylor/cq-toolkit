@@ -207,10 +207,11 @@ describe('dev.review cycle', () => {
     const run = vi.fn(
       async (invocation: {
         prompt: string;
-        toolPolicy: { mode?: string };
+        toolPolicy: { mode?: string; allow?: string[] };
         outputSchema?: unknown;
       }) => {
-        expect(invocation.toolPolicy.mode).toBe('none');
+        expect(invocation.toolPolicy.mode).toBe('allowlist');
+        expect(invocation.toolPolicy.allow).toEqual(['read', 'grep', 'glob']);
         expect(invocation.outputSchema).toBeDefined();
         return {
           stopReason: 'complete' as const,
