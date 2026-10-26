@@ -650,11 +650,28 @@ interface MatchSpan {
  * non-overlapping pass advances past the match (the replacement semantics).
  * Returns spans in the ORIGINAL string, so untouched bytes stay untouched.
  */
-function findMatches(haystack: string, needle: string, overlapping: boolean): MatchSpan[] {
+function findMatches(
+  haystack: string,
+  needle: string,
+  overlapping: boolean,
+  limit = Number.POSITIVE_INFINITY,
+): MatchSpan[] {
   if (needle === '') return [];
   const spans: MatchSpan[] = [];
   let start = 0;
-  while (start <= haystack.length - 1) {
+  while (start <= haystack.length - 1 && spans.length < limit) {
+    // A needle beginning with LF has ONE canonical start in a CRLF pair:
+    // the CR. Without this guard the LF half would count as a second,
+    // overlapping match for the same logical occurrence.
+    if (
+      needle[0] === '\n' &&
+      start > 0 &&
+      haystack[start] === '\n' &&
+      haystack[start - 1] === '\r'
+    ) {
+      start += 1;
+      continue;
+    }
     let h = start;
     let n = 0;
     while (n < needle.length && h < haystack.length) {
@@ -992,7 +1009,8 @@ export function buildTools(
           // outside the replaced spans are never normalised or rewritten.
           const replacement =
             ending === '\r\n' ? replacementLf.replace(/\n/g, '\r\n') : replacementLf;
-          const overlapping = findMatches(body, needle, true);
+          // Only two starts are needed to establish ambiguity.
+          const overlapping = findMatches(body, needle, true, 2);
           if (overlapping.length === 0) {
             return deny('edit', `edit refused: target text not found in '${label}'`);
           }
@@ -1000,7 +1018,7 @@ export function buildTools(
             return deny(
               'edit',
               `edit refused: target text is not unique in '${label}' ` +
-                `(${overlapping.length} possible matches, overlapping included); ` +
+                '(multiple possible matches, overlapping included); ' +
                 'pass replace_all: true to replace every non-overlapping occurrence',
             );
           }
@@ -1008,7 +1026,12 @@ export function buildTools(
           // reports how many spans it actually replaced; a single edit takes
           // the first non-overlapping span. Literal replacement: no
           // `$&`/`$1` substitution.
-          const nonOverlapping = findMatches(body, needle, false);
+          const nonOverlapping = findMatches(
+            body,
+            needle,
+            false,
+            replaceAll ? Number.POSITIVE_INFINITY : 1,
+          );
           const spans = replaceAll ? nonOverlapping : nonOverlapping.slice(0, 1);
           const edited = applySpans(body, spans, replacement);
           const output = `${bom ? BOM : ''}${edited}`;

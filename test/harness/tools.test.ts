@@ -606,7 +606,7 @@ describe('F1 edit correctness', () => {
       });
       expect(refused.ok).toBe(false);
       if (!refused.ok) {
-        expect(refused.denial.reason).toContain('2 possible matches');
+        expect(refused.denial.reason).toContain('multiple possible matches');
       }
       await expect(readFile(join(scratchDir, 'overlap.txt'), 'utf8')).resolves.toBe('aaa\n');
 
@@ -636,6 +636,23 @@ describe('F1 edit correctness', () => {
       expect(result).toMatchObject({ ok: true });
       // The lone LF between b and c is NOT rewritten to CRLF.
       await expect(readFile(join(scratchDir, 'mixed.txt'), 'utf8')).resolves.toBe('a\r\nB\nc\r\n');
+    });
+  });
+
+  test('a needle beginning with LF matches a CRLF pair once, not twice', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'lfstart.txt'), 'a\r\nb\r\n', 'utf8');
+      await tools.read.execute({ path: 'lfstart.txt' });
+      // `\nb` has two raw starts in `\r\n` (the CR and the LF); they are one
+      // logical occurrence, so the unique-match gate must not see ambiguity.
+      const result = await tools.edit.execute({
+        file_path: 'lfstart.txt',
+        old_string: '\nb',
+        new_string: '\nB',
+      });
+      expect(result).toMatchObject({ ok: true });
+      await expect(readFile(join(scratchDir, 'lfstart.txt'), 'utf8')).resolves.toBe('a\r\nB\r\n');
     });
   });
 
