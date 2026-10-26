@@ -5,6 +5,7 @@
 // recording, drift refusal, and the finding-id minting in the ledger.
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,11 @@ import {
 import type { Op } from '../../../src/kernel/types.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
+import {
+  isCoverageV2Complete,
+  ReviewCoverageV2Schema,
+  type ReviewCoverageV2,
+} from '../../../src/ops/review/internal/reviewCoverageV2.js';
 import {
   makeDevReview,
   SCAN_COMPONENT_CAP_BYTES,
@@ -64,6 +70,54 @@ const ran = (
   timedOut: false,
   ...extra,
 });
+
+/**
+ * The ai-sdk pre-request wire shape the review engine's delivery hook parses:
+ * a JSON request whose user turn carries the exact review prompt.
+ */
+function wireRequest(prompt: string): {
+  text: string;
+  contents: { text: string }[];
+} {
+  return {
+    text: JSON.stringify({ prompt: [{ role: 'user', content: prompt }] }),
+    contents: [{ text: prompt }],
+  };
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+
+function reviewCoverage(
+  head: string,
+  base: string,
+  scope: 'full' | 'uncommitted',
+  state: 'planned' | 'excluded',
+): ReviewCoverageV2 {
+  return ReviewCoverageV2Schema.parse({
+    version: 2,
+    head,
+    base,
+    scope,
+    mode: 'session',
+    modeReason: 'fixture coverage',
+    pieces: [
+      {
+        component: 'tracked:src/a.ts',
+        path: 'src/a.ts',
+        sha256: sha256(''),
+        chars: 0,
+        bytes: 0,
+        ...(state === 'excluded'
+          ? {
+              state,
+              exclusion: { rule: 'fixture/**', limitation: 'fixture exclusion limitation' },
+            }
+          : { state }),
+      },
+    ],
+    sessions: [],
+  });
+}
 
 /** A scripted reviewer: `coderabbit` answers with `result`; everything else is real git. */
 const reviewer =
@@ -164,8 +218,8 @@ describe('dev.review cycle', () => {
     repo.commitAll('change scanner policy');
     const effects = repoEffects(repo);
     const runAgentReviewer = vi.fn(async () => ({
-      status: 'ok' as const,
-      value: { findings: [], usage: 1 },
+      status: 'needs-human' as const,
+      reason: 'fixture runner must not be called',
     }));
     const op = makeDevReview({
       effects,
@@ -216,7 +270,6 @@ describe('dev.review cycle', () => {
         return {
           stopReason: 'complete' as const,
           structuredOutput: {
-            receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
             findings: [
               {
                 file: 'src/a.ts',
@@ -232,12 +285,31 @@ describe('dev.review cycle', () => {
         };
       },
     );
+    let wire = '';
     const drivers = {
-      resolve: () => ({
-        lane: 'ai-sdk',
-        modelSpec: { provider: 'scripted', model: 'reviewer' },
-        driver: { run },
-      }),
+      resolve: (request: {
+        beforeRequest?: (
+          text: string,
+          contents?: readonly { text: string }[],
+          context?: { kind: 'model-request' | 'tool-output' },
+        ) => void | Promise<void>;
+      }) => {
+        const resolved = {
+          lane: 'ai-sdk',
+          modelSpec: { provider: 'scripted', model: 'reviewer' },
+          driver: {
+            run: async (invocation: { prompt: string }) => {
+              const payload = wireRequest(invocation.prompt);
+              wire = payload.text;
+              await request.beforeRequest?.(payload.text, payload.contents, {
+                kind: 'model-request',
+              });
+              return run(invocation as never);
+            },
+          },
+        };
+        return resolved;
+      },
     } as unknown as DriverFactory;
     const op = makeDevReview({
       effects,
@@ -253,7 +325,7 @@ describe('dev.review cycle', () => {
         }),
     }) as Op<DevCycleInput, DevReviewReport>;
     const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
-    expect(result.status).toBe('ok');
+    expect(result.status, result.status === 'needs-human' ? result.reason : '').toBe('ok');
     if (result.status !== 'ok') return;
     expect(result.value.reviewer).toBe('agent:reviewer');
     expect(result.value.completion).toEqual({ kind: 'terminal' });
@@ -264,13 +336,170 @@ describe('dev.review cycle', () => {
         excerpt: 'Seeded agent finding',
       }),
     ]);
+    expect(wire).toContain('"role":"user"');
     const [cycle] = effects.openLedger('feature/x').load().records;
     expect(cycle).toMatchObject({
       kind: 'cycle',
       reviewer: 'agent:reviewer',
       completion: { kind: 'terminal' },
     });
+    expect(effects.logs[0]).toContain('coverage: v2 mode=session');
+    expect(effects.logs[0]).toContain('advisories: none');
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  test('an ok agent result with incomplete coverage is blocked, never terminal', async () => {
+    const effects = repoEffects(repo);
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: async (input) => ({
+        status: 'ok',
+        value: {
+          findings: [],
+          usage: 1,
+          coverage: reviewCoverage(input.head, input.base, input.scope, 'planned'),
+          advisories: [],
+          limitations: [],
+        },
+      }),
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('no verifiable coverage proof');
+      expect(result.reason).toContain('coverage is incomplete');
+    }
+    const [cycle] = effects.openLedger('feature/x').load().records;
+    expect(cycle).toMatchObject({
+      kind: 'cycle',
+      completion: { kind: 'blocked' },
+    });
+  });
+
+  test('an ok agent result with mismatched coverage is blocked, never terminal', async () => {
+    const effects = repoEffects(repo);
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: async (input) => ({
+        status: 'ok',
+        value: {
+          findings: [],
+          usage: 1,
+          coverage: reviewCoverage(input.head, 'c'.repeat(40), input.scope, 'excluded'),
+          advisories: [],
+          limitations: [],
+        },
+      }),
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('does not match the reviewed record');
+  });
+
+  test('an ok agent result without coverage is blocked, never terminal', async () => {
+    const effects = repoEffects(repo);
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: async () => ({
+        status: 'ok',
+        value: {
+          findings: [],
+          usage: 1,
+          coverage: undefined as never,
+          advisories: [],
+          limitations: [],
+        },
+      }),
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('no coverage evidence');
+  });
+
+  test('legacy v1 coverage is labelled report-only and never settles terminal', async () => {
+    const effects = repoEffects(repo);
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: async (input) => ({
+        status: 'ok',
+        value: {
+          findings: [],
+          usage: 1,
+          coverage: {
+            head: input.head,
+            base: input.base,
+            scope: input.scope,
+            components: [
+              {
+                component: 'tracked:src/a.ts',
+                path: 'src/a.ts',
+                sha256: sha256(''),
+                chars: 0,
+                bytes: 0,
+              },
+            ],
+            partitions: [
+              {
+                receipt: 'a'.repeat(64),
+                ranges: [{ component: 0, start: 0, end: 0 }],
+                complete: true,
+                promptChars: 1,
+                requests: [{ serializedChars: 1, decodedChars: 0 }],
+              },
+            ],
+          } as never,
+          advisories: [],
+          limitations: [],
+        },
+      }),
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('legacy v1 agent review coverage is report only');
+    const [cycle] = effects.openLedger('feature/x').load().records;
+    expect(cycle).toMatchObject({ kind: 'cycle', completion: { kind: 'blocked' } });
+  });
+
+  test('complete excluded coverage settles terminal and persists advisories', async () => {
+    const effects = repoEffects(repo);
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: async (input) => {
+        const coverage = reviewCoverage(input.head, input.base, input.scope, 'excluded');
+        expect(isCoverageV2Complete(coverage)).toBe(true);
+        return {
+          status: 'ok',
+          value: {
+            findings: [],
+            usage: 3,
+            coverage,
+            advisories: ['fixture advisory'],
+            limitations: ['fixture exclusion limitation'],
+          },
+        };
+      },
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.advisories).toEqual(['fixture advisory']);
+    const [cycle] = effects.openLedger('feature/x').load().records;
+    expect(cycle).toMatchObject({
+      kind: 'cycle',
+      completion: { kind: 'terminal' },
+      advisories: ['fixture advisory'],
+    });
+    expect(effects.logs[0]).toContain('coverage: v2 mode=session');
+    expect(effects.logs[0]).toContain('exclusions: src/a.ts (fixture/**; limitation=');
+    expect(effects.logs[0]).toContain('limitations: fixture exclusion limitation');
+    expect(effects.logs[0]).toContain('advisories: fixture advisory');
   });
 
   test('a terminal cycle: ok report with completion, pinned base, recorded ids and log', async () => {

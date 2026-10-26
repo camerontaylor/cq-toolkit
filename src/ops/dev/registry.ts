@@ -228,6 +228,7 @@ export const registry: OpRegistryEntry[] = [
         import('../analyze/cqConfig.js'),
         import('../analyze/cqConfigDefaults.js'),
         import('../review/agentReviewer.js'),
+        import('./agentReview.js'),
         import('node:fs/promises'),
       ]).then(
         ([
@@ -239,6 +240,7 @@ export const registry: OpRegistryEntry[] = [
           cqConfig,
           cqDefaults,
           agentReviewer,
+          agentReview,
           fs,
         ]) =>
           (async (input: DevReviewInput) => {
@@ -249,23 +251,9 @@ export const registry: OpRegistryEntry[] = [
             // A repo-specific scanner is added only when cq.json configures
             // its optional patterns file; missing toolkit policy is never a
             // prerequisite for an adopter review.
-            const configText = await fs.readFile(`${repoRoot}/cq.json`, 'utf8').catch(() => null);
-            const packageText = await fs
-              .readFile(`${repoRoot}/package.json`, 'utf8')
-              .catch(() => '{}');
-            let packageName = 'repository';
-            try {
-              const data: unknown = JSON.parse(packageText);
-              if (
-                typeof data === 'object' &&
-                data !== null &&
-                'name' in data &&
-                typeof data.name === 'string'
-              )
-                packageName = data.name;
-            } catch {
-              /* descriptive fallback only */
-            }
+            const readFile = (path: string) => fs.readFile(path, 'utf8');
+            const configText = await readFile(`${repoRoot}/cq.json`).catch(() => null);
+            const packageName = await agentReview.readPackageName(readFile, repoRoot);
             const scanSecrets = denylist.makePortableReviewScanner(
               repoRoot,
               dev,
@@ -286,57 +274,13 @@ export const registry: OpRegistryEntry[] = [
               effects: dev,
               scanSecrets,
               ...(patternsFile === undefined ? {} : { patternsFile }),
-              runAgentReviewer: async ({ role, ...reviewInput }) => {
-                if (role !== 'reviewer')
-                  return {
-                    status: 'needs-human',
-                    reason: `unsupported configured reviewer role '${role}'`,
-                  };
-                const configText = await fs
-                  .readFile(`${repoRoot}/cq.json`, 'utf8')
-                  .catch(() => null);
-                if (configText === null)
-                  return { status: 'needs-human', reason: 'agent reviewer requires cq.json' };
-                const parsed = cqConfig.parseCqConfig(configText, repoRoot);
-                if (!parsed.ok)
-                  return {
-                    status: 'needs-human',
-                    reason: `agent reviewer config: ${parsed.reason}`,
-                  };
-                const packageText = await fs
-                  .readFile(`${repoRoot}/package.json`, 'utf8')
-                  .catch(() => '{}');
-                let packageName = 'repository';
-                try {
-                  const data: unknown = JSON.parse(packageText);
-                  if (
-                    typeof data === 'object' &&
-                    data !== null &&
-                    'name' in data &&
-                    typeof data.name === 'string'
-                  )
-                    packageName = data.name;
-                } catch {
-                  /* descriptive fallback only */
-                }
-                const policy = cqDefaults.resolveCqConfigDefaults(parsed.config, { packageName });
-                const roleSpec = policy.roles.reviewer;
-                if (roleSpec === undefined)
-                  return {
-                    status: 'needs-human',
-                    reason: 'cq.json roles.reviewer is required for an agent review',
-                  };
-                const budgetStop = cqDefaults.requireAgenticTokenBudget(policy);
-                if (budgetStop !== undefined) return budgetStop;
-                return agentReviewer.runAgentReviewer(drivers, {
-                  ...reviewInput,
-                  scanSecrets,
-                  role: roleSpec,
-                  maxTokens: policy.budgets.run.maxTokens!,
-                  wallMs: policy.budgets.run.wallMs,
-                  severityMap: policy.review.agentSeverityMap,
-                });
-              },
+              runAgentReviewer: agentReview.makeAgentReviewRunner({
+                repoRoot,
+                readFile,
+                drivers,
+                scanSecrets,
+                run: agentReviewer.runAgentReviewer,
+              }),
             })(input);
           }) as Op<unknown, unknown>,
       ),

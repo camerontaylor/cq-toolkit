@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { ReviewAddressInputSchema } from '../../../../dist/ops/review/registry.js';
 import { makeReviewAddress } from '../../../../dist/ops/review/address.js';
 const drivers = {
-  resolve: ({ modelSpec }) => ({
+  resolve: ({ modelSpec, beforeRequest }) => ({
     lane: 'ai-sdk',
     modelSpec,
     driver: {
@@ -12,15 +12,37 @@ const drivers = {
         const path = join(input.workspace.path, 'src/a.ts');
         const text = await readFile(path, 'utf8');
         let structuredOutput;
-        if (input.outputSchema.name === 'review.agent/v2') {
+        if (input.outputSchema.name === 'review.agent/v3') {
+          // Delivery evidence comes from the pre-upload hook with the exact serialized request.
+          await beforeRequest?.(
+            JSON.stringify({
+              prompt: [
+                {
+                  role: 'user',
+                  content: [{ type: 'text', text: input.prompt }],
+                },
+              ],
+            }),
+            [{ text: input.prompt }],
+            { kind: 'model-request' },
+          );
           structuredOutput = {
-            receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
             findings: text.includes('BAD')
-              ? [{ file: 'src/a.ts', line: 1, severity: 'high', text: 'Replace BAD with GOOD' }]
+              ? [
+                  {
+                    file: 'src/a.ts',
+                    line: 1,
+                    severity: 'high',
+                    text: 'Replace BAD with GOOD',
+                  },
+                ]
               : [],
           };
         } else if (input.outputSchema.name === 'review.address.closure/v1') {
-          structuredOutput = { closed: text.includes('GOOD'), reason: 'candidate contains GOOD' };
+          structuredOutput = {
+            closed: text.includes('GOOD'),
+            reason: 'candidate contains GOOD',
+          };
         } else if (modelSpec.model === 'defer') {
           structuredOutput = {
             disposition: 'deferred',

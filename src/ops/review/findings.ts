@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
 
 /** Normalized finding shared by local and forge review producers. */
 export const FindingSchema = z
@@ -42,6 +43,8 @@ export const FindingsRecordSchema = z
       .optional(),
     sources: z.array(ReviewSourceSchema),
     findings: z.array(FindingSchema),
+    /** Report context only: never dispatched to a fixer or counted as blocking. */
+    advisories: z.array(z.string().min(1)).optional(),
   })
   .strict();
 export type FindingsRecord = z.infer<typeof FindingsRecordSchema>;
@@ -99,11 +102,13 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
   if (first === undefined) throw new Error('findings.merge requires at least one record');
   const sources = new Map<string, ReviewSource>();
   const findings = new Map<string, Finding>();
+  const advisories = new Set<string>();
   for (const record of records) {
     if (record.branch !== first.branch || record.head !== first.head)
       throw new Error('findings records must describe the same branch and head');
     for (const source of record.sources)
       sources.set(`${source.kind}\0${source.cycleId ?? ''}`, source);
+    for (const advisory of record.advisories ?? []) advisories.add(advisory);
     for (const finding of record.findings) {
       const id = key(finding),
         previous = findings.get(id);
@@ -125,6 +130,7 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
       : {}),
     sources: [...sources.values()],
     findings: [...findings.values()],
+    ...(advisories.size > 0 ? { advisories: [...advisories] } : {}),
   };
 }
 
@@ -141,7 +147,9 @@ export function isComplete(
         (!source.coverage ||
           (ReviewCoverageSchema.safeParse(source.coverage).success &&
             source.coverage.head === record.head &&
-            source.coverage.partitions.every((part) => part.complete) &&
+            ('version' in source.coverage
+              ? isCoverageV2Complete(source.coverage)
+              : source.coverage.partitions.every((part) => part.complete)) &&
             (!record.reviewed ||
               (source.coverage.base === record.reviewed.base &&
                 source.coverage.scope === record.reviewed.scope)))),

@@ -99,6 +99,7 @@ export const BudgetSchema: z.ZodType<Budget> = z
     maxTokens: z.number().exactOptional(),
     wallClockMs: z.number().exactOptional(),
     maxAttempts: z.number().exactOptional(),
+    maxSteps: z.number().int().positive().exactOptional(),
     // The strict pre-request ceiling (opt-in): both binds are required and
     // positive when the capability is present — a zero/negative ceiling would
     // disable or invert the bound it names, so the mirror refuses it at the
@@ -219,6 +220,7 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     model: z.string().exactOptional(),
     structuredOutput: z.unknown().optional(),
     usage: UsageSchema,
+    steps: z.number().int().nonnegative().exactOptional(),
     costUSD: z.number().exactOptional(),
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),
     sessionId: z.string().exactOptional(),

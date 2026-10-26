@@ -7,6 +7,7 @@ import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
+import type { ReviewRunInput } from '../../../src/ops/review/run.js';
 import { GIT_HARDEN } from '../../../src/shared/gitHarden.js';
 
 const initial = 'a'.repeat(40),
@@ -47,6 +48,7 @@ async function world(
   }> = [];
   const actions: string[] = [];
   const prompts: string[] = [];
+  const reviewInputs: ReviewRunInput[] = [];
   const files = ['src/a.ts', 'src/b.ts'];
   await mkdir(join(worktree, 'src'), { recursive: true });
   for (const file of files) await writeFile(join(worktree, file), 'BAD\n');
@@ -360,7 +362,8 @@ async function world(
       escalation: { workerAttempts: 1, rescueBase: 0 },
     },
     disposition: async () => ({ status: 'ok', value: {} }),
-    review: async () => {
+    review: async (input) => {
+      reviewInputs.push(input);
       reviewerCalls++;
       return options.reviewOutcome === 'failed'
         ? {
@@ -402,6 +405,7 @@ async function world(
     root,
     actions,
     prompts,
+    reviewInputs,
     resolved,
     reviewerCalls: () => reviewerCalls,
     replies,
@@ -529,6 +533,23 @@ describe('review.address PR phase-one orchestration', () => {
         expect(result.value.fixesPerRun).toBe(1);
         expect(result.value.openBlocking).toEqual([]);
       }
+    } finally {
+      await w.cleanup();
+    }
+  });
+  test('PR re-review carries the thread findings with their recorded dispositions', async () => {
+    const w = await world();
+    try {
+      const result = await w.run();
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(w.reviewInputs).toHaveLength(1);
+      expect(w.reviewInputs[0]?.priorFindings).toEqual([
+        expect.objectContaining({ id: 'T1', source: 'pr-threads', status: 'fixed' }),
+      ]);
+      // The whole-branch comparison and pinned base are unchanged by the addition.
+      expect(w.reviewInputs[0]?.base).toMatch(/^[a-f0-9]{40}$/);
+      expect(w.reviewInputs[0]?.target).toBe('merge-queue');
+      expect(w.reviewInputs[0]?.reviewers).toEqual(['agent']);
     } finally {
       await w.cleanup();
     }

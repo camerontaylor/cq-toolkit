@@ -80,14 +80,19 @@ async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 100
           models.push(input.modelSpec.model);
           let structuredOutput: unknown;
           const content = await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8');
-          if (input.outputSchema?.name === 'review.agent/v2')
+          if (input.outputSchema?.name === 'review.agent/v3') {
+            const serialized = JSON.stringify({
+              prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+            });
+            await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+              kind: 'model-request',
+            });
             structuredOutput = {
-              receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
               findings: content.includes('BAD')
                 ? [{ file: 'src/a.ts', line: 1, severity: 'high', text: finding.text }]
                 : [],
             };
-          else if (input.outputSchema?.name === 'review.address.closure/v1')
+          } else if (input.outputSchema?.name === 'review.address.closure/v1')
             structuredOutput = {
               closed: content.includes('GOOD'),
               reason: 'verified candidate bytes',
@@ -307,12 +312,15 @@ test.each([
             expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('GOOD');
           if (mode === 'mutated-during-review')
             await f.repo.write('src/a.ts', 'export const a = "GOOD";\n');
+          const serialized = JSON.stringify({
+            prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+          });
+          await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+            kind: 'model-request',
+          });
           return {
             stopReason: 'complete',
-            structuredOutput: {
-              receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
-              findings: [],
-            },
+            structuredOutput: { findings: [] },
             usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
             denials: [],
           };
@@ -476,8 +484,14 @@ test('adopted no-ignore repository can re-review ledger revisions and commit a s
           driver: {
             ...resolved.driver,
             run: async (input) => {
-              if (input.outputSchema?.name === 'review.agent/v2') {
-                const reviewHead = /"head":"([a-f0-9]{40,64})"/.exec(input.prompt)?.[1];
+              if (input.outputSchema?.name === 'review.agent/v3') {
+                const serialized = JSON.stringify({
+                  prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+                });
+                await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+                  kind: 'model-request',
+                });
+                const reviewHead = /^Head: ([a-f0-9]{40,64})$/m.exec(input.prompt)?.[1];
                 expect(reviewHead).toBeDefined();
                 if (!reviewedHeads.has(reviewHead!)) {
                   reviewedHeads.add(reviewHead!);
@@ -488,7 +502,6 @@ test('adopted no-ignore repository can re-review ledger revisions and commit a s
                   usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
                   denials: [],
                   structuredOutput: {
-                    receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
                     findings:
                       reviews === 1
                         ? [

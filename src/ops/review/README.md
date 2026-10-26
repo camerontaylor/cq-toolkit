@@ -181,32 +181,60 @@ still matches its ledger disposition. New reviewer feedback reopens the finding.
 
 ## Bounded agent review
 
-`review.run` and `dev.review` use the configured reviewer role for sequential
-partitions of every captured diff component. No content is truncated. Each
-partition carries immutable head/base/scope identity, original path and patch
-line attribution, a hash-bound receipt, and an exact non-overlapping UTF-16
-coverage range. Up to 2,000 preceding characters and the current hunk marker
-are repeated as explicitly separate context; surrogate pairs remain intact.
-The coverage manifest records the SHA-256 of each original component, completed
-ranges and actual request sizes. A missing, replayed or invalid receipt blocks
-completion. Identical findings repeated by overlapping context are deduplicated.
+`review.run` and `dev.review` send the whole change, bounded commit-message intent,
+file list and change-kind instructions to one read-only reviewer session when it
+fits `review.session.maxInputChars` (default 60,000 characters). The reviewer can
+read numbered file windows and use contained `grep` and `glob` searches. Set
+`review.searchTools: false` to retain only `read`. The operation prompt appears
+once as the user message; system messages contain the driver preamble only.
 
-The unchanged harness limit is 20,000 **system-prompt characters**. Partition
-instructions, provenance and context count toward that limit; the driver fits
-its own preamble into the remaining room. This is not a 20,000-character limit
-on the entire invocation or serialized wire request: the supported driver also
-includes the task as a user message. The complete serialized request and decoded
-leaves are scanned before every send and measured separately in the manifest.
-Original unsplit components retain their paths for the mandatory defaults and
-configured scans, including patterns that span a partition boundary.
+The configurable small tier defaults to at most 200 changed lines and five files;
+the medium tier to at most 800 lines and 20 files. Small reviews suggest 0–5
+lookups; medium reviews suggest about 15. Documentation/configuration changes
+ask for source-of-truth checks, and exported/schema changes ask for caller and
+contract checks even when small. A change above the medium tier, or a prompt
+above the session input limit, uses sequential tool-free partitions and emits an
+advisory about limited cross-file context. Partition payloads cover every
+nonexcluded component without truncation, with bounded preceding context and
+surrogate-safe UTF-16 boundaries. There are no area sessions or cross-session
+retries. Repeated findings are deduplicated.
 
-All partitions share one wall deadline, cancellation signal and remaining token
-allowance. Driver-reported input, output, cache and additive reasoning usage
-consume that allowance; the existing token cap is a post-request bound, not a
-new hard wire reservation. Failures preserve prior validated findings and partial
-coverage in blocked evidence. All configured review sources must still finish,
-and repository drift withholds reusable clean proof.
+Coverage v2 retains every original component's path, hash, size and state:
+`planned`, `delivered`, `completed` or `excluded`. Only a clean `model-request`
+hook containing the exact decoded prompt and planned component ranges records
+delivery. Tool-output hooks cannot prove delivery, even if their text mimics a
+request. A component completes only after all its nonoverlapping ranges reach
+schema-valid complete sessions. Every session must complete, and the coverage
+head/base/scope must match the reviewed record. The model returns findings only;
+it provides no receipt or file-coverage attestation. Old coverage remains readable
+and is labelled legacy, using its original completeness rule on old records.
 
-Complete coverage means every captured character was submitted in a validated
-partition. It does not guarantee semantic completeness: partitions have bounded
-local context, and no reducer or global cross-file analysis is performed.
+`review.exclude` defaults to empty. Each explicit glob retains an excluded piece
+and may name an `assuredBy` deterministic check. An exclusion without assurance
+appears as a limitation. Excluded paths remain in the file list. An all-excluded
+review is complete but emits an explicit no-content advisory. Advisories live
+outside findings, appear in logs/readiness/PR reports, and never enter fixer
+dispatch or blocking-finding counts.
+
+Every request and decoded leaf is scanned before sending, including repairs and
+tool outputs with source provenance. Original nonexcluded components are also
+scanned under their source paths before dispatch, including secrets spanning a
+partition boundary. Session evidence records request sizes, usage, observed
+steps, denial count and the actual driver transcript ID for tool-result auditing.
+Recoverable denied or truncated lookups remain visible and do not alone make
+prompt coverage incomplete.
+
+One wall deadline, cancellation signal and token allowance cover all sessions
+and repairs. Driver-reported input, output, cache and additive reasoning usage
+consume the allowance. The token guard is checked after settled requests, so it
+can overshoot; it is not a hard wire reservation. The default main-loop step cap
+is 15; one tool-free JSON repair may add a step. Failed, aborted, undelivered or
+budget-exhausted sessions retain findings and incomplete coverage as blocked
+evidence. All configured sources must finish, and repository drift withholds
+reusable clean proof.
+
+Re-review always covers the whole branch against the pinned base. Prior findings
+and dispositions accompany it unless `review.reReview.includePriorFindings` is
+false (default true). Fixes-only review needs a separate admission/coverage
+design. Complete engine coverage proves delivery and completion, not that the
+reviewer found every semantic defect.

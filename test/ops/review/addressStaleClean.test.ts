@@ -224,16 +224,20 @@ test('an engine-verified fresh checkout rotates the stale receipt', async () => 
         modelSpec: request.modelSpec,
         driver: {
           run: async (input) => {
-            if (input.outputSchema?.name === 'review.agent/v2')
+            if (input.outputSchema?.name === 'review.agent/v3') {
+              const serialized = JSON.stringify({
+                prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+              });
+              await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+                kind: 'model-request',
+              });
               return {
                 stopReason: 'complete' as const,
-                structuredOutput: {
-                  receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
-                  findings: [],
-                },
+                structuredOutput: { findings: [] },
                 usage,
                 denials: [],
               };
+            }
             if (input.outputSchema?.name === 'review.address.closure/v1')
               return {
                 stopReason: 'complete' as const,

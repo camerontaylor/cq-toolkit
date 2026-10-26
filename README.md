@@ -147,7 +147,10 @@ means tests, the other adapters mean static).
 Effective defaults are run/step wall budgets of 20 minutes, a unit wall budget of 60
 minutes, 3 review rounds, blocking critical/major findings, agent high→major and
 medium→minor, CodeRabbit then agent reviewers, address concurrency 2, bulk concurrency 3,
-and escalation worker attempts 2, rescue base 20, one rescue earned per 10 fixed failures,
+review session input of 60,000 characters and 15 reviewer steps, size tiers of 200 changed
+lines/5 files (small) and 800 changed lines/20 files (medium, never below small), no review
+exclusions, prior findings included on re-review, and escalation worker attempts 2, rescue
+base 20, one rescue earned per 10 fixed failures,
 per-package rescue cap 10. There is no token budget default:
 `requireAgenticTokenBudget(policy)` returns a `needs-human` result naming
 `budgets.run.maxTokens` when absent. Bulk query defaults are computed by the forge consumer

@@ -699,6 +699,21 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
     }
   });
 
+  test('Budget.maxSteps maps directly to the Agent SDK maxTurns option', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const { driver, calls } = driverWithCalls(scratchDir, {
+        directive: { kind: 'reply', text: 'ok' },
+      });
+      const result = await driver.run(invocation({ budget: { maxSteps: 3 } }));
+      expect(result.stopReason).toBe('complete');
+      expect(optionsOf(calls)['maxTurns']).toBe(3);
+      expect(result.steps).toBeUndefined(); // stream output cannot count completed SDK turns
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('endpoint env injection: base URL + auth values ride the SDK env; the governed surface is the only surface', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
@@ -1137,6 +1152,10 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       );
       await expect(driver.run(invocation({ budget: { maxTokens: Number.NaN } }))).rejects.toThrow(
         /maxTokens/,
+      );
+      await expect(driver.run(invocation({ budget: { maxSteps: 0 } }))).rejects.toThrow(/maxSteps/);
+      await expect(driver.run(invocation({ budget: { maxSteps: 1.5 } }))).rejects.toThrow(
+        /maxSteps/,
       );
       expect(calls).toEqual([]); // never dispatched
     } finally {

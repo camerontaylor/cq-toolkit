@@ -25,10 +25,14 @@
 //     RUN remains the governor's decision.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
-//     pure token fold — no scheduling primitive involved). stopWhen is
-//     passed ALWAYS: `stepCountIs(DEFAULT_MAX_STEPS)` bounds the tool loop
-//     even without a token cap (the SDK's own default is a single step,
-//     under which tool calls are never followed up).
+//     pure token fold — no scheduling primitive involved).
+//   - The main tool loop is ALWAYS step-bounded with
+//     `stepCountIs(min(maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS))`;
+//     the final schema step is tools-off, and the separate structured-output
+//     repair may add one completed step.
+//   - The prompt budget applies to the caller-owned user prompt, which is
+//     sent once as a user turn. The system message contains only driver-owned
+//     tool-aware guidance.
 //   - Budget.strictTokenBudget (OPT-IN, separate from maxTokens) adds a
 //     BINDING pre-request ceiling: `pre-request-ceiling.ts` wraps the
 //     resolved model so every wire attempt counts the full request and
@@ -321,10 +325,15 @@ export interface AiSdkDriverOptions {
   ) => Promise<
     { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
   >;
-  /** Runs before every provider send, including retries, repairs and tool-loop steps. */
+  /**
+   * Runs before every provider send, including retries and repairs. The
+   * optional context distinguishes a model request from scanned tool output;
+   * existing two-argument callbacks remain valid.
+   */
   beforeRequest?: (
     text: string,
     contents?: readonly { text: string; path?: string }[],
+    context?: { kind: 'model-request' | 'tool-output' },
   ) => void | Promise<void>;
   /**
    * Provider registry override (name → factory). Unknown provider names
@@ -438,10 +447,22 @@ export class AiSdkDriver implements Driver {
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        steps: 0,
         denials: [],
         stopReason: 'aborted',
       };
     }
+
+    if (
+      budget.maxSteps !== undefined &&
+      (!Number.isInteger(budget.maxSteps) || budget.maxSteps <= 0)
+    ) {
+      throw new DispatchError(
+        'config',
+        `ai-sdk driver: budget.maxSteps must be a positive integer, got ${String(budget.maxSteps)}`,
+      );
+    }
+    const effectiveStepCap = Math.min(budget.maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS);
 
     // --- Strict pre-request ceiling capability, resolved + REFUSED BEFORE the
     // provider factory: the capability must be INJECTED (trusted operator
@@ -495,6 +516,7 @@ export class AiSdkDriver implements Driver {
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        steps: 0,
         denials: [],
         stopReason: 'aborted',
       };
@@ -527,10 +549,10 @@ export class AiSdkDriver implements Driver {
     const guard: AiSdkDriverOptions['beforeRequest'] =
       this.beforeRequest === undefined
         ? undefined
-        : async (text, contents) => {
+        : async (text, contents, context) => {
             if (uploadRefused) throw new Error('worker upload already refused');
             try {
-              await this.beforeRequest?.(text, contents);
+              await this.beforeRequest?.(text, contents, context);
             } catch {
               uploadRefused = true;
               throw new Error('worker upload refused by scan');
@@ -550,7 +572,7 @@ export class AiSdkDriver implements Driver {
                 for (const child of Object.values(value)) collect(child);
             };
             collect(JSON.parse(text));
-            await guard(text, contents);
+            await guard(text, contents, { kind: 'model-request' });
             return params;
           },
         },
@@ -678,7 +700,7 @@ export class AiSdkDriver implements Driver {
     const selected = searchWithheld
       ? candidates.filter((tool) => tool.name !== 'grep' && tool.name !== 'glob')
       : candidates;
-    const system = this.composeSystemPrompt(prompt, selected.length > 0);
+    const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
       const descriptor = {
@@ -706,7 +728,7 @@ export class AiSdkDriver implements Driver {
     // scheduling primitive (I8).
     const stopWhen: Array<StopCondition<ToolSet>> = [
       ...(budget.maxTokens !== undefined ? [tokenBudgetCondition(budget.maxTokens)] : []),
-      stepCountIs(DEFAULT_MAX_STEPS),
+      stepCountIs(effectiveStepCap),
     ];
 
     // Structured output (ADR-0002 §2.3): the invocation schema is the only
@@ -732,6 +754,7 @@ export class AiSdkDriver implements Driver {
     // for repair, including when native output parsing throws after the loop.
     const responseMessages: ModelMessage[] = [];
     let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    let completedSteps = 0;
     // Session-log fidelity (item 1.7): the FINAL completed step, so the
     // persisted assistant turn can carry its own usage and requested tool
     // calls. Undefined when no step completed (an immediate abort) — the
@@ -776,10 +799,10 @@ export class AiSdkDriver implements Driver {
           ...(outputSchema !== undefined && selected.length > 0
             ? {
                 prepareStep: ({ stepNumber, messages }) =>
-                  stepNumber >= DEFAULT_MAX_STEPS - 1
+                  stepNumber >= effectiveStepCap - 1
                     ? {
                         activeTools: [],
-                        system: this.composeSystemPrompt(prompt, false),
+                        system: this.composeSystemPrompt(false),
                         ...(prompted
                           ? {
                               messages: [
@@ -801,6 +824,7 @@ export class AiSdkDriver implements Driver {
             : {}),
           stopWhen,
           onStepFinish: (step) => {
+            completedSteps += 1;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             responseMessages.push(...step.response.messages);
             lastStep = {
@@ -838,6 +862,7 @@ export class AiSdkDriver implements Driver {
             rejection: `the reply carried no parseable object — ${describeError(err)}`,
             mainText: err.text ?? '',
             mainUsage: stepUsage,
+            mainSteps: completedSteps,
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
                 ? err.response.modelId
@@ -848,7 +873,6 @@ export class AiSdkDriver implements Driver {
             abortSignal,
             budget,
             model,
-            prompt,
             responseMessages,
             transcript,
             store,
@@ -906,6 +930,7 @@ export class AiSdkDriver implements Driver {
             rejection,
             mainText: text,
             mainUsage: usage,
+            mainSteps: completedSteps,
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
@@ -913,7 +938,6 @@ export class AiSdkDriver implements Driver {
             abortSignal,
             budget,
             model,
-            prompt,
             responseMessages,
             transcript,
             store,
@@ -965,6 +989,7 @@ export class AiSdkDriver implements Driver {
           ? { structuredOutput }
           : {}),
         usage,
+        steps: completedSteps,
         // PRICING KEY: derived over the OBSERVED served model id — a
         // silently-remapped gateway is priced off the id the response
         // reports (the same fact WorkerResult.model carries); the provider
@@ -997,6 +1022,7 @@ export class AiSdkDriver implements Driver {
       if (aborted) {
         return {
           usage: stepUsage,
+          steps: completedSteps,
           sessionId: record.sessionId,
           denials,
           ...capabilityEvidence,
@@ -1013,6 +1039,7 @@ export class AiSdkDriver implements Driver {
         if (err.kind === 'budget') {
           return {
             usage: stepUsage,
+            steps: completedSteps,
             sessionId: record.sessionId,
             denials,
             ...capabilityEvidence,
@@ -1022,6 +1049,7 @@ export class AiSdkDriver implements Driver {
         }
         return {
           usage: stepUsage,
+          steps: completedSteps,
           sessionId: record.sessionId,
           denials,
           stopReason: 'error',
@@ -1045,6 +1073,7 @@ export class AiSdkDriver implements Driver {
       // understates the run, so no figure is claimed.
       return {
         usage: stepUsage,
+        steps: completedSteps,
         sessionId: record.sessionId,
         denials,
         ...capabilityEvidence,
@@ -1083,13 +1112,13 @@ export class AiSdkDriver implements Driver {
     rejection: string;
     mainText: string;
     mainUsage: Usage;
+    mainSteps: number;
     servedModel: string | undefined;
     responseHeaders: Record<string, string> | undefined;
     finishReason: FinishReason;
     abortSignal: AbortSignal | undefined;
     budget: Budget;
     model: LanguageModel;
-    prompt: string;
     responseMessages: ModelMessage[];
     transcript: ModelMessage[];
     store: SessionStore;
@@ -1104,13 +1133,13 @@ export class AiSdkDriver implements Driver {
       rejection,
       mainText,
       mainUsage,
+      mainSteps,
       servedModel,
       responseHeaders,
       finishReason,
       abortSignal,
       budget,
       model,
-      prompt,
       responseMessages,
       transcript,
       store,
@@ -1121,10 +1150,12 @@ export class AiSdkDriver implements Driver {
     } = inputs;
 
     /** Fold-in helper: verdict usage over BOTH calls, cost over the fold. */
+    let repairSteps = 0;
     const verdictExtras = (
       totalUsage: Usage,
-    ): Pick<WorkerResult, 'usage' | 'costUSD' | 'costBasis'> => ({
+    ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis'> => ({
       usage: totalUsage,
+      steps: mainSteps + repairSteps,
       ...costField(
         this.pricing,
         { ...modelSpec, model: servedModel ?? modelSpec.model },
@@ -1132,8 +1163,9 @@ export class AiSdkDriver implements Driver {
       ),
     });
     /** Usage WITHOUT a derived cost — the mixed-identity (repair remap) verdict refuses to price. */
-    const verdictUsageOnly = (totalUsage: Usage): Pick<WorkerResult, 'usage'> => ({
+    const verdictUsageOnly = (totalUsage: Usage): Pick<WorkerResult, 'usage' | 'steps'> => ({
       usage: totalUsage,
+      steps: mainSteps + repairSteps,
     });
     const verdictSignals = (): { providerSignals?: ProviderSignals } => {
       const signals = providerSignalsFromHeaders(responseHeaders);
@@ -1241,7 +1273,7 @@ export class AiSdkDriver implements Driver {
     try {
       const repair = await generateText({
         model,
-        system: this.composeSystemPrompt(prompt, false),
+        system: this.composeSystemPrompt(false),
         messages: repairMessages,
         // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
         // bounded, unlike the main loop.
@@ -1251,6 +1283,7 @@ export class AiSdkDriver implements Driver {
           ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
           : { stopWhen: [stepCountIs(1)] }),
         onStepFinish: (step) => {
+          repairSteps += 1;
           repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
         },
         // Tool-free: NO tools key at all.
@@ -1309,10 +1342,11 @@ export class AiSdkDriver implements Driver {
        */
       const repairVerdictExtras = (
         usage: Usage,
-      ): Pick<WorkerResult, 'usage' | 'costUSD' | 'costBasis'> =>
+      ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis'> =>
         repairIdentity === 'match'
           ? {
               usage,
+              steps: mainSteps + repairSteps,
               ...costField(
                 this.pricing,
                 { ...modelSpec, model: servedModel ?? modelSpec.model },
@@ -1462,6 +1496,7 @@ export class AiSdkDriver implements Driver {
         return {
           ...(servedModel !== undefined ? { model: servedModel } : {}),
           usage: totalUsage,
+          steps: mainSteps + repairSteps,
           sessionId: record.sessionId,
           denials,
           ...capabilityEvidence,
@@ -1503,7 +1538,9 @@ export class AiSdkDriver implements Driver {
           ...(errModel !== undefined ? { model: errModel } : {}),
           // Same aggregate-pricing rule as the returned-repair paths: only
           // a 'match' (both observed and equal, or neither observed) prices.
-          ...(errIdentity === 'match' ? verdictExtras(totalUsage) : { usage: totalUsage }),
+          ...(errIdentity === 'match'
+            ? verdictExtras(totalUsage)
+            : { usage: totalUsage, steps: mainSteps + repairSteps }),
           sessionId: record.sessionId,
           denials,
           ...capabilityEvidence,
@@ -1519,6 +1556,7 @@ export class AiSdkDriver implements Driver {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
         // Failed requests may contain unobserved spend; partial usage cannot price the run.
         usage: totalUsage,
+        steps: mainSteps + repairSteps,
         sessionId: record.sessionId,
         denials,
         ...capabilityEvidence,
@@ -1567,28 +1605,9 @@ export class AiSdkDriver implements Driver {
     }
   }
 
-  /**
-   * The composed system prompt: minimal harness preamble (tool usage +
-   * workspace note) + the op prompt. Budget rule (documented): the OP
-   * PROMPT is caller data — if it alone exceeds maxSystemPromptChars the
-   * run REFUSES loudly (throw before dispatch; silently truncating an op's
-   * task would corrupt semantics). The PREAMBLE is ours — it is truncated
-   * to fit the remaining budget. The op prompt ALSO rides as the terminal
-   * user turn of the conversation (chat providers require a real user
-   * turn to answer; the composed system states the task and the boundary
-   * rules) — the prompt budget accounts for the composed system, the user
-   * turn is the model's input message, not system-prompt text.
-   */
-  private composeSystemPrompt(prompt: string, hasTools: boolean): string {
-    this.validatePromptBudget(prompt);
-    const maxChars = this.harnessConfig.promptBudget.maxSystemPromptChars;
-    const text = hasTools ? SYSTEM_PREAMBLE : TOOL_FREE_PREAMBLE;
-    const room = maxChars - prompt.length - 2; // '\n\n' separator
-    const preamble = room <= 0 ? '' : text.length <= room ? text : text.slice(0, room);
-    // An empty preamble has nothing to separate: the prompt rides ALONE.
-    // The unconditional separator would compose prompt.length + 2 chars —
-    // slipping past the very budget it enforces.
-    return preamble === '' ? prompt : `${preamble}\n\n${prompt}`;
+  /** The system prompt is driver-owned guidance; caller task text stays in its user turn. */
+  private composeSystemPrompt(hasTools: boolean): string {
+    return hasTools ? SYSTEM_PREAMBLE : TOOL_FREE_PREAMBLE;
   }
 }
 
@@ -1804,7 +1823,7 @@ async function runTool(
       throw new Error('read upload lacks source provenance');
     }
     if (result.sourceContents !== undefined) contents.push(...result.sourceContents);
-    await guard(result.output, contents);
+    await guard(result.output, contents, { kind: 'tool-output' });
   }
   // The scan-only provenance (raw file text) must NOT persist: the tool
   // result is JSON-stringified into the transcript and replayed verbatim on

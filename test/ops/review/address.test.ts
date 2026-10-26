@@ -238,6 +238,60 @@ describe('review.address composition', () => {
       await f.cleanup();
     }
   });
+  test('local re-review uploads the prior round findings with their final dispositions', async () => {
+    const f = await fixture();
+    try {
+      let priorFindings: readonly Finding[] | undefined;
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (finding) => ({
+            finding: { ...finding, status: 'fixed', reason: 'verified candidate bytes' },
+            observedHead: f.record().head,
+            reason: 'verified candidate bytes',
+            validation: [],
+          }),
+        }),
+        review: async (input) => {
+          priorFindings = input.priorFindings;
+          return {
+            status: 'ok',
+            value: { ...f.record(), findings: [], advisories: ['re-review advisory'] },
+          };
+        },
+      })({ ...f.input, rounds: 1 });
+      expect(result.status).toBe('ok');
+      expect(priorFindings).toEqual([
+        expect.objectContaining({
+          id: 'a',
+          status: 'fixed',
+          reason: 'verified candidate bytes',
+        }),
+      ]);
+      expect(reportOf(result).advisories).toEqual(['re-review advisory']);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('review advisories stay report context and never enter findings', async () => {
+    const f = await fixture([]);
+    try {
+      const deps = {
+        ...f.deps,
+        initialRecord: {
+          ...f.record(),
+          advisories: ['lockfile excluded: assured by dev.check'],
+        },
+      };
+      const result = await makeReviewAddress(deps)(f.input);
+      expect(result.status).toBe('ok');
+      expect(reportOf(result).advisories).toEqual(['lockfile excluded: assured by dev.check']);
+      expect(reportOf(result).findings).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('a disposition persistence failure cannot become a clean run when re-review omits it', async () => {
     const f = await fixture();
     try {

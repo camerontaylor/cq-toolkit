@@ -16,7 +16,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
-import type { DriverFactory } from '../../../src/driver/factory.js';
+import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -302,7 +302,7 @@ test.each([
       let heldAdmission = false;
       let fencedAdmissions = 0;
       const drivers: DriverFactory = {
-        resolve: (request) => ({
+        resolve: (request: DriverRequest) => ({
           lane: 'ai-sdk',
           modelSpec: request.modelSpec,
           driver: {
@@ -310,14 +310,17 @@ test.each([
               const schema = input.outputSchema!.name;
               invocations.push(schema);
               let output: unknown;
-              if (schema === 'review.agent/v2') {
+              if (schema === 'review.agent/v3') {
+                const serialized = JSON.stringify({
+                  prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+                });
+                await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+                  kind: 'model-request',
+                });
                 expect(await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8')).toContain(
                   reuseRound ? 'BETTER' : 'GOOD',
                 );
-                output = {
-                  receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
-                  findings: [],
-                };
+                output = { findings: [] };
               } else if (schema === 'review.address.closure/v1') {
                 if (earlyTamper) {
                   const path = devLedgerPath(workerRoot, 'cq-review/pr-7');
@@ -673,7 +676,7 @@ test.each([
           }),
         );
       if (!tampered)
-        expect(invocations.filter((name) => name === 'review.agent/v2').length).toBeGreaterThan(0);
+        expect(invocations.filter((name) => name === 'review.agent/v3').length).toBeGreaterThan(0);
       if (siblings) {
         expect(invocations.filter((name) => name === 'review.address.outcome/v1')).toHaveLength(4);
         expect(invocations.filter((name) => name === 'review.address.closure/v1')).toHaveLength(2);
@@ -682,7 +685,7 @@ test.each([
           'review.address.outcome/v1',
           'review.address.outcome/v1',
           'review.address.closure/v1',
-          ...(tampered ? [] : invocations.filter((name) => name === 'review.agent/v2')),
+          ...(tampered ? [] : invocations.filter((name) => name === 'review.agent/v3')),
         ]);
       // The real adapter, not the test, creates both colliding refs.
       expect(repo.git('-C', workerRoot, 'symbolic-ref', '--short', 'HEAD').trim()).toBe(

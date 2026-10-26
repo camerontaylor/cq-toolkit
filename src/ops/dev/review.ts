@@ -37,7 +37,13 @@
 // invocation `cq dev.review --action=enroll …`).
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import type { AgentReviewReport } from '../review/agentReviewer.js';
+import type { AgentReviewReport, AgentReviewResult } from '../review/agentReviewer.js';
+import {
+  isCoverageV2Complete,
+  ReviewCoverageV2Schema,
+  type ReviewCoverageV2,
+} from '../review/internal/reviewCoverageV2.js';
+import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
@@ -74,6 +80,114 @@ import {
 
 /** Per-component scan cap: a bigger file patch or untracked file is refused, never truncated. */
 export const SCAN_COMPONENT_CAP_BYTES = 4 * 1024 * 1024;
+
+/** The immutable identity a terminal review's coverage must attest. */
+export interface AgentReviewCoverageExpectation {
+  head: string;
+  base: string;
+  scope: 'full' | 'uncommitted';
+}
+
+/**
+ * A coverage proof is engine evidence, not a model claim. v2 must validate and
+ * cover every piece; legacy v1 is report-only because it cannot prove delivery
+ * through the current wire seam.
+ */
+export type AgentReviewCoverageVerdict =
+  | { ok: true; coverage: ReviewCoverageV2 }
+  | { ok: false; reason: string; legacy: boolean };
+
+/** Independently verify the engine's coverage before it may settle a terminal review. */
+export function verifyAgentReviewCoverage(
+  coverage: unknown,
+  expected: AgentReviewCoverageExpectation,
+): AgentReviewCoverageVerdict {
+  if (coverage === undefined || coverage === null)
+    return { ok: false, reason: 'agent review returned no coverage evidence', legacy: false };
+  const v2 = ReviewCoverageV2Schema.safeParse(coverage);
+  if (v2.success) {
+    if (!isCoverageV2Complete(v2.data))
+      return { ok: false, reason: 'agent review coverage is incomplete', legacy: false };
+    if (
+      v2.data.head !== expected.head ||
+      v2.data.base !== expected.base ||
+      v2.data.scope !== expected.scope
+    )
+      return {
+        ok: false,
+        reason: `agent review coverage does not match the reviewed record (coverage head ${v2.data.head}, base ${v2.data.base}, scope ${v2.data.scope})`,
+        legacy: false,
+      };
+    return { ok: true, coverage: v2.data };
+  }
+  const legacy = LegacyReviewCoverageSchema.safeParse(coverage);
+  if (legacy.success) {
+    if (
+      legacy.data.head !== expected.head ||
+      legacy.data.base !== expected.base ||
+      legacy.data.scope !== expected.scope
+    )
+      return {
+        ok: false,
+        reason: 'legacy agent review coverage does not match the reviewed record',
+        legacy: true,
+      };
+    if (!legacy.data.partitions.every((partition) => partition.complete))
+      return { ok: false, reason: 'legacy agent review coverage is incomplete', legacy: true };
+    return {
+      ok: false,
+      reason:
+        'legacy v1 agent review coverage is report only; a terminal review requires v2 delivery evidence',
+      legacy: true,
+    };
+  }
+  return { ok: false, reason: 'agent review coverage failed validation', legacy: false };
+}
+
+/**
+ * Human-readable evidence for a review log. It keeps mode, coverage version,
+ * exclusions (with their deterministic assurance), limitations and advisories
+ * visible without making a consumer parse the JSON blob.
+ */
+export function renderAgentReviewEvidence(report: AgentReviewReport | undefined): string[] {
+  if (report === undefined)
+    return ['coverage: none', 'exclusions: none', 'limitations: none', 'advisories: none'];
+  const coverage = report.coverage as unknown;
+  const record =
+    coverage !== null && typeof coverage === 'object' ? (coverage as Record<string, unknown>) : {};
+  const version = typeof record['version'] === 'number' ? record['version'] : 1;
+  const mode = typeof record['mode'] === 'string' ? record['mode'] : 'legacy';
+  const modeReason = typeof record['modeReason'] === 'string' ? record['modeReason'] : '';
+  const pieces = Array.isArray(record['pieces'])
+    ? (record['pieces'] as {
+        path?: unknown;
+        state?: unknown;
+        exclusion?: { rule?: unknown; assuredBy?: unknown; limitation?: unknown };
+      }[])
+    : [];
+  const excluded = pieces.filter((piece) => piece.state === 'excluded');
+  const limitations = report.limitations ?? [];
+  const advisories = report.advisories ?? [];
+  const exclusions = excluded.map((piece) => {
+    const exclusion = piece.exclusion ?? {};
+    const rule = typeof exclusion.rule === 'string' ? exclusion.rule : 'unknown rule';
+    const assurance =
+      typeof exclusion.assuredBy === 'string'
+        ? `assuredBy=${exclusion.assuredBy}`
+        : typeof exclusion.limitation === 'string'
+          ? `limitation=${exclusion.limitation}`
+          : 'no assurance';
+    return `${typeof piece.path === 'string' ? piece.path : 'unknown path'} (${rule}; ${assurance})`;
+  });
+  return [
+    `coverage: v${String(version)} mode=${mode}${modeReason === '' ? '' : ` (${modeReason})`}`,
+    `coverage pieces: ${String(pieces.length)} total, ${String(excluded.length)} excluded`,
+    `exclusions: ${exclusions.length > 0 ? exclusions.join('; ') : 'none'}`,
+    `limitations: ${limitations.length > 0 ? limitations.join('; ') : 'none'}`,
+    `advisories: ${advisories.length > 0 ? advisories.join('; ') : 'none'}`,
+    `coverage evidence: ${JSON.stringify(report.coverage)}`,
+  ];
+}
 
 /** Input of the `dev.review` cycle action (plain JSON; the registry schema mirrors it). */
 export interface DevCycleInput {
@@ -119,13 +233,7 @@ export interface DevReviewDeps {
     components: readonly ScanComponentInput[];
     base: string;
     scope: 'full' | 'uncommitted';
-  }) => Promise<
-    OpResult<{
-      findings: AgentReviewReport['findings'];
-      usage: number;
-      coverage?: AgentReviewReport['coverage'];
-    }> & { report?: AgentReviewReport }
-  >;
+  }) => Promise<AgentReviewResult>;
   /**
    * The author-admission transport (admission actions). When omitted, the
    * admission actions report the configuration gap.
@@ -145,6 +253,8 @@ export interface DevReviewReport {
   dirtySha256: string;
   completion: DevReviewCompletion;
   findings: DevFinding[];
+  /** Report context only: never dispatched or counted as blocking findings. */
+  advisories: string[];
   logPath: string;
   untracked: string[];
   at: string;
@@ -265,6 +375,7 @@ function makeReviewCycle(
       completion: DevReviewCompletion;
       logPath: string;
       findings: Omit<DevFinding, 'id'>[];
+      advisories: string[];
     };
     try {
       span = await effects.withHostLock(async () => {
@@ -284,9 +395,20 @@ function makeReviewCycle(
             scope,
           });
           await refuseDrift('during the agent review run');
+          const report = result.status === 'ok' ? result.value : result.report;
+          const coverage = verifyAgentReviewCoverage(report?.coverage, {
+            head: state.head,
+            base: scope === 'uncommitted' ? state.head : state.base,
+            scope,
+          });
           const completion: DevReviewCompletion =
             result.status === 'ok'
-              ? { kind: 'terminal' }
+              ? coverage.ok
+                ? { kind: 'terminal' }
+                : {
+                    kind: 'blocked',
+                    reason: `agent review returned no verifiable coverage proof — ${coverage.reason}`,
+                  }
               : {
                   kind: 'blocked',
                   reason:
@@ -296,8 +418,8 @@ function makeReviewCycle(
                         ? result.error
                         : result.status,
                 };
-          const report = result.status === 'ok' ? result.value : result.report;
           const findings = report?.findings ?? [];
+          const advisories = report?.advisories ?? [];
           const logPath = await effects.writeReviewLog(
             state.branch,
             `${Date.now()}`,
@@ -310,7 +432,7 @@ function makeReviewCycle(
               `scope: ${scope}`,
               `completion: ${completion.kind}`,
               `findings: ${String(findings.length)}`,
-              `coverage: ${JSON.stringify(report?.coverage)}`,
+              ...renderAgentReviewEvidence(report),
               `usage: ${report?.usage ?? 0}`,
               `at: ${at}`,
               '',
@@ -324,6 +446,7 @@ function makeReviewCycle(
               ...(finding.file ? { fileName: finding.file } : {}),
               excerpt: finding.text,
             })),
+            advisories,
           };
         }
         const timeoutMs = Math.min(DEFAULT_REVIEWER_TIMEOUT_MS, remainingWallMs?.() ?? Infinity);
@@ -371,7 +494,7 @@ function makeReviewCycle(
             '',
           ].join('\n'),
         );
-        return { completion, logPath, findings: parsed.findings };
+        return { completion, logPath, findings: parsed.findings, advisories: [] };
       }, signal);
     } catch (err) {
       // A host-lock, drift, or log-write fault: nothing is recorded, and
@@ -383,7 +506,7 @@ function makeReviewCycle(
       const reason = `review cancelled or wall budget exhausted — ${faultText(err)}`;
       // Cleanup is deliberately outside the cancelled execution effects.
       const logPath = await effects.writeReviewLog(state.branch, `${Date.now()}`, reason);
-      span = { completion: { kind: 'blocked', reason }, logPath, findings: [] };
+      span = { completion: { kind: 'blocked', reason }, logPath, findings: [], advisories: [] };
     }
 
     // The reviewer quota is ALREADY spent, so a store fault still reports
@@ -407,6 +530,7 @@ function makeReviewCycle(
             ...finding,
             id: `${cycleId}#f${String(index + 1)}`,
           })),
+          ...(span.advisories.length > 0 ? { advisories: span.advisories } : {}),
           logPath: span.logPath,
           untracked: state.untracked,
           at,
@@ -448,6 +572,7 @@ function makeReviewCycle(
         dirtySha256: record.dirtySha256,
         completion: record.completion,
         findings: record.findings,
+        advisories: record.advisories ?? [],
         logPath: record.logPath,
         untracked: record.untracked,
         at,

@@ -66,7 +66,7 @@ import type { OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/
 
 // ---------------------------------------------------------------------------
 // generateText arg capture — a TRANSPARENT spy over the real 'ai' module:
-// tests assert what the driver actually PASSED (composed system prompt,
+// tests assert what the driver actually PASSED (system preamble,
 // stopWhen conditions, conversation messages) without signature churn.
 // ---------------------------------------------------------------------------
 
@@ -354,6 +354,27 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 }
 
 describe('ai-sdk driver specifics (mock model)', () => {
+  test.each([0, -1, 2.5, NaN, Infinity])(
+    'rejects invalid maxSteps=%s before provider resolution, with abort precedence',
+    async (maxSteps) => {
+      const provider = vi.fn(() => modelFor({ kind: 'reply', text: 'must never run' }));
+      const driver = new AiSdkDriver({ providers: { mock: provider } });
+      await expect(driver.run(invocation({ budget: { maxSteps } }))).rejects.toMatchObject({
+        name: 'DispatchError',
+        message: `ai-sdk driver: budget.maxSteps must be a positive integer, got ${String(maxSteps)}`,
+      });
+      expect(provider).not.toHaveBeenCalled();
+      const controller = new AbortController();
+      controller.abort();
+      const aborted = await driver.run(invocation({ budget: { maxSteps } }), {
+        signal: controller.signal,
+      });
+      expect(aborted.stopReason).toBe('aborted');
+      expect(aborted.steps).toBe(0);
+      expect(provider).not.toHaveBeenCalled();
+    },
+  );
+
   test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any provider call (PR #238 review round 2)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-preflight-'));
     try {
@@ -729,21 +750,107 @@ describe('ai-sdk driver specifics (mock model)', () => {
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
       });
+      const request = invocation({
+        toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        outputSchema: toOutputSchema(
+          'test/multi-step/v1',
+          z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+        ),
+      });
+      const result = await driver.run(request);
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      expect(result.steps).toBe(DEFAULT_MAX_STEPS); // omitted maxSteps preserves the default
+      // With tools live every step the model answers tool-calls forever and
+      // never emits the object; the tool-free final step is what makes the
+      // structured output reachable — the model is called exactly to the cap.
+      expect(calls).toBe(DEFAULT_MAX_STEPS);
+      calls = 0;
+      const clamped = await driver.run({
+        ...request,
+        budget: { maxSteps: DEFAULT_MAX_STEPS + 1 },
+      });
+      expect(clamped.steps).toBe(DEFAULT_MAX_STEPS);
+      expect(calls).toBe(DEFAULT_MAX_STEPS); // a caller cannot raise the hard SDK ceiling
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a small maxSteps budget is honoured: tools on every step but the last, which is tool-less and answers', async () => {
+    const toolCounts: number[] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        const tools = options.tools?.length ?? 0;
+        toolCounts.push(tools);
+        return tools > 0
+          ? toolCallResult('read', { path: 'absent.txt' })
+          : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-small-steps-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
       const result = await driver.run(
         invocation({
+          budget: { maxSteps: 3 },
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           outputSchema: toOutputSchema(
-            'test/multi-step/v1',
+            'test/small-steps/v1',
             z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
           ),
         }),
       );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
-      // With tools live every step the model answers tool-calls forever and
-      // never emits the object; the tool-free final step is what makes the
-      // structured output reachable — the model is called exactly to the cap.
-      expect(calls).toBe(DEFAULT_MAX_STEPS);
+      expect(result.steps).toBe(3);
+      expect(toolCounts.map((count) => count > 0)).toEqual([true, true, false]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('maxSteps=1 disables tools on the first main step and counts the repair step separately', async () => {
+    const toolCounts: number[] = [];
+    const hookKinds: string[] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        toolCounts.push(options.tools?.length ?? 0);
+        return toolCounts.length === 1
+          ? textResult('not a JSON object')
+          : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-max-steps-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, _contents, context) => {
+          hookKinds.push(context?.kind ?? 'missing');
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { maxSteps: 1 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/max-steps/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.steps).toBe(2); // one main step, plus the one repair step
+      expect(toolCounts).toHaveLength(2);
+      expect(toolCounts[0]).toBe(0); // maxSteps=1 makes the first main step tools-off
+      expect(toolCounts[1]).toBe(0); // repair remains one tool-free step
+      expect(hookKinds).toEqual(['model-request', 'model-request']);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -752,15 +859,16 @@ describe('ai-sdk driver specifics (mock model)', () => {
   test('prompted-schema providers never send response_format: the schema rides the prompt and the reply text is validated (dogfood C, 2026-10-25)', async () => {
     const formats: unknown[] = [];
     const contracts: boolean[] = [];
+    const promptCopies: number[] = [];
     const scans: string[] = [];
     let toolFree = 0;
     const gateway = new MockLanguageModelV4({
       modelId: 'deepseek-v4.1-flash',
       doGenerate: async (options) => {
+        const promptText = JSON.stringify(options.prompt);
         formats.push(options.responseFormat);
-        contracts.push(
-          JSON.stringify(options.prompt).includes('Use the tools to complete the task first'),
-        );
+        contracts.push(promptText.includes('Use the tools to complete the task first'));
+        promptCopies.push(promptText.match(/driver-specific run/g)?.length ?? 0);
         if (options.tools !== undefined && options.tools.length > 0 && formats.length === 1) {
           return toolCallResult('read', { path: 'absent.txt' });
         }
@@ -795,6 +903,17 @@ describe('ai-sdk driver specifics (mock model)', () => {
       // tool step, schema-invalid final text, one tool-free repair
       expect(formats).toHaveLength(3);
       expect(formats.every((format) => format === undefined)).toBe(true);
+      expect(promptCopies).toEqual(formats.map(() => 1));
+      const promptedArgs = lastGenerateTextArgs();
+      expect(promptedArgs.system).toBe(
+        'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.',
+      );
+      expect(promptedArgs.system).not.toContain('driver-specific run');
+      expect(
+        promptedArgs.messages?.filter(
+          (message) => message.role === 'user' && message.content === 'driver-specific run',
+        ),
+      ).toHaveLength(1);
       expect(contracts).toEqual([true, true, false]);
       expect(scans.some((text) => text.includes('Use the tools to complete the task first'))).toBe(
         true,
@@ -802,12 +921,21 @@ describe('ai-sdk driver specifics (mock model)', () => {
       // CONTROL: a native-schema provider still sends the json response format.
       formats.length = 0;
       contracts.length = 0;
+      promptCopies.length = 0;
       scans.length = 0;
       toolFree = 1;
       await driver.run(invocation({ outputSchema: schema }));
       expect(formats[0]).toMatchObject({ type: 'json' });
       expect(contracts.length).toBeGreaterThan(0);
       expect(contracts.every((present) => !present)).toBe(true);
+      expect(promptCopies).toEqual(formats.map(() => 1));
+      const nativeArgs = lastGenerateTextArgs();
+      expect(nativeArgs.system).not.toContain('driver-specific run');
+      expect(
+        nativeArgs.messages?.filter(
+          (message) => message.role === 'user' && message.content === 'driver-specific run',
+        ),
+      ).toHaveLength(1);
       expect(
         scans.every((text) => !text.includes('Use the tools to complete the task first')),
       ).toBe(true);
@@ -838,8 +966,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const preamble = hasTools
         ? 'You are a cq-toolkit worker executing one task. Work inside the provided workspace directory; use the available tools to read, edit, and run. Tool refusals arrive as denial text — adapt instead of retrying the same call.'
         : 'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.';
-      expect(args.system).toBe(`${preamble}\n\nReview the supplied patch.`);
+      expect(args.system).toBe(preamble);
+      expect(args.system).not.toContain('Review the supplied patch.');
       expect(args.tools === undefined).toBe(!hasTools);
+      const userPromptTurns = args.messages?.filter(
+        (message) => message.role === 'user' && message.content === 'Review the supplied patch.',
+      );
+      expect(userPromptTurns).toHaveLength(1);
       const prefix = hasTools
         ? 'Use the tools to complete the task first. When you are done, reply with ONLY one JSON object — no prose, no code fences —'
         : 'Reply with ONLY one JSON object — no prose, no code fences, no tool calls —';
@@ -884,9 +1017,16 @@ describe('ai-sdk driver specifics (mock model)', () => {
         expect(calls).toBe(3);
         const args = lastGenerateTextArgs();
         expect(args.tools).toBeUndefined();
-        expect(args.system).toContain('You have no tools:');
-        expect(args.system).not.toContain('use the available tools');
+        expect(args.system).toBe(
+          'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.',
+        );
+        expect(args.system).not.toContain('driver-specific run');
         const messages = args.messages ?? [];
+        expect(
+          messages.filter(
+            (message) => message.role === 'user' && message.content === 'driver-specific run',
+          ),
+        ).toHaveLength(1);
         expect(messages.filter((message) => message.role === 'tool')).toHaveLength(1);
         const serialized = JSON.stringify(messages);
         expect(serialized.match(/conformance-call-1/g)).toHaveLength(2);
@@ -983,15 +1123,17 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('forced final step restates the tool-free contract (#468)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
+    const hookKinds: string[] = [];
     let calls = 0;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
         const text = JSON.stringify(options.prompt);
+        expect(text.match(/driver-specific run/g)).toHaveLength(1);
         if (options.tools?.length) {
           expect(text).toContain('Use the tools to complete the task first');
-          return toolCallResult('read', { path: 'absent.txt' });
+          return toolCallResult('read', { path: 'evidence.txt' });
         }
         expect(text).toContain('You have no tools:');
         expect(text).not.toContain('Use the tools to complete the task first');
@@ -1000,19 +1142,27 @@ describe('ai-sdk driver specifics (mock model)', () => {
       },
     });
     try {
+      await writeFile(join(scratchDir, 'evidence.txt'), 'safe tool output');
       const driver = new AiSdkDriver({
         providers: { 'opencode-go': () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, _contents, context) => {
+          hookKinds.push(context?.kind ?? 'missing');
+        },
       });
       const result = await driver.run(
         invocation({
           modelSpec: { provider: 'opencode-go', model: 'mock-1' },
+          workspace: { path: scratchDir },
           toolPolicy: { mode: 'allowlist', allow: ['read'] },
           outputSchema: toOutputSchema('test/final/v1', z.object({ answer: z.string() })),
         }),
       );
       expect(result.stopReason).toBe('complete');
       expect(calls).toBe(DEFAULT_MAX_STEPS);
+      expect(hookKinds.filter((kind) => kind === 'model-request')).toHaveLength(DEFAULT_MAX_STEPS);
+      expect(hookKinds).toContain('tool-output');
+      expect(hookKinds.at(-1)).toBe('model-request');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -1120,6 +1270,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       // ADR-0002 §2.3: the uniform miss verdict — output-invalid, rejection
       // recorded in the bounded error text (both the miss and the repair).
       expect(result.errorClass).toBe('output-invalid');
+      expect(result.steps).toBe(DEFAULT_MAX_STEPS + 1); // includes the failed repair step
       expect(
         result.error?.startsWith(
           'ai-sdk driver: structured output invalid after the repair attempt',
@@ -1595,6 +1746,7 @@ describe('ai-sdk driver failure classes (#210)', () => {
       if (outcome.outcome !== 'completed') return; // narrow for TS
       expect(fireGovernedSignal).toBeDefined(); // the rung really was captured
       expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.steps).toBe(1); // the completed tool-call step is retained on abort
       expect(outcome.value.error).toBeUndefined();
       expect(outcome.value.structuredOutput).toBeUndefined();
       // The inner carve-out priced the FULL result usage — the outer catch
@@ -1917,6 +2069,7 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       // reasoning is absent by design (merge-queue 11ea275): it is a subset of
       // outputTokens, so the frozen field stays unset on this lane.
       expect(result.usage).toEqual({ input: 100, output: 12, cacheRead: 15, cacheWrite: 5 });
+      expect(result.steps).toBe(1); // the completed first step is counted before the next request fails
       // cost stays UNFABRICATED on the error path — no figure, no basis
       expect(result.costUSD).toBeUndefined();
       expect(result.costBasis).toBeUndefined();
@@ -1989,10 +2142,10 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
     }
   });
 
-  test('composed system prompt: empty preamble → prompt alone, never past the budget (#18-3)', async () => {
+  test('prompt budget applies to the user turn and leaves the system preamble intact (#18-3)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
-      const prompt = 'p'.repeat(50); // prompt.length === maxSystemPromptChars: no room at all
+      const prompt = 'p'.repeat(50); // prompt.length === maxSystemPromptChars
       const driver = new AiSdkDriver({
         providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
         sessionsDir: join(scratchDir, 'sessions'),
@@ -2001,12 +2154,17 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
           promptBudget: { ...defaultHarnessConfig.promptBudget, maxSystemPromptChars: 50 },
         },
       });
-      await driver.run(invocation({ prompt }));
-      const system = lastGenerateTextArgs().system;
-      expect(system).toBeDefined();
-      expect(system?.length).toBeLessThanOrEqual(50);
-      expect(system?.endsWith(prompt)).toBe(true);
-      expect(system).toBe(prompt); // no room → no preamble → NO separator either
+      await driver.run(invocation({ prompt, toolPolicy: { mode: 'none', allow: [] } }));
+      const args = lastGenerateTextArgs();
+      expect(args.system).toBe(
+        'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.',
+      );
+      expect(
+        args.messages?.filter((message) => message.role === 'user' && message.content === prompt),
+      ).toHaveLength(1);
+      await expect(
+        driver.run(invocation({ prompt: 'p'.repeat(51), toolPolicy: { mode: 'none', allow: [] } })),
+      ).rejects.toThrow(/51 chars, over the harness prompt budget of 50/);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -2040,11 +2198,16 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       });
       callerConfig.promptBudget.maxSystemPromptChars = 5; // post-construction mutation
       await driver.run(invocation({ prompt: 'p' }));
-      const system = lastGenerateTextArgs().system;
-      // Composed under the construction-time 60 (preamble truncated to
-      // 57 + '\n\n' + the 1-char prompt = 60), NOT under the mutated 5
-      // (which would compose the prompt alone) — the clone held.
-      expect(system?.length).toBe(60);
+      const args = lastGenerateTextArgs();
+      expect(args.system).toBe(
+        'You are a cq-toolkit worker executing one task. Work inside the provided workspace directory; use the available tools to read, edit, and run. Tool refusals arrive as denial text — adapt instead of retrying the same call.',
+      );
+      expect(
+        args.messages?.filter((message) => message.role === 'user' && message.content === 'p'),
+      ).toHaveLength(1);
+      await expect(driver.run(invocation({ prompt: 'p'.repeat(61) }))).rejects.toThrow(
+        /61 chars, over the harness prompt budget of 60/,
+      );
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -2087,6 +2250,13 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       });
       const failed = await failDriver.run(invocation({ prompt: 'retry-me-once' }));
       expect(failed.stopReason).toBe('error');
+      const failedArgs = lastGenerateTextArgs();
+      expect(failedArgs.system).not.toContain('retry-me-once');
+      expect(
+        failedArgs.messages?.filter(
+          (message) => message.role === 'user' && message.content === 'retry-me-once',
+        ),
+      ).toHaveLength(1);
       const before = await store.load(failed.sessionId as string);
       expect(before?.messages.at(-1)).toMatchObject({ role: 'user', content: 'retry-me-once' });
 
@@ -2103,6 +2273,7 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       expect(
         messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once'),
       ).toHaveLength(1);
+      expect(lastGenerateTextArgs().system).not.toContain('retry-me-once');
       const after = await store.load(failed.sessionId as string);
       expect(
         after?.messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once'),

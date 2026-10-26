@@ -127,6 +127,8 @@ export interface Budget {
   maxTokens?: number;
   wallClockMs?: number;
   maxAttempts?: number;
+  /** Main-loop completed-step cap; an optional one-step structured-output repair may exceed it. */
+  maxSteps?: number;
   /**
    * Opt-in binding pre-request token ceiling (strict). Absent = the legacy
    * soft `maxTokens` semantics, unchanged — enabling this does not redefine
@@ -296,6 +298,8 @@ export interface WorkerResult {
   model?: string;
   structuredOutput?: unknown;
   usage: Usage;
+  /** Number of completed SDK steps, when the lane can observe them. */
+  steps?: number;
   costUSD?: number;
   /**
    * What `costUSD` is, when it is present (DD-9): `modeled` — an

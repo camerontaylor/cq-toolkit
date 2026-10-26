@@ -8,8 +8,55 @@ export const CQ_CONFIG_FILE = 'cq.json';
 export const CQ_CONFIG_SCHEMA_VERSION = 2;
 
 const PositiveInteger = z.number().int().positive();
+const NonNegativeInteger = z.number().int().nonnegative();
 const SeveritySchema = z.enum(['critical', 'major', 'minor', 'trivial', 'info', 'none']);
 const RoleSchema = z.object({ provider: z.string().min(1), model: z.string().min(1) }).strict();
+
+/** Documented review-session bounds; resolution fills omitted config fields. */
+export const REVIEW_SESSION_DEFAULTS = { maxInputChars: 60_000, maxSteps: 15 } as const;
+
+/** Documented size tiers; a medium threshold may equal its small counterpart, never undercut it. */
+export const REVIEW_SIZE_DEFAULTS = {
+  small: { maxChangedLines: 200, maxFiles: 5 },
+  medium: { maxChangedLines: 800, maxFiles: 20 },
+} as const;
+
+const ReviewSizeTierSchema = z
+  .object({
+    maxChangedLines: NonNegativeInteger.exactOptional(),
+    maxFiles: NonNegativeInteger.exactOptional(),
+  })
+  .strict();
+
+// An omitted tier or field takes its documented default, so a partial override cannot
+// silently invert the tiers (for example a low medium beside the default small threshold).
+const ReviewSizeSchema = z
+  .object({
+    small: ReviewSizeTierSchema.exactOptional(),
+    medium: ReviewSizeTierSchema.exactOptional(),
+  })
+  .strict()
+  .superRefine((size, ctx) => {
+    const small = { ...REVIEW_SIZE_DEFAULTS.small, ...size.small };
+    const medium = { ...REVIEW_SIZE_DEFAULTS.medium, ...size.medium };
+    for (const key of ['maxChangedLines', 'maxFiles'] as const) {
+      if (medium[key] < small[key]) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['medium', key],
+          message: `must not be less than the effective small tier (${small[key]})`,
+        });
+      }
+    }
+  });
+
+const ReviewExclusionSchema = z
+  .object({ pattern: z.string().min(1), assuredBy: z.string().min(1).exactOptional() })
+  .strict();
+
+const ReviewReReviewSchema = z
+  .object({ includePriorFindings: z.boolean().exactOptional() })
+  .strict();
 
 /** Config-only metadata is removed before dispatch to gates.checkRunner. */
 export const CqCheckSchema = CheckRunnerInputObject.extend({
@@ -74,6 +121,16 @@ export const CqConfigSchema = z
           })
           .strict()
           .exactOptional(),
+        session: z
+          .object({
+            maxInputChars: PositiveInteger.exactOptional(),
+            maxSteps: PositiveInteger.exactOptional(),
+          })
+          .strict()
+          .exactOptional(),
+        size: ReviewSizeSchema.exactOptional(),
+        exclude: z.array(ReviewExclusionSchema).exactOptional(),
+        reReview: ReviewReReviewSchema.exactOptional(),
       })
       .strict()
       .exactOptional(),

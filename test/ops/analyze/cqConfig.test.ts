@@ -31,6 +31,16 @@ const full = {
     addressConcurrency: 2,
     denylistPatternsFile: 'denylist.yml',
     bulk: { concurrency: 3, query: 'is:open -is:draft author:fixture' },
+    session: { maxInputChars: 80_000, maxSteps: 20 },
+    size: {
+      small: { maxChangedLines: 100, maxFiles: 3 },
+      medium: { maxChangedLines: 400, maxFiles: 8 },
+    },
+    exclude: [
+      { pattern: 'pnpm-lock.yaml', assuredBy: 'dev.check' },
+      { pattern: 'docs/generated/**' },
+    ],
+    reReview: { includePriorFindings: false },
   },
   escalation: { workerAttempts: 2, rescueBase: 20, rescuePerFixed: 10, rescuePerPackageCap: 10 },
 };
@@ -79,8 +89,14 @@ describe('cq.json v2', () => {
     { ...full, budgets: { unit: { wallMs: 1, extra: 1 } } },
     { ...full, budgets: { step: { wallMs: 1, extra: 1 } } },
     { ...full, review: { extra: 1 } },
+    { ...full, review: { ...full.review, extra: 1 } },
     { ...full, review: { agentSeverityMap: { typo: 'major' } } },
     { ...full, review: { bulk: { extra: 1 } } },
+    { ...full, review: { ...full.review, session: { maxInputChars: 1, extra: 1 } } },
+    { ...full, review: { ...full.review, size: { extra: 1 } } },
+    { ...full, review: { ...full.review, size: { small: { maxFiles: 1, extra: 1 } } } },
+    { ...full, review: { ...full.review, exclude: [{ pattern: 'x', extra: 1 }] } },
+    { ...full, review: { ...full.review, reReview: { includePriorFindings: true, extra: 1 } } },
     { ...full, escalation: { extra: 1 } },
   ])('unknown keys fail at every level (%#)', (config) => {
     expect(CqConfigSchema.safeParse(config).success).toBe(false);
@@ -90,6 +106,46 @@ describe('cq.json v2', () => {
     expect(CqConfigSchema.safeParse({ ...minimal, budgets: { run: { maxTokens } } }).success).toBe(
       false,
     );
+  });
+
+  test.each([
+    { session: { maxInputChars: 0 } },
+    { session: { maxInputChars: -1 } },
+    { session: { maxInputChars: 1.5 } },
+    { session: { maxSteps: 0 } },
+    { session: { maxSteps: 1.5 } },
+    { size: { small: { maxChangedLines: -1 } } },
+    { size: { small: { maxFiles: 1.5 } } },
+    { size: { medium: { maxChangedLines: -1 } } },
+    { exclude: [{ pattern: '' }] },
+    { exclude: [{ pattern: 'x', assuredBy: '' }] },
+    { reReview: { includePriorFindings: 'yes' } },
+  ])('invalid review policy value fails at its field (%#)', (review) => {
+    expect(CqConfigSchema.safeParse({ ...minimal, review }).success).toBe(false);
+  });
+
+  test('review size tiers must be monotonic, including against a defaulted sibling', () => {
+    const parseSize = (size: unknown) => CqConfigSchema.safeParse({ ...minimal, review: { size } });
+    expect(
+      parseSize({
+        small: { maxChangedLines: 200, maxFiles: 5 },
+        medium: { maxChangedLines: 200, maxFiles: 5 },
+      }).success,
+    ).toBe(true);
+    expect(
+      parseSize({ small: { maxChangedLines: 100 }, medium: { maxChangedLines: 50 } }).success,
+    ).toBe(false);
+    expect(parseSize({ small: { maxFiles: 2 }, medium: { maxFiles: 1 } }).success).toBe(false);
+    // Omitted tiers and fields take their documented defaults before comparison.
+    expect(parseSize({ medium: { maxChangedLines: 150 } }).success).toBe(false);
+    expect(parseSize({ small: { maxChangedLines: 900 } }).success).toBe(false);
+    // Raising medium alone is valid; a flag may then raise small above the default medium.
+    expect(parseSize({ medium: { maxChangedLines: 1_000 } }).success).toBe(true);
+    const rejection = parseCqConfig(
+      JSON.stringify({ ...minimal, review: { size: { small: { maxChangedLines: 900 } } } }),
+    );
+    expect(rejection.ok).toBe(false);
+    if (!rejection.ok) expect(rejection.reason).toContain('review.size.medium.maxChangedLines');
   });
 
   test('missing token budget remains absent, and zero rescue allocation is permitted', () => {

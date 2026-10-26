@@ -265,6 +265,26 @@ export function runDriverConformance(
       });
     });
 
+    test('a-v. maxSteps and steps are optional lane-neutral seam fields', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({
+          directive: { kind: 'reply', text: 'ok' },
+          scratchDir,
+        });
+        // A one-step reply is compatible with every lane. This checks that
+        // the additive budget field crosses the seam, without requiring an
+        // unenforced lane to stop at a particular turn count.
+        const result = await driver.run(conformanceInvocation({ budget: { maxSteps: 1 } }));
+        expect(result.stopReason).toBe('complete');
+        if (result.steps !== undefined) {
+          expect(Number.isInteger(result.steps)).toBe(true);
+          expect(result.steps).toBeGreaterThanOrEqual(0);
+        }
+        const roundTrip = WorkerResultSchema.parse(JSON.parse(JSON.stringify(result)));
+        expect(roundTrip.steps).toBe(result.steps);
+      });
+    });
+
     test('a-ii. invocation schema + a non-JSON reply: error/output-invalid, no structuredOutput, usage kept, mirror parses', async () => {
       await withScratch(async (scratchDir) => {
         const schema = z.object({ answer: z.string() }).strict();
