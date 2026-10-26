@@ -269,8 +269,8 @@ function conformanceHarnessConfig(
     workspaceRoot: join(scratchDir, 'workspaces'),
     tools: {
       ...defaultHarnessConfig.tools,
-      run: {
-        ...defaultHarnessConfig.tools.run,
+      bash: {
+        ...defaultHarnessConfig.tools.bash,
         // `echo conformance-marker > note.txt` redirects — the shell-
         // metacharacter guard (fix 1) denies that under a token pattern, so
         // the conformance write rides the documented escape hatch: an
@@ -974,6 +974,84 @@ describe('ai-sdk driver specifics (mock model)', () => {
       }
     },
   );
+
+  test('read upload scanning uses normalized executor provenance for file_path', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-read-provenance-'));
+    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { file_path: 'secret.ts', offset: 1, limit: 1 });
+        }
+        return textResult('read complete');
+      },
+    });
+    const guarded: { text: string; path?: string }[] = [];
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { mode: 'allowlist', allow: ['read'] },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+      expect(guardedSecret).toBeDefined();
+      expect(guardedSecret?.text).toContain('fixture-secret');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('grep upload scanning uses normalized executor provenance for matched files', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
+    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('grep', { pattern: 'fixture-secret' });
+        }
+        return textResult('search complete');
+      },
+    });
+    const guarded: { text: string; path?: string }[] = [];
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { mode: 'allowlist', allow: ['grep'] },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+      expect(guardedSecret).toBeDefined();
+      expect(guardedSecret?.text).toContain('fixture-secret');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
 
   test('forced final step restates the tool-free contract (#468)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
@@ -2029,7 +2107,7 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
     // in strict mode instead of poisoning every later consumer.
     expect(Object.isFrozen(defaultHarnessConfig)).toBe(true);
     expect(Object.isFrozen(defaultHarnessConfig.promptBudget)).toBe(true);
-    expect(Object.isFrozen(defaultHarnessConfig.tools.run)).toBe(true);
+    expect(Object.isFrozen(defaultHarnessConfig.tools.bash)).toBe(true);
     const chars = defaultHarnessConfig.promptBudget.maxSystemPromptChars;
     expect(() => {
       (defaultHarnessConfig.promptBudget as { maxSystemPromptChars: number }).maxSystemPromptChars =
@@ -2803,7 +2881,7 @@ test.each(['initial', 'read', 'run'] as const)(
           ...defaultHarnessConfig,
           tools: {
             ...defaultHarnessConfig.tools,
-            run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['re:^.*$'] },
+            bash: { ...defaultHarnessConfig.tools.bash, commandPatterns: ['re:^.*$'] },
           },
         },
         beforeRequest: async (text) => {

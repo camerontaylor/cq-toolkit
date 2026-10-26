@@ -243,6 +243,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "maximum": 9007199254740991,
           "type": "integer"
         },
+        "searchTools": {
+          "type": "boolean"
+        },
         "session": {
           "additionalProperties": false,
           "properties": {

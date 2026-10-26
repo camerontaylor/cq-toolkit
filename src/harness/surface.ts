@@ -44,7 +44,7 @@ import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { stripMetaSchema } from '../shared/json-schema.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
-import { buildTools } from './tools.js';
+import { buildTools, canonicalToolName, toolAliases } from './tools.js';
 import { harnessRunGate } from '../sandbox/index.js';
 import type { HarnessRunGate } from '../sandbox/index.js';
 import type { ToolkitTool, ToolkitToolName, ToolkitToolResult } from './tools.js';
@@ -92,8 +92,11 @@ export function selectToolNames<N extends string>(
   const mode = policy.mode ?? 'allowlist';
   if (mode === 'none') return [];
   if (mode === 'unrestricted') return [...toolNames];
-  const allowed = new Set(policy.allow);
-  return toolNames.filter((name) => allowed.has(name));
+  // One-release alias: a policy that names the pre-F1 `run` tool selects the
+  // canonical `bash` tool (and vice versa, for a stock surface that still
+  // names it).
+  const allowed = new Set(policy.allow.map((name) => canonicalToolName(name)));
+  return toolNames.filter((name) => allowed.has(canonicalToolName(name)));
 }
 
 /**
@@ -105,10 +108,12 @@ export function selectHarnessSurface(
   harness: HarnessConfig,
   toolPolicy: ToolPolicy,
   gate: HarnessRunGate = harnessRunGate(),
+  sandbox: SandboxLevel = 'none',
 ): ToolkitToolName[] {
   // buildTools touches no filesystem at build time; the workspace argument
-  // only anchors the (lazy) executors, which are discarded here.
-  const names = buildTools(harness, resolve('.'), 'none', gate).map((tool) => tool.name);
+  // only anchors the (lazy) executors, which are discarded here. The sandbox
+  // is still significant: read-only mode exposes the bounded search tools.
+  const names = buildTools(harness, resolve('.'), sandbox, gate).map((tool) => tool.name);
   return selectToolNames(names, toolPolicy);
 }
 
@@ -131,7 +136,7 @@ export const HarnessManifestSchema = z
     sandbox: z.enum(['none', 'workspace-write', 'read-only']),
     /** The selected surface (harness ∩ ToolPolicy), already intersected. */
     tools: z
-      .array(z.enum(['read', 'edit', 'run']))
+      .array(z.enum(['read', 'grep', 'glob', 'edit', 'write', 'bash', 'run']))
       .min(1)
       .refine((tools) => new Set(tools).size === tools.length, {
         message: 'tools must not repeat a name',
@@ -169,7 +174,12 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
   // The gate decides the surface the SAME way execution will: a withheld run
   // tool is absent from both, so a manifest never names a tool the surface
   // cannot serve.
-  const tools = selectHarnessSurface(inputs.harness, inputs.toolPolicy, harnessRunGate());
+  const tools = selectHarnessSurface(
+    inputs.harness,
+    inputs.toolPolicy,
+    harnessRunGate(),
+    inputs.sandbox,
+  );
   if (tools.length === 0) return undefined;
   const workspace = await realpath(inputs.workspace);
   if (!(await stat(workspace)).isDirectory()) {
@@ -261,30 +271,40 @@ export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
   const gate: HarnessRunGate = { ...harnessRunGate(), declaredEnvNames: manifest.envNames };
   const built = buildTools(manifest.harness, manifest.workspace, manifest.sandbox, gate);
   const byName = new Map(built.map((tool) => [tool.name, tool] as const));
-  const missing = manifest.tools.filter((name) => !byName.has(name));
+  // Normalise one-release aliases (`run` → `bash`) and de-duplicate: a
+  // legacy manifest may name either spelling, and both name one served tool.
+  const requested = [...new Set(manifest.tools.map((name) => canonicalToolName(name)))];
+  const missing = requested.filter((name) => !byName.has(name as ToolkitToolName));
   if (missing.length > 0) {
     throw new Error(
       `harness surface: manifest names tools the harness config does not provide: ${missing.join(', ')}`,
     );
   }
-  const served = manifest.tools.map((name) => byName.get(name) as ToolkitTool);
+  const served = requested.map((name) => byName.get(name as ToolkitToolName) as ToolkitTool);
   const tools: HarnessSurfaceTool[] = served.map((tool) => ({
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
     inputJsonSchema: stripMetaSchema(z.toJSONSchema(tool.inputSchema)) as Record<string, unknown>,
   }));
-  const servedNames = new Set<string>(manifest.tools);
+  /** Every accepted spelling (canonical + one-release aliases) → canonical. */
+  const accepted = new Map<string, ToolkitToolName>();
+  for (const name of requested) {
+    const canonical = name as ToolkitToolName;
+    accepted.set(canonical, canonical);
+    for (const alias of toolAliases(canonical)) accepted.set(alias, canonical);
+  }
   let queue: Promise<unknown> = Promise.resolve();
   return {
     manifest,
     tools,
     has(name: string): name is ToolkitToolName {
-      return servedNames.has(name);
+      return accepted.has(name);
     },
     call(name, args, opts) {
-      const tool = byName.get(name as ToolkitToolName);
-      if (tool === undefined || !servedNames.has(name)) {
+      const canonical = accepted.get(name);
+      const tool = canonical === undefined ? undefined : byName.get(canonical);
+      if (tool === undefined || canonical === undefined) {
         return Promise.reject(new Error(`harness surface: '${name}' is not a served tool`));
       }
       const run = queue.then(async (): Promise<HarnessCallOutcome> => {
@@ -323,12 +343,22 @@ export const HARNESS_DENIAL_PREFIXES: readonly string[] = Object.freeze([
   'path escape: ',
   'path not allowed: ',
   'path not allowed by harness config allowlist: ',
+  'path not found: ',
+  'search failed: ',
+  'search denied: ',
+  'grep failed: ',
+  'grep denied: ',
+  'read refused: ',
   'command not allowed by harness config allowlist: ',
   'command allowlist: ',
   'file not found: ',
   'read failed: ',
   'edit refused: ',
   'edit failed: ',
+  'write refused: ',
+  'write failed: ',
+  'bash failed: ',
+  // Pre-F1 prefix, retained for one release (legacy journals/records).
   'run failed: ',
   'cancelled: ',
 ]);

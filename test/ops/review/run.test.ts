@@ -820,8 +820,8 @@ describe('review.run', () => {
           reviewer: 'agent:reviewer',
           completion: expect.objectContaining({
             kind: 'blocked',
-            reason: expect.stringContaining('agent review budget exhausted'),
-          }),
+            reason: expect.stringContaining('agent review budget exhausted') as unknown,
+          }) as unknown,
         }),
       );
     } finally {
@@ -978,8 +978,10 @@ describe('review.run', () => {
         kind: 'cycle',
         completion: expect.objectContaining({
           kind: 'blocked',
-          reason: expect.stringContaining('agent review returned invalid structured output'),
-        }),
+          reason: expect.stringContaining(
+            'agent review returned invalid structured output',
+          ) as unknown,
+        }) as unknown,
         base: state.base,
         head: state.head,
         dirtySha256: state.dirtySha256,
@@ -1393,7 +1395,7 @@ it('sends commit intent and the numstat file list through the scanned session pr
     expect(scanned).toContainEqual(
       expect.objectContaining({
         component: 'review-prompt',
-        text: expect.stringContaining('INTENT_MARKER'),
+        text: expect.stringContaining('INTENT_MARKER') as unknown,
       }),
     );
   } finally {
@@ -1502,10 +1504,10 @@ it('threads review.size and review.exclude, persisting advisories outside findin
           state: 'excluded',
           exclusion: expect.objectContaining({
             rule: '**',
-            limitation: expect.any(String),
-          }),
+            limitation: expect.any(String) as unknown,
+          }) as unknown,
         }),
-      ]),
+      ]) as unknown,
     });
     expect(drivers.resolve).not.toHaveBeenCalled();
     const cycle = effects

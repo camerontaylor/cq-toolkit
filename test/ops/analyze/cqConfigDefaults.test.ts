@@ -32,6 +32,7 @@ describe('cq.json effective policy', () => {
       agentSeverityMap: { high: 'major', medium: 'minor' },
       reviewers: ['coderabbit', 'agent'],
       addressConcurrency: 2,
+      searchTools: true,
       bulk: { concurrency: 3 },
       session: { maxInputChars: 60_000, maxSteps: 15 },
       size: {
@@ -57,6 +58,7 @@ describe('cq.json effective policy', () => {
       budgets: { run: { maxTokens: 10, wallMs: 20 }, unit: { wallMs: 30 } },
       review: {
         rounds: 5,
+        searchTools: false,
         blockingSeverities: ['major'],
         agentSeverityMap: { high: 'critical', low: 'info' },
         denylistPatternsFile: 'patterns.yml',
@@ -95,6 +97,7 @@ describe('cq.json effective policy', () => {
       agentSeverityMap: { high: 'critical', medium: 'trivial', low: 'info' },
       reviewers: ['coderabbit', 'agent'],
       addressConcurrency: 2,
+      searchTools: false,
       denylistPatternsFile: 'patterns.yml',
       bulk: { query: 'is:open', concurrency: 8 },
       session: { maxInputChars: 90_000, maxSteps: 30 },

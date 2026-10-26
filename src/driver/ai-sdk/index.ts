@@ -210,12 +210,11 @@ import type {
   LanguageModelUsage,
   ModelMessage,
   StopCondition,
+  Tool,
   ToolSet,
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
-import { relative, resolve } from 'node:path';
-import { realpath } from 'node:fs/promises';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -223,10 +222,10 @@ import { createDeepSeek } from '@ai-sdk/deepseek';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { buildTools } from '../../harness/tools.js';
+import { buildTools, canonicalToolName } from '../../harness/tools.js';
 import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
-import type { ToolkitTool } from '../../harness/tools.js';
+import type { ToolkitTool, ToolExecuteOptions } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
@@ -594,12 +593,21 @@ export class AiSdkDriver implements Driver {
     const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
-      toolSet[harnessTool.name] = tool({
+      const descriptor = {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
-        execute: async (input: unknown): Promise<string> =>
-          runTool(harnessTool, input, store, record, denials, guard),
-      });
+        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> =>
+          runTool(harnessTool, input, store, record, denials, guard, {
+            signal: options.abortSignal,
+          }),
+      };
+      toolSet[harnessTool.name] = tool(descriptor as Tool);
+      // One-release aliases (the pre-F1 `run` name for `bash`) are registered
+      // under their own names so a model or prompt that still calls them
+      // reaches the canonical executor and denial vocabulary.
+      for (const alias of ('aliases' in harnessTool ? harnessTool.aliases : undefined) ?? []) {
+        toolSet[alias] = tool(descriptor as Tool);
+      }
     }
 
     // --- Timer-free budget + the tool-loop bound: stopWhen is ALWAYS ------
@@ -1654,8 +1662,9 @@ export function selectTools(tools: readonly ToolkitTool[], policy: ToolPolicy): 
   const mode = policy.mode ?? 'allowlist';
   if (mode === 'none') return [];
   if (mode === 'unrestricted') return [...tools];
-  const allowed = new Set(policy.allow);
-  return tools.filter((t) => allowed.has(t.name));
+  // One-release alias: `run` in a ToolPolicy selects the canonical `bash`.
+  const allowed = new Set(policy.allow.map((name) => canonicalToolName(name)));
+  return tools.filter((t) => allowed.has(canonicalToolName(t.name)));
 }
 
 /**
@@ -1670,22 +1679,18 @@ async function runTool(
   record: SessionRecord,
   denials: ToolDenial[],
   guard?: AiSdkDriverOptions['beforeRequest'],
+  options?: ToolExecuteOptions,
 ): Promise<string> {
-  const result = await harnessTool.execute(input);
+  const result = await harnessTool.execute(input, options);
   if (guard !== undefined && result.ok) {
     const contents: { text: string; path?: string }[] = [{ text: result.output }];
-    if (harnessTool.name === 'read') {
-      const path = (input as { path?: unknown } | null)?.path;
-      if (typeof path !== 'string' || record.workspace === undefined)
-        throw new Error('read upload lacks source provenance');
-      const requested = resolve(record.workspace, path);
-      const actual = await realpath(requested);
-      for (const source of new Set([requested, actual]))
-        contents.push({
-          text: result.output,
-          path: relative(record.workspace, source).replaceAll('\\', '/'),
-        });
+    if (
+      harnessTool.name === 'read' &&
+      (record.workspace === undefined || (result.sourceContents?.length ?? 0) === 0)
+    ) {
+      throw new Error('read upload lacks source provenance');
     }
+    if (result.sourceContents !== undefined) contents.push(...result.sourceContents);
     await guard(result.output, contents, { kind: 'tool-output' });
   }
   await store.appendMessage(record.sessionId, {

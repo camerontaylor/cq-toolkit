@@ -116,6 +116,7 @@ import {
 import type { ExpectedInitSurface, HarnessSurface } from '../../harness/surface.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import { toolAliases } from '../../harness/tools.js';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
@@ -376,35 +377,40 @@ export class ClaudeCodeSdkTransport implements Driver {
     // tools, plus the SDK's structured-output tool when outputFormat is set.
     observation.expectedSurface = {
       harness: surface !== undefined,
-      tools: allowed,
+      // The SDK lane registers the one-release aliases as real tools, so its
+      // init surface lists them; the CLI lane's MCP server advertises only
+      // canonical names and keeps the unexpanded list.
+      tools: allowed.flatMap((name) => [name, ...toolAliases(name)]),
       internalTools: outputSchema === undefined ? [] : [STRUCTURED_OUTPUT_TOOL],
     };
 
     // --- The one SDK call: options assembly. ------------------------------
     const sandbox = sandboxOption(sandboxPolicy.level);
-    const sdkTools = (surface?.tools ?? []).map((harnessTool) =>
-      sdk.tool(
-        harnessTool.name,
-        harnessTool.description,
-        // The zod raw shape — the SDK's declared-input form. Deliberately the
-        // NON-strict shape (what the model sees as the tool's schema): the
-        // SDK pre-validates it, so a type-invalid call never reaches the core
-        // and extra keys are stripped — the parity test's one scoped
-        // transport difference (nothing executes either way).
-        harnessTool.inputSchema.shape,
-        (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
-          runHarnessTool(
-            surface as HarnessSurface,
-            harnessTool.name,
-            args,
-            store,
-            record,
-            observation.denials,
-            // Cancellation reaches the executor: the governed signal (I8 —
-            // forwarded, never decided here) and the SDK's per-call signal,
-            // whichever fires first; `run` then kills its process group.
-            callSignal(signal, extra),
-          ),
+    const sdkTools = (surface?.tools ?? []).flatMap((harnessTool) =>
+      [harnessTool.name, ...toolAliases(harnessTool.name)].map((name) =>
+        sdk.tool(
+          name,
+          harnessTool.description,
+          // The zod raw shape — the SDK's declared-input form. Deliberately
+          // the NON-strict shape (what the model sees as the tool's schema):
+          // the SDK pre-validates it, so a type-invalid call never reaches the
+          // core and extra keys are stripped — the parity test's one scoped
+          // transport difference (nothing executes either way).
+          harnessTool.inputSchema.shape,
+          (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
+            runHarnessTool(
+              surface as HarnessSurface,
+              harnessTool.name,
+              args,
+              store,
+              record,
+              observation.denials,
+              // Cancellation reaches the executor: the governed signal (I8 —
+              // forwarded, never decided here) and the SDK's per-call signal,
+              // whichever fires first; `run` then kills its process group.
+              callSignal(signal, extra),
+            ),
+        ),
       ),
     );
     // The SDK query's option object — named apart from the seam's
@@ -420,7 +426,7 @@ export class ClaudeCodeSdkTransport implements Driver {
       // Built-ins OFF — the only tools the agent can touch are the ones the
       // frozen policy pre-approved below (header's governed-surface rule).
       tools: [],
-      allowedTools: allowed.map(qualifiedToolName),
+      allowedTools: allowed.flatMap((name) => [name, ...toolAliases(name)]).map(qualifiedToolName),
       // Headless posture: un-pre-approved tools are auto-DENIED, never
       // prompted; the denials map into WorkerResult.denials post-settle.
       permissionMode: 'default',

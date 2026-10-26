@@ -440,6 +440,7 @@ export function makeReviewRun(
                     scope: reviewedScope,
                     intent: context.intent,
                     fileList: context.fileList,
+                    searchTools: policy.review.searchTools,
                     session: policy.review.session,
                     size: policy.review.size,
                     exclude: policy.review.exclude,

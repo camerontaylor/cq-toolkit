@@ -214,7 +214,10 @@ describe('fixReviewItem happy path', () => {
     expect('truncated' in value).toBe(false);
     expect(invocations).toHaveLength(1);
     const invocation = invocations[0] as OpInvocation;
-    expect(invocation.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read', 'edit'] });
+    expect(invocation.toolPolicy).toEqual({
+      mode: 'allowlist',
+      allow: ['read', 'edit', 'write'],
+    });
     expect(invocation.sandboxPolicy).toEqual({ level: 'workspace-write' });
     expect(invocation.modelSpec).toEqual({ model: 'test-model', provider: 'test-provider' });
     expect(invocation.budget).toEqual({ maxTokens: 12_345 });
@@ -265,7 +268,7 @@ describe('fixReviewItem factory request', () => {
   test('harness passthrough: the input harness rides the request; absent → defaultHarnessConfig', async () => {
     const { op, requests } = scriptedOp([completeWorker(UNCHANGED), completeWorker(UNCHANGED)]);
     const custom = harnessWith((h) => {
-      h.tools.run.commandPatterns = ['git *'];
+      h.tools.bash.commandPatterns = ['git *'];
     });
     await op(baseInput({ harness: custom }));
     await op(baseInput());
@@ -289,15 +292,15 @@ describe('fixReviewItem factory request', () => {
 // ---------------------------------------------------------------------------
 
 describe('fixReviewItem tool allowlist', () => {
-  test('run enabled with non-empty commandPatterns → allow includes run', async () => {
+  test('bash enabled with non-empty commandPatterns → allow includes bash', async () => {
     const harness = harnessWith((h) => {
-      h.tools.run.commandPatterns = ['npm test'];
+      h.tools.bash.commandPatterns = ['npm test'];
     });
     const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
     await op(baseInput({ harness }));
     expect(invocations[0]?.toolPolicy).toEqual({
       mode: 'allowlist',
-      allow: ['read', 'edit', 'run'],
+      allow: ['read', 'edit', 'write', 'bash'],
     });
   });
 
@@ -307,17 +310,20 @@ describe('fixReviewItem tool allowlist', () => {
     });
     const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
     await op(baseInput({ harness }));
-    expect(invocations[0]?.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read'] });
+    expect(invocations[0]?.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read', 'write'] });
   });
 
-  test('run enabled but commandPatterns empty (the deny-all default) → run stays out', async () => {
+  test('bash enabled but commandPatterns empty (the deny-all default) → bash stays out', async () => {
     const harness = harnessWith((h) => {
-      h.tools.run.enabled = true;
-      h.tools.run.commandPatterns = [];
+      h.tools.bash.enabled = true;
+      h.tools.bash.commandPatterns = [];
     });
     const { op, invocations } = scriptedOp([completeWorker(UNCHANGED)]);
     await op(baseInput({ harness }));
-    expect(invocations[0]?.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read', 'edit'] });
+    expect(invocations[0]?.toolPolicy).toEqual({
+      mode: 'allowlist',
+      allow: ['read', 'edit', 'write'],
+    });
   });
 });
 
@@ -950,7 +956,7 @@ describe('FixReviewItemOutputSchema (Codex 2j)', () => {
 
 describe('reviewFixHarness (round-3 item 9)', () => {
   test('narrowed to exactly the git commit plumbing, deep-frozen, schema-parsed', () => {
-    expect(reviewFixHarness.tools.run.commandPatterns).toEqual([
+    expect(reviewFixHarness.tools.bash.commandPatterns).toEqual([
       'git add',
       'git commit',
       'git status',
@@ -959,7 +965,7 @@ describe('reviewFixHarness (round-3 item 9)', () => {
       'git rev-parse',
     ]);
     expect(Object.isFrozen(reviewFixHarness)).toBe(true);
-    expect(Object.isFrozen(reviewFixHarness.tools.run)).toBe(true);
+    expect(Object.isFrozen(reviewFixHarness.tools.bash)).toBe(true);
     // Schema-parsed: reparsing the shipped value is a no-op.
     expect(reviewFixHarness).toEqual(reviewFixHarness);
   });

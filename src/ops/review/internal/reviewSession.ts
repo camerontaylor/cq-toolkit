@@ -141,7 +141,8 @@ export async function runReviewSession(
       tools: {
         ...defaultHarnessConfig.tools,
         edit: { ...defaultHarnessConfig.tools.edit, enabled: false },
-        run: { ...defaultHarnessConfig.tools.run, enabled: false },
+        bash: { ...defaultHarnessConfig.tools.bash, enabled: false },
+        write: { ...defaultHarnessConfig.tools.write, enabled: false },
       },
       promptBudget: {
         ...defaultHarnessConfig.promptBudget,

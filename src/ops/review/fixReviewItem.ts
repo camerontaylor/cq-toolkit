@@ -9,7 +9,7 @@
 //
 // Invariants honored here:
 //   - I1 (vendor-neutral): prompts and the output contract speak only our
-//     vocabulary — repo/pr, worktree, tool names read/edit/run. No vendor
+//     vocabulary — repo/pr, worktree, tool names read/edit/write/bash. No vendor
 //     CLI or SDK words anywhere in composed text.
 //   - R4 (harness policy is DATA): the tool allowlist and the prompt budget
 //     are read from the input's HarnessConfig — never hardcoded. The
@@ -22,9 +22,9 @@
 //     the worker is pointed at.
 //
 // THE CONSERVATIVE TOOL MAPPING (HarnessConfig → ToolPolicy): mode
-// 'allowlist'; `allow` = 'read'/'edit' when each tool's `enabled` is true,
-// plus 'run' ONLY when run.enabled AND commandPatterns is non-empty — the
-// deny-all default (enabled with zero patterns) stays OUT of the allow
+// 'allowlist'; `allow` = 'read'/'edit'/'write' when each tool's `enabled` is
+// true, plus 'bash' ONLY when bash.enabled AND commandPatterns is non-empty
+// — the deny-all default (enabled with zero patterns) stays OUT of the allow
 // list, because a tool that can never be exercised must not be advertised
 // to the worker. sandboxPolicy is always 'workspace-write' (the harness
 // tool surface is designed to pair with it — see harness/config.ts).
@@ -375,8 +375,8 @@ export const reviewFixHarness: HarnessConfig = deepFreeze(
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: {
-        ...defaultHarnessConfig.tools.run,
+      bash: {
+        ...defaultHarnessConfig.tools.bash,
         commandPatterns: [
           'git add',
           'git commit',
@@ -413,8 +413,8 @@ const FENCE_END = '----- UNTRUSTED REVIEW CONTENT END -----';
 
 /**
  * The conservative HarnessConfig → ToolPolicy mapping (module doc). Order
- * is fixed read → edit → run so the allow list is deterministic for tests
- * and narration alike.
+ * is fixed read → edit → write → bash so the allow list is deterministic
+ * for tests and narration alike.
  */
 const toolPolicyFor = (harness: HarnessConfig): ToolPolicy => {
   const allow: string[] = [];
@@ -424,11 +424,14 @@ const toolPolicyFor = (harness: HarnessConfig): ToolPolicy => {
   if (harness.tools.edit.enabled) {
     allow.push('edit');
   }
-  // 'run' joins ONLY when the allowlist is non-empty: the deny-all default
-  // (enabled, zero commandPatterns) denies every run at the harness, so
+  if (harness.tools.write.enabled) {
+    allow.push('write');
+  }
+  // 'bash' joins ONLY when the allowlist is non-empty: the deny-all default
+  // (enabled, zero commandPatterns) denies every command at the harness, so
   // advertising it to the worker would promise a surface that never works.
-  if (harness.tools.run.enabled && harness.tools.run.commandPatterns.length > 0) {
-    allow.push('run');
+  if (harness.tools.bash.enabled && harness.tools.bash.commandPatterns.length > 0) {
+    allow.push('bash');
   }
   return { mode: 'allowlist', allow };
 };

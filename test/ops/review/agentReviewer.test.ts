@@ -63,7 +63,7 @@ function fakeDrivers(options: FakeDriverOptions = {}) {
   const requests: DriverRequest[] = [];
   const invocations: OpInvocation[] = [];
   const signals: (AbortSignal | undefined)[] = [];
-  const run: Driver['run'] = vi.fn(async (invocation, runOptions) => {
+  const run: Driver['run'] = vi.fn(async (invocation: OpInvocation, runOptions?: RunOptions) => {
     invocations.push(invocation);
     signals.push(runOptions?.signal);
     const request = requests.at(-1)!;
@@ -119,7 +119,12 @@ describe('runAgentReviewer v3 session engine', () => {
               end: smallComponent.text.length,
             },
           ],
-          requests: [{ serializedChars: expect.any(Number), decodedChars: expect.any(Number) }],
+          requests: [
+            {
+              serializedChars: expect.any(Number) as unknown,
+              decodedChars: expect.any(Number) as unknown,
+            },
+          ],
         },
       ],
     });
@@ -137,6 +142,19 @@ describe('runAgentReviewer v3 session engine', () => {
     expect(invocation.prompt).not.toContain('receipt:');
     expect(fake.requests[0]?.role).toBe('reviewer');
     expect(fake.requests[0]?.beforeRequest).toBeTypeOf('function');
+  });
+
+  it('keeps read available when search is disabled and disables mutation descriptors', async () => {
+    const fake = fakeDrivers();
+    const result = await runAgentReviewer(fake.drivers, reviewerInput({ searchTools: false }));
+    expect(result.status).toBe('ok');
+    expect(fake.invocations[0]?.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read'] });
+    expect(fake.requests[0]?.harness?.tools).toMatchObject({
+      read: { enabled: true },
+      edit: { enabled: false },
+      write: { enabled: false },
+      bash: { enabled: false },
+    });
   });
 
   it('maps unmapped low severity to minor and omits missing location fields', async () => {
@@ -175,7 +193,9 @@ describe('runAgentReviewer v3 session engine', () => {
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining('agent review requires the ai-sdk pre-upload scan lane'),
+      reason: expect.stringContaining(
+        'agent review requires the ai-sdk pre-upload scan lane',
+      ) as unknown,
     });
     expect(fake.run).not.toHaveBeenCalled();
   });
@@ -188,7 +208,7 @@ describe('runAgentReviewer v3 session engine', () => {
     };
     expect(await runAgentReviewer(noRole, reviewerInput())).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining('agent review did not run: no reviewer role'),
+      reason: expect.stringContaining('agent review did not run: no reviewer role') as unknown,
     });
 
     const detail =
@@ -197,7 +217,9 @@ describe('runAgentReviewer v3 session engine', () => {
     const failed = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(failed).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining(`agent review did not complete (error): ${detail}`),
+      reason: expect.stringContaining(
+        `agent review did not complete (error): ${detail}`,
+      ) as unknown,
       report: {
         coverage: {
           pieces: [{ state: 'delivered' }],
@@ -235,7 +257,7 @@ describe('runAgentReviewer v3 session engine', () => {
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining('agent review returned invalid structured output'),
+      reason: expect.stringContaining('agent review returned invalid structured output') as unknown,
       report: {
         coverage: {
           pieces: [{ state: 'delivered' }],
@@ -250,7 +272,9 @@ describe('runAgentReviewer v3 session engine', () => {
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining('agent review completed without scanned content delivery'),
+      reason: expect.stringContaining(
+        'agent review completed without scanned content delivery',
+      ) as unknown,
       report: {
         coverage: {
           pieces: [{ state: 'planned' }],
@@ -265,7 +289,9 @@ describe('runAgentReviewer v3 session engine', () => {
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining('agent review completed without scanned content delivery'),
+      reason: expect.stringContaining(
+        'agent review completed without scanned content delivery',
+      ) as unknown,
       report: { coverage: { pieces: [{ state: 'planned' }] } },
     });
   });

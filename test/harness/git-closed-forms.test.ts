@@ -24,13 +24,13 @@ function runConfig(commandPatterns: string[]): HarnessConfig {
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs: 5_000, maxOutputChars: 20_000 },
+      bash: { enabled: true, commandPatterns, timeoutMs: 5_000, maxOutputChars: 20_000 },
     },
   };
 }
 
 function runTool(config: HarnessConfig, workspace: string): ToolkitTool {
-  const tool = buildTools(config, workspace).find((candidate) => candidate.name === 'run');
+  const tool = buildTools(config, workspace).find((candidate) => candidate.name === 'bash');
   if (tool === undefined) throw new Error('fixture requires enabled run tool');
   return tool;
 }

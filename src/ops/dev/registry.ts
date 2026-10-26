@@ -335,6 +335,7 @@ export const registry: OpRegistryEntry[] = [
                   maxTokens: policy.budgets.run.maxTokens!,
                   wallMs: policy.budgets.run.wallMs,
                   severityMap: policy.review.agentSeverityMap,
+                  searchTools: policy.review.searchTools,
                   session: policy.review.session,
                   size: policy.review.size,
                   exclude: policy.review.exclude,

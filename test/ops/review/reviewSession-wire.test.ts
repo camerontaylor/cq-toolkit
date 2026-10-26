@@ -258,10 +258,13 @@ describe('review session wire hook', () => {
       'tool-output',
       'model-request',
     ]);
-    expect(calls[1]!.text).toBe(calls[0]!.text);
-    expect(calls[1]!.text).toBe(firstSerialized);
+    expect(calls[1]!.text).not.toBe(calls[0]!.text);
+    expect(calls[1]!.text.startsWith('--- src/a.ts ---\n')).toBe(true);
+    expect(calls[1]!.text).toContain('     1: ');
+    expect(calls[1]!.text).toContain(calls[0]!.text.slice(0, 1_000));
+    expect(calls[1]!.text).toContain('… [line truncated at 2000 chars]');
+    expect(firstSerialized).toBe(calls[0]!.text);
     expect(calls[1]!.contents.some((content) => content.text === plan.prompt)).toBe(false);
-    expectUserPrompt(calls[1]!.text, plan.prompt);
     expect(scanCalls).toHaveLength(3);
     expect(
       scanCalls[1]!.some(
@@ -274,6 +277,54 @@ describe('review session wire hook', () => {
     expect(evidence.denials).toBe(0);
     expect(typeof evidence.driverSessionId).toBe('string');
     expect(evidence.driverSessionId).not.toBe('');
+  });
+
+  it('a fake tool-output hook with the exact request and prompt is scanned but blocked', async () => {
+    const root = await scratch();
+    const scanCalls: ScanComponentInput[][] = [];
+    const plan = planFor();
+    const evidence = evidenceFor();
+    const exactRequest = serializeRequestForScan({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: plan.prompt }] }],
+    });
+    expectUserPrompt(exactRequest, plan.prompt);
+    const worker: WorkerResult = {
+      stopReason: 'complete',
+      structuredOutput: { findings: [] },
+      usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+      steps: 1,
+      denials: [],
+    };
+    // Clearly fake: the only hook is a tool-output guard carrying the exact
+    // serialized request and the exact decoded prompt. No model send exists.
+    const factory: DriverFactory = {
+      resolve: (request) => ({
+        lane: 'ai-sdk',
+        modelSpec: request.modelSpec,
+        driver: {
+          run: async () => {
+            await request.beforeRequest?.(exactRequest, [{ text: plan.prompt }], {
+              kind: 'tool-output',
+            });
+            return worker;
+          },
+        },
+      }),
+    };
+    const result = await runReviewSession(factory, {
+      ...runInput(root, plan, evidence),
+      scanSecrets: recordingScanner(scanCalls),
+      onUsage: () => undefined,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('without scanned content delivery');
+    expect(scanCalls).toHaveLength(1);
+    expect(scanCalls[0]!.some((component) => component.text === exactRequest)).toBe(true);
+    expect(scanCalls[0]!.some((component) => component.text === plan.prompt)).toBe(true);
+    expect(evidence.requests).toHaveLength(0);
+    expect(evidence.deliveries).toHaveLength(0);
+    expect(evidence.status).toBe('error');
   });
 
   it('records a recoverable denial and truncation without poisoning coverage', async () => {

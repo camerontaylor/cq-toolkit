@@ -19,7 +19,7 @@ function config(timeoutMs = 10_000, maxOutputChars?: number): HarnessConfig {
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: {
+      bash: {
         enabled: true,
         commandPatterns: ['git diff', 'git log', 'env'],
         timeoutMs,
@@ -79,7 +79,7 @@ function run(workspace: string, harness = config(), envNames: readonly string[] 
   const tool = buildTools(harness, workspace, 'workspace-write', {
     ...harnessRunGate(),
     declaredEnvNames: envNames,
-  }).find((candidate) => candidate.name === 'run');
+  }).find((candidate) => candidate.name === 'bash');
   if (tool === undefined) throw new Error('run fixture missing tool');
   return tool;
 }

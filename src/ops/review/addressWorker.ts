@@ -385,7 +385,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             enabled: editable,
             pathPatterns: editable ? [finding.file!] : [],
           },
-          run: { ...defaultHarnessConfig.tools.run, enabled: false, commandPatterns: [] },
+          write: { ...defaultHarnessConfig.tools.write, enabled: false, pathPatterns: [] },
+          bash: { ...defaultHarnessConfig.tools.bash, enabled: false, commandPatterns: [] },
         },
       },
     });
@@ -415,7 +416,15 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           prompt,
           modelSpec: resolved.modelSpec,
           workspace: { path: workspace },
-          toolPolicy: { mode: 'allowlist', allow: editable ? ['read', 'edit'] : ['read'] },
+          toolPolicy: {
+            mode: 'allowlist',
+            allow: editable
+              ? ['read', 'edit']
+              : [
+                  'read',
+                  ...(tier === 'reviewer' && policy.review.searchTools ? ['grep', 'glob'] : []),
+                ],
+          },
           sandboxPolicy: { level: editable ? 'workspace-write' : 'read-only' },
           budget: {
             maxTokens: deps.remainingTokens(),

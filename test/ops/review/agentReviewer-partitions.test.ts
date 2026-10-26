@@ -133,7 +133,12 @@ it('uses one tool-aware read-only session with exact original-component delivery
             sha256: createHash('sha256').update(small.text).digest('hex'),
           },
         ],
-        requests: [{ serializedChars: expect.any(Number), decodedChars: expect.any(Number) }],
+        requests: [
+          {
+            serializedChars: expect.any(Number) as unknown,
+            decodedChars: expect.any(Number) as unknown,
+          },
+        ],
       },
     ],
   });
@@ -227,7 +232,9 @@ it('blocks a valid JSON answer when its scanned request was not an actual model 
     const outcome = await runAgentReviewer(fake.drivers, baseInput());
     expect(outcome).toMatchObject({
       status: 'needs-human',
-      reason: expect.stringContaining('agent review completed without scanned content delivery'),
+      reason: expect.stringContaining(
+        'agent review completed without scanned content delivery',
+      ) as unknown,
       report: { coverage: { pieces: [{ state: 'planned' }], sessions: [{ deliveries: [] }] } },
     });
   }
@@ -285,14 +292,14 @@ it('does not count a tool-output JSON spoof or a wrong prompt as delivery', asyn
   const spoofed = await runAgentReviewer(spoof.drivers, baseInput());
   expect(spoofed).toMatchObject({
     status: 'needs-human',
-    reason: expect.stringContaining('without scanned content delivery'),
+    reason: expect.stringContaining('without scanned content delivery') as unknown,
   });
 
   const wrong = fakeDrivers({ hookPrompt: 'not the planned review prompt' });
   const wrongPrompt = await runAgentReviewer(wrong.drivers, baseInput());
   expect(wrongPrompt).toMatchObject({
     status: 'needs-human',
-    reason: expect.stringContaining('without scanned content delivery'),
+    reason: expect.stringContaining('without scanned content delivery') as unknown,
   });
 });
 
@@ -432,7 +439,10 @@ it('returns complete zero-session coverage for excluded content and distinguishe
   expect(outcome.value.coverage.sessions).toEqual([]);
   expect(outcome.value.coverage.pieces).toMatchObject([
     { state: 'excluded', exclusion: { assuredBy: 'generated from reviewed schema' } },
-    { state: 'excluded', exclusion: { limitation: expect.stringContaining('no assuredBy check') } },
+    {
+      state: 'excluded',
+      exclusion: { limitation: expect.stringContaining('no assuredBy check') as unknown },
+    },
   ]);
   expect(outcome.value.advisories).toContain(
     'agent review covered no content: all components excluded',
@@ -449,7 +459,7 @@ it('refuses duplicate component identities rather than collapsing original cover
   );
   expect(outcome).toMatchObject({
     status: 'needs-human',
-    reason: expect.stringContaining('component identities must be unique'),
+    reason: expect.stringContaining('component identities must be unique') as unknown,
   });
   expect(fake.calls()).toBe(0);
 });
