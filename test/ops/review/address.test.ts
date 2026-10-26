@@ -142,6 +142,8 @@ describe('review.address composition', () => {
       });
       expect(reportOf(result).costUSD).toBe(0.25);
       expect(reportOf(result).reasons.join(' ')).toMatch(/budget/);
+      // S7 H (D1): the structured budget marker a composition publishes on.
+      expect(reportOf(result).stop).toBe('budget');
       expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
         reportOf(result),
       );
@@ -191,6 +193,8 @@ describe('review.address composition', () => {
         const result = await makeReviewAddress({ ...f.deps, initialRecord: record })(f.input);
         expect(result.status).toBe('needs-human');
         expect(f.calls).toEqual([]);
+        // A refusal that is not a budget stop never carries the budget marker.
+        expect(reportOf(result).stop).toBeUndefined();
       }
     } finally {
       await f.cleanup();

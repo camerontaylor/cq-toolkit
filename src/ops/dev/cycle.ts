@@ -68,6 +68,16 @@ import { readReadinessWithGaps } from './ready.js';
 import { readWorkState } from './internal/workState.js';
 import { DevCycleCompositionInputSchema } from './registry.js';
 
+/**
+ * Wall time held back from the review and address legs for the publication
+ * leg: the final dev.check (observed 1–2 min on the dev VM in the S7
+ * dogfood), the verified push, pr.open and the findings-section compose.
+ * Ten minutes is ~5× the observed gates, headroom for a loaded host, and
+ * ~4% of the dogfood's 4 h run budget. A run budget under 40 min reserves a
+ * quarter of itself instead, so short budgets still leave the legs time.
+ */
+export const DEV_CYCLE_PUBLICATION_RESERVE_MS = 10 * 60 * 1000;
+
 /** Input of the `dev.cycle` op (plain JSON; the registry schema mirrors it). */
 export interface DevCycleCompositionInput {
   /** Repository the whole cycle runs in (every effect binds to it). */
@@ -249,23 +259,23 @@ export interface DevCycleDeps {
 /** Build the `dev.cycle` op over the injected steps. */
 export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, DevCycleReport> {
   return guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
+    // ONE run budget across the legs (S7 attempt H): the run started here,
+    // and every token a default leg's driver spends is metered here.
+    const cycleStarted = Date.now();
+    let spentTokens = 0;
+    const drivers = meterDrivers(deps.drivers ?? createDriverFactory(), (tokens) => {
+      spentTokens += tokens;
+    });
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const check =
       deps.check ?? ((step: DevCheckInput) => makeDevCheck(deps.effects, deps.scanSecrets)(step));
-    const review =
-      deps.review ??
-      ((step: ReviewRunInput) =>
-        makeReviewRun({ drivers: deps.drivers ?? createDriverFactory() })(step));
-    // The default address leg is CONSTRUCTED with the caller's injected
+    const review = deps.review ?? ((step: ReviewRunInput) => makeReviewRun({ drivers })(step));
+    // The default address leg is CONSTRUCTED with the cycle's (metered)
     // driver factory: the whole cycle honours one wiring — test transports
     // injected here must not be replaced by real provider factories inside
     // the address leg's own default construction.
     const address =
-      deps.address ??
-      ((step: ReviewAddressInput) =>
-        deps.drivers === undefined
-          ? makeReviewAddress()(step)
-          : makeReviewAddress({ drivers: deps.drivers })(step));
+      deps.address ?? ((step: ReviewAddressInput) => makeReviewAddress({ drivers })(step));
     // The forge effects for the findings-section compose: the DEFAULT
     // publication leg's own effects. When deps.open is injected WITHOUT
     // deps.gh, the injected leg owns the forge — no effects are constructed
@@ -328,7 +338,14 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
 
     // ---- policy (the reviewers/severities the readiness read honours) ----
     const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
-    let policy: { reviewers: readonly string[]; blockingSeverities: readonly string[] } | undefined;
+    let policy:
+      | {
+          reviewers: readonly string[];
+          blockingSeverities: readonly string[];
+          runWallMs: number;
+          runMaxTokens: number | undefined;
+        }
+      | undefined;
     if (configText !== null) {
       const parsed = parseCqConfig(configText, input.repoRoot);
       if (!parsed.ok)
@@ -353,6 +370,8 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       policy = {
         reviewers: configured.review.reviewers,
         blockingSeverities: configured.review.blockingSeverities,
+        runWallMs: configured.budgets.run.wallMs,
+        runMaxTokens: configured.budgets.run.maxTokens,
       };
     }
 
@@ -366,8 +385,23 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     const firstCheck = await check(checkStep);
     if (firstCheck.status !== 'ok') return stepResult('dev.check', firstCheck);
 
+    // What is left of the ONE run budget for an agentic leg: the wall to the
+    // run deadline minus the publication reserve (so a budget stop can still
+    // run the final gates and publish), and the tokens the metered drivers
+    // have not spent. Without a cq.json the legs keep their own defaults.
+    const legBudget = (): { wallMs?: number; maxTokens?: number } => {
+      if (policy === undefined) return {};
+      const reserve = Math.min(DEV_CYCLE_PUBLICATION_RESERVE_MS, Math.floor(policy.runWallMs / 4));
+      return {
+        wallMs: Math.max(1, policy.runWallMs - reserve - (Date.now() - cycleStarted)),
+        ...(policy.runMaxTokens === undefined
+          ? {}
+          : { maxTokens: Math.max(1, policy.runMaxTokens - spentTokens) }),
+      };
+    };
+
     // --------------------------- 2. review.run ---------------------------
-    const run = await review({ repoRoot: input.repoRoot, target });
+    const run = await review({ repoRoot: input.repoRoot, target, ...legBudget() });
     if (run.status !== 'ok') return stepResult('review.run', run);
 
     // ------------------ 3. review.address (until clean) ------------------
@@ -381,6 +415,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       source: 'local',
       target,
       ...(run.value.reviewed === undefined ? {} : { base: run.value.reviewed.base }),
+      ...legBudget(),
     });
     if (addressResult.status !== 'ok') {
       // ROUND CAP ONLY: the address leg marks its designed stop with the
@@ -395,11 +430,18 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // needs-human-with-PR — so report presence is never the trigger;
       // the structured stop is. Any other refusal propagates verbatim and
       // stops the cycle.
-      const roundCap =
-        addressResult.status === 'needs-human' &&
-        addressResult.report?.stop === 'round-cap' &&
-        addressResult.report !== undefined;
-      if (!roundCap) return stepResult('review.address', addressResult);
+      //
+      // BUDGET STOP (S7 attempt H): the spec's invariant is that the branch
+      // is never left unpublished unless the forge call fails, so the
+      // address leg's structured `stop: 'budget'` takes the SAME path —
+      // final gates, push, draft — with the leg's reason kept verbatim. The
+      // final gates are never skipped: the publication reserve held back
+      // from the legs (legBudget) exists for them, and they run even if the
+      // run deadline has passed — dev.check has no wall input, and a draft
+      // over unchecked gates would be the worse failure.
+      const stop = addressResult.status === 'needs-human' ? addressResult.report?.stop : undefined;
+      if ((stop !== 'round-cap' && stop !== 'budget') || addressResult.report === undefined)
+        return stepResult('review.address', addressResult);
 
       // The FINAL deterministic gates run BEFORE the round-cap publication
       // (the same gates the clean path re-runs at the addressed head): a fix
@@ -408,7 +450,9 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       const capCheck = await check(checkStep);
       if (capCheck.status !== 'ok') return stepResult('dev.check (final)', capCheck);
       return await finishNotReady(
-        'review round cap reached with open findings',
+        stop === 'budget'
+          ? `review.address stopped on the run budget — ${addressResult.status === 'needs-human' ? addressResult.reason : 'token or wall budget exhausted'}`
+          : 'review round cap reached with open findings',
         addressResult.report,
       );
     }
@@ -523,4 +567,35 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       };
     }
   });
+}
+
+/**
+ * Meter a driver factory: every resolved driver reports its run's total
+ * tokens (input + output + cache + reasoning) to `spend`, so the cycle can
+ * hand each agentic leg what is left of the one run token budget. The Driver
+ * seam is `run()` only, so the wrapper is the whole driver.
+ */
+function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): DriverFactory {
+  return {
+    resolve: (request) => {
+      const resolved = factory.resolve(request);
+      return {
+        ...resolved,
+        driver: {
+          run: async (invocation, options) => {
+            const result = await resolved.driver.run(invocation, options);
+            const { usage } = result;
+            spend(
+              usage.input +
+                usage.output +
+                usage.cacheRead +
+                usage.cacheWrite +
+                (usage.reasoning ?? 0),
+            );
+            return result;
+          },
+        },
+      };
+    },
+  };
 }
