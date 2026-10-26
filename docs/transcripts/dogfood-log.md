@@ -215,8 +215,9 @@ optional `includeIntegration` input appending `--include-integration` to the
 gate's `--base`/`--range` argv, recorded as `includeIntegration: true` in the
 check record; dev.cycle forwards it to both check legs; RED-first tests,
 statics, knip and regenerated op docs). Evidence: `test:narrow result="pass"
-exit=0 files=7 projects="pure,process" tests="180/180" failed=0` (check,
-cycle, both registries, review, pr-open), `pnpm lint` 0 errors,
+exit=0 files=7 projects="pure,process" tests="180/180" failed=0` (the seven
+files are `dev.check`, `dev.cycle`, both registry suites, `review-loop`,
+`review.address` and `pr-open`), `pnpm lint` 0 errors,
 `format:check` clean, `knip` clean.
 
 ```sh
@@ -242,8 +243,8 @@ returns **51** related test files for the branch's 8 src/scripts changes
 (`src/ops/dev/registry.ts` reaches the central registry barrel, so CLI
 conformance, smoke, driver, plans and e2e suites all import it), and the
 reviewed NON_IMPORT_MAP adds **27** more from four fan-out rows
-(`docs/ops/*` → test/scripts/_; `scripts/lib/test-narrow.mjs` →
-test/scripts/_ + test/workflows/* + policyDiff; `src/ops/**` →
+(`docs/ops/*` → `test/scripts/*`; `scripts/lib/test-narrow.mjs` →
+`test/scripts/*` + `test/workflows/*` + policyDiff; `src/ops/**` →
 cli/registry+conformance+served-model-sites; any `src/**/*.ts` →
 protectedPaths). 51 ∪ 27 = 78. Named-file selection (the wrapper's designed
 escape) is unavailable inside dev.check's automated `--base` call.
@@ -279,8 +280,16 @@ and dev.cycle forwards it to every check leg. `ae669f3d` fixed the follow-on
 ledger-evolution defect attempt C-1 exposed (a REQUIRED new schema field
 made pre-existing records unloadable — all gates green, record unpersisted);
 `testSelection` is optional on read, always written. Evidence:
-`test:narrow result="pass" exit=0 files=9 projects="pure,process"
-tests="231/231" failed=0`, lint 0, format clean, knip clean.
+`test:narrow result="pass" exit=0 files=10 projects="pure,process,integration"
+tests="231/231" failed=0` — the named selection IS the gate input, so the
+row's own numbers follow from the ten files above and reconcile with the
+record: all ten are selected (`planRun` puts a gated file in the run because
+`includeIntegration` covers its class, so the e2e file is not filtered out),
+`files` counts that run, `projects` names every project it uses
+(`integration` for test/e2e/review/review-address.e2e.test.ts), and a pass
+means every selected file executed at least one test — `runVerdict` fails a
+selected file that runs none, so nine files, an unrun file or an all-skipped
+file can never carry a green row. lint 0, format clean, knip clean.
 
 Named files for this branch (10, at the cap): test/plans/review-loop.test.ts,
 test/ops/review/address-pr.test.ts, test/ops/review/address.test.ts,
@@ -316,3 +325,30 @@ entry). Artifacts: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025-c/`,
 agent log `~/.jcode/scratch/cq-dev-review/fix_s7-dogfood-address-469-…-agent-…log`.
 Defect candidate from C-1 (fixed in-branch): required-field ledger evolution.
 Remaining: rerun when the Go key's quota window resets.
+
+## S7 dogfood attempts D–J: dev.cycle on fix/s7-dogfood-address-469 (paused)
+
+All runs were detached on triton, from `dist` at the named head, with the same flags as
+attempt C (`--push --target=merge-queue --includeIntegration=true` plus 10 named
+`--testFiles`). Run state lives under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
+Every run exited **3** at `review.run` or `review.address`, and **none opened a PR**.
+Each found a defect, fixed in-branch:
+
+| Attempt  | Head       | Stopped at                                    | Cause                                                                                                                                                                                     | Fix                                                                                               |
+| -------- | ---------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| D        | `e1b63507` | process killed silently after the secret scan | lane shell-tool timeout (runs are now detached)                                                                                                                                           | —                                                                                                 |
+| D take 3 | `e1b63507` | review.run                                    | CodeRabbit no-fresh notice on an already-reviewed head (#485); DeepSeek reviewer emits DSML tool-call markup (#483)                                                                       | `0b6c3276` reviewer → `zai`/`glm-5.3-flash` (owner)                                               |
+| E        | `0b6c3276` | review.run, partition 4                       | ai-sdk per-request step timeout hard-coded at 120 s                                                                                                                                       | `01127c00` step bound from `budgets.step.wallMs`                                                  |
+| F        | `01127c00` | review.run, partition 20/28                   | undici default headersTimeout of 300 s on the non-streaming repair call; error detail dropped (#484)                                                                                      | `15d9b8df` (#484), `56b7bdd4` (undici timeouts follow the step bound)                             |
+| G        | `56b7bdd4` | review.run, partition 11/32                   | `output-invalid`: GLM added an unknown key `rule_id_hint` to a finding                                                                                                                    | `35daf528` strip and count unknown finding keys                                                   |
+| H        | `35daf528` | review.address, budget                        | review.run TERMINAL on both reviewers (agent: 64 findings). Address made **8 verified fix commits** but nothing was published, and the legs didn't share the run wall (5 h 48 m)          | `fa9b1948` budget stop publishes a draft; one run budget across legs. #490 (rows stay `open`)     |
+| I        | `fa9b1948` | review.run, partition 9/34                    | one GLM request ran the full 20-min step bound                                                                                                                                            | `fc59ec3d` step bound 1 h (owner), `0ff7c961` one retry per partition on transient/output-invalid |
+| J        | `0ff7c961` | review.run                                    | GLM degenerate loop: 458 676 chars of hallucinated `BASH:` calls and echoed schema, until the model's output limit. `finishReason: 'length'` maps to `budget-exhausted` (`index.ts:1781`) | — (paused)                                                                                        |
+
+**Measured:** attempt H `fixesPerRun` = **8** (`c013-35daf528#f3`, `#f4`, `#f5`, `#f15`,
+`#f34`–`#f37`; ~6.9M tokens, ~4 h address wall). This is the first live review-side run with
+multiple verified fixes. The chancellor pushed them as `00fb37ba` after the run.
+
+**Paused (owner, 2026-10-26):** the agent reviewer's remaining failures share #483's root
+cause, a tool-less turn told to "use the tools", and #483's redesign replaces that reviewer.
+The S7 acceptance run (dev.cycle opens a PR with a readiness record) is rerun on top of #483.

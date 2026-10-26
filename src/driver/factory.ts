@@ -81,6 +81,13 @@ export interface DriverRequest {
    * once the run settles, whatever the verdict.
    */
   sessionRetention?: 'keep' | 'reap-on-settle';
+  /**
+   * Per-request step bound for this run's ai-sdk lane (the agent reviewer
+   * passes cq.json `budgets.step.wallMs`, capped at the remaining review wall
+   * time). Beats the lane config's `stepTimeoutMs`; absent both, the driver
+   * default applies. Other lanes have no per-request HTTP bound and ignore it.
+   */
+  stepTimeoutMs?: number;
 }
 
 /** The resolved, constructed, wrapped driver plus the facts it resolved on. */
@@ -142,6 +149,7 @@ export type AiSdkLaneConfig = Pick<
   | 'sessionsDir'
   | 'strictTokenCapability'
   | 'strictTokenReservationHook'
+  | 'stepTimeoutMs'
 >;
 
 /** Factory configuration — plain data a deployment composes (never plan JSON). */
@@ -326,6 +334,7 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
     }
     case 'ai-sdk': {
       const cfg = config.lanes?.aiSdk;
+      const stepTimeoutMs = request.stepTimeoutMs ?? cfg?.stepTimeoutMs;
       return new AiSdkDriver({
         ...(request.beforeRequest === undefined ? {} : { beforeRequest: request.beforeRequest }),
         ...(cfg?.providers !== undefined ? { providers: cfg.providers } : {}),
@@ -336,6 +345,7 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
         ...(cfg?.strictTokenReservationHook !== undefined
           ? { strictTokenReservationHook: cfg.strictTokenReservationHook }
           : {}),
+        ...(stepTimeoutMs !== undefined ? { stepTimeoutMs } : {}),
         sessionsDir,
         ...harness,
         ...pricing,

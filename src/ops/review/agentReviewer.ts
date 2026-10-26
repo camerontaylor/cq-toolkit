@@ -35,6 +35,8 @@ export interface AgentReviewerInput {
   role: ModelSpec;
   maxTokens: number;
   wallMs: number;
+  /** cq.json `budgets.step.wallMs`: the per-request step bound, capped at the remaining `wallMs`. */
+  stepWallMs?: number;
   signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
@@ -199,6 +201,14 @@ export async function runAgentReviewer(
             report!.advisories = [...new Set([...report!.advisories, ...advisories])];
           },
           searchTools: input.searchTools ?? true,
+          ...(input.stepWallMs === undefined
+            ? {}
+            : {
+                stepTimeoutMs: Math.max(
+                  1,
+                  Math.floor(Math.min(input.stepWallMs, deadline - Date.now())),
+                ),
+              }),
         });
         ensureActive();
         if (report.usage > input.maxTokens) activeSession.status = 'budget';

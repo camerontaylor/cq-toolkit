@@ -15,7 +15,7 @@ import {
   renderFindingsSection,
 } from '../../../src/ops/dev/cycle.js';
 import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
-import type { DriverFactory } from '../../../src/driver/factory.js';
+import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
 import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -754,20 +754,29 @@ describe('dev.cycle', () => {
       repo.commitAll('budgeted review fixture');
       await seed(repo);
       const addressInputs: ReviewAddressInput[] = [];
+      // The session engine's delivery evidence is the request hook carrying
+      // the exact prompt, so the fake calls it the way the ai-sdk lane does.
       const drivers = {
-        resolve: () => ({
+        resolve: (request: DriverRequest) => ({
           lane: 'ai-sdk',
           modelSpec: { provider: 'mock', model: 'mock' },
           driver: {
-            run: async (invocation: { prompt: string }) => ({
-              stopReason: 'complete' as const,
-              structuredOutput: {
-                receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
-                findings: [],
-              },
-              usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
-              denials: [],
-            }),
+            run: async (invocation: { prompt: string }) => {
+              await request.beforeRequest?.(
+                JSON.stringify({
+                  prompt: [{ role: 'user', content: [{ type: 'text', text: invocation.prompt }] }],
+                }),
+                [{ text: invocation.prompt }],
+                { kind: 'model-request' },
+              );
+              return {
+                stopReason: 'complete' as const,
+                structuredOutput: { findings: [] },
+                usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+                steps: 1,
+                denials: [],
+              };
+            },
           },
         }),
       } as unknown as DriverFactory;
@@ -783,7 +792,7 @@ describe('dev.cycle', () => {
       });
       await op({ repoRoot: repo.root });
       expect(addressInputs).toHaveLength(1);
-      // One reviewer request per partition, 150 tokens each.
+      // One reviewer request per session, 150 tokens each.
       const spent = 10_000 - (addressInputs[0]?.maxTokens ?? 10_000);
       expect(spent).toBeGreaterThanOrEqual(150);
       expect(spent % 150).toBe(0);
