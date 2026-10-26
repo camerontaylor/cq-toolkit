@@ -1,11 +1,14 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { partitionReview } from '../../../src/ops/review/internal/reviewPartitions.js';
 import {
+  FindingsRecordSchema,
   isComplete,
   merge,
   openBlocking,
   type FindingsRecord,
 } from '../../../src/ops/review/findings.js';
+import type { ReviewCoverageV2 } from '../../../src/ops/review/internal/reviewCoverageV2.js';
 
 const record = (
   source: 'agent' | 'coderabbit',
@@ -18,6 +21,55 @@ const record = (
   sources: [{ kind: source, status }],
   findings,
 });
+
+const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+
+function v2Coverage(over: Partial<ReviewCoverageV2> = {}): ReviewCoverageV2 {
+  const text = 'abcdefghij';
+  return {
+    version: 2,
+    head: 'abc123',
+    base: 'b'.repeat(40),
+    scope: 'full',
+    mode: 'session',
+    modeReason: 'input fits the session budget',
+    pieces: [
+      {
+        component: 'tracked:a',
+        path: 'a',
+        sha256: sha(text),
+        chars: text.length,
+        bytes: text.length,
+        state: 'completed',
+        sessionId: 's1',
+      },
+    ],
+    sessions: [
+      {
+        id: 's1',
+        status: 'complete',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        deliveries: [{ component: 'tracked:a', start: 0, end: text.length, sha256: sha(text) }],
+        requests: [{ serializedChars: 10, decodedChars: 10 }],
+      },
+    ],
+    ...over,
+  };
+}
+
+function v2Record(
+  over: Partial<FindingsRecord> = {},
+  coverage: ReviewCoverageV2 = v2Coverage(),
+): FindingsRecord {
+  return {
+    schemaVersion: 1,
+    branch: 'feat/example',
+    head: coverage.head,
+    sources: [{ kind: 'agent', status: 'terminal', coverage }],
+    findings: [],
+    ...over,
+  };
+}
 
 describe('review findings records', () => {
   it('deduplicates by file, line and rule and merges source attribution', () => {
@@ -248,3 +300,98 @@ it.each(['partial', 'head', 'base', 'scope', 'gap'] as const)(
     expect(isComplete(candidate, ['agent'])).toBe(false);
   },
 );
+
+describe('review coverage v2 records', () => {
+  it('accepts complete v2 evidence and rejects every incomplete state', () => {
+    expect(isComplete(v2Record(), ['agent'])).toBe(true);
+
+    const planned = v2Coverage();
+    planned.pieces[0]!.state = 'planned';
+    delete planned.pieces[0]!.sessionId;
+    planned.sessions = [];
+    expect(isComplete(v2Record({}, planned), ['agent'])).toBe(false);
+
+    const delivered = v2Coverage();
+    delivered.pieces[0]!.state = 'delivered';
+    expect(isComplete(v2Record({}, delivered), ['agent'])).toBe(false);
+
+    const failedSession = v2Coverage();
+    failedSession.sessions.push({
+      id: 's2',
+      status: 'aborted',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      deliveries: [],
+      requests: [],
+    });
+    expect(isComplete(v2Record({}, failedSession), ['agent'])).toBe(false);
+  });
+
+  it('matches v2 head and only matches base/scope when the record attests them', () => {
+    expect(isComplete(v2Record({ head: 'other' }), ['agent'])).toBe(false);
+
+    const baseMismatch = v2Record({ reviewed: { base: 'c'.repeat(40), scope: 'full' } });
+    expect(isComplete(baseMismatch, ['agent'])).toBe(false);
+
+    const scopeMismatch = v2Record({ reviewed: { base: 'b'.repeat(40), scope: 'uncommitted' } });
+    expect(isComplete(scopeMismatch, ['agent'])).toBe(false);
+
+    const matching = v2Record({ reviewed: { base: 'b'.repeat(40), scope: 'full' } });
+    expect(isComplete(matching, ['agent'])).toBe(true);
+
+    expect(isComplete(v2Record(), ['agent'])).toBe(true);
+  });
+
+  it('keeps legacy v1 coverage on the legacy partition rule', () => {
+    const { coverage } = partitionReview({
+      head: 'a'.repeat(40),
+      base: 'b'.repeat(40),
+      scope: 'full',
+      components: [{ component: 'tracked:a', path: 'a', text: 'diff' }],
+    });
+    coverage.partitions.forEach((part) => {
+      part.complete = true;
+    });
+    const legacy: FindingsRecord = {
+      ...record('agent', 'terminal'),
+      head: coverage.head,
+      reviewed: { base: coverage.base, scope: 'full' },
+      sources: [{ kind: 'agent', status: 'terminal', coverage }],
+    };
+    expect(isComplete(legacy, ['agent'])).toBe(true);
+    coverage.partitions[0]!.complete = false;
+    expect(isComplete(legacy, ['agent'])).toBe(false);
+  });
+
+  it('parses a record carrying v2 coverage and advisories', () => {
+    const parsed = FindingsRecordSchema.parse({ ...v2Record(), advisories: ['size advisory'] });
+    expect(parsed.advisories).toEqual(['size advisory']);
+    expect(parsed.sources[0]?.coverage).toMatchObject({ version: 2 });
+  });
+});
+
+describe('review advisories', () => {
+  it('unions advisories deterministically and never dispatches or blocks them', () => {
+    const first = {
+      ...record('agent', 'terminal'),
+      advisories: ['large change', 'lockfile excluded'],
+    };
+    const second = {
+      ...record('coderabbit', 'terminal'),
+      advisories: ['lockfile excluded', 'docs-only change'],
+    };
+    const merged = merge([first, second]);
+    expect(merged.advisories).toEqual(['large change', 'lockfile excluded', 'docs-only change']);
+    expect(isComplete(merged, ['agent', 'coderabbit'])).toBe(true);
+    expect(openBlocking(merged)).toHaveLength(0);
+    expect(merge([record('agent', 'terminal')]).advisories).toBeUndefined();
+  });
+
+  it('never turns an advisory into a finding or blocking evidence', () => {
+    const advisory = {
+      ...record('agent', 'terminal'),
+      advisories: ['critical: review ran partitioned over the size budget'],
+    };
+    expect(openBlocking(advisory)).toEqual([]);
+    expect(isComplete(advisory, ['agent'])).toBe(true);
+  });
+});

@@ -1,31 +1,17 @@
-import { defaultHarnessConfig } from '../../harness/config.js';
-import type { DiffSecretScanner, ScanComponentInput } from '../dev/denylist.js';
-import { partitionReview, type ReviewCoverage } from './internal/reviewPartitions.js';
-import { resolve } from 'node:path';
-import { z } from 'zod';
-import { toOutputSchema } from '../../driver/common/structured.js';
-import { boundedErrorText } from '../../driver/error-text.js';
 import type { DriverFactory } from '../../driver/factory.js';
-import type { OpInvocation } from '../../driver/types.js';
-import type { OpResult } from '../../kernel/types.js';
+import type { ModelSpec, Usage } from '../../driver/types.js';
+import { boundedErrorText } from '../../driver/error-text.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import type { OpResult } from '../../kernel/types.js';
+import type { DiffSecretScanner, ScanComponentInput } from '../dev/denylist.js';
 import type { Finding } from './findings.js';
-
-const OutputSchema = z
-  .object({
-    findings: z.array(
-      z
-        .object({
-          file: z.string().optional(),
-          line: z.number().int().positive().optional(),
-          rule: z.string().optional(),
-          severity: z.enum(['high', 'medium', 'low']),
-          text: z.string().min(1),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+import { createReviewPlan } from './internal/reviewPlan.js';
+import {
+  isCoverageV2Complete,
+  ReviewCoverageV2Schema,
+  type ReviewCoverageV2,
+} from './internal/reviewCoverageV2.js';
+import { runReviewSession, scanReviewUpload } from './internal/reviewSession.js';
 
 export interface AgentReviewerInput {
   repoRoot: string;
@@ -35,191 +21,78 @@ export interface AgentReviewerInput {
   components?: readonly ScanComponentInput[];
   base?: string;
   scope?: 'full' | 'uncommitted';
+  intent?: string;
+  fileList?: string;
+  priorFindings?: readonly Finding[];
+  session?: { maxInputChars?: number; maxSteps?: number };
+  size?: {
+    small?: { maxChangedLines?: number; maxFiles?: number };
+    medium?: { maxChangedLines?: number; maxFiles?: number };
+  };
+  exclude?: readonly { pattern: string; assuredBy?: string }[];
+  searchTools?: boolean;
   scanSecrets: DiffSecretScanner;
-  role: { provider: string; model: string };
+  role: ModelSpec;
   maxTokens: number;
   wallMs: number;
   signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
 
-/** Read-only structured review through the configured reviewer role. */
-async function runPartition(
-  drivers: DriverFactory,
-  input: AgentReviewerInput & {
-    receipt: string;
-    onUsage: (usage: number) => void;
-    onRequest: (serializedChars: number, decodedChars: number) => void;
-  },
-): Promise<OpResult<{ findings: Finding[]; usage: number }>> {
-  if (input.signal?.aborted || currentJobContext()?.signal.aborted)
-    return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
-  let resolved: ReturnType<DriverFactory['resolve']>;
-  try {
-    resolved = drivers.resolve({
-      role: 'reviewer',
-      modelSpec: input.role,
-      harness: defaultHarnessConfig,
-      beforeRequest: async (text, contents = []) => {
-        input.signal?.throwIfAborted();
-        input.onRequest(
-          text.length,
-          contents.reduce((total, content) => total + content.text.length, 0),
-        );
-        await scanComplete(input.scanSecrets, [
-          { component: 'request', path: 'review-request.json', text },
-          ...contents.map((content, index) => ({
-            component: `request-content-${index}`,
-            path: content.path ?? 'review-request.json',
-            text: content.text,
-          })),
-        ]);
-        input.signal?.throwIfAborted();
-      },
-    });
-  } catch (error) {
-    return {
-      status: 'needs-human',
-      reason: `agent review could not dispatch: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-  const invocation: OpInvocation = {
-    prompt: input.diff,
-    modelSpec: resolved.modelSpec,
-    toolPolicy: { mode: 'none', allow: [] },
-    sandboxPolicy: { level: 'read-only' },
-    workspace: { path: resolve(input.repoRoot) },
-    budget: { maxTokens: input.maxTokens },
-    outputSchema: toOutputSchema(
-      'review.agent/v2',
-      OutputSchema.extend({ receipt: z.literal(input.receipt) }),
-    ),
-  };
-  let result: Awaited<ReturnType<typeof resolved.driver.run>>;
-  const controller = new AbortController();
-  const signals = [input.signal, currentJobContext()?.signal].filter(
-    (value): value is AbortSignal => value !== undefined,
-  );
-  const parentSignal = signals.length ? AbortSignal.any(signals) : undefined;
-  const relayAbort = () => controller.abort(parentSignal?.reason);
-  const rejectCancelled = () => new Error('agent review cancelled by parent job');
-  let cancelReview: (() => void) | undefined;
-  if (parentSignal?.aborted) relayAbort();
-  else parentSignal?.addEventListener('abort', relayAbort, { once: true });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const timed = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        controller.abort(
-          new Error(`agent review exceeded ${String(input.wallMs)}ms wall deadline`),
-        );
-        reject(new Error(`agent review exceeded ${String(input.wallMs)}ms wall deadline`));
-      }, input.wallMs);
-    });
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      if (parentSignal?.aborted) reject(rejectCancelled());
-      else if (parentSignal !== undefined) {
-        cancelReview = () => reject(rejectCancelled());
-        parentSignal.addEventListener('abort', cancelReview, { once: true });
-      }
-    });
-    result = await Promise.race([
-      resolved.driver.run(invocation, { signal: controller.signal }),
-      timed,
-      cancelled,
-    ]);
-  } catch (error) {
-    return {
-      status: 'needs-human',
-      reason: `agent review did not run: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    parentSignal?.removeEventListener('abort', relayAbort);
-    if (cancelReview !== undefined) parentSignal?.removeEventListener('abort', cancelReview);
-  }
-  currentJobContext()?.reportResult({
-    usage: result.usage,
-    ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
-  });
-  input.onUsage(
-    result.usage.input +
-      result.usage.output +
-      result.usage.cacheRead +
-      result.usage.cacheWrite +
-      (result.usage.reasoning ?? 0),
-  );
-  if (result.stopReason !== 'complete') {
-    if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
-    // #484: carry the driver's failure detail (bounded + secret-redacted at
-    // the seam) into the blocked reason the review log records — a bare
-    // stop reason sent operators to the raw session log to find the cause.
-    const detail = result.error === undefined ? '' : `: ${boundedErrorText(result.error)}`;
-    return {
-      status: 'needs-human',
-      reason: `agent review did not complete (${result.stopReason})${detail}`,
-    };
-  }
-  const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
-    result.structuredOutput,
-  );
-  if (!parsed.success)
-    return { status: 'failed', error: 'agent review returned invalid structured output' };
-  return {
-    status: 'ok',
-    value: {
-      usage:
-        result.usage.input +
-        result.usage.output +
-        result.usage.cacheRead +
-        result.usage.cacheWrite +
-        (result.usage.reasoning ?? 0),
-      findings: parsed.data.findings.map((item, index) => ({
-        id: `agent-${index + 1}`,
-        source: 'agent',
-        ...(item.file ? { file: item.file } : {}),
-        ...(item.line ? { line: item.line } : {}),
-        ...(item.rule ? { rule: item.rule } : {}),
-        severity: input.severityMap[item.severity] ?? 'minor',
-        text: item.text,
-        status: 'open' as const,
-      })),
-    },
-  };
-}
-
 export interface AgentReviewReport {
   findings: Finding[];
   usage: number;
-  coverage: ReviewCoverage;
+  coverage: ReviewCoverageV2;
+  advisories: string[];
+  limitations: string[];
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
 
-async function scanComplete(
-  scanner: DiffSecretScanner,
-  components: readonly ScanComponentInput[],
-): Promise<void> {
-  const verdicts = await scanner(components);
-  if (
-    verdicts.length !== components.length ||
-    new Set(verdicts.map((v) => v.component)).size !== components.length ||
-    components.some((c) => !verdicts.some((v) => v.component === c.component)) ||
-    verdicts.some((v) => v.hits.length > 0)
-  )
-    throw new Error(
-      'agent review upload refused: protected content or incomplete scanner verdicts',
+const totalUsage = (usage: Usage): number =>
+  usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
+
+/** Fold engine delivery into component states. Failed sessions never prove completion. */
+function updatePieces(coverage: ReviewCoverageV2): void {
+  for (const piece of coverage.pieces) {
+    if (piece.state === 'excluded') continue;
+    const rows = coverage.sessions.flatMap((session) =>
+      session.deliveries
+        .filter((delivery) => delivery.component === piece.component)
+        .map((delivery) => ({ session, delivery })),
     );
+    const sessionIds = [...new Set(rows.map(({ session }) => session.id))];
+    if (sessionIds.length === 1) piece.sessionId = sessionIds[0]!;
+    else delete piece.sessionId;
+    piece.state = rows.length ? 'delivered' : 'planned';
+    let end = 0;
+    let complete = rows.length > 0;
+    for (const { session, delivery } of rows.sort((a, b) => a.delivery.start - b.delivery.start)) {
+      if (session.status !== 'complete' || delivery.start !== end) complete = false;
+      end = delivery.end;
+    }
+    if (complete && end === piece.chars) piece.state = 'completed';
+  }
 }
 
-/** Complete, bounded read-only review; every validated partition consumes the same budgets. */
+function incompleteReason(coverage: ReviewCoverageV2): string {
+  const pieces = coverage.pieces
+    .filter((piece) => piece.state !== 'completed' && piece.state !== 'excluded')
+    .map((piece) => `${piece.path} (${piece.state})`);
+  const sessions = coverage.sessions
+    .filter((session) => session.status !== 'complete')
+    .map((session) => `${session.id} (${session.status})`);
+  return `agent review coverage incomplete: ${[...pieces, ...sessions].join(', ') || 'invalid evidence'}`;
+}
+
+/** One review budget/deadline covers the session or every fallback partition and repair. */
 export async function runAgentReviewer(
   drivers: DriverFactory,
   input: AgentReviewerInput,
 ): Promise<AgentReviewResult> {
   const signals = [input.signal, currentJobContext()?.signal].filter(
-    (s): s is AbortSignal => s !== undefined,
+    (signal): signal is AbortSignal => signal !== undefined,
   );
-  if (signals.some((s) => s.aborted))
+  if (signals.some((signal) => signal.aborted))
     return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   const controller = new AbortController();
   const parent = AbortSignal.any(signals);
@@ -231,10 +104,24 @@ export async function runAgentReviewer(
     if (Date.now() >= deadline) throw new Error('agent review wall budget exhausted');
   };
   let report: AgentReviewReport | undefined;
+  let activeSession: ReviewCoverageV2['sessions'][number] | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled: (() => void) | undefined;
+  const snapshot = (): AgentReviewReport | undefined => {
+    if (report === undefined) return undefined;
+    updatePieces(report.coverage);
+    return structuredClone(report);
+  };
   try {
     const work = async (): Promise<AgentReviewResult> => {
+      ensureActive();
+      if (
+        !Number.isFinite(input.maxTokens) ||
+        input.maxTokens <= 0 ||
+        !Number.isFinite(input.wallMs) ||
+        input.wallMs <= 0
+      )
+        return { status: 'budget-exhausted' };
       const originals = input.components ?? [
         { component: 'diff', path: 'review.diff', text: input.diff },
       ];
@@ -243,55 +130,119 @@ export async function runAgentReviewer(
           ? originals
           : [{ component: 'empty-comparison', path: 'review.diff', text: '' }]
       ).map((component) => Object.freeze({ ...component }));
-      if (new Set(components.map((c) => c.component)).size !== components.length)
+      if (new Set(components.map((component) => component.component)).size !== components.length)
         throw new Error('agent review component identities must be unique');
-      const plan = partitionReview({
+      const plan = createReviewPlan({
         head: input.head,
         base: input.base ?? input.head,
         scope: input.scope ?? 'full',
+        branch: input.branch,
         components,
+        ...(input.intent === undefined ? {} : { intent: input.intent }),
+        ...(input.fileList === undefined ? {} : { fileList: input.fileList }),
+        ...(input.priorFindings === undefined ? {} : { priorFindings: input.priorFindings }),
+        ...(input.session === undefined ? {} : { session: input.session }),
+        ...(input.size === undefined ? {} : { size: input.size }),
+        ...(input.exclude === undefined ? {} : { exclude: input.exclude }),
       });
-      report = { findings: [], usage: 0, coverage: plan.coverage };
-      if (plan.partitions.length === 0) throw new Error('agent review has no coverage partitions');
-      await scanComplete(input.scanSecrets, components);
-      for (const [index, part] of plan.partitions.entries()) {
+      report = {
+        findings: [],
+        usage: 0,
+        coverage: plan.coverage,
+        advisories: plan.advisories,
+        limitations: plan.limitations,
+      };
+      // Excluded bytes are retained in local coverage but are never uploaded.
+      await scanReviewUpload(
+        input.scanSecrets,
+        components.filter((component) =>
+          plan.coverage.pieces.some(
+            (piece) => piece.component === component.component && piece.state !== 'excluded',
+          ),
+        ),
+      );
+      ensureActive();
+      for (const session of plan.sessions) {
         ensureActive();
-        if (report.usage >= input.maxTokens) return { status: 'budget-exhausted', report };
-        await scanComplete(input.scanSecrets, [
-          { component: 'partition', path: 'review-request.txt', text: part.prompt },
+        if (report.usage >= input.maxTokens)
+          return { status: 'budget-exhausted', report: snapshot()! };
+        activeSession = {
+          id: session.id,
+          status: 'error',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          deliveries: [],
+          requests: [],
+        };
+        report.coverage.sessions.push(activeSession);
+        await scanReviewUpload(input.scanSecrets, [
+          { component: 'review-prompt', path: 'review-request.txt', text: session.prompt },
         ]);
         ensureActive();
-        const result = await runPartition(drivers, {
-          ...input,
-          components,
-          diff: part.prompt,
-          receipt: part.receipt,
-          signal: controller.signal,
+        const result = await runReviewSession(drivers, {
+          repoRoot: input.repoRoot,
+          role: input.role,
+          severityMap: input.severityMap,
           maxTokens: input.maxTokens - report.usage,
-          wallMs: Math.max(1, deadline - Date.now()),
+          maxSteps: input.session?.maxSteps ?? 15,
+          maxPromptChars: Math.max(20_000, input.session?.maxInputChars ?? 60_000),
+          signal: controller.signal,
+          scanSecrets: input.scanSecrets,
+          components,
+          plan: session,
+          evidence: activeSession,
           onUsage: (usage) => {
-            report!.usage += usage;
+            report!.usage += totalUsage(usage);
           },
-          onRequest: (serializedChars, decodedChars) => {
-            report!.coverage.partitions[index]!.requests.push({ serializedChars, decodedChars });
-          },
+          searchTools: input.searchTools ?? true,
         });
         ensureActive();
-        if (result.status !== 'ok') return { ...result, report };
-        for (const finding of result.value.findings) {
-          const same = (other: Finding) =>
-            other.file === finding.file &&
-            other.line === finding.line &&
-            other.rule === finding.rule &&
-            other.text === finding.text &&
-            other.severity === finding.severity;
-          if (!report.findings.some(same))
-            report.findings.push({ ...finding, id: `agent-${index + 1}-${finding.id}` });
+        if (report.usage > input.maxTokens) activeSession.status = 'budget';
+        updatePieces(report.coverage);
+        activeSession = undefined;
+        if (result.status !== 'ok') {
+          const reason = incompleteReason(report.coverage);
+          if (result.status === 'budget-exhausted')
+            return {
+              status: 'needs-human',
+              reason: `agent review budget exhausted; ${reason}`,
+              report: snapshot()!,
+            };
+          const detail =
+            result.status === 'needs-human'
+              ? result.reason
+              : result.status === 'failed'
+                ? result.error
+                : result.status;
+          return { status: 'needs-human', reason: `${detail}; ${reason}`, report: snapshot()! };
         }
-        report.coverage.partitions[index]!.complete = true;
-        if (report.usage > input.maxTokens) return { status: 'budget-exhausted', report };
+        for (const finding of result.value) {
+          if (
+            !report.findings.some(
+              (other) =>
+                other.file === finding.file &&
+                other.line === finding.line &&
+                other.rule === finding.rule &&
+                other.text === finding.text &&
+                other.severity === finding.severity,
+            )
+          )
+            report.findings.push(finding);
+        }
+        if (report.usage > input.maxTokens)
+          return {
+            status: 'needs-human',
+            reason: `agent review budget exhausted; ${incompleteReason(report.coverage)}`,
+            report: snapshot()!,
+          };
       }
-      return { status: 'ok', value: report };
+      ReviewCoverageV2Schema.parse(report.coverage);
+      if (!isCoverageV2Complete(report.coverage))
+        return {
+          status: 'needs-human',
+          reason: incompleteReason(report.coverage),
+          report: snapshot()!,
+        };
+      return { status: 'ok', value: snapshot()! };
     };
     const stopped = new Promise<never>((_resolve, reject) => {
       cancelled = () => reject(new Error('agent review cancelled or wall budget exhausted'));
@@ -303,10 +254,13 @@ export async function runAgentReviewer(
     });
     return await Promise.race([work(), stopped]);
   } catch (error) {
+    if (activeSession !== undefined)
+      activeSession.status = controller.signal.aborted ? 'aborted' : 'error';
+    const partial = snapshot();
     return {
       status: 'needs-human',
-      reason: `agent review did not run: ${error instanceof Error ? error.message : String(error)}`,
-      ...(report === undefined ? {} : { report }),
+      reason: `agent review did not run: ${boundedErrorText(error instanceof Error ? error.message : String(error))}${partial ? `; ${incompleteReason(partial.coverage)}` : ''}`,
+      ...(partial === undefined ? {} : { report: partial }),
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
