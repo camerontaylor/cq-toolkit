@@ -123,6 +123,12 @@ the frozen `ToolPolicy` filters the surface per-op (allowlist default /
 unrestricted / none); every harness denial is both the tool's output text
 and a verbatim `{ tool, reason }` entry in `WorkerResult.denials`.
 
+Prompt placement: the system message contains only the driver-owned,
+tool-aware preamble. The caller's operation prompt is admitted against the
+harness prompt budget and sent once as a user turn; persisted session history
+continues to replay through the transcript, including same-prompt retry reuse.
+Prompted-schema requests may add a separate schema-contract user turn.
+
 Boundary caveat (named in the harness tools header): the harness containment
 is lexical and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
 command can plant a symlink pointing outside the workspace. read/edit

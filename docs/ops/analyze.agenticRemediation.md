@@ -25,6 +25,11 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         "maxAttempts": {
           "type": "number"
         },
+        "maxSteps": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
         "maxTokens": {
           "type": "number"
         },

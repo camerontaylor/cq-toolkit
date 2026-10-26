@@ -25,10 +25,14 @@
 //     RUN remains the governor's decision.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
-//     pure token fold — no scheduling primitive involved). stopWhen is
-//     passed ALWAYS: `stepCountIs(DEFAULT_MAX_STEPS)` bounds the tool loop
-//     even without a token cap (the SDK's own default is a single step,
-//     under which tool calls are never followed up).
+//     pure token fold — no scheduling primitive involved).
+//   - The main tool loop is ALWAYS step-bounded with
+//     `stepCountIs(min(maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS))`;
+//     the final schema step is tools-off, and the separate structured-output
+//     repair may add one completed step.
+//   - The prompt budget applies to the caller-owned user prompt, which is
+//     sent once as a user turn. The system message contains only driver-owned
+//     tool-aware guidance.
 //   - Budget.strictTokenBudget (OPT-IN, separate from maxTokens) adds a
 //     BINDING pre-request ceiling: `pre-request-ceiling.ts` wraps the
 //     resolved model so every wire attempt counts the full request and
@@ -582,7 +586,7 @@ export class AiSdkDriver implements Driver {
       runGate,
     );
     const selected = selectTools(harnessTools, toolPolicy);
-    const system = this.composeSystemPrompt(prompt, selected.length > 0);
+    const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
       toolSet[harnessTool.name] = tool({
@@ -675,7 +679,7 @@ export class AiSdkDriver implements Driver {
                   stepNumber >= effectiveStepCap - 1
                     ? {
                         activeTools: [],
-                        system: this.composeSystemPrompt(prompt, false),
+                        system: this.composeSystemPrompt(false),
                         ...(prompted
                           ? {
                               messages: [
@@ -745,7 +749,6 @@ export class AiSdkDriver implements Driver {
             abortSignal,
             budget,
             model,
-            prompt,
             responseMessages,
             transcript,
             store,
@@ -810,7 +813,6 @@ export class AiSdkDriver implements Driver {
             abortSignal,
             budget,
             model,
-            prompt,
             responseMessages,
             transcript,
             store,
@@ -987,7 +989,6 @@ export class AiSdkDriver implements Driver {
     abortSignal: AbortSignal | undefined;
     budget: Budget;
     model: LanguageModel;
-    prompt: string;
     responseMessages: ModelMessage[];
     transcript: ModelMessage[];
     store: SessionStore;
@@ -1007,7 +1008,6 @@ export class AiSdkDriver implements Driver {
       abortSignal,
       budget,
       model,
-      prompt,
       responseMessages,
       transcript,
       store,
@@ -1136,7 +1136,7 @@ export class AiSdkDriver implements Driver {
     try {
       const repair = await generateText({
         model,
-        system: this.composeSystemPrompt(prompt, false),
+        system: this.composeSystemPrompt(false),
         messages: repairMessages,
         // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
         // bounded, unlike the main loop.
@@ -1460,28 +1460,9 @@ export class AiSdkDriver implements Driver {
     }
   }
 
-  /**
-   * The composed system prompt: minimal harness preamble (tool usage +
-   * workspace note) + the op prompt. Budget rule (documented): the OP
-   * PROMPT is caller data — if it alone exceeds maxSystemPromptChars the
-   * run REFUSES loudly (throw before dispatch; silently truncating an op's
-   * task would corrupt semantics). The PREAMBLE is ours — it is truncated
-   * to fit the remaining budget. The op prompt ALSO rides as the terminal
-   * user turn of the conversation (chat providers require a real user
-   * turn to answer; the composed system states the task and the boundary
-   * rules) — the prompt budget accounts for the composed system, the user
-   * turn is the model's input message, not system-prompt text.
-   */
-  private composeSystemPrompt(prompt: string, hasTools: boolean): string {
-    this.validatePromptBudget(prompt);
-    const maxChars = this.harnessConfig.promptBudget.maxSystemPromptChars;
-    const text = hasTools ? SYSTEM_PREAMBLE : TOOL_FREE_PREAMBLE;
-    const room = maxChars - prompt.length - 2; // '\n\n' separator
-    const preamble = room <= 0 ? '' : text.length <= room ? text : text.slice(0, room);
-    // An empty preamble has nothing to separate: the prompt rides ALONE.
-    // The unconditional separator would compose prompt.length + 2 chars —
-    // slipping past the very budget it enforces.
-    return preamble === '' ? prompt : `${preamble}\n\n${prompt}`;
+  /** The system prompt is driver-owned guidance; caller task text stays in its user turn. */
+  private composeSystemPrompt(hasTools: boolean): string {
+    return hasTools ? SYSTEM_PREAMBLE : TOOL_FREE_PREAMBLE;
   }
 }
 
