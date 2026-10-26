@@ -924,10 +924,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
         }),
       );
       expect(result.stopReason).toBe('complete');
-      expect(guarded).toContainEqual({
-        text: expect.stringContaining('fixture-secret'),
-        path: 'secret.ts',
-      });
+      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+      expect(guardedSecret).toBeDefined();
+      expect(guardedSecret?.text).toContain('fixture-secret');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -964,10 +963,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
         }),
       );
       expect(result.stopReason).toBe('complete');
-      expect(guarded).toContainEqual({
-        text: expect.stringContaining('fixture-secret'),
-        path: 'secret.ts',
-      });
+      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+      expect(guardedSecret).toBeDefined();
+      expect(guardedSecret?.text).toContain('fixture-secret');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

@@ -97,14 +97,12 @@ describe('windowed read tool', () => {
       await writeFile(join(workspace, 'binary.dat'), Buffer.from([0x61, 0x00, 0x62]));
       await writeFile(join(workspace, 'invalid.txt'), Buffer.from([0xc3, 0x28]));
       const read = tool(buildTools(defaultHarnessConfig, workspace), 'read');
-      await expect(read.execute({ file_path: 'binary.dat' })).resolves.toMatchObject({
-        ok: false,
-        denial: { reason: expect.stringContaining('binary file') },
-      });
-      await expect(read.execute({ file_path: 'invalid.txt' })).resolves.toMatchObject({
-        ok: false,
-        denial: { reason: expect.stringContaining('not valid UTF-8') },
-      });
+      const binary = await read.execute({ file_path: 'binary.dat' });
+      expect(binary.ok).toBe(false);
+      if (!binary.ok) expect(binary.denial.reason).toContain('binary file');
+      const invalid = await read.execute({ file_path: 'invalid.txt' });
+      expect(invalid.ok).toBe(false);
+      if (!invalid.ok) expect(invalid.denial.reason).toContain('not valid UTF-8');
     });
   });
 
@@ -225,22 +223,15 @@ describe('contained grep and glob tools', () => {
       await symlink(join(outside, 'secret.txt'), join(workspace, 'nested', 'outside-link'));
       const tools = buildTools(defaultHarnessConfig, workspace, 'read-only');
       const grep = tool(tools, 'grep');
-      await expect(
-        grep.execute({ pattern: 'secret', path: 'outside-link' }),
-      ).resolves.toMatchObject({
-        ok: false,
-        denial: { reason: expect.stringContaining('path escape') },
-      });
-      await expect(grep.execute({ pattern: 'config', path: 'git-link' })).resolves.toMatchObject({
-        ok: false,
-        denial: { reason: expect.stringContaining('.git') },
-      });
-      await expect(grep.execute({ pattern: 'gitdir', path: 'nested/.git' })).resolves.toMatchObject(
-        {
-          ok: false,
-          denial: { reason: expect.stringContaining('.git') },
-        },
-      );
+      const outsideLink = await grep.execute({ pattern: 'secret', path: 'outside-link' });
+      expect(outsideLink.ok).toBe(false);
+      if (!outsideLink.ok) expect(outsideLink.denial.reason).toContain('path escape');
+      const gitLink = await grep.execute({ pattern: 'config', path: 'git-link' });
+      expect(gitLink.ok).toBe(false);
+      if (!gitLink.ok) expect(gitLink.denial.reason).toContain('.git');
+      const gitFile = await grep.execute({ pattern: 'gitdir', path: 'nested/.git' });
+      expect(gitFile.ok).toBe(false);
+      if (!gitFile.ok) expect(gitFile.denial.reason).toContain('.git');
       const broadSearch = await grep.execute({ pattern: 'external-secret' });
       expect(broadSearch).toMatchObject({ ok: true, output: 'No matches' });
     });
@@ -264,11 +255,13 @@ describe('contained grep and glob tools', () => {
       }
       await writeFile(join(workspace, 'oversize.txt'), Buffer.alloc(20 * 1_024 * 1_024 + 1, 0x78));
       const byteLimited = await grep.execute({ pattern: 'never-present' });
-      expect(byteLimited).toMatchObject({
-        ok: true,
-        output: expect.stringContaining(`[truncated: searched bytes cap ${20 * 1_024 * 1_024}]`),
-        truncated: true,
-      });
+      expect(byteLimited.ok).toBe(true);
+      if (byteLimited.ok) {
+        expect(byteLimited.output).toContain(
+          `[truncated: searched bytes cap ${20 * 1_024 * 1_024}]`,
+        );
+        expect(byteLimited.truncated).toBe(true);
+      }
     });
   });
 
@@ -305,10 +298,9 @@ describe('contained grep and glob tools', () => {
       const controller = new AbortController();
       const pending = grep.execute({ pattern: 'needle' }, { signal: controller.signal });
       setTimeout(() => controller.abort(), 5);
-      await expect(pending).resolves.toMatchObject({
-        ok: false,
-        denial: { reason: expect.stringContaining('cancelled:') },
-      });
+      const aborted = await pending;
+      expect(aborted.ok).toBe(false);
+      if (!aborted.ok) expect(aborted.denial.reason).toContain('cancelled:');
     });
   });
 });
