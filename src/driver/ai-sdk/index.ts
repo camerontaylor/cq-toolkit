@@ -812,12 +812,18 @@ export class AiSdkDriver implements Driver {
           // then throws. Disabling tools on that step nudges the model into
           // prose the Output.object path can parse. Pure step-number function —
           // no scheduling primitive (I8).
+          // The step keeps the tool definitions and forbids calls with
+          // `toolChoice: 'none'` (#502): a request whose history is full of tool
+          // calls but which carries no definitions makes DeepSeek answer with
+          // DSML pseudo-tool-call text, forcing the repair call. OpenAI-chat and
+          // DeepSeek routes send `tool_choice: "none"`; the zai and anthropic
+          // providers drop the tools for 'none', as `activeTools: []` did.
           ...(outputSchema !== undefined && selected.length > 0
             ? {
                 prepareStep: ({ stepNumber, messages }) =>
                   stepNumber >= effectiveStepCap - 1
                     ? {
-                        activeTools: [],
+                        toolChoice: 'none' as const,
                         system: this.composeSystemPrompt(false),
                         ...(prompted
                           ? {

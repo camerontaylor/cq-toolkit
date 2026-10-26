@@ -140,6 +140,17 @@ function mockUsage(): LanguageModelV4GenerateResult['usage'] {
   };
 }
 
+/**
+ * Tools the model may call on this request: the forced final step keeps the
+ * definitions but sets `toolChoice: 'none'` (#502), so it offers none.
+ */
+function offeredToolCount(options: {
+  tools?: readonly unknown[];
+  toolChoice?: { type: string };
+}): number {
+  return options.toolChoice?.type === 'none' ? 0 : (options.tools?.length ?? 0);
+}
+
 function textResult(text: string): LanguageModelV4GenerateResult {
   return {
     content: [{ type: 'text', text }],
@@ -738,8 +749,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
-        const tools = options.tools;
-        return tools !== undefined && tools.length > 0
+        return offeredToolCount(options) > 0
           ? toolCallResult('read', { path: 'absent.txt' })
           : textResult('{"fixed":true,"notes":"ok"}');
       },
@@ -782,7 +792,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
-        const tools = options.tools?.length ?? 0;
+        const tools = offeredToolCount(options);
         toolCounts.push(tools);
         return tools > 0
           ? toolCallResult('read', { path: 'absent.txt' })
@@ -814,13 +824,55 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('the forced final step keeps tool definitions and sends toolChoice none (#502)', async () => {
+    const requests: { tools: number; choice: string | undefined }[] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        requests.push({ tools: options.tools?.length ?? 0, choice: options.toolChoice?.type });
+        if (offeredToolCount(options) > 0) return toolCallResult('read', { path: 'absent.txt' });
+        // The final step's text misses the schema, so the repair call runs too.
+        return requests.length === 3
+          ? textResult('not a JSON object')
+          : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-choice-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { maxSteps: 3 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/final-choice/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(requests).toHaveLength(4);
+      expect(requests[0]?.choice).not.toBe('none');
+      expect(requests[1]?.choice).not.toBe('none');
+      // The final step: the history's tool calls still have their definitions.
+      expect(requests[2]).toEqual({ tools: 1, choice: 'none' });
+      // The repair stays a tool-free request.
+      expect(requests[3]?.tools).toBe(0);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('maxSteps=1 disables tools on the first main step and counts the repair step separately', async () => {
     const toolCounts: number[] = [];
     const hookKinds: string[] = [];
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
-        toolCounts.push(options.tools?.length ?? 0);
+        toolCounts.push(offeredToolCount(options));
         return toolCounts.length === 1
           ? textResult('not a JSON object')
           : textResult('{"fixed":true,"notes":"ok"}');
@@ -869,7 +921,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
         formats.push(options.responseFormat);
         contracts.push(promptText.includes('Use the tools to complete the task first'));
         promptCopies.push(promptText.match(/driver-specific run/g)?.length ?? 0);
-        if (options.tools !== undefined && options.tools.length > 0 && formats.length === 1) {
+        if (offeredToolCount(options) > 0 && formats.length === 1) {
           return toolCallResult('read', { path: 'absent.txt' });
         }
         toolFree += 1;
@@ -1048,7 +1100,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
-        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+        if (calls === 1 && offeredToolCount(options) > 0) {
           return toolCallResult('read', { file_path: 'secret.ts', offset: 1, limit: 1 });
         }
         return textResult('read complete');
@@ -1087,7 +1139,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
-        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+        if (calls === 1 && offeredToolCount(options) > 0) {
           return toolCallResult('grep', { pattern: 'fixture-secret' });
         }
         return textResult('search complete');
@@ -1131,7 +1183,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
         calls += 1;
         const text = JSON.stringify(options.prompt);
         expect(text.match(/driver-specific run/g)).toHaveLength(1);
-        if (options.tools?.length) {
+        if (offeredToolCount(options) > 0) {
           expect(text).toContain('Use the tools to complete the task first');
           return toolCallResult('read', { path: 'evidence.txt' });
         }
@@ -1242,7 +1294,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
         calls += 1;
         // The repair is TOOL-FREE: the mock answers it with another tool
         // call, so the repair's own parse misses too — the give-up path.
-        if (options.tools !== undefined && options.tools.length > 0) {
+        if (offeredToolCount(options) > 0) {
           return toolCallResult('read', { path: 'absent.txt' });
         }
         return textResult('still not an object');
@@ -1305,7 +1357,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
         // FIRST tool-free call must ALSO miss (else the loop's final step
         // completes the run and no repair fires); the SECOND — the repair —
         // answers with the valid object.
-        if (options.tools !== undefined && options.tools.length > 0) {
+        if (offeredToolCount(options) > 0) {
           return toolCallResult('read', { path: 'absent.txt' });
         }
         toolFreeCalls += 1;
@@ -1379,7 +1431,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
-        if (options.tools !== undefined && options.tools.length > 0) {
+        if (offeredToolCount(options) > 0) {
           return toolCallResult('read', { path: 'absent.txt' });
         }
         toolFreeCalls += 1;
@@ -1438,7 +1490,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
           new MockLanguageModelV4({
             modelId: 'mock-1',
             doGenerate: async (options: { tools?: unknown[] }) => {
-              if (options.tools !== undefined && options.tools.length > 0) {
+              if (offeredToolCount(options) > 0) {
                 return {
                   ...toolCallResult('read', { path: 'absent.txt' }),
                   response: { modelId: '' },
@@ -1478,7 +1530,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
           new MockLanguageModelV4({
             modelId: 'mock-1',
             doGenerate: async (options: { tools?: unknown[] }) => {
-              if (options.tools !== undefined && options.tools.length > 0) {
+              if (offeredToolCount(options) > 0) {
                 return toolCallResult('read', { path: 'absent.txt' });
               }
               toolFree2 += 1;
@@ -3432,7 +3484,7 @@ describe('read/grep raw scan provenance + persist stripping', () => {
         modelId: 'mock-1',
         doGenerate: async (options) => {
           modelCalls++;
-          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          if (modelCalls === 1 && offeredToolCount(options) > 0) {
             return toolCallResult('read', { path: 'secret.txt' });
           }
           return textResult('done');
@@ -3472,7 +3524,7 @@ describe('read/grep raw scan provenance + persist stripping', () => {
         modelId: 'mock-1',
         doGenerate: async (options) => {
           modelCalls++;
-          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          if (modelCalls === 1 && offeredToolCount(options) > 0) {
             return toolCallResult('read', { path: 'secret.txt' });
           }
           return textResult('done');
@@ -3520,7 +3572,7 @@ describe('read/grep raw scan provenance + persist stripping', () => {
         modelId: 'mock-1',
         doGenerate: async (options) => {
           modelCalls++;
-          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          if (modelCalls === 1 && offeredToolCount(options) > 0) {
             return toolCallResult('grep', { pattern: 'grep-secret-value' });
           }
           return textResult('done');
