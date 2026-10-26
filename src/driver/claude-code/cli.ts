@@ -182,7 +182,7 @@ import { applyCorrelationEnv, correlationEnvRemovals } from '../correlation-env.
 import { rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { buildTools } from '../../harness/tools.js';
+import { buildTools, canonicalToolName, toolAliases } from '../../harness/tools.js';
 import {
   buildManifest,
   compareInitSurface,
@@ -468,8 +468,14 @@ export class ClaudeCodeCliTransport implements Driver {
     let manifest: HarnessManifest | undefined;
     let allowed: string[];
     if (stock) {
+      // Stock mode is the legacy inert allowlist over the CLI's builtins: it
+      // keeps the pre-F1 read/edit/run names and never grows the new `write`
+      // tool (the harness config's canonical names are mapped back here).
       allowed = selectToolNames(
-        buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map((t) => t.name),
+        buildTools(this.harnessConfig, workspace, sandboxPolicy.level)
+          .map((t) => t.name)
+          .filter((name) => name !== 'write')
+          .map((name) => (name === 'bash' ? 'run' : name)),
         toolPolicy,
       );
     } else {
@@ -506,10 +512,17 @@ export class ClaudeCodeCliTransport implements Driver {
     // OutputSchema the shared validator judges.
     const outputSchema = opInvocation.outputSchema;
 
+    // The CLI's permission gate is byte-exact over --allowedTools, so the
+    // one-release aliases (the pre-F1 `run` name) must be named there too;
+    // the reported init surface stays canonical.
     const argv = buildArgs({
       route,
       toolSurface: this.toolSurface,
-      allowedToolNames: stock ? allowed : allowed.map(qualifiedToolName),
+      allowedToolNames: stock
+        ? allowed
+        : allowed
+            .flatMap((name) => [name, ...toolAliases(name)])
+            .map((name) => qualifiedToolName(name)),
       mcpConfigPath,
       outputJsonSchema:
         outputSchema === undefined
@@ -1311,8 +1324,10 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         if (rec['is_error'] !== true || observation.deniedToolUseIds.has(id)) continue;
         observation.deniedToolUseIds.add(id);
         const rawName = observation.toolUseNameById.get(id) ?? 'unknown';
-        // Harness names in OUR vocabulary (the SDK transport's too).
-        const tool = harnessToolName(rawName);
+        // Harness names in OUR vocabulary (the SDK transport's too). The
+        // one-release `run` alias folds to canonical `bash`, matching the
+        // core's denial and the SDK transport.
+        const tool = canonicalToolName(harnessToolName(rawName));
         if (
           observation.expectedSurface !== undefined &&
           isQualifiedHarnessTool(rawName) &&
@@ -1413,7 +1428,7 @@ async function persistObservation(
         : observation.expectedSurface === undefined
           ? rawName
           : isQualifiedHarnessTool(rawName)
-            ? harnessToolName(rawName)
+            ? canonicalToolName(harnessToolName(rawName))
             : undefined;
     if (name === undefined || !allowedNames.has(name)) continue; // governed surface only
     const use = observation.toolUses.find((candidate) => candidate.id === outcome.toolUseId);

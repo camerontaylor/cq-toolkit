@@ -253,7 +253,9 @@ export function runDriverConformance(
             outputSchema: toOutputSchema('conformance/structured/v1', schema),
           }),
         );
-        expect(result.stopReason).toBe('complete');
+        expect(`${result.stopReason}${result.error === undefined ? '' : `: ${result.error}`}`).toBe(
+          'complete',
+        );
         expect(result.structuredOutput).toBeDefined();
         const once = JSON.parse(JSON.stringify(result.structuredOutput)) as unknown;
         // stringify → parse → revalidate → deep-equal: plain JSON in, schema-valid, no drift.
@@ -449,7 +451,7 @@ export function runDriverConformance(
             kind: 'tool-then-reply',
             tool: 'edit',
             toolIdentity: 'edit',
-            input: { path: 'x.txt', oldText: 'a', newText: 'b' },
+            input: { file_path: 'x.txt', old_string: 'a', new_string: 'b' },
             reply: 'noted the refusal',
           },
           scratchDir,
@@ -521,8 +523,8 @@ export function runDriverConformance(
         const driver1 = makeDriver({
           directive: {
             kind: 'tool-then-reply',
-            tool: 'run',
-            toolIdentity: 'run',
+            tool: 'bash',
+            toolIdentity: 'bash',
             input: { command: 'echo conformance-marker > note.txt' },
             reply: 'wrote note.txt',
           },
@@ -574,8 +576,8 @@ export function runDriverConformance(
         const driver1 = makeDriver({
           directive: {
             kind: 'tool-then-reply',
-            tool: 'run',
-            toolIdentity: 'run',
+            tool: 'bash',
+            toolIdentity: 'bash',
             input: { command: 'echo conformance-marker > note.txt' },
             reply: 'wrote note.txt',
           },
@@ -777,8 +779,8 @@ export function runDriverConformance(
         const driver = makeDriver({
           directive: {
             kind: 'tool-then-reply',
-            tool: 'run',
-            toolIdentity: 'run',
+            tool: 'bash',
+            toolIdentity: 'bash',
             input: { command: 'echo policy-marker > policy.txt' },
             reply: 'unused',
           },
@@ -828,8 +830,8 @@ export function runDriverConformance(
         const deniedDriver = makeDriver({
           directive: {
             kind: 'tool-then-reply',
-            tool: 'run',
-            toolIdentity: 'run',
+            tool: 'bash',
+            toolIdentity: 'bash',
             input: { command: 'echo allowlist-marker > out-of-policy.txt' },
             reply: 'unused',
           },
@@ -843,7 +845,7 @@ export function runDriverConformance(
           }),
         );
         const deniedRecord = await store.load(denied.sessionId as string);
-        expect(deniedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(
+        expect(deniedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'bash')).toBe(
           false,
         );
       });
@@ -1027,8 +1029,8 @@ export function runDriverConformance(
         const driver = makeDriver({
           directive: {
             kind: 'tool-then-reply',
-            tool: 'run',
-            toolIdentity: 'run',
+            tool: 'bash',
+            toolIdentity: 'bash',
             input: { command: 'echo conformance-marker > note.txt' },
             reply: 'wrote note.txt',
           },

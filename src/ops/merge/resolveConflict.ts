@@ -21,7 +21,7 @@
 // but neither is it confinement: there is NO OS-level confinement on this
 // seam. The worktree is bound as the invocation's workspace (the driver
 // binds cwd and harness confinement to it); the bounds that remain are
-// the allowlisted tool surface ({read, edit, run}
+// the allowlisted tool surface ({read, edit, bash}
 // in allowlist mode), the prompt's hard constraints (no force, no squash,
 // no rebase, no amend, no protected-branch destination), and the
 // wall-clock budget REQUEST (Budget.wallClockMs) — a request on the seam,
@@ -67,7 +67,7 @@
 //      allowlist is the deferred fix.
 //   d. Inside: the prompt is rendered from prompts/conflict.default.md
 //      with the seven vars.
-//   e. ONE resolved.driver.run: toolPolicy allow ['read','edit','run']
+//   e. ONE resolved.driver.run: toolPolicy allow ['read','edit','bash']
 //      mode 'allowlist'; sandboxPolicy level 'none' (the trap above);
 //      budget.wallClockMs default DEFAULT_RESOLVE_WALL_CLOCK_MS. The
 //      invocation binds the prepared worktree as its workspace
@@ -597,7 +597,7 @@ export function makeResolveConflictOp(
               {
                 prompt,
                 modelSpec: resolved.modelSpec,
-                toolPolicy: { allow: ['read', 'edit', 'run'], mode: 'allowlist' },
+                toolPolicy: { allow: ['read', 'edit', 'bash'], mode: 'allowlist' },
                 sandboxPolicy: { level: 'none' },
                 workspace: { path: worktree },
                 outputSchema: RESOLVE_DECISION_OUTPUT_SCHEMA,

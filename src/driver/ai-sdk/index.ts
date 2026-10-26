@@ -219,7 +219,7 @@ import { createDeepSeek } from '@ai-sdk/deepseek';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { buildTools } from '../../harness/tools.js';
+import { buildTools, canonicalToolName } from '../../harness/tools.js';
 import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool } from '../../harness/tools.js';
@@ -580,12 +580,19 @@ export class AiSdkDriver implements Driver {
     const selected = selectTools(harnessTools, toolPolicy);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
-      toolSet[harnessTool.name] = tool({
+      const descriptor = {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
         execute: async (input: unknown): Promise<string> =>
           runTool(harnessTool, input, store, record, denials, guard),
-      });
+      };
+      toolSet[harnessTool.name] = tool(descriptor);
+      // One-release aliases (the pre-F1 `run` name for `bash`) are registered
+      // under their own names so a model or prompt that still calls them
+      // reaches the canonical executor and denial vocabulary.
+      for (const alias of harnessTool.aliases ?? []) {
+        toolSet[alias] = tool(descriptor);
+      }
     }
 
     // --- Timer-free budget + the tool-loop bound: stopWhen is ALWAYS ------
@@ -1587,8 +1594,9 @@ export function selectTools(tools: readonly ToolkitTool[], policy: ToolPolicy): 
   const mode = policy.mode ?? 'allowlist';
   if (mode === 'none') return [];
   if (mode === 'unrestricted') return [...tools];
-  const allowed = new Set(policy.allow);
-  return tools.filter((t) => allowed.has(t.name));
+  // One-release alias: `run` in a ToolPolicy selects the canonical `bash`.
+  const allowed = new Set(policy.allow.map((name) => canonicalToolName(name)));
+  return tools.filter((t) => allowed.has(canonicalToolName(t.name)));
 }
 
 /**

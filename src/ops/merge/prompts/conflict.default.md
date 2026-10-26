@@ -28,7 +28,9 @@ You are the merge-conflict resolver for PR {{pr}}.
 
 2. Honor BOTH sides of every conflict. Where the two sides do not
    contradict each other, keep the UNION of both. Where they do,
-   reconcile them explicitly; never silently drop either side.
+   reconcile them explicitly; never silently drop either side. Read each
+   conflicted file before editing it: an edit is refused until the file has
+   been read, and again if the file changed since that read.
 3. Regenerate generated files (lockfiles, codegen) with their generator
    instead of hand-merging them.
 4. Run the repository's package checks (typecheck, lint, tests) and fix

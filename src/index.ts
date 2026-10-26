@@ -154,10 +154,12 @@ export {
 export { classifyDispatch, LANE_CLASSIFICATION } from './kernel/lanes.js';
 export type { BudgetClass, LaneClassificationRow } from './kernel/lanes.js';
 // Composition harness (T1.4) — re-export only, no logic: the R4 per-op
-// config schema + conservative defaults, the toolkit's minimal read/edit/run
+// config schema + conservative defaults, the toolkit's minimal
+// read/edit/write/bash
 // tool surface with its per-op allowlists, and the JSONL session store
 // backing the I6 isolation contract.
 export type {
+  BashToolConfig,
   FileToolConfig,
   HarnessConfig,
   HarnessToolConfig,
@@ -165,6 +167,7 @@ export type {
   RunToolConfig,
 } from './harness/config.js';
 export {
+  BashToolConfigSchema,
   defaultHarnessConfig,
   FileToolConfigSchema,
   HarnessConfigSchema,
@@ -173,21 +176,31 @@ export {
   RunToolConfigSchema,
 } from './harness/config.js';
 export type {
+  BashToolInput,
+  CanonicalEditToolInput,
   EditToolInput,
+  LegacyEditToolInput,
   ReadToolInput,
   RunToolInput,
   ToolExecuteOptions,
   ToolkitTool,
   ToolkitToolName,
   ToolkitToolResult,
+  WriteToolInput,
 } from './harness/tools.js';
 export {
+  BashToolInputSchema,
   buildTools,
+  CanonicalEditToolInputSchema,
+  canonicalToolName,
   compileCommandPatterns,
   compilePathPatterns,
   EditToolInputSchema,
+  LegacyEditToolInputSchema,
   ReadToolInputSchema,
   RunToolInputSchema,
+  toolAliases,
+  WriteToolInputSchema,
 } from './harness/tools.js';
 // The shared harness tool-surface core (W1.4, ADR-0002 Annex A.1) —
 // re-export only: naming, selection, the driver-authored manifest, the
