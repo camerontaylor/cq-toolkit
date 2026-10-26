@@ -145,9 +145,14 @@ projection protocol does not exist and is an activation blocker for that
 bridge. With no hook the shared token allowance is enforced per-invocation
 only — a named gap, not a whole-job claim.
 The one driver-side temporal bound is the SDK call's per-request
-`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
-but a bound on each step of the tool loop so a hung HTTP request cannot
-stall the loop.
+`timeout: { stepMs }` — NOT a run deadline, but a bound on each step of the
+tool loop (and the repair call) so a hung HTTP request cannot stall the loop.
+It defaults to `DEFAULT_STEP_TIMEOUT_MS` (120 s); the `stepTimeoutMs`
+constructor option overrides it, and the factory takes it per request
+(`DriverRequest.stepTimeoutMs`) or per lane (`lanes.aiSdk.stepTimeoutMs`).
+The agent reviewer passes cq.json `budgets.step.wallMs`, capped at the
+remaining review wall time, because a reasoning model can legitimately spend
+minutes on one request.
 
 Transient retry (#210): the SDK call runs `maxRetries: 1` — ONE retry per
 step request (bounded; ≤ DEFAULT_MAX_STEPS per run) for the SDK's own

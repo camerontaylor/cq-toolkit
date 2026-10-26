@@ -38,6 +38,8 @@ export interface AgentReviewerInput {
   role: { provider: string; model: string };
   maxTokens: number;
   wallMs: number;
+  /** cq.json `budgets.step.wallMs`: the per-request step bound, capped at the remaining `wallMs`. */
+  stepWallMs?: number;
   signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
@@ -59,6 +61,9 @@ async function runPartition(
       role: 'reviewer',
       modelSpec: input.role,
       harness: defaultHarnessConfig,
+      ...(input.stepWallMs === undefined
+        ? {}
+        : { stepTimeoutMs: Math.max(1, Math.floor(Math.min(input.stepWallMs, input.wallMs))) }),
       beforeRequest: async (text, contents = []) => {
         input.signal?.throwIfAborted();
         input.onRequest(

@@ -340,6 +340,7 @@ export const registry: OpRegistryEntry[] = [
                   role: roleSpec,
                   maxTokens: policy.budgets.run.maxTokens!,
                   wallMs: policy.budgets.run.wallMs,
+                  stepWallMs: policy.budgets.step.wallMs,
                   severityMap: policy.review.agentSeverityMap,
                 });
               },

@@ -419,3 +419,47 @@ it.each(['entry', 'running'] as const)(
     else expect(signal?.aborted).toBe(true);
   },
 );
+
+describe('runAgentReviewer per-request step bound', () => {
+  const reviewWith = async (input: { stepWallMs?: number; wallMs: number }) => {
+    const resolveDriver = vi.fn((_request: { stepTimeoutMs?: number }) => ({
+      driver: {
+        run: vi.fn(async () => ({
+          stopReason: 'complete' as const,
+          structuredOutput: { findings: [] },
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+        })),
+      },
+      lane: 'ai-sdk',
+      modelSpec: { provider: 'mock', model: 'mock' },
+    }));
+    const result = await runAgentReviewer({ resolve: resolveDriver } as unknown as DriverFactory, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      severityMap: { high: 'major', medium: 'minor' },
+      ...input,
+    });
+    expect(result.status).toBe('ok');
+    return resolveDriver.mock.calls.map(([request]) => request.stepTimeoutMs);
+  };
+
+  it('passes budgets.step.wallMs to the driver as stepTimeoutMs', async () => {
+    expect(await reviewWith({ stepWallMs: 1_200_000, wallMs: 14_400_000 })).toEqual([1_200_000]);
+  });
+
+  it('caps the step bound at the remaining review wall time', async () => {
+    const [stepTimeoutMs] = await reviewWith({ stepWallMs: 1_200_000, wallMs: 60_000 });
+    expect(stepTimeoutMs).toBeGreaterThan(0);
+    expect(stepTimeoutMs).toBeLessThanOrEqual(60_000);
+  });
+
+  it('leaves the driver default when no step budget is given', async () => {
+    expect(await reviewWith({ wallMs: 60_000 })).toEqual([undefined]);
+  });
+});

@@ -20,9 +20,9 @@
 //   - Budget.wallClockMs is IGNORED here — the governor's escalation ladder
 //     is the wall-clock owner; a driver-owned deadline would duplicate and
 //     races it. The SDK call's per-request `timeout.stepMs`
-//     (DEFAULT_STEP_TIMEOUT_MS) is NOT a run deadline — it bounds one HTTP
-//     request so a hung connection cannot stall the loop; WHEN to abort the
-//     RUN remains the governor's decision.
+//     (stepTimeoutMs, default DEFAULT_STEP_TIMEOUT_MS) is NOT a run
+//     deadline — it bounds one HTTP request so a hung connection cannot
+//     stall the loop; WHEN to abort the RUN remains the governor's decision.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
 //     pure token fold — no scheduling primitive involved). stopWhen is
@@ -172,9 +172,9 @@
 // and its exhausted-retry error names the attempt count and the last error
 // (`Failed after N attempts. Last error: …`), so the cause still reaches
 // WorkerResult.error. Each step of the tool loop is also bounded by
-// DEFAULT_STEP_TIMEOUT_MS (a hung HTTP request cannot stall the loop); that
-// per-request step-timeout abort is NOT SDK-retryable and therefore
-// classifies as 'transient' (the TimeoutError error class name).
+// stepTimeoutMs, default DEFAULT_STEP_TIMEOUT_MS (a hung HTTP request cannot
+// stall the loop); that per-request step-timeout abort is NOT SDK-retryable
+// and therefore classifies as 'transient' (the TimeoutError error class name).
 //
 // COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
 // model id ({ ...modelSpec, model: servedModel ?? modelSpec.model } — a
@@ -280,6 +280,9 @@ export const DEFAULT_MAX_STEPS = 40;
  * ignored here). It bounds a single provider HTTP request so a hung
  * connection cannot stall the loop indefinitely; the SDK aborts that step
  * and surfaces the cause, which the classifier maps to [endpoint-timeout].
+ * This is the DEFAULT only: `AiSdkDriverOptions.stepTimeoutMs` overrides it
+ * per driver (cq ops pass cq.json `budgets.step.wallMs` through the factory),
+ * since a reasoning model can legitimately spend minutes on one request.
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
@@ -339,6 +342,12 @@ export interface AiSdkDriverOptions {
    * whole-job claim.
    */
   strictTokenReservationHook?: (receipt: WireReservation) => void | Promise<void>;
+  /**
+   * Per-request wall-clock bound for each SDK step, tool-loop and repair
+   * alike (`timeout.stepMs`). Default: DEFAULT_STEP_TIMEOUT_MS. A positive
+   * integer; still NOT a run deadline (the governor owns that).
+   */
+  stepTimeoutMs?: number;
 }
 
 /**
@@ -360,6 +369,7 @@ export class AiSdkDriver implements Driver {
   private readonly strictTokenReservationHook:
     | ((receipt: WireReservation) => void | Promise<void>)
     | undefined;
+  private readonly stepTimeoutMs: number;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -378,6 +388,12 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
+    const stepTimeoutMs = options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    if (!Number.isSafeInteger(stepTimeoutMs) || stepTimeoutMs <= 0)
+      throw new Error(
+        `ai-sdk driver: stepTimeoutMs must be a positive integer (got ${String(stepTimeoutMs)})`,
+      );
+    this.stepTimeoutMs = stepTimeoutMs;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -646,10 +662,11 @@ export class AiSdkDriver implements Driver {
           // api-equivalent caveat the modeled label records, not a hidden
           // second charge.
           maxRetries: 1,
-          // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
+          // Per-request bound for EACH step (stepTimeoutMs, default
+          // DEFAULT_STEP_TIMEOUT_MS): a
           // hung request cannot stall the loop. The step-timeout abort is not
           // SDK-retryable; it classifies as 'transient' (TimeoutError name).
-          timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
+          timeout: { stepMs: this.stepTimeoutMs },
           ...(selected.length > 0 ? { tools: toolSet } : {}),
           // DECOUPLE the mandatory structured object from the tool loop (#203):
           // with tools available on the final step the model tends to call one
@@ -1087,7 +1104,7 @@ export class AiSdkDriver implements Driver {
         // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
         // bounded, unlike the main loop.
         maxRetries: 0,
-        timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
+        timeout: { stepMs: this.stepTimeoutMs },
         ...(remainingTokens !== undefined
           ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
           : { stopWhen: [stepCountIs(1)] }),

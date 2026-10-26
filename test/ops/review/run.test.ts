@@ -65,6 +65,36 @@ describe('review.run', () => {
     }
   });
 
+  it('bounds each agent reviewer request by cq.json budgets.step.wallMs', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500, wallMs: 14_400_000 }, step: { wallMs: 900_000 } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
+      repo.commitAll('fixture step budget');
+      const drivers = scriptedDrivers();
+      await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      const requests = vi.mocked(drivers.resolve).mock.calls.map(([request]) => request);
+      expect(requests.length).toBeGreaterThan(0);
+      for (const request of requests) expect(request.stepTimeoutMs).toBe(900_000);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('maps an unresolvable target to needs-human before starting a reviewer', async () => {
     const repo = await makeTestRepo();
     try {

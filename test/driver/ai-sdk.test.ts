@@ -1158,6 +1158,36 @@ describe('ai-sdk driver failure classes (#210)', () => {
     }
   });
 
+  test('a configured stepTimeoutMs bounds both the tool-loop call and the repair call', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'not an object' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        stepTimeoutMs: 1_200_000,
+      });
+      await driver.run(
+        invocation({
+          outputSchema: toOutputSchema('test/step-timeout/v1', z.object({ ok: z.boolean() })),
+        }),
+      );
+      // The miss triggers the one repair: the main call and the repair both
+      // carry the configured bound, not the 120 s default.
+      expect(
+        captured.generateTextArgs.slice(-2).map((args) => (args as { timeout?: unknown }).timeout),
+      ).toEqual([{ stepMs: 1_200_000 }, { stepMs: 1_200_000 }]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([0, -1, 1.5, Number.NaN])(
+    'a non-positive-integer stepTimeoutMs (%s) is rejected at construction',
+    (stepTimeoutMs) => {
+      expect(() => new AiSdkDriver({ stepTimeoutMs })).toThrow(/stepTimeoutMs/);
+    },
+  );
+
   test('an SDK-retryable endpoint failure is classified transient with providerSignals from the error headers', async () => {
     const transient = new APICallError({
       message: 'Cannot connect to API: Headers Timeout Error',
