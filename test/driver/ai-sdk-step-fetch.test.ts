@@ -88,8 +88,12 @@ describe('createStepFetch', () => {
   });
 
   test('a stall longer than a smaller bound succeeds under a larger configured bound', async () => {
-    // undici's socket timers tick at ~1 s, so the scale is seconds.
-    const { url } = await stallingServer(2_500);
+    // undici's socket timers tick at ~1 s, so the scale is seconds. Keep the
+    // stall more than a tick clear of the smaller bound: the 1 000 ms headers
+    // timeout can fire ~1 s late (~2 000 ms), so a slower answer could win the
+    // race on a jittery CI runner. 4 000 ms leaves ~2 s of slack for the
+    // rejection, and the 6 000 ms bound below still exceeds the stall.
+    const { url } = await stallingServer(4_000);
     // The smaller bound stands in for the old 300 s default…
     await expect(createStepFetch(1_000, 0)(url)).rejects.toThrow();
     // …and the configured bound replaces it.
