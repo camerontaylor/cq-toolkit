@@ -751,6 +751,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('maxSteps=1 disables tools on the first main step and counts the repair step separately', async () => {
     const toolCounts: number[] = [];
+    const hookKinds: string[] = [];
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
@@ -765,6 +766,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, _contents, context) => {
+          hookKinds.push(context?.kind ?? 'missing');
+        },
       });
       const result = await driver.run(
         invocation({
@@ -781,6 +785,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(toolCounts).toHaveLength(2);
       expect(toolCounts[0]).toBe(0); // maxSteps=1 makes the first main step tools-off
       expect(toolCounts[1]).toBe(0); // repair remains one tool-free step
+      expect(hookKinds).toEqual(['model-request', 'model-request']);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -972,6 +977,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('forced final step restates the tool-free contract (#468)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
+    const hookKinds: string[] = [];
     let calls = 0;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
@@ -981,7 +987,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
         expect(text.match(/driver-specific run/g)).toHaveLength(1);
         if (options.tools?.length) {
           expect(text).toContain('Use the tools to complete the task first');
-          return toolCallResult('read', { path: 'absent.txt' });
+          return toolCallResult('read', { path: 'evidence.txt' });
         }
         expect(text).toContain('You have no tools:');
         expect(text).not.toContain('Use the tools to complete the task first');
@@ -990,19 +996,27 @@ describe('ai-sdk driver specifics (mock model)', () => {
       },
     });
     try {
+      await writeFile(join(scratchDir, 'evidence.txt'), 'safe tool output');
       const driver = new AiSdkDriver({
         providers: { 'opencode-go': () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, _contents, context) => {
+          hookKinds.push(context?.kind ?? 'missing');
+        },
       });
       const result = await driver.run(
         invocation({
           modelSpec: { provider: 'opencode-go', model: 'mock-1' },
+          workspace: { path: scratchDir },
           toolPolicy: { mode: 'allowlist', allow: ['read'] },
           outputSchema: toOutputSchema('test/final/v1', z.object({ answer: z.string() })),
         }),
       );
       expect(result.stopReason).toBe('complete');
       expect(calls).toBe(DEFAULT_MAX_STEPS);
+      expect(hookKinds.filter((kind) => kind === 'model-request')).toHaveLength(DEFAULT_MAX_STEPS);
+      expect(hookKinds).toContain('tool-output');
+      expect(hookKinds.at(-1)).toBe('model-request');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

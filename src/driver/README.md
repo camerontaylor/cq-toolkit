@@ -98,6 +98,11 @@ Constructor options:
   `https://api.z.ai/api/paas/v4`). The conformance suite injects mocks here.
 - `harnessConfig?` — harness tool surface + prompt budget
   (default: `defaultHarnessConfig`).
+- `beforeRequest?` — ai-sdk-only upload gate. It receives serialized text,
+  decoded content leaves, and an optional `{ kind }` context: `model-request`
+  before each SDK model send (including forced-final and repair requests), or
+  `tool-output` before a successful tool result is exposed to the model. The
+  metadata is additive; existing two-argument callbacks remain compatible.
 
 Structured output (seam v2, ADR-0002 section 2.3): there is NO
 construction-time schema — the request rides `OpInvocation.outputSchema`

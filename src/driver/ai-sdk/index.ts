@@ -289,10 +289,15 @@ export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
-  /** Runs before every provider send, including retries, repairs and tool-loop steps. */
+  /**
+   * Runs before every provider send, including retries and repairs. The
+   * optional context distinguishes a model request from scanned tool output;
+   * existing two-argument callbacks remain valid.
+   */
   beforeRequest?: (
     text: string,
     contents?: readonly { text: string; path?: string }[],
+    context?: { kind: 'model-request' | 'tool-output' },
   ) => void | Promise<void>;
   /**
    * Provider registry override (name → factory). Unknown provider names
@@ -492,10 +497,10 @@ export class AiSdkDriver implements Driver {
     const guard: AiSdkDriverOptions['beforeRequest'] =
       this.beforeRequest === undefined
         ? undefined
-        : async (text, contents) => {
+        : async (text, contents, context) => {
             if (uploadRefused) throw new Error('worker upload already refused');
             try {
-              await this.beforeRequest?.(text, contents);
+              await this.beforeRequest?.(text, contents, context);
             } catch {
               uploadRefused = true;
               throw new Error('worker upload refused by scan');
@@ -515,7 +520,7 @@ export class AiSdkDriver implements Driver {
                 for (const child of Object.values(value)) collect(child);
             };
             collect(JSON.parse(text));
-            await guard(text, contents);
+            await guard(text, contents, { kind: 'model-request' });
             return params;
           },
         },
@@ -1681,7 +1686,7 @@ async function runTool(
           path: relative(record.workspace, source).replaceAll('\\', '/'),
         });
     }
-    await guard(result.output, contents);
+    await guard(result.output, contents, { kind: 'tool-output' });
   }
   await store.appendMessage(record.sessionId, {
     role: 'tool',
