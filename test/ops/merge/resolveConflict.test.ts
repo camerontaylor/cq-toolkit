@@ -34,7 +34,7 @@
 //      needs-human), an `error` verdict → failed with errorClass=<x> named
 //      in the text, the fail-closed contract violation (never ok, never
 //      needs-human), the modelSpec runtime requirement, the invocation
-//      shape (allowlist tools read/edit/run; sandbox level 'none' — the
+//      shape (allowlist tools read/edit/bash; sandbox level 'none' — the
 //      network-for-push trap; the workspace binding; the decision-schema
 //      outputSchema; NO sessionRef; wall-clock default and override), and
 //      the failure surfaces: nonzero fetch, throwing worktreePrepare, a
@@ -641,7 +641,7 @@ describe('resolveConflict op', () => {
     expect(invocation.prompt).toContain('/wt/pr-44');
     expect(invocation.prompt).toContain('{"decision":"acted|escalate","summary":"…"}');
     // Tool surface: the write-capable allowlist, exactly.
-    expect(invocation.toolPolicy).toEqual({ allow: ['read', 'edit', 'run'], mode: 'allowlist' });
+    expect(invocation.toolPolicy).toEqual({ allow: ['read', 'edit', 'bash'], mode: 'allowlist' });
     // THE SANDBOX TRAP (module doc): level 'none' is the ONLY correct
     // request — a workspace-write sandbox would block the network the
     // push needs, and the frozen SandboxPolicy has no network field to

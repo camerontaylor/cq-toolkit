@@ -58,6 +58,7 @@ import {
   createHarnessSurface,
   qualifiedToolName,
 } from '../../src/harness/surface.js';
+import { canonicalToolName, toolAliases } from '../../src/harness/tools.js';
 import type { HarnessManifest, McpCallToolResult } from '../../src/harness/surface.js';
 import { CONFORMANCE_MODEL, CONFORMANCE_PROVIDER } from '../../src/driver/conformance.js';
 
@@ -76,7 +77,8 @@ const HARNESS: HarnessConfig = {
   tools: {
     read: { ...defaultHarnessConfig.tools.read, pathPatterns: ['note.txt', 'src/**'] },
     edit: { ...defaultHarnessConfig.tools.edit, pathPatterns: ['note.txt', 'src/**'] },
-    run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['echo'] },
+    write: { ...defaultHarnessConfig.tools.write, enabled: false, pathPatterns: [] },
+    bash: { ...defaultHarnessConfig.tools.bash, commandPatterns: ['echo'] },
   },
 };
 
@@ -84,7 +86,7 @@ const ENV_HARNESS: HarnessConfig = {
   ...HARNESS,
   tools: {
     ...HARNESS.tools,
-    run: { ...HARNESS.tools.run, commandPatterns: ['env'] },
+    bash: { ...HARNESS.tools.bash, commandPatterns: ['env'] },
   },
 };
 
@@ -100,6 +102,7 @@ interface Step {
 /** The workspace-write manifest's sequence. */
 const WRITE_STEPS: readonly Step[] = [
   { label: 'read ok', tool: 'read', input: { path: 'note.txt' } },
+  { label: 'read before edit', tool: 'read', input: { path: 'src/a.txt' } },
   {
     label: 'edit ok',
     tool: 'edit',
@@ -580,15 +583,24 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
       expect(agent.verdict.stopReason).toBe('complete');
       expect(agent.verdict.error).toBeUndefined();
       // The registered surface IS the core surface: same names, descriptions,
-      // and the declared shape covers exactly the strict schema's keys.
+      // and the declared shape covers exactly the strict schema's keys. The
+      // one-release `run` alias is registered alongside `bash`.
       const coreSurface = createHarnessSurface(await manifestFor(core.workspace, phase.sandbox));
-      expect(agent.tools.map((t) => t.name)).toEqual(coreSurface.tools.map((t) => t.name));
-      expect(agent.tools.map((t) => t.description)).toEqual(
-        coreSurface.tools.map((t) => t.description),
-      );
-      expect(agent.tools.map((t) => Object.keys(t.shape as object))).toEqual(
-        coreSurface.tools.map((t) => Object.keys(t.inputSchema.shape)),
-      );
+      const expectedNames = coreSurface.tools.flatMap((tool) => [
+        tool.name,
+        ...toolAliases(tool.name),
+      ]);
+      expect(agent.tools.map((t) => t.name)).toEqual(expectedNames);
+      for (const tool of agent.tools) {
+        const coreTool = coreSurface.tools.find(
+          (candidate) => candidate.name === canonicalToolName(tool.name),
+        );
+        if (coreTool === undefined) throw new Error(`no core tool for '${tool.name}'`);
+        expect(tool.description, tool.name).toBe(coreTool.description);
+        expect(Object.keys(tool.shape as object), tool.name).toEqual(
+          Object.keys(coreTool.inputSchema.shape),
+        );
+      }
 
       expect(core.results).toHaveLength(phase.steps.length);
       expect(stdio.results).toHaveLength(phase.steps.length);
@@ -606,6 +618,7 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
           false,
           false,
           false,
+          false,
           true,
           true,
           true,
@@ -615,15 +628,16 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
           true,
         ]);
         expect(texts[0]).toBe(NOTE_BODY);
-        expect(texts[1]).toBe("edited 'src/a.txt': replaced 1 occurrence");
-        expect(texts[2]).toBe('beta\n');
-        expect(texts[3]).toBe("path not allowed by harness config allowlist: 'secret.txt'");
-        expect(texts[4]).toBe("path escape: '../x' resolves outside the workspace");
+        expect(texts[1]).toBe(A_BODY);
+        expect(texts[2]).toBe("edited 'src/a.txt': replaced 1 occurrence");
+        expect(texts[3]).toBe('beta\n');
+        expect(texts[4]).toBe("path not allowed by harness config allowlist: 'secret.txt'");
         expect(texts[5]).toBe("path escape: '../x' resolves outside the workspace");
-        expect(texts[6]).toBe("file not found: 'src/missing.txt'");
-        expect(texts[7]).toBe('exit 0\n--- stdout ---\nhi\n');
-        expect(texts[8]).toBe("command not allowed by harness config allowlist: 'whoami'");
-        expect(texts[9]?.startsWith('command allowlist: shell metacharacters')).toBe(true);
+        expect(texts[6]).toBe("path escape: '../x' resolves outside the workspace");
+        expect(texts[7]).toBe("file not found: 'src/missing.txt'");
+        expect(texts[8]).toBe('exit 0\n--- stdout ---\nhi\n');
+        expect(texts[9]).toBe("command not allowed by harness config allowlist: 'whoami'");
+        expect(texts[10]?.startsWith('command allowlist: shell metacharacters')).toBe(true);
         // Post-state parity: every path's edit landed identically.
         for (const ws of [core.workspace, stdio.workspace, agent.workspace]) {
           await expect(readFile(join(ws, 'src', 'a.txt'), 'utf8')).resolves.toBe('beta\n');
@@ -736,7 +750,7 @@ describe('harness parity — Level 2: WorkerResult.denials (claude-agent fold �
     // Frozen shape: exactly {tool, reason}, harness names.
     for (const denial of [...agentDenials, ...subprocessDenials]) {
       expect(Object.keys(denial).sort()).toEqual(['reason', 'tool']);
-      expect(['read', 'edit', 'run']).toContain(denial.tool);
+      expect(['read', 'edit', 'bash']).toContain(denial.tool);
     }
     expect(agentDenials).toEqual(referenceDenials);
     expect(subprocessDenials).toEqual(referenceDenials);
@@ -747,10 +761,10 @@ describe('harness parity — Level 2: WorkerResult.denials (claude-agent fold �
       'read',
       'edit',
       'read',
-      'run',
-      'run',
+      'bash',
+      'bash',
       'edit',
-      'run',
+      'bash',
     ]);
   }, 60_000);
 });

@@ -1484,8 +1484,8 @@ describe('truncated-context resolve gate (round-3 item 13)', () => {
 
 describe('shipped fixer harness rides the plan (round-3 item 9)', () => {
   test('the plan default IS the shipped reviewFixHarness value', () => {
-    expect(reviewFixHarness.tools.run.enabled).toBe(true);
-    expect(reviewFixHarness.tools.run.commandPatterns[0]).toBe('git add');
+    expect(reviewFixHarness.tools.bash.enabled).toBe(true);
+    expect(reviewFixHarness.tools.bash.commandPatterns[0]).toBe('git add');
   });
 
   test('the fix job input carries the git-commit-capable harness by default', async () => {
@@ -1493,9 +1493,9 @@ describe('shipped fixer harness rides the plan (round-3 item 9)', () => {
       driverResults: [completeWorker(fixLine(true, 's', [NEW_SHA]))],
     });
     const job = outcome.plan.jobs[0] as {
-      input: { harness: { tools: { run: { commandPatterns: string[] } } } };
+      input: { harness: { tools: { bash: { commandPatterns: string[] } } } };
     };
-    expect(job.input.harness.tools.run.commandPatterns).toEqual([
+    expect(job.input.harness.tools.bash.commandPatterns).toEqual([
       'git add',
       'git commit',
       'git status',
