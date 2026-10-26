@@ -745,12 +745,15 @@ describe('ai-sdk driver specifics (mock model)', () => {
   test('prompted-schema providers never send response_format: the schema rides the prompt and the reply text is validated (dogfood C, 2026-10-25)', async () => {
     const formats: unknown[] = [];
     const contracts: boolean[] = [];
+    const scans: string[] = [];
     let toolFree = 0;
     const gateway = new MockLanguageModelV4({
       modelId: 'deepseek-v4.1-flash',
       doGenerate: async (options) => {
         formats.push(options.responseFormat);
-        contracts.push(JSON.stringify(options.prompt).includes('JSON Schema'));
+        contracts.push(
+          JSON.stringify(options.prompt).includes('Use the tools to complete the task first'),
+        );
         if (options.tools !== undefined && options.tools.length > 0 && formats.length === 1) {
           return toolCallResult('read', { path: 'absent.txt' });
         }
@@ -765,6 +768,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { 'opencode-go': () => gateway, mock: () => gateway },
         sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (text) => {
+          scans.push(text);
+        },
       });
       const schema = toOutputSchema(
         'test/prompted/v1',
@@ -782,12 +788,202 @@ describe('ai-sdk driver specifics (mock model)', () => {
       // tool step, schema-invalid final text, one tool-free repair
       expect(formats).toHaveLength(3);
       expect(formats.every((format) => format === undefined)).toBe(true);
-      expect(contracts.every(Boolean)).toBe(true);
+      expect(contracts).toEqual([true, true, false]);
+      expect(scans.some((text) => text.includes('Use the tools to complete the task first'))).toBe(
+        true,
+      );
       // CONTROL: a native-schema provider still sends the json response format.
       formats.length = 0;
+      contracts.length = 0;
+      scans.length = 0;
       toolFree = 1;
       await driver.run(invocation({ outputSchema: schema }));
       expect(formats[0]).toMatchObject({ type: 'json' });
+      expect(contracts.length).toBeGreaterThan(0);
+      expect(contracts.every((present) => !present)).toBe(true);
+      expect(
+        scans.every((text) => !text.includes('Use the tools to complete the task first')),
+      ).toBe(true);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([false, true])('main wording matches offered tools: %s (#483)', async (hasTools) => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-tool-wording-'));
+    const schema = toOutputSchema('test/wording/v1', z.object({ answer: z.string() }));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { 'opencode-go': () => modelFor({ kind: 'reply', text: '{"answer":"ok"}' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      await driver.run(
+        invocation({
+          prompt: 'Review the supplied patch.',
+          modelSpec: { provider: 'opencode-go', model: 'mock-1' },
+          toolPolicy: hasTools
+            ? { mode: 'allowlist', allow: ['read'] }
+            : { mode: 'none', allow: [] },
+          outputSchema: schema,
+        }),
+      );
+      const args = lastGenerateTextArgs();
+      const preamble = hasTools
+        ? 'You are a cq-toolkit worker executing one task. Work inside the provided workspace directory; use the available tools to read, edit, and run. Tool refusals arrive as denial text — adapt instead of retrying the same call.'
+        : 'You are a cq-toolkit worker executing one task. You have no tools: everything you need is in the messages below. Answer directly.';
+      expect(args.system).toBe(`${preamble}\n\nReview the supplied patch.`);
+      expect(args.tools === undefined).toBe(!hasTools);
+      const prefix = hasTools
+        ? 'Use the tools to complete the task first. When you are done, reply with ONLY one JSON object — no prose, no code fences —'
+        : 'Reply with ONLY one JSON object — no prose, no code fences, no tool calls —';
+      expect(args.messages?.at(-1)?.content).toBe(
+        `${prefix} that validates against this JSON Schema (draft 2020-12):\n${JSON.stringify(schema.schema)}`,
+      );
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['mock', 'opencode-go'])(
+    'repair retains tool evidence exactly once: %s (#483)',
+    async (provider) => {
+      const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-evidence-'));
+      await writeFile(join(scratchDir, 'evidence.txt'), 'observed evidence 483');
+      let calls = 0;
+      const mock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => {
+          calls += 1;
+          if (calls === 1) return toolCallResult('read', { path: 'evidence.txt' });
+          return textResult(
+            calls === 2 ? 'I reviewed the evidence.' : '{"answer":"observed evidence 483"}',
+          );
+        },
+      });
+      try {
+        const driver = new AiSdkDriver({
+          providers: { [provider]: () => mock },
+          sessionsDir: join(scratchDir, 'sessions'),
+        });
+        const result = await driver.run(
+          invocation({
+            modelSpec: { provider, model: 'mock-1' },
+            workspace: { path: scratchDir },
+            toolPolicy: { mode: 'allowlist', allow: ['read'] },
+            outputSchema: toOutputSchema('test/evidence/v1', z.object({ answer: z.string() })),
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(calls).toBe(3);
+        const args = lastGenerateTextArgs();
+        expect(args.tools).toBeUndefined();
+        expect(args.system).toContain('You have no tools:');
+        expect(args.system).not.toContain('use the available tools');
+        const messages = args.messages ?? [];
+        expect(messages.filter((message) => message.role === 'tool')).toHaveLength(1);
+        const serialized = JSON.stringify(messages);
+        expect(serialized.match(/conformance-call-1/g)).toHaveLength(2);
+        expect(serialized.match(/I reviewed the evidence\./g)).toHaveLength(1);
+        expect(serialized).toContain('observed evidence 483');
+        expect(serialized).not.toContain('Use the tools to complete');
+        expect(messages.at(-1)?.content).toContain('no tool calls');
+      } finally {
+        await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('forced final step restates the tool-free contract (#468)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        const text = JSON.stringify(options.prompt);
+        if (options.tools?.length) {
+          expect(text).toContain('Use the tools to complete the task first');
+          return toolCallResult('read', { path: 'absent.txt' });
+        }
+        expect(text).toContain('You have no tools:');
+        expect(text).not.toContain('Use the tools to complete the task first');
+        expect(text.match(/no prose, no code fences, no tool calls/g)).toHaveLength(1);
+        return textResult('{"answer":"ok"}');
+      },
+    });
+    try {
+      const driver = new AiSdkDriver({
+        providers: { 'opencode-go': () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          modelSpec: { provider: 'opencode-go', model: 'mock-1' },
+          toolPolicy: { mode: 'allowlist', allow: ['read'] },
+          outputSchema: toOutputSchema('test/final/v1', z.object({ answer: z.string() })),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(calls).toBe(DEFAULT_MAX_STEPS);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['<｜DSML｜ calls>', '<|DSML| calls>', '<tool_call>', '<function_call>'])(
+    'markup parse failure has a precise diagnostic: %s',
+    (markup) =>
+      expect(() => parseReplyJson(`${markup}not JSON`)).toThrow(
+        'model emitted tool-call markup instead of the JSON reply',
+      ),
+  );
+
+  test.each(['<｜DSML｜ calls>', '<|DSML| calls>', '<tool_call>', '<function_call>'])(
+    'markup-wrapped schema-shaped JSON is rejected: %s',
+    (markup) =>
+      expect(() => parseReplyJson(`${markup}{"answer":"ok"}</tool_call>`)).toThrow(
+        'model emitted tool-call markup instead of the JSON reply',
+      ),
+  );
+
+  test('literal markup inside a JSON value remains ordinary data', () => {
+    const value = { answer: '<tool_call>' };
+    for (const text of [
+      JSON.stringify(value),
+      `\`\`\`json\n${JSON.stringify(value)}\n\`\`\``,
+      `Answer: ${JSON.stringify(value)}`,
+    ]) {
+      expect(parseReplyJson(text)).toEqual(value);
+    }
+  });
+
+  test('markup parse failure is repaired once and survives a failed repair (#483)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-markup-'));
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        calls += 1;
+        return textResult('<｜DSML｜ calls>not JSON');
+      },
+    });
+    try {
+      const driver = new AiSdkDriver({
+        providers: { 'opencode-go': () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          modelSpec: { provider: 'opencode-go', model: 'mock-1' },
+          toolPolicy: { mode: 'none', allow: [] },
+          outputSchema: toOutputSchema('test/markup/v1', z.object({ answer: z.string() })),
+        }),
+      );
+      expect(calls).toBe(2);
+      expect(result.stopReason).toBe('error');
+      expect(result.error).toContain('model emitted tool-call markup instead of the JSON reply');
+      expect(lastGenerateTextArgs().system).toBe(generateTextArgsFromEnd(1).system);
+      expect(JSON.stringify(lastGenerateTextArgs())).not.toContain('Use the tools to complete');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -1669,6 +1865,42 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
     }
   });
 
+  test('provider cancellation outranks an oversized prompt without creating a session', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-abort-prompt-'));
+    const controller = new AbortController();
+    let calls = 0;
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          mock: () => {
+            controller.abort();
+            return new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: async () => {
+                calls += 1;
+                return textResult('must never run');
+              },
+            });
+          },
+        },
+        sessionsDir: join(scratchDir, 'sessions'),
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          promptBudget: { ...defaultHarnessConfig.promptBudget, maxSystemPromptChars: 50 },
+        },
+      });
+      const result = await driver.run(invocation({ prompt: 'p'.repeat(51) }), {
+        signal: controller.signal,
+      });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.sessionId).toBeUndefined();
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(calls).toBe(0);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('composed system prompt: empty preamble → prompt alone, never past the budget (#18-3)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
@@ -2131,7 +2363,9 @@ describe('ai-sdk driver seam v2 §2.3: invocation outputSchema + repair + provid
       // The model sees what it produced: the transcript + its own reply ride.
       expect(
         repairTurns.some(
-          (m) => m.role === 'assistant' && m.content.includes('prose instead of the JSON'),
+          (m) =>
+            m.role === 'assistant' &&
+            JSON.stringify(m.content).includes('prose instead of the JSON'),
         ),
       ).toBe(true);
     } finally {
