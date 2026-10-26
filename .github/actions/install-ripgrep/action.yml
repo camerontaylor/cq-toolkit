@@ -8,6 +8,8 @@ runs:
       run: |
         set -euo pipefail
         version=15.2.0
+        observed_version=not-yet-observed
+        trap 'status=$?; printf "install-ripgrep: line %s command %q failed with status %s; observed ripgrep version: %s\n" "$LINENO" "$BASH_COMMAND" "$status" "$observed_version" >&2' ERR
         case "${RUNNER_OS}:${RUNNER_ARCH}" in
           Linux:X64)
             target=x86_64-unknown-linux-musl
@@ -46,5 +48,14 @@ runs:
         bin_dir="${RUNNER_TEMP:?RUNNER_TEMP must be set}/bin"
         mkdir -p "$bin_dir"
         install -m 0755 "${workdir}/extracted/rg" "${bin_dir}/rg"
-        test "$("${bin_dir}/rg" --version | head -n 1)" = "ripgrep ${version}"
+        version_output="$("${bin_dir}/rg" --version)"
+        observed_version="${version_output%%$'\n'*}"
+        case "$observed_version" in
+          "ripgrep ${version}"|"ripgrep ${version} "*)
+            ;;
+          *)
+            printf 'Unsupported ripgrep version, expected %s and observed %s\n' "$version" "$observed_version" >&2
+            false
+            ;;
+        esac
         printf '%s\n' "$bin_dir" >> "$GITHUB_PATH"
