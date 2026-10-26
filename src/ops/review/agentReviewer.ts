@@ -4,6 +4,7 @@ import { partitionReview, type ReviewCoverage } from './internal/reviewPartition
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
+import { boundedErrorText } from '../../driver/error-text.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { OpInvocation } from '../../driver/types.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -149,9 +150,15 @@ async function runPartition(
       (result.usage.reasoning ?? 0),
   );
   if (result.stopReason !== 'complete') {
-    return result.stopReason === 'budget'
-      ? { status: 'budget-exhausted' }
-      : { status: 'needs-human', reason: `agent review did not complete (${result.stopReason})` };
+    if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
+    // #484: carry the driver's failure detail (bounded + secret-redacted at
+    // the seam) into the blocked reason the review log records — a bare
+    // stop reason sent operators to the raw session log to find the cause.
+    const detail = result.error === undefined ? '' : `: ${boundedErrorText(result.error)}`;
+    return {
+      status: 'needs-human',
+      reason: `agent review did not complete (${result.stopReason})${detail}`,
+    };
   }
   const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
     result.structuredOutput,

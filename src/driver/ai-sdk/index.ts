@@ -433,7 +433,6 @@ export class AiSdkDriver implements Driver {
       sessionRef ?? (modelSpec.provider === 'opencode-go' ? randomUUID() : undefined);
     const resolvedModel = this.resolveModel(modelSpec, sessionId);
     let model: LanguageModel = resolvedModel;
-    const system = this.composeSystemPrompt(prompt);
     // Resolve policy before creating session/workspace state: malformed
     // sandbox configuration must fail before any partial run state exists.
     const runGate = harnessRunGate(
@@ -461,6 +460,8 @@ export class AiSdkDriver implements Driver {
         stopReason: 'aborted',
       };
     }
+
+    this.validatePromptBudget(prompt);
 
     // --- Strict pre-request ceiling wrap: the capability was validated above,
     // so the ceiling is constructed here (once) over the resolved model. The
@@ -581,6 +582,7 @@ export class AiSdkDriver implements Driver {
       runGate,
     );
     const selected = selectTools(harnessTools, toolPolicy);
+    const system = this.composeSystemPrompt(prompt, selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
       toolSet[harnessTool.name] = tool({
@@ -609,7 +611,10 @@ export class AiSdkDriver implements Driver {
     const prompted = outputSchema !== undefined && promptedSchemaProvider(modelSpec.provider);
     const messages: ModelMessage[] =
       prompted && outputSchema !== undefined
-        ? [...transcript, { role: 'user', content: schemaContract(outputSchema) }]
+        ? [
+            ...transcript,
+            { role: 'user', content: schemaContract(outputSchema, selected.length > 0) },
+          ]
         : transcript;
 
     // --- The one SDK call. -------------------------------------------------
@@ -618,6 +623,9 @@ export class AiSdkDriver implements Driver {
     // fails mid-loop still carries the tokens its completed steps spent
     // (an error verdict reporting all-zero usage after real work would be
     // dishonest evidence). The fold never feeds a cost figure on this path.
+    // ai@7 response.messages covers one step; retain every completed step
+    // for repair, including when native output parsing throws after the loop.
+    const responseMessages: ModelMessage[] = [];
     let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     let completedSteps = 0;
     // Session-log fidelity (item 1.7): the FINAL completed step, so the
@@ -663,14 +671,35 @@ export class AiSdkDriver implements Driver {
           // no scheduling primitive (I8).
           ...(outputSchema !== undefined && selected.length > 0
             ? {
-                prepareStep: ({ stepNumber }: { stepNumber: number }) =>
-                  stepNumber >= effectiveStepCap - 1 ? { activeTools: [] } : undefined,
+                prepareStep: ({ stepNumber, messages }) =>
+                  stepNumber >= effectiveStepCap - 1
+                    ? {
+                        activeTools: [],
+                        system: this.composeSystemPrompt(prompt, false),
+                        ...(prompted
+                          ? {
+                              messages: [
+                                ...messages.filter(
+                                  (message) =>
+                                    message.role !== 'user' ||
+                                    message.content !== schemaContract(outputSchema, true),
+                                ),
+                                {
+                                  role: 'user' as const,
+                                  content: schemaContract(outputSchema, false),
+                                },
+                              ],
+                            }
+                          : {}),
+                      }
+                    : undefined,
               }
             : {}),
           stopWhen,
           onStepFinish: (step) => {
             completedSteps += 1;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
+            responseMessages.push(...step.response.messages);
             lastStep = {
               usage: step.usage,
               toolCalls: step.toolCalls as readonly unknown[] | undefined,
@@ -716,7 +745,8 @@ export class AiSdkDriver implements Driver {
             abortSignal,
             budget,
             model,
-            system,
+            prompt,
+            responseMessages,
             transcript,
             store,
             record,
@@ -780,7 +810,8 @@ export class AiSdkDriver implements Driver {
             abortSignal,
             budget,
             model,
-            system,
+            prompt,
+            responseMessages,
             transcript,
             store,
             record,
@@ -956,7 +987,8 @@ export class AiSdkDriver implements Driver {
     abortSignal: AbortSignal | undefined;
     budget: Budget;
     model: LanguageModel;
-    system: string;
+    prompt: string;
+    responseMessages: ModelMessage[];
     transcript: ModelMessage[];
     store: SessionStore;
     record: SessionRecord;
@@ -975,7 +1007,8 @@ export class AiSdkDriver implements Driver {
       abortSignal,
       budget,
       model,
-      system,
+      prompt,
+      responseMessages,
       transcript,
       store,
       record,
@@ -1086,12 +1119,16 @@ export class AiSdkDriver implements Driver {
 
     const repairMessages: ModelMessage[] = [
       ...transcript,
-      ...(mainText.trim() !== '' ? [{ role: 'assistant' as const, content: mainText }] : []),
+      ...(responseMessages.length > 0
+        ? responseMessages
+        : mainText.trim() !== ''
+          ? [{ role: 'assistant' as const, content: mainText }]
+          : []),
       {
         role: 'user',
         content:
           `Your previous reply did not satisfy the required JSON contract. ` +
-          `Reply with ONLY one JSON object — no prose, no code fences — that validates ` +
+          `Reply with ONLY one JSON object — no prose, no code fences, no tool calls — that validates ` +
           `against this JSON Schema (draft 2020-12):\n${JSON.stringify(outputSchema.schema)}`,
       },
     ];
@@ -1099,7 +1136,7 @@ export class AiSdkDriver implements Driver {
     try {
       const repair = await generateText({
         model,
-        system,
+        system: this.composeSystemPrompt(prompt, false),
         messages: repairMessages,
         // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
         // bounded, unlike the main loop.
@@ -1414,6 +1451,15 @@ export class AiSdkDriver implements Driver {
     return factory(modelSpec.model, sessionId);
   }
 
+  private validatePromptBudget(prompt: string): void {
+    const maxChars = this.harnessConfig.promptBudget.maxSystemPromptChars;
+    if (prompt.length > maxChars) {
+      throw new Error(
+        `ai-sdk driver: op prompt is ${prompt.length} chars, over the harness prompt budget of ${maxChars} — refusing (not truncating caller data)`,
+      );
+    }
+  }
+
   /**
    * The composed system prompt: minimal harness preamble (tool usage +
    * workspace note) + the op prompt. Budget rule (documented): the OP
@@ -1426,20 +1472,12 @@ export class AiSdkDriver implements Driver {
    * rules) — the prompt budget accounts for the composed system, the user
    * turn is the model's input message, not system-prompt text.
    */
-  private composeSystemPrompt(prompt: string): string {
+  private composeSystemPrompt(prompt: string, hasTools: boolean): string {
+    this.validatePromptBudget(prompt);
     const maxChars = this.harnessConfig.promptBudget.maxSystemPromptChars;
-    if (prompt.length > maxChars) {
-      throw new Error(
-        `ai-sdk driver: op prompt is ${prompt.length} chars, over the harness prompt budget of ${maxChars} — refusing (not truncating caller data)`,
-      );
-    }
+    const text = hasTools ? SYSTEM_PREAMBLE : TOOL_FREE_PREAMBLE;
     const room = maxChars - prompt.length - 2; // '\n\n' separator
-    const preamble =
-      room <= 0
-        ? ''
-        : SYSTEM_PREAMBLE.length <= room
-          ? SYSTEM_PREAMBLE
-          : SYSTEM_PREAMBLE.slice(0, room);
+    const preamble = room <= 0 ? '' : text.length <= room ? text : text.slice(0, room);
     // An empty preamble has nothing to separate: the prompt rides ALONE.
     // The unconditional separator would compose prompt.length + 2 chars —
     // slipping past the very budget it enforces.
@@ -1457,6 +1495,10 @@ const SYSTEM_PREAMBLE =
   'Work inside the provided workspace directory; use the available tools to read, edit, and run. ' +
   'Tool refusals arrive as denial text — adapt instead of retrying the same call.';
 
+const TOOL_FREE_PREAMBLE =
+  'You are a cq-toolkit worker executing one task. ' +
+  'You have no tools: everything you need is in the messages below. Answer directly.';
+
 /**
  * Providers whose chat route cannot carry `response_format: json_schema`
  * (live probe 2026-10-25): the OpenCode Go gateway answers 400 to any
@@ -1471,10 +1513,12 @@ function promptedSchemaProvider(provider: string): boolean {
   return PROMPTED_SCHEMA_PROVIDERS.has(provider);
 }
 
-function schemaContract(outputSchema: OutputSchema): string {
+function schemaContract(outputSchema: OutputSchema, hasTools: boolean): string {
+  const instruction = hasTools
+    ? 'Use the tools to complete the task first. When you are done, reply with ONLY one JSON object — no prose, no code fences —'
+    : 'Reply with ONLY one JSON object — no prose, no code fences, no tool calls —';
   return (
-    `Use the tools to complete the task first. When you are done, reply with ONLY one JSON ` +
-    `object — no prose, no code fences — that validates against this JSON Schema ` +
+    `${instruction} that validates against this JSON Schema ` +
     `(draft 2020-12):\n${JSON.stringify(outputSchema.schema)}`
   );
 }
@@ -1489,8 +1533,22 @@ export function parseReplyJson(text: string): unknown {
   } catch (error) {
     const start = body.indexOf('{');
     const end = body.lastIndexOf('}');
-    if (start === -1 || end <= start) throw error;
-    return JSON.parse(body.slice(start, end + 1));
+    try {
+      if (start === -1 || end <= start) throw error;
+      if (
+        /<[|｜]DSML[|｜]|<tool_call>|<function_call>/.test(
+          body.slice(0, start) + body.slice(end + 1),
+        )
+      ) {
+        throw new Error('model emitted tool-call markup instead of the JSON reply');
+      }
+      return JSON.parse(body.slice(start, end + 1));
+    } catch (parseError) {
+      if (/<[|｜]DSML[|｜]|<tool_call>|<function_call>/.test(text)) {
+        throw new Error('model emitted tool-call markup instead of the JSON reply');
+      }
+      throw parseError;
+    }
   }
 }
 
