@@ -127,6 +127,8 @@ export interface Budget {
   maxTokens?: number;
   wallClockMs?: number;
   maxAttempts?: number;
+  /** Maximum number of completed SDK steps for lanes that enforce this bound. */
+  maxSteps?: number;
   /**
    * Opt-in binding pre-request token ceiling (strict). Absent = the legacy
    * soft `maxTokens` semantics, unchanged — enabling this does not redefine
@@ -296,6 +298,8 @@ export interface WorkerResult {
   model?: string;
   structuredOutput?: unknown;
   usage: Usage;
+  /** Number of completed SDK steps, when the lane can observe them. */
+  steps?: number;
   costUSD?: number;
   /**
    * What `costUSD` is, when it is present (DD-9): `modeled` — an

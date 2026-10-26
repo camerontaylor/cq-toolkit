@@ -3,7 +3,8 @@
 The seam between the toolkit and any worker that can run a prompt. One
 method: `Driver.run(opInvocation) → Promise<WorkerResult>`. Source of
 truth: `src/driver/types.ts` (types); zod mirrors of the serializable
-parts live in `src/kernel/schema.ts`.
+parts live in `src/driver/schema.ts` and are re-exported by
+`src/kernel/schema.ts`.
 
 ## The contract
 
@@ -14,7 +15,7 @@ parts live in `src/kernel/schema.ts`.
 - `toolPolicy: ToolPolicy` — `{ allow: readonly string[]; mode?: 'allowlist' | 'unrestricted' | 'none' }`
 - `sandboxPolicy: SandboxPolicy` — `{ level: 'none' | 'workspace-write' | 'read-only' }`
 - `sessionRef?: string` — opaque session handle for multi-turn continuation
-- `budget: Budget` — `{ maxUsd?, maxTokens?, wallClockMs?, maxAttempts? }`
+- `budget: Budget` — `{ maxUsd?, maxTokens?, maxSteps?, wallClockMs?, maxAttempts? }`
 
 `WorkerResult` — the plain-data outcome:
 
@@ -23,6 +24,7 @@ parts live in `src/kernel/schema.ts`.
   (tokens; `reasoning` is additive only when the lane's SDK reports
   reasoning OUTSIDE output — a lane whose SDK counts thinking inside
   output must not emit it)
+- `steps?: number` — completed SDK steps, only when observed by the lane
 - `costUSD?: number`
 - `costBasis?: 'modeled' | 'billed'` — what `costUSD` is, when it is present (DD-9)
 - `sessionId?: string`
@@ -44,6 +46,21 @@ parts live in `src/kernel/schema.ts`.
 - Anything persisted uses our own vocabulary — no vendor message shapes in
   `WorkerResult` or anywhere else; the strict zod mirrors reject
   unknown-key pollution.
+
+## Step budget support
+
+`Budget.maxSteps` is an optional positive integer. Support is lane-specific:
+
+| Lane              | Enforces `maxSteps`                                                                                                                                                              | Reports `WorkerResult.steps`                                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `ai-sdk`          | Yes. Main-loop cap is `min(maxSteps, 40)`; absent means 40. A structured-output repair remains its existing single bounded step and can make the total exceed the main-loop cap. | Yes. Counts each completed main and repair SDK step via `onStepFinish`, including partial/error verdicts. |
+| `claude-code` CLI | No. No direct invocation-level CLI turn-limit mapping is used.                                                                                                                   | No. The stream does not expose a reliable completed SDK-step count.                                       |
+| `claude-code` SDK | No. No direct invocation-level SDK turn-limit mapping is used.                                                                                                                   | No. The result usage aggregates worker activity and is not a count of completed SDK turns.                |
+| `acp`             | No. ACP has no direct supported turn-limit mapping in this driver.                                                                                                               | No. Protocol observations do not provide a reliable completed SDK-step count.                             |
+
+`maxTokens` and governed wall-clock cancellation remain independent hard
+guards. Unenforced lanes do not imply enforcement or synthesize a `steps`
+value.
 
 ## Freeze rule
 
@@ -116,7 +133,9 @@ run's `RunOptions.signal` (seam v2 — the caller passes the governed rung-1
 signal explicitly) as the SDK `abortSignal` and
 ignores `Budget.wallClockMs` (the governor's ladder decides when to abort);
 `Budget.maxTokens` becomes a timer-free `stopWhen` condition over
-accumulated step usage; `maxAttempts` is the runner/governor's retry
+accumulated step usage; `Budget.maxSteps` lowers the main-loop cap from its
+default of 40 (never raises it), and completed main plus repair steps are
+reported via `WorkerResult.steps`; `maxAttempts` is the runner/governor's retry
 business (one attempt per run); `maxUsd` is caller-side derived accounting.
 `Budget.strictTokenBudget` (opt-in, separate — it does NOT redefine
 `maxTokens`) wraps the resolved model so every wire attempt counts the full

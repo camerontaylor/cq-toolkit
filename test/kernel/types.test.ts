@@ -206,6 +206,8 @@ function genBudget(r: Rng): Budget {
   if (wallClockMs !== undefined) b.wallClockMs = wallClockMs;
   const maxAttempts = sometimes(r, () => intBetween(r, 1, 5));
   if (maxAttempts !== undefined) b.maxAttempts = maxAttempts;
+  const maxSteps = sometimes(r, () => intBetween(r, 1, 50));
+  if (maxSteps !== undefined) b.maxSteps = maxSteps;
   return b;
 }
 
@@ -267,6 +269,8 @@ function genWorkerResult(r: Rng): WorkerResult {
     denials,
     stopReason: pick(r, STOP_REASONS),
   };
+  const steps = sometimes(r, () => intBetween(r, 0, 50));
+  if (steps !== undefined) result.steps = steps;
   const structuredOutput = sometimes(r, () => jsonValue(r, 2));
   if (structuredOutput !== undefined) result.structuredOutput = structuredOutput;
   // DD-9 wire pairing (mirror refinement): costBasis is present exactly
@@ -1296,6 +1300,9 @@ describe('exact optional schema boundaries', () => {
     expect(kernelSchema.BudgetSchema.parse({})).toEqual({});
     expect(kernelSchema.BudgetSchema.safeParse({ maxUsd: undefined }).success).toBe(false);
     expect(kernelSchema.BudgetSchema.parse({ maxUsd: 0 })).toEqual({ maxUsd: 0 });
+    expect(kernelSchema.BudgetSchema.parse({ maxSteps: 1 })).toEqual({ maxSteps: 1 });
+    expect(kernelSchema.BudgetSchema.safeParse({ maxSteps: 0 }).success).toBe(false);
+    expect(kernelSchema.BudgetSchema.safeParse({ maxSteps: 1.5 }).success).toBe(false);
     const plan = { id: 'optional-boundary', jobs: [] };
     expect(kernelSchema.PlanSchema.parse(plan)).toEqual(plan);
     expect(kernelSchema.PlanSchema.safeParse({ ...plan, label: undefined }).success).toBe(false);
@@ -1307,6 +1314,10 @@ describe('exact optional schema boundaries', () => {
       stopReason: 'error' as const,
     };
     expect(kernelSchema.WorkerResultSchema.parse(workerResult)).toEqual(workerResult);
+    expect(kernelSchema.WorkerResultSchema.parse({ ...workerResult, steps: 0 }).steps).toBe(0);
+    expect(kernelSchema.WorkerResultSchema.safeParse({ ...workerResult, steps: -1 }).success).toBe(
+      false,
+    );
     expect(
       kernelSchema.WorkerResultSchema.safeParse({ ...workerResult, error: undefined }).success,
     ).toBe(false);

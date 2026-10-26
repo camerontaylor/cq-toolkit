@@ -733,10 +733,51 @@ describe('ai-sdk driver specifics (mock model)', () => {
       );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      expect(result.steps).toBe(DEFAULT_MAX_STEPS); // omitted maxSteps preserves the default
       // With tools live every step the model answers tool-calls forever and
       // never emits the object; the tool-free final step is what makes the
       // structured output reachable — the model is called exactly to the cap.
       expect(calls).toBe(DEFAULT_MAX_STEPS);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('maxSteps caps the main loop, disables tools on its final step, and counts repair steps', async () => {
+    const toolCounts: number[] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        toolCounts.push(options.tools?.length ?? 0);
+        return toolCounts.length === 1
+          ? toolCallResult('read', { path: 'absent.txt' })
+          : toolCounts.length === 2
+            ? textResult('not a JSON object')
+            : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-max-steps-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { maxSteps: 2 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/max-steps/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.steps).toBe(3); // two main steps, plus the one repair step
+      expect(toolCounts).toHaveLength(3);
+      expect(toolCounts[0]).toBeGreaterThan(0);
+      expect(toolCounts[1]).toBe(0); // final main-loop step is tools-off
+      expect(toolCounts[2]).toBe(0); // repair remains one tool-free step
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -836,6 +877,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       // ADR-0002 §2.3: the uniform miss verdict — output-invalid, rejection
       // recorded in the bounded error text (both the miss and the repair).
       expect(result.errorClass).toBe('output-invalid');
+      expect(result.steps).toBe(DEFAULT_MAX_STEPS + 1); // includes the failed repair step
       expect(
         result.error?.startsWith(
           'ai-sdk driver: structured output invalid after the repair attempt',

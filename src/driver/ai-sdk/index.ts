@@ -383,6 +383,7 @@ export class AiSdkDriver implements Driver {
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
+    const effectiveStepCap = Math.min(budget.maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS);
     const strictBudget = budget.strictTokenBudget;
     // The run signal is read ONCE here; both the ENTRY and LATE checks read the
     // SAME live RunOptions.signal through `signalAborted`.
@@ -396,6 +397,7 @@ export class AiSdkDriver implements Driver {
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        steps: 0,
         denials: [],
         stopReason: 'aborted',
       };
@@ -454,6 +456,7 @@ export class AiSdkDriver implements Driver {
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        steps: 0,
         denials: [],
         stopReason: 'aborted',
       };
@@ -596,7 +599,7 @@ export class AiSdkDriver implements Driver {
     // scheduling primitive (I8).
     const stopWhen: Array<StopCondition<ToolSet>> = [
       ...(budget.maxTokens !== undefined ? [tokenBudgetCondition(budget.maxTokens)] : []),
-      stepCountIs(DEFAULT_MAX_STEPS),
+      stepCountIs(effectiveStepCap),
     ];
 
     // Structured output (ADR-0002 §2.3): the invocation schema is the only
@@ -616,6 +619,7 @@ export class AiSdkDriver implements Driver {
     // (an error verdict reporting all-zero usage after real work would be
     // dishonest evidence). The fold never feeds a cost figure on this path.
     let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    let completedSteps = 0;
     // Session-log fidelity (item 1.7): the FINAL completed step, so the
     // persisted assistant turn can carry its own usage and requested tool
     // calls. Undefined when no step completed (an immediate abort) — the
@@ -660,11 +664,12 @@ export class AiSdkDriver implements Driver {
           ...(outputSchema !== undefined && selected.length > 0
             ? {
                 prepareStep: ({ stepNumber }: { stepNumber: number }) =>
-                  stepNumber >= DEFAULT_MAX_STEPS - 1 ? { activeTools: [] } : undefined,
+                  stepNumber >= effectiveStepCap - 1 ? { activeTools: [] } : undefined,
               }
             : {}),
           stopWhen,
           onStepFinish: (step) => {
+            completedSteps += 1;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             lastStep = {
               usage: step.usage,
@@ -701,6 +706,7 @@ export class AiSdkDriver implements Driver {
             rejection: `the reply carried no parseable object — ${describeError(err)}`,
             mainText: err.text ?? '',
             mainUsage: stepUsage,
+            mainSteps: completedSteps,
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
                 ? err.response.modelId
@@ -767,6 +773,7 @@ export class AiSdkDriver implements Driver {
             rejection,
             mainText: text,
             mainUsage: usage,
+            mainSteps: completedSteps,
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
@@ -824,6 +831,7 @@ export class AiSdkDriver implements Driver {
           ? { structuredOutput }
           : {}),
         usage,
+        steps: completedSteps,
         // PRICING KEY: derived over the OBSERVED served model id — a
         // silently-remapped gateway is priced off the id the response
         // reports (the same fact WorkerResult.model carries); the provider
@@ -854,6 +862,7 @@ export class AiSdkDriver implements Driver {
       if (aborted) {
         return {
           usage: stepUsage,
+          steps: completedSteps,
           sessionId: record.sessionId,
           denials,
           stopReason: 'aborted',
@@ -869,6 +878,7 @@ export class AiSdkDriver implements Driver {
         if (err.kind === 'budget') {
           return {
             usage: stepUsage,
+            steps: completedSteps,
             sessionId: record.sessionId,
             denials,
             stopReason: 'budget',
@@ -877,6 +887,7 @@ export class AiSdkDriver implements Driver {
         }
         return {
           usage: stepUsage,
+          steps: completedSteps,
           sessionId: record.sessionId,
           denials,
           stopReason: 'error',
@@ -900,6 +911,7 @@ export class AiSdkDriver implements Driver {
       // understates the run, so no figure is claimed.
       return {
         usage: stepUsage,
+        steps: completedSteps,
         sessionId: record.sessionId,
         denials,
         stopReason: 'error',
@@ -937,6 +949,7 @@ export class AiSdkDriver implements Driver {
     rejection: string;
     mainText: string;
     mainUsage: Usage;
+    mainSteps: number;
     servedModel: string | undefined;
     responseHeaders: Record<string, string> | undefined;
     finishReason: FinishReason;
@@ -955,6 +968,7 @@ export class AiSdkDriver implements Driver {
       rejection,
       mainText,
       mainUsage,
+      mainSteps,
       servedModel,
       responseHeaders,
       finishReason,
@@ -970,10 +984,12 @@ export class AiSdkDriver implements Driver {
     } = inputs;
 
     /** Fold-in helper: verdict usage over BOTH calls, cost over the fold. */
+    let repairSteps = 0;
     const verdictExtras = (
       totalUsage: Usage,
-    ): Pick<WorkerResult, 'usage' | 'costUSD' | 'costBasis'> => ({
+    ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis'> => ({
       usage: totalUsage,
+      steps: mainSteps + repairSteps,
       ...costField(
         this.pricing,
         { ...modelSpec, model: servedModel ?? modelSpec.model },
@@ -981,8 +997,9 @@ export class AiSdkDriver implements Driver {
       ),
     });
     /** Usage WITHOUT a derived cost — the mixed-identity (repair remap) verdict refuses to price. */
-    const verdictUsageOnly = (totalUsage: Usage): Pick<WorkerResult, 'usage'> => ({
+    const verdictUsageOnly = (totalUsage: Usage): Pick<WorkerResult, 'usage' | 'steps'> => ({
       usage: totalUsage,
+      steps: mainSteps + repairSteps,
     });
     const verdictSignals = (): { providerSignals?: ProviderSignals } => {
       const signals = providerSignalsFromHeaders(responseHeaders);
@@ -1092,6 +1109,7 @@ export class AiSdkDriver implements Driver {
           ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
           : { stopWhen: [stepCountIs(1)] }),
         onStepFinish: (step) => {
+          repairSteps += 1;
           repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
         },
         // Tool-free: NO tools key at all.
@@ -1150,10 +1168,11 @@ export class AiSdkDriver implements Driver {
        */
       const repairVerdictExtras = (
         usage: Usage,
-      ): Pick<WorkerResult, 'usage' | 'costUSD' | 'costBasis'> =>
+      ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis'> =>
         repairIdentity === 'match'
           ? {
               usage,
+              steps: mainSteps + repairSteps,
               ...costField(
                 this.pricing,
                 { ...modelSpec, model: servedModel ?? modelSpec.model },
@@ -1298,6 +1317,7 @@ export class AiSdkDriver implements Driver {
         return {
           ...(servedModel !== undefined ? { model: servedModel } : {}),
           usage: totalUsage,
+          steps: mainSteps + repairSteps,
           sessionId: record.sessionId,
           denials,
           stopReason: 'error',
@@ -1338,7 +1358,9 @@ export class AiSdkDriver implements Driver {
           ...(errModel !== undefined ? { model: errModel } : {}),
           // Same aggregate-pricing rule as the returned-repair paths: only
           // a 'match' (both observed and equal, or neither observed) prices.
-          ...(errIdentity === 'match' ? verdictExtras(totalUsage) : { usage: totalUsage }),
+          ...(errIdentity === 'match'
+            ? verdictExtras(totalUsage)
+            : { usage: totalUsage, steps: mainSteps + repairSteps }),
           sessionId: record.sessionId,
           denials,
           stopReason: 'error',
@@ -1353,6 +1375,7 @@ export class AiSdkDriver implements Driver {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
         // Failed requests may contain unobserved spend; partial usage cannot price the run.
         usage: totalUsage,
+        steps: mainSteps + repairSteps,
         sessionId: record.sessionId,
         denials,
         stopReason: aborted ? 'aborted' : 'error',
