@@ -81,16 +81,18 @@ export interface ReviewAddressReport {
   reasons: string[];
   escalation?: ReturnType<AddressWorker['escalation']>;
   /**
-   * The leg's STRUCTURED terminal outcome, set on the round-cap stop only
-   * ('round-cap'): the machine-checkable discriminator a composition uses
-   * to decide the spec's draft-at-cap publication. Deliberately NOT parsed
+   * The leg's STRUCTURED terminal outcome: 'round-cap' on the round-cap stop,
+   * 'budget' when the run's token or wall budget stopped it (S7 attempt H —
+   * the spec's "branch never left unpublished" invariant). The
+   * machine-checkable discriminator a composition uses to decide the
+   * draft publication. Deliberately NOT parsed
    * out of `reason` — finish() appends '; report: <path>' to every
    * needs-human reason, so string-matching the reason can never be exact.
    * Rides the report envelope (the kernel-sanctioned extension, stripped
    * before the strict OpResultSchema base parse) — a top-level result field
    * would be an unrecognized key and trip the frozen taxonomy.
    */
-  stop?: 'round-cap';
+  stop?: 'round-cap' | 'budget';
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -205,6 +207,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     let worker: AddressWorker | undefined;
     let publishOnExit: (() => Promise<void>) | undefined;
     let cleanStop: (() => string | undefined) | undefined;
+    // Set by stop() when it observes the token/wall budget spent (after its
+    // parent-cancel and tampered-bookkeeping precedence): every exit from
+    // then on is a budget stop, whichever route reaches finish() — a direct
+    // `finish(stop())`, or the driver wrapper's thrown stop reaching a catch.
+    let budgetSpent = false;
     /**
      * The exit publication's terminal state, settled by the wrapper below:
      * 'published' once a push left this process, 'failed' with its error
@@ -218,6 +225,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       structuredStop?: 'round-cap',
     ): Promise<ReviewAddressResult> => {
       if (reason) report.reasons.push(reason);
+      let publicationFailed = false;
       if (publishOnExit && !parent?.aborted) {
         try {
           await publishOnExit();
@@ -230,6 +238,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           // The outcome is now the publication failure, not the round cap: a
           // composition must not publish a draft over it.
           structuredStop = undefined;
+          publicationFailed = true;
         }
       }
       const stopped = status === 'ok' ? cleanStop?.() : undefined;
@@ -238,13 +247,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         reason = stopped;
         report.reasons.push(stopped);
       }
+      // The budget marker: a needs-human exit after the budget ran out —
+      // never over a cancelled parent or a failed exit publication.
+      let marker: 'round-cap' | 'budget' | undefined = structuredStop;
+      if (
+        marker === undefined &&
+        status === 'needs-human' &&
+        budgetSpent &&
+        !publicationFailed &&
+        !parent?.aborted
+      )
+        marker = 'budget';
       // The structured round-cap marker rides the report envelope — the
       // kernel-sanctioned extension the CLI strips before the strict
       // OpResultSchema parse. It must be assigned BEFORE the report is
       // persisted below so the written artifact agrees with the returned
       // envelope (and the publication-failure clearing above, which erases
       // the marker, is included in both).
-      if (structuredStop !== undefined) report.stop = structuredStop;
+      if (marker !== undefined) report.stop = marker;
       // #469: settle the mixed-worktree withhold rows with the engine's own
       // publication truth. The loop wrote them BEFORE the exit publication
       // ran ("the loop pushed nothing … may still happen at engine exit");
@@ -346,14 +366,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         report.usage.cacheWrite -
         (report.usage.reasoning ?? 0);
       const remainingWallMs = () => cap - (Date.now() - start);
-      const stop = () =>
-        parent?.aborted
-          ? 'parent cancelled'
-          : bookkeepingTampered
-            ? 'engine bookkeeping changed; worker tree is dirty'
-            : remainingTokens() <= 0 || remainingWallMs() <= 0
-              ? 'token or wall budget exhausted'
-              : undefined;
+      const stop = () => {
+        if (parent?.aborted) return 'parent cancelled';
+        if (bookkeepingTampered) return 'engine bookkeeping changed; worker tree is dirty';
+        if (remainingTokens() <= 0 || remainingWallMs() <= 0) {
+          budgetSpent = true;
+          return 'token or wall budget exhausted';
+        }
+        return undefined;
+      };
       cleanStop = stop;
       const account = (result: WorkerResult, governed = true) => {
         for (const key of ['input', 'output', 'cacheRead', 'cacheWrite'] as const)

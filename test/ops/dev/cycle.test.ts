@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { rm } from 'node:fs/promises';
 import {
+  DEV_CYCLE_PUBLICATION_RESERVE_MS,
   DEV_FINDINGS_SECTION_MARKER,
   followUpCommand,
   makeDevCycle,
@@ -584,26 +585,68 @@ describe('dev.cycle', () => {
   });
 
   // ---- BEFORE controls (P1 thread 7kNb + 7lxL): report presence is NOT
-  // round-cap. Budget stops, blocked re-reviews and admission failures all
-  // carry a report; only the round-cap stop publishes a draft.
+  // a publication trigger. Blocked re-reviews and admission failures carry a
+  // report too; only the STRUCTURED stops — 'round-cap' and (S7 attempt H,
+  // the spec's never-unpublished invariant) 'budget' — publish a draft.
 
-  /** An address leg that stopped on the BUDGET with a report attached. */
+  /** An address leg that stopped on the BUDGET: the production finish() shape, structured marker inside. */
   function budgetStopAddress(state: WorkState): AddressLeg {
     return async () => ({
       status: 'needs-human',
       reason: 'review.address: token or wall budget exhausted; report: /tmp/r.json',
-      report: addressReport(state, [capFinding], []),
+      report: { ...addressReport(state, [capFinding], []), stop: 'budget' as const },
     });
   }
 
-  test('BEFORE (P1): an address BUDGET stop with a report propagates verbatim — NO push, NO PR, no draft', async () => {
+  test('S7 H (D1): an address BUDGET stop runs the final gates, pushes and publishes a DRAFT, keeping the budget reason', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const checks: string[] = [];
+    let pushCalls = 0;
+    const { gh, bodies } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(checks),
+      review: cleanReview(state),
+      address: budgetStopAddress(state),
+      open: openFake(opens),
+      gh,
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('NOT READY');
+    expect(result.reason).toContain('token or wall budget exhausted');
+    expect(result.reason).toContain('draft PR #42');
+    // The final gates ran before the publication (first check + final check).
+    expect(checks).toHaveLength(2);
+    expect(pushCalls).toBe(1);
+    expect(opens).toEqual([
+      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+    ]);
+    // The open findings ride the draft like the round cap's.
+    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+    expect(bodies[0]).toContain('c001-aaaaaaaa#f1');
+  });
+
+  test('S7 H (D1): a red FINAL gate on the budget path refuses verbatim — NO push, NO PR', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
     const opens: PrOpenInput[] = [];
     let pushCalls = 0;
+    let checkRuns = 0;
     const op = makeDevCycle({
       effects: effects(),
-      check: greenCheck(),
+      check: async (input) => {
+        checkRuns++;
+        if (checkRuns === 1) return greenCheck()({ ...input });
+        return { status: 'failed', error: 'dev.check: the addressed head broke format:check' };
+      },
       review: cleanReview(state),
       address: budgetStopAddress(state),
       open: openFake(opens),
@@ -613,12 +656,169 @@ describe('dev.cycle', () => {
       },
     });
     const result = await op({ repoRoot: repo.root });
-    expect(result.status).toBe('needs-human');
-    if (result.status !== 'needs-human') return;
-    expect(result.reason).toContain('token or wall budget exhausted');
-    expect(result.reason).not.toContain('NOT READY');
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toBe(
+        'dev.cycle (dev.check (final)): dev.check: the addressed head broke format:check',
+      );
     expect(pushCalls).toBe(0);
     expect(opens).toEqual([]);
+  });
+
+  test('a budget-like REASON without the structured marker still propagates verbatim (no string matching)', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    let pushCalls = 0;
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: async () => ({
+        status: 'needs-human',
+        reason: 'review.address: token or wall budget exhausted; report: /tmp/r.json',
+        report: addressReport(state, [capFinding], []),
+      }),
+      open: openFake(opens),
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).not.toContain('NOT READY');
+    expect(pushCalls).toBe(0);
+    expect(opens).toEqual([]);
+  });
+
+  test('S7 H (D2): one run deadline — the review and address legs get the remaining wall minus the publication reserve', async () => {
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        budgets: { run: { maxTokens: 1000, wallMs: 3_600_000 } },
+        review: { reviewers: ['agent'] },
+      }),
+    );
+    repo.commitAll('budgeted cq.json');
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const reviewInputs: ReviewRunInput[] = [];
+    const addressInputs: ReviewAddressInput[] = [];
+    const review = cleanReview(state);
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: async (input) => {
+        reviewInputs.push(input);
+        // The review leg spends 50 ms of the shared run wall.
+        await new Promise((done) => setTimeout(done, 50));
+        return review(input);
+      },
+      address: async (input) => {
+        addressInputs.push(input);
+        return { status: 'ok', value: addressReport(state, [], []) };
+      },
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    await op({ repoRoot: repo.root });
+    const budget = 3_600_000 - DEV_CYCLE_PUBLICATION_RESERVE_MS;
+    expect(reviewInputs[0]?.wallMs).toBeLessThanOrEqual(budget);
+    expect(reviewInputs[0]?.wallMs).toBeGreaterThan(budget - 10_000);
+    expect(reviewInputs[0]?.maxTokens).toBe(1000);
+    // The address leg gets what the review leg left, not a fresh run budget.
+    expect(addressInputs[0]?.wallMs).toBeLessThanOrEqual((reviewInputs[0]?.wallMs ?? 0) - 50);
+    expect(addressInputs[0]?.maxTokens).toBe(1000);
+  });
+
+  test("S7 H (D2): tokens the review leg spent through the cycle's drivers are gone from the address leg's budget", async () => {
+    const scanner = await makeGitleaksFixture();
+    vi.stubEnv('PATH', scanner.path);
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-cycle' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 10_000, wallMs: 3_600_000 } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
+      await repo.write('src/a.ts', 'export const a = 1;\n');
+      repo.commitAll('budgeted review fixture');
+      await seed(repo);
+      const addressInputs: ReviewAddressInput[] = [];
+      const drivers = {
+        resolve: () => ({
+          lane: 'ai-sdk',
+          modelSpec: { provider: 'mock', model: 'mock' },
+          driver: {
+            run: async (invocation: { prompt: string }) => ({
+              stopReason: 'complete' as const,
+              structuredOutput: {
+                receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
+                findings: [],
+              },
+              usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            }),
+          },
+        }),
+      } as unknown as DriverFactory;
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(),
+        drivers,
+        address: async (input) => {
+          addressInputs.push(input);
+          return { status: 'failed', error: 'stop after the address input is observed' };
+        },
+        open: openFake([]),
+      });
+      await op({ repoRoot: repo.root });
+      expect(addressInputs).toHaveLength(1);
+      // One reviewer request per partition, 150 tokens each.
+      const spent = 10_000 - (addressInputs[0]?.maxTokens ?? 10_000);
+      expect(spent).toBeGreaterThanOrEqual(150);
+      expect(spent % 150).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(scanner.root, { recursive: true, force: true });
+    }
+  });
+
+  test('S7 H (D2): a short run budget keeps a proportional reserve (a quarter) so the legs still get time', async () => {
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        budgets: { run: { maxTokens: 1000, wallMs: 20_000 } },
+        review: { reviewers: ['agent'] },
+      }),
+    );
+    repo.commitAll('short budget');
+    await seed(repo);
+    const reviewInputs: ReviewRunInput[] = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: async (input) => {
+        reviewInputs.push(input);
+        return { status: 'failed', error: 'stop here' };
+      },
+      open: openFake([]),
+    });
+    await op({ repoRoot: repo.root });
+    expect(reviewInputs[0]?.wallMs).toBeLessThanOrEqual(15_000);
+    expect(reviewInputs[0]?.wallMs).toBeGreaterThan(10_000);
   });
 
   test('BEFORE (P1): a BLOCKED RE-REVIEW with a report propagates verbatim — NO push, NO PR', async () => {
