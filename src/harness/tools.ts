@@ -5,7 +5,7 @@
 // Search/read ergonomics follow OpenCode v1.19.4 (MIT), especially
 // packages/opencode/src/tool/{read,grep,glob}.ts; binary/UTF-8 handling also
 // follows jcode v0.99.1 (MIT), crates/jcode-app-core/src/tool/read.rs.
-// Pinned notices and source revisions: THIRD_PARTY_NOTICES.md.
+// Pinned notices and source revisions: policy/THIRD_PARTY_NOTICES.md.
 //
 // R4: existing tool surface and budgets are PER-OP CONFIG (data from
 // config.ts). New search tools use fixed safety ceilings in this experiment
