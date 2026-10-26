@@ -16,6 +16,7 @@
 // sets it (the workflow wiring is T1.7's). When opted in, a missing provider
 // key fails loudly instead of silently passing.
 import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { spawn as childSpawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -29,6 +30,10 @@ import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   AiSdkDriver,
   DEFAULT_MAX_STEPS,
+  defaultResolveRg,
+  parseRgVersion,
+  versionAtLeast,
+  RG_MINIMUM_VERSION,
   parseReplyJson,
   serializeRequestForScan,
   DEFAULT_STEP_TIMEOUT_MS,
@@ -3055,57 +3060,166 @@ describe('rg capability seam (injected resolveRg)', () => {
   });
 });
 
-describe('rg runtime floor boundary (11.0.0)', () => {
-  const runWithVersion = async (version: string | undefined): Promise<WorkerResult> => {
-    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-boundary-'));
+describe('rg runtime floor boundary — PRODUCTION comparator', () => {
+  // The PRODUCTION versionAtLeast/parseRgVersion, not a test-local mirror:
+  // these pin the exact comparison the driver ships.
+  test.each([
+    ['10.5.0', false],
+    ['11.0.0', true],
+    ['11.1.3', true],
+    ['14.1.1', true],
+    ['15.2.0', true],
+  ])('versionAtLeast(%s, 11.0.0) === %s', (found, expected) => {
+    expect(versionAtLeast(found, '11.0.0')).toBe(expected);
+  });
+
+  test.each([
+    ['ripgrep 15.2.0 (rev e89fff89ac)', '15.2.0'],
+    ['ripgrep 14.1.1 (rev 4649aa9700)', '14.1.1'],
+    ['ripgrep 11.0.0', '11.0.0'],
+  ])('parseRgVersion(%s) === %s', (line, expected) => {
+    expect(parseRgVersion(line)).toBe(expected);
+  });
+
+  test.each([
+    ['', undefined],
+    ['not a version line', undefined],
+    ['ripgrep 15', undefined],
+  ])('parseRgVersion(%j) is undefined', (line, expected) => {
+    expect(parseRgVersion(line)).toBe(expected);
+  });
+
+  test('defaultResolveRg drives the production comparator through a fake rg executable', async () => {
+    // A fake `rg` on PATH whose first stdout line is scripted: proves the
+    // default resolver parses the REAL executable's output with the
+    // PRODUCTION comparator — no test-local mirror anywhere in the path.
+    const binDir = await mkdtemp(join(tmpdir(), 'aidrv-fake-rg-'));
+    const script = async (body: string): Promise<string> => {
+      const path = join(binDir, 'rg');
+      await writeFile(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      return path;
+    };
+    const originalPath = process.env.PATH;
+    const runWithFake = async (body: string): Promise<WorkerResult> => {
+      await script(body);
+      // The default resolver spawns `rg` from PATH: prepend the fake bin for
+      // the duration of the run and restore after (vi.stubEnv restores too).
+      process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+      const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-fake-'));
+      try {
+        const driver = new AiSdkDriver({
+          providers: { mock: (modelId) => modelFor(undefined, modelId) },
+          sessionsDir: join(root, 'sessions'),
+          harnessConfig: conformanceHarnessConfig(root),
+          resolveRg: defaultResolveRg,
+        });
+        return await driver.run(
+          invocation({
+            workspace: { path: root },
+            toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+            sandboxPolicy: { level: 'read-only' },
+          }),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    };
     try {
+      // serves: 14.1.1 >= floor 11.0.0
+      const serving = await runWithFake(`echo 'ripgrep 14.1.1 (rev 4649aa9700)'`);
+      expect(serving.capabilities?.rg).toMatchObject({ available: true, version: '14.1.1', probe: 'ok' });
+      // withheld: 10.5.0 < floor
+      const withheld = await runWithFake(`echo 'ripgrep 10.5.0'`);
+      expect(withheld.capabilities?.rg).toMatchObject({ available: false, found: '10.5.0', probe: 'old' });
+      expect(withheld.advisories).toEqual(['search tools unavailable: ripgrep older than minimum 11.0.0']);
+      // absent: nonzero exit
+      const absent = await runWithFake(`exit 2`);
+      expect(absent.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    } finally {
+      process.env.PATH = originalPath;
+      await rm(binDir, { recursive: true, force: true });
+    }
+  });
+
+  test('CI guard: on CI a missing/old real rg FAILS the search-tool surface outright (no skip)', async () => {
+    if (process.env.CI !== 'true' && process.env.GITHUB_ACTIONS !== 'true') {
+      // Off CI this assertion is vacuous by design (developers may lack rg);
+      // ON CI the precondition below fails the test when rg is absent/old.
+      expect(process.env.CI === undefined || process.env.CI === 'false').toBe(true);
+      return;
+    }
+    const bin = await new Promise<string | undefined>((resolve) => {
+      const child = childSpawn('rg', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      let head = '';
+      child.stdout?.on('data', (c: Buffer) => {
+        if (head === '') head = c.toString('utf8');
+      });
+      child.on('error', () => resolve(undefined));
+      child.on('close', (code) => resolve(code === 0 ? head : undefined));
+    });
+    const version = parseRgVersion(bin?.split('\n')[0]);
+    // THE GUARD: on CI, rg must exist AND satisfy the runtime floor.
+    expect(version).toBeDefined();
+    expect(versionAtLeast(version as string, RG_MINIMUM_VERSION)).toBe(true);
+  });
+});
+
+describe('rg policy seam regressions (probe decision from candidates)', () => {
+  const runCase = async (
+    toolPolicy: OpInvocation['toolPolicy'],
+    sandbox: 'none' | 'workspace-write' | 'read-only',
+  ): Promise<{ result: WorkerResult; probes: number }> => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-seam-'));
+    try {
+      let probes = 0;
       const driver = new AiSdkDriver({
         providers: { mock: (modelId) => modelFor(undefined, modelId) },
         sessionsDir: join(root, 'sessions'),
         harnessConfig: conformanceHarnessConfig(root),
-        resolveRg: async () =>
-          version === undefined
-            ? { ok: false, reason: 'absent' }
-            : versionAtLeastMock(version)
-              ? { ok: true, version }
-              : { ok: false, reason: 'old', found: version },
+        resolveRg: async () => {
+          probes++;
+          return { ok: false, reason: 'absent' };
+        },
       });
-      return await driver.run(
-        invocation({
-          workspace: { path: root },
-          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
-          sandboxPolicy: { level: 'read-only' },
-        }),
+      const result = await driver.run(
+        invocation({ workspace: { path: root }, toolPolicy, sandboxPolicy: { level: sandbox } }),
       );
+      return { result, probes };
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   };
-  /** Mirror of the driver's own comparison, driving the injected outcomes. */
-  const versionAtLeastMock = (found: string): boolean => {
-    const parse = (v: string): [number, number, number] => {
-      const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
-      return [major ?? 0, minor ?? 0, patch ?? 0];
-    };
-    const [fm, fn, fp] = parse(found);
-    return fm > 11 || (fm === 11 && (fn > 0 || fp >= 0));
-  };
 
-  test('rg 10.x is WITHHELD (old) with the found version recorded', async () => {
-    const result = await runWithVersion('10.5.0');
-    expect(result.capabilities?.rg).toMatchObject({ available: false, found: '10.5.0', probe: 'old' });
-    expect(result.advisories).toEqual(['search tools unavailable: ripgrep older than minimum 11.0.0']);
+  test('glob-only allowlist still probes and withholds BOTH search tools', async () => {
+    const { result, probes } = await runCase(
+      { allow: ['read', 'glob'], mode: 'allowlist' },
+      'read-only',
+    );
+    expect(probes).toBe(1);
+    expect(result.capabilities?.rg?.available).toBe(false);
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
   });
 
-  test('rg 11.0.0 (the floor itself) SERVES: available, no advisory', async () => {
-    const result = await runWithVersion('11.0.0');
-    expect(result.capabilities?.rg).toMatchObject({ available: true, version: '11.0.0', probe: 'ok' });
+  test('unrestricted policy probes (candidates include search on read-only)', async () => {
+    const { result, probes } = await runCase({ allow: [], mode: 'unrestricted' }, 'read-only');
+    expect(probes).toBe(1);
+    expect(result.capabilities?.rg?.available).toBe(false);
+  });
+
+  test('workspace-write sandbox withholds search from candidates: NO probe, silent', async () => {
+    const { result, probes } = await runCase(
+      { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+      'workspace-write',
+    );
+    expect(probes).toBe(0);
+    expect(result.capabilities).toBeUndefined();
     expect(result.advisories).toBeUndefined();
   });
 
-  test('rg 14.1 (host version) SERVES: available, no advisory', async () => {
-    const result = await runWithVersion('14.1.1');
-    expect(result.capabilities?.rg).toMatchObject({ available: true, version: '14.1.1', probe: 'ok' });
+  test('read/search-only policy (no search tool) never probes: silent', async () => {
+    const { result, probes } = await runCase({ allow: ['read'], mode: 'allowlist' }, 'read-only');
+    expect(probes).toBe(0);
+    expect(result.capabilities).toBeUndefined();
     expect(result.advisories).toBeUndefined();
   });
 });

@@ -166,9 +166,13 @@ async function runPartition(
     // the seam) into the blocked reason the review log records — a bare
     // stop reason sent operators to the raw session log to find the cause.
     const detail = result.error === undefined ? '' : `: ${boundedErrorText(result.error)}`;
+    // rg capability seam: blocked evidence travels too — a withheld search
+    // tool is visible even when the partition did not complete.
     return {
       status: 'needs-human',
       reason: `agent review did not complete (${result.stopReason})${detail}`,
+      ...(result.capabilities === undefined ? {} : { capabilities: result.capabilities }),
+      ...(result.advisories === undefined ? {} : { advisories: result.advisories }),
     };
   }
   const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
@@ -303,6 +307,14 @@ export async function runAgentReviewer(
           },
         });
         ensureActive();
+        // rg capability seam: fold the partition's driver-observed evidence
+        // into the report — advisories deduplicated, capabilities last-wins
+        // (every partition probes the same host). Blocked results keep the
+        // evidence too: the fold precedes the blocked return so a withheld
+        // search tool is visible even on a run that did not complete.
+        if (result.capabilities !== undefined) report.capabilities = result.capabilities;
+        if (result.advisories !== undefined)
+          report.advisories = [...new Set([...(report.advisories ?? []), ...result.advisories])];
         if (result.status !== 'ok') return { ...result, report };
         for (const finding of result.value.findings) {
           const same = (other: Finding) =>

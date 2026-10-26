@@ -302,14 +302,14 @@ export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
  */
 export const RG_MINIMUM_VERSION = '11.0.0';
 
-/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). */
-const parseRgVersion = (line: string | undefined): string | undefined => {
+/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). Exported for boundary tests. */
+export const parseRgVersion = (line: string | undefined): string | undefined => {
   const match = /^ripgrep (\d+\.\d+\.\d+)/.exec(line ?? '');
   return match?.[1];
 };
 
-/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. */
-const versionAtLeast = (found: string, minimum: string): boolean => {
+/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. Exported for boundary tests. */
+export const versionAtLeast = (found: string, minimum: string): boolean => {
   const parse = (v: string): [number, number, number] => {
     const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
     return [major ?? 0, minor ?? 0, patch ?? 0];

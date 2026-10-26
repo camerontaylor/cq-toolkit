@@ -535,3 +535,73 @@ it.each(['entry', 'running'] as const)(
     else expect(signal?.aborted).toBe(true);
   },
 );
+
+describe('rg evidence folding into AgentReviewReport', () => {
+  const baseInput = {
+    repoRoot: '.',
+    branch: 'review-fixture',
+    head: 'abc123',
+    scanSecrets: cleanScan,
+    diff: 'diff',
+    role: { provider: 'mock', model: 'mock' },
+    maxTokens: 500,
+    wallMs: 1000,
+    severityMap: { high: 'major', medium: 'minor' },
+  } as const;
+  const driversOf = (run: ReturnType<typeof vi.fn>): DriverFactory =>
+    ({
+      resolve: vi.fn(() => ({
+        driver: { run },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    }) as unknown as DriverFactory;
+
+  it('folds capabilities + advisories into the report on SUCCESS (deduplicated across partitions)', async () => {
+    let calls = 0;
+    const run = vi.fn(async () => {
+      calls++;
+      return {
+        stopReason: 'complete' as const,
+        structuredOutput: { findings: [] },
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        capabilities: { rg: { available: false, found: '10.5.0', minimum: '11.0.0', probe: 'old' as const } },
+        advisories: calls === 1
+          ? ['search tools unavailable: ripgrep older than minimum 11.0.0']
+          : ['search tools unavailable: ripgrep not found', 'search tools unavailable: ripgrep older than minimum 11.0.0'],
+      };
+    });
+    const result = await runAgentReviewer(driversOf(run), {
+      ...baseInput,
+      // Force TWO partitions so the dedupe path is exercised.
+      components: [
+        { component: 'diff-a', path: 'a.diff', text: 'a' },
+        { component: 'diff-b', path: 'b.diff', text: 'b' },
+      ],
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.capabilities?.rg).toMatchObject({ available: false, probe: 'old' });
+    expect(result.value.advisories).toEqual([
+      'search tools unavailable: ripgrep older than minimum 11.0.0',
+      'search tools unavailable: ripgrep not found',
+    ]);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the evidence on a BLOCKED result (withheld search visible even when the run does not complete)', async () => {
+    const run = vi.fn(async () => ({
+      stopReason: 'error' as const,
+      usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      error: 'provider exploded',
+      capabilities: { rg: { available: false, minimum: '11.0.0', probe: 'absent' as const } },
+      advisories: ['search tools unavailable: ripgrep not found'],
+    }));
+    const result = await runAgentReviewer(driversOf(run), baseInput);
+    expect(result.status).toBe('needs-human');
+    expect(result.report?.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.report?.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+});
