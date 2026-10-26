@@ -9,9 +9,14 @@
 //
 // The socket timeouts are set to the step bound PLUS a margin rather than 0
 // (disabled): the SDK's step abort fires first and stays the one classified
-// cause ('transient', TimeoutError), while the socket timeout remains a
-// backstop for a request that somehow escapes the abort signal, so no
-// request through this transport can hang forever.
+// cause ('transient', TimeoutError), while the socket timeouts remain a
+// backstop for a request that somehow escapes the abort signal — but for
+// stalls only. `headersTimeout` bounds time-to-headers, and `bodyTimeout` is
+// an idle timeout that resets on every received chunk, so neither bounds
+// total response time: a body that keeps delivering a chunk at least once
+// per stepTimeoutMs + marginMs is never terminated here and can outlive the
+// step bound indefinitely. Such escaped-abort, steady-drip responses are NOT
+// covered by this backstop; ending them needs a total-body-time deadline.
 import { Agent, fetch as undiciFetch } from 'undici';
 
 /** Socket-timeout slack over the step bound, so `timeout.stepMs` always fires first. */
