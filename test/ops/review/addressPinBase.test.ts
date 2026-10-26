@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeGhRunner, type GhFn, type GhResult } from '../../../src/adapters/forge-github/gh.js';
-import type { DriverFactory } from '../../../src/driver/factory.js';
+import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 
@@ -60,6 +60,7 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
     );
     repo.commitAll('seed PR finding');
     repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head', 'HEAD:refs/heads/feature/x');
+    const pinnedBase = repo.git('rev-parse', 'origin/merge-queue').trim();
     const ok = (value: unknown): GhResult => ({
       code: 0,
       stdout: typeof value === 'string' ? value : JSON.stringify(value),
@@ -168,16 +169,35 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
       throw new Error(`unexpected fake forge command: ${args.join(' ')}`);
     };
     const usage = { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 };
-    // Every review.agent/v2 prompt embeds its comparison partition; the
+    // Every review.agent/v3 prompt carries explicit Base/Head metadata and its
+    // comparison partition; the
     // round-2 re-review's content is the discriminator under test.
     const prompts: string[] = [];
+    const reviewBases: string[] = [];
+    const reviewHeads: string[] = [];
     const drivers: DriverFactory = {
-      resolve: (request) => ({
+      resolve: (request: DriverRequest) => ({
         lane: 'ai-sdk',
         modelSpec: request.modelSpec,
         driver: {
           run: async (input) => {
-            if (input.outputSchema?.name === 'review.agent/v2') {
+            if (input.outputSchema?.name === 'review.agent/v3') {
+              const serialized = JSON.stringify({
+                prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+              });
+              await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+                kind: 'model-request',
+              });
+              const metadata =
+                /^Base: ([a-f0-9]{40})\nHead: ([a-f0-9]{40})\nScope: (?:full|uncommitted)$/m.exec(
+                  input.prompt,
+                );
+              expect(
+                metadata,
+                'v3 reviewer prompts carry valid pinned Base and Head metadata',
+              ).not.toBeNull();
+              reviewBases.push(metadata![1]!);
+              reviewHeads.push(metadata![2]!);
               // Round 1's re-review (seed leg -BAD +GOOD) reports the new
               // thread's change as a finding, which keeps the run in round
               // 2; round 2's re-review (over the T2 fix) returns clean.
@@ -187,7 +207,6 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
                 return {
                   stopReason: 'complete' as const,
                   structuredOutput: {
-                    receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
                     findings: [
                       {
                         file: 'src/a.ts',
@@ -203,10 +222,7 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
               prompts.push(input.prompt);
               return {
                 stopReason: 'complete' as const,
-                structuredOutput: {
-                  receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
-                  findings: [],
-                },
+                structuredOutput: { findings: [] },
                 usage,
                 denials: [],
               };
@@ -291,6 +307,9 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
     expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
     expect(flipped, 'the flip fired before round 2').toBe(true);
     expect(prompts.length, 'both rounds dispatched re-review partitions').toBeGreaterThan(0);
+    expect(reviewBases.length).toBeGreaterThan(0);
+    expect(reviewBases.every((base) => base === pinnedBase)).toBe(true);
+    expect(reviewHeads.every((head) => /^[a-f0-9]{40}$/.test(head))).toBe(true);
     // DISCRIMINATING: comparison legs render base→HEAD. The invocation's pin
     // is the original seed, so round 2's leg is -BAD +BEST. If the live
     // (advanced) target leaked in, round 2's merge-base collapses onto the
