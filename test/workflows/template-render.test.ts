@@ -342,3 +342,122 @@ describe('render-templates --write refuses an invalid table', () => {
     },
   );
 });
+
+describe('install-ripgrep action version validation', () => {
+  const actionPath = join(ROOT, '.github/actions/install-ripgrep/action.yml');
+  const actionText = readFileSync(actionPath, 'utf8');
+  const runMarker = '      run: |\n';
+  const runStart = actionText.indexOf(runMarker);
+  if (runStart < 0) throw new Error('install-ripgrep action run script is missing');
+  const actionScript = actionText
+    .slice(runStart + runMarker.length)
+    .split('\n')
+    .map((line) => (line.startsWith('        ') ? line.slice(8) : line))
+    .join('\n');
+
+  function runActionWithVersion(versionLine: string): {
+    root: string;
+    status: number | null;
+    stderr: string;
+    githubPath: string;
+  } {
+    const root = mkdtempSync(join(tmpdir(), 'cq-install-ripgrep-'));
+    const mockBin = join(root, 'mock-bin');
+    const runnerTemp = join(root, 'runner-temp');
+    const githubPath = join(root, 'github-path');
+    mkdirSync(mockBin);
+    mkdirSync(runnerTemp);
+    writeFileSync(githubPath, '');
+
+    const mock = (name: string, lines: string[]) =>
+      writeFileSync(join(mockBin, name), `${lines.join('\n')}\n`, { mode: 0o755 });
+    mock('curl', [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'while (($#)); do',
+      '  if [[ "$1" == "--output" ]]; then',
+      '    shift',
+      '    : > "$1"',
+      '    exit 0',
+      '  fi',
+      '  shift',
+      'done',
+      'exit 2',
+    ]);
+    mock('sha256sum', ['#!/usr/bin/env bash', 'cat >/dev/null']);
+    mock('tar', [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'destination=',
+      'while (($#)); do',
+      '  if [[ "$1" == "-C" ]]; then',
+      '    destination="$2"',
+      '    shift 2',
+      '  else',
+      '    shift',
+      '  fi',
+      'done',
+      'cat > "$destination/rg" <<\'RG_FIXTURE\'',
+      '#!/usr/bin/env bash',
+      'printf "%s\\n" "$RG_FIXTURE_VERSION"',
+      'RG_FIXTURE',
+    ]);
+
+    const result = spawnSync('bash', ['-c', actionScript], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_PATH: githubPath,
+        PATH: `${mockBin}:${process.env.PATH ?? ''}`,
+        RG_FIXTURE_VERSION: versionLine,
+        RUNNER_ARCH: 'X64',
+        RUNNER_OS: 'Linux',
+        RUNNER_TEMP: runnerTemp,
+      },
+    });
+    return { root, status: result.status, stderr: result.stderr, githubPath };
+  }
+
+  it('accepts the pinned version followed by the upstream revision suffix', () => {
+    const result = runActionWithVersion('ripgrep 15.2.0 (rev e89fff89ac)');
+    try {
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(result.githubPath, 'utf8')).toBe(
+        `${join(result.root, 'runner-temp/bin')}\n`,
+      );
+      expect(existsSync(join(result.root, 'runner-temp/bin/rg'))).toBe(true);
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the exact pinned version without a revision suffix', () => {
+    const result = runActionWithVersion('ripgrep 15.2.0');
+    try {
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(result.githubPath, 'utf8')).toBe(
+        `${join(result.root, 'runner-temp/bin')}\n`,
+      );
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['older version', 'ripgrep 15.1.0 (rev old)'],
+    ['version with an extra patch digit', 'ripgrep 15.2.01'],
+  ])('rejects %s and diagnoses the observed version', (_case, versionLine) => {
+    const result = runActionWithVersion(versionLine);
+    try {
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        `Unsupported ripgrep version, expected 15.2.0 and observed ${versionLine}`,
+      );
+      expect(result.stderr).toContain(`observed ripgrep version: ${versionLine}`);
+      expect(result.stderr).toContain('failed with status 1');
+      expect(readFileSync(result.githubPath, 'utf8')).toBe('');
+    } finally {
+      rmSync(result.root, { recursive: true, force: true });
+    }
+  });
+});

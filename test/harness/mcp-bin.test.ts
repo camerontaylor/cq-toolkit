@@ -41,9 +41,10 @@ const BIN = fileURLToPath(new URL('../../src/harness/mcp/bin.ts', import.meta.ur
 const renderRead = (path: string, body: string): string => {
   const lines = body.split(/\r\n|\n|\r/);
   if (lines.at(-1) === '') lines.pop();
-  return ['--- ' + path + ' ---', ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`)].join(
-    '\n',
-  );
+  return [
+    '--- ' + path + ' ---',
+    ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`),
+  ].join('\n');
 };
 
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
@@ -327,9 +328,7 @@ describe('SDK round-trip conformance (@modelcontextprotocol/sdk Client)', () => 
 
       const read = await client.callTool({ name: 'read', arguments: { path: 'a.txt' } });
       expect(read.isError).toBeFalsy();
-      expect(read.content).toEqual([
-        { type: 'text', text: renderRead('a.txt', 'alpha') },
-      ]);
+      expect(read.content).toEqual([{ type: 'text', text: renderRead('a.txt', 'alpha') }]);
 
       const denied = await client.callTool({ name: 'read', arguments: { path: '../outside' } });
       expect(denied.isError).toBe(true);

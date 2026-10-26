@@ -1,0 +1,61 @@
+name: install-ripgrep
+description: Install the digest-pinned ripgrep host tool used by harness search tools.
+runs:
+  using: composite
+  steps:
+    - name: Install ripgrep 15.2.0 from the pinned upstream release
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=15.2.0
+        observed_version=not-yet-observed
+        trap 'status=$?; printf "install-ripgrep: line %s command %q failed with status %s; observed ripgrep version: %s\n" "$LINENO" "$BASH_COMMAND" "$status" "$observed_version" >&2' ERR
+        case "${RUNNER_OS}:${RUNNER_ARCH}" in
+          Linux:X64)
+            target=x86_64-unknown-linux-musl
+            digest=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+            ;;
+          Linux:ARM64)
+            target=aarch64-unknown-linux-gnu
+            digest=a740b91c82eaf9914cfedd353572f2791cbe0162c84101ee0951058f4dcbc90d
+            ;;
+          macOS:X64)
+            target=x86_64-apple-darwin
+            digest=af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1
+            ;;
+          macOS:ARM64)
+            target=aarch64-apple-darwin
+            digest=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4
+            ;;
+          *)
+            printf 'Unsupported ripgrep runner: %s:%s\n' "$RUNNER_OS" "$RUNNER_ARCH" >&2
+            exit 1
+            ;;
+        esac
+
+        archive="ripgrep-${version}-${target}.tar.gz"
+        workdir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ripgrep.XXXXXX")"
+        mkdir "${workdir}/extracted"
+        curl --fail --silent --show-error --location --retry 3 \
+          "https://github.com/BurntSushi/ripgrep/releases/download/${version}/${archive}" \
+          --output "${workdir}/${archive}"
+        if [ "$RUNNER_OS" = macOS ]; then
+          printf '%s  %s\n' "$digest" "${workdir}/${archive}" | shasum -a 256 -c -
+        else
+          printf '%s  %s\n' "$digest" "${workdir}/${archive}" | sha256sum -c -
+        fi
+        tar -xzf "${workdir}/${archive}" --strip-components=1 -C "${workdir}/extracted"
+        bin_dir="${RUNNER_TEMP:?RUNNER_TEMP must be set}/bin"
+        mkdir -p "$bin_dir"
+        install -m 0755 "${workdir}/extracted/rg" "${bin_dir}/rg"
+        version_output="$("${bin_dir}/rg" --version)"
+        observed_version="${version_output%%$'\n'*}"
+        case "$observed_version" in
+          "ripgrep ${version}"|"ripgrep ${version} "*)
+            ;;
+          *)
+            printf 'Unsupported ripgrep version, expected %s and observed %s\n' "$version" "$observed_version" >&2
+            false
+            ;;
+        esac
+        printf '%s\n' "$bin_dir" >> "$GITHUB_PATH"

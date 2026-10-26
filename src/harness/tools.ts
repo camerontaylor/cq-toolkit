@@ -1225,8 +1225,13 @@ export function buildTools(
             root !== undefined && isInside(effective, root)
               ? relative(root, effective).split(sep).join('/')
               : relOf(effective);
+          // Scan-source provenance is the RAW unformatted selected lines —
+          // line-anchored secret rules (^CONFIDENTIAL:) must match the raw
+          // source, not the numbered display the model sees. The formatted
+          // `output` still rides the model payload; the guard scans BOTH.
+          const rawSelected = selected.join('\n');
           const sourceContents = [...new Set([relOf(abs), resolvedRel])].map((path) => ({
-            text: output,
+            text: rawSelected,
             path,
           }));
           return {
@@ -1322,7 +1327,7 @@ export function buildTools(
           return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
         }
 
-        const byPath = new Map<string, { file: SearchFile; lines: string[] }>();
+        const byPath = new Map<string, { file: SearchFile; lines: string[]; raw: string[] }>();
         const fileByPath = new Map(files.files.map((file) => [resolve(file.effectivePath), file]));
         let truncatedLine = false;
         let sawMalformedTail = false;
@@ -1378,11 +1383,14 @@ export function buildTools(
             };
           }
           const key = resolve(file.effectivePath);
-          const group = byPath.get(key) ?? { file, lines: [] };
+          const group = byPath.get(key) ?? { file, lines: [], raw: [] };
           const rawLine = data.lines.text.replace(/\r?\n$/, '');
           const cappedLine = truncateLine(rawLine, SEARCH_LINE_CHARS);
           truncatedLine ||= cappedLine.truncated;
           group.lines.push(`${data.line_number}: ${cappedLine.text}`);
+          // Raw unformatted line kept alongside: scan provenance must see the
+          // anchorable source text (^CONFIDENTIAL:), not the numbered display.
+          group.raw.push(rawLine);
           byPath.set(key, group);
         }
 
@@ -1396,12 +1404,13 @@ export function buildTools(
           left.file.lexicalRel.localeCompare(right.file.lexicalRel),
         );
         const allMatches = groups.reduce((count, group) => count + group.lines.length, 0);
-        const keptGroups: { file: SearchFile; lines: string[] }[] = [];
+        const keptGroups: { file: SearchFile; lines: string[]; raw: string[] }[] = [];
         let remaining = SEARCH_MATCH_LIMIT;
         for (const group of groups) {
           if (remaining <= 0) break;
           const lines = group.lines.slice(0, remaining);
-          keptGroups.push({ file: group.file, lines });
+          const raw = group.raw.slice(0, remaining);
+          keptGroups.push({ file: group.file, lines, raw });
           remaining -= lines.length;
         }
         if (allMatches > SEARCH_MATCH_LIMIT) {
@@ -1421,10 +1430,13 @@ export function buildTools(
           SEARCH_OUTPUT_CHARS,
           `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
         );
-        const sourceContents = keptGroups.flatMap(({ file, lines }) =>
+        // Scan-source provenance is the RAW unformatted matched lines (the
+        // scan guard sees anchorable source text); the numbered display rides
+        // the model payload. Same raw-plus-formatted contract as read.
+        const sourceContents = keptGroups.flatMap(({ file, raw }) =>
           [...new Set([file.lexicalRel, file.resolvedRel])].map((path) => ({
             path,
-            text: lines.join('\n'),
+            text: raw.join('\n'),
           })),
         );
         if (isAborted(options?.signal)) {

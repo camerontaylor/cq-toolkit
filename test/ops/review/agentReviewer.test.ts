@@ -240,6 +240,56 @@ describe('runAgentReviewer v3 session engine', () => {
     });
   });
 
+  it('retains capability evidence and the deduped advisory on a budget-settled session', async () => {
+    const advisory = 'search tools unavailable: ripgrep not found';
+    const rgAbsent = {
+      rg: { available: false, minimum: '15.2.0', probe: 'absent' as const },
+    };
+    const fake = fakeDrivers({
+      result: workerResult({
+        stopReason: 'budget',
+        capabilities: rgAbsent,
+        advisories: [advisory, advisory],
+      }),
+    });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human' || result.report === undefined) return;
+    expect(result.reason).toContain('agent review budget exhausted');
+    expect(result.report.findings).toEqual([]);
+    expect(result.report.advisories).toEqual([advisory]);
+    expect(result.report.coverage.pieces[0]?.state).toBe('delivered');
+    expect(result.report.coverage.sessions[0]).toMatchObject({
+      status: 'budget',
+      capabilities: rgAbsent,
+    });
+  });
+
+  it('retains capability evidence and the deduped advisory on invalid structured output', async () => {
+    const advisory = 'search tools unavailable: ripgrep not found';
+    const rgAbsent = {
+      rg: { available: false, minimum: '15.2.0', probe: 'absent' as const },
+    };
+    const fake = fakeDrivers({
+      result: workerResult({
+        structuredOutput: { unexpected: true },
+        capabilities: rgAbsent,
+        advisories: [advisory, advisory],
+      }),
+    });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human' || result.report === undefined) return;
+    expect(result.reason).toContain('agent review returned invalid structured output');
+    expect(result.report.findings).toEqual([]);
+    expect(result.report.advisories).toEqual([advisory]);
+    expect(result.report.coverage.pieces[0]?.state).toBe('delivered');
+    expect(result.report.coverage.sessions[0]).toMatchObject({
+      status: 'error',
+      capabilities: rgAbsent,
+    });
+  });
+
   it('maps unmapped low severity to minor and omits missing location fields', async () => {
     const fake = fakeDrivers({
       result: workerResult({

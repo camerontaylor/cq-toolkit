@@ -266,9 +266,12 @@ describe('review session wire hook', () => {
     expect(firstSerialized).toBe(calls[0]!.text);
     expect(calls[1]!.contents.some((content) => content.text === plan.prompt)).toBe(false);
     expect(scanCalls).toHaveLength(3);
+    // The model sees the numbered display; the guard also receives the raw
+    // selected lines with path provenance.
+    expect(scanCalls[1]!.some((component) => component.text === calls[1]!.text)).toBe(true);
     expect(
       scanCalls[1]!.some(
-        (component) => component.path === 'src/a.ts' && component.text === calls[1]!.text,
+        (component) => component.path === 'src/a.ts' && component.text === firstSerialized,
       ),
     ).toBe(true);
     expect(evidence.requests).toHaveLength(2);

@@ -48,7 +48,7 @@ describe('windowed read tool', () => {
       expect(result.output).toContain('     2: beta');
       expect(result.output).toContain('offset=3 to continue');
       expect(result.output).not.toContain('alpha');
-      expect(result.sourceContents).toEqual([{ text: result.output, path: 'window.txt' }]);
+      expect(result.sourceContents).toEqual([{ text: 'beta', path: 'window.txt' }]);
       expect(result.truncated).toBe(true);
     });
   });
@@ -169,7 +169,7 @@ describe('contained grep and glob tools', () => {
       expect(result.output).toContain('--- src/match.ts ---');
       expect(result.output).toContain('2: needle-value');
       expect(result.output).not.toContain('other.js');
-      expect(result.sourceContents).toEqual([{ path: 'src/match.ts', text: '2: needle-value' }]);
+      expect(result.sourceContents).toEqual([{ path: 'src/match.ts', text: 'needle-value' }]);
       const empty = await grep.execute({ pattern: 'no-such-token' });
       expect(empty).toMatchObject({ ok: true, output: 'No matches', truncated: false });
     });

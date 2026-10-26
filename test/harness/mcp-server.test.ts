@@ -58,9 +58,10 @@ function harnessWithRun(commandPatterns: string[]): HarnessConfig {
 const renderRead = (path: string, body: string): string => {
   const lines = body.split(/\r\n|\n|\r/);
   if (lines.at(-1) === '') lines.pop();
-  return ['--- ' + path + ' ---', ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`)].join(
-    '\n',
-  );
+  return [
+    '--- ' + path + ' ---',
+    ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`),
+  ].join('\n');
 };
 
 function manifestFor(workspace: string, over: Partial<HarnessManifest> = {}): HarnessManifest {

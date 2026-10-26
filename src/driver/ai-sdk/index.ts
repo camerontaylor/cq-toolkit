@@ -287,17 +287,33 @@ export const DEFAULT_MAX_STEPS = 40;
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
-/** The documented minimum ripgrep version (installer/docs lane pins the same). */
-export const RG_MINIMUM_VERSION = '15.2.0';
+/**
+ * The minimum ripgrep the search tools need at runtime: 11.0.0 (the CI
+ * installer pins a newer 15.2.0 separately — that is the installer's
+ * constant, not this driver's; 14.x and every 11+ build SERVE, never
+ * "below minimum"). Flag floor is 0.10.0 — upstream CHANGELOG #0100
+ * (2018-09-07) added --json (feature #244), and 0.10.0's src/app.rs already
+ * carries every flag both invocations use (`--files --no-config --hidden
+ * --color=never --null --glob --` and `--json --max-count -e --`); no newer
+ * flag raises it. The BEHAVIOR floor is 11.0.0 (CHANGELOG #1100,
+ * 2019-04-15): non-fatal search errors became exit 2 even with matches
+ * found — before 11, a partial-error search could exit 0/1 with
+ * incomplete results, which the grep tool would wrongly serve (it denies
+ * exit codes other than 0/1 precisely to refuse error-partial output).
+ * Sources: github.com/BurntSushi/ripgrep/blob/15.2.0/CHANGELOG.md
+ * #1100-2019-04-15 and #0100-2018-09-07. Boundary tests: 10.x rejects,
+ * 11.0.0 and 14.1 accept.
+ */
+export const RG_MINIMUM_VERSION = '11.0.0';
 
-/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). */
-const parseRgVersion = (line: string | undefined): string | undefined => {
+/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). Exported for boundary tests. */
+export const parseRgVersion = (line: string | undefined): string | undefined => {
   const match = /^ripgrep (\d+\.\d+\.\d+)/.exec(line ?? '');
   return match?.[1];
 };
 
-/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. */
-const versionAtLeast = (found: string, minimum: string): boolean => {
+/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. Exported for boundary tests. */
+export const versionAtLeast = (found: string, minimum: string): boolean => {
   const parse = (v: string): [number, number, number] => {
     const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
     return [major ?? 0, minor ?? 0, patch ?? 0];
@@ -323,6 +339,14 @@ export const defaultResolveRg = (
     }
     let child: ReturnType<typeof childSpawn>;
     let settled = false;
+    const timer = setTimeout(() => {
+      child?.kill();
+      done({ ok: false, reason: 'absent' });
+    }, 5_000);
+    const onAbort = (): void => {
+      child?.kill();
+      done({ ok: false, reason: 'absent' });
+    };
     const done = (
       outcome:
         | { ok: true; version: string }
@@ -330,34 +354,45 @@ export const defaultResolveRg = (
     ): void => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       settle(outcome);
     };
+    signal?.addEventListener('abort', onAbort, { once: true });
     try {
       child = childSpawn('rg', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
     } catch {
       done({ ok: false, reason: 'absent' });
       return;
     }
-    const timer = setTimeout(() => {
-      child.kill();
-      done({ ok: false, reason: 'absent' });
-    }, 5_000);
-    signal?.addEventListener('abort', () => child.kill(), { once: true });
-    let firstLine = '';
+    // Only the FIRST line matters; decode incrementally so a chunk split
+    // mid-line cannot lose the version, and stop accumulating once the first
+    // newline arrives (bounded by the version line, never the whole output).
+    let head = '';
+    let headDone = false;
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (firstLine === '') firstLine = chunk.toString('utf8').split('\n')[0] ?? '';
+      if (headDone) return;
+      head += chunk.toString('utf8');
+      const newline = head.indexOf('\n');
+      if (newline !== -1) {
+        head = head.slice(0, newline);
+        headDone = true;
+      }
+      if (head.length > 256) {
+        head = head.slice(0, 256);
+        headDone = true;
+      }
     });
     child.on('error', () => {
-      clearTimeout(timer);
       done({ ok: false, reason: 'absent' });
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
-      const version = parseRgVersion(firstLine);
+      const version = parseRgVersion(head);
       if (code !== 0 || version === undefined) {
         done({ ok: false, reason: 'absent' });
         return;
       }
+      // 10.x and older are withheld; 11.0.0+ (incl. the host's 14.1) serve.
       done(
         versionAtLeast(version, RG_MINIMUM_VERSION)
           ? { ok: true, version }
@@ -679,30 +714,70 @@ export class AiSdkDriver implements Driver {
     // harness surfaces. With no explicit config, preserve the pre-W1.11
     // no-policy behavior; an expressed environment is resolved by the gate.
     const denials: ToolDenial[] = [];
-    // The rg capability probe: ONE memoized probe per RUN (not per selection).
-    // Triggered only when the run's ToolPolicy actually requests grep; shared
-    // by search-tool withholding below and the result capability record. A
-    // reviewer-level searchTools:false stays silent — the policy never lists
-    // grep, so no probe, no advisory, no capability entry (the distinguishable
-    // 'not configured' state).
-    const rgProbePromise =
-      toolPolicy.allow !== undefined && toolPolicy.allow.includes('grep')
-        ? this.resolveRg(abortSignal).catch(() => ({
-            ok: false as const,
-            reason: 'absent' as const,
-          }))
-        : undefined;
-    const rgProbe = rgProbePromise === undefined ? undefined : await rgProbePromise;
-    const searchWithheld = rgProbe !== undefined && rgProbe.ok === false;
     const harnessTools = buildTools(
       this.harnessConfig,
       record.workspace,
       sandboxPolicy.level,
       runGate,
     );
-    const selected = selectTools(harnessTools, toolPolicy).filter(
-      (tool) => !searchWithheld || (tool.name !== 'grep' && tool.name !== 'glob'),
-    );
+    // The rg capability probe: ONE probe per RUN, decided from the CANDIDATE
+    // selection (harness surface ∩ policy) — probe iff grep OR glob is
+    // actually offered, so a glob-only allowlist, a sandbox/harness that
+    // withholds search, and an unrestricted policy are all handled without a
+    // bypass and without probing when search is unavailable anyway. Absent/
+    // old rg then filters BOTH tools from the candidates. A selection without
+    // any search tool never probes (the distinguishable not-configured state).
+    const candidates = selectTools(harnessTools, toolPolicy);
+    const searchOffered = candidates.some((tool) => tool.name === 'grep' || tool.name === 'glob');
+    const rgProbe = searchOffered
+      ? await this.resolveRg(abortSignal).catch(() => ({
+          ok: false as const,
+          reason: 'absent' as const,
+        }))
+      : undefined;
+    const searchWithheld = rgProbe !== undefined && rgProbe.ok === false;
+    // rg capability seam: the evidence object attached to EVERY post-probe
+    // verdict from this run — success, repair success/failure, error, abort,
+    // budget — so consumers always see what the once-per-run probe observed.
+    const capabilityEvidence =
+      rgProbe === undefined
+        ? {}
+        : {
+            capabilities: {
+              rg:
+                rgProbe.ok === true
+                  ? {
+                      available: true,
+                      version: rgProbe.version,
+                      minimum: RG_MINIMUM_VERSION,
+                      probe: 'ok' as const,
+                    }
+                  : rgProbe.reason === 'old'
+                    ? {
+                        available: false,
+                        ...(rgProbe.found !== undefined ? { found: rgProbe.found } : {}),
+                        minimum: RG_MINIMUM_VERSION,
+                        probe: rgProbe.reason,
+                      }
+                    : {
+                        available: false,
+                        minimum: RG_MINIMUM_VERSION,
+                        probe: rgProbe.reason,
+                      },
+            },
+            ...(searchWithheld
+              ? {
+                  advisories: [
+                    rgProbe.ok === false && rgProbe.reason === 'old'
+                      ? `search tools unavailable: ripgrep older than minimum ${RG_MINIMUM_VERSION}`
+                      : 'search tools unavailable: ripgrep not found',
+                  ],
+                }
+              : {}),
+          };
+    const selected = searchWithheld
+      ? candidates.filter((tool) => tool.name !== 'grep' && tool.name !== 'glob')
+      : candidates;
     const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
@@ -872,6 +947,7 @@ export class AiSdkDriver implements Driver {
                 : undefined,
             responseHeaders: err.response?.headers,
             finishReason: err.finishReason ?? 'error',
+            capabilityEvidence,
             abortSignal,
             budget,
             model,
@@ -936,6 +1012,7 @@ export class AiSdkDriver implements Driver {
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
+            capabilityEvidence,
             abortSignal,
             budget,
             model,
@@ -998,43 +1075,8 @@ export class AiSdkDriver implements Driver {
         ...costField(this.pricing, { ...modelSpec, model: servedModel ?? modelSpec.model }, usage),
         sessionId: record.sessionId,
         denials,
-        // rg capability seam: evidence + advisory ride ANY verdict this lane
-        // observed the probe on; other lanes leave the fields undefined.
-        ...(rgProbe !== undefined
-          ? {
-              capabilities: {
-                rg:
-                  rgProbe.ok === true
-                    ? {
-                        available: true,
-                        version: rgProbe.version,
-                        minimum: RG_MINIMUM_VERSION,
-                        probe: 'ok' as const,
-                      }
-                    : rgProbe.reason === 'old'
-                      ? {
-                          available: false,
-                          ...(rgProbe.found !== undefined ? { found: rgProbe.found } : {}),
-                          minimum: RG_MINIMUM_VERSION,
-                          probe: rgProbe.reason,
-                        }
-                      : {
-                          available: false,
-                          minimum: RG_MINIMUM_VERSION,
-                          probe: rgProbe.reason,
-                        },
-              },
-              ...(searchWithheld
-                ? {
-                    advisories: [
-                      rgProbe.ok === false && rgProbe.reason === 'old'
-                        ? `search tools unavailable: ripgrep older than minimum ${RG_MINIMUM_VERSION}`
-                        : 'search tools unavailable: ripgrep not found',
-                    ],
-                  }
-                : {}),
-            }
-          : {}),
+        // rg capability seam: evidence rides EVERY verdict (shared object).
+        ...capabilityEvidence,
         stopReason,
         ...(finishClass !== undefined
           ? {
@@ -1061,6 +1103,7 @@ export class AiSdkDriver implements Driver {
           steps: completedSteps,
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'aborted',
           ...(signals !== undefined ? { providerSignals: signals } : {}),
         };
@@ -1077,6 +1120,7 @@ export class AiSdkDriver implements Driver {
             steps: completedSteps,
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'budget',
             ...(signals !== undefined ? { providerSignals: signals } : {}),
           };
@@ -1110,6 +1154,7 @@ export class AiSdkDriver implements Driver {
         steps: completedSteps,
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(`ai-sdk driver: run failed — ${describeError(err)}`),
         errorClass: classifyRunFailure(err),
@@ -1158,6 +1203,8 @@ export class AiSdkDriver implements Driver {
     record: SessionRecord;
     modelSpec: ModelSpec;
     denials: ToolDenial[];
+    /** rg capability seam: the once-per-run probe evidence, attached to every miss-flow verdict. */
+    capabilityEvidence: Partial<WorkerResult>;
   }): Promise<WorkerResult> {
     const {
       outputSchema,
@@ -1177,6 +1224,7 @@ export class AiSdkDriver implements Driver {
       record,
       modelSpec,
       denials,
+      capabilityEvidence,
     } = inputs;
 
     /** Fold-in helper: verdict usage over BOTH calls, cost over the fold. */
@@ -1228,6 +1276,7 @@ export class AiSdkDriver implements Driver {
         ...verdictExtras(mainUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: mapped,
         ...verdictSignals(),
       };
@@ -1241,6 +1290,7 @@ export class AiSdkDriver implements Driver {
         ...verdictExtras(mainUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(
           `ai-sdk driver: the run ended with finishReason '${String(finishReason)}' before a schema-valid object (${rejection})`,
@@ -1262,6 +1312,7 @@ export class AiSdkDriver implements Driver {
           ...verdictExtras(mainUsage),
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'aborted',
           ...verdictSignals(),
         };
@@ -1271,6 +1322,7 @@ export class AiSdkDriver implements Driver {
         ...verdictExtras(mainUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(
           `ai-sdk driver: structured output invalid and the token budget leaves no room for the repair attempt — ${rejection}`,
@@ -1432,6 +1484,7 @@ export class AiSdkDriver implements Driver {
             ...repairVerdictExtras(totalUsage),
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'error',
             error: boundedErrorText(
               `ai-sdk driver: the repair attempt ended on the provider's terminal status (${String(repair.finishReason)})`,
@@ -1455,6 +1508,7 @@ export class AiSdkDriver implements Driver {
             ...verdictUsageOnly(totalUsage),
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'error',
             error: boundedErrorText(
               repairServedModel === undefined
@@ -1471,6 +1525,7 @@ export class AiSdkDriver implements Driver {
           ...repairVerdictExtras(totalUsage),
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: repairStop,
           ...repairSignals(),
         };
@@ -1480,6 +1535,7 @@ export class AiSdkDriver implements Driver {
         ...repairVerdictExtras(totalUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(
           `ai-sdk driver: structured output invalid after the repair attempt — ${rejection}; repair: ${repairRejection}`,
@@ -1510,6 +1566,7 @@ export class AiSdkDriver implements Driver {
             ...verdictExtras(totalUsage),
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'budget',
             ...verdictSignals(),
           };
@@ -1520,6 +1577,7 @@ export class AiSdkDriver implements Driver {
           steps: mainSteps + repairSteps,
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'error',
           error: boundedErrorText(
             `ai-sdk driver: structured output invalid and the repair attempt was refused by the strict token ceiling for an infrastructure reason (${err.reason}) — ${err.message}`,
@@ -1563,6 +1621,7 @@ export class AiSdkDriver implements Driver {
             : { usage: totalUsage, steps: mainSteps + repairSteps }),
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'error',
           error: boundedErrorText(
             `ai-sdk driver: structured output invalid after the repair attempt — ${rejection}; repair: ${describeError(err)}`,
@@ -1578,6 +1637,7 @@ export class AiSdkDriver implements Driver {
         steps: mainSteps + repairSteps,
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: aborted ? 'aborted' : 'error',
         ...(!aborted
           ? {
@@ -1843,10 +1903,22 @@ async function runTool(
     if (result.sourceContents !== undefined) contents.push(...result.sourceContents);
     await guard(result.output, contents, { kind: 'tool-output' });
   }
+  // The scan-only provenance (raw file text) must NOT persist: the tool
+  // result is JSON-stringified into the transcript and replayed verbatim on
+  // resume — sourceContents would put pre-cap-scan-only data past the output
+  // bounds and leak it to a later model turn. Strip it AFTER the guard, keep
+  // the guard itself unconditional (user-approved contract).
+  const persistable =
+    result.ok && result.sourceContents !== undefined
+      ? (() => {
+          const { sourceContents: _scanOnly, ...rest } = result;
+          return rest;
+        })()
+      : result;
   await store.appendMessage(record.sessionId, {
     role: 'tool',
     toolName: harnessTool.name,
-    content: JSON.stringify(result),
+    content: JSON.stringify(persistable),
     at: nowIso(),
   });
   if (result.ok) {

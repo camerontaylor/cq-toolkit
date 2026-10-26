@@ -96,6 +96,8 @@ jobs:
           git init .
           git fetch --no-tags "${RUNNER_TEMP}/cq-source/source.bundle" refs/cq-transfer/subject
           git checkout --detach "$SUBJECT"
+      - name: Install ripgrep for harness search tools
+        uses: ./.github/actions/install-ripgrep
       - name: Set up pnpm (version from package.json packageManager)
         # v6.1.0, immutable commit pin (repo policy)
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413

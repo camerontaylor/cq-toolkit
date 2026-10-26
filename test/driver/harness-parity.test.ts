@@ -146,9 +146,10 @@ const A_BODY = 'alpha\n';
 const renderRead = (path: string, body: string): string => {
   const lines = body.split(/\r\n|\n|\r/);
   if (lines.at(-1) === '') lines.pop();
-  return ['--- ' + path + ' ---', ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`)].join(
-    '\n',
-  );
+  return [
+    '--- ' + path + ' ---',
+    ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`),
+  ].join('\n');
 };
 
 // ---------------------------------------------------------------------------
@@ -652,7 +653,11 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
           await expect(readFile(join(ws, 'src', 'a.txt'), 'utf8')).resolves.toBe('beta\n');
         }
       } else {
-        expect(texts).toEqual([renderRead('note.txt', NOTE_BODY), 'sandbox: read-only', 'sandbox: read-only']);
+        expect(texts).toEqual([
+          renderRead('note.txt', NOTE_BODY),
+          'sandbox: read-only',
+          'sandbox: read-only',
+        ]);
         expect(core.results.map((r) => r.isError === true)).toEqual([false, true, true]);
         for (const ws of [core.workspace, stdio.workspace, agent.workspace]) {
           await expect(readFile(join(ws, 'note.txt'), 'utf8')).resolves.toBe(NOTE_BODY);

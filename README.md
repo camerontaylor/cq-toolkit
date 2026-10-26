@@ -220,6 +220,13 @@ registered — is [policy/README.md](policy/README.md).
 
 Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds the package and drives a real governed plan through the built barrel (`scripts/smoke-run-plan.mjs` — two jobs, claude-code driver (CLI transport), journal + report + I1 output contract asserted), and the [pack audit](.github/workflows/pack-audit.yml) tarballs the package, asserts every shipped path hangs off the `files` allowlist, and denylist-scans the unpacked tree. The required `static` job regenerates the op reference and fails on drift, so `docs/ops/` cannot diverge from the registry.
 
+CI and self-hosted review jobs also require the host `rg` executable for the
+harness search tools. Ripgrep **11.0.0 is the runtime floor**; CI installs the
+exact **15.2.0 pin** through [`.github/actions/install-ripgrep`](.github/actions/install-ripgrep/action.yml)
+from upstream release archives with per-OS/architecture SHA-256 verification.
+It is a host prerequisite, not an npm dependency; deployers running these
+tools outside the provided workflows must install `rg` 11.0.0 or newer.
+
 ## Local verification
 
 The repository uses pnpm (pinned by `packageManager`). Its
