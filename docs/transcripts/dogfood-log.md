@@ -215,8 +215,9 @@ optional `includeIntegration` input appending `--include-integration` to the
 gate's `--base`/`--range` argv, recorded as `includeIntegration: true` in the
 check record; dev.cycle forwards it to both check legs; RED-first tests,
 statics, knip and regenerated op docs). Evidence: `test:narrow result="pass"
-exit=0 files=7 projects="pure,process" tests="180/180" failed=0` (check,
-cycle, both registries, review, pr-open), `pnpm lint` 0 errors,
+exit=0 files=7 projects="pure,process" tests="180/180" failed=0` (the seven
+files are `dev.check`, `dev.cycle`, both registry suites, `review-loop`,
+`review.address` and `pr-open`), `pnpm lint` 0 errors,
 `format:check` clean, `knip` clean.
 
 ```sh
