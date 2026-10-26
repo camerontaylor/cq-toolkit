@@ -798,6 +798,45 @@ describe('F1 write tool', () => {
       );
     });
   });
+
+  test('a new file cannot escape through a symlinked parent or a dangling symlink', async () => {
+    await withScratch(async (scratchDir) => {
+      const workspace = join(scratchDir, 'ws');
+      const outside = join(scratchDir, 'outside');
+      await mkdir(workspace, { recursive: true });
+      await mkdir(outside, { recursive: true });
+      const write = buildTools(defaultHarnessConfig, workspace).find(
+        (candidate) => candidate.name === 'write',
+      );
+      if (write === undefined) throw new Error('missing write');
+
+      // A symlinked PARENT directory must not create outside the workspace.
+      await symlink(outside, join(workspace, 'link'));
+      const viaParent = await write.execute({ file_path: 'link/new.txt', content: 'escape\n' });
+      expect(viaParent.ok).toBe(false);
+      if (!viaParent.ok) expect(viaParent.denial.reason).toContain('path escape');
+      await expect(readFile(join(outside, 'new.txt'), 'utf8')).rejects.toThrow();
+
+      // A dangling symlink must not be followed to create its target.
+      await symlink(join(outside, 'missing.txt'), join(workspace, 'dangling'));
+      const viaDangling = await write.execute({ file_path: 'dangling', content: 'escape\n' });
+      expect(viaDangling.ok).toBe(false);
+      if (!viaDangling.ok) expect(viaDangling.denial.reason).toContain('does not resolve');
+      await expect(readFile(join(outside, 'missing.txt'), 'utf8')).rejects.toThrow();
+
+      // A symlinked parent INSIDE the workspace still works.
+      await mkdir(join(workspace, 'real'));
+      await symlink(join(workspace, 'real'), join(workspace, 'alias'));
+      const inside = await write.execute({
+        file_path: 'alias/inside.txt',
+        content: 'inside\n',
+      });
+      expect(inside).toMatchObject({ ok: true });
+      await expect(readFile(join(workspace, 'real', 'inside.txt'), 'utf8')).resolves.toBe(
+        'inside\n',
+      );
+    });
+  });
 });
 
 describe('F1 bash tool', () => {

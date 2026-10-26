@@ -138,8 +138,8 @@
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
 import { createHash } from 'node:crypto';
-import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
-import { relative, resolve, sep } from 'node:path';
+import { lstat, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { buildChildEnv } from '../shared/proc.js';
@@ -1074,9 +1074,24 @@ export function buildTools(
         if (abs === undefined) {
           return deny('write', `path escape: '${path}' resolves outside the workspace`);
         }
-        const effective = await resolveRealInside(abs);
+        let effective = await resolveRealInside(abs);
         if (effective === undefined) {
           return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
+        }
+        // A MISSING target has no realpath, so resolveRealInside fell back to
+        // the lexical path. Decide a new file's containment by its PARENT's
+        // realpath (a symlinked parent must not create outside the
+        // workspace), and refuse a dangling symlink outright: writeFile would
+        // otherwise follow it to an unchecked destination.
+        const link = await lstat(abs).catch(() => undefined);
+        if (link === undefined) {
+          const parent = await resolveRealInside(dirname(abs));
+          if (parent === undefined) {
+            return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
+          }
+          effective = join(parent, basename(abs));
+        } else if (link.isSymbolicLink() && effective === abs) {
+          return deny('write', `write refused: '${relOf(abs)}' is a symlink that does not resolve`);
         }
         if (await touchesGit(abs, effective)) return gitDenial('write', abs);
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
