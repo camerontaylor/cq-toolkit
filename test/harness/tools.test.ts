@@ -883,8 +883,8 @@ describe('F1 edit correctness', () => {
         tools.edit.execute({ file_path: 'serial.txt', old_string: 'a', new_string: 'b' }),
         tools.edit.execute({ file_path: 'serial.txt', old_string: 'b', new_string: 'c' }),
       ]);
-      expect(first).toMatchObject({ ok: true });
-      expect(second).toMatchObject({ ok: true });
+      expect(first.ok, first.ok ? '' : first.denial.reason).toBe(true);
+      expect(second.ok, second.ok ? '' : second.denial.reason).toBe(true);
       await expect(readFile(join(scratchDir, 'serial.txt'), 'utf8')).resolves.toBe('c\n');
     });
   });
@@ -987,11 +987,6 @@ describe('F1 edit correctness', () => {
   });
 
   describe('F1 admission ordering (macOS concurrent-edit race fix)', () => {
-    afterEach(() => {
-      vi.restoreAllMocks();
-      gateRealpath(undefined); // the hoisted gate never leaks across tests
-    });
-
     test('arrival order survives async preflight: the second call cannot start its read before the first is admitted', async () => {
       await withScratch(async (scratchDir) => {
         const file = join(scratchDir, 'serial.txt');
@@ -1039,9 +1034,12 @@ describe('F1 edit correctness', () => {
         const probesWhileHeld = probeCalls;
         // With ordered admission the second's preflight cannot begin while
         // the first holds the admission turn.
-        expect(probesWhileHeld).toBe(1);
-        releaseFirst();
-        gateRealpath(undefined);
+        try {
+          expect(probesWhileHeld).toBe(1);
+        } finally {
+          releaseFirst();
+          gateRealpath(undefined);
+        }
 
         const [firstResult, secondResult] = await Promise.all([first, second]);
         expect(firstResult.ok, firstResult.ok ? '' : firstResult.denial.reason).toBe(true);
@@ -1050,9 +1048,9 @@ describe('F1 edit correctness', () => {
       });
     });
 
-    test('symlinked workspace root (/var → /private style): canonical-target edits via mixed aliases serialize in arrival order', async () => {
+    test('mixed descendant aliases serialize edits to one canonical file in arrival order', async () => {
       await withScratch(async (scratchDir) => {
-        // A symlinked root INSIDE the workspace: `alias` → `real`. Two calls
+        // A descendant alias INSIDE the workspace: `alias` → `real`. Two calls
         // addressing the SAME canonical file through DIFFERENT aliases must
         // serialize (the queue re-keys to the canonical path).
         const workspace = join(scratchDir, 'ws');
@@ -1071,15 +1069,15 @@ describe('F1 edit correctness', () => {
         await writeFile(join(workspace, 'real', 't.txt'), 'a\n', 'utf8');
         await read.execute({ path: 'real/t.txt' });
 
-        // Edit via the alias FIRST (queue admits on lexical alias path), then
+        // Edit via the alias FIRST (first admission turn), then
         // via the real path. Both must succeed in arrival order: the canonical
         // re-key must not let the second bypass the first.
         const [viaAlias, viaReal] = await Promise.all([
           edit.execute({ file_path: 'alias/t.txt', old_string: 'a', new_string: 'b' }),
           edit.execute({ file_path: 'real/t.txt', old_string: 'b', new_string: 'c' }),
         ]);
-        expect(viaAlias).toMatchObject({ ok: true });
-        expect(viaReal).toMatchObject({ ok: true });
+        expect(viaAlias.ok, viaAlias.ok ? '' : viaAlias.denial.reason).toBe(true);
+        expect(viaReal.ok, viaReal.ok ? '' : viaReal.denial.reason).toBe(true);
         await expect(readFile(join(workspace, 'real', 't.txt'), 'utf8')).resolves.toBe('c\n');
       });
     });
