@@ -1116,27 +1116,39 @@ export function buildTools(
   };
 
   /**
-   * Serialize every call that touches one file (read/edit/write), in arrival
-   * order. The ai-sdk driver runs a step's tool calls concurrently, so two
-   * edits of one file would otherwise interleave their read/verify/write
-   * sequence. The queue is per resolved path; a settled tail is dropped.
+   * Per-canonical-file BODY queues: the mutual exclusion for read/edit/write,
+   * keyed by the canonical (realpath) path; a settled tail is dropped.
    */
   const fileQueues = new Map<string, Promise<void>>();
-  const withFileLock = async <T>(key: string, body: () => Promise<T>): Promise<T> => {
+
+  /**
+   * ADMISSION: a single global turn serializes ONLY the async preflight
+   * (realpath, touchesGit, pathAllowedEverywhere) so per-file bodies enqueue
+   * in ARRIVAL order, not preflight-completion order; unrelated files' bodies
+   * still overlap. Gates unchanged.
+   */
+  let admissionTail: Promise<void> = Promise.resolve();
+  const admit = async <T>(
+    preflight: () => Promise<{ key: string | undefined; body: () => Promise<T> }>,
+  ): Promise<T> => {
+    const current = admissionTail.then(preflight, preflight);
+    admissionTail = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    const { key, body } = await current;
+    if (key === undefined) return body(); // denied in preflight — nothing to serialize
     const previous = fileQueues.get(key) ?? Promise.resolve();
     let release!: () => void;
-    const current = new Promise<void>((resolve) => {
+    const fileTurn = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const tail = previous.then(() => current);
+    const tail = previous.then(() => fileTurn);
     fileQueues.set(key, tail);
-    await previous;
-    try {
-      return await body();
-    } finally {
+    return previous.then(body).finally(() => {
       release();
       if (fileQueues.get(key) === tail) fileQueues.delete(key);
-    }
+    });
   };
 
   const tools: ToolkitTool[] = [];
@@ -1165,86 +1177,99 @@ export function buildTools(
         if (abs === undefined) {
           return deny('read', `path escape: '${requested}' resolves outside the workspace`);
         }
-        const effective = await resolveRealInside(abs);
-        if (effective === undefined) {
-          return deny(
-            'read',
-            `path escape: '${requested}' escapes the workspace through a symlink`,
-          );
-        }
-        if (await touchesGit(abs, effective)) return gitDenial('read', abs);
-        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
-          return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
-        }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
-          let bytes: Buffer;
-          try {
-            bytes = await readFile(effective);
-          } catch (err) {
-            const reason =
-              errorCode(err) === 'ENOENT'
-                ? `file not found: '${relOf(abs)}'`
-                : `read failed: ${messageOf(err)}`;
-            return deny('read', reason);
+        // ADMISSION: the preflight runs inside the ordered admission turn (see
+        // admit); the body then enqueues on the canonical path's own queue.
+        return admit(async () => {
+          const effective = await resolveRealInside(abs);
+          if (effective === undefined) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('read', `path escape: '${requested}' escapes the workspace through a symlink`),
+            };
           }
-          if (isBinary(bytes)) {
-            return deny('read', `read refused: '${relOf(abs)}' is a binary file`);
+          if (await touchesGit(abs, effective)) {
+            return { key: undefined, body: async () => gitDenial('read', abs) };
           }
-          const text = decodeUtf8(bytes);
-          if (text === undefined) {
-            return deny('read', `read refused: '${relOf(abs)}' is not valid UTF-8`);
+          if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+            };
           }
-          // Keep the F1 SHA-256 ledger tied to the whole file, even when the
-          // model receives only a line window.
-          await rememberRead(effective, bytes);
-          const lines = text.split(/\r\n|\n|\r/);
-          if (lines.at(-1) === '') lines.pop();
-          const offset = parsed.data.offset ?? 1;
-          const limit = parsed.data.limit ?? DEFAULT_READ_LIMIT;
-          const selected = lines.slice(offset - 1, offset - 1 + limit);
-          let lineTruncated = false;
-          const numbered = selected.map((line, index) => {
-            const cappedLine = truncateLine(line, MAX_READ_LINE_CHARS);
-            lineTruncated ||= cappedLine.truncated;
-            return `${String(offset + index).padStart(6)}: ${cappedLine.text}`;
-          });
-          const nextOffset = offset + selected.length;
-          const windowTruncated = nextOffset <= lines.length;
-          const parts = [`--- ${relOf(abs)} ---`, ...numbered];
-          if (windowTruncated) {
-            parts.push(`… (truncated; use offset=${nextOffset} to continue)`);
-          }
-          const capped = capOutputWithMarker(
-            parts.join('\n'),
-            fileCfg.maxOutputChars,
-            `[truncated: output chars cap ${fileCfg.maxOutputChars}]`,
-          );
-          const output = capped.output;
-          const root = await workspaceRealRoot();
-          const resolvedRel =
-            root !== undefined && isInside(effective, root)
-              ? relative(root, effective).split(sep).join('/')
-              : relOf(effective);
-          // Scan-source provenance is the RAW unformatted selected lines —
-          // line-anchored secret rules (^CONFIDENTIAL:) must match the raw
-          // source, not the numbered display the model sees. The formatted
-          // `output` still rides the model payload; the guard scans BOTH.
-          const rawSelected = selected.join('\n');
-          const sourceContents = [...new Set([relOf(abs), resolvedRel])].map((path) => ({
-            text: rawSelected,
-            path,
-          }));
           return {
-            ok: true,
-            output,
-            truncated: lineTruncated || windowTruncated || capped.truncated,
-            sourceContents,
+            key: effective,
+            body: async (): Promise<ToolkitToolResult> => {
+              let bytes: Buffer;
+              try {
+                bytes = await readFile(effective);
+              } catch (err) {
+                const reason =
+                  errorCode(err) === 'ENOENT'
+                    ? `file not found: '${relOf(abs)}'`
+                    : `read failed: ${messageOf(err)}`;
+                return deny('read', reason);
+              }
+              if (isBinary(bytes)) {
+                return deny('read', `read refused: '${relOf(abs)}' is a binary file`);
+              }
+              const text = decodeUtf8(bytes);
+              if (text === undefined) {
+                return deny('read', `read refused: '${relOf(abs)}' is not valid UTF-8`);
+              }
+              // Keep the F1 SHA-256 ledger tied to the whole file, even when the
+              // model receives only a line window.
+              await rememberRead(effective, bytes);
+              const lines = text.split(/\r\n|\n|\r/);
+              if (lines.at(-1) === '') lines.pop();
+              const offset = parsed.data.offset ?? 1;
+              const limit = parsed.data.limit ?? DEFAULT_READ_LIMIT;
+              const selected = lines.slice(offset - 1, offset - 1 + limit);
+              let lineTruncated = false;
+              const numbered = selected.map((line, index) => {
+                const cappedLine = truncateLine(line, MAX_READ_LINE_CHARS);
+                lineTruncated ||= cappedLine.truncated;
+                return `${String(offset + index).padStart(6)}: ${cappedLine.text}`;
+              });
+              const nextOffset = offset + selected.length;
+              const windowTruncated = nextOffset <= lines.length;
+              const parts = [`--- ${relOf(abs)} ---`, ...numbered];
+              if (windowTruncated) {
+                parts.push(`… (truncated; use offset=${nextOffset} to continue)`);
+              }
+              const capped = capOutputWithMarker(
+                parts.join('\n'),
+                fileCfg.maxOutputChars,
+                `[truncated: output chars cap ${fileCfg.maxOutputChars}]`,
+              );
+              const output = capped.output;
+              const root = await workspaceRealRoot();
+              const resolvedRel =
+                root !== undefined && isInside(effective, root)
+                  ? relative(root, effective).split(sep).join('/')
+                  : relOf(effective);
+              // Scan-source provenance is the RAW unformatted selected lines —
+              // line-anchored secret rules (^CONFIDENTIAL:) must match the raw
+              // source, not the numbered display the model sees. The formatted
+              // `output` still rides the model payload; the guard scans BOTH.
+              const rawSelected = selected.join('\n');
+              const sourceContents = [...new Set([relOf(abs), resolvedRel])].map((path) => ({
+                text: rawSelected,
+                path,
+              }));
+              return {
+                ok: true,
+                output,
+                truncated: lineTruncated || windowTruncated || capped.truncated,
+                sourceContents,
+              };
+            },
           };
         });
       },
     });
   }
-
   // Search is exposed only in a read-only sandbox. The per-op ToolPolicy is
   // still the authority that selects these descriptors for a model request.
   if (cfg.tools.read.enabled && sandbox === 'read-only') {
@@ -1526,88 +1551,104 @@ export function buildTools(
         if (abs === undefined) {
           return deny('edit', `path escape: '${path}' resolves outside the workspace`);
         }
-        const effective = await resolveRealInside(abs);
-        if (effective === undefined) {
-          return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
-        }
-        if (await touchesGit(abs, effective)) return gitDenial('edit', abs);
-        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
-          return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
-        }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
-          let bytes: Buffer;
-          try {
-            bytes = await readFile(effective);
-          } catch (err) {
-            const reason =
-              errorCode(err) === 'ENOENT'
-                ? `file not found: '${relOf(abs)}'`
-                : `read failed: ${messageOf(err)}`;
-            return deny('edit', reason);
+        // ADMISSION: preflight inside the ordered admission turn (see admit).
+        return admit(async () => {
+          const effective = await resolveRealInside(abs);
+          if (effective === undefined) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('edit', `path escape: '${path}' escapes the workspace through a symlink`),
+            };
           }
-          const label = relOf(abs);
-          if (isBinary(bytes)) return deny('edit', `edit refused: '${label}' is a binary file`);
-          const text = decodeUtf8(bytes);
-          if (text === undefined) {
-            return deny('edit', `edit refused: '${label}' is not valid UTF-8`);
+          if (await touchesGit(abs, effective)) {
+            return { key: undefined, body: async () => gitDenial('edit', abs) };
           }
-          const prior = readState.get(effective);
-          if (prior === undefined) {
-            return deny('edit', `edit refused: '${label}' must be read before it is edited`);
+          if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+            };
           }
-          if (prior.sha256 !== sha256(bytes)) {
-            return deny(
-              'edit',
-              `edit refused: '${label}' changed since it was read; read it again`,
-            );
-          }
-          const bom = text.startsWith(BOM);
-          const body = stripBom(text);
-          const needle = toLf(oldString);
-          const ending = dominantLineEnding(body);
-          const replacementLf = toLf(newString);
-          // New text follows the file's dominant convention; existing bytes
-          // outside the replaced spans are never normalised or rewritten.
-          const replacement =
-            ending === '\r\n' ? replacementLf.replace(/\n/g, '\r\n') : replacementLf;
-          // Only two starts are needed to establish ambiguity.
-          const overlapping = findMatches(body, needle, true, 2);
-          if (overlapping.length === 0) {
-            return deny('edit', `edit refused: target text not found in '${label}'`);
-          }
-          if (overlapping.length > 1 && !replaceAll) {
-            return deny(
-              'edit',
-              `edit refused: target text is not unique in '${label}' ` +
-                '(multiple possible matches, overlapping included); ' +
-                'pass replace_all: true to replace every non-overlapping occurrence',
-            );
-          }
-          // replace_all uses the standard NON-overlapping semantics and
-          // reports how many spans it actually replaced; a single edit takes
-          // the first non-overlapping span. Literal replacement: no
-          // `$&`/`$1` substitution.
-          const nonOverlapping = findMatches(
-            body,
-            needle,
-            false,
-            replaceAll ? Number.POSITIVE_INFINITY : 1,
-          );
-          const spans = replaceAll ? nonOverlapping : nonOverlapping.slice(0, 1);
-          const edited = applySpans(body, spans, replacement);
-          const output = `${bom ? BOM : ''}${edited}`;
-          try {
-            await writeFile(effective, output, 'utf8');
-          } catch (err) {
-            return deny('edit', `edit failed: ${messageOf(err)}`);
-          }
-          await rememberRead(effective, Buffer.from(output, 'utf8'));
-          const replaced = spans.length;
-          const capped = capOutput(
-            `edited '${label}': replaced ${replaced} ${replaced === 1 ? 'occurrence' : 'occurrences'}`,
-            fileCfg.maxOutputChars,
-          );
-          return { ok: true, ...capped };
+          return {
+            key: effective,
+            body: async (): Promise<ToolkitToolResult> => {
+              let bytes: Buffer;
+              try {
+                bytes = await readFile(effective);
+              } catch (err) {
+                const reason =
+                  errorCode(err) === 'ENOENT'
+                    ? `file not found: '${relOf(abs)}'`
+                    : `read failed: ${messageOf(err)}`;
+                return deny('edit', reason);
+              }
+              const label = relOf(abs);
+              if (isBinary(bytes)) return deny('edit', `edit refused: '${label}' is a binary file`);
+              const text = decodeUtf8(bytes);
+              if (text === undefined) {
+                return deny('edit', `edit refused: '${label}' is not valid UTF-8`);
+              }
+              const prior = readState.get(effective);
+              if (prior === undefined) {
+                return deny('edit', `edit refused: '${label}' must be read before it is edited`);
+              }
+              if (prior.sha256 !== sha256(bytes)) {
+                return deny(
+                  'edit',
+                  `edit refused: '${label}' changed since it was read; read it again`,
+                );
+              }
+              const bom = text.startsWith(BOM);
+              const body = stripBom(text);
+              const needle = toLf(oldString);
+              const ending = dominantLineEnding(body);
+              const replacementLf = toLf(newString);
+              // New text follows the file's dominant convention; existing bytes
+              // outside the replaced spans are never normalised or rewritten.
+              const replacement =
+                ending === '\r\n' ? replacementLf.replace(/\n/g, '\r\n') : replacementLf;
+              // Only two starts are needed to establish ambiguity.
+              const overlapping = findMatches(body, needle, true, 2);
+              if (overlapping.length === 0) {
+                return deny('edit', `edit refused: target text not found in '${label}'`);
+              }
+              if (overlapping.length > 1 && !replaceAll) {
+                return deny(
+                  'edit',
+                  `edit refused: target text is not unique in '${label}' ` +
+                    '(multiple possible matches, overlapping included); ' +
+                    'pass replace_all: true to replace every non-overlapping occurrence',
+                );
+              }
+              // replace_all uses the standard NON-overlapping semantics and
+              // reports how many spans it actually replaced; a single edit takes
+              // the first non-overlapping span. Literal replacement: no
+              // `$&`/`$1` substitution.
+              const nonOverlapping = findMatches(
+                body,
+                needle,
+                false,
+                replaceAll ? Number.POSITIVE_INFINITY : 1,
+              );
+              const spans = replaceAll ? nonOverlapping : nonOverlapping.slice(0, 1);
+              const edited = applySpans(body, spans, replacement);
+              const output = `${bom ? BOM : ''}${edited}`;
+              try {
+                await writeFile(effective, output, 'utf8');
+              } catch (err) {
+                return deny('edit', `edit failed: ${messageOf(err)}`);
+              }
+              await rememberRead(effective, Buffer.from(output, 'utf8'));
+              const replaced = spans.length;
+              const capped = capOutput(
+                `edited '${label}': replaced ${replaced} ${replaced === 1 ? 'occurrence' : 'occurrences'}`,
+                fileCfg.maxOutputChars,
+              );
+              return { ok: true, ...capped };
+            },
+          };
         });
       },
     });
@@ -1635,79 +1676,103 @@ export function buildTools(
         if (abs === undefined) {
           return deny('write', `path escape: '${path}' resolves outside the workspace`);
         }
-        let effective = await resolveRealInside(abs);
-        if (effective === undefined) {
-          return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
-        }
-        // A MISSING target has no realpath, so resolveRealInside fell back to
-        // the lexical path. Decide a new file's containment by its PARENT's
-        // realpath (a symlinked parent must not create outside the
-        // workspace), and refuse a dangling symlink outright: writeFile would
-        // otherwise follow it to an unchecked destination.
-        const link = await lstat(abs).catch(() => undefined);
-        if (link === undefined) {
-          const parent = await resolveRealInside(dirname(abs));
-          if (parent === undefined) {
-            return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
+        // ADMISSION: preflight inside the ordered admission turn (see admit).
+        return admit(async () => {
+          let effective = await resolveRealInside(abs);
+          if (effective === undefined) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('write', `path escape: '${path}' escapes the workspace through a symlink`),
+            };
           }
-          effective = join(parent, basename(abs));
-        } else if (link.isSymbolicLink() && effective === abs) {
-          return deny('write', `write refused: '${relOf(abs)}' is a symlink that does not resolve`);
-        }
-        if (await touchesGit(abs, effective)) return gitDenial('write', abs);
-        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
-          return deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
-        }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
-          const label = relOf(abs);
-          let existing: Buffer | undefined;
-          try {
-            existing = await readFile(effective);
-          } catch (err) {
-            if (errorCode(err) !== 'ENOENT') {
-              return deny('write', `write failed: ${messageOf(err)}`);
+          // A MISSING target has no realpath, so resolveRealInside fell back to
+          // the lexical path. Decide a new file's containment by its PARENT's
+          // realpath (a symlinked parent must not create outside the
+          // workspace), and refuse a dangling symlink outright: writeFile would
+          // otherwise follow it to an unchecked destination.
+          const link = await lstat(abs).catch(() => undefined);
+          if (link === undefined) {
+            const parent = await resolveRealInside(dirname(abs));
+            if (parent === undefined) {
+              return {
+                key: undefined,
+                body: async () =>
+                  deny('write', `path escape: '${path}' escapes the workspace through a symlink`),
+              };
             }
+            effective = join(parent, basename(abs));
+          } else if (link.isSymbolicLink() && effective === abs) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('write', `write refused: '${relOf(abs)}' is a symlink that does not resolve`),
+            };
           }
-          let output = content;
-          if (existing !== undefined) {
-            if (isBinary(existing)) {
-              return deny('write', `write refused: '${label}' is a binary file`);
-            }
-            const text = decodeUtf8(existing);
-            if (text === undefined) {
-              return deny('write', `write refused: '${label}' is not valid UTF-8`);
-            }
-            const prior = readState.get(effective);
-            if (prior === undefined) {
-              return deny(
-                'write',
-                `write refused: '${label}' must be read before it is overwritten`,
+          if (await touchesGit(abs, effective)) {
+            return { key: undefined, body: async () => gitDenial('write', abs) };
+          }
+          if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+            };
+          }
+          return {
+            key: effective,
+            body: async (): Promise<ToolkitToolResult> => {
+              const label = relOf(abs);
+              let existing: Buffer | undefined;
+              try {
+                existing = await readFile(effective);
+              } catch (err) {
+                if (errorCode(err) !== 'ENOENT') {
+                  return deny('write', `write failed: ${messageOf(err)}`);
+                }
+              }
+              let output = content;
+              if (existing !== undefined) {
+                if (isBinary(existing)) {
+                  return deny('write', `write refused: '${label}' is a binary file`);
+                }
+                const text = decodeUtf8(existing);
+                if (text === undefined) {
+                  return deny('write', `write refused: '${label}' is not valid UTF-8`);
+                }
+                const prior = readState.get(effective);
+                if (prior === undefined) {
+                  return deny(
+                    'write',
+                    `write refused: '${label}' must be read before it is overwritten`,
+                  );
+                }
+                if (prior.sha256 !== sha256(existing)) {
+                  return deny(
+                    'write',
+                    `write refused: '${label}' changed since it was read; read it again`,
+                  );
+                }
+                // Preserve the existing file's BOM and line-ending convention.
+                output = restoreTextStyle(
+                  toLf(stripBom(content)),
+                  text.startsWith(BOM),
+                  dominantLineEnding(text),
+                );
+              }
+              try {
+                await writeFile(effective, output, 'utf8');
+              } catch (err) {
+                return deny('write', `write failed: ${messageOf(err)}`);
+              }
+              await rememberRead(effective, Buffer.from(output, 'utf8'));
+              const capped = capOutput(
+                `wrote '${label}': ${Buffer.byteLength(output, 'utf8')} bytes`,
+                fileCfg.maxOutputChars,
               );
-            }
-            if (prior.sha256 !== sha256(existing)) {
-              return deny(
-                'write',
-                `write refused: '${label}' changed since it was read; read it again`,
-              );
-            }
-            // Preserve the existing file's BOM and line-ending convention.
-            output = restoreTextStyle(
-              toLf(stripBom(content)),
-              text.startsWith(BOM),
-              dominantLineEnding(text),
-            );
-          }
-          try {
-            await writeFile(effective, output, 'utf8');
-          } catch (err) {
-            return deny('write', `write failed: ${messageOf(err)}`);
-          }
-          await rememberRead(effective, Buffer.from(output, 'utf8'));
-          const capped = capOutput(
-            `wrote '${label}': ${Buffer.byteLength(output, 'utf8')} bytes`,
-            fileCfg.maxOutputChars,
-          );
-          return { ok: true, ...capped };
+              return { ok: true, ...capped };
+            },
+          };
         });
       },
     };
