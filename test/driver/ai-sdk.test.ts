@@ -1033,6 +1033,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
+        // The provenance test needs grep SERVED: inject an ok rg (the host's
+        // rg may be older than the documented minimum).
+        resolveRg: async () => ({ ok: true, version: '15.2.0' }),
         beforeRequest: async (_text, contents = []) => {
           guarded.push(...contents);
         },
@@ -3021,3 +3024,146 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// N. rg capability seam (injected resolver, deterministic)
+// ---------------------------------------------------------------------------
+
+describe('rg capability seam (injected resolveRg)', () => {
+  test('rg ok: grep/glob stay on the surface; result records probe ok with no advisory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-ok-'));
+    try {
+      let probes = 0;
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => {
+          probes++;
+          return { ok: true, version: '15.2.0' };
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.capabilities?.rg).toEqual({
+        available: true,
+        version: '15.2.0',
+        minimum: '15.2.0',
+        probe: 'ok',
+      });
+      expect(result.advisories).toBeUndefined();
+      expect(probes).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rg absent: grep/glob WITHHELD, capability records absent, advisory carries the not-found line', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-absent-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => ({ ok: false, reason: 'absent' }),
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.capabilities?.rg).toEqual({
+        available: false,
+        minimum: '15.2.0',
+        probe: 'absent',
+      });
+      expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rg old: capability carries found; advisory names the minimum', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-old-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => ({ ok: false, reason: 'old', found: '13.0.0' }),
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.capabilities?.rg).toEqual({
+        available: false,
+        found: '13.0.0',
+        minimum: '15.2.0',
+        probe: 'old',
+      });
+      expect(result.advisories).toEqual([
+        'search tools unavailable: ripgrep older than minimum 15.2.0',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a policy that does not request grep never probes and records nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-silent-'));
+    try {
+      let probes = 0;
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => {
+          probes++;
+          return { ok: false, reason: 'absent' };
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.capabilities).toBeUndefined();
+      expect(result.advisories).toBeUndefined();
+      expect(probes).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the mirror accepts a result carrying the seam fields and one without (conformance absent-field rule)', async () => {
+    const base = {
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'complete' as const,
+    };
+    expect(WorkerResultSchema.parse(base)).toBeDefined();
+    expect(
+      WorkerResultSchema.parse({
+        ...base,
+        capabilities: {
+          rg: { available: false, found: '13.0.0', minimum: '15.2.0', probe: 'old' },
+        },
+        advisories: ['search tools unavailable: ripgrep not found'],
+      }).capabilities?.rg?.probe,
+    ).toBe('old');
+  });
+});

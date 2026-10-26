@@ -54,6 +54,15 @@ function harnessWithRun(commandPatterns: string[]): HarnessConfig {
   };
 }
 
+/** Mirror of the production read renderer (tools.ts): 6-wide line numbers under a `--- path ---` header. */
+const renderRead = (path: string, body: string): string => {
+  const lines = body.split(/\r\n|\n|\r/);
+  if (lines.at(-1) === '') lines.pop();
+  return ['--- ' + path + ' ---', ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`)].join(
+    '\n',
+  );
+};
+
 function manifestFor(workspace: string, over: Partial<HarnessManifest> = {}): HarnessManifest {
   return HarnessManifestSchema.parse({
     v: 1,
@@ -214,7 +223,7 @@ describe('tools/list + tools/call', () => {
     expect(await io.next()).toEqual({
       jsonrpc: '2.0',
       id: 1,
-      result: { content: [{ type: 'text', text: 'alpha' }] },
+      result: { content: [{ type: 'text', text: renderRead('a.txt', 'alpha') }] },
     });
   });
 

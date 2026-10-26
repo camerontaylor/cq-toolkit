@@ -231,6 +231,25 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     nativeSessionId: z.string().min(1).exactOptional(),
     nativeSessionPath: z.string().min(1).exactOptional(),
     denials: z.array(ToolDenialSchema),
+    // rg capability seam: populated only by a lane that observed the probe
+    // (today ai-sdk); absent elsewhere — permissive-by-key, strict-by-shape.
+    capabilities: z
+      .object({
+        rg: z
+          .object({
+            available: z.boolean(),
+            version: z.string().min(1).exactOptional(),
+            minimum: z.string().min(1),
+            probe: z.enum(['ok', 'absent', 'old']),
+            found: z.string().min(1).exactOptional(),
+          })
+          .strict()
+          .exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
+    // Non-fatal run notes a consumer may surface; never a verdict change.
+    advisories: z.array(z.string().min(1)).exactOptional(),
     // Mirror-only tightening: the frozen doc says "message", not "non-empty" — and the producer bound is 500 chars plus the 13-char '… [truncated]' marker from PR-B's error-text.ts, so the mirror allows 513.
     error: z.string().min(1).max(513).exactOptional(),
     // Seam v2 (ADR-0002 §2.2): structured failure class on an error verdict,

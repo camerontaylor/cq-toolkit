@@ -110,6 +110,7 @@ export async function runReviewSession(
     plan: PlannedReviewSession;
     evidence: ReviewCoverageV2['sessions'][number];
     onUsage: (usage: Usage) => void;
+    onAdvisories?: (advisories: readonly string[]) => void;
     searchTools: boolean;
   },
 ): Promise<OpResult<Finding[]>> {
@@ -226,6 +227,9 @@ export async function runReviewSession(
   if (result.steps !== undefined) evidence.steps = result.steps;
   if (result.sessionId !== undefined) evidence.driverSessionId = result.sessionId;
   evidence.denials = result.denials.length;
+  if (result.capabilities !== undefined)
+    evidence.capabilities = structuredClone(result.capabilities);
+  if (result.advisories !== undefined) input.onAdvisories?.(result.advisories);
   input.onUsage(result.usage);
   evidence.status = result.stopReason;
   if (result.stopReason !== 'complete') {

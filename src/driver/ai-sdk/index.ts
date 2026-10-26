@@ -215,6 +215,7 @@ import type {
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
+import { spawn as childSpawn } from 'node:child_process';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -286,8 +287,100 @@ export const DEFAULT_MAX_STEPS = 40;
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
+/** The documented minimum ripgrep version (installer/docs lane pins the same). */
+export const RG_MINIMUM_VERSION = '15.2.0';
+
+/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). */
+const parseRgVersion = (line: string | undefined): string | undefined => {
+  const match = /^ripgrep (\d+\.\d+\.\d+)/.exec(line ?? '');
+  return match?.[1];
+};
+
+/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. */
+const versionAtLeast = (found: string, minimum: string): boolean => {
+  const parse = (v: string): [number, number, number] => {
+    const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
+    return [major ?? 0, minor ?? 0, patch ?? 0];
+  };
+  const [fm, fn, fp] = parse(found);
+  const [tm, tn, tp] = parse(minimum);
+  return fm !== tm ? fm > tm : fn !== tn ? fn > tn : fp >= tp;
+};
+
+/**
+ * The production rg resolver: ONE bounded `rg --version` child, cancellation-
+ * honoring, resolving to the outcome only — never the binary path.
+ */
+export const defaultResolveRg = (
+  signal?: AbortSignal,
+): Promise<
+  { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
+> =>
+  new Promise((settle) => {
+    if (signal?.aborted === true) {
+      settle({ ok: false, reason: 'absent' });
+      return;
+    }
+    let child: ReturnType<typeof childSpawn>;
+    let settled = false;
+    const done = (
+      outcome:
+        | { ok: true; version: string }
+        | { ok: false; reason: 'absent' | 'old'; found?: string },
+    ): void => {
+      if (settled) return;
+      settled = true;
+      settle(outcome);
+    };
+    try {
+      child = childSpawn('rg', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      done({ ok: false, reason: 'absent' });
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill();
+      done({ ok: false, reason: 'absent' });
+    }, 5_000);
+    signal?.addEventListener('abort', () => child.kill(), { once: true });
+    let firstLine = '';
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (firstLine === '') firstLine = chunk.toString('utf8').split('\n')[0] ?? '';
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      done({ ok: false, reason: 'absent' });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const version = parseRgVersion(firstLine);
+      if (code !== 0 || version === undefined) {
+        done({ ok: false, reason: 'absent' });
+        return;
+      }
+      done(
+        versionAtLeast(version, RG_MINIMUM_VERSION)
+          ? { ok: true, version }
+          : { ok: false, reason: 'old', found: version },
+      );
+    });
+  });
+
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
+  /**
+   * The ripgrep capability probe (rg seam): runtime-only, NEVER HarnessConfig
+   * data. The default shells `rg --version` once per RUN (memoized on the
+   * run's promise — shared by manifest/descriptor selection and the result
+   * capability record; not per selection) with a bounded child process that
+   * honors the cancellation signal. The resolved binary path is never
+   * reported — only the outcome. Tests inject a deterministic resolver.
+   */
+  resolveRg?: (
+    signal?: AbortSignal,
+  ) => Promise<
+    { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
+  >;
   /**
    * Runs before every provider send, including retries and repairs. The
    * optional context distinguishes a model request from scanned tool output;
@@ -368,6 +461,8 @@ export class AiSdkDriver implements Driver {
   private readonly strictTokenReservationHook:
     | ((receipt: WireReservation) => void | Promise<void>)
     | undefined;
+  /** Runtime rg probe seam (injected, async, never serializable config). */
+  private readonly resolveRg: NonNullable<AiSdkDriverOptions['resolveRg']>;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -386,6 +481,7 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
+    this.resolveRg = options.resolveRg ?? defaultResolveRg;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -583,13 +679,30 @@ export class AiSdkDriver implements Driver {
     // harness surfaces. With no explicit config, preserve the pre-W1.11
     // no-policy behavior; an expressed environment is resolved by the gate.
     const denials: ToolDenial[] = [];
+    // The rg capability probe: ONE memoized probe per RUN (not per selection).
+    // Triggered only when the run's ToolPolicy actually requests grep; shared
+    // by search-tool withholding below and the result capability record. A
+    // reviewer-level searchTools:false stays silent — the policy never lists
+    // grep, so no probe, no advisory, no capability entry (the distinguishable
+    // 'not configured' state).
+    const rgProbePromise =
+      toolPolicy.allow !== undefined && toolPolicy.allow.includes('grep')
+        ? this.resolveRg(abortSignal).catch(() => ({
+            ok: false as const,
+            reason: 'absent' as const,
+          }))
+        : undefined;
+    const rgProbe = rgProbePromise === undefined ? undefined : await rgProbePromise;
+    const searchWithheld = rgProbe !== undefined && rgProbe.ok === false;
     const harnessTools = buildTools(
       this.harnessConfig,
       record.workspace,
       sandboxPolicy.level,
       runGate,
     );
-    const selected = selectTools(harnessTools, toolPolicy);
+    const selected = selectTools(harnessTools, toolPolicy).filter(
+      (tool) => !searchWithheld || (tool.name !== 'grep' && tool.name !== 'glob'),
+    );
     const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
@@ -885,6 +998,43 @@ export class AiSdkDriver implements Driver {
         ...costField(this.pricing, { ...modelSpec, model: servedModel ?? modelSpec.model }, usage),
         sessionId: record.sessionId,
         denials,
+        // rg capability seam: evidence + advisory ride ANY verdict this lane
+        // observed the probe on; other lanes leave the fields undefined.
+        ...(rgProbe !== undefined
+          ? {
+              capabilities: {
+                rg:
+                  rgProbe.ok === true
+                    ? {
+                        available: true,
+                        version: rgProbe.version,
+                        minimum: RG_MINIMUM_VERSION,
+                        probe: 'ok' as const,
+                      }
+                    : rgProbe.reason === 'old'
+                      ? {
+                          available: false,
+                          ...(rgProbe.found !== undefined ? { found: rgProbe.found } : {}),
+                          minimum: RG_MINIMUM_VERSION,
+                          probe: rgProbe.reason,
+                        }
+                      : {
+                          available: false,
+                          minimum: RG_MINIMUM_VERSION,
+                          probe: rgProbe.reason,
+                        },
+              },
+              ...(searchWithheld
+                ? {
+                    advisories: [
+                      rgProbe.ok === false && rgProbe.reason === 'old'
+                        ? `search tools unavailable: ripgrep older than minimum ${RG_MINIMUM_VERSION}`
+                        : 'search tools unavailable: ripgrep not found',
+                    ],
+                  }
+                : {}),
+            }
+          : {}),
         stopReason,
         ...(finishClass !== undefined
           ? {

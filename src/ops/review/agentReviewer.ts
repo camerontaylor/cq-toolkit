@@ -193,6 +193,9 @@ export async function runAgentReviewer(
           onUsage: (usage) => {
             report!.usage += totalUsage(usage);
           },
+          onAdvisories: (advisories) => {
+            report!.advisories = [...new Set([...report!.advisories, ...advisories])];
+          },
           searchTools: input.searchTools ?? true,
         });
         ensureActive();
