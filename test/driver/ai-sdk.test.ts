@@ -3235,3 +3235,200 @@ describe('rg policy seam regressions (probe decision from candidates)', () => {
     expect(result.advisories).toBeUndefined();
   });
 });
+
+describe('read/grep raw scan provenance + persist stripping', () => {
+  test('read: guard receives RAW unformatted lines under the real path (line-anchored rules match)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rawread-'));
+    try {
+      // The numbered display shifts the line: '^CONFIDENTIAL:' anchors on the
+      // RAW source line, which the display '     1: CONFIDENTIAL: x' breaks.
+      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
+      const guarded: { text: string; path?: string }[] = [];
+      let modelCalls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          modelCalls++;
+          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+            return toolCallResult('read', { path: 'secret.txt' });
+          }
+          return textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const raw = guarded.find((c) => c.path === 'secret.txt');
+      expect(raw).toBeDefined();
+      // The RAW line: a ^CONFIDENTIAL: rule matches; the numbered display line would not.
+      expect(raw?.text).toBe('CONFIDENTIAL: top-secret-value');
+      expect(raw?.text).not.toContain('     1:');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('read: sourceContents are scan-only — NOT persisted into the session transcript', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-nopersist-'));
+    try {
+      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
+      let modelCalls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          modelCalls++;
+          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+            return toolCallResult('read', { path: 'secret.txt' });
+          }
+          return textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        beforeRequest: async () => {}, // guard present (scan runs), contract unconditional
+      });
+      await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      // Every persisted tool message: no sourceContents key anywhere.
+      const storeDir = join(root, 'sessions');
+      const persisted: string[] = [];
+      const walk = async (dir: string): Promise<void> => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          const p = join(dir, entry.name);
+          if (entry.isDirectory()) await walk(p);
+          else if (entry.name.endsWith('.jsonl')) persisted.push(await readFile(p, 'utf8'));
+        }
+      };
+      await walk(storeDir);
+      expect(persisted.length).toBeGreaterThan(0);
+      for (const body of persisted) expect(body).not.toContain('sourceContents');
+      // The DISPLAY output is persisted (the model needs it on replay).
+      expect(persisted.some((b) => b.includes('CONFIDENTIAL: top-secret-value'))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('grep: guard receives RAW matched lines (anchors intact), display stays numbered', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rawgrep-'));
+    try {
+      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: grep-secret-value\n', 'utf8');
+      const guarded: { text: string; path?: string }[] = [];
+      let modelCalls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          modelCalls++;
+          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+            return toolCallResult('grep', { pattern: 'grep-secret-value' });
+          }
+          return textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['grep'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const raw = guarded.find((c) => c.path === 'secret.txt');
+      expect(raw).toBeDefined();
+      expect(raw?.text).toBe('CONFIDENTIAL: grep-secret-value');
+      expect(raw?.text).not.toContain('     1:');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('rg probe evidence on EVERY post-probe verdict', () => {
+  const runAbsentoK = async (
+    model: MockLanguageModelV4,
+    resolveRg: NonNullable<AiSdkDriverOptions['resolveRg']>,
+  ) => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-verdict-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg,
+      });
+      return await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+          outputSchema: {
+            name: 'test.verdict/v1',
+            schema: {
+              type: 'object',
+              properties: { reply: { type: 'string' } },
+              required: ['reply'],
+              additionalProperties: false,
+            },
+          },
+        }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  test('REPAIR SUCCESS: the miss-flow verdict still carries the probe evidence', async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        calls++;
+        // First (main) call returns unparseable text; the repair returns valid JSON.
+        return calls === 1
+          ? textResult('this is not the requested object')
+          : textResult('{"reply":"repaired"}');
+      },
+    });
+    const result = await runAbsentoK(model, async () => ({ ok: false, reason: 'absent' }));
+    expect(result.stopReason).toBe('complete');
+    expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+
+  test('REPAIR FAILURE: the error verdict still carries the probe evidence', async () => {
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => textResult('still not the object'),
+    });
+    const result = await runAbsentoK(model, async () => ({ ok: false, reason: 'absent' }));
+    expect(result.stopReason).toBe('error');
+    expect(result.errorClass).toBe('output-invalid');
+    expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+});
