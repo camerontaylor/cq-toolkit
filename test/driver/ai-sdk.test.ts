@@ -269,8 +269,8 @@ function conformanceHarnessConfig(
     workspaceRoot: join(scratchDir, 'workspaces'),
     tools: {
       ...defaultHarnessConfig.tools,
-      run: {
-        ...defaultHarnessConfig.tools.run,
+      bash: {
+        ...defaultHarnessConfig.tools.bash,
         // `echo conformance-marker > note.txt` redirects — the shell-
         // metacharacter guard (fix 1) denies that under a token pattern, so
         // the conformance write rides the documented escape hatch: an
@@ -1929,7 +1929,7 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
     // in strict mode instead of poisoning every later consumer.
     expect(Object.isFrozen(defaultHarnessConfig)).toBe(true);
     expect(Object.isFrozen(defaultHarnessConfig.promptBudget)).toBe(true);
-    expect(Object.isFrozen(defaultHarnessConfig.tools.run)).toBe(true);
+    expect(Object.isFrozen(defaultHarnessConfig.tools.bash)).toBe(true);
     const chars = defaultHarnessConfig.promptBudget.maxSystemPromptChars;
     expect(() => {
       (defaultHarnessConfig.promptBudget as { maxSystemPromptChars: number }).maxSystemPromptChars =
@@ -2690,7 +2690,7 @@ test.each(['initial', 'read', 'run'] as const)(
           ...defaultHarnessConfig,
           tools: {
             ...defaultHarnessConfig.tools,
-            run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['re:^.*$'] },
+            bash: { ...defaultHarnessConfig.tools.bash, commandPatterns: ['re:^.*$'] },
           },
         },
         beforeRequest: async (text) => {

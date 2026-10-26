@@ -63,7 +63,8 @@ const inputFor = (root: string): FixReviewItemInput => ({
       ...defaultHarnessConfig.tools,
       read: { ...defaultHarnessConfig.tools.read, enabled: false },
       edit: { ...defaultHarnessConfig.tools.edit, enabled: false },
-      run: { ...defaultHarnessConfig.tools.run, enabled: false },
+      write: { ...defaultHarnessConfig.tools.write, enabled: false },
+      bash: { ...defaultHarnessConfig.tools.bash, enabled: false },
     },
   },
 });

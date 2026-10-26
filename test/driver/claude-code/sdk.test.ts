@@ -424,8 +424,8 @@ function conformanceHarnessConfig(
     workspaceRoot: join(scratchDir, 'workspaces'),
     tools: {
       ...defaultHarnessConfig.tools,
-      run: {
-        ...defaultHarnessConfig.tools.run,
+      bash: {
+        ...defaultHarnessConfig.tools.bash,
         // `echo conformance-marker > note.txt` redirects — the shell-
         // metacharacter guard denies that under a token pattern, so the
         // conformance write rides the documented escape hatch: an anchored
@@ -1806,7 +1806,13 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       );
       expect(leaky.tools).toContain('mcp__claude_ai_Gmail__send_message');
       expect(honestInitSurface(optionsOf(calls), { subscriptionConnectors: true })).toEqual({
-        tools: ['mcp__cq-harness__read', 'mcp__cq-harness__edit', 'mcp__cq-harness__run'],
+        tools: [
+          'mcp__cq-harness__read',
+          'mcp__cq-harness__edit',
+          'mcp__cq-harness__bash',
+          'mcp__cq-harness__run',
+          'mcp__cq-harness__write',
+        ],
         mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
       });
     } finally {
@@ -1901,7 +1907,13 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
         errorClass: 'harness',
         expected: {
           mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
-          tools: ['mcp__cq-harness__edit', 'mcp__cq-harness__read', 'mcp__cq-harness__run'],
+          tools: [
+            'mcp__cq-harness__bash',
+            'mcp__cq-harness__edit',
+            'mcp__cq-harness__read',
+            'mcp__cq-harness__run',
+            'mcp__cq-harness__write',
+          ],
         },
       });
       const observed = marker?.['observed'] as { mcp_servers: unknown; tools: string[] };
@@ -2319,7 +2331,7 @@ describe('claude-agent harness calls are cancellable (W1.4 review cycle 1)', () 
             ...defaultHarnessConfig,
             tools: {
               ...defaultHarnessConfig.tools,
-              run: { enabled: true, commandPatterns: ['sleep'], timeoutMs: 60_000 },
+              bash: { enabled: true, commandPatterns: ['sleep'], timeoutMs: 60_000 },
             },
           },
         });

@@ -49,7 +49,7 @@ function harnessWithRun(commandPatterns: string[]): HarnessConfig {
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs: 60_000, maxOutputChars: 10_000 },
+      bash: { enabled: true, commandPatterns, timeoutMs: 60_000, maxOutputChars: 10_000 },
     },
   };
 }
@@ -59,7 +59,7 @@ function manifestFor(workspace: string, over: Partial<HarnessManifest> = {}): Ha
     v: 1,
     workspace,
     sandbox: 'workspace-write',
-    tools: ['read', 'run'],
+    tools: ['read', 'bash'],
     harness: harnessWithRun(['sleep', 'echo']),
     envNames: [],
     ...over,
@@ -192,11 +192,11 @@ describe('initialize + ping', () => {
 
 describe('tools/list + tools/call', () => {
   test('tools/list serves only the manifest tools, with strict schemas', async () => {
-    const io = startServer(surfaceFor({ tools: ['run', 'read'] }));
+    const io = startServer(surfaceFor({ tools: ['bash', 'read'] }));
     io.send(request(1, 'tools/list'));
     const reply = await io.next();
     const tools = (reply['result'] as { tools: Array<Record<string, unknown>> }).tools;
-    expect(tools.map((tool) => tool['name'])).toEqual(['run', 'read']);
+    expect(tools.map((tool) => tool['name'])).toEqual(['bash', 'read']);
     for (const tool of tools) {
       expect(typeof tool['description']).toBe('string');
       const schema = tool['inputSchema'] as Record<string, unknown>;
@@ -409,7 +409,7 @@ describe('framing and lifetime', () => {
 describe('concurrency and cancellation', () => {
   test('ping is answered while a slow run is in flight', async () => {
     const io = startServer(surfaceFor());
-    io.send(request(1, 'tools/call', { name: 'run', arguments: { command: 'sleep 0.5' } }));
+    io.send(request(1, 'tools/call', { name: 'bash', arguments: { command: 'sleep 0.5' } }));
     io.send(request(2, 'ping'));
     expect(await io.next()).toMatchObject({ id: 2, result: {} });
     expect(await io.next()).toMatchObject({
@@ -421,7 +421,7 @@ describe('concurrency and cancellation', () => {
   test('notifications/cancelled kills the in-flight run and suppresses its response', async () => {
     const io = startServer(surfaceFor());
     const started = Date.now();
-    io.send(request(5, 'tools/call', { name: 'run', arguments: { command: 'sleep 30' } }));
+    io.send(request(5, 'tools/call', { name: 'bash', arguments: { command: 'sleep 30' } }));
     io.send(request(6, 'ping')); // proves the call was dispatched before cancelling
     expect(await io.next()).toMatchObject({ id: 6 });
     io.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 5 } });
@@ -449,14 +449,14 @@ describe('concurrency and cancellation', () => {
     const spying: HarnessSurface = {
       manifest: real.manifest,
       tools: real.tools,
-      has: (name: string): name is 'read' | 'run' => real.has(name),
+      has: (name: string): name is 'read' | 'bash' => real.has(name),
       call: (name, args, opts) => {
         if (opts?.signal !== undefined) signals.push(opts.signal);
         return real.call(name, args, opts);
       },
     };
     const io = startServer(spying);
-    io.send(request(1, 'tools/call', { name: 'run', arguments: { command: 'sleep 30' } }));
+    io.send(request(1, 'tools/call', { name: 'bash', arguments: { command: 'sleep 30' } }));
     io.send(request(2, 'ping'));
     expect(await io.next()).toMatchObject({ id: 2 });
     expect(signals).toHaveLength(1);
@@ -476,7 +476,7 @@ describe('concurrency and cancellation', () => {
   test('EOF also aborts the in-flight call', async () => {
     const real = surfaceFor();
     const io = startServer(real);
-    io.send(request(1, 'tools/call', { name: 'run', arguments: { command: 'sleep 30' } }));
+    io.send(request(1, 'tools/call', { name: 'bash', arguments: { command: 'sleep 30' } }));
     io.send(request(2, 'ping'));
     expect(await io.next()).toMatchObject({ id: 2 });
     const started = Date.now();
@@ -494,7 +494,7 @@ describe('checkStartup', () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.manifest.workspace).toBe(workspace);
-      expect(result.surface.tools.map((tool) => tool.name)).toEqual(['read', 'run']);
+      expect(result.surface.tools.map((tool) => tool.name)).toEqual(['read', 'bash']);
     }
   });
 
@@ -545,10 +545,10 @@ describe('checkStartup', () => {
   test('a manifest naming a disabled tool → surface mismatch', () => {
     const harness: HarnessConfig = {
       ...defaultHarnessConfig,
-      tools: { ...defaultHarnessConfig.tools, run: { enabled: false, commandPatterns: [] } },
+      tools: { ...defaultHarnessConfig.tools, bash: { enabled: false, commandPatterns: [] } },
     };
     const manifest = manifestFor(scratch(), { harness });
-    expect(refusal([JSON.stringify(manifest)])).toMatch(/^surface mismatch: .*run/);
+    expect(refusal([JSON.stringify(manifest)])).toMatch(/^surface mismatch: .*bash/);
   });
 });
 
@@ -576,8 +576,8 @@ describe('scrubEnvironment', () => {
 describe('lifecycle hardening (improvement pass)', () => {
   test('a reused in-flight id is refused with -32600 and the first call still completes', async () => {
     const io = startServer(surfaceFor());
-    io.send(request(7, 'tools/call', { name: 'run', arguments: { command: 'sleep 1' } }));
-    io.send(request(7, 'tools/call', { name: 'run', arguments: { command: 'echo dup' } }));
+    io.send(request(7, 'tools/call', { name: 'bash', arguments: { command: 'sleep 1' } }));
+    io.send(request(7, 'tools/call', { name: 'bash', arguments: { command: 'echo dup' } }));
     const first = await io.next();
     expect(first['id']).toBe(7);
     expect((first['error'] as { code?: unknown }).code).toBe(-32600);

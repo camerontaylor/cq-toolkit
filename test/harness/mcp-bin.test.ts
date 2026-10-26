@@ -53,14 +53,14 @@ function manifestFor(
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs: 60_000, maxOutputChars: 100_000 },
+      bash: { enabled: true, commandPatterns, timeoutMs: 60_000, maxOutputChars: 100_000 },
     },
   };
   return HarnessManifestSchema.parse({
     v: 1,
     workspace,
     sandbox: 'workspace-write',
-    tools: ['read', 'run'],
+    tools: ['read', 'bash'],
     harness,
     envNames: [],
     ...over,
@@ -210,7 +210,7 @@ describe('lifetime', () => {
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'run',
+          name: 'bash',
           arguments: { command: "sh -c 'sleep 60 & echo $! > pid.txt; wait'" },
         },
       });
@@ -258,7 +258,7 @@ describe('env scrub', () => {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'run', arguments: { command: 'env' } },
+      params: { name: 'bash', arguments: { command: 'env' } },
     });
     const text = textOf(await server.response(1));
     expect(text).toContain('FOO=kept');
@@ -280,7 +280,7 @@ describe('env scrub', () => {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'run', arguments: { command: 'env' } },
+      params: { name: 'bash', arguments: { command: 'env' } },
     });
     const text = textOf(await server.response(1));
     expect(text.startsWith('exit 0')).toBe(true);
@@ -310,7 +310,7 @@ describe('SDK round-trip conformance (@modelcontextprotocol/sdk Client)', () => 
       expect(client.getServerCapabilities()?.tools).toEqual({ listChanged: false });
 
       const { tools } = await client.listTools();
-      expect(tools.map((tool) => tool.name)).toEqual(['read', 'run']);
+      expect(tools.map((tool) => tool.name)).toEqual(['read', 'bash']);
       for (const tool of tools) {
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.inputSchema['additionalProperties']).toBe(false);

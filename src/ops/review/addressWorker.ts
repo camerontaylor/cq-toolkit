@@ -385,7 +385,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             enabled: editable,
             pathPatterns: editable ? [finding.file!] : [],
           },
-          run: { ...defaultHarnessConfig.tools.run, enabled: false, commandPatterns: [] },
+          write: { ...defaultHarnessConfig.tools.write, enabled: false, pathPatterns: [] },
+          bash: { ...defaultHarnessConfig.tools.bash, enabled: false, commandPatterns: [] },
         },
       },
     });
