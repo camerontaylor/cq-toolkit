@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
 import type { DriverFactory } from '../../driver/factory.js';
+import type { WorkerResult } from '../../driver/types.js';
 import type { OpInvocation } from '../../driver/types.js';
 import type { OpResult } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
@@ -52,7 +53,13 @@ async function runPartition(
     onUsage: (usage: number) => void;
     onRequest: (serializedChars: number, decodedChars: number) => void;
   },
-): Promise<OpResult<{ findings: Finding[]; usage: number }>> {
+): Promise<
+  OpResult<{ findings: Finding[]; usage: number }> & {
+    /** Driver-observed capability evidence + advisories, when the driver surfaced them. */
+    capabilities?: WorkerResult['capabilities'];
+    advisories?: string[];
+  }
+> {
   if (input.signal?.aborted || currentJobContext()?.signal.aborted)
     return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   let resolved: ReturnType<DriverFactory['resolve']>;
@@ -171,6 +178,8 @@ async function runPartition(
     return { status: 'failed', error: 'agent review returned invalid structured output' };
   return {
     status: 'ok',
+    ...(result.capabilities === undefined ? {} : { capabilities: result.capabilities }),
+    ...(result.advisories === undefined ? {} : { advisories: result.advisories }),
     value: {
       usage:
         result.usage.input +
@@ -196,6 +205,19 @@ export interface AgentReviewReport {
   findings: Finding[];
   usage: number;
   coverage: ReviewCoverage;
+  /**
+   * Non-fatal run notes folded from the driver results (rg capability
+   * seam): deduplicated, evidence-adjacent, never a verdict change. Present
+   * only when a driver observed something worth surfacing.
+   */
+  advisories?: string[];
+  /**
+   * The driver capability evidence behind the advisories (rg seam), when any
+   * partition's driver observed it. One record — every partition probes the
+   * same host, so the last observation wins; consumers needing per-partition
+   * detail read the session log.
+   */
+  capabilities?: WorkerResult['capabilities'];
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
 

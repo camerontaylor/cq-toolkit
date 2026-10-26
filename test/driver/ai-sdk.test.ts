@@ -2927,7 +2927,7 @@ describe('rg capability seam (injected resolveRg)', () => {
         harnessConfig: conformanceHarnessConfig(root),
         resolveRg: async () => {
           probes++;
-          return { ok: true, version: '15.2.0' };
+          return { ok: true, version: '14.1.1' };
         },
       });
       const result = await driver.run(
@@ -2940,8 +2940,8 @@ describe('rg capability seam (injected resolveRg)', () => {
       expect(result.stopReason).toBe('complete');
       expect(result.capabilities?.rg).toEqual({
         available: true,
-        version: '15.2.0',
-        minimum: '15.2.0',
+        version: '14.1.1',
+        minimum: '11.0.0',
         probe: 'ok',
       });
       expect(result.advisories).toBeUndefined();
@@ -2969,7 +2969,7 @@ describe('rg capability seam (injected resolveRg)', () => {
       );
       expect(result.capabilities?.rg).toEqual({
         available: false,
-        minimum: '15.2.0',
+        minimum: '11.0.0',
         probe: 'absent',
       });
       expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
@@ -2985,7 +2985,7 @@ describe('rg capability seam (injected resolveRg)', () => {
         providers: { mock: (modelId) => modelFor(undefined, modelId) },
         sessionsDir: join(root, 'sessions'),
         harnessConfig: conformanceHarnessConfig(root),
-        resolveRg: async () => ({ ok: false, reason: 'old', found: '13.0.0' }),
+        resolveRg: async () => ({ ok: false, reason: 'old', found: '10.5.0' }),
       });
       const result = await driver.run(
         invocation({
@@ -2996,12 +2996,12 @@ describe('rg capability seam (injected resolveRg)', () => {
       );
       expect(result.capabilities?.rg).toEqual({
         available: false,
-        found: '13.0.0',
-        minimum: '15.2.0',
+        found: '10.5.0',
+        minimum: '11.0.0',
         probe: 'old',
       });
       expect(result.advisories).toEqual([
-        'search tools unavailable: ripgrep older than minimum 15.2.0',
+        'search tools unavailable: ripgrep older than minimum 11.0.0',
       ]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -3052,5 +3052,60 @@ describe('rg capability seam (injected resolveRg)', () => {
         advisories: ['search tools unavailable: ripgrep not found'],
       }).capabilities?.rg?.probe,
     ).toBe('old');
+  });
+});
+
+describe('rg runtime floor boundary (11.0.0)', () => {
+  const runWithVersion = async (version: string | undefined): Promise<WorkerResult> => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-boundary-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () =>
+          version === undefined
+            ? { ok: false, reason: 'absent' }
+            : versionAtLeastMock(version)
+              ? { ok: true, version }
+              : { ok: false, reason: 'old', found: version },
+      });
+      return await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+  /** Mirror of the driver's own comparison, driving the injected outcomes. */
+  const versionAtLeastMock = (found: string): boolean => {
+    const parse = (v: string): [number, number, number] => {
+      const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
+      return [major ?? 0, minor ?? 0, patch ?? 0];
+    };
+    const [fm, fn, fp] = parse(found);
+    return fm > 11 || (fm === 11 && (fn > 0 || fp >= 0));
+  };
+
+  test('rg 10.x is WITHHELD (old) with the found version recorded', async () => {
+    const result = await runWithVersion('10.5.0');
+    expect(result.capabilities?.rg).toMatchObject({ available: false, found: '10.5.0', probe: 'old' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep older than minimum 11.0.0']);
+  });
+
+  test('rg 11.0.0 (the floor itself) SERVES: available, no advisory', async () => {
+    const result = await runWithVersion('11.0.0');
+    expect(result.capabilities?.rg).toMatchObject({ available: true, version: '11.0.0', probe: 'ok' });
+    expect(result.advisories).toBeUndefined();
+  });
+
+  test('rg 14.1 (host version) SERVES: available, no advisory', async () => {
+    const result = await runWithVersion('14.1.1');
+    expect(result.capabilities?.rg).toMatchObject({ available: true, version: '14.1.1', probe: 'ok' });
+    expect(result.advisories).toBeUndefined();
   });
 });
