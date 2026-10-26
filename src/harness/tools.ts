@@ -1122,21 +1122,68 @@ export function buildTools(
    * sequence. The queue is per resolved path; a settled tail is dropped.
    */
   const fileQueues = new Map<string, Promise<void>>();
-  const withFileLock = async <T>(key: string, body: () => Promise<T>): Promise<T> => {
-    const previous = fileQueues.get(key) ?? Promise.resolve();
+  /**
+   * ADMISSION TICKETS — the fix for the macOS F1 race (concurrent edits,
+   * `second` landed `ok:false` changed-since-read): the old `withFileLock` was
+   * reached only AFTER each call's ASYNC preflight (realpath, touchesGit,
+   * pathAllowedEverywhere), so two concurrent calls on one file can complete
+   * their preflight in REVERSE order and take the lock backwards — the
+   * second edit then reads the file before the first edit's write lands and
+   * sees a changed-since-read ledger. The fix: capture the queue POSITION
+   * SYNCHRONOUSLY, before any await, keyed by the lexical path (two calls on
+   * one file always share the lexical key; the body re-keys to the canonical
+   * path once the realpath resolves, preserving per-canonical-file
+   * serialization). No global serialization: only same-lexical-file calls
+   * share a ticket; different files enqueue independently. The canonical
+   * body is chained onto the ticket so admission order equals arrival order
+   * end-to-end.
+   */
+  type AdmissionTicket = {
+    /**
+     * Run `body` when this call's turn arrives. `canonicalAbs` re-keys the
+     * serialization to the resolved path — a call arriving through a
+     * DIFFERENT lexical alias of the same canonical file chains onto that
+     * canonical queue too, so mixed-alias access cannot bypass admission
+     * order. The canonical chain is released when the body settles.
+     */
+    run: <T>(canonicalAbs: string, body: () => Promise<T>) => Promise<T>;
+  };
+  const admitByLexicalPath = (lexicalAbs: string): AdmissionTicket => {
+    const previous = fileQueues.get(lexicalAbs) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     const tail = previous.then(() => current);
-    fileQueues.set(key, tail);
-    await previous;
-    try {
-      return await body();
-    } finally {
-      release();
-      if (fileQueues.get(key) === tail) fileQueues.delete(key);
-    }
+    fileQueues.set(lexicalAbs, tail);
+    let entered = false;
+    return {
+      run: <T>(canonicalAbs: string, body: () => Promise<T>): Promise<T> => {
+        if (entered) throw new Error('admission ticket already consumed');
+        entered = true;
+        // Release the lexical admission only; the canonical chain below owns
+        // the mutual exclusion from here on. The chain is bookkeeping (a
+        // queue-position release), never an error surface — settled, not
+        // awaited, per the no-floating-promises rule.
+        void previous.then(
+          () => release(),
+          () => release(),
+        );
+        // Canonical re-key: chain onto the canonical path's queue so any
+        // concurrent alias/real mix of the same file serializes.
+        const canonicalPrevious = fileQueues.get(canonicalAbs) ?? Promise.resolve();
+        let canonicalRelease!: () => void;
+        const canonicalCurrent = new Promise<void>((resolve) => {
+          canonicalRelease = resolve;
+        });
+        const canonicalTail = canonicalPrevious.then(() => canonicalCurrent);
+        fileQueues.set(canonicalAbs, canonicalTail);
+        return canonicalPrevious.then(body).finally(() => {
+          canonicalRelease();
+          if (fileQueues.get(canonicalAbs) === canonicalTail) fileQueues.delete(canonicalAbs);
+        });
+      },
+    };
   };
 
   const tools: ToolkitTool[] = [];
@@ -1165,6 +1212,9 @@ export function buildTools(
         if (abs === undefined) {
           return deny('read', `path escape: '${requested}' resolves outside the workspace`);
         }
+        // ADMISSION TICKET: the queue position is captured synchronously (see
+        // admitByLexicalPath) so arrival order survives the async preflight.
+        const ticket = admitByLexicalPath(abs);
         const effective = await resolveRealInside(abs);
         if (effective === undefined) {
           return deny(
@@ -1176,7 +1226,7 @@ export function buildTools(
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
+        return ticket.run(effective, async (): Promise<ToolkitToolResult> => {
           let bytes: Buffer;
           try {
             bytes = await readFile(effective);
@@ -1526,6 +1576,8 @@ export function buildTools(
         if (abs === undefined) {
           return deny('edit', `path escape: '${path}' resolves outside the workspace`);
         }
+        // ADMISSION TICKET: synchronous queue capture (see admitByLexicalPath).
+        const ticket = admitByLexicalPath(abs);
         const effective = await resolveRealInside(abs);
         if (effective === undefined) {
           return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
@@ -1534,7 +1586,7 @@ export function buildTools(
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
+        return ticket.run(effective, async (): Promise<ToolkitToolResult> => {
           let bytes: Buffer;
           try {
             bytes = await readFile(effective);
@@ -1635,6 +1687,8 @@ export function buildTools(
         if (abs === undefined) {
           return deny('write', `path escape: '${path}' resolves outside the workspace`);
         }
+        // ADMISSION TICKET: synchronous queue capture (see admitByLexicalPath).
+        const ticket = admitByLexicalPath(abs);
         let effective = await resolveRealInside(abs);
         if (effective === undefined) {
           return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
@@ -1658,7 +1712,7 @@ export function buildTools(
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
+        return ticket.run(effective, async (): Promise<ToolkitToolResult> => {
           const label = relOf(abs);
           let existing: Buffer | undefined;
           try {

@@ -16,7 +16,46 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi, afterEach } from 'vitest';
+import type { PathLike } from 'node:fs';
+
+// realpath gate for admission-order tests: vi.mock is HOISTED above the
+// imports, so these variables are initialized by the factory (which runs at
+// mock-install time); when the gate is unset, realpath passes straight
+// through to the ORIGINAL captured below — never through the mock itself.
+const { gateRealpath, gatedRealpath, setOriginalRealpath } = vi.hoisted(() => {
+  const state: {
+    gate?: ((real: () => Promise<string>) => Promise<string>) | undefined;
+    original?: (path: PathLike) => Promise<string>;
+  } = {};
+  const gatedRealpath = async (path: PathLike): Promise<string> => {
+    const real = () => {
+      const original = state.original;
+      if (original === undefined) throw new Error('original realpath not captured');
+      return original(path);
+    };
+    return state.gate === undefined ? real() : state.gate(real);
+  };
+  return {
+    gatedRealpath,
+    gateRealpath: (gate: ((real: () => Promise<string>) => Promise<string>) | undefined): void => {
+      state.gate = gate;
+    },
+    setOriginalRealpath: (original: (path: PathLike) => Promise<string>): void => {
+      state.original = original;
+    },
+  };
+});
+let realpathGate: ((real: () => Promise<string>) => Promise<string>) | undefined;
+void realpathGate;
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  setOriginalRealpath(actual.realpath);
+  return {
+    ...actual,
+    realpath: (path: PathLike): Promise<string> => gatedRealpath(path),
+  };
+});
 import { buildTools } from '../../src/harness/tools.js';
 import { defaultHarnessConfig, HarnessConfigSchema } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
@@ -760,6 +799,106 @@ describe('F1 edit correctness', () => {
       expect(first).toMatchObject({ ok: true });
       expect(second).toMatchObject({ ok: true });
       await expect(readFile(join(scratchDir, 'serial.txt'), 'utf8')).resolves.toBe('c\n');
+    });
+  });
+
+  describe('F1 admission ordering (macOS concurrent-edit race fix)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    test('arrival order survives async preflight: the second call cannot start its read before the first is admitted', async () => {
+      await withScratch(async (scratchDir) => {
+        const file = join(scratchDir, 'serial.txt');
+        await writeFile(file, 'a\n', 'utf8');
+        const tools = defaultTools(scratchDir);
+        await tools.read.execute({ path: 'serial.txt' });
+
+        // Deterministic gate on realpath: the FIRST caller's realpath resolves
+        // only after the SECOND caller has been admitted (which, pre-fix, let
+        // the second caller take the lock backwards). Mock fs/promises.realpath
+        // — the module binding buildTools actually uses.
+        let firstArrived = false;
+        let secondAdmitted = false;
+        let releaseFirst!: () => void;
+        const firstCanResolve = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        // Gated via the vi.mock'd realpath (realpathGate above): the FIRST
+        // caller's realpath resolves only after the second caller has been
+        // admitted — deterministic, no timing loop.
+        gateRealpath(async (real) => {
+          const result = real();
+          if (!firstArrived) {
+            firstArrived = true;
+            await firstCanResolve;
+          }
+          return result;
+        });
+
+        const events: string[] = [];
+        const first = tools.edit
+          .execute({ file_path: 'serial.txt', old_string: 'a', new_string: 'b' })
+          .then((r) => {
+            events.push('first-done');
+            return r;
+          });
+        // Yield microtasks so the first caller enters its held realpath.
+        await Promise.resolve();
+        await Promise.resolve();
+        const second = tools.edit
+          .execute({ file_path: 'serial.txt', old_string: 'b', new_string: 'c' })
+          .then((r) => {
+            events.push('second-done');
+            return r;
+          });
+        // The second caller has now been admitted synchronously (admission is
+        // sync in execute, before any await on the second call's preflight).
+        secondAdmitted = true;
+        releaseFirst();
+        gateRealpath(undefined);
+
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+        expect(secondAdmitted).toBe(true);
+        expect(firstResult).toMatchObject({ ok: true });
+        expect(secondResult).toMatchObject({ ok: true });
+        expect(events).toEqual(['first-done', 'second-done']);
+        await expect(readFile(file, 'utf8')).resolves.toBe('c\n');
+      });
+    });
+
+    test('symlinked workspace root (/var → /private style): canonical-target edits via mixed aliases serialize in arrival order', async () => {
+      await withScratch(async (scratchDir) => {
+        // A symlinked root INSIDE the workspace: `alias` → `real`. Two calls
+        // addressing the SAME canonical file through DIFFERENT aliases must
+        // serialize (the queue re-keys to the canonical path).
+        const workspace = join(scratchDir, 'ws');
+        await mkdir(join(workspace, 'real'), { recursive: true });
+        await symlink(join(workspace, 'real'), join(workspace, 'alias'));
+        const tools = buildTools(defaultHarnessConfig, workspace);
+        const byName = (name: 'read' | 'edit') => {
+          const tool = tools.find((candidate) => candidate.name === name);
+          if (tool === undefined) throw new Error(`missing ${name}`);
+          return tool;
+        };
+        const read = byName('read');
+        const edit = byName('edit');
+
+        // Create and read through the real path.
+        await writeFile(join(workspace, 'real', 't.txt'), 'a\n', 'utf8');
+        await read.execute({ path: 'real/t.txt' });
+
+        // Edit via the alias FIRST (queue admits on lexical alias path), then
+        // via the real path. Both must succeed in arrival order: the canonical
+        // re-key must not let the second bypass the first.
+        const [viaAlias, viaReal] = await Promise.all([
+          edit.execute({ file_path: 'alias/t.txt', old_string: 'a', new_string: 'b' }),
+          edit.execute({ file_path: 'real/t.txt', old_string: 'b', new_string: 'c' }),
+        ]);
+        expect(viaAlias).toMatchObject({ ok: true });
+        expect(viaReal).toMatchObject({ ok: true });
+        await expect(readFile(join(workspace, 'real', 't.txt'), 'utf8')).resolves.toBe('c\n');
+      });
     });
   });
 });
