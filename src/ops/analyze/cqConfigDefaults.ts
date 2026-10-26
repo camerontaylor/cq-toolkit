@@ -32,6 +32,7 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
     },
     review: {
       rounds: f.review?.rounds ?? c.review?.rounds ?? 3,
+      searchTools: f.review?.searchTools ?? c.review?.searchTools ?? true,
       blockingSeverities:
         f.review?.blockingSeverities ??
         c.review?.blockingSeverities ??

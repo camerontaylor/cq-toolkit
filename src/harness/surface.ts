@@ -108,10 +108,12 @@ export function selectHarnessSurface(
   harness: HarnessConfig,
   toolPolicy: ToolPolicy,
   gate: HarnessRunGate = harnessRunGate(),
+  sandbox: SandboxLevel = 'none',
 ): ToolkitToolName[] {
   // buildTools touches no filesystem at build time; the workspace argument
-  // only anchors the (lazy) executors, which are discarded here.
-  const names = buildTools(harness, resolve('.'), 'none', gate).map((tool) => tool.name);
+  // only anchors the (lazy) executors, which are discarded here. The sandbox
+  // is still significant: read-only mode exposes the bounded search tools.
+  const names = buildTools(harness, resolve('.'), sandbox, gate).map((tool) => tool.name);
   return selectToolNames(names, toolPolicy);
 }
 
@@ -134,7 +136,7 @@ export const HarnessManifestSchema = z
     sandbox: z.enum(['none', 'workspace-write', 'read-only']),
     /** The selected surface (harness ∩ ToolPolicy), already intersected. */
     tools: z
-      .array(z.enum(['read', 'edit', 'write', 'bash', 'run']))
+      .array(z.enum(['read', 'grep', 'glob', 'edit', 'write', 'bash', 'run']))
       .min(1)
       .refine((tools) => new Set(tools).size === tools.length, {
         message: 'tools must not repeat a name',
@@ -172,7 +174,12 @@ export async function buildManifest(inputs: ManifestInputs): Promise<HarnessMani
   // The gate decides the surface the SAME way execution will: a withheld run
   // tool is absent from both, so a manifest never names a tool the surface
   // cannot serve.
-  const tools = selectHarnessSurface(inputs.harness, inputs.toolPolicy, harnessRunGate());
+  const tools = selectHarnessSurface(
+    inputs.harness,
+    inputs.toolPolicy,
+    harnessRunGate(),
+    inputs.sandbox,
+  );
   if (tools.length === 0) return undefined;
   const workspace = await realpath(inputs.workspace);
   if (!(await stat(workspace)).isDirectory()) {
@@ -336,6 +343,12 @@ export const HARNESS_DENIAL_PREFIXES: readonly string[] = Object.freeze([
   'path escape: ',
   'path not allowed: ',
   'path not allowed by harness config allowlist: ',
+  'path not found: ',
+  'search failed: ',
+  'search denied: ',
+  'grep failed: ',
+  'grep denied: ',
+  'read refused: ',
   'command not allowed by harness config allowlist: ',
   'command allowlist: ',
   'file not found: ',

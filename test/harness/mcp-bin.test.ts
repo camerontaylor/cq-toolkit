@@ -37,6 +37,16 @@ import type { HarnessManifest } from '../../src/harness/surface.js';
 const LOADER = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
 const BIN = fileURLToPath(new URL('../../src/harness/mcp/bin.ts', import.meta.url));
 
+/** Mirror of the production read renderer (tools.ts): 6-wide line numbers under a `--- path ---` header. */
+const renderRead = (path: string, body: string): string => {
+  const lines = body.split(/\r\n|\n|\r/);
+  if (lines.at(-1) === '') lines.pop();
+  return [
+    '--- ' + path + ' ---',
+    ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`),
+  ].join('\n');
+};
+
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
 function scratch(): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-mcp-bin-')));
@@ -318,7 +328,7 @@ describe('SDK round-trip conformance (@modelcontextprotocol/sdk Client)', () => 
 
       const read = await client.callTool({ name: 'read', arguments: { path: 'a.txt' } });
       expect(read.isError).toBeFalsy();
-      expect(read.content).toEqual([{ type: 'text', text: 'alpha' }]);
+      expect(read.content).toEqual([{ type: 'text', text: renderRead('a.txt', 'alpha') }]);
 
       const denied = await client.callTool({ name: 'read', arguments: { path: '../outside' } });
       expect(denied.isError).toBe(true);

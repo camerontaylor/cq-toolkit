@@ -16,6 +16,7 @@
 // sets it (the workflow wiring is T1.7's). When opted in, a missing provider
 // key fails loudly instead of silently passing.
 import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { spawn as childSpawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -54,6 +55,12 @@ import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { toOutputSchema } from '../../src/driver/common/structured.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
+import {
+  probeRgVersion as harnessProbeRg,
+  parseRgVersion,
+  versionAtLeast,
+  RG_MINIMUM_VERSION,
+} from '../../src/harness/tools.js';
 import { SessionStore } from '../../src/harness/session.js';
 import type { OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
 
@@ -892,6 +899,87 @@ describe('ai-sdk driver specifics (mock model)', () => {
       }
     },
   );
+
+  test('read upload scanning uses normalized executor provenance for file_path', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-read-provenance-'));
+    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { file_path: 'secret.ts', offset: 1, limit: 1 });
+        }
+        return textResult('read complete');
+      },
+    });
+    const guarded: { text: string; path?: string }[] = [];
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { mode: 'allowlist', allow: ['read'] },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+      expect(guardedSecret).toBeDefined();
+      expect(guardedSecret?.text).toContain('fixture-secret');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('grep upload scanning uses normalized executor provenance for matched files', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-grep-provenance-'));
+    await writeFile(join(scratchDir, 'secret.ts'), 'api_key = "fixture-secret"\n', 'utf8');
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls === 1 && options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('grep', { pattern: 'fixture-secret' });
+        }
+        return textResult('search complete');
+      },
+    });
+    const guarded: { text: string; path?: string }[] = [];
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        // The provenance test needs grep SERVED: inject an ok rg (the host's
+        // rg may be older than the documented minimum).
+        resolveRg: async () => ({ ok: true, version: '15.2.0' }),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { mode: 'allowlist', allow: ['grep'] },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const guardedSecret = guarded.find((content) => content.path === 'secret.ts');
+      expect(guardedSecret).toBeDefined();
+      expect(guardedSecret?.text).toContain('fixture-secret');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
 
   test('forced final step restates the tool-free contract (#468)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-contract-'));
@@ -2830,3 +2918,519 @@ test.each(['private', 'public', 'newline', 'prompt'] as const)(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// N. rg capability seam (injected resolver, deterministic)
+// ---------------------------------------------------------------------------
+
+describe('rg capability seam (injected resolveRg)', () => {
+  test('rg ok: grep/glob stay on the surface; result records probe ok with no advisory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-ok-'));
+    try {
+      let probes = 0;
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => {
+          probes++;
+          return { ok: true, version: '14.1.1' };
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.capabilities?.rg).toEqual({
+        available: true,
+        version: '14.1.1',
+        minimum: '11.0.0',
+        probe: 'ok',
+      });
+      expect(result.advisories).toBeUndefined();
+      expect(probes).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rg absent: grep/glob WITHHELD, capability records absent, advisory carries the not-found line', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-absent-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => ({ ok: false, reason: 'absent' }),
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.capabilities?.rg).toEqual({
+        available: false,
+        minimum: '11.0.0',
+        probe: 'absent',
+      });
+      expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rg old: capability carries found; advisory names the minimum', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-old-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => ({ ok: false, reason: 'old', found: '10.5.0' }),
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.capabilities?.rg).toEqual({
+        available: false,
+        found: '10.5.0',
+        minimum: '11.0.0',
+        probe: 'old',
+      });
+      expect(result.advisories).toEqual([
+        'search tools unavailable: ripgrep older than minimum 11.0.0',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a policy that does not request grep never probes and records nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-silent-'));
+    try {
+      let probes = 0;
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => {
+          probes++;
+          return { ok: false, reason: 'absent' };
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.capabilities).toBeUndefined();
+      expect(result.advisories).toBeUndefined();
+      expect(probes).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the mirror accepts a result carrying the seam fields and one without (conformance absent-field rule)', async () => {
+    const base = {
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'complete' as const,
+    };
+    expect(WorkerResultSchema.parse(base)).toBeDefined();
+    expect(
+      WorkerResultSchema.parse({
+        ...base,
+        capabilities: {
+          rg: { available: false, found: '13.0.0', minimum: '15.2.0', probe: 'old' },
+        },
+        advisories: ['search tools unavailable: ripgrep not found'],
+      }).capabilities?.rg?.probe,
+    ).toBe('old');
+  });
+});
+
+describe('rg runtime floor boundary — PRODUCTION comparator', () => {
+  // The PRODUCTION versionAtLeast/parseRgVersion, not a test-local mirror:
+  // these pin the exact comparison the driver ships.
+  test.each([
+    ['10.5.0', false],
+    ['11.0.0', true],
+    ['11.1.3', true],
+    ['14.1.1', true],
+    ['15.2.0', true],
+  ])('versionAtLeast(%s, 11.0.0) === %s', (found, expected) => {
+    expect(versionAtLeast(found, '11.0.0')).toBe(expected);
+  });
+
+  test.each([
+    ['ripgrep 15.2.0 (rev e89fff89ac)', '15.2.0'],
+    ['ripgrep 14.1.1 (rev 4649aa9700)', '14.1.1'],
+    ['ripgrep 11.0.0', '11.0.0'],
+  ])('parseRgVersion(%s) === %s', (line, expected) => {
+    expect(parseRgVersion(line)).toBe(expected);
+  });
+
+  test.each([
+    ['', undefined],
+    ['not a version line', undefined],
+    ['ripgrep 15', undefined],
+  ])('parseRgVersion(%j) is undefined', (line, expected) => {
+    expect(parseRgVersion(line)).toBe(expected);
+  });
+
+  test('defaultResolveRg drives the production comparator through a fake rg executable', async () => {
+    // A fake `rg` on PATH whose first stdout line is scripted: proves the
+    // default resolver parses the REAL executable's output with the
+    // PRODUCTION comparator — no test-local mirror anywhere in the path.
+    const binDir = await mkdtemp(join(tmpdir(), 'aidrv-fake-rg-'));
+    const script = async (body: string): Promise<string> => {
+      const path = join(binDir, 'rg');
+      await writeFile(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      return path;
+    };
+    const originalPath = process.env.PATH;
+    const runWithFake = async (body: string): Promise<WorkerResult> => {
+      await script(body);
+      // The default resolver spawns `rg` from PATH: prepend the fake bin for
+      // the duration of the run and restore after (vi.stubEnv restores too).
+      process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+      const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-fake-'));
+      try {
+        const driver = new AiSdkDriver({
+          providers: { mock: (modelId) => modelFor(undefined, modelId) },
+          sessionsDir: join(root, 'sessions'),
+          harnessConfig: conformanceHarnessConfig(root),
+          resolveRg: harnessProbeRg,
+        });
+        return await driver.run(
+          invocation({
+            workspace: { path: root },
+            toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+            sandboxPolicy: { level: 'read-only' },
+          }),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    };
+    try {
+      // serves: 14.1.1 >= floor 11.0.0
+      const serving = await runWithFake(`echo 'ripgrep 14.1.1 (rev 4649aa9700)'`);
+      expect(serving.capabilities?.rg).toMatchObject({
+        available: true,
+        version: '14.1.1',
+        probe: 'ok',
+      });
+      // withheld: 10.5.0 < floor
+      const withheld = await runWithFake(`echo 'ripgrep 10.5.0'`);
+      expect(withheld.capabilities?.rg).toMatchObject({
+        available: false,
+        found: '10.5.0',
+        probe: 'old',
+      });
+      expect(withheld.advisories).toEqual([
+        'search tools unavailable: ripgrep older than minimum 11.0.0',
+      ]);
+      // absent: nonzero exit
+      const absent = await runWithFake(`exit 2`);
+      expect(absent.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    } finally {
+      process.env.PATH = originalPath;
+      await rm(binDir, { recursive: true, force: true });
+    }
+  });
+
+  test('CI guard: on CI a missing/old real rg FAILS the search-tool surface outright (no skip)', async () => {
+    const onCi =
+      process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false';
+    if (!onCi) {
+      // Off CI this test simply returns (developers may lack rg); ON CI the
+      // precondition below fails the test when rg is absent/old. Any truthy
+      // CI value guards (CI=1 is common).
+      return;
+    }
+    const bin = await new Promise<string | undefined>((resolve) => {
+      const child = childSpawn('rg', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      let head = '';
+      child.stdout?.on('data', (c: Buffer) => {
+        if (head === '') head = c.toString('utf8');
+      });
+      child.on('error', () => resolve(undefined));
+      child.on('close', (code) => resolve(code === 0 ? head : undefined));
+    });
+    const version = parseRgVersion(bin?.split('\n')[0]);
+    // THE GUARD: on CI, rg must exist AND satisfy the runtime floor.
+    expect(version).toBeDefined();
+    expect(versionAtLeast(version as string, RG_MINIMUM_VERSION)).toBe(true);
+  });
+});
+
+describe('rg policy seam regressions (probe decision from candidates)', () => {
+  const runCase = async (
+    toolPolicy: OpInvocation['toolPolicy'],
+    sandbox: 'none' | 'workspace-write' | 'read-only',
+  ): Promise<{ result: WorkerResult; probes: number }> => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-seam-'));
+    try {
+      let probes = 0;
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg: async () => {
+          probes++;
+          return { ok: false, reason: 'absent' };
+        },
+      });
+      const result = await driver.run(
+        invocation({ workspace: { path: root }, toolPolicy, sandboxPolicy: { level: sandbox } }),
+      );
+      return { result, probes };
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  test('glob-only allowlist still probes and withholds BOTH search tools', async () => {
+    const { result, probes } = await runCase(
+      { allow: ['read', 'glob'], mode: 'allowlist' },
+      'read-only',
+    );
+    expect(probes).toBe(1);
+    expect(result.capabilities?.rg?.available).toBe(false);
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+
+  test('unrestricted policy probes (candidates include search on read-only)', async () => {
+    const { result, probes } = await runCase({ allow: [], mode: 'unrestricted' }, 'read-only');
+    expect(probes).toBe(1);
+    expect(result.capabilities?.rg?.available).toBe(false);
+  });
+
+  test('workspace-write sandbox withholds search from candidates: NO probe, silent', async () => {
+    const { result, probes } = await runCase(
+      { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+      'workspace-write',
+    );
+    expect(probes).toBe(0);
+    expect(result.capabilities).toBeUndefined();
+    expect(result.advisories).toBeUndefined();
+  });
+
+  test('read/search-only policy (no search tool) never probes: silent', async () => {
+    const { result, probes } = await runCase({ allow: ['read'], mode: 'allowlist' }, 'read-only');
+    expect(probes).toBe(0);
+    expect(result.capabilities).toBeUndefined();
+    expect(result.advisories).toBeUndefined();
+  });
+});
+
+describe('read/grep raw scan provenance + persist stripping', () => {
+  test('read: guard receives RAW unformatted lines under the real path (line-anchored rules match)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rawread-'));
+    try {
+      // The numbered display shifts the line: '^CONFIDENTIAL:' anchors on the
+      // RAW source line, which the display '     1: CONFIDENTIAL: x' breaks.
+      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
+      const guarded: { text: string; path?: string }[] = [];
+      let modelCalls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          modelCalls++;
+          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+            return toolCallResult('read', { path: 'secret.txt' });
+          }
+          return textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const raw = guarded.find((c) => c.path === 'secret.txt');
+      expect(raw).toBeDefined();
+      // The RAW line: a ^CONFIDENTIAL: rule matches; the numbered display line would not.
+      expect(raw?.text).toBe('CONFIDENTIAL: top-secret-value');
+      expect(raw?.text).not.toContain('     1:');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('read: sourceContents are scan-only — NOT persisted into the session transcript', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-nopersist-'));
+    try {
+      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: top-secret-value\n', 'utf8');
+      let modelCalls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          modelCalls++;
+          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+            return toolCallResult('read', { path: 'secret.txt' });
+          }
+          return textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        beforeRequest: async () => {}, // guard present (scan runs), contract unconditional
+      });
+      await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      // Every persisted tool message: no sourceContents key anywhere.
+      const storeDir = join(root, 'sessions');
+      const persisted: string[] = [];
+      const walk = async (dir: string): Promise<void> => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          const p = join(dir, entry.name);
+          if (entry.isDirectory()) await walk(p);
+          else if (entry.name.endsWith('.jsonl')) persisted.push(await readFile(p, 'utf8'));
+        }
+      };
+      await walk(storeDir);
+      expect(persisted.length).toBeGreaterThan(0);
+      for (const body of persisted) expect(body).not.toContain('sourceContents');
+      // The DISPLAY output is persisted (the model needs it on replay).
+      expect(persisted.some((b) => b.includes('CONFIDENTIAL: top-secret-value'))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('grep: guard receives RAW matched lines (anchors intact), display stays numbered', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rawgrep-'));
+    try {
+      await writeFile(join(root, 'secret.txt'), 'CONFIDENTIAL: grep-secret-value\n', 'utf8');
+      const guarded: { text: string; path?: string }[] = [];
+      let modelCalls = 0;
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          modelCalls++;
+          if (modelCalls === 1 && options.tools !== undefined && options.tools.length > 0) {
+            return toolCallResult('grep', { pattern: 'grep-secret-value' });
+          }
+          return textResult('done');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        beforeRequest: async (_text, contents = []) => {
+          guarded.push(...contents);
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['grep'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const raw = guarded.find((c) => c.path === 'secret.txt');
+      expect(raw).toBeDefined();
+      expect(raw?.text).toBe('CONFIDENTIAL: grep-secret-value');
+      expect(raw?.text).not.toContain('     1:');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('rg probe evidence on EVERY post-probe verdict', () => {
+  const runAbsentoK = async (
+    model: MockLanguageModelV4,
+    resolveRg: NonNullable<AiSdkDriverOptions['resolveRg']>,
+  ) => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-rg-verdict-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(root),
+        resolveRg,
+      });
+      return await driver.run(
+        invocation({
+          workspace: { path: root },
+          toolPolicy: { allow: ['read', 'grep', 'glob'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'read-only' },
+          outputSchema: {
+            name: 'test.verdict/v1',
+            schema: {
+              type: 'object',
+              properties: { reply: { type: 'string' } },
+              required: ['reply'],
+              additionalProperties: false,
+            },
+          },
+        }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  test('REPAIR SUCCESS: the miss-flow verdict still carries the probe evidence', async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        calls++;
+        // First (main) call returns unparseable text; the repair returns valid JSON.
+        return calls === 1
+          ? textResult('this is not the requested object')
+          : textResult('{"reply":"repaired"}');
+      },
+    });
+    const result = await runAbsentoK(model, async () => ({ ok: false, reason: 'absent' }));
+    expect(result.stopReason).toBe('complete');
+    expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+
+  test('REPAIR FAILURE: the error verdict still carries the probe evidence', async () => {
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => textResult('still not the object'),
+    });
+    const result = await runAbsentoK(model, async () => ({ ok: false, reason: 'absent' }));
+    expect(result.stopReason).toBe('error');
+    expect(result.errorClass).toBe('output-invalid');
+    expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+});

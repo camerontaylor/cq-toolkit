@@ -35,6 +35,8 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install ripgrep for harness search tools
+      uses: ./.github/actions/install-ripgrep
     # One compiler ratchet plus typed lint; aliases must not duplicate it.
     - name: Static gate
       shell: bash

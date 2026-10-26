@@ -51,6 +51,7 @@ export const CqConfigSchema = z
     review: z
       .object({
         rounds: PositiveInteger.exactOptional(),
+        searchTools: z.boolean().exactOptional(),
         blockingSeverities: z.array(SeveritySchema).exactOptional(),
         agentSeverityMap: z
           .object({

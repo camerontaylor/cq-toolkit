@@ -1071,7 +1071,7 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
       };
       expect(folded.input.path).toBe('note.txt');
       expect(folded.ok).toBe(true);
-      expect(folded.output).toBe('hello note');
+      expect(folded.output).toBe('--- note.txt ---\n     1: hello note');
     });
   });
 

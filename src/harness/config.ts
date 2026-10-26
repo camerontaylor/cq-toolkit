@@ -170,7 +170,8 @@ export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
  *
  * Tool ORDER is deliberate: read, edit, bash, write. The pre-F1 surface was
  * read/edit/run, so an explicit `maxTools: 3` still yields read/edit/bash —
- * the new `write` tool is the one a tight budget sheds first.
+ * the new `write` tool is the one a tight budget sheds first. The default
+ * budget also reserves room for read-only `grep` and `glob`.
  */
 export const defaultHarnessConfig: HarnessConfig = deepFreeze(
   HarnessConfigSchema.parse({
@@ -182,7 +183,7 @@ export const defaultHarnessConfig: HarnessConfig = deepFreeze(
     },
     promptBudget: {
       maxSystemPromptChars: 20_000,
-      maxTools: 4, // read/edit/bash/write — inert at the default, enforced if tightened
+      maxTools: 6, // read/edit/bash/write plus read-only grep/glob
       maxToolDescriptionChars: 1_024,
     },
   }),

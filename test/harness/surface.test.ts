@@ -48,6 +48,7 @@ import {
 } from '../../src/harness/surface.js';
 import type { HarnessManifest } from '../../src/harness/surface.js';
 import { buildTools } from '../../src/harness/tools.js';
+import { harnessRunGate } from '../../src/sandbox/index.js';
 import type { ToolkitToolResult } from '../../src/harness/tools.js';
 
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
@@ -176,7 +177,7 @@ describe('buildManifest', () => {
     const built = await buildManifest({
       workspace: join(dir, 'link'),
       sandbox: 'read-only',
-      toolPolicy: { allow: ['run', 'read'] }, // legacy `run` still selects bash
+      toolPolicy: { allow: ['read'] },
       harness: defaultHarnessConfig,
       envNames: ['GH_TOKEN'],
     });
@@ -184,10 +185,43 @@ describe('buildManifest', () => {
       v: 1,
       workspace: real,
       sandbox: 'read-only',
-      tools: ['read', 'bash'],
+      tools: ['read'],
       harness: defaultHarnessConfig,
       envNames: ['GH_TOKEN'],
     });
+  });
+
+  test('records the read-only search tool selection in the strict manifest', async () => {
+    const built = await buildManifest({
+      workspace: scratch(),
+      sandbox: 'read-only',
+      toolPolicy: { allow: ['read', 'grep', 'glob'] },
+      harness: defaultHarnessConfig,
+    });
+    expect(built?.tools).toEqual(['read', 'grep', 'glob']);
+  });
+
+  test('keeps the established tools within the budget before read-only search tools', () => {
+    const workspace = scratch();
+    const tools = buildTools(defaultHarnessConfig, workspace, 'read-only');
+    expect(tools.map(({ name }) => name)).toEqual([
+      'read',
+      'edit',
+      'bash',
+      'write',
+      'grep',
+      'glob',
+    ]);
+    const tightBudget: HarnessConfig = {
+      ...defaultHarnessConfig,
+      promptBudget: { ...defaultHarnessConfig.promptBudget, maxTools: 4 },
+    };
+    expect(buildTools(tightBudget, workspace, 'read-only').map(({ name }) => name)).toEqual([
+      'read',
+      'edit',
+      'bash',
+      'write',
+    ]);
   });
 
   test('an empty selection yields no manifest (and touches no filesystem)', async () => {
@@ -278,7 +312,9 @@ describe('createHarnessSurface', () => {
       expect(tool.description.length).toBeGreaterThan(0);
     }
     const read = surface.tools.find((tool) => tool.name === 'read');
-    expect(read?.inputJsonSchema['required']).toEqual(['path']);
+    expect(read?.inputJsonSchema).toHaveProperty('properties.file_path');
+    expect(read?.inputJsonSchema).toHaveProperty('properties.path');
+    expect(read?.inputJsonSchema['required']).toBeUndefined();
   });
 
   test('call on an unserved name rejects (even one the config provides)', async () => {
@@ -292,8 +328,13 @@ describe('createHarnessSurface', () => {
     await writeFile(join(workspace, 'a.txt'), 'alpha', 'utf8');
     const surface = createHarnessSurface(manifest(workspace));
     const ok = await surface.call('read', { path: 'a.txt' });
-    expect(ok.result).toEqual({ content: [{ type: 'text', text: 'alpha' }] });
-    expect(ok.outcome).toMatchObject({ ok: true, output: 'alpha' });
+    expect(ok.result).toEqual({
+      content: [{ type: 'text', text: '--- a.txt ---\n     1: alpha' }],
+    });
+    expect(ok.outcome).toMatchObject({
+      ok: true,
+      output: '--- a.txt ---\n     1: alpha',
+    });
     const denied = await surface.call('read', { path: '../x' });
     expect(denied.result.isError).toBe(true);
     expect(denied.result.content[0]?.text.startsWith('path escape: ')).toBe(true);
@@ -319,7 +360,10 @@ describe('createHarnessSurface', () => {
     });
     const [, read] = await Promise.all([slow, fast]);
     expect(order).toEqual(['bash', 'read']);
-    expect(read.outcome).toMatchObject({ ok: true, output: 'done\n' });
+    expect(read.outcome).toMatchObject({
+      ok: true,
+      output: '--- done.txt ---\n     1: done',
+    });
   });
 
   test('an already-aborted signal: the call never executes (cancelled denial)', async () => {
@@ -379,7 +423,9 @@ describe('isHarnessDenial against real denials', () => {
       },
     };
     const tool = (ws: string, sandbox: 'workspace-write' | 'read-only', name: string) => {
-      const found = buildTools(config, ws, sandbox).find((t) => t.name === name);
+      const found = buildTools(config, ws, sandbox, harnessRunGate({ env: {} })).find(
+        (t) => t.name === name,
+      );
       if (found === undefined) throw new Error(`no ${name}`);
       return found;
     };
@@ -397,7 +443,11 @@ describe('isHarnessDenial against real denials', () => {
         old_string: 'a',
         new_string: 'b',
       }),
-      sandboxRun: await tool(workspace, 'read-only', 'bash').execute({ command: 'echo x' }),
+      sandboxBash: await tool(workspace, 'read-only', 'bash').execute({ command: 'echo x' }),
+      sandboxWrite: await tool(workspace, 'read-only', 'write').execute({
+        file_path: 'new.txt',
+        content: 'new',
+      }),
       invalidInput: await tool(workspace, 'workspace-write', 'read').execute({ nope: 1 }),
       lexicalEscape: await tool(workspace, 'workspace-write', 'read').execute({ path: '../x' }),
       symlinkEscape: await tool(workspace, 'workspace-write', 'read').execute({ path: 'link.txt' }),
@@ -438,6 +488,8 @@ describe('isHarnessDenial against real denials', () => {
       return result !== undefined && !result.ok ? result.denial.reason : '';
     };
     expect(reasonOf('sandboxEdit')).toBe('sandbox: read-only');
+    expect(reasonOf('sandboxBash')).toBe('sandbox: read-only');
+    expect(reasonOf('sandboxWrite')).toBe('sandbox: read-only');
     expect(reasonOf('symlinkEscape')).toMatch(/^path escape: .*symlink/);
     expect(reasonOf('metacharacters')).toMatch(/^command allowlist: /);
     expect(reasonOf('readFailed')).toMatch(/^read failed: /);

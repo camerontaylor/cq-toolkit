@@ -7,6 +7,16 @@ running on itself, recorded rather than claimed.
 Link format: every entry in every table below is the PR URL plus the
 workflow run URL. An entry without both is a claim, not evidence.
 
+## CI host prerequisites
+
+Jobs that run the toolkit's harness search tools install the host `rg`
+executable through [`.github/actions/install-ripgrep`](.github/actions/install-ripgrep/action.yml).
+Ripgrep **11.0.0 is the runtime floor**; the action installs the exact CI pin,
+**15.2.0**. It downloads upstream Linux and macOS release archives for x64 and
+arm64, checks their pinned SHA-256 digests, and installs the verified binary.
+This is not an npm dependency or a JavaScript fallback; self-hosted runners
+and other deployments must provide `rg` 11.0.0 or newer.
+
 ## Soak (ws-k stage-2 acceptance)
 
 PRs processed end-to-end by the scheduled automation: **0**

@@ -2,13 +2,16 @@
 // (read/edit/write/bash, per-op allowlists). The pre-F1 `run` name and the
 // pre-F1 edit arguments are accepted as one-release aliases; see
 // canonicalToolName/toolAliases and the edit input schema below.
+// Search/read ergonomics follow OpenCode v1.19.4 (MIT), especially
+// packages/opencode/src/tool/{read,grep,glob}.ts; binary/UTF-8 handling also
+// follows jcode v0.99.1 (MIT), crates/jcode-app-core/src/tool/read.rs.
+// Pinned notices and source revisions: policy/THIRD_PARTY_NOTICES.md.
 //
-// R4: the tool surface and its budgets are PER-OP CONFIG (data from
-// config.ts), never hardcoded constants. What IS fixed here is the minimal
-// tool DEFINITIONS themselves — names, descriptions, input schemas — the
-// harness's small plain-data surface every driver adapter can map onto its
-// own SDK tool format. Driver-agnostic by construction: NO vendor imports
-// in src/harness/**; the ai-sdk driver (slice 2) adapts these descriptors.
+// R4: existing tool surface and budgets are PER-OP CONFIG (data from
+// config.ts). New search tools use fixed safety ceilings in this experiment
+// (candidate count/bytes, matches, output/line chars, timeout); these are
+// documented below and are not claimed to be per-op knobs. Tool descriptors
+// remain driver-agnostic plain data with no vendor imports in src/harness/**.
 //
 // THE SHARED RUN GATE (W1.11 / D14): every surface that builds these tools —
 // the ai-sdk driver, the subprocess driver's harness surface, the MCP harness
@@ -89,6 +92,14 @@
 // not bless its target's location (pattern 'src/**', link src/link →
 // ../secret.txt). Denies when either check misses.
 //
+// SEARCH TOCTOU (same partial-hardening limit): grep/glob enumerate names,
+// then apply these lexical/realpath/.git/path-pattern gates before reading
+// any allowed file. `rg` later opens the gated realpath strings; a file or
+// ancestor replaced after its check can still redirect or change that open.
+// This is the same check-then-use window as read/edit, not an fd-pinned or
+// OS-level sandbox. Cancellation is checked during enumeration/gating and
+// before success, but it does not close this filesystem race.
+//
 // PATH PATTERN SEMANTICS (the read/edit allowlist): glob-ish strings matched
 // against the workspace-relative POSIX path ('/' separators), FULL match:
 //   - '**' spans whole path segments (zero or more; as the last segment it
@@ -157,12 +168,67 @@ import type { HarnessConfig } from './config.js';
  * unbounded memory (the old `exec` path capped at its 1 MiB maxBuffer).
  */
 const UNCAPPED_RETENTION_BYTES = 1_048_576;
+const DEFAULT_READ_LIMIT = 2_000;
+const MAX_READ_LINE_CHARS = 2_000;
+const SEARCH_CANDIDATE_LIMIT = 1_000;
+const SEARCH_CANDIDATE_OUTPUT_BYTES = 4 * 1_024 * 1_024;
+const SEARCH_BYTES_LIMIT = 20 * 1_024 * 1_024;
+const SEARCH_MATCH_LIMIT = 100;
+const SEARCH_OUTPUT_CHARS = 50_000;
+const SEARCH_LINE_CHARS = 2_000;
+const SEARCH_PROCESS_OUTPUT_BYTES = 2 * 1_024 * 1_024;
+const SEARCH_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
 // ---------------------------------------------------------------------------
 
-export const ReadToolInputSchema = z.object({ path: z.string().min(1) }).strict();
+export const ReadToolInputSchema = z
+  .object({
+    file_path: z.string().min(1).optional(),
+    path: z.string().min(1).optional(),
+    offset: z.number().int().positive().optional(),
+    limit: z.number().int().positive().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.file_path === undefined && value.path === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'read requires file_path (or path)',
+        path: ['file_path'],
+      });
+    }
+    if (value.file_path !== undefined && value.path !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'read accepts file_path or the path alias, not both',
+        path: ['path'],
+      });
+    }
+  });
+
+export const GrepToolInputSchema = z
+  .object({
+    pattern: z.string().min(1),
+    path: z.string().min(1).optional(),
+    glob: z.string().min(1).optional(),
+    include: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.glob !== undefined && value.include !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'grep accepts glob or the include alias, not both',
+        path: ['include'],
+      });
+    }
+  });
+
+export const GlobToolInputSchema = z
+  .object({ pattern: z.string().min(1), path: z.string().min(1).optional() })
+  .strict();
 
 /**
  * The canonical edit arguments (the convention shared by Claude Code, jcode
@@ -300,6 +366,8 @@ export const BashToolInputSchema = z
 export const RunToolInputSchema = BashToolInputSchema;
 
 export type ReadToolInput = z.infer<typeof ReadToolInputSchema>;
+export type GrepToolInput = z.infer<typeof GrepToolInputSchema>;
+export type GlobToolInput = z.infer<typeof GlobToolInputSchema>;
 export type CanonicalEditToolInput = z.infer<typeof CanonicalEditToolInputSchema>;
 export type LegacyEditToolInput = z.infer<typeof LegacyEditToolInputSchema>;
 export type EditToolInput = z.infer<typeof EditToolInputSchema>;
@@ -308,8 +376,8 @@ export type BashToolInput = z.infer<typeof BashToolInputSchema>;
 /** The pre-F1 name for {@link BashToolInput} — accepted for one release. */
 export type RunToolInput = BashToolInput;
 
-/** The four canonical toolkit tool names — the fixed minimal surface. */
-export type ToolkitToolName = 'read' | 'edit' | 'write' | 'bash';
+/** The read-only search tools join the canonical toolkit surface for read-only ops. */
+export type ToolkitToolName = 'read' | 'edit' | 'write' | 'bash' | 'grep' | 'glob';
 
 /** The pre-F1 model-facing tool name — accepted for one release. */
 export type LegacyToolName = 'run';
@@ -339,6 +407,8 @@ export type ToolkitToolResult =
       ok: true;
       output: string;
       truncated: boolean;
+      /** Source text and workspace-relative path provenance for the upload guard. */
+      sourceContents?: readonly { text: string; path: string }[];
       /** `bash` only: 0–nonzero on a normal exit, null when signal-killed. */
       exitCode?: number | null;
       /** `bash` only: true when the process was killed by a signal (timeout). */
@@ -391,6 +461,18 @@ export type ToolkitTool =
       execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
       /** `run` — the pre-F1 name, accepted for one release. */
       aliases?: readonly string[];
+    }
+  | {
+      name: 'grep';
+      description: string;
+      inputSchema: typeof GrepToolInputSchema;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
+    }
+  | {
+      name: 'glob';
+      description: string;
+      inputSchema: typeof GlobToolInputSchema;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     };
 
 // ---------------------------------------------------------------------------
@@ -576,6 +658,36 @@ function capOutput(
   return { output: text.slice(0, maxChars), truncated: true };
 }
 
+/** Cap tool output without making the reason for truncation invisible. */
+function capOutputWithMarker(
+  text: string,
+  maxChars: number | undefined,
+  marker: string,
+): { output: string; truncated: boolean } {
+  if (maxChars === undefined || text.length <= maxChars) {
+    return { output: text, truncated: false };
+  }
+  const truncationLines = text
+    .split('\n')
+    .filter((line) => line.startsWith('[truncated:') || line.startsWith('… (truncated;'));
+  const uniqueMarkers = [...new Set([...truncationLines, marker])];
+  const suffix = uniqueMarkers.join('\n');
+  const visibleMarker = `\n${suffix}`;
+  return {
+    output: `${text.slice(0, Math.max(0, maxChars - visibleMarker.length))}${visibleMarker}`,
+    truncated: true,
+  };
+}
+
+function truncateLine(line: string, maxChars: number): { text: string; truncated: boolean } {
+  if (line.length <= maxChars) return { text: line, truncated: false };
+  const marker = `… [line truncated at ${maxChars} chars]`;
+  return {
+    text: `${line.slice(0, Math.max(0, maxChars - marker.length))}${marker}`,
+    truncated: true,
+  };
+}
+
 /** Head-truncate a tool description to the prompt-budget cap, ellipsis-marked. */
 function capDescription(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 1))}…`;
@@ -727,7 +839,10 @@ export function buildTools(
   const workspaceAbs = resolve(workspace);
   const { promptBudget } = cfg;
 
-  const deny = (tool: ToolkitToolName, reason: string): ToolkitToolResult => ({
+  const deny = (
+    tool: ToolkitToolName,
+    reason: string,
+  ): Extract<ToolkitToolResult, { ok: false }> => ({
     ok: false,
     denial: { tool, reason },
   });
@@ -798,7 +913,10 @@ export function buildTools(
       root !== undefined && isInside(effective, root) && hasGitSegment(relative(root, effective))
     );
   };
-  const gitDenial = (tool: ToolkitToolName, abs: string): ToolkitToolResult =>
+  const gitDenial = (
+    tool: ToolkitToolName,
+    abs: string,
+  ): Extract<ToolkitToolResult, { ok: false }> =>
     deny(tool, `path not allowed: '${relOf(abs)}' is inside a .git directory (toolkit invariant)`);
 
   const pathAllowed = (patterns: readonly string[], abs: string): boolean =>
@@ -834,6 +952,149 @@ export function buildTools(
   const invalidInput = (tool: ToolkitToolName, err: z.ZodError): ToolkitToolResult =>
     deny(tool, `invalid input: ${messageOf(err)}`);
 
+  type SearchFile = {
+    lexicalPath: string;
+    effectivePath: string;
+    lexicalRel: string;
+    resolvedRel: string;
+    size: number;
+  };
+  const isAborted = (signal: AbortSignal | undefined): boolean => signal?.aborted === true;
+  type SearchFileResult =
+    | { ok: true; files: SearchFile[]; markers: string[] }
+    | { ok: false; denial: Extract<ToolkitToolResult, { ok: false }> };
+
+  /** Enumerate first, gate every bounded candidate, and return only safe files. */
+  const collectSearchFiles = async (
+    tool: 'grep' | 'glob',
+    requestedPath: string | undefined,
+    fileGlob: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<SearchFileResult> => {
+    const cancelled = (): SearchFileResult => ({
+      ok: false,
+      denial: deny(tool, 'cancelled: search was aborted or timed out'),
+    });
+    if (isAborted(signal)) return cancelled();
+    const requested = requestedPath ?? '.';
+    const scope = resolveInside(requested);
+    if (scope === undefined) {
+      return {
+        ok: false,
+        denial: deny(tool, `path escape: '${requested}' resolves outside the workspace`),
+      };
+    }
+    const effectiveScope = await resolveRealInside(scope);
+    if (isAborted(signal)) return cancelled();
+    if (effectiveScope === undefined) {
+      return {
+        ok: false,
+        denial: deny(tool, `path escape: '${requested}' escapes the workspace through a symlink`),
+      };
+    }
+    if (await touchesGit(scope, effectiveScope)) {
+      return { ok: false, denial: gitDenial(tool, scope) };
+    }
+    const scopeInfo = await stat(effectiveScope).catch(() => undefined);
+    if (isAborted(signal)) return cancelled();
+    if (scopeInfo === undefined) {
+      return { ok: false, denial: deny(tool, `path not found: '${relOf(scope)}'`) };
+    }
+
+    const scopeArg = relOf(scope) || '.';
+    const enumerateArgs = [
+      '--files',
+      '--no-config',
+      '--hidden',
+      '--color=never',
+      '--null',
+      ...(fileGlob === undefined ? [] : ['--glob', fileGlob]),
+      '--glob',
+      '!.git',
+      '--',
+      scopeArg,
+    ];
+    const listing = await runArgvCommand('rg', enumerateArgs, {
+      env: buildChildEnv(process.env),
+      cwd: workspaceAbs,
+      maxBytes: SEARCH_CANDIDATE_OUTPUT_BYTES,
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (listing.kind === 'killed') {
+      return cancelled();
+    }
+    if (listing.kind === 'spawn-error') {
+      return { ok: false, denial: deny(tool, `search failed: ${messageOf(listing.error)}`) };
+    }
+    if (listing.overflowed) {
+      return {
+        ok: false,
+        denial: deny(tool, 'search denied: candidate enumeration output cap exceeded'),
+      };
+    }
+    if (listing.code !== 0 && listing.code !== 1) {
+      return {
+        ok: false,
+        denial: deny(tool, `search failed: rg candidate enumeration exited ${listing.code}`),
+      };
+    }
+    if (isAborted(signal)) return cancelled();
+
+    const rawPaths = listing.stdout
+      .split('\0')
+      .filter((candidate) => candidate.length > 0)
+      .sort();
+    const markers: string[] = [];
+    const boundedPaths = rawPaths.slice(0, SEARCH_CANDIDATE_LIMIT);
+    if (rawPaths.length > SEARCH_CANDIDATE_LIMIT) {
+      markers.push(`[truncated: candidate files cap ${SEARCH_CANDIDATE_LIMIT}]`);
+    }
+
+    const allowed: SearchFile[] = [];
+    for (const rawPath of boundedPaths) {
+      if (isAborted(signal)) return cancelled();
+      const lexicalPath = resolveInside(rawPath);
+      if (lexicalPath === undefined) continue;
+      const effectivePath = await resolveRealInside(lexicalPath);
+      if (isAborted(signal)) return cancelled();
+      if (effectivePath === undefined) continue;
+      if (await touchesGit(lexicalPath, effectivePath)) continue;
+      if (!(await pathAllowedEverywhere(cfg.tools.read.pathPatterns, lexicalPath, effectivePath))) {
+        continue;
+      }
+      const fileInfo = await stat(effectivePath).catch(() => undefined);
+      if (isAborted(signal)) return cancelled();
+      if (fileInfo === undefined || !fileInfo.isFile()) continue;
+      const realRoot = await workspaceRealRoot();
+      const resolvedRel =
+        realRoot !== undefined && isInside(effectivePath, realRoot)
+          ? relative(realRoot, effectivePath).split(sep).join('/')
+          : relOf(effectivePath);
+      allowed.push({
+        lexicalPath,
+        effectivePath,
+        lexicalRel: relOf(lexicalPath),
+        resolvedRel,
+        size: fileInfo.size,
+      });
+    }
+
+    const files: SearchFile[] = [];
+    let searchedBytes = 0;
+    for (const file of allowed) {
+      if (isAborted(signal)) return cancelled();
+      if (file.size > SEARCH_BYTES_LIMIT - searchedBytes) {
+        markers.push(`[truncated: searched bytes cap ${SEARCH_BYTES_LIMIT}]`);
+        break;
+      }
+      files.push(file);
+      searchedBytes += file.size;
+    }
+    if (isAborted(signal)) return cancelled();
+    return { ok: true, files, markers };
+  };
+
   /**
    * The prior-read ledger for edit/write staleness. Keyed by the resolved
    * path, it records the exact bytes a `read` returned; an edit/write must
@@ -855,30 +1116,43 @@ export function buildTools(
   };
 
   /**
-   * Serialize every call that touches one file (read/edit/write), in arrival
-   * order. The ai-sdk driver runs a step's tool calls concurrently, so two
-   * edits of one file would otherwise interleave their read/verify/write
-   * sequence. The queue is per resolved path; a settled tail is dropped.
+   * Per-canonical-file BODY queues: the mutual exclusion for read/edit/write,
+   * keyed by the canonical (realpath) path; a settled tail is dropped.
    */
   const fileQueues = new Map<string, Promise<void>>();
-  const withFileLock = async <T>(key: string, body: () => Promise<T>): Promise<T> => {
+
+  /**
+   * ADMISSION: a single global turn serializes ONLY the async preflight
+   * (realpath, touchesGit, pathAllowedEverywhere) so per-file bodies enqueue
+   * in ARRIVAL order, not preflight-completion order; unrelated files' bodies
+   * still overlap. Gates unchanged.
+   */
+  let admissionTail: Promise<void> = Promise.resolve();
+  const admit = async <T>(
+    preflight: () => Promise<{ key: string | undefined; body: () => Promise<T> }>,
+  ): Promise<T> => {
+    const current = admissionTail.then(preflight, preflight);
+    admissionTail = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    const { key, body } = await current;
+    if (key === undefined) return body(); // denied in preflight — nothing to serialize
     const previous = fileQueues.get(key) ?? Promise.resolve();
     let release!: () => void;
-    const current = new Promise<void>((resolve) => {
+    const fileTurn = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const tail = previous.then(() => current);
+    const tail = previous.then(() => fileTurn);
     fileQueues.set(key, tail);
-    await previous;
-    try {
-      return await body();
-    } finally {
+    return previous.then(body).finally(() => {
       release();
       if (fileQueues.get(key) === tail) fileQueues.delete(key);
-    }
+    });
   };
 
   const tools: ToolkitTool[] = [];
+  const searchTools: ToolkitTool[] = [];
   // `write` is built before `bash` (so the read/edit/write helpers stay
   // together) but pushed AFTER it: the pre-F1 surface was read/edit/run, so
   // an explicit `maxTools: 3` must still yield read/edit/bash.
@@ -890,46 +1164,358 @@ export function buildTools(
     tools.push({
       name: 'read',
       description: capDescription(
-        'Read a text file from the workspace and return its contents. ' +
-          'Input: { path } — a path inside the workspace, resolved against the workspace root.',
+        'Read a text file from the workspace. Input: { file_path, offset?, limit? }. ' +
+          'offset is 1-based; limit defaults to 2000 lines. Use the path alias if needed.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: ReadToolInputSchema,
       execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
         const parsed = ReadToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('read', parsed.error);
-        const abs = resolveInside(parsed.data.path);
+        const requested = (parsed.data.file_path ?? parsed.data.path) as string;
+        const abs = resolveInside(requested);
         if (abs === undefined) {
-          return deny('read', `path escape: '${parsed.data.path}' resolves outside the workspace`);
+          return deny('read', `path escape: '${requested}' resolves outside the workspace`);
         }
-        const effective = await resolveRealInside(abs);
-        if (effective === undefined) {
-          return deny(
-            'read',
-            `path escape: '${parsed.data.path}' escapes the workspace through a symlink`,
-          );
-        }
-        if (await touchesGit(abs, effective)) return gitDenial('read', abs);
-        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
-          return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
-        }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
-          let bytes: Buffer;
-          try {
-            bytes = await readFile(effective);
-          } catch (err) {
-            const reason =
-              errorCode(err) === 'ENOENT'
-                ? `file not found: '${relOf(abs)}'`
-                : `read failed: ${messageOf(err)}`;
-            return deny('read', reason);
+        // ADMISSION: the preflight runs inside the ordered admission turn (see
+        // admit); the body then enqueues on the canonical path's own queue.
+        return admit(async () => {
+          const effective = await resolveRealInside(abs);
+          if (effective === undefined) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('read', `path escape: '${requested}' escapes the workspace through a symlink`),
+            };
           }
-          // Record the exact bytes the model saw (the output cap does not
-          // change the staleness identity: the whole file was read).
-          await rememberRead(effective, bytes);
-          const capped = capOutput(bytes.toString('utf8'), fileCfg.maxOutputChars);
-          return { ok: true, ...capped };
+          if (await touchesGit(abs, effective)) {
+            return { key: undefined, body: async () => gitDenial('read', abs) };
+          }
+          if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+            };
+          }
+          return {
+            key: effective,
+            body: async (): Promise<ToolkitToolResult> => {
+              let bytes: Buffer;
+              try {
+                bytes = await readFile(effective);
+              } catch (err) {
+                const reason =
+                  errorCode(err) === 'ENOENT'
+                    ? `file not found: '${relOf(abs)}'`
+                    : `read failed: ${messageOf(err)}`;
+                return deny('read', reason);
+              }
+              if (isBinary(bytes)) {
+                return deny('read', `read refused: '${relOf(abs)}' is a binary file`);
+              }
+              const text = decodeUtf8(bytes);
+              if (text === undefined) {
+                return deny('read', `read refused: '${relOf(abs)}' is not valid UTF-8`);
+              }
+              // Keep the F1 SHA-256 ledger tied to the whole file, even when the
+              // model receives only a line window.
+              await rememberRead(effective, bytes);
+              const lines = text.split(/\r\n|\n|\r/);
+              if (lines.at(-1) === '') lines.pop();
+              const offset = parsed.data.offset ?? 1;
+              const limit = parsed.data.limit ?? DEFAULT_READ_LIMIT;
+              const selected = lines.slice(offset - 1, offset - 1 + limit);
+              let lineTruncated = false;
+              const numbered = selected.map((line, index) => {
+                const cappedLine = truncateLine(line, MAX_READ_LINE_CHARS);
+                lineTruncated ||= cappedLine.truncated;
+                return `${String(offset + index).padStart(6)}: ${cappedLine.text}`;
+              });
+              const nextOffset = offset + selected.length;
+              const windowTruncated = nextOffset <= lines.length;
+              const parts = [`--- ${relOf(abs)} ---`, ...numbered];
+              if (windowTruncated) {
+                parts.push(`… (truncated; use offset=${nextOffset} to continue)`);
+              }
+              const capped = capOutputWithMarker(
+                parts.join('\n'),
+                fileCfg.maxOutputChars,
+                `[truncated: output chars cap ${fileCfg.maxOutputChars}]`,
+              );
+              const output = capped.output;
+              const root = await workspaceRealRoot();
+              const resolvedRel =
+                root !== undefined && isInside(effective, root)
+                  ? relative(root, effective).split(sep).join('/')
+                  : relOf(effective);
+              // Scan-source provenance is the RAW unformatted selected lines —
+              // line-anchored secret rules (^CONFIDENTIAL:) must match the raw
+              // source, not the numbered display the model sees. The formatted
+              // `output` still rides the model payload; the guard scans BOTH.
+              const rawSelected = selected.join('\n');
+              const sourceContents = [...new Set([relOf(abs), resolvedRel])].map((path) => ({
+                text: rawSelected,
+                path,
+              }));
+              return {
+                ok: true,
+                output,
+                truncated: lineTruncated || windowTruncated || capped.truncated,
+                sourceContents,
+              };
+            },
+          };
         });
+      },
+    });
+  }
+  // Search is exposed only in a read-only sandbox. The per-op ToolPolicy is
+  // still the authority that selects these descriptors for a model request.
+  if (cfg.tools.read.enabled && sandbox === 'read-only') {
+    searchTools.push({
+      name: 'grep',
+      description: capDescription(
+        'Search workspace text for a regex. Input: { pattern, path?, glob? }. ' +
+          'Use include as an alias for glob. Search is bounded and respects .gitignore.',
+        promptBudget.maxToolDescriptionChars,
+      ),
+      inputSchema: GrepToolInputSchema,
+      execute: async (
+        rawInput: unknown,
+        options?: ToolExecuteOptions,
+      ): Promise<ToolkitToolResult> => {
+        const parsed = GrepToolInputSchema.safeParse(rawInput);
+        if (!parsed.success) return invalidInput('grep', parsed.error);
+        const files = await collectSearchFiles(
+          'grep',
+          parsed.data.path,
+          parsed.data.glob ?? parsed.data.include,
+          options?.signal,
+        );
+        if (!files.ok) return files.denial;
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+        }
+        const markers = [...files.markers];
+        if (files.files.length === 0) {
+          const output = ['No matches', ...markers].join('\n');
+          const capped = capOutputWithMarker(
+            output,
+            SEARCH_OUTPUT_CHARS,
+            `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+          );
+          if (isAborted(options?.signal)) {
+            return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+          }
+          return { ok: true, ...capped, truncated: markers.length > 0 || capped.truncated };
+        }
+
+        const args = [
+          '--json',
+          '--no-config',
+          '--hidden',
+          '--color=never',
+          '--max-count',
+          String(SEARCH_MATCH_LIMIT + 1),
+          '-e',
+          parsed.data.pattern,
+          '--',
+          ...files.files.map((file) => file.effectivePath),
+        ];
+        const result = await runArgvCommand('rg', args, {
+          env: buildChildEnv(process.env),
+          cwd: workspaceAbs,
+          maxBytes: SEARCH_PROCESS_OUTPUT_BYTES,
+          timeoutMs: SEARCH_TIMEOUT_MS,
+          ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        });
+        if (result.kind === 'killed') {
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: 'cancelled: grep was aborted or timed out' },
+          };
+        }
+        if (result.kind === 'spawn-error') {
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: `grep failed: ${messageOf(result.error)}` },
+          };
+        }
+        if (result.code !== 0 && result.code !== 1) {
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: `grep failed: rg exited ${result.code}` },
+          };
+        }
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+        }
+
+        const byPath = new Map<string, { file: SearchFile; lines: string[]; raw: string[] }>();
+        const fileByPath = new Map(files.files.map((file) => [resolve(file.effectivePath), file]));
+        let truncatedLine = false;
+        let sawMalformedTail = false;
+        const jsonLines = result.stdout.split('\n');
+        for (const [index, line] of jsonLines.entries()) {
+          if (line.length === 0) continue;
+          let event: unknown;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            if (result.overflowed && index === jsonLines.length - 1) {
+              sawMalformedTail = true;
+              continue;
+            }
+            return {
+              ok: false,
+              denial: { tool: 'grep', reason: 'grep denied: rg returned malformed JSON output' },
+            };
+          }
+          if (typeof event !== 'object' || event === null || !('type' in event)) continue;
+          const typed = event as {
+            type?: unknown;
+            data?: {
+              path?: { text?: unknown; bytes?: unknown };
+              lines?: { text?: unknown; bytes?: unknown };
+              line_number?: unknown;
+            };
+          };
+          if (typed.type !== 'match') continue;
+          const data = typed.data;
+          if (
+            data === undefined ||
+            typeof data.path?.text !== 'string' ||
+            typeof data.lines?.text !== 'string' ||
+            typeof data.line_number !== 'number'
+          ) {
+            return {
+              ok: false,
+              denial: {
+                tool: 'grep',
+                reason: 'grep denied: rg returned non-text path or match data',
+              },
+            };
+          }
+          const file = fileByPath.get(resolve(workspaceAbs, data.path.text));
+          if (file === undefined) {
+            return {
+              ok: false,
+              denial: {
+                tool: 'grep',
+                reason: 'grep denied: rg returned a path outside the allowed file list',
+              },
+            };
+          }
+          const key = resolve(file.effectivePath);
+          const group = byPath.get(key) ?? { file, lines: [], raw: [] };
+          const rawLine = data.lines.text.replace(/\r?\n$/, '');
+          const cappedLine = truncateLine(rawLine, SEARCH_LINE_CHARS);
+          truncatedLine ||= cappedLine.truncated;
+          group.lines.push(`${data.line_number}: ${cappedLine.text}`);
+          // Raw unformatted line kept alongside: scan provenance must see the
+          // anchorable source text (^CONFIDENTIAL:), not the numbered display.
+          group.raw.push(rawLine);
+          byPath.set(key, group);
+        }
+
+        if (result.overflowed) {
+          markers.push(`[truncated: rg process output bytes cap ${SEARCH_PROCESS_OUTPUT_BYTES}]`);
+        }
+        if (sawMalformedTail) {
+          markers.push('[truncated: rg process output ended mid-record]');
+        }
+        const groups = [...byPath.values()].sort((left, right) =>
+          left.file.lexicalRel.localeCompare(right.file.lexicalRel),
+        );
+        const allMatches = groups.reduce((count, group) => count + group.lines.length, 0);
+        const keptGroups: { file: SearchFile; lines: string[]; raw: string[] }[] = [];
+        let remaining = SEARCH_MATCH_LIMIT;
+        for (const group of groups) {
+          if (remaining <= 0) break;
+          const lines = group.lines.slice(0, remaining);
+          const raw = group.raw.slice(0, remaining);
+          keptGroups.push({ file: group.file, lines, raw });
+          remaining -= lines.length;
+        }
+        if (allMatches > SEARCH_MATCH_LIMIT) {
+          markers.push(`[truncated: matches cap ${SEARCH_MATCH_LIMIT}]`);
+        }
+        if (truncatedLine) markers.push(`[truncated: per-line chars cap ${SEARCH_LINE_CHARS}]`);
+
+        const outputParts = keptGroups.flatMap(({ file, lines }) => [
+          `--- ${file.lexicalRel} ---`,
+          ...lines,
+        ]);
+        if (outputParts.length === 0) outputParts.push('No matches');
+        outputParts.push(...markers);
+        const outputBeforeCap = outputParts.join('\n');
+        const capped = capOutputWithMarker(
+          outputBeforeCap,
+          SEARCH_OUTPUT_CHARS,
+          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+        );
+        // Scan-source provenance is the RAW unformatted matched lines (the
+        // scan guard sees anchorable source text); the numbered display rides
+        // the model payload. Same raw-plus-formatted contract as read.
+        const sourceContents = keptGroups.flatMap(({ file, raw }) =>
+          [...new Set([file.lexicalRel, file.resolvedRel])].map((path) => ({
+            path,
+            text: raw.join('\n'),
+          })),
+        );
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+        }
+        return {
+          ok: true,
+          output: capped.output,
+          truncated: markers.length > 0 || truncatedLine || capped.truncated,
+          sourceContents,
+        };
+      },
+    });
+
+    searchTools.push({
+      name: 'glob',
+      description: capDescription(
+        'List workspace files matching a glob. Input: { pattern, path? }. ' +
+          'Search is bounded and respects .gitignore.',
+        promptBudget.maxToolDescriptionChars,
+      ),
+      inputSchema: GlobToolInputSchema,
+      execute: async (
+        rawInput: unknown,
+        options?: ToolExecuteOptions,
+      ): Promise<ToolkitToolResult> => {
+        const parsed = GlobToolInputSchema.safeParse(rawInput);
+        if (!parsed.success) return invalidInput('glob', parsed.error);
+        const files = await collectSearchFiles(
+          'glob',
+          parsed.data.path,
+          parsed.data.pattern,
+          options?.signal,
+        );
+        if (!files.ok) return files.denial;
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
+        }
+        const outputParts = files.files.map((file) => file.lexicalRel);
+        if (outputParts.length === 0) outputParts.push('No files found');
+        outputParts.push(...files.markers);
+        const capped = capOutputWithMarker(
+          outputParts.join('\n'),
+          SEARCH_OUTPUT_CHARS,
+          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+        );
+        if (isAborted(options?.signal)) {
+          return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
+        }
+        return {
+          ok: true,
+          ...capped,
+          truncated: files.markers.length > 0 || capped.truncated,
+        };
       },
     });
   }
@@ -965,88 +1551,104 @@ export function buildTools(
         if (abs === undefined) {
           return deny('edit', `path escape: '${path}' resolves outside the workspace`);
         }
-        const effective = await resolveRealInside(abs);
-        if (effective === undefined) {
-          return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
-        }
-        if (await touchesGit(abs, effective)) return gitDenial('edit', abs);
-        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
-          return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
-        }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
-          let bytes: Buffer;
-          try {
-            bytes = await readFile(effective);
-          } catch (err) {
-            const reason =
-              errorCode(err) === 'ENOENT'
-                ? `file not found: '${relOf(abs)}'`
-                : `read failed: ${messageOf(err)}`;
-            return deny('edit', reason);
+        // ADMISSION: preflight inside the ordered admission turn (see admit).
+        return admit(async () => {
+          const effective = await resolveRealInside(abs);
+          if (effective === undefined) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('edit', `path escape: '${path}' escapes the workspace through a symlink`),
+            };
           }
-          const label = relOf(abs);
-          if (isBinary(bytes)) return deny('edit', `edit refused: '${label}' is a binary file`);
-          const text = decodeUtf8(bytes);
-          if (text === undefined) {
-            return deny('edit', `edit refused: '${label}' is not valid UTF-8`);
+          if (await touchesGit(abs, effective)) {
+            return { key: undefined, body: async () => gitDenial('edit', abs) };
           }
-          const prior = readState.get(effective);
-          if (prior === undefined) {
-            return deny('edit', `edit refused: '${label}' must be read before it is edited`);
+          if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+            };
           }
-          if (prior.sha256 !== sha256(bytes)) {
-            return deny(
-              'edit',
-              `edit refused: '${label}' changed since it was read; read it again`,
-            );
-          }
-          const bom = text.startsWith(BOM);
-          const body = stripBom(text);
-          const needle = toLf(oldString);
-          const ending = dominantLineEnding(body);
-          const replacementLf = toLf(newString);
-          // New text follows the file's dominant convention; existing bytes
-          // outside the replaced spans are never normalised or rewritten.
-          const replacement =
-            ending === '\r\n' ? replacementLf.replace(/\n/g, '\r\n') : replacementLf;
-          // Only two starts are needed to establish ambiguity.
-          const overlapping = findMatches(body, needle, true, 2);
-          if (overlapping.length === 0) {
-            return deny('edit', `edit refused: target text not found in '${label}'`);
-          }
-          if (overlapping.length > 1 && !replaceAll) {
-            return deny(
-              'edit',
-              `edit refused: target text is not unique in '${label}' ` +
-                '(multiple possible matches, overlapping included); ' +
-                'pass replace_all: true to replace every non-overlapping occurrence',
-            );
-          }
-          // replace_all uses the standard NON-overlapping semantics and
-          // reports how many spans it actually replaced; a single edit takes
-          // the first non-overlapping span. Literal replacement: no
-          // `$&`/`$1` substitution.
-          const nonOverlapping = findMatches(
-            body,
-            needle,
-            false,
-            replaceAll ? Number.POSITIVE_INFINITY : 1,
-          );
-          const spans = replaceAll ? nonOverlapping : nonOverlapping.slice(0, 1);
-          const edited = applySpans(body, spans, replacement);
-          const output = `${bom ? BOM : ''}${edited}`;
-          try {
-            await writeFile(effective, output, 'utf8');
-          } catch (err) {
-            return deny('edit', `edit failed: ${messageOf(err)}`);
-          }
-          await rememberRead(effective, Buffer.from(output, 'utf8'));
-          const replaced = spans.length;
-          const capped = capOutput(
-            `edited '${label}': replaced ${replaced} ${replaced === 1 ? 'occurrence' : 'occurrences'}`,
-            fileCfg.maxOutputChars,
-          );
-          return { ok: true, ...capped };
+          return {
+            key: effective,
+            body: async (): Promise<ToolkitToolResult> => {
+              let bytes: Buffer;
+              try {
+                bytes = await readFile(effective);
+              } catch (err) {
+                const reason =
+                  errorCode(err) === 'ENOENT'
+                    ? `file not found: '${relOf(abs)}'`
+                    : `read failed: ${messageOf(err)}`;
+                return deny('edit', reason);
+              }
+              const label = relOf(abs);
+              if (isBinary(bytes)) return deny('edit', `edit refused: '${label}' is a binary file`);
+              const text = decodeUtf8(bytes);
+              if (text === undefined) {
+                return deny('edit', `edit refused: '${label}' is not valid UTF-8`);
+              }
+              const prior = readState.get(effective);
+              if (prior === undefined) {
+                return deny('edit', `edit refused: '${label}' must be read before it is edited`);
+              }
+              if (prior.sha256 !== sha256(bytes)) {
+                return deny(
+                  'edit',
+                  `edit refused: '${label}' changed since it was read; read it again`,
+                );
+              }
+              const bom = text.startsWith(BOM);
+              const body = stripBom(text);
+              const needle = toLf(oldString);
+              const ending = dominantLineEnding(body);
+              const replacementLf = toLf(newString);
+              // New text follows the file's dominant convention; existing bytes
+              // outside the replaced spans are never normalised or rewritten.
+              const replacement =
+                ending === '\r\n' ? replacementLf.replace(/\n/g, '\r\n') : replacementLf;
+              // Only two starts are needed to establish ambiguity.
+              const overlapping = findMatches(body, needle, true, 2);
+              if (overlapping.length === 0) {
+                return deny('edit', `edit refused: target text not found in '${label}'`);
+              }
+              if (overlapping.length > 1 && !replaceAll) {
+                return deny(
+                  'edit',
+                  `edit refused: target text is not unique in '${label}' ` +
+                    '(multiple possible matches, overlapping included); ' +
+                    'pass replace_all: true to replace every non-overlapping occurrence',
+                );
+              }
+              // replace_all uses the standard NON-overlapping semantics and
+              // reports how many spans it actually replaced; a single edit takes
+              // the first non-overlapping span. Literal replacement: no
+              // `$&`/`$1` substitution.
+              const nonOverlapping = findMatches(
+                body,
+                needle,
+                false,
+                replaceAll ? Number.POSITIVE_INFINITY : 1,
+              );
+              const spans = replaceAll ? nonOverlapping : nonOverlapping.slice(0, 1);
+              const edited = applySpans(body, spans, replacement);
+              const output = `${bom ? BOM : ''}${edited}`;
+              try {
+                await writeFile(effective, output, 'utf8');
+              } catch (err) {
+                return deny('edit', `edit failed: ${messageOf(err)}`);
+              }
+              await rememberRead(effective, Buffer.from(output, 'utf8'));
+              const replaced = spans.length;
+              const capped = capOutput(
+                `edited '${label}': replaced ${replaced} ${replaced === 1 ? 'occurrence' : 'occurrences'}`,
+                fileCfg.maxOutputChars,
+              );
+              return { ok: true, ...capped };
+            },
+          };
         });
       },
     });
@@ -1074,79 +1676,103 @@ export function buildTools(
         if (abs === undefined) {
           return deny('write', `path escape: '${path}' resolves outside the workspace`);
         }
-        let effective = await resolveRealInside(abs);
-        if (effective === undefined) {
-          return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
-        }
-        // A MISSING target has no realpath, so resolveRealInside fell back to
-        // the lexical path. Decide a new file's containment by its PARENT's
-        // realpath (a symlinked parent must not create outside the
-        // workspace), and refuse a dangling symlink outright: writeFile would
-        // otherwise follow it to an unchecked destination.
-        const link = await lstat(abs).catch(() => undefined);
-        if (link === undefined) {
-          const parent = await resolveRealInside(dirname(abs));
-          if (parent === undefined) {
-            return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
+        // ADMISSION: preflight inside the ordered admission turn (see admit).
+        return admit(async () => {
+          let effective = await resolveRealInside(abs);
+          if (effective === undefined) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('write', `path escape: '${path}' escapes the workspace through a symlink`),
+            };
           }
-          effective = join(parent, basename(abs));
-        } else if (link.isSymbolicLink() && effective === abs) {
-          return deny('write', `write refused: '${relOf(abs)}' is a symlink that does not resolve`);
-        }
-        if (await touchesGit(abs, effective)) return gitDenial('write', abs);
-        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
-          return deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
-        }
-        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
-          const label = relOf(abs);
-          let existing: Buffer | undefined;
-          try {
-            existing = await readFile(effective);
-          } catch (err) {
-            if (errorCode(err) !== 'ENOENT') {
-              return deny('write', `write failed: ${messageOf(err)}`);
+          // A MISSING target has no realpath, so resolveRealInside fell back to
+          // the lexical path. Decide a new file's containment by its PARENT's
+          // realpath (a symlinked parent must not create outside the
+          // workspace), and refuse a dangling symlink outright: writeFile would
+          // otherwise follow it to an unchecked destination.
+          const link = await lstat(abs).catch(() => undefined);
+          if (link === undefined) {
+            const parent = await resolveRealInside(dirname(abs));
+            if (parent === undefined) {
+              return {
+                key: undefined,
+                body: async () =>
+                  deny('write', `path escape: '${path}' escapes the workspace through a symlink`),
+              };
             }
+            effective = join(parent, basename(abs));
+          } else if (link.isSymbolicLink() && effective === abs) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('write', `write refused: '${relOf(abs)}' is a symlink that does not resolve`),
+            };
           }
-          let output = content;
-          if (existing !== undefined) {
-            if (isBinary(existing)) {
-              return deny('write', `write refused: '${label}' is a binary file`);
-            }
-            const text = decodeUtf8(existing);
-            if (text === undefined) {
-              return deny('write', `write refused: '${label}' is not valid UTF-8`);
-            }
-            const prior = readState.get(effective);
-            if (prior === undefined) {
-              return deny(
-                'write',
-                `write refused: '${label}' must be read before it is overwritten`,
+          if (await touchesGit(abs, effective)) {
+            return { key: undefined, body: async () => gitDenial('write', abs) };
+          }
+          if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+            return {
+              key: undefined,
+              body: async () =>
+                deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+            };
+          }
+          return {
+            key: effective,
+            body: async (): Promise<ToolkitToolResult> => {
+              const label = relOf(abs);
+              let existing: Buffer | undefined;
+              try {
+                existing = await readFile(effective);
+              } catch (err) {
+                if (errorCode(err) !== 'ENOENT') {
+                  return deny('write', `write failed: ${messageOf(err)}`);
+                }
+              }
+              let output = content;
+              if (existing !== undefined) {
+                if (isBinary(existing)) {
+                  return deny('write', `write refused: '${label}' is a binary file`);
+                }
+                const text = decodeUtf8(existing);
+                if (text === undefined) {
+                  return deny('write', `write refused: '${label}' is not valid UTF-8`);
+                }
+                const prior = readState.get(effective);
+                if (prior === undefined) {
+                  return deny(
+                    'write',
+                    `write refused: '${label}' must be read before it is overwritten`,
+                  );
+                }
+                if (prior.sha256 !== sha256(existing)) {
+                  return deny(
+                    'write',
+                    `write refused: '${label}' changed since it was read; read it again`,
+                  );
+                }
+                // Preserve the existing file's BOM and line-ending convention.
+                output = restoreTextStyle(
+                  toLf(stripBom(content)),
+                  text.startsWith(BOM),
+                  dominantLineEnding(text),
+                );
+              }
+              try {
+                await writeFile(effective, output, 'utf8');
+              } catch (err) {
+                return deny('write', `write failed: ${messageOf(err)}`);
+              }
+              await rememberRead(effective, Buffer.from(output, 'utf8'));
+              const capped = capOutput(
+                `wrote '${label}': ${Buffer.byteLength(output, 'utf8')} bytes`,
+                fileCfg.maxOutputChars,
               );
-            }
-            if (prior.sha256 !== sha256(existing)) {
-              return deny(
-                'write',
-                `write refused: '${label}' changed since it was read; read it again`,
-              );
-            }
-            // Preserve the existing file's BOM and line-ending convention.
-            output = restoreTextStyle(
-              toLf(stripBom(content)),
-              text.startsWith(BOM),
-              dominantLineEnding(text),
-            );
-          }
-          try {
-            await writeFile(effective, output, 'utf8');
-          } catch (err) {
-            return deny('write', `write failed: ${messageOf(err)}`);
-          }
-          await rememberRead(effective, Buffer.from(output, 'utf8'));
-          const capped = capOutput(
-            `wrote '${label}': ${Buffer.byteLength(output, 'utf8')} bytes`,
-            fileCfg.maxOutputChars,
-          );
-          return { ok: true, ...capped };
+              return { ok: true, ...capped };
+            },
+          };
         });
       },
     };
@@ -1272,6 +1898,11 @@ export function buildTools(
 
   if (writeTool !== undefined) tools.push(writeTool);
 
+  // Keep the four established tools ahead of search tools so a constrained
+  // prompt budget never hides the sandbox-denial surface. The default budget
+  // includes both search tools; smaller explicit budgets retain prior order.
+  tools.push(...searchTools);
+
   // Sandbox gate for the WRITE tools lives INSIDE their executors (read-only
   // keeps `read`, denies edit/write/bash with the documented reason — the
   // tools stay on the surface so the denial is observable, per the
@@ -1280,3 +1911,55 @@ export function buildTools(
   // R4: maxTools is DATA — slice the surface to the configured count.
   return tools.slice(0, promptBudget.maxTools);
 }
+
+// ---------------------------------------------------------------------------
+// The rg capability probe (harness layer owns the clock)
+// ---------------------------------------------------------------------------
+
+/** The minimum ripgrep the search tools need at runtime (CI pins 15.2.0 separately). */
+export const RG_MINIMUM_VERSION = '11.0.0';
+
+/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). */
+export const parseRgVersion = (line: string | undefined): string | undefined => {
+  const match = /^ripgrep (\d+\.\d+\.\d+)/.exec(line ?? '');
+  return match?.[1];
+};
+
+/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. */
+export const versionAtLeast = (found: string, minimum: string): boolean => {
+  const parse = (v: string): [number, number, number] => {
+    const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
+    return [major ?? 0, minor ?? 0, patch ?? 0];
+  };
+  const [fm, fn, fp] = parse(found);
+  const [tm, tn, tp] = parse(minimum);
+  return fm !== tm ? fm > tm : fn !== tn ? fn > tn : fp >= tp;
+};
+
+export type RgProbeOutcome =
+  | { ok: true; version: string }
+  | { ok: false; reason: 'absent' | 'old'; found?: string };
+
+/**
+ * The production rg probe — HARNESS LAYER, which owns the clock legally
+ * (`runArgvCommand`'s timeoutMs kills the process group; src/driver/** owns
+ * no setTimeout/AbortController per the I8 hygiene rule). ONE bounded
+ * `rg --version` child with a 5s process-group timeout, cancellation via
+ * the run's signal. Resolves to the outcome only — never the binary path.
+ * Drivers inject this as their `resolveRg` default.
+ */
+export const probeRgVersion = (signal?: AbortSignal): Promise<RgProbeOutcome> =>
+  runArgvCommand('rg', ['--version'], {
+    env: buildChildEnv(process.env),
+    cwd: process.cwd(),
+    maxBytes: 4096,
+    timeoutMs: 5_000,
+    ...(signal === undefined ? {} : { signal }),
+  }).then((outcome): RgProbeOutcome => {
+    if (outcome.kind !== 'exit' || outcome.code !== 0) return { ok: false, reason: 'absent' };
+    const version = parseRgVersion(outcome.stdout.split('\n')[0]);
+    if (version === undefined) return { ok: false, reason: 'absent' };
+    return versionAtLeast(version, RG_MINIMUM_VERSION)
+      ? { ok: true, version }
+      : { ok: false, reason: 'old', found: version };
+  });

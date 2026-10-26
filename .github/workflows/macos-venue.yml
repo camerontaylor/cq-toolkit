@@ -33,6 +33,7 @@ on:
       - 'src/shared/**'
       - 'scripts/**'
       - '.github/actions/static-gate/**'
+      - '.github/actions/install-ripgrep/**'
       - .github/workflows/macos-venue.yml
   workflow_dispatch:
 

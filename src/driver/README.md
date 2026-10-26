@@ -104,6 +104,26 @@ the frozen `ToolPolicy` filters the surface per-op (allowlist default /
 unrestricted / none); every harness denial is both the tool's output text
 and a verbatim `{ tool, reason }` entry in `WorkerResult.denials`.
 
+rg capability seam (per-lane): the ai-sdk lane is the ONLY lane that
+populates `WorkerResult.capabilities.rg` and `WorkerResult.advisories` —
+every other lane leaves both undefined (the conformance suite accepts the
+absent fields). The probe is injected via the runtime-only constructor
+option `resolveRg` (async, bounded `rg --version` child, cancellation
+honored; NEVER HarnessConfig/Zod data, and the resolved binary path is
+never reported). One probe per RUN — memoized on the run's promise, shared
+by search-tool withholding and the result record, never per selection:
+
+- `rg` present at >= the documented minimum (`RG_MINIMUM_VERSION`, 15.2.0):
+  `capabilities.rg = { available: true, version, minimum, probe: 'ok' }`;
+  grep/glob stay on the surface; no advisory.
+- `rg` absent or too old: `capabilities.rg = { available: false, minimum,
+probe: 'absent' | 'old', found? (the too-old version) }`; grep/glob are
+  WITHHELD from the surface and `advisories` carries exactly
+  `"search tools unavailable: ripgrep not found"` or
+  `"search tools unavailable: ripgrep older than minimum 15.2.0"`.
+- A run whose ToolPolicy does not request grep never probes and records
+  nothing (the distinguishable not-configured state).
+
 Boundary caveat (named in the harness tools header): the harness containment
 is lexical and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
 command can plant a symlink pointing outside the workspace. read/edit

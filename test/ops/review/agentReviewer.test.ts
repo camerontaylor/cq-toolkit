@@ -49,7 +49,10 @@ describe('runAgentReviewer', () => {
         workspace: { path: string };
         outputSchema?: unknown;
       }) => {
-        expect(invocation.toolPolicy).toEqual({ mode: 'none', allow: [] });
+        expect(invocation.toolPolicy).toEqual({
+          mode: 'allowlist',
+          allow: ['read', 'grep', 'glob'],
+        });
         expect(invocation.sandboxPolicy.level).toBe('read-only');
         expect(invocation.workspace.path).toBe(resolve('.'));
         expect(invocation.outputSchema).toBeDefined();
@@ -85,6 +88,37 @@ describe('runAgentReviewer', () => {
     });
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.value.findings[0]?.severity).toBe('major');
+  });
+
+  it('keeps read available while explicitly disabling search tools', async () => {
+    const run = vi.fn(async (invocation: { toolPolicy: { allow: string[]; mode?: string } }) => {
+      expect(invocation.toolPolicy).toEqual({ mode: 'allowlist', allow: ['read'] });
+      return {
+        stopReason: 'complete' as const,
+        structuredOutput: { findings: [] },
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+      };
+    });
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: { run },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    await runAgentReviewer(drivers, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 1000,
+      searchTools: false,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
   });
 
   it('uses the minor fallback for unmapped severities and omits absent location fields', async () => {
@@ -501,3 +535,145 @@ it.each(['entry', 'running'] as const)(
     else expect(signal?.aborted).toBe(true);
   },
 );
+
+describe('rg evidence folding into AgentReviewReport', () => {
+  const baseInput = {
+    repoRoot: '.',
+    branch: 'review-fixture',
+    head: 'abc123',
+    scanSecrets: cleanScan,
+    diff: 'diff',
+    role: { provider: 'mock', model: 'mock' },
+    maxTokens: 500,
+    wallMs: 1000,
+    severityMap: { high: 'major', medium: 'minor' },
+  } as const;
+  const driversOf = (run: ReturnType<typeof vi.fn>): DriverFactory =>
+    ({
+      resolve: vi.fn(() => ({
+        driver: { run },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    }) as unknown as DriverFactory;
+
+  it('folds capabilities + advisories into the report on SUCCESS (deduplicated across partitions)', async () => {
+    let calls = 0;
+    const run = vi.fn(async () => {
+      calls++;
+      return {
+        stopReason: 'complete' as const,
+        structuredOutput: { findings: [] },
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        capabilities: {
+          rg: { available: false, found: '10.5.0', minimum: '11.0.0', probe: 'old' as const },
+        },
+        advisories:
+          calls === 1
+            ? ['search tools unavailable: ripgrep older than minimum 11.0.0']
+            : [
+                'search tools unavailable: ripgrep not found',
+                'search tools unavailable: ripgrep older than minimum 11.0.0',
+              ],
+      };
+    });
+    const result = await runAgentReviewer(driversOf(run), {
+      ...baseInput,
+      // Force TWO partitions so the dedupe path is exercised.
+      components: [
+        { component: 'diff-a', path: 'a.diff', text: 'a' },
+        { component: 'diff-b', path: 'b.diff', text: 'b' },
+      ],
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.capabilities?.rg).toMatchObject({ available: false, probe: 'old' });
+    expect(result.value.advisories).toEqual([
+      'search tools unavailable: ripgrep older than minimum 11.0.0',
+      'search tools unavailable: ripgrep not found',
+    ]);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the evidence on a BLOCKED result (withheld search visible even when the run does not complete)', async () => {
+    const run = vi.fn(async () => ({
+      stopReason: 'error' as const,
+      usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      error: 'provider exploded',
+      capabilities: { rg: { available: false, minimum: '11.0.0', probe: 'absent' as const } },
+      advisories: ['search tools unavailable: ripgrep not found'],
+    }));
+    const result = await runAgentReviewer(driversOf(run), baseInput);
+    expect(result.status).toBe('needs-human');
+    expect(result.report?.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.report?.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+});
+
+describe('rg evidence folding — budget and invalid post-settle returns', () => {
+  const baseInput = {
+    repoRoot: '.',
+    branch: 'review-fixture',
+    head: 'abc123',
+    scanSecrets: cleanScan,
+    diff: 'diff',
+    role: { provider: 'mock', model: 'mock' },
+    maxTokens: 500,
+    wallMs: 1000,
+    severityMap: { high: 'major', medium: 'minor' },
+  } as const;
+  const driversOf = (run: ReturnType<typeof vi.fn>): DriverFactory =>
+    ({
+      resolve: vi.fn(() => ({
+        driver: { run },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    }) as unknown as DriverFactory;
+  const evidenceOnly = {
+    capabilities: { rg: { available: false, minimum: '11.0.0', probe: 'absent' as const } },
+    advisories: ['search tools unavailable: ripgrep not found'],
+  };
+  const baseResult = {
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+  };
+
+  it('budget-exhausted return carries the evidence', async () => {
+    let calls = 0;
+    const run = vi.fn(async () => {
+      calls++;
+      if (calls === 1)
+        return {
+          stopReason: 'complete' as const,
+          structuredOutput: {
+            findings: [{ file: 'a', line: 1, rule: 'r', severity: 'high', text: 'burn' }],
+          },
+          usage: { input: 400, output: 200, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          ...evidenceOnly,
+        };
+      return { stopReason: 'budget' as const, ...evidenceOnly };
+    });
+    const result = await runAgentReviewer(driversOf(run), baseInput);
+    expect(result.status).toBe('budget-exhausted');
+    expect(result.report?.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.report?.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+
+  it('invalid structured output return carries the evidence', async () => {
+    const run = vi.fn(async () => ({
+      stopReason: 'complete' as const,
+      structuredOutput: { findings: 'not-an-array' },
+      ...baseResult,
+      ...evidenceOnly,
+    }));
+    const result = await runAgentReviewer(driversOf(run), baseInput);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+});

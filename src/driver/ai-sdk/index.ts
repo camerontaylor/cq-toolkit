@@ -206,12 +206,11 @@ import type {
   LanguageModelUsage,
   ModelMessage,
   StopCondition,
+  Tool,
   ToolSet,
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
-import { relative, resolve } from 'node:path';
-import { realpath } from 'node:fs/promises';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -219,10 +218,15 @@ import { createDeepSeek } from '@ai-sdk/deepseek';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { buildTools, canonicalToolName } from '../../harness/tools.js';
+import {
+  buildTools,
+  canonicalToolName,
+  probeRgVersion,
+  RG_MINIMUM_VERSION as HARNESS_RG_FLOOR,
+} from '../../harness/tools.js';
 import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
-import type { ToolkitTool } from '../../harness/tools.js';
+import type { ToolkitTool, ToolExecuteOptions } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
@@ -283,8 +287,40 @@ export const DEFAULT_MAX_STEPS = 40;
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
+/**
+ * The minimum ripgrep the search tools need at runtime: 11.0.0 (the CI
+ * installer pins a newer 15.2.0 separately — that is the installer's
+ * constant, not this driver's; 14.x and every 11+ build SERVE, never
+ * "below minimum"). Flag floor is 0.10.0 — upstream CHANGELOG #0100
+ * (2018-09-07) added --json (feature #244), and 0.10.0's src/app.rs already
+ * carries every flag both invocations use (`--files --no-config --hidden
+ * --color=never --null --glob --` and `--json --max-count -e --`); no newer
+ * flag raises it. The BEHAVIOR floor is 11.0.0 (CHANGELOG #1100,
+ * 2019-04-15): non-fatal search errors became exit 2 even with matches
+ * found — before 11, a partial-error search could exit 0/1 with
+ * incomplete results, which the grep tool would wrongly serve (it denies
+ * exit codes other than 0/1 precisely to refuse error-partial output).
+ * Sources: github.com/BurntSushi/ripgrep/blob/15.2.0/CHANGELOG.md
+ * #1100-2019-04-15 and #0100-2018-09-07. Boundary tests: 10.x rejects,
+ * 11.0.0 and 14.1 accept.
+ */
+export const RG_MINIMUM_VERSION = HARNESS_RG_FLOOR;
+
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
+  /**
+   * The ripgrep capability probe (rg seam): runtime-only, NEVER HarnessConfig
+   * data. The default shells `rg --version` once per RUN (memoized on the
+   * run's promise — shared by manifest/descriptor selection and the result
+   * capability record; not per selection) with a bounded child process that
+   * honors the cancellation signal. The resolved binary path is never
+   * reported — only the outcome. Tests inject a deterministic resolver.
+   */
+  resolveRg?: (
+    signal?: AbortSignal,
+  ) => Promise<
+    { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
+  >;
   /** Runs before every provider send, including retries, repairs and tool-loop steps. */
   beforeRequest?: (
     text: string,
@@ -360,6 +396,8 @@ export class AiSdkDriver implements Driver {
   private readonly strictTokenReservationHook:
     | ((receipt: WireReservation) => void | Promise<void>)
     | undefined;
+  /** Runtime rg probe seam (injected, async, never serializable config). */
+  private readonly resolveRg: NonNullable<AiSdkDriverOptions['resolveRg']>;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -378,6 +416,10 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
+    // The default probe lives in the HARNESS layer (src/harness/tools.ts),
+    // which owns the clock legally (runArgvCommand timeoutMs); the driver owns
+    // no timer (I8 hygiene) and only forwards the run's governed signal.
+    this.resolveRg = options.resolveRg ?? probeRgVersion;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -578,22 +620,81 @@ export class AiSdkDriver implements Driver {
       sandboxPolicy.level,
       runGate,
     );
-    const selected = selectTools(harnessTools, toolPolicy);
+    // The rg capability probe: ONE probe per RUN, decided from the CANDIDATE
+    // selection (harness surface ∩ policy) — probe iff grep OR glob is
+    // actually offered, so a glob-only allowlist, a sandbox/harness that
+    // withholds search, and an unrestricted policy are all handled without a
+    // bypass and without probing when search is unavailable anyway. Absent/
+    // old rg then filters BOTH tools from the candidates. A selection without
+    // any search tool never probes (the distinguishable not-configured state).
+    const candidates = selectTools(harnessTools, toolPolicy);
+    const searchOffered = candidates.some((tool) => tool.name === 'grep' || tool.name === 'glob');
+    const rgProbe = searchOffered
+      ? await this.resolveRg(abortSignal).catch(() => ({
+          ok: false as const,
+          reason: 'absent' as const,
+        }))
+      : undefined;
+    const searchWithheld = rgProbe !== undefined && rgProbe.ok === false;
+    // rg capability seam: the evidence object attached to EVERY post-probe
+    // verdict from this run — success, repair success/failure, error, abort,
+    // budget — so consumers always see what the once-per-run probe observed.
+    const capabilityEvidence =
+      rgProbe === undefined
+        ? {}
+        : {
+            capabilities: {
+              rg:
+                rgProbe.ok === true
+                  ? {
+                      available: true,
+                      version: rgProbe.version,
+                      minimum: RG_MINIMUM_VERSION,
+                      probe: 'ok' as const,
+                    }
+                  : rgProbe.reason === 'old'
+                    ? {
+                        available: false,
+                        ...(rgProbe.found !== undefined ? { found: rgProbe.found } : {}),
+                        minimum: RG_MINIMUM_VERSION,
+                        probe: rgProbe.reason,
+                      }
+                    : {
+                        available: false,
+                        minimum: RG_MINIMUM_VERSION,
+                        probe: rgProbe.reason,
+                      },
+            },
+            ...(searchWithheld
+              ? {
+                  advisories: [
+                    rgProbe.ok === false && rgProbe.reason === 'old'
+                      ? `search tools unavailable: ripgrep older than minimum ${RG_MINIMUM_VERSION}`
+                      : 'search tools unavailable: ripgrep not found',
+                  ],
+                }
+              : {}),
+          };
+    const selected = searchWithheld
+      ? candidates.filter((tool) => tool.name !== 'grep' && tool.name !== 'glob')
+      : candidates;
     const system = this.composeSystemPrompt(prompt, selected.length > 0);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {
       const descriptor = {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
-        execute: async (input: unknown): Promise<string> =>
-          runTool(harnessTool, input, store, record, denials, guard),
+        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> =>
+          runTool(harnessTool, input, store, record, denials, guard, {
+            signal: options.abortSignal,
+          }),
       };
-      toolSet[harnessTool.name] = tool(descriptor);
+      toolSet[harnessTool.name] = tool(descriptor as Tool);
       // One-release aliases (the pre-F1 `run` name for `bash`) are registered
       // under their own names so a model or prompt that still calls them
       // reaches the canonical executor and denial vocabulary.
-      for (const alias of harnessTool.aliases ?? []) {
-        toolSet[alias] = tool(descriptor);
+      for (const alias of ('aliases' in harnessTool ? harnessTool.aliases : undefined) ?? []) {
+        toolSet[alias] = tool(descriptor as Tool);
       }
     }
 
@@ -743,6 +844,7 @@ export class AiSdkDriver implements Driver {
                 : undefined,
             responseHeaders: err.response?.headers,
             finishReason: err.finishReason ?? 'error',
+            capabilityEvidence,
             abortSignal,
             budget,
             model,
@@ -807,6 +909,7 @@ export class AiSdkDriver implements Driver {
             servedModel,
             responseHeaders: result.response.headers,
             finishReason,
+            capabilityEvidence,
             abortSignal,
             budget,
             model,
@@ -869,6 +972,8 @@ export class AiSdkDriver implements Driver {
         ...costField(this.pricing, { ...modelSpec, model: servedModel ?? modelSpec.model }, usage),
         sessionId: record.sessionId,
         denials,
+        // rg capability seam: evidence rides EVERY verdict (shared object).
+        ...capabilityEvidence,
         stopReason,
         ...(finishClass !== undefined
           ? {
@@ -894,6 +999,7 @@ export class AiSdkDriver implements Driver {
           usage: stepUsage,
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'aborted',
           ...(signals !== undefined ? { providerSignals: signals } : {}),
         };
@@ -909,6 +1015,7 @@ export class AiSdkDriver implements Driver {
             usage: stepUsage,
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'budget',
             ...(signals !== undefined ? { providerSignals: signals } : {}),
           };
@@ -940,6 +1047,7 @@ export class AiSdkDriver implements Driver {
         usage: stepUsage,
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(`ai-sdk driver: run failed — ${describeError(err)}`),
         errorClass: classifyRunFailure(err),
@@ -988,6 +1096,8 @@ export class AiSdkDriver implements Driver {
     record: SessionRecord;
     modelSpec: ModelSpec;
     denials: ToolDenial[];
+    /** rg capability seam: the once-per-run probe evidence, attached to every miss-flow verdict. */
+    capabilityEvidence: Partial<WorkerResult>;
   }): Promise<WorkerResult> {
     const {
       outputSchema,
@@ -1007,6 +1117,7 @@ export class AiSdkDriver implements Driver {
       record,
       modelSpec,
       denials,
+      capabilityEvidence,
     } = inputs;
 
     /** Fold-in helper: verdict usage over BOTH calls, cost over the fold. */
@@ -1055,6 +1166,7 @@ export class AiSdkDriver implements Driver {
         ...verdictExtras(mainUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: mapped,
         ...verdictSignals(),
       };
@@ -1068,6 +1180,7 @@ export class AiSdkDriver implements Driver {
         ...verdictExtras(mainUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(
           `ai-sdk driver: the run ended with finishReason '${String(finishReason)}' before a schema-valid object (${rejection})`,
@@ -1089,6 +1202,7 @@ export class AiSdkDriver implements Driver {
           ...verdictExtras(mainUsage),
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'aborted',
           ...verdictSignals(),
         };
@@ -1098,6 +1212,7 @@ export class AiSdkDriver implements Driver {
         ...verdictExtras(mainUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(
           `ai-sdk driver: structured output invalid and the token budget leaves no room for the repair attempt — ${rejection}`,
@@ -1257,6 +1372,7 @@ export class AiSdkDriver implements Driver {
             ...repairVerdictExtras(totalUsage),
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'error',
             error: boundedErrorText(
               `ai-sdk driver: the repair attempt ended on the provider's terminal status (${String(repair.finishReason)})`,
@@ -1280,6 +1396,7 @@ export class AiSdkDriver implements Driver {
             ...verdictUsageOnly(totalUsage),
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'error',
             error: boundedErrorText(
               repairServedModel === undefined
@@ -1296,6 +1413,7 @@ export class AiSdkDriver implements Driver {
           ...repairVerdictExtras(totalUsage),
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: repairStop,
           ...repairSignals(),
         };
@@ -1305,6 +1423,7 @@ export class AiSdkDriver implements Driver {
         ...repairVerdictExtras(totalUsage),
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: 'error',
         error: boundedErrorText(
           `ai-sdk driver: structured output invalid after the repair attempt — ${rejection}; repair: ${repairRejection}`,
@@ -1335,6 +1454,7 @@ export class AiSdkDriver implements Driver {
             ...verdictExtras(totalUsage),
             sessionId: record.sessionId,
             denials,
+            ...capabilityEvidence,
             stopReason: 'budget',
             ...verdictSignals(),
           };
@@ -1344,6 +1464,7 @@ export class AiSdkDriver implements Driver {
           usage: totalUsage,
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'error',
           error: boundedErrorText(
             `ai-sdk driver: structured output invalid and the repair attempt was refused by the strict token ceiling for an infrastructure reason (${err.reason}) — ${err.message}`,
@@ -1385,6 +1506,7 @@ export class AiSdkDriver implements Driver {
           ...(errIdentity === 'match' ? verdictExtras(totalUsage) : { usage: totalUsage }),
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'error',
           error: boundedErrorText(
             `ai-sdk driver: structured output invalid after the repair attempt — ${rejection}; repair: ${describeError(err)}`,
@@ -1399,6 +1521,7 @@ export class AiSdkDriver implements Driver {
         usage: totalUsage,
         sessionId: record.sessionId,
         denials,
+        ...capabilityEvidence,
         stopReason: aborted ? 'aborted' : 'error',
         ...(!aborted
           ? {
@@ -1669,28 +1792,36 @@ async function runTool(
   record: SessionRecord,
   denials: ToolDenial[],
   guard?: AiSdkDriverOptions['beforeRequest'],
+  options?: ToolExecuteOptions,
 ): Promise<string> {
-  const result = await harnessTool.execute(input);
+  const result = await harnessTool.execute(input, options);
   if (guard !== undefined && result.ok) {
     const contents: { text: string; path?: string }[] = [{ text: result.output }];
-    if (harnessTool.name === 'read') {
-      const path = (input as { path?: unknown } | null)?.path;
-      if (typeof path !== 'string' || record.workspace === undefined)
-        throw new Error('read upload lacks source provenance');
-      const requested = resolve(record.workspace, path);
-      const actual = await realpath(requested);
-      for (const source of new Set([requested, actual]))
-        contents.push({
-          text: result.output,
-          path: relative(record.workspace, source).replaceAll('\\', '/'),
-        });
+    if (
+      harnessTool.name === 'read' &&
+      (record.workspace === undefined || (result.sourceContents?.length ?? 0) === 0)
+    ) {
+      throw new Error('read upload lacks source provenance');
     }
+    if (result.sourceContents !== undefined) contents.push(...result.sourceContents);
     await guard(result.output, contents);
   }
+  // The scan-only provenance (raw file text) must NOT persist: the tool
+  // result is JSON-stringified into the transcript and replayed verbatim on
+  // resume — sourceContents would put pre-cap-scan-only data past the output
+  // bounds and leak it to a later model turn. Strip it AFTER the guard, keep
+  // the guard itself unconditional (user-approved contract).
+  const persistable =
+    result.ok && result.sourceContents !== undefined
+      ? (() => {
+          const { sourceContents: _scanOnly, ...rest } = result;
+          return rest;
+        })()
+      : result;
   await store.appendMessage(record.sessionId, {
     role: 'tool',
     toolName: harnessTool.name,
-    content: JSON.stringify(result),
+    content: JSON.stringify(persistable),
     at: nowIso(),
   });
   if (result.ok) {

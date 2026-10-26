@@ -142,6 +142,16 @@ const PHASES: ReadonlyArray<{ sandbox: SandboxLevel; steps: readonly Step[] }> =
 const NOTE_BODY = 'hello note\n';
 const A_BODY = 'alpha\n';
 
+/** Mirror of the production read renderer (tools.ts): 6-wide line numbers under a `--- path ---` header. */
+const renderRead = (path: string, body: string): string => {
+  const lines = body.split(/\r\n|\n|\r/);
+  if (lines.at(-1) === '') lines.pop();
+  return [
+    '--- ' + path + ' ---',
+    ...lines.map((l, i) => `${String(i + 1).padStart(6)}: ${l}`),
+  ].join('\n');
+};
+
 // ---------------------------------------------------------------------------
 // Scratch + workspace helpers
 // ---------------------------------------------------------------------------
@@ -627,10 +637,10 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
           true,
           true,
         ]);
-        expect(texts[0]).toBe(NOTE_BODY);
-        expect(texts[1]).toBe(A_BODY);
+        expect(texts[0]).toBe(renderRead('note.txt', NOTE_BODY));
+        expect(texts[1]).toBe(renderRead('src/a.txt', A_BODY));
         expect(texts[2]).toBe("edited 'src/a.txt': replaced 1 occurrence");
-        expect(texts[3]).toBe('beta\n');
+        expect(texts[3]).toBe(renderRead('src/a.txt', 'beta\n'));
         expect(texts[4]).toBe("path not allowed by harness config allowlist: 'secret.txt'");
         expect(texts[5]).toBe("path escape: '../x' resolves outside the workspace");
         expect(texts[6]).toBe("path escape: '../x' resolves outside the workspace");
@@ -643,7 +653,11 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
           await expect(readFile(join(ws, 'src', 'a.txt'), 'utf8')).resolves.toBe('beta\n');
         }
       } else {
-        expect(texts).toEqual([NOTE_BODY, 'sandbox: read-only', 'sandbox: read-only']);
+        expect(texts).toEqual([
+          renderRead('note.txt', NOTE_BODY),
+          'sandbox: read-only',
+          'sandbox: read-only',
+        ]);
         expect(core.results.map((r) => r.isError === true)).toEqual([false, true, true]);
         for (const ws of [core.workspace, stdio.workspace, agent.workspace]) {
           await expect(readFile(join(ws, 'note.txt'), 'utf8')).resolves.toBe(NOTE_BODY);

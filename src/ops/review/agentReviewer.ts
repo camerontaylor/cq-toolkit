@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
 import type { DriverFactory } from '../../driver/factory.js';
+import type { WorkerResult } from '../../driver/types.js';
 import type { OpInvocation } from '../../driver/types.js';
 import type { OpResult } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
@@ -39,6 +40,7 @@ export interface AgentReviewerInput {
   role: { provider: string; model: string };
   maxTokens: number;
   wallMs: number;
+  searchTools?: boolean;
   signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
@@ -51,7 +53,13 @@ async function runPartition(
     onUsage: (usage: number) => void;
     onRequest: (serializedChars: number, decodedChars: number) => void;
   },
-): Promise<OpResult<{ findings: Finding[]; usage: number }>> {
+): Promise<
+  OpResult<{ findings: Finding[]; usage: number }> & {
+    /** Driver-observed capability evidence + advisories, when the driver surfaced them. */
+    capabilities?: WorkerResult['capabilities'];
+    advisories?: string[];
+  }
+> {
   if (input.signal?.aborted || currentJobContext()?.signal.aborted)
     return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   let resolved: ReturnType<DriverFactory['resolve']>;
@@ -86,7 +94,10 @@ async function runPartition(
   const invocation: OpInvocation = {
     prompt: input.diff,
     modelSpec: resolved.modelSpec,
-    toolPolicy: { mode: 'none', allow: [] },
+    toolPolicy: {
+      mode: 'allowlist',
+      allow: input.searchTools === false ? ['read'] : ['read', 'grep', 'glob'],
+    },
     sandboxPolicy: { level: 'read-only' },
     workspace: { path: resolve(input.repoRoot) },
     budget: { maxTokens: input.maxTokens },
@@ -149,8 +160,14 @@ async function runPartition(
       result.usage.cacheWrite +
       (result.usage.reasoning ?? 0),
   );
+  // rg capability seam: ONE evidence object spread into EVERY post-settle
+  // return (budget / needs-human / invalid / success) — no return drops it.
+  const evidence = {
+    ...(result.capabilities === undefined ? {} : { capabilities: result.capabilities }),
+    ...(result.advisories === undefined ? {} : { advisories: result.advisories }),
+  };
   if (result.stopReason !== 'complete') {
-    if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
+    if (result.stopReason === 'budget') return { status: 'budget-exhausted', ...evidence };
     // #484: carry the driver's failure detail (bounded + secret-redacted at
     // the seam) into the blocked reason the review log records — a bare
     // stop reason sent operators to the raw session log to find the cause.
@@ -158,15 +175,21 @@ async function runPartition(
     return {
       status: 'needs-human',
       reason: `agent review did not complete (${result.stopReason})${detail}`,
+      ...evidence,
     };
   }
   const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
     result.structuredOutput,
   );
   if (!parsed.success)
-    return { status: 'failed', error: 'agent review returned invalid structured output' };
+    return {
+      status: 'failed',
+      error: 'agent review returned invalid structured output',
+      ...evidence,
+    };
   return {
     status: 'ok',
+    ...evidence,
     value: {
       usage:
         result.usage.input +
@@ -192,8 +215,26 @@ export interface AgentReviewReport {
   findings: Finding[];
   usage: number;
   coverage: ReviewCoverage;
+  /**
+   * Non-fatal run notes folded from the driver results (rg capability
+   * seam): deduplicated, evidence-adjacent, never a verdict change. Present
+   * only when a driver observed something worth surfacing.
+   */
+  advisories?: string[];
+  /**
+   * The driver capability evidence behind the advisories (rg seam), when any
+   * partition's driver observed it. One record — every partition probes the
+   * same host, so the last observation wins; consumers needing per-partition
+   * detail read the session log.
+   */
+  capabilities?: WorkerResult['capabilities'];
 }
-export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
+export type AgentReviewResult = OpResult<AgentReviewReport> & {
+  report?: AgentReviewReport;
+  /** rg capability seam: evidence rides the top level too when a partition's driver observed it (failed returns carry it via runPartition). */
+  capabilities?: WorkerResult['capabilities'];
+  advisories?: string[];
+};
 
 async function scanComplete(
   scanner: DiffSecretScanner,
@@ -277,6 +318,14 @@ export async function runAgentReviewer(
           },
         });
         ensureActive();
+        // rg capability seam: fold the partition's driver-observed evidence
+        // into the report — advisories deduplicated, capabilities last-wins
+        // (every partition probes the same host). Blocked results keep the
+        // evidence too: the fold precedes the blocked return so a withheld
+        // search tool is visible even on a run that did not complete.
+        if (result.capabilities !== undefined) report.capabilities = result.capabilities;
+        if (result.advisories !== undefined)
+          report.advisories = [...new Set([...(report.advisories ?? []), ...result.advisories])];
         if (result.status !== 'ok') return { ...result, report };
         for (const finding of result.value.findings) {
           const same = (other: Finding) =>
