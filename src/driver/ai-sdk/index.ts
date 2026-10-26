@@ -434,7 +434,6 @@ export class AiSdkDriver implements Driver {
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
-    const effectiveStepCap = Math.min(budget.maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS);
     const strictBudget = budget.strictTokenBudget;
     // The run signal is read ONCE here; both the ENTRY and LATE checks read the
     // SAME live RunOptions.signal through `signalAborted`.
@@ -453,6 +452,17 @@ export class AiSdkDriver implements Driver {
         stopReason: 'aborted',
       };
     }
+
+    if (
+      budget.maxSteps !== undefined &&
+      (!Number.isInteger(budget.maxSteps) || budget.maxSteps <= 0)
+    ) {
+      throw new DispatchError(
+        'config',
+        `ai-sdk driver: budget.maxSteps must be a positive integer, got ${String(budget.maxSteps)}`,
+      );
+    }
+    const effectiveStepCap = Math.min(budget.maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS);
 
     // --- Strict pre-request ceiling capability, resolved + REFUSED BEFORE the
     // provider factory: the capability must be INJECTED (trusted operator

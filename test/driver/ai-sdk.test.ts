@@ -354,6 +354,27 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 }
 
 describe('ai-sdk driver specifics (mock model)', () => {
+  test.each([0, -1, 2.5, NaN, Infinity])(
+    'rejects invalid maxSteps=%s before provider resolution, with abort precedence',
+    async (maxSteps) => {
+      const provider = vi.fn(() => modelFor({ kind: 'reply', text: 'must never run' }));
+      const driver = new AiSdkDriver({ providers: { mock: provider } });
+      await expect(driver.run(invocation({ budget: { maxSteps } }))).rejects.toMatchObject({
+        name: 'DispatchError',
+        message: `ai-sdk driver: budget.maxSteps must be a positive integer, got ${String(maxSteps)}`,
+      });
+      expect(provider).not.toHaveBeenCalled();
+      const controller = new AbortController();
+      controller.abort();
+      const aborted = await driver.run(invocation({ budget: { maxSteps } }), {
+        signal: controller.signal,
+      });
+      expect(aborted.stopReason).toBe('aborted');
+      expect(aborted.steps).toBe(0);
+      expect(provider).not.toHaveBeenCalled();
+    },
+  );
+
   test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any provider call (PR #238 review round 2)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-preflight-'));
     try {
