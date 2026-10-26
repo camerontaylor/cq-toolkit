@@ -1592,7 +1592,7 @@ it('threads review.size thresholds into the reviewer instructions', async () => 
         components.map((component) => ({ component: component.component, hits: [] })),
     })({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
-    expect(prompts.join('\n')).toContain('Up to about 15 lookups');
+    expect(prompts.join('\n')).toContain('Prioritise contracts other code depends on');
   } finally {
     await repo.cleanup();
   }

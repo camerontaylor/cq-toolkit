@@ -147,7 +147,7 @@ it('uses one tool-aware read-only session with exact original-component delivery
     toolPolicy: { mode: 'allowlist', allow: ['read', 'grep', 'glob'] },
     sandboxPolicy: { level: 'read-only' },
     workspace: { path: '/fixture/repo' },
-    budget: { maxTokens: 10_000, maxSteps: 15 },
+    budget: { maxTokens: 10_000, maxSteps: 4 },
     outputSchema: { name: 'review.agent/v3' },
   });
 });

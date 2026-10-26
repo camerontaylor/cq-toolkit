@@ -15,10 +15,17 @@ const PRIOR_FINDINGS_CAP = 4_000;
 
 const ALL_EXCLUDED_ADVISORY = 'agent review covered no content: all components excluded';
 
+/**
+ * Model steps per tier, a ceiling under `session.maxSteps`: a small or medium
+ * diff needs a few targeted lookups, not the full loop (a 4-file doc change once burned
+ * all 15 steps on unrelated reads). The final step is the JSON answer.
+ */
+export const REVIEW_TIER_STEPS = { small: 4, medium: 6 } as const;
+
 const SIZE_INSTRUCTIONS = {
-  small: "Most reviews need 0-5 lookups. Check the changed code's direct uses, then answer.",
+  small: "Most reviews need 0-2 lookups. Check the changed code's direct uses, then answer.",
   medium:
-    'Up to about 15 lookups. Prioritise contracts other code depends on: exported functions, schemas, config keys, CLI flags, persisted formats. Use grep to find their users.',
+    'Prioritise contracts other code depends on: exported functions, schemas, config keys, CLI flags, persisted formats. Use grep to find their users, then answer.',
 } as const;
 
 const DOCS_CONFIG_INSTRUCTION =
@@ -75,6 +82,8 @@ export interface PlannedReviewSession {
   prompt: string;
   placements: ReviewPlacement[];
   tools: boolean;
+  /** Tier-scaled step budget for a tool session; absent for tool-less partitions. */
+  maxSteps?: number;
 }
 
 export interface ReviewPlan {
@@ -340,7 +349,7 @@ function buildSessionPrompt(input: {
   builder.line(SIZE_INSTRUCTIONS[input.tier]);
   for (const instruction of input.context.kindInstructions) builder.line(instruction);
   builder.line(
-    `You may take at most ${String(input.maxSteps)} model steps in total, including tool calls; reserve the final step for your JSON answer.`,
+    `You have a budget of ${String(input.maxSteps)} model steps in total, including tool calls; the last step has no tools and is your JSON answer. Use tools only for targeted verification of the changed code and its direct callers; do not explore the repository broadly. Stop and answer as soon as the changed contracts and their callers are checked.`,
   );
   builder.line(FINDINGS_INSTRUCTION);
   builder.line();
@@ -517,6 +526,7 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     );
 
   const tier = withinSmall ? 'small' : 'medium';
+  const maxSteps = Math.min(bounds.maxSteps, REVIEW_TIER_STEPS[tier]);
   const built = buildSessionPrompt({
     head: input.head,
     base: input.base,
@@ -525,7 +535,7 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     components: reviewed,
     context,
     tier,
-    maxSteps: bounds.maxSteps,
+    maxSteps,
   });
   if (built.prompt.length > bounds.maxInputChars)
     return partition(
@@ -546,7 +556,13 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
   return {
     coverage,
     sessions: [
-      { id: 'session-1', prompt: built.prompt, placements: built.placements, tools: true },
+      {
+        id: 'session-1',
+        prompt: built.prompt,
+        placements: built.placements,
+        tools: true,
+        maxSteps,
+      },
     ],
     advisories: [],
     limitations,

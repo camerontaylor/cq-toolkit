@@ -136,7 +136,7 @@ describe('runAgentReviewer v3 session engine', () => {
     });
     expect(invocation.sandboxPolicy).toEqual({ level: 'read-only' });
     expect(invocation.workspace).toEqual({ path: resolve('/fixture/repo') });
-    expect(invocation.budget).toEqual({ maxTokens: 500, maxSteps: 15 });
+    expect(invocation.budget).toEqual({ maxTokens: 500, maxSteps: 4 });
     expect(invocation.outputSchema).toMatchObject({ name: 'review.agent/v3' });
     expect(invocation.prompt).toContain(smallComponent.text);
     expect(invocation.prompt).not.toContain('receipt:');

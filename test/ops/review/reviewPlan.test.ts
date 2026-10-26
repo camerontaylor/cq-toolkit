@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { REVIEW_SESSION_DEFAULTS } from '../../../src/ops/analyze/cqConfig.js';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type { ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import {
+  REVIEW_TIER_STEPS,
   createReviewPlan,
   type CreateReviewPlanInput,
   type PlannedReviewSession,
@@ -124,9 +126,9 @@ describe('createReviewPlan session mode', () => {
     expect(session!.prompt).toContain('## Intent');
     expect(session!.prompt).toContain('Align the reviewer prompt');
     expect(session!.prompt).toContain('## Changed files');
-    expect(session!.prompt).toContain('Most reviews need 0-5 lookups');
-    expect(session!.prompt).toContain('You may take at most 15 model steps');
-    expect(session!.prompt).toContain('reserve the final step for your JSON answer');
+    expect(session!.prompt).toContain('Most reviews need 0-2 lookups');
+    expect(session!.prompt).toContain('budget of 4 model steps');
+    expect(session!.prompt).toContain('the last step has no tools and is your JSON answer');
     expect(session!.prompt).toContain('"findings"');
     expect(session!.prompt).not.toMatch(/receipt/i);
     expect(plan.advisories).toEqual([]);
@@ -176,7 +178,7 @@ describe('createReviewPlan session mode', () => {
     const defaults = createReviewPlan(planInput(components));
     expect(defaults.coverage.mode).toBe('session');
     expect(defaults.coverage.modeReason).toContain('medium');
-    expect(defaults.sessions[0]!.prompt).toContain('Up to about 15 lookups');
+    expect(defaults.sessions[0]!.prompt).toContain('Prioritise contracts other code depends on');
   });
 
   it('uses the documented small and medium tiers with configurable thresholds', () => {
@@ -191,7 +193,7 @@ describe('createReviewPlan session mode', () => {
     );
     expect(medium.coverage.mode).toBe('session');
     expect(medium.coverage.modeReason).toContain('medium');
-    expect(medium.sessions[0]!.prompt).toContain('Up to about 15 lookups');
+    expect(medium.sessions[0]!.prompt).toContain('Prioritise contracts other code depends on');
 
     const small = createReviewPlan(
       planInput([tracked('src/a.ts', ['a', 'b'])], {
@@ -326,6 +328,34 @@ describe('createReviewPlan session mode', () => {
         placement.offset + (placement.end - placement.start),
       ),
     ).toBe(text);
+  });
+});
+
+describe('createReviewPlan session step budget', () => {
+  const small = tracked('src/a.ts', ['export const a = 1;']);
+  const medium = tracked(
+    'src/big.ts',
+    Array.from({ length: 400 }, (_, index) => `export const v${String(index)} = ${String(index)};`),
+  );
+
+  it('gives a small change the small-tier budget and says so in the prompt', () => {
+    const session = createReviewPlan(planInput([small])).sessions[0]!;
+    expect(session.maxSteps).toBe(REVIEW_TIER_STEPS.small);
+    expect(session.maxSteps).toBeLessThan(REVIEW_SESSION_DEFAULTS.maxSteps);
+    expect(session.prompt).toContain(`budget of ${String(REVIEW_TIER_STEPS.small)} model steps`);
+    expect(session.prompt).toContain('Stop and answer');
+  });
+
+  it('gives a medium change the larger medium-tier budget', () => {
+    const session = createReviewPlan(planInput([medium])).sessions[0]!;
+    expect(session.maxSteps).toBe(REVIEW_TIER_STEPS.medium);
+    expect(session.prompt).toContain(`budget of ${String(REVIEW_TIER_STEPS.medium)} model steps`);
+  });
+
+  it('never exceeds a lower configured session.maxSteps', () => {
+    const session = createReviewPlan(planInput([small], { session: { maxSteps: 2 } })).sessions[0]!;
+    expect(session.maxSteps).toBe(2);
+    expect(session.prompt).toContain('budget of 2 model steps');
   });
 });
 

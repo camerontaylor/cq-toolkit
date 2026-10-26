@@ -33,6 +33,7 @@ export interface PlannedReviewSession {
   prompt: string;
   placements: { component: string; start: number; end: number; offset: number }[];
   tools: boolean;
+  maxSteps?: number;
 }
 
 /** Every scan input needs an explicit, clean verdict; an empty response proves nothing. */
@@ -210,7 +211,7 @@ export async function runReviewSession(
       },
       sandboxPolicy: { level: 'read-only' },
       workspace: { path: resolve(input.repoRoot) },
-      budget: { maxTokens: input.maxTokens, maxSteps: input.maxSteps },
+      budget: { maxTokens: input.maxTokens, maxSteps: plan.maxSteps ?? input.maxSteps },
       outputSchema: toOutputSchema('review.agent/v3', OutputSchema),
     },
     { signal },

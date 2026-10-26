@@ -777,6 +777,43 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('a small maxSteps budget is honoured: tools on every step but the last, which is tool-less and answers', async () => {
+    const toolCounts: number[] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        const tools = options.tools?.length ?? 0;
+        toolCounts.push(tools);
+        return tools > 0
+          ? toolCallResult('read', { path: 'absent.txt' })
+          : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-small-steps-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { maxSteps: 3 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/small-steps/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      expect(result.steps).toBe(3);
+      expect(toolCounts.map((count) => count > 0)).toEqual([true, true, false]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('maxSteps=1 disables tools on the first main step and counts the repair step separately', async () => {
     const toolCounts: number[] = [];
     const hookKinds: string[] = [];
