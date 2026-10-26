@@ -1009,6 +1009,8 @@ export function buildTools(
       '--color=never',
       '--null',
       ...(fileGlob === undefined ? [] : ['--glob', fileGlob]),
+      '--glob',
+      '!.git',
       '--',
       scopeArg,
     ];
@@ -1138,6 +1140,7 @@ export function buildTools(
   };
 
   const tools: ToolkitTool[] = [];
+  const searchTools: ToolkitTool[] = [];
   // `write` is built before `bash` (so the read/edit/write helpers stay
   // together) but pushed AFTER it: the pre-F1 surface was read/edit/run, so
   // an explicit `maxTools: 3` must still yield read/edit/bash.
@@ -1240,7 +1243,7 @@ export function buildTools(
   // Search is exposed only in a read-only sandbox. The per-op ToolPolicy is
   // still the authority that selects these descriptors for a model request.
   if (cfg.tools.read.enabled && sandbox === 'read-only') {
-    tools.push({
+    searchTools.push({
       name: 'grep',
       description: capDescription(
         'Search workspace text for a regex. Input: { pattern, path?, glob? }. ' +
@@ -1436,7 +1439,7 @@ export function buildTools(
       },
     });
 
-    tools.push({
+    searchTools.push({
       name: 'glob',
       description: capDescription(
         'List workspace files matching a glob. Input: { pattern, path? }. ' +
@@ -1817,6 +1820,11 @@ export function buildTools(
   }
 
   if (writeTool !== undefined) tools.push(writeTool);
+
+  // Keep the four established tools ahead of search tools so a constrained
+  // prompt budget never hides the sandbox-denial surface. The default budget
+  // includes both search tools; smaller explicit budgets retain prior order.
+  tools.push(...searchTools);
 
   // Sandbox gate for the WRITE tools lives INSIDE their executors (read-only
   // keeps `read`, denies edit/write/bash with the documented reason — the

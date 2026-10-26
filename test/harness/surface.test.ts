@@ -201,6 +201,29 @@ describe('buildManifest', () => {
     expect(built?.tools).toEqual(['read', 'grep', 'glob']);
   });
 
+  test('keeps the established tools within the budget before read-only search tools', () => {
+    const workspace = scratch();
+    const tools = buildTools(defaultHarnessConfig, workspace, 'read-only');
+    expect(tools.map(({ name }) => name)).toEqual([
+      'read',
+      'edit',
+      'bash',
+      'write',
+      'grep',
+      'glob',
+    ]);
+    const tightBudget: HarnessConfig = {
+      ...defaultHarnessConfig,
+      promptBudget: { ...defaultHarnessConfig.promptBudget, maxTools: 4 },
+    };
+    expect(buildTools(tightBudget, workspace, 'read-only').map(({ name }) => name)).toEqual([
+      'read',
+      'edit',
+      'bash',
+      'write',
+    ]);
+  });
+
   test('an empty selection yields no manifest (and touches no filesystem)', async () => {
     await expect(
       buildManifest({
@@ -420,6 +443,11 @@ describe('isHarnessDenial against real denials', () => {
         old_string: 'a',
         new_string: 'b',
       }),
+      sandboxBash: await tool(workspace, 'read-only', 'bash').execute({ command: 'echo x' }),
+      sandboxWrite: await tool(workspace, 'read-only', 'write').execute({
+        file_path: 'new.txt',
+        content: 'new',
+      }),
       invalidInput: await tool(workspace, 'workspace-write', 'read').execute({ nope: 1 }),
       lexicalEscape: await tool(workspace, 'workspace-write', 'read').execute({ path: '../x' }),
       symlinkEscape: await tool(workspace, 'workspace-write', 'read').execute({ path: 'link.txt' }),
@@ -460,6 +488,8 @@ describe('isHarnessDenial against real denials', () => {
       return result !== undefined && !result.ok ? result.denial.reason : '';
     };
     expect(reasonOf('sandboxEdit')).toBe('sandbox: read-only');
+    expect(reasonOf('sandboxBash')).toBe('sandbox: read-only');
+    expect(reasonOf('sandboxWrite')).toBe('sandbox: read-only');
     expect(reasonOf('symlinkEscape')).toMatch(/^path escape: .*symlink/);
     expect(reasonOf('metacharacters')).toMatch(/^command allowlist: /);
     expect(reasonOf('readFailed')).toMatch(/^read failed: /);
