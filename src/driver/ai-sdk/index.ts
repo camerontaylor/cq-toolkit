@@ -718,14 +718,28 @@ export class AiSdkDriver implements Driver {
       : candidates;
     const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
+    // Set by prepareStep on the forced final step. That step keeps the tool
+    // definitions with toolChoice 'none' (#502), so the executors stay
+    // registered; a provider that ignores 'none' must still not run a tool
+    // whose result the model would never see.
+    let finalStepStarted = false;
     for (const harnessTool of selected) {
       const descriptor = {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
-        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> =>
-          runTool(harnessTool, input, store, record, denials, guard, {
+        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> => {
+          if (finalStepStarted) {
+            const denial = {
+              tool: harnessTool.name,
+              reason: 'tool calls are disabled on the final step; reply with the answer',
+            };
+            denials.push(denial);
+            return denial.reason;
+          }
+          return runTool(harnessTool, input, store, record, denials, guard, {
             signal: options.abortSignal,
-          }),
+          });
+        },
       };
       toolSet[harnessTool.name] = tool(descriptor as Tool);
       // One-release aliases (the pre-F1 `run` name for `bash`) are registered
@@ -809,7 +823,7 @@ export class AiSdkDriver implements Driver {
           // DECOUPLE the mandatory structured object from the tool loop (#203):
           // with tools available on the final step the model tends to call one
           // more tool instead of emitting the required object, and `result.output`
-          // then throws. Disabling tools on that step nudges the model into
+          // then throws. Forbidding tool calls on that step nudges the model into
           // prose the Output.object path can parse. Pure step-number function —
           // no scheduling primitive (I8).
           // The step keeps the tool definitions and forbids calls with
@@ -820,28 +834,29 @@ export class AiSdkDriver implements Driver {
           // providers drop the tools for 'none', as `activeTools: []` did.
           ...(outputSchema !== undefined && selected.length > 0
             ? {
-                prepareStep: ({ stepNumber, messages }) =>
-                  stepNumber >= effectiveStepCap - 1
-                    ? {
-                        toolChoice: 'none' as const,
-                        system: this.composeSystemPrompt(false),
-                        ...(prompted
-                          ? {
-                              messages: [
-                                ...messages.filter(
-                                  (message) =>
-                                    message.role !== 'user' ||
-                                    message.content !== schemaContract(outputSchema, true),
-                                ),
-                                {
-                                  role: 'user' as const,
-                                  content: schemaContract(outputSchema, false),
-                                },
-                              ],
-                            }
-                          : {}),
-                      }
-                    : undefined,
+                prepareStep: ({ stepNumber, messages }) => {
+                  if (stepNumber < effectiveStepCap - 1) return undefined;
+                  finalStepStarted = true;
+                  return {
+                    toolChoice: 'none' as const,
+                    system: this.composeSystemPrompt(false),
+                    ...(prompted
+                      ? {
+                          messages: [
+                            ...messages.filter(
+                              (message) =>
+                                message.role !== 'user' ||
+                                message.content !== schemaContract(outputSchema, true),
+                            ),
+                            {
+                              role: 'user' as const,
+                              content: schemaContract(outputSchema, false),
+                            },
+                          ],
+                        }
+                      : {}),
+                  };
+                },
               }
             : {}),
           stopWhen,

@@ -866,6 +866,54 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('a tool call on the final step is denied, not executed, when a provider ignores toolChoice none (#502)', async () => {
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        // Ignores toolChoice 'none': the final step answers with a tool call too.
+        if (calls <= 2) return toolCallResult('read', { path: 'absent.txt' });
+        if (options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { path: 'final.txt' });
+        }
+        return textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-deny-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { maxSteps: 3 },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/final-deny/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      const finalDenials = result.denials.filter((denial) =>
+        denial.reason.includes('disabled on the final step'),
+      );
+      expect(finalDenials).toEqual([
+        {
+          tool: 'read',
+          reason: 'tool calls are disabled on the final step; reply with the answer',
+        },
+      ]);
+      // The two earlier reads ran (and were denied as absent), the final one never executed.
+      expect(result.denials.filter((denial) => denial.reason.includes('final.txt'))).toEqual([]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('maxSteps=1 disables tools on the first main step and counts the repair step separately', async () => {
     const toolCounts: number[] = [];
     const hookKinds: string[] = [];
