@@ -209,6 +209,29 @@ describe('createReviewPlan session mode', () => {
     expect(large.coverage.modeReason).toBe('large change above the medium size tier');
   });
 
+  it('chooses the size tier from reviewed content while retaining excluded coverage', () => {
+    const components = [
+      tracked('src/a.ts', ['changed']),
+      tracked(
+        'pnpm-lock.yaml',
+        Array.from({ length: 1000 }, () => 'generated'),
+      ),
+      ...Array.from({ length: 21 }, (_, index) => tracked(`generated/${String(index)}.ts`)),
+    ];
+    const plan = createReviewPlan(
+      planInput(components, {
+        exclude: [
+          { pattern: 'pnpm-lock.yaml', assuredBy: 'lockfile check' },
+          { pattern: 'generated/**', assuredBy: 'generator check' },
+        ],
+      }),
+    );
+    expect(plan.coverage.mode).toBe('session');
+    expect(plan.coverage.modeReason).toContain('small');
+    expect(plan.coverage.pieces.filter((piece) => piece.state === 'excluded')).toHaveLength(22);
+    expect(plan.sessions[0]!.prompt).toContain('pnpm-lock.yaml');
+  });
+
   it('adds the documentation and configuration instruction only for docs/config changes', () => {
     const docs = createReviewPlan(
       planInput([tracked('docs/guide.md', ['new value'])], {

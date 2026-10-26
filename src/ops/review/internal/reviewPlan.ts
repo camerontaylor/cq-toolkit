@@ -451,11 +451,11 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     };
   }
 
-  const changedLines = input.components.reduce(
+  const changedLines = reviewed.reduce(
     (total, component) => total + changedLineCount(component),
     0,
   );
-  const fileCount = new Set(input.components.map((component) => component.path)).size;
+  const fileCount = new Set(reviewed.map((component) => component.path)).size;
   const withinSmall =
     changedLines <= bounds.small.maxChangedLines && fileCount <= bounds.small.maxFiles;
   const aboveMedium =
