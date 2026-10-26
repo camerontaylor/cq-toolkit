@@ -64,12 +64,19 @@ function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): 
   };
 }
 
-/** The review-log line naming extra finding keys the agent reviewer stripped (none → empty). */
+/**
+ * The review-log line naming extra finding keys the agent reviewer stripped (none → empty).
+ * Keys come from untrusted agent output, so they are percent-encoded before emission:
+ * control characters (newlines, CR, etc.) cannot forge extra log lines, and the encoded
+ * form never contains ',' or '×', keeping the single-line `key×count` list unambiguous.
+ */
 function strippedLine(stripped: Readonly<Record<string, number>> | undefined): string {
   const entries = Object.entries(stripped ?? {});
   return entries.length === 0
     ? ''
-    : `stripped extra finding keys: ${entries.map(([key, count]) => `${key}×${String(count)}`).join(', ')}\n`;
+    : `stripped extra finding keys: ${entries
+        .map(([key, count]) => `${encodeURIComponent(key)}×${String(count)}`)
+        .join(', ')}\n`;
 }
 
 /** Produce a single normalized record from the configured sources. */
