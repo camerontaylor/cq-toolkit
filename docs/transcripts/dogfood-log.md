@@ -325,3 +325,30 @@ entry). Artifacts: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025-c/`,
 agent log `~/.jcode/scratch/cq-dev-review/fix_s7-dogfood-address-469-…-agent-…log`.
 Defect candidate from C-1 (fixed in-branch): required-field ledger evolution.
 Remaining: rerun when the Go key's quota window resets.
+
+## S7 dogfood attempts D–J: dev.cycle on fix/s7-dogfood-address-469 (paused)
+
+All runs were detached on triton, from `dist` at the named head, with the same flags as
+attempt C (`--push --target=merge-queue --includeIntegration=true` plus 10 named
+`--testFiles`). Run state lives under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
+Every run exited **3** at `review.run` or `review.address`, and **none opened a PR**.
+Each found a defect, fixed in-branch:
+
+| Attempt  | Head       | Stopped at                                    | Cause                                                                                                                                                                                     | Fix                                                                                               |
+| -------- | ---------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| D        | `e1b63507` | process killed silently after the secret scan | lane shell-tool timeout (runs are now detached)                                                                                                                                           | —                                                                                                 |
+| D take 3 | `e1b63507` | review.run                                    | CodeRabbit no-fresh notice on an already-reviewed head (#485); DeepSeek reviewer emits DSML tool-call markup (#483)                                                                       | `0b6c3276` reviewer → `zai`/`glm-5.3-flash` (owner)                                               |
+| E        | `0b6c3276` | review.run, partition 4                       | ai-sdk per-request step timeout hard-coded at 120 s                                                                                                                                       | `01127c00` step bound from `budgets.step.wallMs`                                                  |
+| F        | `01127c00` | review.run, partition 20/28                   | undici default headersTimeout of 300 s on the non-streaming repair call; error detail dropped (#484)                                                                                      | `15d9b8df` (#484), `56b7bdd4` (undici timeouts follow the step bound)                             |
+| G        | `56b7bdd4` | review.run, partition 11/32                   | `output-invalid`: GLM added an unknown key `rule_id_hint` to a finding                                                                                                                    | `35daf528` strip and count unknown finding keys                                                   |
+| H        | `35daf528` | review.address, budget                        | review.run TERMINAL on both reviewers (agent: 64 findings). Address made **8 verified fix commits** but nothing was published, and the legs didn't share the run wall (5 h 48 m)          | `fa9b1948` budget stop publishes a draft; one run budget across legs. #490 (rows stay `open`)     |
+| I        | `fa9b1948` | review.run, partition 9/34                    | one GLM request ran the full 20-min step bound                                                                                                                                            | `fc59ec3d` step bound 1 h (owner), `0ff7c961` one retry per partition on transient/output-invalid |
+| J        | `0ff7c961` | review.run                                    | GLM degenerate loop: 458 676 chars of hallucinated `BASH:` calls and echoed schema, until the model's output limit. `finishReason: 'length'` maps to `budget-exhausted` (`index.ts:1781`) | — (paused)                                                                                        |
+
+**Measured:** attempt H `fixesPerRun` = **8** (`c013-35daf528#f3`, `#f4`, `#f5`, `#f15`,
+`#f34`–`#f37`; ~6.9M tokens, ~4 h address wall). This is the first live review-side run with
+multiple verified fixes. The chancellor pushed them as `00fb37ba` after the run.
+
+**Paused (owner, 2026-10-26):** the agent reviewer's remaining failures share #483's root
+cause, a tool-less turn told to "use the tools", and #483's redesign replaces that reviewer.
+The S7 acceptance run (dev.cycle opens a PR with a readiness record) is rerun on top of #483.
