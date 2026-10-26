@@ -22,8 +22,8 @@
       "model": "deepseek-v4.1-flash"
     },
     "reviewer": {
-      "provider": "opencode-go",
-      "model": "deepseek-v4.1-flash"
+      "provider": "zai",
+      "model": "glm-5.3-flash"
     }
   },
   "budgets": {
