@@ -580,3 +580,46 @@ describe('runAgentReviewer failure detail (#484)', () => {
     if (result.status === 'needs-human') expect(result.reason.length).toBeLessThan(800);
   });
 });
+
+describe('runAgentReviewer output contract', () => {
+  it('lets finding items carry extra keys while the top level stays closed', async () => {
+    let schema: { schema: Record<string, unknown> } | undefined;
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async (invocation: { outputSchema?: { schema: Record<string, unknown> } }) => {
+            schema = invocation.outputSchema;
+            return {
+              stopReason: 'complete' as const,
+              structuredOutput: { findings: [] },
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    await runAgentReviewer(drivers, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 60_000,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    const doc = schema?.schema as {
+      additionalProperties?: unknown;
+      required?: string[];
+      properties: { findings: { items: { additionalProperties?: unknown; required?: string[] } } };
+    };
+    expect(doc.additionalProperties).toBe(false);
+    expect(doc.required).toEqual(expect.arrayContaining(['findings', 'receipt']));
+    expect(doc.properties.findings.items.additionalProperties).toBeUndefined();
+    expect(doc.properties.findings.items.required).toEqual(['severity', 'text']);
+  });
+});

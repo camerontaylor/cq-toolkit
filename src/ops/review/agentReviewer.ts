@@ -10,21 +10,35 @@ import type { OpResult } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import type { Finding } from './findings.js';
 
-const OutputSchema = z
-  .object({
-    findings: z.array(
-      z
-        .object({
-          file: z.string().optional(),
-          line: z.number().int().positive().optional(),
-          rule: z.string().optional(),
-          severity: z.enum(['high', 'medium', 'low']),
-          text: z.string().min(1),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+// A finding item STRIPS unknown keys (S7 attempt G: one GLM finding carried
+// `rule_id_hint` and the strict item blocked the whole review); every field
+// check and the required severity/text still hold, and the top level stays
+// strict with its receipt. The emitted contract therefore leaves item
+// `additionalProperties` open: the driver validates the reply against the
+// SAME document it sent (ADR-0002 §2.3), so a closed item in the contract
+// would reject the extra key before this parse could strip it.
+const FindingItemSchema = z.object({
+  file: z.string().optional(),
+  line: z.number().int().positive().optional(),
+  rule: z.string().optional(),
+  severity: z.enum(['high', 'medium', 'low']),
+  text: z.string().min(1),
+});
+const FINDING_KEYS = new Set(Object.keys(FindingItemSchema.shape));
+const OutputSchema = z.object({ findings: z.array(FindingItemSchema) }).strict();
+
+/** Count the extra finding keys the parse strips, so tolerance stays visible. */
+function strippedFindingKeys(raw: unknown): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const findings = (raw as { findings?: unknown } | null)?.findings;
+  if (!Array.isArray(findings)) return counts;
+  for (const item of findings as unknown[]) {
+    if (item === null || typeof item !== 'object') continue;
+    for (const key of Object.keys(item))
+      if (!FINDING_KEYS.has(key)) counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
 
 export interface AgentReviewerInput {
   repoRoot: string;
@@ -59,7 +73,7 @@ async function runPartition(
     onUsage: (usage: number) => void;
     onRequest: (serializedChars: number, decodedChars: number) => void;
   },
-): Promise<OpResult<{ findings: Finding[]; usage: number }>> {
+): Promise<OpResult<{ findings: Finding[]; usage: number; strippedKeys: Record<string, number> }>> {
   if (input.signal?.aborted || currentJobContext()?.signal.aborted)
     return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   let resolved: ReturnType<DriverFactory['resolve']>;
@@ -196,6 +210,7 @@ async function runPartition(
         text: item.text,
         status: 'open' as const,
       })),
+      strippedKeys: strippedFindingKeys(result.structuredOutput),
     },
   };
 }
@@ -204,6 +219,8 @@ export interface AgentReviewReport {
   findings: Finding[];
   usage: number;
   coverage: ReviewCoverage;
+  /** Extra finding keys stripped from replies (key → count); absent when none. */
+  strippedKeys?: Record<string, number>;
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
 
@@ -312,6 +329,8 @@ export async function runAgentReviewer(
           if (!report.findings.some(same))
             report.findings.push({ ...finding, id: `agent-${index + 1}-${finding.id}` });
         }
+        for (const [key, count] of Object.entries(result.value.strippedKeys))
+          (report.strippedKeys ??= {})[key] = (report.strippedKeys[key] ?? 0) + count;
         report.coverage.partitions[index]!.complete = true;
         if (report.usage > input.maxTokens) return { status: 'budget-exhausted', report };
       }

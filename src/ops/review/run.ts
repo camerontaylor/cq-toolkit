@@ -64,6 +64,14 @@ function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): 
   };
 }
 
+/** The review-log line naming extra finding keys the agent reviewer stripped (none → empty). */
+function strippedLine(stripped: Readonly<Record<string, number>> | undefined): string {
+  const entries = Object.entries(stripped ?? {});
+  return entries.length === 0
+    ? ''
+    : `stripped extra finding keys: ${entries.map(([key, count]) => `${key}×${String(count)}`).join(', ')}\n`;
+}
+
 /** Produce a single normalized record from the configured sources. */
 export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsRecord> {
   return async (input): Promise<OpResult<FindingsRecord>> => {
@@ -368,7 +376,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                   logPath = await effects.writeReviewLog(
                     state.branch,
                     `agent-${Date.now()}`,
-                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\ncoverage: ${JSON.stringify(report?.coverage)}\nusage: ${report?.usage ?? 0}\n`,
+                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\ncoverage: ${JSON.stringify(report?.coverage)}\nusage: ${report?.usage ?? 0}\n${strippedLine(report?.strippedKeys)}`,
                   );
                 } catch (error) {
                   return {

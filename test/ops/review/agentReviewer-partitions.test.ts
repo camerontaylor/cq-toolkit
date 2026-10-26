@@ -373,3 +373,42 @@ it('refuses zero wall allowance before provider send and zero token allowance be
   expect(f.prompts).toHaveLength(0);
   expect(f.calls()).toBe(0);
 });
+
+// S7 attempt G: GLM added `rule_id_hint` to one finding and the strict item
+// schema blocked the whole review. Extra keys INSIDE a finding are now
+// stripped (and counted); everything else in the contract stays enforced.
+const small = 'diff --git a/src/a.ts b/src/a.ts\n+one line\n';
+const reviewOnce = async (reply: (receipt: string | undefined) => unknown) => {
+  const f = await fixture({
+    reply: (prompt) => reply(/receipt: ([a-f0-9]+)/.exec(prompt)?.[1]),
+  });
+  return runAgentReviewer(f.drivers, {
+    ...f.input,
+    diff: small,
+    components: [{ component: 'tracked:src/a.ts', path: 'src/a.ts', text: small }],
+  });
+};
+
+it('strips and counts an extra finding key instead of blocking the review', async () => {
+  const result = await reviewOnce((receipt) => ({
+    receipt,
+    findings: [
+      { severity: 'high', text: 'kept', rule_id_hint: 'x' },
+      { severity: 'low', text: 'also kept', rule_id_hint: 'y', confidence: 0.9 },
+    ],
+  }));
+  expect(result.status).toBe('ok');
+  if (result.status !== 'ok') return;
+  expect(result.value.findings.map((finding) => finding.text)).toEqual(['kept', 'also kept']);
+  for (const finding of result.value.findings) expect(finding).not.toHaveProperty('rule_id_hint');
+  expect(result.value.strippedKeys).toEqual({ rule_id_hint: 2, confidence: 1 });
+});
+
+it.each([
+  ['a finding without text', { findings: [{ severity: 'high' }] }],
+  ['a finding with an unknown severity', { findings: [{ severity: 'urgent', text: 't' }] }],
+  ['an extra top-level key', { findings: [], summary: 'extra' }],
+])('still rejects %s', async (_label, body) => {
+  const result = await reviewOnce((receipt) => ({ receipt, ...body }));
+  expect(result.status).not.toBe('ok');
+});

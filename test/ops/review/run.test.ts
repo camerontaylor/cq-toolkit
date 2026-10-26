@@ -95,6 +95,48 @@ describe('review.run', () => {
     }
   });
 
+  it('records stripped extra finding keys in the agent review log', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const drivers = {
+        resolve: vi.fn(() => ({
+          lane: 'ai-sdk',
+          modelSpec: { provider: 'mock', model: 'mock' },
+          driver: {
+            run: async (input: { prompt: string }) => ({
+              stopReason: 'complete' as const,
+              structuredOutput: {
+                receipt: /receipt: ([a-f0-9]+)/.exec(input.prompt)?.[1],
+                findings: [{ severity: 'high', text: 'seeded', rule_id_hint: 'x' }],
+              },
+              usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            }),
+          },
+        })),
+      } as unknown as DriverFactory;
+      const logs: string[] = [];
+      const effects = repoEffects(repo);
+      const writeReviewLog = effects.writeReviewLog;
+      effects.writeReviewLog = async (branch, stamp, content) => {
+        logs.push(content);
+        return writeReviewLog(branch, stamp, content);
+      };
+      await makeReviewRun({
+        drivers,
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      const agentLog = logs.find((log) => log.startsWith('agent reviewer:'));
+      expect(agentLog).toContain('completion: terminal');
+      expect(agentLog).toMatch(/stripped extra finding keys: rule_id_hint×\d+\n/);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('maps an unresolvable target to needs-human before starting a reviewer', async () => {
     const repo = await makeTestRepo();
     try {
