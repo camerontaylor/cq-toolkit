@@ -62,6 +62,22 @@ export const ReviewCoverageV2Schema = z
           driverSessionId: z.string().min(1).optional(),
           /** Recoverable tool denials are visible evidence, not a completeness input. */
           denials: Count.optional(),
+          /** Host capability evidence only; missing search never changes coverage completeness. */
+          capabilities: z
+            .object({
+              rg: z
+                .object({
+                  available: z.boolean(),
+                  version: z.string().min(1).optional(),
+                  found: z.string().min(1).optional(),
+                  minimum: z.string().min(1),
+                  probe: z.enum(['ok', 'absent', 'old']),
+                })
+                .strict()
+                .optional(),
+            })
+            .strict()
+            .optional(),
           deliveries: z.array(DeliverySchema),
           /** Clean model-send hooks; refused scans and tool-output guards are not sends. */
           requests: z.array(z.object({ serializedChars: Count, decodedChars: Count }).strict()),

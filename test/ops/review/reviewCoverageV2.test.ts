@@ -96,6 +96,17 @@ function expectInvalidMessage(value: unknown, fragment: string): void {
 }
 
 describe('review coverage v2 schema', () => {
+  it('records unavailable search as capability evidence without changing completeness', () => {
+    const value = sessionMode();
+    value.sessions[0]!.capabilities = {
+      rg: { available: false, minimum: '15.2.0', probe: 'absent' },
+    };
+    expect(parse(value).success).toBe(true);
+    expect(isCoverageV2Complete(value)).toBe(true);
+    value.sessions[0]!.status = 'error';
+    expect(isCoverageV2Complete(value)).toBe(false);
+  });
+
   it('accepts complete session-mode and partitioned evidence', () => {
     for (const value of [sessionMode(), partitioned()]) {
       expect(parse(value).success).toBe(true);
