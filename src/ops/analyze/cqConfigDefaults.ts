@@ -1,6 +1,11 @@
 // Pure policy resolution: no provider/model defaults, filesystem, env or driver imports.
 import type { OpResult } from '../../kernel/types.js';
-import type { CqConfig, CqSeverity } from './cqConfig.js';
+import {
+  REVIEW_SESSION_DEFAULTS,
+  REVIEW_SIZE_DEFAULTS,
+  type CqConfig,
+  type CqSeverity,
+} from './cqConfig.js';
 
 /** Flags use the same nested policy shape; packageName is supplied from package.json by the caller. */
 export type CqConfigFlags = Partial<Omit<CqConfig, 'schemaVersion' | 'checks'>> & {
@@ -59,6 +64,48 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
         ...c.review?.bulk,
         ...f.review?.bulk,
         concurrency: f.review?.bulk?.concurrency ?? c.review?.bulk?.concurrency ?? 3,
+      },
+      session: {
+        maxInputChars:
+          f.review?.session?.maxInputChars ??
+          c.review?.session?.maxInputChars ??
+          REVIEW_SESSION_DEFAULTS.maxInputChars,
+        maxSteps:
+          f.review?.session?.maxSteps ??
+          c.review?.session?.maxSteps ??
+          REVIEW_SESSION_DEFAULTS.maxSteps,
+      },
+      size: {
+        small: {
+          maxChangedLines:
+            f.review?.size?.small?.maxChangedLines ??
+            c.review?.size?.small?.maxChangedLines ??
+            REVIEW_SIZE_DEFAULTS.small.maxChangedLines,
+          maxFiles:
+            f.review?.size?.small?.maxFiles ??
+            c.review?.size?.small?.maxFiles ??
+            REVIEW_SIZE_DEFAULTS.small.maxFiles,
+        },
+        medium: {
+          maxChangedLines:
+            f.review?.size?.medium?.maxChangedLines ??
+            c.review?.size?.medium?.maxChangedLines ??
+            REVIEW_SIZE_DEFAULTS.medium.maxChangedLines,
+          maxFiles:
+            f.review?.size?.medium?.maxFiles ??
+            c.review?.size?.medium?.maxFiles ??
+            REVIEW_SIZE_DEFAULTS.medium.maxFiles,
+        },
+      },
+      exclude:
+        f.review?.exclude ??
+        c.review?.exclude ??
+        ([] satisfies NonNullable<NonNullable<CqConfig['review']>['exclude']>),
+      reReview: {
+        includePriorFindings:
+          f.review?.reReview?.includePriorFindings ??
+          c.review?.reReview?.includePriorFindings ??
+          true,
       },
     },
     escalation: {

@@ -198,6 +198,35 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "minLength": 1,
           "type": "string"
         },
+        "exclude": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "assuredBy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "pattern": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "reReview": {
+          "additionalProperties": false,
+          "properties": {
+            "includePriorFindings": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
         "reviewers": {
           "items": {
             "enum": [
@@ -213,6 +242,60 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991,
           "type": "integer"
+        },
+        "session": {
+          "additionalProperties": false,
+          "properties": {
+            "maxInputChars": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            "maxSteps": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "size": {
+          "additionalProperties": false,
+          "properties": {
+            "medium": {
+              "additionalProperties": false,
+              "properties": {
+                "maxChangedLines": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxFiles": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "small": {
+              "additionalProperties": false,
+              "properties": {
+                "maxChangedLines": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxFiles": {
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
         }
       },
       "type": "object"

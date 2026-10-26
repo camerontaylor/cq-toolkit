@@ -33,6 +33,13 @@ describe('cq.json effective policy', () => {
       reviewers: ['coderabbit', 'agent'],
       addressConcurrency: 2,
       bulk: { concurrency: 3 },
+      session: { maxInputChars: 60_000, maxSteps: 15 },
+      size: {
+        small: { maxChangedLines: 200, maxFiles: 5 },
+        medium: { maxChangedLines: 800, maxFiles: 20 },
+      },
+      exclude: [],
+      reReview: { includePriorFindings: true },
     });
     expect(effective.escalation).toEqual({
       workerAttempts: 2,
@@ -54,6 +61,10 @@ describe('cq.json effective policy', () => {
         agentSeverityMap: { high: 'critical', low: 'info' },
         denylistPatternsFile: 'patterns.yml',
         bulk: { query: 'is:open', concurrency: 6 },
+        session: { maxSteps: 30 },
+        size: { small: { maxChangedLines: 50 }, medium: { maxFiles: 40 } },
+        exclude: [{ pattern: 'pnpm-lock.yaml', assuredBy: 'dev.check' }],
+        reReview: { includePriorFindings: false },
       },
       escalation: { workerAttempts: 4, rescueBase: 0, rescuePerPackageCap: 0 },
     };
@@ -62,7 +73,13 @@ describe('cq.json effective policy', () => {
       ...flags,
       maxTokens: 100,
       budgets: { run: { wallMs: 200 } },
-      review: { agentSeverityMap: { medium: 'trivial' }, bulk: { concurrency: 8 } },
+      review: {
+        agentSeverityMap: { medium: 'trivial' },
+        bulk: { concurrency: 8 },
+        session: { maxInputChars: 90_000 },
+        size: { small: { maxFiles: 7 }, medium: { maxChangedLines: 900 } },
+        reReview: { includePriorFindings: true },
+      },
       escalation: { rescuePerFixed: 15 },
     });
     expect(effective.packages).toEqual(config.packages);
@@ -80,6 +97,13 @@ describe('cq.json effective policy', () => {
       addressConcurrency: 2,
       denylistPatternsFile: 'patterns.yml',
       bulk: { query: 'is:open', concurrency: 8 },
+      session: { maxInputChars: 90_000, maxSteps: 30 },
+      size: {
+        small: { maxChangedLines: 50, maxFiles: 7 },
+        medium: { maxChangedLines: 900, maxFiles: 40 },
+      },
+      exclude: [{ pattern: 'pnpm-lock.yaml', assuredBy: 'dev.check' }],
+      reReview: { includePriorFindings: true },
     });
     expect(effective.escalation).toEqual({
       workerAttempts: 4,
@@ -88,6 +112,21 @@ describe('cq.json effective policy', () => {
       rescuePerPackageCap: 0,
     });
     expect(config).toEqual(before);
+  });
+
+  test('a flag may raise the small tier above the default medium when config raises medium', () => {
+    const config: CqConfig = {
+      ...minimal,
+      review: { size: { medium: { maxChangedLines: 1_000 } } },
+    };
+    const effective = resolveCqConfigDefaults(config, {
+      ...flags,
+      review: { size: { small: { maxChangedLines: 900 } } },
+    });
+    expect(effective.review.size).toEqual({
+      small: { maxChangedLines: 900, maxFiles: 5 },
+      medium: { maxChangedLines: 1_000, maxFiles: 20 },
+    });
   });
 
   test('explicit kinds and related args survive resolution', () => {
