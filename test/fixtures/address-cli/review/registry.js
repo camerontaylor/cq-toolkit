@@ -1,65 +1,65 @@
 // Only the provider is scripted: CLI, scanners, git, ledger, gates and re-review are production.
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { ReviewAddressInputSchema } from "../../../../dist/ops/review/registry.js";
-import { makeReviewAddress } from "../../../../dist/ops/review/address.js";
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { ReviewAddressInputSchema } from '../../../../dist/ops/review/registry.js';
+import { makeReviewAddress } from '../../../../dist/ops/review/address.js';
 const drivers = {
   resolve: ({ modelSpec, beforeRequest }) => ({
-    lane: "ai-sdk",
+    lane: 'ai-sdk',
     modelSpec,
     driver: {
       run: async (input) => {
-        const path = join(input.workspace.path, "src/a.ts");
-        const text = await readFile(path, "utf8");
+        const path = join(input.workspace.path, 'src/a.ts');
+        const text = await readFile(path, 'utf8');
         let structuredOutput;
-        if (input.outputSchema.name === "review.agent/v3") {
+        if (input.outputSchema.name === 'review.agent/v3') {
           // Delivery evidence comes from the pre-upload hook with the exact serialized request.
           await beforeRequest?.(
             JSON.stringify({
               prompt: [
                 {
-                  role: "user",
-                  content: [{ type: "text", text: input.prompt }],
+                  role: 'user',
+                  content: [{ type: 'text', text: input.prompt }],
                 },
               ],
             }),
             [{ text: input.prompt }],
-            { kind: "model-request" },
+            { kind: 'model-request' },
           );
           structuredOutput = {
-            findings: text.includes("BAD")
+            findings: text.includes('BAD')
               ? [
                   {
-                    file: "src/a.ts",
+                    file: 'src/a.ts',
                     line: 1,
-                    severity: "high",
-                    text: "Replace BAD with GOOD",
+                    severity: 'high',
+                    text: 'Replace BAD with GOOD',
                   },
                 ]
               : [],
           };
-        } else if (input.outputSchema.name === "review.address.closure/v1") {
+        } else if (input.outputSchema.name === 'review.address.closure/v1') {
           structuredOutput = {
-            closed: text.includes("GOOD"),
-            reason: "candidate contains GOOD",
+            closed: text.includes('GOOD'),
+            reason: 'candidate contains GOOD',
           };
-        } else if (modelSpec.model === "defer") {
+        } else if (modelSpec.model === 'defer') {
           structuredOutput = {
-            disposition: "deferred",
-            reason: "owner decision needed",
-            evidence: [{ path: "src/a.ts", line: 1 }],
+            disposition: 'deferred',
+            reason: 'owner decision needed',
+            evidence: [{ path: 'src/a.ts', line: 1 }],
           };
         } else {
-          if (!input.prompt.startsWith("related-check feedback"))
-            await writeFile(path, text.replace("BAD", "GOOD"));
+          if (!input.prompt.startsWith('related-check feedback'))
+            await writeFile(path, text.replace('BAD', 'GOOD'));
           structuredOutput = {
-            disposition: "fixed",
-            reason: "correct fixture value",
+            disposition: 'fixed',
+            reason: 'correct fixture value',
             evidence: [],
           };
         }
         return {
-          stopReason: "complete",
+          stopReason: 'complete',
           structuredOutput,
           denials: [],
           usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
@@ -70,7 +70,7 @@ const drivers = {
 };
 export const registry = [
   {
-    name: "review.address",
+    name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
     importer: async () => makeReviewAddress({ drivers }),
   },
