@@ -484,3 +484,62 @@ it('captures only exact, valid empty-component placements as delivery', async ()
     end: 0,
   });
 });
+
+it('rejects a session whose evidence record is not empty before dispatch', async () => {
+  const planned = createReviewPlan({
+    head: 'a'.repeat(40),
+    base: 'b'.repeat(40),
+    scope: 'full',
+    components: [small],
+  });
+  const session = planned.sessions[0]!;
+  const fake = fakeDrivers();
+  await expect(
+    runReviewSession(fake.drivers, {
+      repoRoot: '/fixture/repo',
+      role: { provider: 'mock', model: 'fixture' },
+      severityMap: { high: 'major', medium: 'minor' },
+      maxTokens: 100,
+      maxSteps: 4,
+      maxPromptChars: 60_000,
+      signal: new AbortController().signal,
+      scanSecrets: clean,
+      components: [small],
+      plan: session,
+      evidence: {
+        id: session.id,
+        status: 'error',
+        usage: { ...usage },
+        deliveries: [],
+        requests: [{ kind: 'model-request', matched: true }] as never,
+      },
+      onUsage: () => undefined,
+      searchTools: true,
+    }),
+  ).rejects.toThrow('agent review session evidence must start empty');
+  expect(fake.calls()).toBe(0);
+});
+
+it('tracks old and new line numbers through context, removed and added hunk lines', () => {
+  const text = ['@@ -10,4 +20,4 @@', ' context', '-removed', '+added', ' tail', ''].join('\n');
+  const plan = partitionReview({
+    head: 'a'.repeat(40),
+    base: 'b'.repeat(40),
+    scope: 'full',
+    components: [{ component: 'tracked:a.ts', path: 'a.ts', text }],
+    requireReceipt: false,
+  });
+  expect(plan.partitions).toHaveLength(1);
+});
+
+it('refuses partition instructions that alone exceed the prompt cap', () => {
+  expect(() =>
+    partitionReview({
+      head: 'a'.repeat(40),
+      base: 'b'.repeat(40),
+      scope: 'full',
+      components: [{ component: 'tracked:a.ts', path: 'a.ts', text: 'x\n' }],
+      instructions: 'i'.repeat(200_000),
+    }),
+  ).toThrow('exceed the supported prompt limit');
+});
