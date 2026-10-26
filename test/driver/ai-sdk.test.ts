@@ -3127,11 +3127,21 @@ describe('rg runtime floor boundary — PRODUCTION comparator', () => {
     try {
       // serves: 14.1.1 >= floor 11.0.0
       const serving = await runWithFake(`echo 'ripgrep 14.1.1 (rev 4649aa9700)'`);
-      expect(serving.capabilities?.rg).toMatchObject({ available: true, version: '14.1.1', probe: 'ok' });
+      expect(serving.capabilities?.rg).toMatchObject({
+        available: true,
+        version: '14.1.1',
+        probe: 'ok',
+      });
       // withheld: 10.5.0 < floor
       const withheld = await runWithFake(`echo 'ripgrep 10.5.0'`);
-      expect(withheld.capabilities?.rg).toMatchObject({ available: false, found: '10.5.0', probe: 'old' });
-      expect(withheld.advisories).toEqual(['search tools unavailable: ripgrep older than minimum 11.0.0']);
+      expect(withheld.capabilities?.rg).toMatchObject({
+        available: false,
+        found: '10.5.0',
+        probe: 'old',
+      });
+      expect(withheld.advisories).toEqual([
+        'search tools unavailable: ripgrep older than minimum 11.0.0',
+      ]);
       // absent: nonzero exit
       const absent = await runWithFake(`exit 2`);
       expect(absent.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
@@ -3142,7 +3152,8 @@ describe('rg runtime floor boundary — PRODUCTION comparator', () => {
   });
 
   test('CI guard: on CI a missing/old real rg FAILS the search-tool surface outright (no skip)', async () => {
-    const onCi = process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false';
+    const onCi =
+      process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false';
     if (!onCi) {
       // Off CI this test simply returns (developers may lack rg); ON CI the
       // precondition below fails the test when rg is absent/old. Any truthy

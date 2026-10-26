@@ -325,7 +325,9 @@ export const versionAtLeast = (found: string, minimum: string): boolean => {
  */
 export const defaultResolveRg = (
   signal?: AbortSignal,
-): Promise<{ ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }> =>
+): Promise<
+  { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
+> =>
   new Promise((settle) => {
     if (signal?.aborted === true) {
       settle({ ok: false, reason: 'absent' });
@@ -341,7 +343,11 @@ export const defaultResolveRg = (
       child?.kill();
       done({ ok: false, reason: 'absent' });
     };
-    const done = (outcome: { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }): void => {
+    const done = (
+      outcome:
+        | { ok: true; version: string }
+        | { ok: false; reason: 'absent' | 'old'; found?: string },
+    ): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -383,7 +389,11 @@ export const defaultResolveRg = (
         return;
       }
       // 10.x and older are withheld; 11.0.0+ (incl. the host's 14.1) serve.
-      done(versionAtLeast(version, RG_MINIMUM_VERSION) ? { ok: true, version } : { ok: false, reason: 'old', found: version });
+      done(
+        versionAtLeast(version, RG_MINIMUM_VERSION)
+          ? { ok: true, version }
+          : { ok: false, reason: 'old', found: version },
+      );
     });
   });
 
@@ -708,7 +718,10 @@ export class AiSdkDriver implements Driver {
     const candidates = selectTools(harnessTools, toolPolicy);
     const searchOffered = candidates.some((tool) => tool.name === 'grep' || tool.name === 'glob');
     const rgProbe = searchOffered
-      ? await this.resolveRg(abortSignal).catch(() => ({ ok: false as const, reason: 'absent' as const }))
+      ? await this.resolveRg(abortSignal).catch(() => ({
+          ok: false as const,
+          reason: 'absent' as const,
+        }))
       : undefined;
     const searchWithheld = rgProbe !== undefined && rgProbe.ok === false;
     const selected = searchWithheld
@@ -1013,7 +1026,12 @@ export class AiSdkDriver implements Driver {
               capabilities: {
                 rg:
                   rgProbe.ok === true
-                    ? { available: true, version: rgProbe.version, minimum: RG_MINIMUM_VERSION, probe: 'ok' as const }
+                    ? {
+                        available: true,
+                        version: rgProbe.version,
+                        minimum: RG_MINIMUM_VERSION,
+                        probe: 'ok' as const,
+                      }
                     : rgProbe.reason === 'old'
                       ? {
                           available: false,

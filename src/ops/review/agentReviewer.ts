@@ -182,7 +182,11 @@ async function runPartition(
     result.structuredOutput,
   );
   if (!parsed.success)
-    return { status: 'failed', error: 'agent review returned invalid structured output', ...evidence };
+    return {
+      status: 'failed',
+      error: 'agent review returned invalid structured output',
+      ...evidence,
+    };
   return {
     status: 'ok',
     ...evidence,

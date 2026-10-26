@@ -117,7 +117,7 @@ by search-tool withholding and the result record, never per selection:
   `capabilities.rg = { available: true, version, minimum, probe: 'ok' }`;
   grep/glob stay on the surface; no advisory.
 - `rg` absent or too old: `capabilities.rg = { available: false, minimum,
-  probe: 'absent' | 'old', found? (the too-old version) }`; grep/glob are
+probe: 'absent' | 'old', found? (the too-old version) }`; grep/glob are
   WITHHELD from the surface and `advisories` carries exactly
   `"search tools unavailable: ripgrep not found"` or
   `"search tools unavailable: ripgrep older than minimum 15.2.0"`.

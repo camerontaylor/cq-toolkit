@@ -566,10 +566,16 @@ describe('rg evidence folding into AgentReviewReport', () => {
         structuredOutput: { findings: [] },
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
         denials: [],
-        capabilities: { rg: { available: false, found: '10.5.0', minimum: '11.0.0', probe: 'old' as const } },
-        advisories: calls === 1
-          ? ['search tools unavailable: ripgrep older than minimum 11.0.0']
-          : ['search tools unavailable: ripgrep not found', 'search tools unavailable: ripgrep older than minimum 11.0.0'],
+        capabilities: {
+          rg: { available: false, found: '10.5.0', minimum: '11.0.0', probe: 'old' as const },
+        },
+        advisories:
+          calls === 1
+            ? ['search tools unavailable: ripgrep older than minimum 11.0.0']
+            : [
+                'search tools unavailable: ripgrep not found',
+                'search tools unavailable: ripgrep older than minimum 11.0.0',
+              ],
       };
     });
     const result = await runAgentReviewer(driversOf(run), {
