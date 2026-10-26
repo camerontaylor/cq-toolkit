@@ -802,9 +802,105 @@ describe('F1 edit correctness', () => {
     });
   });
 
+  test('a preflight denial leaves no poisoned queue: the next same-path call runs normally', async () => {
+    await withScratch(async (scratchDir) => {
+      const file = join(scratchDir, 'guard.txt');
+      await writeFile(file, 'keep\n', 'utf8');
+      const tools = defaultTools(scratchDir);
+
+      // Hold realpath so a second call is admitted while the first is in
+      // preflight; the first then DENIES (symlink escape), exercising the
+      // release-on-denial path.
+      try {
+        await mkdir(join(scratchDir, 'outside'), { recursive: true });
+        await symlink(join(scratchDir, 'outside'), join(scratchDir, 'escape'));
+      } catch {
+        // exists
+      }
+      gateRealpath(async (real) => {
+        const result = await real();
+        return result.endsWith('guard.txt') ? join(scratchDir, 'outside', 'guard.txt') : result;
+      });
+      const denied = await tools.edit.execute({
+        file_path: 'escape/guard.txt',
+        old_string: 'keep',
+        new_string: 'x',
+      });
+      expect(denied.ok).toBe(false);
+      gateRealpath(undefined);
+
+      // NO poisoned queue: the next same-path call runs normally.
+      await tools.read.execute({ path: 'guard.txt' });
+      const fine = await tools.edit.execute({
+        file_path: 'guard.txt',
+        old_string: 'keep',
+        new_string: 'changed',
+      });
+      if (!fine.ok) throw new Error(`expected ok, got denial: ${fine.denial.reason}`);
+      await expect(readFile(file, 'utf8')).resolves.toBe('changed\n');
+    });
+  });
+
+  test('a SYMLINKED WORKSPACE ROOT itself (buildTools(aliasRoot)): canonical edits still work', async () => {
+    await withScratch(async (scratchDir) => {
+      const realRoot = join(scratchDir, 'real-root');
+      const aliasRoot = join(scratchDir, 'alias-root');
+      await mkdir(realRoot, { recursive: true });
+      await symlink(realRoot, aliasRoot);
+      await writeFile(join(realRoot, 't.txt'), 'a\n', 'utf8');
+      const toolsReal = defaultTools(realRoot);
+      // ONE alias buildTools call: its prior-read ledger is per buildTools,
+      // so the read and the edit must come from the SAME instance.
+      const toolsAlias = buildTools(defaultHarnessConfig, aliasRoot);
+      const editAlias = toolsAlias.find((c) => c.name === 'edit');
+      const readAlias = toolsAlias.find((c) => c.name === 'read');
+      if (editAlias === undefined || readAlias === undefined) throw new Error('missing tools');
+      await toolsReal.read.execute({ path: 't.txt' });
+      const aliasRead = await readAlias.execute({ path: 't.txt' });
+      if (!aliasRead.ok) throw new Error(`alias read denied: ${aliasRead.denial.reason}`);
+      const edited = await editAlias.execute({
+        file_path: 't.txt',
+        old_string: 'a',
+        new_string: 'b',
+      });
+      if (!edited.ok) throw new Error(`expected ok, got denial: ${edited.denial.reason}`);
+      await expect(readFile(join(realRoot, 't.txt'), 'utf8')).resolves.toBe('b\n');
+    });
+  });
+
+  test('unrelated-file bodies remain independent: a held preflight does not block another file', async () => {
+    await withScratch(async (scratchDir) => {
+      const a = join(scratchDir, 'a.txt');
+      const b = join(scratchDir, 'b.txt');
+      await writeFile(a, 'a\n', 'utf8');
+      await writeFile(b, 'b\n', 'utf8');
+      const tools = defaultTools(scratchDir);
+      await tools.read.execute({ path: 'a.txt' });
+      await tools.read.execute({ path: 'b.txt' });
+      gateRealpath(async (real) => {
+        const result = await real();
+        if (result.endsWith('a.txt')) {
+          // Hold a.txt's realpath; b.txt must NOT wait on it.
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return result;
+      });
+      const [editA, editB] = await Promise.all([
+        tools.edit.execute({ file_path: 'a.txt', old_string: 'a', new_string: 'x' }),
+        tools.edit.execute({ file_path: 'b.txt', old_string: 'b', new_string: 'y' }),
+      ]);
+      gateRealpath(undefined);
+      if (!editA.ok) throw new Error(`a denied: ${editA.denial.reason}`);
+      if (!editB.ok) throw new Error(`b denied: ${editB.denial.reason}`);
+      await expect(readFile(a, 'utf8')).resolves.toBe('x\n');
+      await expect(readFile(b, 'utf8')).resolves.toBe('y\n');
+    });
+  });
+
   describe('F1 admission ordering (macOS concurrent-edit race fix)', () => {
     afterEach(() => {
       vi.restoreAllMocks();
+      gateRealpath(undefined); // the hoisted gate never leaks across tests
     });
 
     test('arrival order survives async preflight: the second call cannot start its read before the first is admitted', async () => {
