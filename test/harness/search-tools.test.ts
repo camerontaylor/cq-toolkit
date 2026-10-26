@@ -136,6 +136,26 @@ describe('contained grep and glob tools', () => {
     });
   });
 
+  test('excludes .git before the candidate cap can crowd out workspace files', async () => {
+    await withWorkspace(async (workspace) => {
+      const gitDir = join(workspace, '.git');
+      await mkdir(gitDir);
+      await Promise.all(
+        Array.from({ length: 1_001 }, (_, index) =>
+          writeFile(join(gitDir, `${String(index).padStart(4, '0')}.txt`), 'needle', 'utf8'),
+        ),
+      );
+      await writeFile(join(workspace, 'visible.txt'), 'needle', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({ pattern: 'needle' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('visible.txt');
+        expect(result.output).not.toContain('.git/');
+      }
+    });
+  });
+
   test('grep supports regex, include alias, line numbers, grouped source provenance, and no matches', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, 'src'), { recursive: true });
