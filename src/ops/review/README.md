@@ -234,7 +234,7 @@ One wall deadline, cancellation signal and token allowance cover all sessions
 and repairs. Driver-reported input, output, cache and additive reasoning usage
 consume the allowance. The token guard is checked after settled requests, so it
 can overshoot; it is not a hard wire reservation. The default main-loop step cap
-is 15; one tool-free JSON repair may add a step. Failed, aborted, undelivered or
+is 15; one JSON repair (same tools, none executed) may add a step. Failed, aborted, undelivered or
 budget-exhausted sessions retain findings and incomplete coverage as blocked
 evidence. All configured sources must finish, and repository drift withholds
 reusable clean proof.

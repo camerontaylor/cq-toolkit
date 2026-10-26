@@ -745,7 +745,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('structured output is decoupled from the tool loop: the final step disables tools (#203)', async () => {
+  test('structured output is decoupled from the tool loop: the final step asks for the answer (#203, #502)', async () => {
     let calls = 0;
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
@@ -774,7 +774,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
       expect(result.steps).toBe(DEFAULT_MAX_STEPS); // omitted maxSteps preserves the default
       // With tools live every step the model answers tool-calls forever and
-      // never emits the object; the tool-free final step is what makes the
+      // never emits the object; the final-step instruction turn is what makes the
       // structured output reachable — the model is called exactly to the cap.
       expect(calls).toBe(DEFAULT_MAX_STEPS);
       calls = 0;
@@ -789,7 +789,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('a small maxSteps budget is honoured: tools on every step but the last, which is tool-less and answers', async () => {
+  test('a small maxSteps budget is honoured: the last step is invited to answer instead of calling tools', async () => {
     const toolCounts: number[] = [];
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
@@ -928,7 +928,83 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('maxSteps=1 disables tools on the first main step and counts the repair step separately', async () => {
+  test('a tool call inside the repair is not executed and settles output-invalid (#502)', async () => {
+    let calls = 0;
+    const executed: string[] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        calls += 1;
+        // Main loop: prose instead of the object; repair: a tool call instead of the object.
+        return calls === 1
+          ? textResult('not a JSON object')
+          : toolCallResult('read', { path: 'evidence.txt' });
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-repair-tool-'));
+    try {
+      await writeFile(join(scratchDir, 'evidence.txt'), 'must not be read by the repair');
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        beforeRequest: async (_text, _contents, context) => {
+          if (context?.kind === 'tool-output') executed.push('tool-output');
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema('test/repair-tool/v1', z.object({ answer: z.string() })),
+        }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(calls).toBe(2);
+      expect(result.steps).toBe(2); // one main step, plus the one repair step
+      expect(executed).toEqual([]); // the repair's tool call never ran
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('the repair sends the same tool names as the main loop, aliases included (#502)', async () => {
+    const toolNames: string[][] = [];
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        toolNames.push((options.tools ?? []).map((t) => ('name' in t ? t.name : '')).sort());
+        return toolNames.length === 1
+          ? textResult('not a JSON object')
+          : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-repair-alias-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          workspace: { path: scratchDir },
+          toolPolicy: { allow: ['read', 'bash'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/repair-alias/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(toolNames).toHaveLength(2);
+      expect(toolNames[0]).toContain('run');
+      expect(toolNames[1]).toEqual(toolNames[0]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('maxSteps=1 makes the final step the first main step and counts the repair step separately', async () => {
     const toolCounts: number[] = [];
     const hookKinds: string[] = [];
     const mock = new MockLanguageModelV4({
@@ -962,8 +1038,8 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(result.stopReason).toBe('complete');
       expect(result.steps).toBe(2); // one main step, plus the one repair step
       expect(toolCounts).toHaveLength(2);
-      expect(toolCounts[0]).toBe(0); // maxSteps=1 makes the first main step tools-off
-      expect(toolCounts[1]).toBe(0); // repair remains one tool-free step
+      expect(toolCounts[0]).toBe(0); // maxSteps=1 makes the first main step the final step
+      expect(toolCounts[1]).toBe(0); // repair remains one step that executes no tools
       expect(hookKinds).toEqual(['model-request', 'model-request']);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -1420,8 +1496,8 @@ describe('ai-sdk driver specifics (mock model)', () => {
       modelId: 'mock-1',
       doGenerate: async (options) => {
         calls += 1;
-        // Main loop tool-calls. The lane's TOOL-FREE FINAL LOOP STEP (and
-        // then the tool-free REPAIR) is distinguished by counting: the
+        // Main loop tool-calls. The lane's FINAL LOOP STEP (and
+        // then the REPAIR) is distinguished by counting: the
         // FIRST tool-free call must ALSO miss (else the loop's final step
         // completes the run and no repair fires); the SECOND — the repair —
         // answers with the valid object.

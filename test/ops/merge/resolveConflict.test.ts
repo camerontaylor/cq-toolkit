@@ -794,7 +794,7 @@ describe('resolveConflict op', () => {
     const result = await op(baseInput());
     expect(result.status).toBe('failed');
     expect(failedError(result)).toContain('conflict agent failed');
-    expect(failedError(result)).toContain('1 tool use(s) denied by policy');
+    expect(failedError(result)).toContain('1 tool use(s) denied (see the session record');
     expect(failedError(result)).toContain('errorClass=served-model-mismatch');
     expect(failedError(result)).toContain('requested glm-5.3, served glm-4-7');
 

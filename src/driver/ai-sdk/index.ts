@@ -738,6 +738,12 @@ export class AiSdkDriver implements Driver {
               reason: 'tool calls are disabled on the final step; reply with the answer',
             };
             denials.push(denial);
+            await store.appendMessage(record.sessionId, {
+              role: 'tool',
+              toolName: harnessTool.name,
+              content: JSON.stringify({ ok: false, denial }),
+              at: nowIso(),
+            });
             return denial.reason;
           }
           return runTool(harnessTool, input, store, record, denials, guard, {
@@ -745,16 +751,18 @@ export class AiSdkDriver implements Driver {
           });
         },
       };
-      toolSet[harnessTool.name] = tool(descriptor as Tool);
-      repairToolSet[harnessTool.name] = tool({
+      const repairDescriptor = {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
-      } as Tool);
+      };
+      toolSet[harnessTool.name] = tool(descriptor as Tool);
+      repairToolSet[harnessTool.name] = tool(repairDescriptor as Tool);
       // One-release aliases (the pre-F1 `run` name for `bash`) are registered
       // under their own names so a model or prompt that still calls them
       // reaches the canonical executor and denial vocabulary.
       for (const alias of ('aliases' in harnessTool ? harnessTool.aliases : undefined) ?? []) {
         toolSet[alias] = tool(descriptor as Tool);
+        repairToolSet[alias] = tool(repairDescriptor as Tool);
       }
     }
 

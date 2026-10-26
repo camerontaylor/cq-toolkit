@@ -650,7 +650,7 @@ export function makeResolveConflictOp(
           if (result.stopReason === 'error') {
             const hint =
               result.denials.length > 0
-                ? `${result.denials.length} tool use(s) denied by policy (see the session record for narration)`
+                ? `${result.denials.length} tool use(s) denied (see the session record for narration)`
                 : 'no denials recorded (see the session record for narration)';
             // ADR-0002 §2.9: EVERY error verdict → 'failed', with the
             // structured class named in the text (errorClass=<x>) for

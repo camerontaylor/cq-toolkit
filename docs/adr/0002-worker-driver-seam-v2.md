@@ -184,7 +184,7 @@ When no schema is requested, `structuredOutput` MUST be absent.
 
 **Per-lane transport and repair.** The _verdict_ is uniform; the transport stays native.
 
-- **ai-sdk:** `Output.object` over the JSON Schema, keeping the step-7 tool cutoff. It MUST make **one** bounded
+- **ai-sdk:** `Output.object` over the JSON Schema, with a final-step instruction turn at the step cap (see the 2026-10-27 amendment). It MUST make **one** bounded
   repair request before giving up: no tool execution, over the session transcript, schema restated, `maxRetries: 0`, inside
   `budget` and `signal`.
 - **claude-agent:** native `outputFormat` `json_schema` (the SDK validates and retries).
