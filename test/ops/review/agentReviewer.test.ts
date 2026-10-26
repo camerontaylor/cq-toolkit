@@ -286,6 +286,88 @@ describe('runAgentReviewer', () => {
       severityMap: { high: 'major', medium: 'minor' },
     });
     expect(result.status).toBe(expected);
+    // A stop with no driver detail keeps the stable, detail-free reason.
+    if (stopReason !== 'budget')
+      expect(result).toMatchObject({
+        status: 'needs-human',
+        reason: `agent review did not complete (${stopReason})`,
+      });
+  });
+
+  it('carries the driver error detail into the blocked reason (#484)', async () => {
+    // The #483 live shape: a DSML reply the prompted-schema parse rejected,
+    // with the precise cause already classified by the driver.
+    const detail =
+      'ai-sdk driver: structured output invalid after the repair attempt — the reply carried no parseable object — model emitted tool-call markup instead of the JSON reply';
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => ({
+            stopReason: 'error' as const,
+            error: detail,
+            errorClass: 'output-invalid' as const,
+            usage: { input: 3059, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          })),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 1000,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      reason: `agent review did not complete (error): ${detail}`,
+    });
+  });
+
+  it('bounds and secret-redacts the driver error detail before the blocked reason (#484)', async () => {
+    vi.stubEnv('CQ_484_REVIEW_TOKEN', 'review-token-value');
+    try {
+      const drivers = {
+        resolve: vi.fn(() => ({
+          driver: {
+            run: vi.fn(async () => ({
+              stopReason: 'error' as const,
+              error: `upstream echoed review-token-value then ${'x'.repeat(600)}`,
+              usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            })),
+          },
+          lane: 'ai-sdk',
+          modelSpec: { provider: 'mock', model: 'mock' },
+        })),
+      } as unknown as DriverFactory;
+      const result = await runAgentReviewer(drivers, {
+        repoRoot: '/fixture',
+        branch: 'review-fixture',
+        head: 'abc123',
+        scanSecrets: cleanScan,
+        diff: '',
+        role: { provider: 'mock', model: 'mock' },
+        maxTokens: 500,
+        wallMs: 1000,
+        severityMap: { high: 'major', medium: 'minor' },
+      });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('[redacted]');
+      expect(result.reason).not.toContain('review-token-value');
+      expect(result.reason).toContain('… [truncated]');
+      expect(result.reason.length).toBeLessThan(600);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('rejects invalid structured output', async () => {
