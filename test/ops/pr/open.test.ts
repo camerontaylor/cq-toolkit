@@ -275,6 +275,34 @@ describe('pr.open', () => {
     expect(create.body).not.toContain(DEV_READINESS_SECTION_MARKER);
   });
 
+  test('the not-ready gaps section binds advisories to the exact dirty identity', async () => {
+    await seed(repo, () => [
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        reviewer: 'agent',
+        dirtySha256: 'different-dirty',
+        advisories: ['stale dirty advisory'],
+      }),
+    ]);
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.ready).toBe(false);
+    const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
+      body: string;
+    };
+    expect(create.body).toContain('stale-review-identity');
+    expect(create.body).not.toContain('stale dirty advisory');
+  });
+
   test('an ADOPTED not-ready re-run refreshes the gaps AND dispositions sections in place', async () => {
     // First pass: open the not-ready draft.
     const first = ghFake();
@@ -462,6 +490,16 @@ describe('the readiness renderers', () => {
     const advisoryLedger = ledgerWith([
       cycleRecord({ reviewer: 'agent', advisories: ['superseded note'] }),
       cycleRecord({ reviewer: 'agent', advisories: ['large change <script>\nlookups limited'] }),
+      cycleRecord({
+        reviewer: 'agent',
+        scope: 'uncommitted',
+        advisories: ['uncommitted note'],
+      }),
+      cycleRecord({
+        reviewer: 'agent',
+        dirtySha256: 'different-dirty',
+        advisories: ['different dirty note'],
+      }),
       cycleRecord({ reviewer: 'agent', head: 'different-head', advisories: ['stale head'] }),
       cycleRecord({ reviewer: 'agent', base: 'different-base', advisories: ['stale base'] }),
       cycleRecord({ reviewer: 'agent', target: 'different-target', advisories: ['stale target'] }),
@@ -476,6 +514,8 @@ describe('the readiness renderers', () => {
       expect(section).not.toContain('stale head');
       expect(section).not.toContain('stale base');
       expect(section).not.toContain('stale target');
+      expect(section).not.toContain('uncommitted note');
+      expect(section).not.toContain('different dirty note');
     }
     expect(ready).toContain('terminal, reviewer');
   });

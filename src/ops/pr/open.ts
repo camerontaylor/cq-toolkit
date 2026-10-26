@@ -116,6 +116,7 @@ function reviewAdvisories(
   for (const entry of ledger.records) {
     if (
       entry.kind === 'cycle' &&
+      entry.scope === 'full' &&
       entry.head === state.head &&
       entry.base === state.base &&
       entry.target === state.target &&
@@ -190,7 +191,7 @@ export const DEV_READINESS_GAPS_SECTION_MARKER = '<!-- cq:dev-readiness-gaps -->
  * place, so they never depend on the one creation-time comment.
  */
 export function renderReadinessGapsSection(
-  state: { branch: string; head: string; base: string },
+  state: { branch: string; head: string; base: string; dirtySha256?: string },
   ledger: DevLedgerFile,
   target: string,
   gaps: readonly { field: string; detail: string }[],
@@ -355,7 +356,12 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
             )?.gates ?? [],
           )
         : renderReadinessGapsSection(
-            { branch: state.branch, head: state.head, base: state.base },
+            {
+              branch: state.branch,
+              head: state.head,
+              base: state.base,
+              dirtySha256: state.dirtySha256,
+            },
             ledger,
             target,
             gaps!,

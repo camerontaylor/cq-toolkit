@@ -542,6 +542,12 @@ export function makeReviewRun(
                       detail: `review.run: agent review attempt was dispatched but its dev ledger outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
                     };
                   }
+                  // One identity for the report and the ledger: blocked partial
+                  // findings must use the exact cycle ids the ledger recorded.
+                  const cycleFindings = agentFindings.map((finding, index) => ({
+                    ...finding,
+                    id: `${cycleId}#f${String(index + 1)}`,
+                  }));
                   if (agent.status === 'ok' && blockedReason === undefined) {
                     records.push({
                       schemaVersion: 1,
@@ -555,10 +561,7 @@ export function makeReviewRun(
                           coverage: coverage.ok ? coverage.coverage : agent.value.coverage,
                         },
                       ],
-                      findings: agent.value.findings.map((finding, index) => ({
-                        ...finding,
-                        id: `${cycleId}#f${String(index + 1)}`,
-                      })),
+                      findings: cycleFindings,
                       ...(advisories.length > 0 ? { advisories } : {}),
                     });
                   } else {
@@ -567,8 +570,8 @@ export function makeReviewRun(
                       blockedReason ?? 'agent review did not complete',
                       cycleId,
                     );
+                    partial.findings = cycleFindings;
                     if (report) {
-                      partial.findings = report.findings;
                       // A malformed coverage object must not invalidate the
                       // blocked findings record. Valid incomplete v2 (and
                       // legacy v1) evidence is still preserved.

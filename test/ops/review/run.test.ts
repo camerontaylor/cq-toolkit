@@ -8,7 +8,7 @@ import { runCli } from '../../../src/cli/main.js';
 import type { CliIo } from '../../../src/cli/output.js';
 import { assembleReadiness, DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
-import { cycleRecord } from '../dev/fakes.js';
+import { cycleRecord, dispositionRecord } from '../dev/fakes.js';
 import { repoEffects, makeTestRepo, seed } from '../dev/repo.js';
 
 async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>): Promise<void> {
@@ -1637,6 +1637,82 @@ it('keeps blocked evidence when an engine report carries malformed coverage', as
     };
     expect(persisted.sources[0]).toMatchObject({ kind: 'agent', status: 'blocked' });
     expect(persisted.sources[0]).not.toHaveProperty('coverage');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('maps blocked partial findings to the ledger cycle so a disposition closes them', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const effects = repoEffects(repo);
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+      runAgentReviewer: async () => ({
+        status: 'needs-human',
+        reason: 'fixture engine blocked',
+        report: {
+          findings: [
+            {
+              id: 'session-1-1',
+              source: 'agent',
+              severity: 'major',
+              text: 'blocked partial finding',
+              status: 'open',
+            },
+          ],
+          usage: 1,
+          coverage: undefined as never,
+          advisories: ['blocked advisory'],
+          limitations: [],
+        },
+      }),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    const ledger = effects.openLedger('feature/x').load();
+    const cycle = ledger.records.find(
+      (entry) => entry.kind === 'cycle' && entry.reviewer === 'agent:reviewer',
+    );
+    if (cycle?.kind !== 'cycle') throw new Error('missing agent cycle');
+    const findingId = cycle.findings[0]?.id;
+    expect(findingId).toBe(`c001-${cycle.head.slice(0, 8)}#f1`);
+    expect(result.report?.findings).toEqual([
+      expect.objectContaining({ id: findingId, text: 'blocked partial finding' }),
+    ]);
+    expect(result.report?.advisories).toEqual(['blocked advisory']);
+
+    const readiness = assembleReadiness({
+      branch: ledger.branch,
+      target: 'merge-queue',
+      identity: {
+        base: cycle.base,
+        head: cycle.head,
+        dirtySha256: cycle.dirtySha256,
+      },
+      ledger: {
+        version: DEV_LEDGER_VERSION,
+        branch: ledger.branch,
+        records: [
+          ...ledger.records,
+          dispositionRecord({
+            findingId: findingId!,
+            action: 'fixed',
+            why: 'fixture disposition closes the blocked partial finding',
+            head: cycle.head,
+          }),
+        ],
+      },
+      untracked: [],
+      configuredReviewers: ['agent'],
+      nowIso: '2026-10-26T00:00:00.000Z',
+    });
+    expect(readiness.ready).toBe(false);
+    if (!readiness.ready)
+      expect(readiness.gaps.some((gap) => gap.field === 'open-blocking-findings')).toBe(false);
   } finally {
     await repo.cleanup();
   }
