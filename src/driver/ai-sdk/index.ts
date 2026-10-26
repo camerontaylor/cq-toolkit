@@ -253,6 +253,7 @@ import type {
 import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
 import { defaultSessionsDir } from '../sessions-dir.js';
+import { createStepFetch } from './step-fetch.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -372,7 +373,15 @@ export class AiSdkDriver implements Driver {
   private readonly stepTimeoutMs: number;
 
   constructor(options: AiSdkDriverOptions = {}) {
-    this.providers = options.providers ?? defaultProviders();
+    const stepTimeoutMs = options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    if (!Number.isSafeInteger(stepTimeoutMs) || stepTimeoutMs <= 0)
+      throw new Error(
+        `ai-sdk driver: stepTimeoutMs must be a positive integer (got ${String(stepTimeoutMs)})`,
+      );
+    this.stepTimeoutMs = stepTimeoutMs;
+    // The production providers fetch through a transport bounded by the same
+    // step bound (step-fetch.ts); injected providers are left untouched.
+    this.providers = options.providers ?? defaultProviders(createStepFetch(stepTimeoutMs));
     // The effective config is stored as a deep-frozen STRUCTURED CLONE:
     // neither the caller's object (mutated after construction) nor the
     // shared `defaultHarnessConfig` can be reached — or mutated — through
@@ -388,12 +397,6 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
-    const stepTimeoutMs = options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
-    if (!Number.isSafeInteger(stepTimeoutMs) || stepTimeoutMs <= 0)
-      throw new Error(
-        `ai-sdk driver: stepTimeoutMs must be a positive integer (got ${String(stepTimeoutMs)})`,
-      );
-    this.stepTimeoutMs = stepTimeoutMs;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -1547,7 +1550,7 @@ function signalAborted(signal: AbortSignal | undefined): boolean {
  * in-process lane (no host CLI) for exactly that handle, while real vendor
  * handles keep their own routes.
  */
-function defaultProviders(): Record<string, ProviderFactory> {
+function defaultProviders(fetch: typeof globalThis.fetch): Record<string, ProviderFactory> {
   const requireEnv = (provider: string, envName: string): string => {
     const value = process.env[envName];
     if (value === undefined || value === '') {
@@ -1566,14 +1569,18 @@ function defaultProviders(): Record<string, ProviderFactory> {
       createZai({
         apiKey: requireEnv(handle, 'ZAI_API_KEY'),
         baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
+        fetch,
       }).languageModel(modelId);
   return {
     anthropic: (modelId) =>
-      createAnthropic({ apiKey: requireEnv('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(
+      createAnthropic({
+        apiKey: requireEnv('anthropic', 'ANTHROPIC_API_KEY'),
+        fetch,
+      }).languageModel(modelId),
+    openai: (modelId) =>
+      createOpenAI({ apiKey: requireEnv('openai', 'OPENAI_API_KEY'), fetch }).languageModel(
         modelId,
       ),
-    openai: (modelId) =>
-      createOpenAI({ apiKey: requireEnv('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
     zai: zai('zai'),
     // The driver-kind alias (see header): the self-host default provider.
     // It reports ITS OWN handle in a missing-key error (not 'zai'), so the
@@ -1582,6 +1589,7 @@ function defaultProviders(): Record<string, ProviderFactory> {
     deepseek: (modelId) =>
       createDeepSeek({
         apiKey: requireEnv('deepseek', 'DEEPSEEK_API_KEY'),
+        fetch,
       }).languageModel(modelId),
     // Chat-completions-only OpenCode Go handle (see the doc comment above):
     // both the credential and the route are required env reads — there is
@@ -1591,6 +1599,7 @@ function defaultProviders(): Record<string, ProviderFactory> {
         apiKey: requireEnv('opencode-go', 'OPENCODE_GO_API_KEY'),
         baseURL: requireEnv('opencode-go', 'OPENCODE_GO_BASE_URL'),
         headers: { 'x-opencode-session': sessionId ?? randomUUID() },
+        fetch,
       }).chat(modelId),
   };
 }

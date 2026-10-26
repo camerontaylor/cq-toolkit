@@ -152,7 +152,11 @@ constructor option overrides it, and the factory takes it per request
 (`DriverRequest.stepTimeoutMs`) or per lane (`lanes.aiSdk.stepTimeoutMs`).
 The agent reviewer passes cq.json `budgets.step.wallMs`, capped at the
 remaining review wall time, because a reasoning model can legitimately spend
-minutes on one request.
+minutes on one request. The production default providers fetch through a
+per-driver undici dispatcher (`ai-sdk/step-fetch.ts`) whose header and body
+timeouts are the step bound plus `STEP_FETCH_MARGIN_MS`: Node's bundled fetch
+otherwise gives up on a non-streaming request after undici's default 300 s,
+whatever the step bound says. Injected providers keep their own transport.
 
 Transient retry (#210): the SDK call runs `maxRetries: 1` — ONE retry per
 step request (bounded; ≤ DEFAULT_MAX_STEPS per run) for the SDK's own
