@@ -19,14 +19,45 @@ import { join } from 'node:path';
 import { describe, expect, test, vi, afterEach } from 'vitest';
 import type { PathLike } from 'node:fs';
 
+// The hoisted fs gate never leaks across tests (file-level, covers every describe).
+afterEach(() => {
+  gateRealpath(undefined);
+  releaseWriteFileHold();
+});
+
 // realpath gate for admission-order tests: vi.mock is HOISTED above the
 // imports, so these variables are initialized by the factory (which runs at
 // mock-install time); when the gate is unset, realpath passes straight
 // through to the ORIGINAL captured below — never through the mock itself.
-const { gateRealpath, gatedRealpath, setOriginalRealpath } = vi.hoisted(() => {
+const {
+  gateRealpath,
+  gatedRealpath,
+  setOriginalRealpath,
+  armWriteFileHold,
+  releaseWriteFileHold,
+  gatedWriteFile,
+  setOriginalWriteFile,
+} = vi.hoisted(() => {
   const state: {
     gate?: ((real: () => Promise<string>) => Promise<string>) | undefined;
     original?: (path: PathLike) => Promise<string>;
+    writeHold?:
+      | {
+          suffix: string;
+          entered: () => void;
+          enteredPromise: Promise<void>;
+          release: () => void;
+          releasePromise: Promise<void>;
+        }
+      | undefined;
+    writeHoldRelease?: (() => void) | undefined;
+    originalWriteFile?:
+      | ((
+          path: PathLike,
+          data: string | Uint8Array,
+          options?: { encoding?: string } | string,
+        ) => Promise<void>)
+      | undefined;
   } = {};
   const gatedRealpath = async (path: PathLike): Promise<string> => {
     const real = () => {
@@ -36,6 +67,21 @@ const { gateRealpath, gatedRealpath, setOriginalRealpath } = vi.hoisted(() => {
     };
     return state.gate === undefined ? real() : state.gate(real);
   };
+  const gatedWriteFile = async (
+    path: PathLike,
+    data: string | Uint8Array,
+    options?: { encoding?: string } | string,
+  ): Promise<void> => {
+    const original = state.originalWriteFile;
+    if (original === undefined) throw new Error('original writeFile not captured');
+    const hold = state.writeHold;
+    if (hold === undefined || !String(path).endsWith(hold.suffix)) {
+      return original(path, data, options);
+    }
+    hold.entered();
+    await hold.releasePromise;
+    return original(path, data, options);
+  };
   return {
     gatedRealpath,
     gateRealpath: (gate: ((real: () => Promise<string>) => Promise<string>) | undefined): void => {
@@ -44,16 +90,57 @@ const { gateRealpath, gatedRealpath, setOriginalRealpath } = vi.hoisted(() => {
     setOriginalRealpath: (original: (path: PathLike) => Promise<string>): void => {
       state.original = original;
     },
+    gatedWriteFile,
+    setOriginalWriteFile: (
+      original: (
+        file: PathLike,
+        data: string | Uint8Array,
+        options?: { encoding?: string; mode?: number; flag?: string } | string,
+      ) => Promise<void>,
+    ): void => {
+      state.originalWriteFile = original as (
+        path: PathLike,
+        data: string | Uint8Array,
+        options?: { encoding?: string } | string,
+      ) => Promise<void>;
+    },
+    armWriteFileHold: (suffix: string): Promise<void> => {
+      let enteredResolve!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => {
+        enteredResolve = resolve;
+      });
+      let releaseResolve!: () => void;
+      const releasePromise = new Promise<void>((resolve) => {
+        releaseResolve = resolve;
+      });
+      state.writeHold = {
+        suffix,
+        entered: enteredResolve,
+        enteredPromise,
+        release: releaseResolve,
+        releasePromise,
+      };
+      state.writeHoldRelease = releaseResolve;
+      return enteredPromise;
+    },
+    releaseWriteFileHold: (): void => {
+      state.writeHoldRelease?.();
+      state.writeHold = undefined;
+    },
   };
 });
-let realpathGate: ((real: () => Promise<string>) => Promise<string>) | undefined;
-void realpathGate;
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   setOriginalRealpath(actual.realpath);
+  setOriginalWriteFile(actual.writeFile as Parameters<typeof setOriginalWriteFile>[0]);
   return {
     ...actual,
     realpath: (path: PathLike): Promise<string> => gatedRealpath(path),
+    writeFile: (
+      path: PathLike,
+      data: string | Uint8Array,
+      options?: { encoding?: string } | string,
+    ): Promise<void> => gatedWriteFile(path, data, options),
   };
 });
 import { buildTools } from '../../src/harness/tools.js';
@@ -802,73 +889,68 @@ describe('F1 edit correctness', () => {
     });
   });
 
-  test('a preflight denial leaves no poisoned queue: the next same-path call runs normally', async () => {
+  test('a preflight denial leaves no poisoned queue: the next SAME-path call runs normally', async () => {
     await withScratch(async (scratchDir) => {
       const file = join(scratchDir, 'guard.txt');
       await writeFile(file, 'keep\n', 'utf8');
-      const tools = defaultTools(scratchDir);
+      // SAME lexical path for both calls; edit.pathPatterns DENY it, so the
+      // edit's preflight denies (path not allowed) while read allows — the
+      // exact 586-poisoning shape: edit admitted, denied, released; a later
+      // read on the SAME path must run normally.
+      const denyEditConfig = {
+        ...defaultHarnessConfig,
+        tools: {
+          ...defaultHarnessConfig.tools,
+          edit: {
+            ...defaultHarnessConfig.tools.edit,
+            pathPatterns: ['elsewhere/**'],
+          },
+        },
+      };
+      const tools = buildTools(denyEditConfig, scratchDir);
+      const read = tools.find((c) => c.name === 'read');
+      const edit = tools.find((c) => c.name === 'edit');
+      if (read === undefined || edit === undefined) throw new Error('missing tools');
 
-      // Hold realpath so a second call is admitted while the first is in
-      // preflight; the first then DENIES (symlink escape), exercising the
-      // release-on-denial path.
-      try {
-        await mkdir(join(scratchDir, 'outside'), { recursive: true });
-        await symlink(join(scratchDir, 'outside'), join(scratchDir, 'escape'));
-      } catch {
-        // exists
-      }
-      gateRealpath(async (real) => {
-        const result = await real();
-        return result.endsWith('guard.txt') ? join(scratchDir, 'outside', 'guard.txt') : result;
-      });
-      const denied = await tools.edit.execute({
-        file_path: 'escape/guard.txt',
+      const denied = await edit.execute({
+        file_path: 'guard.txt',
         old_string: 'keep',
         new_string: 'x',
       });
-      expect(denied.ok).toBe(false);
-      gateRealpath(undefined);
+      expect(denied.ok, denied.ok ? '' : denied.denial.reason).toBe(false);
+      if (!denied.ok) expect(denied.denial.reason).toContain('path not allowed');
 
-      // NO poisoned queue: the next same-path call runs normally.
-      await tools.read.execute({ path: 'guard.txt' });
-      const fine = await tools.edit.execute({
-        file_path: 'guard.txt',
-        old_string: 'keep',
-        new_string: 'changed',
-      });
-      if (!fine.ok) throw new Error(`expected ok, got denial: ${fine.denial.reason}`);
-      await expect(readFile(file, 'utf8')).resolves.toBe('changed\n');
+      // NO poisoned queue: a later read on the SAME path runs normally.
+      const fine = await read.execute({ path: 'guard.txt' });
+      expect(fine.ok, fine.ok ? '' : fine.denial.reason).toBe(true);
     });
   });
 
-  test('a SYMLINKED WORKSPACE ROOT itself (buildTools(aliasRoot)): canonical edits still work', async () => {
+  test('a SYMLINKED WORKSPACE ROOT itself: TWO concurrent ordered edits through buildTools(aliasRoot)', async () => {
     await withScratch(async (scratchDir) => {
       const realRoot = join(scratchDir, 'real-root');
       const aliasRoot = join(scratchDir, 'alias-root');
       await mkdir(realRoot, { recursive: true });
       await symlink(realRoot, aliasRoot);
       await writeFile(join(realRoot, 't.txt'), 'a\n', 'utf8');
-      const toolsReal = defaultTools(realRoot);
       // ONE alias buildTools call: its prior-read ledger is per buildTools,
-      // so the read and the edit must come from the SAME instance.
+      // so the read and both edits come from the SAME instance.
       const toolsAlias = buildTools(defaultHarnessConfig, aliasRoot);
       const editAlias = toolsAlias.find((c) => c.name === 'edit');
       const readAlias = toolsAlias.find((c) => c.name === 'read');
       if (editAlias === undefined || readAlias === undefined) throw new Error('missing tools');
-      await toolsReal.read.execute({ path: 't.txt' });
-      const aliasRead = await readAlias.execute({ path: 't.txt' });
-      if (!aliasRead.ok) throw new Error(`alias read denied: ${aliasRead.denial.reason}`);
-      const edited = await editAlias.execute({
-        file_path: 't.txt',
-        old_string: 'a',
-        new_string: 'b',
-      });
-      if (!edited.ok) throw new Error(`expected ok, got denial: ${edited.denial.reason}`);
-      await expect(readFile(join(realRoot, 't.txt'), 'utf8')).resolves.toBe('b\n');
+      await readAlias.execute({ path: 't.txt' });
+      const [first, second] = await Promise.all([
+        editAlias.execute({ file_path: 't.txt', old_string: 'a', new_string: 'b' }),
+        editAlias.execute({ file_path: 't.txt', old_string: 'b', new_string: 'c' }),
+      ]);
+      expect(first.ok, first.ok ? '' : first.denial.reason).toBe(true);
+      expect(second.ok, second.ok ? '' : second.denial.reason).toBe(true);
+      await expect(readFile(join(realRoot, 't.txt'), 'utf8')).resolves.toBe('c\n');
     });
   });
 
-  test('unrelated-file bodies remain independent: a held preflight does not block another file', async () => {
+  test('unrelated-file BODIES remain independent: a held a.txt write does not block b.txt settling', async () => {
     await withScratch(async (scratchDir) => {
       const a = join(scratchDir, 'a.txt');
       const b = join(scratchDir, 'b.txt');
@@ -877,23 +959,30 @@ describe('F1 edit correctness', () => {
       const tools = defaultTools(scratchDir);
       await tools.read.execute({ path: 'a.txt' });
       await tools.read.execute({ path: 'b.txt' });
-      gateRealpath(async (real) => {
-        const result = await real();
-        if (result.endsWith('a.txt')) {
-          // Hold a.txt's realpath; b.txt must NOT wait on it.
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-        return result;
+
+      // Hold a.txt's WRITE (inside its body, after the preflight): b.txt's
+      // edit must SETTLE while a's body is still in flight — body
+      // independence, which preflight-level delays cannot prove.
+      const holdEntered = armWriteFileHold('a.txt');
+      const editA = tools.edit
+        .execute({ file_path: 'a.txt', old_string: 'a', new_string: 'x' })
+        .finally(() => {
+          releaseWriteFileHold();
+        });
+      await holdEntered;
+      const editB = await tools.edit.execute({
+        file_path: 'b.txt',
+        old_string: 'b',
+        new_string: 'y',
       });
-      const [editA, editB] = await Promise.all([
-        tools.edit.execute({ file_path: 'a.txt', old_string: 'a', new_string: 'x' }),
-        tools.edit.execute({ file_path: 'b.txt', old_string: 'b', new_string: 'y' }),
-      ]);
-      gateRealpath(undefined);
-      if (!editA.ok) throw new Error(`a denied: ${editA.denial.reason}`);
-      if (!editB.ok) throw new Error(`b denied: ${editB.denial.reason}`);
-      await expect(readFile(a, 'utf8')).resolves.toBe('x\n');
+      // b settles WHILE a's body write is still held:
+      expect(editB.ok, editB.ok ? '' : editB.denial.reason).toBe(true);
       await expect(readFile(b, 'utf8')).resolves.toBe('y\n');
+      // Release a; it completes normally.
+      releaseWriteFileHold();
+      const settledA = await editA;
+      expect(settledA.ok, settledA.ok ? '' : settledA.denial.reason).toBe(true);
+      await expect(readFile(a, 'utf8')).resolves.toBe('x\n');
     });
   });
 
@@ -910,55 +999,53 @@ describe('F1 edit correctness', () => {
         const tools = defaultTools(scratchDir);
         await tools.read.execute({ path: 'serial.txt' });
 
-        // Deterministic gate on realpath: the FIRST caller's realpath resolves
-        // only after the SECOND caller has been admitted (which, pre-fix, let
-        // the second caller take the lock backwards). Mock fs/promises.realpath
-        // — the module binding buildTools actually uses.
-        let firstArrived = false;
-        let secondAdmitted = false;
+        // Deterministic gate: the FIRST caller's realpath is HELD. A deferred
+        // signalled by the mock itself records when the first caller entered
+        // the held realpath; the second caller is started only after that.
+        let firstEntered!: () => void;
+        const firstEnteredPromise = new Promise<void>((resolve) => {
+          firstEntered = resolve;
+        });
         let releaseFirst!: () => void;
         const firstCanResolve = new Promise<void>((resolve) => {
           releaseFirst = resolve;
         });
-        // Gated via the vi.mock'd realpath (realpathGate above): the FIRST
-        // caller's realpath resolves only after the second caller has been
-        // admitted — deterministic, no timing loop.
+        let probeCalls = 0;
         gateRealpath(async (real) => {
+          probeCalls++;
           const result = real();
-          if (!firstArrived) {
-            firstArrived = true;
+          if (probeCalls === 1) {
+            firstEntered();
             await firstCanResolve;
           }
           return result;
         });
 
-        const events: string[] = [];
-        const first = tools.edit
-          .execute({ file_path: 'serial.txt', old_string: 'a', new_string: 'b' })
-          .then((r) => {
-            events.push('first-done');
-            return r;
-          });
-        // Yield microtasks so the first caller enters its held realpath.
-        await Promise.resolve();
-        await Promise.resolve();
-        const second = tools.edit
-          .execute({ file_path: 'serial.txt', old_string: 'b', new_string: 'c' })
-          .then((r) => {
-            events.push('second-done');
-            return r;
-          });
-        // The second caller has now been admitted synchronously (admission is
-        // sync in execute, before any await on the second call's preflight).
-        secondAdmitted = true;
+        const first = tools.edit.execute({
+          file_path: 'serial.txt',
+          old_string: 'a',
+          new_string: 'b',
+        });
+        // The first caller is now HELD inside its realpath.
+        await firstEnteredPromise;
+        const second = tools.edit.execute({
+          file_path: 'serial.txt',
+          old_string: 'b',
+          new_string: 'c',
+        });
+        // Drain microtasks, then assert the second caller has NOT entered its
+        // realpath (ordered admission holds it behind the first).
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const probesWhileHeld = probeCalls;
+        // With ordered admission the second's preflight cannot begin while
+        // the first holds the admission turn.
+        expect(probesWhileHeld).toBe(1);
         releaseFirst();
         gateRealpath(undefined);
 
         const [firstResult, secondResult] = await Promise.all([first, second]);
-        expect(secondAdmitted).toBe(true);
-        expect(firstResult).toMatchObject({ ok: true });
-        expect(secondResult).toMatchObject({ ok: true });
-        expect(events).toEqual(['first-done', 'second-done']);
+        expect(firstResult.ok, firstResult.ok ? '' : firstResult.denial.reason).toBe(true);
+        expect(secondResult.ok, secondResult.ok ? '' : secondResult.denial.reason).toBe(true);
         await expect(readFile(file, 'utf8')).resolves.toBe('c\n');
       });
     });

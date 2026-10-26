@@ -1116,23 +1116,16 @@ export function buildTools(
   };
 
   /**
-   * Per-canonical-file BODY queues: the mutual exclusion for read/edit/write.
-   * Keyed by the canonical (realpath) path; a settled tail is dropped.
+   * Per-canonical-file BODY queues: the mutual exclusion for read/edit/write,
+   * keyed by the canonical (realpath) path; a settled tail is dropped.
    */
   const fileQueues = new Map<string, Promise<void>>();
 
   /**
-   * ADMISSION — the fix for the macOS F1 race (concurrent edits, `second`
-   * landed `ok:false` changed-since-read): the preflight (realpath,
-   * touchesGit, pathAllowedEverywhere) is ASYNC, so with per-path locks
-   * alone, two concurrent calls on one file can complete their preflight in
-   * REVERSE order and enqueue their bodies backwards — the second edit then
-   * reads before the first edit's write lands. The fix: a single GLOBAL
-   * admission turn serializes ONLY the preflight; the resolved body is then
-   * enqueued onto the canonical path's OWN queue. Admission is released in a
-   * finally WITHOUT awaiting the body, so unrelated files' bodies still
-   * overlap. The wall-clock cost is the preflight only, never whole file
-   * operations. Staleness and containment gates are unchanged.
+   * ADMISSION: a single global turn serializes ONLY the async preflight
+   * (realpath, touchesGit, pathAllowedEverywhere) so per-file bodies enqueue
+   * in ARRIVAL order, not preflight-completion order; unrelated files' bodies
+   * still overlap. Gates unchanged.
    */
   let admissionTail: Promise<void> = Promise.resolve();
   const admit = async <T>(
