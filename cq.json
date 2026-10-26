@@ -29,7 +29,7 @@
   "budgets": {
     "run": { "maxTokens": 25000000, "wallMs": 14400000 },
     "unit": { "wallMs": 3600000 },
-    "step": { "wallMs": 1200000 }
+    "step": { "wallMs": 3600000 }
   },
   "review": {
     "reviewers": ["coderabbit", "agent"],
