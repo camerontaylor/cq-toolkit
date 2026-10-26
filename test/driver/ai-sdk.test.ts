@@ -1588,6 +1588,16 @@ describe('ai-sdk driver failure classes (#210)', () => {
       expect(args.maxRetries).toBe(1);
       // Per-request bound for EACH step of the tool loop.
       expect(args.timeout).toEqual({ stepMs: DEFAULT_STEP_TIMEOUT_MS });
+      expect(DEFAULT_STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(600_000);
+      // The bound is configurable per driver and validated.
+      const tuned = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        stepTimeoutMs: 900_000,
+      });
+      await tuned.run(invocation());
+      expect(lastGenerateTextArgs().timeout).toEqual({ stepMs: 900_000 });
+      expect(() => new AiSdkDriver({ stepTimeoutMs: 0 })).toThrow(/stepTimeoutMs/);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

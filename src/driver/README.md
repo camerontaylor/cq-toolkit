@@ -197,7 +197,7 @@ projection protocol does not exist and is an activation blocker for that
 bridge. With no hook the shared token allowance is enforced per-invocation
 only — a named gap, not a whole-job claim.
 The one driver-side temporal bound is the SDK call's per-request
-`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
+`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (600 s; `AiSdkDriverOptions.stepTimeoutMs`) — NOT a run deadline,
 but a bound on each step of the tool loop so a hung HTTP request cannot
 stall the loop.
 

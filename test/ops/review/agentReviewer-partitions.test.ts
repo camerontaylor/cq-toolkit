@@ -543,3 +543,36 @@ it('refuses partition instructions that alone exceed the prompt cap', () => {
     }),
   ).toThrow('exceed the supported prompt limit');
 });
+
+it('keeps dispatching independent sessions after one fails and still blocks with the failure named', async () => {
+  const fake = fakeDrivers({
+    result: (_invocation, call) =>
+      call === 1
+        ? result({ stopReason: 'error', error: 'step timeout', structuredOutput: undefined })
+        : result(),
+  });
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({ diff: large, components: [{ ...small, text: large }], maxTokens: 1_000_000 }),
+  );
+  expect(outcome.status).toBe('needs-human');
+  expect(fake.calls()).toBeGreaterThan(2);
+  if (outcome.status !== 'needs-human') throw new Error('expected needs-human');
+  expect(outcome.reason).toContain('step timeout');
+  expect(outcome.report?.coverage.sessions[0]).toMatchObject({ status: 'error' });
+  expect(outcome.report?.coverage.sessions[1]).toMatchObject({ status: 'complete' });
+  expect(outcome.report?.findings.length).toBeGreaterThan(0);
+});
+
+it('stops after two consecutive failed sessions instead of spending the rest of the budget', async () => {
+  const fake = fakeDrivers({
+    result: () =>
+      result({ stopReason: 'error', error: 'provider down', structuredOutput: undefined }),
+  });
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({ diff: large, components: [{ ...small, text: large }], maxTokens: 1_000_000 }),
+  );
+  expect(outcome.status).toBe('needs-human');
+  expect(fake.calls()).toBe(2);
+});

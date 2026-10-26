@@ -288,8 +288,12 @@ export const DEFAULT_MAX_STEPS = 40;
  * ignored here). It bounds a single provider HTTP request so a hung
  * connection cannot stall the loop indefinitely; the SDK aborts that step
  * and surfaces the cause, which the classifier maps to [endpoint-timeout].
+ * The default is generous because a non-streaming step legitimately waits for
+ * its whole output (a 48k-token review answer exceeded the old 120 s); ai@7's
+ * `chunkMs` applies to streaming only, so it cannot serve this path.
+ * Override per driver with `AiSdkDriverOptions.stepTimeoutMs`.
  */
-export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
+export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
 
 /**
  * The minimum ripgrep the search tools need at runtime: 11.0.0 (the CI
@@ -325,6 +329,11 @@ export interface AiSdkDriverOptions {
   ) => Promise<
     { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
   >;
+  /**
+   * Per-request bound for each SDK step, in ms (`timeout.stepMs`). It catches
+   * a hung request, not a slow long answer; default DEFAULT_STEP_TIMEOUT_MS.
+   */
+  stepTimeoutMs?: number;
   /**
    * Runs before every provider send, including retries and repairs. The
    * optional context distinguishes a model request from scanned tool output;
@@ -407,6 +416,7 @@ export class AiSdkDriver implements Driver {
     | undefined;
   /** Runtime rg probe seam (injected, async, never serializable config). */
   private readonly resolveRg: NonNullable<AiSdkDriverOptions['resolveRg']>;
+  private readonly stepTimeoutMs: number;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -422,6 +432,12 @@ export class AiSdkDriver implements Driver {
         : deepFreeze(structuredClone(options.sandboxConfig));
     this.sessionsDir = options.sessionsDir;
     this.beforeRequest = options.beforeRequest;
+    const stepTimeoutMs = options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    if (!Number.isInteger(stepTimeoutMs) || stepTimeoutMs <= 0)
+      throw new Error(
+        `ai-sdk driver: stepTimeoutMs must be a positive integer, got ${String(stepTimeoutMs)}`,
+      );
+    this.stepTimeoutMs = stepTimeoutMs;
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
@@ -788,7 +804,7 @@ export class AiSdkDriver implements Driver {
           // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
           // hung request cannot stall the loop. The step-timeout abort is not
           // SDK-retryable; it classifies as 'transient' (TimeoutError name).
-          timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
+          timeout: { stepMs: this.stepTimeoutMs },
           ...(selected.length > 0 ? { tools: toolSet } : {}),
           // DECOUPLE the mandatory structured object from the tool loop (#203):
           // with tools available on the final step the model tends to call one
@@ -1278,7 +1294,7 @@ export class AiSdkDriver implements Driver {
         // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
         // bounded, unlike the main loop.
         maxRetries: 0,
-        timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
+        timeout: { stepMs: this.stepTimeoutMs },
         ...(remainingTokens !== undefined
           ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
           : { stopWhen: [stepCountIs(1)] }),

@@ -189,15 +189,21 @@ read numbered file windows and use contained `grep` and `glob` searches. Set
 once as the user message; system messages contain the driver preamble only.
 
 The configurable small tier defaults to at most 200 changed lines and five files;
-the medium tier to at most 800 lines and 20 files. Small reviews suggest 0–5
-lookups; medium reviews suggest about 15. Documentation/configuration changes
+the medium tier to at most 800 lines and 20 files. A session gets a model-step
+budget by tier (small 4, medium 6, capped by `review.session.maxSteps`), stated in
+the prompt; the last step has no tools. The budget bounds the main loop: if the
+final reply is not valid JSON, the driver's single schema-repair call runs on top
+of it and is reported as one extra step. Documentation/configuration changes
 ask for source-of-truth checks, and exported/schema changes ask for caller and
 contract checks even when small. A change above the medium tier, or a prompt
 above the session input limit, uses sequential tool-free partitions and emits an
 advisory about limited cross-file context. Partition payloads cover every
 nonexcluded component without truncation, with bounded preceding context and
 surrogate-safe UTF-16 boundaries. There are no area sessions or cross-session
-retries. Repeated findings are deduplicated.
+retries. A session that fails (for example a step timeout) does not stop the
+remaining independent partitions; the result is still `needs-human` naming the
+first failure and the incomplete pieces, but carries every other session's
+findings. Two consecutive failed sessions stop the run. Repeated findings are deduplicated.
 
 Coverage v2 retains every original component's path, hash, size and state:
 `planned`, `delivered`, `completed` or `excluded`. Only a clean `model-request`

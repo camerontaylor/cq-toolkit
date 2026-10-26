@@ -162,6 +162,8 @@ export async function runAgentReviewer(
         ),
       );
       ensureActive();
+      let firstFailure: string | undefined;
+      let consecutiveFailures = 0;
       for (const session of plan.sessions) {
         ensureActive();
         if (report.usage >= input.maxTokens)
@@ -216,8 +218,21 @@ export async function runAgentReviewer(
               : result.status === 'failed'
                 ? result.error
                 : result.status;
-          return { status: 'needs-human', reason: `${detail}; ${reason}`, report: snapshot()! };
+          // Sessions are independent: one failed session must not leave the
+          // rest unattempted (the blocked result then carries the most
+          // findings and coverage). Two consecutive failures mean the
+          // provider itself is unhealthy, so stop rather than burn budget.
+          firstFailure ??= detail;
+          consecutiveFailures += 1;
+          if (consecutiveFailures >= 2)
+            return {
+              status: 'needs-human',
+              reason: `${firstFailure}; ${reason}`,
+              report: snapshot()!,
+            };
+          continue;
         }
+        consecutiveFailures = 0;
         for (const finding of result.value) {
           if (
             !report.findings.some(
@@ -239,6 +254,12 @@ export async function runAgentReviewer(
           };
       }
       ReviewCoverageV2Schema.parse(report.coverage);
+      if (firstFailure !== undefined)
+        return {
+          status: 'needs-human',
+          reason: `${firstFailure}; ${incompleteReason(report.coverage)}`,
+          report: snapshot()!,
+        };
       if (!isCoverageV2Complete(report.coverage))
         return {
           status: 'needs-human',
