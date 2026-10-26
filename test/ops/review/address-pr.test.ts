@@ -434,7 +434,8 @@ async function world(
           return worker.withVerifiedHead!(action);
         },
         fix: async (finding, round) => {
-          if (options.failer && finding.id === 'T3') throw new Error('worker crash: scripted T3 fault');
+          if (options.failer && finding.id === 'T3')
+            throw new Error('worker crash: scripted T3 fault');
           return worker.fix(finding, round);
         },
       };
