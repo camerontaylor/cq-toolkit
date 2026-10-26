@@ -375,11 +375,13 @@ async function runTaskLoopInner(
                   allow:
                     bindings.toolPolicy?.mode === 'none'
                       ? []
-                      : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'run']).filter(
-                          (tool) =>
-                            ['read', 'edit', 'run'].includes(tool) &&
-                            (tool !== 'run' || bindings.taskWorker !== undefined),
-                        ),
+                      : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'bash'])
+                          .map((tool) => (tool === 'run' ? 'bash' : tool))
+                          .filter(
+                            (tool) =>
+                              ['read', 'edit', 'bash'].includes(tool) &&
+                              (tool !== 'bash' || bindings.taskWorker !== undefined),
+                          ),
                   mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
                 },
                 sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },

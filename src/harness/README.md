@@ -1,8 +1,10 @@
-Toolkit-owned minimal tool surface (read/edit/run), per-op allowlists.
+Toolkit-owned minimal tool surface (read/edit/write/bash), per-op allowlists.
+The pre-F1 `run` tool name and `path`/`oldText`/`newText` edit arguments are
+accepted as one-release aliases.
 Land: phase 1 (WS-B).
 
 - `config.ts` / `tools.ts` — the per-op config and the executors (every
-  refusal a `{ tool, reason }` denial; `run` in its own process group,
+  refusal a `{ tool, reason }` denial; `bash` in its own process group,
   cancellable via `execute(input, { signal })`).
 - `run.ts` — shared child-process lifecycle for shell commands and
   harness-owned argv executed without a shell.
@@ -16,7 +18,7 @@ Land: phase 1 (WS-B).
 
 ## Closed-form git commands
 
-The `run` tool accepts exactly these forms after whitespace normalization,
+The `bash` tool (legacy `run` alias) accepts exactly these forms after whitespace normalization,
 and each form still needs a command-allowlist grant:
 
 | Diff                            | Log                       |
@@ -55,7 +57,7 @@ group, and timeout or abort sends SIGKILL to that group, including
 descendants. Windows kills the direct child only. A noisy command is
 truncated rather than denied; killed commands return a null exit code.
 
-Every `run` child receives a default-deny environment composed by the
+Every `bash` child receives a default-deny environment composed by the
 shared core at execution time, whether called directly through
 `buildTools`, in-process through the claude-code lane's SDK transport, or through
 the CLI transport's stdio MCP server. Only default runtime/locale/network

@@ -1,4 +1,7 @@
-// Toolkit-owned minimal tool set — T1.4 slice 1 (read/edit/run, per-op allowlists).
+// Toolkit-owned minimal tool set — T1.4 slice 1, canonical names from F1
+// (read/edit/write/bash, per-op allowlists). The pre-F1 `run` name and the
+// pre-F1 edit arguments are accepted as one-release aliases; see
+// canonicalToolName/toolAliases and the edit input schema below.
 //
 // R4: the tool surface and its budgets are PER-OP CONFIG (data from
 // config.ts), never hardcoded constants. What IS fixed here is the minimal
@@ -10,10 +13,10 @@
 // THE SHARED RUN GATE (W1.11 / D14): every surface that builds these tools —
 // the ai-sdk driver, the subprocess driver's harness surface, the MCP harness
 // surface — reaches the same decision through `buildTools(..., gate)`. The
-// default gate is `harnessRunGate()` (src/sandbox), which withholds `run`
+// default gate is `harnessRunGate()` (src/sandbox), which withholds `bash`
 // entirely whenever the environment expresses a CQ_SANDBOX policy and no
 // certified launcher backs it, so a driver choice cannot bypass the policy.
-// A withheld run tool is OMITTED, not denied: an unreachable tool never
+// A withheld bash tool is OMITTED, not denied: an unreachable tool never
 // reaches child_process.
 //
 // THE LAUNCHER ENV SCRUB: an allowed command's child gets a default-deny
@@ -37,8 +40,19 @@
 //   'command allowlist: shell metacharacters not permitted with token
 //    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
-//   'edit failed: …' | 'run failed: …'
+//   'edit failed: …' | 'write refused: …' | 'write failed: …'
+//   'bash failed: …' (the pre-F1 'run failed: …' prefix is still recognized)
 //   'cancelled: …' (surface.ts: a queued call cancelled before it ran)
+//
+// EDIT/WRITE CORRECTNESS (F1): edit refuses an ambiguous target unless
+// `replace_all` is true, requires a prior `read` of the same resolved file,
+// and re-hashes the bytes to refuse a file that changed since that read.
+// Matching runs in LF space with the file's BOM and dominant line ending
+// restored on write; binary (NUL in the first 8 KiB) and invalid-UTF-8
+// files are refused. read/edit/write serialize per resolved path, so two
+// calls in one model step cannot interleave their verify-and-write
+// sequence. `write` may create a new file without a read; overwriting an
+// existing file takes the same prior-read and staleness checks as edit.
 //
 // ENFORCEMENT ORDER per call: sandbox gate → input schema → workspace
 // containment (lexical, then symlink realpath re-check) → config allowlist →
@@ -46,19 +60,19 @@
 //
 // SANDBOX MAPPING + TRUST BOUNDARY (driver seam SandboxLevel; issue #28):
 // sandboxPolicy governs the TOOL SURFACE — which tools exist, and what
-// read/edit may touch via the lexical + realpath path guards below. `run`
+// read/edit/write may touch via the lexical + realpath path guards below. `bash`
 // commands execute with HOST PRIVILEGES, scoped to the cwd convention only
 // (cwd = workspace); the command allowlist (token patterns / anchored re:)
 // is the additional GATE over what may run, never a confinement of how.
 // 'workspace-write' does NOT confer OS-level confinement: there is no
 // sandbox-exec/landlock/bwrap in v1 — OS-sandbox enforcement is the
 // recorded T1.8 strategy question.
-//   - 'read-only'       → `edit`/`run` deny with 'sandbox: read-only'; `read`
+//   - 'read-only'       → `edit`/`write`/`bash` deny with 'sandbox: read-only'; `read`
 //                         stays available.
 //   - 'none' | 'workspace-write' → tools behave per config.
 //
 // SYMLINK CHANNEL (named limitation + partial hardening): containment is
-// lexical, and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
+// lexical, and the `bash` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
 // command can create a symlink inside the workspace pointing outside
 // (`ln -s /etc passwd`), after which read/edit through the link would cross
 // the boundary. Partial hardening: read/edit REALPATH the resolved path and
@@ -123,7 +137,8 @@
 // wall-clock of their own: local fs ops need no timer, and wall-clock POLICY
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
-import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
@@ -149,7 +164,23 @@ const UNCAPPED_RETENTION_BYTES = 1_048_576;
 
 export const ReadToolInputSchema = z.object({ path: z.string().min(1) }).strict();
 
-export const EditToolInputSchema = z
+/**
+ * The canonical edit arguments (the convention shared by Claude Code, jcode
+ * and dsh). `replace_all` is the explicit opt-in for a non-unique target:
+ * without it, an ambiguous match is REFUSED rather than silently replacing
+ * the first occurrence (the live correctness bug F1 fixes).
+ */
+export const CanonicalEditToolInputSchema = z
+  .object({
+    file_path: z.string().min(1),
+    old_string: z.string().min(1),
+    new_string: z.string(),
+    replace_all: z.boolean().optional(),
+  })
+  .strict();
+
+/** The pre-F1 edit arguments — accepted for one release, normalised. */
+export const LegacyEditToolInputSchema = z
   .object({
     path: z.string().min(1),
     oldText: z.string().min(1),
@@ -157,14 +188,141 @@ export const EditToolInputSchema = z
   })
   .strict();
 
-export const RunToolInputSchema = z.object({ command: z.string().min(1) }).strict();
+/**
+ * The advertised edit shape. Every field is optional at the JSON-schema
+ * level so ONE object can carry either argument spelling (a union would
+ * break the Claude SDK's raw-shape registration); the refinement below
+ * enforces the required combination, and the executor re-checks it.
+ */
+export const EditToolInputSchema = z
+  .object({
+    file_path: z.string().min(1).optional(),
+    old_string: z.string().min(1).optional(),
+    new_string: z.string().optional(),
+    replace_all: z.boolean().optional(),
+    path: z.string().min(1).optional(),
+    oldText: z.string().min(1).optional(),
+    newText: z.string().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const canonical =
+      value.file_path !== undefined ||
+      value.old_string !== undefined ||
+      value.new_string !== undefined ||
+      value.replace_all !== undefined;
+    const legacy =
+      value.path !== undefined || value.oldText !== undefined || value.newText !== undefined;
+    if (canonical && legacy) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'edit accepts either file_path/old_string/new_string/replace_all or the legacy path/oldText/newText, not both',
+      });
+      return;
+    }
+    if (canonical) {
+      if (value.file_path === undefined) {
+        ctx.addIssue({ code: 'custom', message: 'edit requires file_path', path: ['file_path'] });
+      }
+      if (value.old_string === undefined) {
+        ctx.addIssue({ code: 'custom', message: 'edit requires old_string', path: ['old_string'] });
+      }
+      if (value.new_string === undefined) {
+        ctx.addIssue({ code: 'custom', message: 'edit requires new_string', path: ['new_string'] });
+      }
+      return;
+    }
+    if (value.path === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'edit requires file_path (or path)',
+        path: ['path'],
+      });
+    }
+    if (value.oldText === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'edit requires old_string (or oldText)',
+        path: ['oldText'],
+      });
+    }
+    if (value.newText === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'edit requires new_string (or newText)',
+        path: ['newText'],
+      });
+    }
+  });
+
+/**
+ * `write {file_path, content}` — canonical, with `path` accepted as the
+ * one-release argument-repair alias (§6b).
+ */
+export const WriteToolInputSchema = z
+  .object({
+    file_path: z.string().min(1).optional(),
+    path: z.string().min(1).optional(),
+    content: z.string(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.file_path === undefined && value.path === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'write requires file_path (or path)',
+        path: ['file_path'],
+      });
+    }
+    if (value.file_path !== undefined && value.path !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'write accepts file_path or the legacy path alias, not both',
+        path: ['path'],
+      });
+    }
+  });
+
+/**
+ * `bash {command, timeout?}` — `timeout` is a per-call bound in ms that may
+ * only SHORTEN the config's policy timeout. The pre-F1 `run` tool had the
+ * same `{command}` shape, so no argument alias is needed.
+ */
+export const BashToolInputSchema = z
+  .object({
+    command: z.string().min(1),
+    timeout: z.number().int().positive().optional(),
+  })
+  .strict();
+
+/** The pre-F1 name for {@link BashToolInputSchema} — accepted for one release. */
+export const RunToolInputSchema = BashToolInputSchema;
 
 export type ReadToolInput = z.infer<typeof ReadToolInputSchema>;
+export type CanonicalEditToolInput = z.infer<typeof CanonicalEditToolInputSchema>;
+export type LegacyEditToolInput = z.infer<typeof LegacyEditToolInputSchema>;
 export type EditToolInput = z.infer<typeof EditToolInputSchema>;
-export type RunToolInput = z.infer<typeof RunToolInputSchema>;
+export type WriteToolInput = z.infer<typeof WriteToolInputSchema>;
+export type BashToolInput = z.infer<typeof BashToolInputSchema>;
+/** The pre-F1 name for {@link BashToolInput} — accepted for one release. */
+export type RunToolInput = BashToolInput;
 
-/** The three toolkit tool names — the fixed minimal surface. */
-export type ToolkitToolName = 'read' | 'edit' | 'run';
+/** The four canonical toolkit tool names — the fixed minimal surface. */
+export type ToolkitToolName = 'read' | 'edit' | 'write' | 'bash';
+
+/** The pre-F1 model-facing tool name — accepted for one release. */
+export type LegacyToolName = 'run';
+
+/** Pre-F1 tool name → canonical name (`run` → `bash`); all others unchanged. */
+export function canonicalToolName(name: string): string {
+  return name === 'run' ? 'bash' : name;
+}
+
+/** Canonical tool name → its accepted one-release aliases. */
+export function toolAliases(name: string): readonly string[] {
+  return name === 'bash' ? ['run'] : [];
+}
 
 // ---------------------------------------------------------------------------
 // Tool results + descriptors — plain data, driver-agnostic
@@ -181,16 +339,16 @@ export type ToolkitToolResult =
       ok: true;
       output: string;
       truncated: boolean;
-      /** `run` only: 0–nonzero on a normal exit, null when signal-killed. */
+      /** `bash` only: 0–nonzero on a normal exit, null when signal-killed. */
       exitCode?: number | null;
-      /** `run` only: true when the process was killed by a signal (timeout). */
+      /** `bash` only: true when the process was killed by a signal (timeout). */
       killed?: boolean;
     }
   | { ok: false; denial: ToolDenial };
 
 /**
  * Per-call execution options (additive). `signal` cancels an in-flight
- * call: `run` kills the command's whole process group; read/edit are
+ * call: `bash` kills the command's whole process group; read/edit/write are
  * local fs ops that finish on their own and ignore it.
  */
 export interface ToolExecuteOptions {
@@ -209,18 +367,30 @@ export type ToolkitTool =
       description: string;
       inputSchema: typeof ReadToolInputSchema;
       execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
+      /** One-release pre-F1 aliases the driver may also register. */
+      aliases?: readonly string[];
     }
   | {
       name: 'edit';
       description: string;
       inputSchema: typeof EditToolInputSchema;
       execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
+      aliases?: readonly string[];
     }
   | {
-      name: 'run';
+      name: 'write';
       description: string;
-      inputSchema: typeof RunToolInputSchema;
+      inputSchema: typeof WriteToolInputSchema;
       execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
+      aliases?: readonly string[];
+    }
+  | {
+      name: 'bash';
+      description: string;
+      inputSchema: typeof BashToolInputSchema;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
+      /** `run` — the pre-F1 name, accepted for one release. */
+      aliases?: readonly string[];
     };
 
 // ---------------------------------------------------------------------------
@@ -411,6 +581,69 @@ function capDescription(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
+/** A UTF-8 BOM as it appears after decoding (kept by `ignoreBOM: true`). */
+const BOM = '\uFEFF';
+
+/** The NUL probe window for binary refusal (§6b: the first 8 KiB). */
+const BINARY_PROBE_BYTES = 8_192;
+
+/** SHA-256 of the exact bytes on disk (the staleness identity). */
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** True when the first 8 KiB contain a NUL byte — the binary refusal signal. */
+function isBinary(bytes: Buffer): boolean {
+  return bytes.subarray(0, BINARY_PROBE_BYTES).includes(0);
+}
+
+/**
+ * Decode strict UTF-8. `ignoreBOM: true` keeps a leading BOM in the string so
+ * the editor can preserve it; `fatal: true` refuses invalid UTF-8 instead of
+ * mangling the file with replacement characters.
+ */
+function decodeUtf8(bytes: Buffer): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Strip a leading BOM for matching (the write path restores it). */
+function stripBom(text: string): string {
+  return text.startsWith(BOM) ? text.slice(1) : text;
+}
+
+/** Normalise CRLF to LF for matching (the write path restores the file's style). */
+function toLf(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
+/** The file's dominant line ending: CRLF when any CRLF is present, else LF. */
+function lineEndingOf(text: string): '\n' | '\r\n' {
+  return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+/** Restore a file's BOM and dominant line ending after an LF-space edit. */
+function restoreTextStyle(text: string, bom: boolean, ending: '\n' | '\r\n'): string {
+  const body = ending === '\r\n' ? text.replace(/\n/g, '\r\n') : text;
+  return `${bom ? BOM : ''}${body}`;
+}
+
+/** Non-overlapping occurrence count of `needle` in `haystack`. */
+function countOccurrences(haystack: string, needle: string): number {
+  if (needle === '') return 0;
+  let count = 0;
+  let index = 0;
+  for (;;) {
+    const found = haystack.indexOf(needle, index);
+    if (found === -1) return count;
+    count += 1;
+    index = found + needle.length;
+  }
+}
+
 /**
  * Build the harness tools for one workspace and one op's config.
  *
@@ -541,7 +774,55 @@ export function buildTools(
   const invalidInput = (tool: ToolkitToolName, err: z.ZodError): ToolkitToolResult =>
     deny(tool, `invalid input: ${messageOf(err)}`);
 
+  /**
+   * The prior-read ledger for edit/write staleness. Keyed by the resolved
+   * path, it records the exact bytes a `read` returned; an edit/write must
+   * find an entry and the on-disk SHA-256 must still match it. The ledger is
+   * per `buildTools` call — a fresh run (or a resumed session) starts empty,
+   * so the model re-reads rather than editing against state it cannot see.
+   */
+  type ReadRecord = { sha256: string; mtimeMs: number; size: number };
+  const readState = new Map<string, ReadRecord>();
+
+  /** Record a successful read's byte identity (mtime is diagnostic). */
+  const rememberRead = async (key: string, bytes: Buffer): Promise<void> => {
+    const info = await stat(key).catch(() => undefined);
+    readState.set(key, {
+      sha256: sha256(bytes),
+      mtimeMs: info?.mtimeMs ?? 0,
+      size: bytes.byteLength,
+    });
+  };
+
+  /**
+   * Serialize every call that touches one file (read/edit/write), in arrival
+   * order. The ai-sdk driver runs a step's tool calls concurrently, so two
+   * edits of one file would otherwise interleave their read/verify/write
+   * sequence. The queue is per resolved path; a settled tail is dropped.
+   */
+  const fileQueues = new Map<string, Promise<void>>();
+  const withFileLock = async <T>(key: string, body: () => Promise<T>): Promise<T> => {
+    const previous = fileQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    fileQueues.set(key, tail);
+    await previous;
+    try {
+      return await body();
+    } finally {
+      release();
+      if (fileQueues.get(key) === tail) fileQueues.delete(key);
+    }
+  };
+
   const tools: ToolkitTool[] = [];
+  // `write` is built before `bash` (so the read/edit/write helpers stay
+  // together) but pushed AFTER it: the pre-F1 surface was read/edit/run, so
+  // an explicit `maxTools: 3` must still yield read/edit/bash.
+  let writeTool: ToolkitTool | undefined;
 
   // --- read -----------------------------------------------------------------
   if (cfg.tools.read.enabled) {
@@ -572,18 +853,23 @@ export function buildTools(
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
-        let content: string;
-        try {
-          content = await readFile(effective, 'utf8');
-        } catch (err) {
-          const reason =
-            errorCode(err) === 'ENOENT'
-              ? `file not found: '${relOf(abs)}'`
-              : `read failed: ${messageOf(err)}`;
-          return deny('read', reason);
-        }
-        const capped = capOutput(content, fileCfg.maxOutputChars);
-        return { ok: true, ...capped };
+        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
+          let bytes: Buffer;
+          try {
+            bytes = await readFile(effective);
+          } catch (err) {
+            const reason =
+              errorCode(err) === 'ENOENT'
+                ? `file not found: '${relOf(abs)}'`
+                : `read failed: ${messageOf(err)}`;
+            return deny('read', reason);
+          }
+          // Record the exact bytes the model saw (the output cap does not
+          // change the staleness identity: the whole file was read).
+          await rememberRead(effective, bytes);
+          const capped = capOutput(bytes.toString('utf8'), fileCfg.maxOutputChars);
+          return { ok: true, ...capped };
+        });
       },
     });
   }
@@ -594,8 +880,9 @@ export function buildTools(
     tools.push({
       name: 'edit',
       description: capDescription(
-        'Replace the first occurrence of a target string in a workspace text file. ' +
-          'Input: { path, oldText, newText } — refuses when oldText does not appear in the file.',
+        'Edit a workspace text file. Input: { file_path, old_string, new_string, replace_all? }. ' +
+          'Read the file first: the edit is refused when it was not read, or when it changed since. ' +
+          'An ambiguous old_string is refused unless replace_all is true.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: EditToolInputSchema,
@@ -603,7 +890,17 @@ export function buildTools(
         if (sandbox === 'read-only') return deny('edit', 'sandbox: read-only');
         const parsed = EditToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('edit', parsed.error);
-        const { path, oldText, newText } = parsed.data;
+        // The schema's refinement guarantees exactly one complete argument
+        // set; the casts below only recover that guarantee for the compiler.
+        const canonical =
+          parsed.data.file_path !== undefined ||
+          parsed.data.old_string !== undefined ||
+          parsed.data.new_string !== undefined ||
+          parsed.data.replace_all !== undefined;
+        const path = (canonical ? parsed.data.file_path : parsed.data.path) as string;
+        const oldString = (canonical ? parsed.data.old_string : parsed.data.oldText) as string;
+        const newString = (canonical ? parsed.data.new_string : parsed.data.newText) as string;
+        const replaceAll = canonical && parsed.data.replace_all === true;
         const abs = resolveInside(path);
         if (abs === undefined) {
           return deny('edit', `path escape: '${path}' resolves outside the workspace`);
@@ -616,44 +913,164 @@ export function buildTools(
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
-        let content: string;
-        try {
-          content = await readFile(effective, 'utf8');
-        } catch (err) {
-          const reason =
-            errorCode(err) === 'ENOENT'
-              ? `file not found: '${relOf(abs)}'`
-              : `read failed: ${messageOf(err)}`;
-          return deny('edit', reason);
-        }
-        if (!content.includes(oldText)) {
-          return deny('edit', `edit refused: target text not found in '${relOf(abs)}'`);
-        }
-        // String.prototype.replace with a STRING search swaps the FIRST
-        // occurrence; the function replacer keeps `$` sequences in newText
-        // literal (no $&/$1 substitution).
-        const edited = content.replace(oldText, () => newText);
-        try {
-          await writeFile(effective, edited, 'utf8');
-        } catch (err) {
-          return deny('edit', `edit failed: ${messageOf(err)}`);
-        }
-        const capped = capOutput(
-          `edited '${relOf(abs)}': replaced 1 occurrence`,
-          fileCfg.maxOutputChars,
-        );
-        return { ok: true, ...capped };
+        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
+          let bytes: Buffer;
+          try {
+            bytes = await readFile(effective);
+          } catch (err) {
+            const reason =
+              errorCode(err) === 'ENOENT'
+                ? `file not found: '${relOf(abs)}'`
+                : `read failed: ${messageOf(err)}`;
+            return deny('edit', reason);
+          }
+          const label = relOf(abs);
+          if (isBinary(bytes)) return deny('edit', `edit refused: '${label}' is a binary file`);
+          const text = decodeUtf8(bytes);
+          if (text === undefined) {
+            return deny('edit', `edit refused: '${label}' is not valid UTF-8`);
+          }
+          const prior = readState.get(effective);
+          if (prior === undefined) {
+            return deny('edit', `edit refused: '${label}' must be read before it is edited`);
+          }
+          if (prior.sha256 !== sha256(bytes)) {
+            return deny(
+              'edit',
+              `edit refused: '${label}' changed since it was read; read it again`,
+            );
+          }
+          const bom = text.startsWith(BOM);
+          const ending = lineEndingOf(text);
+          const normalized = toLf(stripBom(text));
+          const needle = toLf(oldString);
+          const replacement = toLf(newString);
+          const count = countOccurrences(normalized, needle);
+          if (count === 0) {
+            return deny('edit', `edit refused: target text not found in '${label}'`);
+          }
+          if (count > 1 && !replaceAll) {
+            return deny(
+              'edit',
+              `edit refused: target text is not unique in '${label}' (${count} occurrences); ` +
+                'pass replace_all: true to replace every occurrence',
+            );
+          }
+          // String search + function replacer: literal matching, and `$`
+          // sequences in newString stay literal (no $&/$1 substitution).
+          const edited = replaceAll
+            ? normalized.split(needle).join(replacement)
+            : normalized.replace(needle, () => replacement);
+          const output = restoreTextStyle(edited, bom, ending);
+          try {
+            await writeFile(effective, output, 'utf8');
+          } catch (err) {
+            return deny('edit', `edit failed: ${messageOf(err)}`);
+          }
+          await rememberRead(effective, Buffer.from(output, 'utf8'));
+          const replaced = replaceAll ? count : 1;
+          const capped = capOutput(
+            `edited '${label}': replaced ${replaced} ${replaced === 1 ? 'occurrence' : 'occurrences'}`,
+            fileCfg.maxOutputChars,
+          );
+          return { ok: true, ...capped };
+        });
       },
     });
   }
 
-  // --- run --------------------------------------------------------------------
-  if (cfg.tools.run.enabled && gate.enabled) {
+  // --- write ------------------------------------------------------------------
+  if (cfg.tools.write.enabled) {
+    const fileCfg = cfg.tools.write;
+    writeTool = {
+      name: 'write',
+      description: capDescription(
+        'Create or overwrite a workspace text file. Input: { file_path, content }. ' +
+          'Creating a new file needs no prior read; overwriting an existing file is refused ' +
+          'unless it was read and has not changed since.',
+        promptBudget.maxToolDescriptionChars,
+      ),
+      inputSchema: WriteToolInputSchema,
+      execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
+        if (sandbox === 'read-only') return deny('write', 'sandbox: read-only');
+        const parsed = WriteToolInputSchema.safeParse(rawInput);
+        if (!parsed.success) return invalidInput('write', parsed.error);
+        const path = (parsed.data.file_path ?? parsed.data.path) as string;
+        const content = parsed.data.content;
+        const abs = resolveInside(path);
+        if (abs === undefined) {
+          return deny('write', `path escape: '${path}' resolves outside the workspace`);
+        }
+        const effective = await resolveRealInside(abs);
+        if (effective === undefined) {
+          return deny('write', `path escape: '${path}' escapes the workspace through a symlink`);
+        }
+        if (await touchesGit(abs, effective)) return gitDenial('write', abs);
+        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
+          return deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
+        }
+        return withFileLock(effective, async (): Promise<ToolkitToolResult> => {
+          const label = relOf(abs);
+          let existing: Buffer | undefined;
+          try {
+            existing = await readFile(effective);
+          } catch (err) {
+            if (errorCode(err) !== 'ENOENT') {
+              return deny('write', `write failed: ${messageOf(err)}`);
+            }
+          }
+          let output = content;
+          if (existing !== undefined) {
+            if (isBinary(existing)) {
+              return deny('write', `write refused: '${label}' is a binary file`);
+            }
+            const text = decodeUtf8(existing);
+            if (text === undefined) {
+              return deny('write', `write refused: '${label}' is not valid UTF-8`);
+            }
+            const prior = readState.get(effective);
+            if (prior === undefined) {
+              return deny(
+                'write',
+                `write refused: '${label}' must be read before it is overwritten`,
+              );
+            }
+            if (prior.sha256 !== sha256(existing)) {
+              return deny(
+                'write',
+                `write refused: '${label}' changed since it was read; read it again`,
+              );
+            }
+            // Preserve the existing file's BOM and line-ending convention.
+            output = restoreTextStyle(
+              toLf(stripBom(content)),
+              text.startsWith(BOM),
+              lineEndingOf(text),
+            );
+          }
+          try {
+            await writeFile(effective, output, 'utf8');
+          } catch (err) {
+            return deny('write', `write failed: ${messageOf(err)}`);
+          }
+          await rememberRead(effective, Buffer.from(output, 'utf8'));
+          const capped = capOutput(
+            `wrote '${label}': ${Buffer.byteLength(output, 'utf8')} bytes`,
+            fileCfg.maxOutputChars,
+          );
+          return { ok: true, ...capped };
+        });
+      },
+    };
+  }
+
+  // --- bash -------------------------------------------------------------------
+  if (cfg.tools.bash.enabled && gate.enabled) {
     // Validate the complete launcher environment before exposing an executor.
     // A malformed or policy-bearing passthrough must fail during tool
     // construction, never later inside a model-directed command.
     buildSandboxLauncherEnv({}, gate);
-    const runCfg = cfg.tools.run;
+    const runCfg = cfg.tools.bash;
     const patterns = compileCommandPatterns(runCfg.commandPatterns); // loud on config corruption
     const formatOutcome = (
       exitCode: number | null,
@@ -670,7 +1087,7 @@ export function buildTools(
       // Normal exits (including nonzero) and kills remain tool results.
       // Only spawn-level failures are denials.
       if (outcome.kind === 'spawn-error') {
-        return deny('run', `run failed: ${messageOf(outcome.error)}`);
+        return deny('bash', `bash failed: ${messageOf(outcome.error)}`);
       }
       const killed = outcome.kind === 'killed';
       const exitCode = killed ? null : outcome.code;
@@ -687,21 +1104,23 @@ export function buildTools(
       };
     };
     tools.push({
-      name: 'run',
+      name: 'bash',
       description: capDescription(
         'Execute a shell command inside the workspace and capture its stdout, stderr, and exit code. ' +
-          'Input: { command }. TRUST BOUNDARY: commands run with HOST privileges, scoped to the ' +
+          'Input: { command, timeout? }. TRUST BOUNDARY: commands run with HOST privileges, scoped to the ' +
           'workspace-cwd convention only — the configured allowlist, timeout, and output cap are ' +
           'gates over what may run, not an OS sandbox. Allowlist syntax: whitespace token prefixes, ' +
           'or anchored re: patterns as the deliberate metacharacter escape hatch.',
         promptBudget.maxToolDescriptionChars,
       ),
-      inputSchema: RunToolInputSchema,
+      inputSchema: BashToolInputSchema,
+      // The pre-F1 model-facing name, accepted for one release.
+      aliases: toolAliases('bash'),
       execute: async (rawInput: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult> => {
-        if (sandbox === 'read-only') return deny('run', 'sandbox: read-only');
-        const parsed = RunToolInputSchema.safeParse(rawInput);
-        if (!parsed.success) return invalidInput('run', parsed.error);
-        const command = parsed.data.command;
+        if (sandbox === 'read-only') return deny('bash', 'sandbox: read-only');
+        const parsed = BashToolInputSchema.safeParse(rawInput);
+        if (!parsed.success) return invalidInput('bash', parsed.error);
+        const { command, timeout } = parsed.data;
         let env: Record<string, string>;
         try {
           // Scrub at the shared core on every transport; never depend on an
@@ -713,8 +1132,15 @@ export function buildTools(
             ...(gate.declaredEnvNames ?? []),
           ]);
         } catch (error) {
-          return deny('run', `run failed: ${messageOf(error)}`);
+          return deny('bash', `bash failed: ${messageOf(error)}`);
         }
+        // A model-supplied timeout may only SHORTEN the config's policy bound.
+        const timeoutMs =
+          runCfg.timeoutMs === undefined
+            ? timeout
+            : timeout === undefined
+              ? runCfg.timeoutMs
+              : Math.min(runCfg.timeoutMs, timeout);
         const executionOptions: RunCommandOptions = {
           cwd: workspaceAbs,
           env,
@@ -723,7 +1149,7 @@ export function buildTools(
             runCfg.maxOutputChars !== undefined
               ? runCfg.maxOutputChars * 4 + 65_536
               : UNCAPPED_RETENTION_BYTES,
-          ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
         };
         const raw = command.trim().split(/\s+/);
@@ -736,7 +1162,7 @@ export function buildTools(
           const argv = forms.get(key);
           if (argv === undefined || !commandVerdict(patterns, key).allowed) {
             return deny(
-              'run',
+              'bash',
               `command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
             );
           }
@@ -745,7 +1171,7 @@ export function buildTools(
         const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
           return deny(
-            'run',
+            'bash',
             verdict.metacharacters
               ? 'command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring'
               : `command not allowed by harness config allowlist: '${command}'`,
@@ -756,10 +1182,12 @@ export function buildTools(
     });
   }
 
+  if (writeTool !== undefined) tools.push(writeTool);
+
   // Sandbox gate for the WRITE tools lives INSIDE their executors (read-only
-  // keeps `read`, denies edit/run with the documented reason — the tools stay
-  // on the surface so the denial is observable, per the sandbox-mapping
-  // contract).
+  // keeps `read`, denies edit/write/bash with the documented reason — the
+  // tools stay on the surface so the denial is observable, per the
+  // sandbox-mapping contract).
 
   // R4: maxTools is DATA — slice the surface to the configured count.
   return tools.slice(0, promptBudget.maxTools);

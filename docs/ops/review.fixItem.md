@@ -111,6 +111,35 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         "tools": {
           "additionalProperties": false,
           "properties": {
+            "bash": {
+              "additionalProperties": false,
+              "properties": {
+                "commandPatterns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "maxOutputChars": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "timeoutMs": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "enabled",
+                "commandPatterns"
+              ],
+              "type": "object"
+            },
             "edit": {
               "additionalProperties": false,
               "properties": {
@@ -187,12 +216,35 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                 "commandPatterns"
               ],
               "type": "object"
+            },
+            "write": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "maxOutputChars": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "pathPatterns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "pathPatterns"
+              ],
+              "type": "object"
             }
           },
           "required": [
             "read",
-            "edit",
-            "run"
+            "edit"
           ],
           "type": "object"
         },

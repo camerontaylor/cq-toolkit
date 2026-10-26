@@ -1527,7 +1527,7 @@ function resultDetail(result: {
 /** The shipped default fixer prompt (placeholder-substituted per unit). */
 export const DEFAULT_UNIT_PROMPT_TEMPLATE =
   'You are the {fixer} fixer for package "{package}". ' +
-  'Work in the checkout at {worktree}: fix the failing checks for that package with the ' +
+  'Work in the checkout at {worktree}: read each file before editing it, fix the failing checks for that package with the ' +
   "smallest possible edits to the package's own files, then report exactly what changed. " +
   'Never touch anything outside the checkout.';
 
@@ -1856,8 +1856,8 @@ export function bindingsFromDispatch(
                 ...defaultHarnessConfig,
                 tools: {
                   ...defaultHarnessConfig.tools,
-                  run: {
-                    ...defaultHarnessConfig.tools.run,
+                  bash: {
+                    ...defaultHarnessConfig.tools.bash,
                     commandPatterns: [
                       're:^' +
                         [related.command, ...related.args]
