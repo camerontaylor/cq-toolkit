@@ -195,7 +195,7 @@ describe('runAgentReviewer', () => {
     });
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: 'agent review could not dispatch: no reviewer role',
+      reason: 'agent review could not dispatch: no reviewer role [partition 1/1: review.diff]',
     });
   });
 
@@ -224,7 +224,7 @@ describe('runAgentReviewer', () => {
     });
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: 'agent review did not run: provider unavailable',
+      reason: 'agent review did not run: provider unavailable [partition 1/1: review.diff]',
     });
   });
 
@@ -251,7 +251,7 @@ describe('runAgentReviewer', () => {
     });
     expect(result).toMatchObject({
       status: 'needs-human',
-      reason: 'agent review did not run: scripted rejection',
+      reason: 'agent review did not run: scripted rejection [partition 1/1: review.diff]',
     });
   });
 
@@ -316,7 +316,7 @@ describe('runAgentReviewer', () => {
     });
     expect(result).toMatchObject({
       status: 'failed',
-      error: 'agent review returned invalid structured output',
+      error: 'agent review returned invalid structured output [partition 1/1: review.diff]',
     });
   });
 
@@ -461,5 +461,122 @@ describe('runAgentReviewer per-request step bound', () => {
 
   it('leaves the driver default when no step budget is given', async () => {
     expect(await reviewWith({ wallMs: 60_000 })).toEqual([undefined]);
+  });
+});
+
+describe('runAgentReviewer failure detail (#484)', () => {
+  const reviewFailingSecond = async (failure: { errorClass?: string; error?: string }) => {
+    let calls = 0;
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => {
+            calls += 1;
+            if (calls === 1)
+              return {
+                stopReason: 'complete' as const,
+                structuredOutput: { findings: [] },
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+              };
+            return {
+              stopReason: 'error' as const,
+              ...failure,
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    return runAgentReviewer(drivers, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      components: [
+        { component: 'tracked:src/a.ts', path: 'src/a.ts', text: 'a change' },
+        { component: 'tracked:test/b.test.ts', path: 'test/b.test.ts', text: 'b change' },
+      ],
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 60_000,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+  };
+
+  it('carries the driver errorClass, error text and failing partition into the reason', async () => {
+    const result = await reviewFailingSecond({
+      errorClass: 'transient',
+      error: 'Step timeout of 1200000ms exceeded\n  at the provider',
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain(
+      'agent review did not complete (error: transient — Step timeout of 1200000ms exceeded at the provider)',
+    );
+    expect(result.reason).toContain('partition 2/2: test/b.test.ts');
+    // The completed partition stays recorded; only the failing one is open.
+    expect(result.report?.coverage.partitions.map((part) => part.complete)).toEqual([true, false]);
+  });
+
+  it('keeps the bare stop reason when the driver supplies no detail', async () => {
+    const result = await reviewFailingSecond({});
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toBe(
+        'agent review did not complete (error) [partition 2/2: test/b.test.ts]',
+      );
+  });
+
+  it('names the partition in flight when the wall deadline stops the review', async () => {
+    let calls = 0;
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => {
+            calls += 1;
+            if (calls > 1) return new Promise<never>(() => undefined);
+            return {
+              stopReason: 'complete' as const,
+              structuredOutput: { findings: [] },
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '.',
+      branch: 'review-fixture',
+      head: 'abc123',
+      scanSecrets: cleanScan,
+      diff: 'diff',
+      components: [
+        { component: 'tracked:src/a.ts', path: 'src/a.ts', text: 'a change' },
+        { component: 'tracked:test/b.test.ts', path: 'test/b.test.ts', text: 'b change' },
+      ],
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 200,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('wall');
+      expect(result.reason).toMatch(/\[partition 2\/2: test\/b\.test\.ts\]$/);
+    }
+  });
+
+  it('bounds an oversized driver error in the reason', async () => {
+    const result = await reviewFailingSecond({ errorClass: 'unknown', error: 'x'.repeat(5_000) });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason.length).toBeLessThan(800);
   });
 });

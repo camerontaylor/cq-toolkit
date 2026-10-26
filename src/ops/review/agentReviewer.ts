@@ -44,6 +44,13 @@ export interface AgentReviewerInput {
   severityMap: { high: string; medium: string; low?: string };
 }
 
+/** Collapse driver error text to one bounded line for a record reason. */
+function oneLine(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > ERROR_DETAIL_CHARS ? `${flat.slice(0, ERROR_DETAIL_CHARS)}…` : flat;
+}
+const ERROR_DETAIL_CHARS = 500;
+
 /** Read-only structured review through the configured reviewer role. */
 async function runPartition(
   drivers: DriverFactory,
@@ -154,9 +161,16 @@ async function runPartition(
       (result.usage.reasoning ?? 0),
   );
   if (result.stopReason !== 'complete') {
-    return result.stopReason === 'budget'
-      ? { status: 'budget-exhausted' }
-      : { status: 'needs-human', reason: `agent review did not complete (${result.stopReason})` };
+    if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
+    // #484: the driver's errorClass and bounded error text are the only
+    // evidence of WHY the reviewer stopped; drop them and the record is blind.
+    const detail = [result.errorClass, result.error && oneLine(result.error)]
+      .filter((part): part is string => part !== undefined && part !== '')
+      .join(' — ');
+    return {
+      status: 'needs-human',
+      reason: `agent review did not complete (${result.stopReason}${detail === '' ? '' : `: ${detail}`})`,
+    };
   }
   const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
     result.structuredOutput,
@@ -229,6 +243,8 @@ export async function runAgentReviewer(
     if (Date.now() >= deadline) throw new Error('agent review wall budget exhausted');
   };
   let report: AgentReviewReport | undefined;
+  // The partition in flight, named in every blocked reason (#484).
+  let where = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled: (() => void) | undefined;
   try {
@@ -253,6 +269,10 @@ export async function runAgentReviewer(
       if (plan.partitions.length === 0) throw new Error('agent review has no coverage partitions');
       await scanComplete(input.scanSecrets, components);
       for (const [index, part] of plan.partitions.entries()) {
+        const component = plan.coverage.partitions[index]?.ranges[0]?.component;
+        where = ` [partition ${String(index + 1)}/${String(plan.partitions.length)}${
+          component === undefined ? '' : `: ${plan.coverage.components[component]?.path ?? '?'}`
+        }]`;
         ensureActive();
         if (report.usage >= input.maxTokens) return { status: 'budget-exhausted', report };
         await scanComplete(input.scanSecrets, [
@@ -275,7 +295,13 @@ export async function runAgentReviewer(
           },
         });
         ensureActive();
-        if (result.status !== 'ok') return { ...result, report };
+        if (result.status !== 'ok') {
+          if (result.status === 'needs-human')
+            return { ...result, reason: `${result.reason}${where}`, report };
+          if (result.status === 'failed')
+            return { ...result, error: `${result.error}${where}`, report };
+          return { ...result, report };
+        }
         for (const finding of result.value.findings) {
           const same = (other: Finding) =>
             other.file === finding.file &&
@@ -289,6 +315,7 @@ export async function runAgentReviewer(
         report.coverage.partitions[index]!.complete = true;
         if (report.usage > input.maxTokens) return { status: 'budget-exhausted', report };
       }
+      where = '';
       return { status: 'ok', value: report };
     };
     const stopped = new Promise<never>((_resolve, reject) => {
@@ -303,7 +330,7 @@ export async function runAgentReviewer(
   } catch (error) {
     return {
       status: 'needs-human',
-      reason: `agent review did not run: ${error instanceof Error ? error.message : String(error)}`,
+      reason: `agent review did not run: ${error instanceof Error ? error.message : String(error)}${where}`,
       ...(report === undefined ? {} : { report }),
     };
   } finally {

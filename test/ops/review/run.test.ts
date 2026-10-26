@@ -969,7 +969,7 @@ describe('review.run', () => {
         .at(-1);
       expect(latestAgent).toMatchObject({
         kind: 'cycle',
-        completion: { kind: 'blocked', reason: 'agent review returned invalid structured output' },
+        completion: { kind: 'blocked' },
         base: state.base,
         head: state.head,
         dirtySha256: state.dirtySha256,
@@ -977,6 +977,9 @@ describe('review.run', () => {
         scope: 'full',
       });
       if (!latestAgent || latestAgent.kind !== 'cycle') throw new Error('missing agent cycle');
+      expect(
+        latestAgent.completion.kind === 'blocked' ? latestAgent.completion.reason : undefined,
+      ).toMatch(/^agent review returned invalid structured output \[partition 1\/\d+: \S+\]$/);
       const readiness = assembleReadiness({
         branch: state.branch,
         target: 'merge-queue',
