@@ -145,6 +145,8 @@ describe('review.address composition', () => {
       });
       expect(reportOf(result).costUSD).toBe(0.25);
       expect(reportOf(result).reasons.join(' ')).toMatch(/budget/);
+      // S7 H (D1): the structured budget marker a composition publishes on.
+      expect(reportOf(result).stop).toBe('budget');
       expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
         reportOf(result),
       );
@@ -212,6 +214,8 @@ describe('review.address composition', () => {
         const result = await makeReviewAddress({ ...f.deps, initialRecord: record })(f.input);
         expect(result.status).toBe('needs-human');
         expect(f.calls).toEqual([]);
+        // A refusal that is not a budget stop never carries the budget marker.
+        expect(reportOf(result).stop).toBeUndefined();
       }
     } finally {
       await f.cleanup();
@@ -609,10 +613,11 @@ describe('blocked re-review marker (#509)', () => {
     expect(reportOf(result).stop).toBe('rereview-blocked');
   });
 
-  test('a retry that exhausts the token budget never carries the marker', async () => {
+  test('a retry that exhausts the token budget carries budget, never rereview-blocked', async () => {
     const { result, reviews } = await run(100);
     expect(reviews).toBe(2);
     expect(result.status).toBe('needs-human');
-    expect(reportOf(result).stop).toBeUndefined();
+    expect(reportOf(result).stop).toBe('budget');
+    expect(reportOf(result).stop).not.toBe('rereview-blocked');
   });
 });
