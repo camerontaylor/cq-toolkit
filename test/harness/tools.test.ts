@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { buildTools } from '../../src/harness/tools.js';
-import { defaultHarnessConfig } from '../../src/harness/config.js';
+import { defaultHarnessConfig, HarnessConfigSchema } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import { isHarnessDenial } from '../../src/harness/surface.js';
 import { reviewFixHarness } from '../../src/ops/review/fixReviewItem.js';
@@ -38,7 +38,7 @@ function runConfig(commandPatterns: string[]) {
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs: 5_000, maxOutputChars: 10_000 },
+      bash: { enabled: true, commandPatterns, timeoutMs: 5_000, maxOutputChars: 10_000 },
     },
   };
 }
@@ -48,7 +48,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
     await withScratch(async (scratchDir) => {
       // Shell BUILTINS only (echo): an allowed case EXECUTES, so it must
       // spawn nothing external (review round 3, finding 1).
-      const run = buildTools(runConfig(['echo pilot']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runConfig(['echo pilot']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command: 'echo pilot patrol' });
       expect(result?.ok).toBe(true);
       if (result?.ok) {
@@ -68,11 +68,11 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
     'npm test\nwhoami',
   ])('metacharacter variant denied: %j', async (command) => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command });
       expect(result?.ok).toBe(false);
       if (!result?.ok) {
-        expect(result?.denial.tool).toBe('run');
+        expect(result?.denial.tool).toBe('bash');
         expect(result?.denial.reason).toBe(
           'command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring',
         );
@@ -82,7 +82,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
 
   test('a non-matching command keeps the plain allowlist-miss reason', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command: 'npm run test' });
       expect(result?.ok).toBe(false);
       if (!result?.ok) {
@@ -96,7 +96,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
       // Builtins only — the case EXECUTES (the re: author owns the full
       // metachar-bearing string), so nothing external may spawn.
       const run = buildTools(runConfig(['re:^echo pilot.*$']), scratchDir).find(
-        (t) => t.name === 'run',
+        (t) => t.name === 'bash',
       );
       const result = await run?.execute({ command: 'echo pilot; exit 0' });
       expect(result?.ok).toBe(true); // the re: author owns the full string
@@ -113,7 +113,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
       const run = buildTools(
         runConfig(['echo pilot', 're:^echo pilot ; exit 3$']),
         scratchDir,
-      ).find((t) => t.name === 'run');
+      ).find((t) => t.name === 'bash');
       const result = await run?.execute({ command: 'echo pilot ; exit 3' });
       expect(result?.ok).toBe(true);
       if (result?.ok) {
@@ -124,7 +124,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
 
   test('a token-pattern metachar match still denies when no re: pattern allows', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command: 'npm test ; deploy' });
       expect(result?.ok).toBe(false);
       if (!result?.ok) {
@@ -246,7 +246,7 @@ describe('run output: maxBuffer sized above the cap (issue #18)', () => {
         ...defaultHarnessConfig,
         tools: {
           ...defaultHarnessConfig.tools,
-          run: {
+          bash: {
             enabled: true,
             commandPatterns: ['re:^i=0; while.*cap-probe.*$'],
             timeoutMs: 30_000,
@@ -254,7 +254,7 @@ describe('run output: maxBuffer sized above the cap (issue #18)', () => {
           },
         },
       };
-      const run = buildTools(capConfig, scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(capConfig, scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({
         command: `i=0; while [ $i -lt 11000 ]; do printf 'cap-probe line %05d ${'x'.repeat(110)}\\n' "$i"; i=$((i+1)); done`,
       });
@@ -322,7 +322,7 @@ function runOnly(
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs, maxOutputChars },
+      bash: { enabled: true, commandPatterns, timeoutMs, maxOutputChars },
     },
   };
 }
@@ -336,7 +336,7 @@ describe('run: process-group cancellation (W1.4)', () => {
     async () => {
       await withScratch(async (scratchDir) => {
         const run = buildTools(runOnly([GRANDCHILD_PATTERN]), scratchDir).find(
-          (t) => t.name === 'run',
+          (t) => t.name === 'bash',
         );
         const controller = new AbortController();
         const pending = run?.execute({ command: GRANDCHILD }, { signal: controller.signal });
@@ -363,7 +363,7 @@ describe('run: process-group cancellation (W1.4)', () => {
         let pid: number | undefined;
         await withScratch(async (scratchDir) => {
           const run = buildTools(runOnly([GRANDCHILD_PATTERN], timeoutMs), scratchDir).find(
-            (t) => t.name === 'run',
+            (t) => t.name === 'bash',
           );
           const result = await run?.execute({ command: GRANDCHILD });
           expect(result).toMatchObject({ ok: true, exitCode: null, killed: true });
@@ -383,7 +383,7 @@ describe('run: process-group cancellation (W1.4)', () => {
   test('a pre-aborted signal never spawns and reports a kill', async () => {
     await withScratch(async (scratchDir) => {
       const run = buildTools(runOnly(['re:^echo ran > marker\\.txt$']), scratchDir).find(
-        (t) => t.name === 'run',
+        (t) => t.name === 'bash',
       );
       const controller = new AbortController();
       controller.abort();
@@ -400,7 +400,7 @@ describe('run: process-group cancellation (W1.4)', () => {
 
   test('a signal that never aborts leaves a normal run untouched', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runOnly(['echo']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runOnly(['echo']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute(
         { command: 'echo steady' },
         { signal: new AbortController().signal },
@@ -413,7 +413,7 @@ describe('run: process-group cancellation (W1.4)', () => {
 describe('run: results, output retention and spawn failure (W1.4)', () => {
   test('a nonzero exit is an ok result carrying the code, not a denial', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runOnly(['exit']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runOnly(['exit']), scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command: 'exit 7' });
       expect(result).toEqual({
         ok: true,
@@ -428,7 +428,7 @@ describe('run: results, output retention and spawn failure (W1.4)', () => {
   test('stdout and stderr are both captured under their own headings', async () => {
     await withScratch(async (scratchDir) => {
       const run = buildTools(runOnly(['re:^echo out; echo err 1>&2$']), scratchDir).find(
-        (t) => t.name === 'run',
+        (t) => t.name === 'bash',
       );
       const result = await run?.execute({ command: 'echo out; echo err 1>&2' });
       expect(result).toMatchObject({ ok: true, exitCode: 0 });
@@ -443,7 +443,7 @@ describe('run: results, output retention and spawn failure (W1.4)', () => {
       // cap 50 chars → retention 50*4 + 64 KiB per stream; 200 000 bytes of
       // printf output overruns the retention bound AND the cap.
       const run = buildTools(runOnly(["re:^printf '%0200000d' 0$"], 5_000, 50), scratchDir).find(
-        (t) => t.name === 'run',
+        (t) => t.name === 'bash',
       );
       const result = await run?.execute({ command: "printf '%0200000d' 0" });
       expect(result).toMatchObject({ ok: true, exitCode: 0, killed: false, truncated: true });
@@ -457,13 +457,13 @@ describe('run: results, output retention and spawn failure (W1.4)', () => {
   test('a spawn failure (missing workspace cwd) denies with run failed:', async () => {
     await withScratch(async (scratchDir) => {
       const run = buildTools(runOnly(['echo']), join(scratchDir, 'missing')).find(
-        (t) => t.name === 'run',
+        (t) => t.name === 'bash',
       );
       const result = await run?.execute({ command: 'echo nope' });
       expect(result?.ok).toBe(false);
       if (!result?.ok) {
-        expect(result?.denial.tool).toBe('run');
-        expect(result?.denial.reason.startsWith('run failed: ')).toBe(true);
+        expect(result?.denial.tool).toBe('bash');
+        expect(result?.denial.reason.startsWith('bash failed: ')).toBe(true);
       }
     });
   });
@@ -476,10 +476,10 @@ describe('run output retention without a cap (improvement pass)', () => {
         ...defaultHarnessConfig,
         tools: {
           ...defaultHarnessConfig.tools,
-          run: { enabled: true, commandPatterns: ['head'], timeoutMs: 20_000 },
+          bash: { enabled: true, commandPatterns: ['head'], timeoutMs: 20_000 },
         },
       };
-      const run = buildTools(config, scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(config, scratchDir).find((t) => t.name === 'bash');
       const result = await run?.execute({ command: 'head -c 3000000 /dev/zero' });
       expect(result?.ok).toBe(true);
       if (result?.ok !== true) return;
@@ -529,12 +529,265 @@ describe('toolkit invariant: read/edit never touch .git (W1.4 composition review
       );
       expect(await readFile(join(workspace, 'sub', '.git'), 'utf8')).toContain('/repo/');
       // …while ordinary files — and dot-files that merely START with .git — stay editable.
+      await expect(read?.execute({ path: '.gitignore' })).resolves.toMatchObject({ ok: true });
       expect(
         await edit?.execute({ path: '.gitignore', oldText: 'node_modules', newText: 'dist' }),
       ).toMatchObject({ ok: true });
+      await expect(read?.execute({ path: 'src.ts' })).resolves.toMatchObject({ ok: true });
       expect(
         await edit?.execute({ path: 'src.ts', oldText: 'a = 1', newText: 'a = 2' }),
       ).toMatchObject({ ok: true });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F1 — canonical edit/write/bash correctness
+// ---------------------------------------------------------------------------
+
+/** The default tools, built ONCE so the prior-read ledger is shared. */
+function defaultTools(workspace: string) {
+  const tools = buildTools(defaultHarnessConfig, workspace);
+  const byName = (name: 'read' | 'edit' | 'write' | 'bash') => {
+    const tool = tools.find((candidate) => candidate.name === name);
+    if (tool === undefined) throw new Error(`missing ${name}`);
+    return tool;
+  };
+  return {
+    read: byName('read'),
+    edit: byName('edit'),
+    write: byName('write'),
+    bash: byName('bash'),
+  };
+}
+
+describe('F1 edit correctness', () => {
+  test('an ambiguous target is refused unless replace_all is true', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'dup.txt'), 'x\nx\n', 'utf8');
+      await tools.read.execute({ path: 'dup.txt' });
+
+      const refused = await tools.edit.execute({
+        file_path: 'dup.txt',
+        old_string: 'x',
+        new_string: 'y',
+      });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) {
+        expect(refused.denial.reason).toContain('not unique');
+        expect(refused.denial.reason).toContain('replace_all');
+      }
+      await expect(readFile(join(scratchDir, 'dup.txt'), 'utf8')).resolves.toBe('x\nx\n');
+
+      const replaced = await tools.edit.execute({
+        file_path: 'dup.txt',
+        old_string: 'x',
+        new_string: 'y',
+        replace_all: true,
+      });
+      expect(replaced).toMatchObject({ ok: true });
+      if (replaced.ok) expect(replaced.output).toContain('replaced 2 occurrences');
+      await expect(readFile(join(scratchDir, 'dup.txt'), 'utf8')).resolves.toBe('y\ny\n');
+    });
+  });
+
+  test('the pre-F1 path/oldText/newText arguments are still accepted', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'legacy.txt'), 'hello world\n', 'utf8');
+      await tools.read.execute({ path: 'legacy.txt' });
+      const result = await tools.edit.execute({
+        path: 'legacy.txt',
+        oldText: 'world',
+        newText: 'there',
+      });
+      expect(result).toMatchObject({ ok: true });
+      await expect(readFile(join(scratchDir, 'legacy.txt'), 'utf8')).resolves.toBe('hello there\n');
+    });
+  });
+
+  test('a CRLF file with a BOM keeps both after an LF-space edit', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      const original = '\uFEFFalpha\r\nbeta\r\n';
+      await writeFile(join(scratchDir, 'crlf.txt'), original, 'utf8');
+      await tools.read.execute({ path: 'crlf.txt' });
+      const result = await tools.edit.execute({
+        file_path: 'crlf.txt',
+        old_string: 'alpha\nbeta',
+        new_string: 'alpha\nBETA',
+      });
+      expect(result).toMatchObject({ ok: true });
+      await expect(readFile(join(scratchDir, 'crlf.txt'), 'utf8')).resolves.toBe(
+        '\uFEFFalpha\r\nBETA\r\n',
+      );
+    });
+  });
+
+  test('edit requires a prior read and refuses a file that changed since it', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'stale.txt'), 'one\n', 'utf8');
+
+      const unread = await tools.edit.execute({
+        file_path: 'stale.txt',
+        old_string: 'one',
+        new_string: 'two',
+      });
+      expect(unread.ok).toBe(false);
+      if (!unread.ok) expect(unread.denial.reason).toContain('must be read before');
+
+      await tools.read.execute({ path: 'stale.txt' });
+      await writeFile(join(scratchDir, 'stale.txt'), 'changed\n', 'utf8');
+      const stale = await tools.edit.execute({
+        file_path: 'stale.txt',
+        old_string: 'one',
+        new_string: 'two',
+      });
+      expect(stale.ok).toBe(false);
+      if (!stale.ok) expect(stale.denial.reason).toContain('changed since it was read');
+
+      await tools.read.execute({ path: 'stale.txt' });
+      const fresh = await tools.edit.execute({
+        file_path: 'stale.txt',
+        old_string: 'changed',
+        new_string: 'two',
+      });
+      expect(fresh).toMatchObject({ ok: true });
+    });
+  });
+
+  test('binary and invalid-UTF-8 files are refused, never rewritten', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'bin.dat'), Buffer.from([0x61, 0x00, 0x62]));
+      await writeFile(join(scratchDir, 'bad.txt'), Buffer.from([0xff, 0xfe, 0x61]));
+      await tools.read.execute({ path: 'bin.dat' });
+      await tools.read.execute({ path: 'bad.txt' });
+
+      const binary = await tools.edit.execute({
+        file_path: 'bin.dat',
+        old_string: 'a',
+        new_string: 'z',
+      });
+      expect(binary.ok).toBe(false);
+      if (!binary.ok) expect(binary.denial.reason).toContain('binary file');
+
+      const invalid = await tools.edit.execute({
+        file_path: 'bad.txt',
+        old_string: 'a',
+        new_string: 'z',
+      });
+      expect(invalid.ok).toBe(false);
+      if (!invalid.ok) expect(invalid.denial.reason).toContain('not valid UTF-8');
+    });
+  });
+
+  test('concurrent edits of one file serialize: the second sees the first result', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      await writeFile(join(scratchDir, 'serial.txt'), 'a\n', 'utf8');
+      await tools.read.execute({ path: 'serial.txt' });
+      const [first, second] = await Promise.all([
+        tools.edit.execute({ file_path: 'serial.txt', old_string: 'a', new_string: 'b' }),
+        tools.edit.execute({ file_path: 'serial.txt', old_string: 'b', new_string: 'c' }),
+      ]);
+      expect(first).toMatchObject({ ok: true });
+      expect(second).toMatchObject({ ok: true });
+      await expect(readFile(join(scratchDir, 'serial.txt'), 'utf8')).resolves.toBe('c\n');
+    });
+  });
+});
+
+describe('F1 write tool', () => {
+  test('creates a new file without a prior read; overwrite needs a read and preserves style', async () => {
+    await withScratch(async (scratchDir) => {
+      const tools = defaultTools(scratchDir);
+      const created = await tools.write.execute({
+        file_path: 'new.txt',
+        content: 'created\n',
+      });
+      expect(created).toMatchObject({ ok: true });
+      await expect(readFile(join(scratchDir, 'new.txt'), 'utf8')).resolves.toBe('created\n');
+
+      // A file this tools instance created is already known; one created
+      // outside it must be read before it can be overwritten.
+      await writeFile(join(scratchDir, 'external.txt'), 'outside\n', 'utf8');
+      const unread = await tools.write.execute({
+        file_path: 'external.txt',
+        content: 'overwrite\n',
+      });
+      expect(unread.ok).toBe(false);
+      if (!unread.ok) expect(unread.denial.reason).toContain('must be read before');
+
+      // Style preservation on overwrite: BOM + CRLF stay.
+      await writeFile(join(scratchDir, 'styled.txt'), '\uFEFFa\r\nb\r\n', 'utf8');
+      await tools.read.execute({ path: 'styled.txt' });
+      const overwritten = await tools.write.execute({
+        file_path: 'styled.txt',
+        content: 'x\ny\n',
+      });
+      expect(overwritten).toMatchObject({ ok: true });
+      await expect(readFile(join(scratchDir, 'styled.txt'), 'utf8')).resolves.toBe(
+        '\uFEFFx\r\ny\r\n',
+      );
+    });
+  });
+});
+
+describe('F1 bash tool', () => {
+  test('the run alias is advertised for one release and the timeout can only shorten the policy', async () => {
+    await withScratch(async (scratchDir) => {
+      const bash = buildTools(runConfig(['sleep']), scratchDir).find(
+        (candidate) => candidate.name === 'bash',
+      );
+      expect(bash?.aliases).toEqual(['run']);
+      const started = Date.now();
+      const result = await bash?.execute({ command: 'sleep 5', timeout: 50 });
+      expect(result).toMatchObject({ ok: true, killed: true, exitCode: null });
+      expect(Date.now() - started).toBeLessThan(2_000);
+    });
+  });
+
+  test('maxTools: 3 keeps the pre-F1 read/edit/bash surface (write is shed first)', async () => {
+    await withScratch(async (scratchDir) => {
+      const config: HarnessConfig = {
+        ...defaultHarnessConfig,
+        promptBudget: { ...defaultHarnessConfig.promptBudget, maxTools: 3 },
+      };
+      expect(buildTools(config, scratchDir).map((tool) => tool.name)).toEqual([
+        'read',
+        'edit',
+        'bash',
+      ]);
+    });
+  });
+});
+
+describe('F1 config migration', () => {
+  test('the legacy tools.run key normalises to tools.bash; both keys are refused', () => {
+    const parsed = HarnessConfigSchema.parse({
+      tools: {
+        read: defaultHarnessConfig.tools.read,
+        edit: defaultHarnessConfig.tools.edit,
+        run: { enabled: true, commandPatterns: ['echo'] },
+      },
+      promptBudget: defaultHarnessConfig.promptBudget,
+    });
+    expect(parsed.tools.bash.commandPatterns).toEqual(['echo']);
+    expect(parsed.tools.write.enabled).toBe(true);
+
+    expect(() =>
+      HarnessConfigSchema.parse({
+        tools: {
+          read: defaultHarnessConfig.tools.read,
+          edit: defaultHarnessConfig.tools.edit,
+          bash: { enabled: true, commandPatterns: ['echo'] },
+          run: { enabled: true, commandPatterns: ['echo'] },
+        },
+        promptBudget: defaultHarnessConfig.promptBudget,
+      }),
+    ).toThrow(/mutually exclusive/);
   });
 });

@@ -57,13 +57,13 @@ function scratch(): string {
   return dir;
 }
 
-/** The default harness config with the given run allowlist. */
+/** The default harness config with the given bash allowlist. */
 function withRun(commandPatterns: string[], timeoutMs = 5_000): HarnessConfig {
   return {
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs, maxOutputChars: 10_000 },
+      bash: { enabled: true, commandPatterns, timeoutMs, maxOutputChars: 10_000 },
     },
   };
 }
@@ -74,7 +74,7 @@ function manifest(workspace: string, over: Partial<HarnessManifest> = {}): Harne
     v: 1,
     workspace,
     sandbox: 'workspace-write',
-    tools: ['read', 'edit', 'run'],
+    tools: ['read', 'edit', 'bash'],
     harness: withRun(['echo', 'sleep']),
     envNames: [],
     ...over,
@@ -84,7 +84,7 @@ function manifest(workspace: string, over: Partial<HarnessManifest> = {}): Harne
 describe('naming', () => {
   test('qualified spelling round-trips and is recognized', () => {
     expect(qualifiedToolName('read')).toBe('mcp__cq-harness__read');
-    expect(harnessToolName('mcp__cq-harness__run')).toBe('run');
+    expect(harnessToolName('mcp__cq-harness__bash')).toBe('bash');
     expect(isQualifiedHarnessTool('mcp__cq-harness__edit')).toBe(true);
   });
 
@@ -97,21 +97,23 @@ describe('naming', () => {
 });
 
 describe('selection', () => {
-  const names = ['read', 'edit', 'run'] as const;
+  const names = ['read', 'edit', 'write', 'bash'] as const;
 
   test('none → nothing; unrestricted → everything', () => {
     expect(selectToolNames(names, { allow: ['read'], mode: 'none' })).toEqual([]);
     expect(selectToolNames(names, { allow: [], mode: 'unrestricted' })).toEqual([
       'read',
       'edit',
-      'run',
+      'write',
+      'bash',
     ]);
   });
 
   test('allowlist (explicit or default) intersects, in toolNames order', () => {
+    // `run` is the one-release pre-F1 alias for `bash`.
     expect(selectToolNames(names, { allow: ['run', 'read', 'Bash'], mode: 'allowlist' })).toEqual([
       'read',
-      'run',
+      'bash',
     ]);
     expect(selectToolNames(names, { allow: ['edit'] })).toEqual(['edit']);
   });
@@ -123,7 +125,8 @@ describe('selection', () => {
     };
     expect(selectHarnessSurface(noEdit, { allow: [], mode: 'unrestricted' })).toEqual([
       'read',
-      'run',
+      'bash',
+      'write',
     ]);
     const oneTool: HarnessConfig = {
       ...defaultHarnessConfig,
@@ -132,7 +135,7 @@ describe('selection', () => {
     expect(selectHarnessSurface(oneTool, { allow: ['read', 'run'] })).toEqual(['read']);
   });
 
-  test('selectHarnessSurface is loud on a corrupt run allowlist', () => {
+  test('selectHarnessSurface is loud on a corrupt bash allowlist', () => {
     expect(() => selectHarnessSurface(withRun(['re:(']), { allow: ['run'] })).toThrow();
   });
 });
@@ -173,7 +176,7 @@ describe('buildManifest', () => {
     const built = await buildManifest({
       workspace: join(dir, 'link'),
       sandbox: 'read-only',
-      toolPolicy: { allow: ['run', 'read'] },
+      toolPolicy: { allow: ['run', 'read'] }, // legacy `run` still selects bash
       harness: defaultHarnessConfig,
       envNames: ['GH_TOKEN'],
     });
@@ -181,7 +184,7 @@ describe('buildManifest', () => {
       v: 1,
       workspace: real,
       sandbox: 'read-only',
-      tools: ['read', 'run'],
+      tools: ['read', 'bash'],
       harness: defaultHarnessConfig,
       envNames: ['GH_TOKEN'],
     });
@@ -239,11 +242,11 @@ describe('createHarnessSurface', () => {
   test('throws when the manifest names a disabled tool', () => {
     const harness: HarnessConfig = {
       ...defaultHarnessConfig,
-      tools: { ...defaultHarnessConfig.tools, run: { enabled: false, commandPatterns: [] } },
+      tools: { ...defaultHarnessConfig.tools, bash: { enabled: false, commandPatterns: [] } },
     };
     expect(() =>
-      createHarnessSurface(manifest(scratch(), { harness, tools: ['read', 'run'] })),
-    ).toThrow(/does not provide: run/);
+      createHarnessSurface(manifest(scratch(), { harness, tools: ['read', 'bash'] })),
+    ).toThrow(/does not provide: bash/);
   });
 
   test('throws when maxTools slices away a named tool', () => {
@@ -252,7 +255,7 @@ describe('createHarnessSurface', () => {
       promptBudget: { ...defaultHarnessConfig.promptBudget, maxTools: 2 },
     };
     expect(() => createHarnessSurface(manifest(scratch(), { harness }))).toThrow(
-      /does not provide: run/,
+      /does not provide: bash/,
     );
   });
 
@@ -262,9 +265,11 @@ describe('createHarnessSurface', () => {
   });
 
   test('serves tools in manifest order with strict JSON Schemas', () => {
+    // The legacy `run` spelling normalises to the canonical `bash` tool.
     const surface = createHarnessSurface(manifest(scratch(), { tools: ['run', 'read'] }));
-    expect(surface.tools.map((tool) => tool.name)).toEqual(['run', 'read']);
+    expect(surface.tools.map((tool) => tool.name)).toEqual(['bash', 'read']);
     expect(surface.has('run')).toBe(true);
+    expect(surface.has('bash')).toBe(true);
     expect(surface.has('edit')).toBe(false);
     for (const tool of surface.tools) {
       expect(tool.inputJsonSchema['type']).toBe('object');
@@ -302,8 +307,8 @@ describe('createHarnessSurface', () => {
       manifest(workspace, { harness: withRun(['re:^sleep 0\\.3; echo done > done\\.txt$']) }),
     );
     const order: string[] = [];
-    const slow = surface.call('run', { command: 'sleep 0.3; echo done > done.txt' }).then((r) => {
-      order.push('run');
+    const slow = surface.call('bash', { command: 'sleep 0.3; echo done > done.txt' }).then((r) => {
+      order.push('bash');
       return r;
     });
     // The read arrives second: it must not start until the run has settled,
@@ -313,7 +318,7 @@ describe('createHarnessSurface', () => {
       return r;
     });
     const [, read] = await Promise.all([slow, fast]);
-    expect(order).toEqual(['run', 'read']);
+    expect(order).toEqual(['bash', 'read']);
     expect(read.outcome).toMatchObject({ ok: true, output: 'done\n' });
   });
 
@@ -322,13 +327,13 @@ describe('createHarnessSurface', () => {
     const controller = new AbortController();
     controller.abort();
     const { outcome } = await surface.call(
-      'run',
+      'bash',
       { command: 'echo x' },
       { signal: controller.signal },
     );
     expect(outcome).toEqual({
       ok: false,
-      denial: { tool: 'run', reason: 'cancelled: the call was cancelled before it ran' },
+      denial: { tool: 'bash', reason: 'cancelled: the call was cancelled before it ran' },
     });
   });
 });
@@ -378,40 +383,49 @@ describe('isHarnessDenial against real denials', () => {
       if (found === undefined) throw new Error(`no ${name}`);
       return found;
     };
+    // One tools instance for the read-then-edit cases: the prior-read ledger
+    // lives per buildTools call, so a fresh instance would deny the edit for
+    // the wrong reason.
+    const fileTools = buildTools(config, workspace, 'workspace-write');
+    const fileRead = fileTools.find((tool) => tool.name === 'read');
+    const fileEdit = fileTools.find((tool) => tool.name === 'edit');
+    if (fileRead === undefined || fileEdit === undefined) throw new Error('file tools missing');
+    await fileRead.execute({ path: 'a.txt' });
     const reasons: Record<string, ToolkitToolResult> = {
       sandboxEdit: await tool(workspace, 'read-only', 'edit').execute({
-        path: 'a.txt',
-        oldText: 'a',
-        newText: 'b',
+        file_path: 'a.txt',
+        old_string: 'a',
+        new_string: 'b',
       }),
-      sandboxRun: await tool(workspace, 'read-only', 'run').execute({ command: 'echo x' }),
+      sandboxRun: await tool(workspace, 'read-only', 'bash').execute({ command: 'echo x' }),
       invalidInput: await tool(workspace, 'workspace-write', 'read').execute({ nope: 1 }),
       lexicalEscape: await tool(workspace, 'workspace-write', 'read').execute({ path: '../x' }),
       symlinkEscape: await tool(workspace, 'workspace-write', 'read').execute({ path: 'link.txt' }),
       pathNotAllowed: await tool(workspace, 'workspace-write', 'read').execute({ path: 'a.md' }),
-      commandNotAllowed: await tool(workspace, 'workspace-write', 'run').execute({
+      commandNotAllowed: await tool(workspace, 'workspace-write', 'bash').execute({
         command: 'rm -rf x',
       }),
-      metacharacters: await tool(workspace, 'workspace-write', 'run').execute({
+      metacharacters: await tool(workspace, 'workspace-write', 'bash').execute({
         command: 'echo x; whoami',
       }),
       fileNotFound: await tool(workspace, 'workspace-write', 'read').execute({ path: 'none.txt' }),
       readFailed: await tool(workspace, 'workspace-write', 'read').execute({ path: 'dir' }),
-      editRefused: await tool(workspace, 'workspace-write', 'edit').execute({
-        path: 'a.txt',
-        oldText: 'zzz',
-        newText: 'y',
+      editRefused: await fileEdit.execute({
+        file_path: 'a.txt',
+        old_string: 'zzz',
+        new_string: 'y',
       }),
-      runFailed: await tool(join(workspace, 'gone'), 'workspace-write', 'run').execute({
+      runFailed: await tool(join(workspace, 'gone'), 'workspace-write', 'bash').execute({
         command: 'echo x',
       }),
     };
     // edit failed: needs a write the OS refuses — root ignores 0o444.
     if (process.getuid?.() !== 0 && process.platform !== 'win32') {
-      reasons['editFailed'] = await tool(workspace, 'workspace-write', 'edit').execute({
-        path: 'locked.txt',
-        oldText: 'alpha',
-        newText: 'beta',
+      await fileRead.execute({ path: 'locked.txt' });
+      reasons['editFailed'] = await fileEdit.execute({
+        file_path: 'locked.txt',
+        old_string: 'alpha',
+        new_string: 'beta',
       });
     }
     for (const [label, result] of Object.entries(reasons)) {
@@ -427,7 +441,7 @@ describe('isHarnessDenial against real denials', () => {
     expect(reasonOf('symlinkEscape')).toMatch(/^path escape: .*symlink/);
     expect(reasonOf('metacharacters')).toMatch(/^command allowlist: /);
     expect(reasonOf('readFailed')).toMatch(/^read failed: /);
-    expect(reasonOf('runFailed')).toMatch(/^run failed: /);
+    expect(reasonOf('runFailed')).toMatch(/^bash failed: /);
     if (reasons['editFailed'] !== undefined)
       expect(reasonOf('editFailed')).toMatch(/^edit failed: /);
   });
@@ -557,7 +571,7 @@ describe('queued cancellation (improvement pass)', () => {
     await writeFile(join(workspace, 'note.txt'), 'before\n');
     const surface = createHarnessSurface(manifest(workspace));
     const cancel = new AbortController();
-    const running = surface.call('run', { command: 'sleep 1' });
+    const running = surface.call('bash', { command: 'sleep 1' });
     const queued = surface.call(
       'edit',
       { path: 'note.txt', oldText: 'before', newText: 'after' },

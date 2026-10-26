@@ -80,6 +80,7 @@ import { DispatchError, errorClassOf } from '../../../src/driver/errors.js';
 import { SessionStore } from '../../../src/harness/session.js';
 import { realClock, runLadder } from '../../../src/kernel/governor.js';
 import { toOutputSchema } from '../../../src/driver/common/structured.js';
+import { canonicalToolName } from '../../../src/harness/tools.js';
 import { WorkerResultSchema } from '../../../src/kernel/schema.js';
 import type {
   Driver,
@@ -223,7 +224,7 @@ function conformanceHarnessConfig(
     workspaceRoot: join(scratchDir, 'workspaces'),
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['re:^echo .* > note\\.txt$'] },
+      bash: { ...defaultHarnessConfig.tools.bash, commandPatterns: ['re:^echo .* > note\\.txt$'] },
     },
   };
 }
@@ -271,7 +272,14 @@ function fakeManagedScript(
   const allowedIndex = opts.args.indexOf('--allowedTools');
   const allowed = (allowedIndex === -1 ? '' : (opts.args[allowedIndex + 1] ?? ''))
     .split(' ')
-    .filter(Boolean);
+    .filter(Boolean)
+    // The real CLI reports the MCP server's tools/list, which advertises
+    // canonical names only; --allowedTools also carries the one-release
+    // `run` alias, which the init surface must not duplicate.
+    .map((name) =>
+      name === 'mcp__cq-harness__run' ? 'mcp__cq-harness__bash' : canonicalToolName(name),
+    )
+    .filter((name, index, all) => all.indexOf(name) === index);
   const harnessMode = opts.args.includes('--tools');
   const hasSchema = opts.args.includes('--json-schema');
   const sessionId = `fake-cli-${fakeManagedSessionCounter++}`;
@@ -2161,7 +2169,7 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
         '--mcp-config',
         configPath,
         '--allowedTools',
-        'mcp__cq-harness__read mcp__cq-harness__edit mcp__cq-harness__run',
+        'mcp__cq-harness__read mcp__cq-harness__edit mcp__cq-harness__bash mcp__cq-harness__run mcp__cq-harness__write',
         '--model',
         'conformance-1',
       ]);
@@ -2487,7 +2495,7 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
           scratchDir,
           {
             FAKE_AGENT_MODE: 'tool-then-reply',
-            FAKE_AGENT_TOOL: 'run',
+            FAKE_AGENT_TOOL: 'bash',
             FAKE_AGENT_INPUT: JSON.stringify({ command: 'echo served-marker > note.txt' }),
           },
           [],
@@ -2500,7 +2508,7 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
       expect(await readFile(join(record?.workspace as string, 'note.txt'), 'utf8')).toBe(
         'served-marker\n',
       );
-      const message = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'run');
+      const message = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'bash');
       expect(JSON.parse(message?.content ?? '{}')).toMatchObject({
         input: { command: 'echo served-marker > note.txt' },
         ok: true,
@@ -2765,7 +2773,7 @@ describe('claude-code CLI transport seam v2: RunOptions.signal + workspace bindi
       const spawnedCwds: string[] = [];
       const extraEnv = {
         FAKE_AGENT_MODE: 'tool-then-reply',
-        FAKE_AGENT_TOOL: 'run',
+        FAKE_AGENT_TOOL: 'bash',
         FAKE_AGENT_INPUT: JSON.stringify({ command: 'echo conformance-marker > note.txt' }),
         FAKE_AGENT_REPLY: 'wrote note.txt',
       };

@@ -25,7 +25,7 @@ function runConfig(commandPatterns: string[]) {
     ...defaultHarnessConfig,
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { enabled: true, commandPatterns, timeoutMs: 5_000, maxOutputChars: 10_000 },
+      bash: { enabled: true, commandPatterns, timeoutMs: 5_000, maxOutputChars: 10_000 },
     },
   };
 }
@@ -58,11 +58,11 @@ describe('the shared run gate withholds `run` on every harness surface', () => {
     const names = buildTools(runConfig(['env']), process.cwd(), 'workspace-write', gate).map(
       (tool) => tool.name,
     );
-    expect(names).not.toContain('run');
+    expect(names).not.toContain('bash');
     // The manifest surface selects through the same gate, so it never names
     // a tool the surface cannot serve.
     expect(buildTools(runConfig(['env']), process.cwd()).map((tool) => tool.name)).not.toContain(
-      'run',
+      'bash',
     );
   });
 
@@ -81,10 +81,10 @@ describe('the shared run gate withholds `run` on every harness surface', () => {
   test('CQ_SANDBOX=off keeps the tool, and an unexpressed environment is unchanged', () => {
     process.env['CQ_SANDBOX'] = 'off';
     delete process.env['CQ_RUN_TOOL'];
-    expect(buildTools(runConfig(['env']), process.cwd()).map((t) => t.name)).toContain('run');
+    expect(buildTools(runConfig(['env']), process.cwd()).map((t) => t.name)).toContain('bash');
     for (const name of POLICY_NAMES) delete process.env[name];
     expect(harnessRunGate()).toEqual({ enabled: true, envPassthrough: [] });
-    expect(buildTools(runConfig(['env']), process.cwd()).map((t) => t.name)).toContain('run');
+    expect(buildTools(runConfig(['env']), process.cwd()).map((t) => t.name)).toContain('bash');
   });
 
   test('the gate agrees with resolveSandboxConfig for a driver-supplied policy', () => {
@@ -111,7 +111,7 @@ describe('the launcher env scrub reaches the actual run child', () => {
       const run = buildTools(runConfig(['re:^env$']), scratch, 'workspace-write', {
         enabled: true,
         envPassthrough: [names.keep],
-      }).find((tool) => tool.name === 'run');
+      }).find((tool) => tool.name === 'bash');
       const result = await run?.execute({ command: 'env' });
       expect(result?.ok).toBe(true);
       if (result?.ok) {
