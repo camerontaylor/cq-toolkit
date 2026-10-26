@@ -211,7 +211,6 @@ import type {
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
-import { spawn as childSpawn } from 'node:child_process';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -219,7 +218,12 @@ import { createDeepSeek } from '@ai-sdk/deepseek';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { buildTools, canonicalToolName } from '../../harness/tools.js';
+import {
+  buildTools,
+  canonicalToolName,
+  probeRgVersion,
+  RG_MINIMUM_VERSION as HARNESS_RG_FLOOR,
+} from '../../harness/tools.js';
 import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool, ToolExecuteOptions } from '../../harness/tools.js';
@@ -300,102 +304,7 @@ export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
  * #1100-2019-04-15 and #0100-2018-09-07. Boundary tests: 10.x rejects,
  * 11.0.0 and 14.1 accept.
  */
-export const RG_MINIMUM_VERSION = '11.0.0';
-
-/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). Exported for boundary tests. */
-export const parseRgVersion = (line: string | undefined): string | undefined => {
-  const match = /^ripgrep (\d+\.\d+\.\d+)/.exec(line ?? '');
-  return match?.[1];
-};
-
-/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. Exported for boundary tests. */
-export const versionAtLeast = (found: string, minimum: string): boolean => {
-  const parse = (v: string): [number, number, number] => {
-    const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
-    return [major ?? 0, minor ?? 0, patch ?? 0];
-  };
-  const [fm, fn, fp] = parse(found);
-  const [tm, tn, tp] = parse(minimum);
-  return fm !== tm ? fm > tm : fn !== tn ? fn > tn : fp >= tp;
-};
-
-/**
- * The production rg resolver: ONE bounded `rg --version` child, cancellation-
- * honoring, resolving to the outcome only — never the binary path.
- */
-export const defaultResolveRg = (
-  signal?: AbortSignal,
-): Promise<
-  { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
-> =>
-  new Promise((settle) => {
-    if (signal?.aborted === true) {
-      settle({ ok: false, reason: 'absent' });
-      return;
-    }
-    let child: ReturnType<typeof childSpawn>;
-    let settled = false;
-    const timer = setTimeout(() => {
-      child?.kill();
-      done({ ok: false, reason: 'absent' });
-    }, 5_000);
-    const onAbort = (): void => {
-      child?.kill();
-      done({ ok: false, reason: 'absent' });
-    };
-    const done = (
-      outcome:
-        | { ok: true; version: string }
-        | { ok: false; reason: 'absent' | 'old'; found?: string },
-    ): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      settle(outcome);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    try {
-      child = childSpawn('rg', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
-    } catch {
-      done({ ok: false, reason: 'absent' });
-      return;
-    }
-    // Only the FIRST line matters; decode incrementally so a chunk split
-    // mid-line cannot lose the version, and stop accumulating once the first
-    // newline arrives (bounded by the version line, never the whole output).
-    let head = '';
-    let headDone = false;
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (headDone) return;
-      head += chunk.toString('utf8');
-      const newline = head.indexOf('\n');
-      if (newline !== -1) {
-        head = head.slice(0, newline);
-        headDone = true;
-      }
-      if (head.length > 256) {
-        head = head.slice(0, 256);
-        headDone = true;
-      }
-    });
-    child.on('error', () => {
-      done({ ok: false, reason: 'absent' });
-    });
-    child.on('close', (code) => {
-      const version = parseRgVersion(head);
-      if (code !== 0 || version === undefined) {
-        done({ ok: false, reason: 'absent' });
-        return;
-      }
-      // 10.x and older are withheld; 11.0.0+ (incl. the host's 14.1) serve.
-      done(
-        versionAtLeast(version, RG_MINIMUM_VERSION)
-          ? { ok: true, version }
-          : { ok: false, reason: 'old', found: version },
-      );
-    });
-  });
+export const RG_MINIMUM_VERSION = HARNESS_RG_FLOOR;
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
@@ -507,7 +416,10 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
-    this.resolveRg = options.resolveRg ?? defaultResolveRg;
+    // The default probe lives in the HARNESS layer (src/harness/tools.ts),
+    // which owns the clock legally (runArgvCommand timeoutMs); the driver owns
+    // no timer (I8 hygiene) and only forwards the run's governed signal.
+    this.resolveRg = options.resolveRg ?? probeRgVersion;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */

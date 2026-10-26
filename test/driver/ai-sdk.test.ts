@@ -30,10 +30,6 @@ import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   AiSdkDriver,
   DEFAULT_MAX_STEPS,
-  defaultResolveRg,
-  parseRgVersion,
-  versionAtLeast,
-  RG_MINIMUM_VERSION,
   parseReplyJson,
   serializeRequestForScan,
   DEFAULT_STEP_TIMEOUT_MS,
@@ -59,6 +55,12 @@ import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { toOutputSchema } from '../../src/driver/common/structured.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
+import {
+  probeRgVersion as harnessProbeRg,
+  parseRgVersion,
+  versionAtLeast,
+  RG_MINIMUM_VERSION,
+} from '../../src/harness/tools.js';
 import { SessionStore } from '../../src/harness/session.js';
 import type { OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
 
@@ -3111,7 +3113,7 @@ describe('rg runtime floor boundary — PRODUCTION comparator', () => {
           providers: { mock: (modelId) => modelFor(undefined, modelId) },
           sessionsDir: join(root, 'sessions'),
           harnessConfig: conformanceHarnessConfig(root),
-          resolveRg: defaultResolveRg,
+          resolveRg: harnessProbeRg,
         });
         return await driver.run(
           invocation({
