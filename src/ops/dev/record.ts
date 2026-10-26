@@ -101,6 +101,12 @@ export interface DevCycleRecord {
   dirtySha256: string;
   completion: DevReviewCompletion;
   findings: DevFinding[];
+  /**
+   * Report context only: a size/coverage note the reviewer emitted. It is
+   * never dispatched to a fixer and never counted as a blocking finding.
+   * Optional so v2 ledgers written before this field still parse.
+   */
+  advisories?: string[];
   /** Where the raw stream log was saved — OUTSIDE the repository (protocol §3). */
   logPath: string;
   /** Untracked non-ignored files present at cycle time (outside the review scope). */
@@ -211,6 +217,7 @@ const DevCycleRecordSchema = z
     dirtySha256: z.string().min(1),
     completion: DevCompletionSchema,
     findings: z.array(DevFindingSchema),
+    advisories: z.array(z.string().min(1)).exactOptional(),
     logPath: z.string().min(1),
     untracked: z.array(z.string().min(1)),
     at: z.string().min(1),

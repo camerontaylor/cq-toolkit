@@ -28,24 +28,38 @@ async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>
 
 function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
   return {
-    resolve: vi.fn(() => ({
-      lane: 'ai-sdk',
-      modelSpec: { provider: 'mock', model: 'mock' },
-      driver: {
-        run: async (input: { prompt: string }) => {
-          onRun?.(input);
-          return {
-            stopReason: 'complete' as const,
-            structuredOutput: {
-              receipt: /receipt: ([a-f0-9]+)/.exec(input.prompt)?.[1],
-              findings: [{ severity: 'high', text: 'seeded' }],
-            },
-            usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
-            denials: [],
-          };
+    resolve: vi.fn(
+      (request: {
+        beforeRequest?: (
+          text: string,
+          contents?: readonly { text: string }[],
+          context?: { kind: 'model-request' | 'tool-output' },
+        ) => void | Promise<void>;
+      }) => ({
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+        driver: {
+          run: async (input: { prompt: string }) => {
+            onRun?.(input);
+            // The engine records delivery from the real serialized ai-sdk
+            // request shape, not from the model's output.
+            await request.beforeRequest?.(
+              JSON.stringify({ prompt: [{ role: 'user', content: input.prompt }] }),
+              [{ text: input.prompt }],
+              { kind: 'model-request' },
+            );
+            return {
+              stopReason: 'complete' as const,
+              structuredOutput: {
+                findings: [{ severity: 'high', text: 'seeded' }],
+              },
+              usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          },
         },
-      },
-    })),
+      }),
+    ),
   } as unknown as DriverFactory;
 }
 
@@ -167,7 +181,7 @@ describe('review.run', () => {
           `import { makeReviewRun } from ${JSON.stringify(runUrl)};\n` +
           `import { makeSubprocessDevEffects } from ${JSON.stringify(effectsUrl)};\n` +
           `const entry = entries.find((candidate) => candidate.name === 'review.run');\n` +
-          `const drivers = { resolve: () => ({ lane: 'ai-sdk', modelSpec: { provider: 'mock', model: 'mock' }, driver: { run: async (invocation) => ({ stopReason: 'complete', structuredOutput: { receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1], findings: [{ file: 'src/a.ts', line: 1, rule: 'fixture', severity: 'high', text: 'Seeded fixture finding' }] }, usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, denials: [] }) } }) };\n` +
+          `const drivers = { resolve: (request) => ({ lane: 'ai-sdk', modelSpec: { provider: 'mock', model: 'mock' }, driver: { run: async (invocation) => { await request.beforeRequest?.(JSON.stringify({ prompt: [{ role: 'user', content: invocation.prompt }] }), [{ text: invocation.prompt }], { kind: 'model-request' }); return { stopReason: 'complete', structuredOutput: { findings: [{ file: 'src/a.ts', line: 1, rule: 'fixture', severity: 'high', text: 'Seeded fixture finding' }] }, usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 }, denials: [] }; } } }) };\n` +
           `export const registry = [{ ...entry, importer: async () => makeReviewRun({ drivers, effectsFactory: makeSubprocessDevEffects, scannerFactory: () => async (components) => components.map((component) => ({ component: component.component, hits: [] })) }) }];\n`,
       );
       process.env['PATH'] = `${bin}:${priorPath}`;
@@ -179,12 +193,19 @@ describe('review.run', () => {
       });
       expect(code).toBe(3);
       expect(err).toEqual([]);
-      const artifact = JSON.parse(out.join('')) as { status: string; reason: string };
-      expect(artifact).toEqual({
+      const artifact = JSON.parse(out.join('')) as {
+        status: string;
+        reason: string;
+        report?: { sources: { kind: string; status: string }[] };
+      };
+      expect(artifact).toMatchObject({
         status: 'needs-human',
         reason:
           'review.run: not every configured reviewer completed a terminal cycle; the findings record, including partial findings, was persisted',
       });
+      expect(artifact.report?.sources).toContainEqual(
+        expect.objectContaining({ kind: 'agent', status: 'terminal' }),
+      );
       const headPrefix = repo.git('rev-parse', 'HEAD').trim().slice(0, 8);
       const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
       const [recordFile] = await readdir(folder);
@@ -237,38 +258,53 @@ describe('review.run', () => {
           ? { exitCode: 1, stdout: '', stderr: 'not authenticated', timedOut: false }
           : undefined,
       );
+      let wire = '';
       const drivers = {
-        resolve: vi.fn(() => ({
-          lane: 'ai-sdk',
-          modelSpec: { provider: 'mock', model: 'mock' },
-          driver: {
-            run: async (invocation: {
-              prompt: string;
-              toolPolicy: { mode?: string };
-              outputSchema?: unknown;
-            }) => {
-              expect(invocation.toolPolicy.mode).toBe('none');
-              expect(invocation.outputSchema).toBeDefined();
-              return {
-                stopReason: 'complete' as const,
-                structuredOutput: {
-                  receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
-                  findings: [
-                    {
-                      file: 'src/a.ts',
-                      line: 1,
-                      rule: 'fixture',
-                      severity: 'high',
-                      text: 'Seeded fixture finding',
-                    },
-                  ],
-                },
-                usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
-                denials: [],
-              };
+        resolve: vi.fn(
+          (request: {
+            beforeRequest?: (
+              text: string,
+              contents?: readonly { text: string }[],
+              context?: { kind: 'model-request' | 'tool-output' },
+            ) => void | Promise<void>;
+          }) => ({
+            lane: 'ai-sdk',
+            modelSpec: { provider: 'mock', model: 'mock' },
+            driver: {
+              run: async (invocation: {
+                prompt: string;
+                toolPolicy: { mode?: string; allow?: string[] };
+                outputSchema?: unknown;
+              }) => {
+                expect(invocation.toolPolicy.mode).toBe('allowlist');
+                expect(invocation.toolPolicy.allow).toEqual(['read', 'grep', 'glob']);
+                expect(invocation.outputSchema).toBeDefined();
+                wire = JSON.stringify({
+                  prompt: [{ role: 'user', content: invocation.prompt }],
+                });
+                await request.beforeRequest?.(wire, [{ text: invocation.prompt }], {
+                  kind: 'model-request',
+                });
+                return {
+                  stopReason: 'complete' as const,
+                  structuredOutput: {
+                    findings: [
+                      {
+                        file: 'src/a.ts',
+                        line: 1,
+                        rule: 'fixture',
+                        severity: 'high',
+                        text: 'Seeded fixture finding',
+                      },
+                    ],
+                  },
+                  usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+                  denials: [],
+                };
+              },
             },
-          },
-        })),
+          }),
+        ),
       } as unknown as DriverFactory;
       const result = await makeReviewRun({
         drivers,
@@ -302,6 +338,7 @@ describe('review.run', () => {
       expect(persisted.findings[0]?.id).toBe(
         `${persisted.sources.find((source) => source.kind === 'agent')?.cycleId}#f1`,
       );
+      expect(wire).toContain('"role":"user"');
     } finally {
       await repo.cleanup();
     }
@@ -781,10 +818,10 @@ describe('review.run', () => {
         expect.objectContaining({
           kind: 'cycle',
           reviewer: 'agent:reviewer',
-          completion: {
+          completion: expect.objectContaining({
             kind: 'blocked',
-            reason: 'agent review did not complete (budget-exhausted)',
-          },
+            reason: expect.stringContaining('agent review budget exhausted'),
+          }),
         }),
       );
     } finally {
@@ -939,7 +976,10 @@ describe('review.run', () => {
         .at(-1);
       expect(latestAgent).toMatchObject({
         kind: 'cycle',
-        completion: { kind: 'blocked', reason: 'agent review returned invalid structured output' },
+        completion: expect.objectContaining({
+          kind: 'blocked',
+          reason: expect.stringContaining('agent review returned invalid structured output'),
+        }),
         base: state.base,
         head: state.head,
         dirtySha256: state.dirtySha256,
@@ -1129,7 +1169,7 @@ describe('review.run', () => {
       expect(scanned).toContain('src/public.txt');
       expect(scanned).toContain('src/public-renamed.txt');
       expect(result.status).toBe('ok');
-      expect(drivers.resolve).toHaveBeenCalledTimes(2);
+      expect(drivers.resolve).toHaveBeenCalledTimes(1);
       const diffCalls = effects.calls.filter(
         (call) => call.command === 'git' && call.args[0] === 'diff',
       );
@@ -1323,6 +1363,332 @@ it('persists completed findings as blocked when the source changes during the ag
       findings: [expect.objectContaining({ text: 'seeded' })],
     });
     expect(persisted).not.toHaveProperty('reviewed');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('sends commit intent and the numstat file list through the scanned session prompt', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    await repo.write('src/intent.ts', 'export const intent = 1;\n');
+    repo.commitAll('feat: capture INTENT_MARKER\n\nexplains the change');
+    const prompts: string[] = [];
+    const scanned: { component: string; text: string }[] = [];
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+      effectsFactory: () => repoEffects(repo),
+      scannerFactory: () => async (components) => {
+        scanned.push(...components.map(({ component, text }) => ({ component, text })));
+        return components.map((component) => ({ component: component.component, hits: [] }));
+      },
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    const prompt = prompts.join('\n');
+    expect(prompt).toContain('INTENT_MARKER');
+    expect(prompt).toContain('explains the change');
+    expect(prompt).toContain('## Changed files');
+    expect(prompt).toMatch(/\d+\t\d+\tsrc\/intent\.ts/);
+    expect(scanned).toContainEqual(
+      expect.objectContaining({
+        component: 'review-prompt',
+        text: expect.stringContaining('INTENT_MARKER'),
+      }),
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('forwards prior findings only when reReview.includePriorFindings is enabled', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const writeConfig = async (includePriorFindings: boolean) => {
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['agent'], reReview: { includePriorFindings } },
+        }),
+      );
+      repo.commitAll(`review.reReview.includePriorFindings=${String(includePriorFindings)}`);
+    };
+    const priorFindings = [
+      {
+        id: 'c001#f1',
+        source: 'agent',
+        file: 'src/a.ts',
+        line: 1,
+        rule: 'fixture',
+        severity: 'major',
+        text: 'PRIOR_FINDING_MARKER',
+        status: 'fixed' as const,
+        reason: 'addressed in the previous round',
+      },
+    ];
+    const prompts: string[] = [];
+    await writeConfig(true);
+    const included = await makeReviewRun({
+      drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+      effectsFactory: () => repoEffects(repo),
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root, priorFindings });
+    expect(included.status).toBe('ok');
+    expect(prompts.join('\n')).toContain('PRIOR_FINDING_MARKER');
+    expect(prompts.join('\n')).toContain('addressed in the previous round');
+
+    prompts.length = 0;
+    await writeConfig(false);
+    const excluded = await makeReviewRun({
+      drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+      effectsFactory: () => repoEffects(repo),
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root, priorFindings });
+    expect(excluded.status).toBe('ok');
+    expect(prompts.join('\n')).not.toContain('PRIOR_FINDING_MARKER');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('threads review.size and review.exclude, persisting advisories outside findings', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        budgets: { run: { maxTokens: 500 } },
+        review: {
+          reviewers: ['agent'],
+          size: {
+            small: { maxChangedLines: 0, maxFiles: 0 },
+            medium: { maxChangedLines: 1000, maxFiles: 100 },
+          },
+          exclude: [{ pattern: '**' }],
+        },
+      }),
+    );
+    repo.commitAll('configure review size and exclusions');
+    const effects = repoEffects(repo);
+    const drivers = scriptedDrivers();
+    const result = await makeReviewRun({
+      drivers,
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.findings).toEqual([]);
+    expect(result.value.advisories).toEqual([
+      'agent review covered no content: all components excluded',
+    ]);
+    expect(result.value.sources[0]?.coverage).toMatchObject({
+      version: 2,
+      mode: 'session',
+      pieces: expect.arrayContaining([
+        expect.objectContaining({
+          state: 'excluded',
+          exclusion: expect.objectContaining({
+            rule: '**',
+            limitation: expect.any(String),
+          }),
+        }),
+      ]),
+    });
+    expect(drivers.resolve).not.toHaveBeenCalled();
+    const cycle = effects
+      .openLedger('feature/x')
+      .load()
+      .records.find((entry) => entry.kind === 'cycle' && entry.reviewer === 'agent:reviewer');
+    expect(cycle).toMatchObject({
+      advisories: ['agent review covered no content: all components excluded'],
+    });
+    expect(effects.logs[0]).toContain('mode=session');
+    expect(effects.logs[0]).toContain('limitation=');
+    expect(effects.logs[0]).toContain(
+      'advisories: agent review covered no content: all components excluded',
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('threads review.session maxInputChars and forces the recorded partitioned fallback', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        budgets: { run: { maxTokens: 500 } },
+        review: { reviewers: ['agent'], session: { maxInputChars: 1 } },
+      }),
+    );
+    repo.commitAll('configure a tiny session budget');
+    const effects = repoEffects(repo);
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.sources[0]?.coverage).toMatchObject({
+      version: 2,
+      mode: 'partitioned',
+      modeReason: 'over session input budget',
+    });
+    expect(result.value.advisories).toContainEqual(expect.stringContaining('partitioned fallback'));
+    expect(effects.logs[0]).toContain('mode=partitioned');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('threads review.size thresholds into the reviewer instructions', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        budgets: { run: { maxTokens: 500 } },
+        review: {
+          reviewers: ['agent'],
+          size: {
+            small: { maxChangedLines: 0, maxFiles: 0 },
+            medium: { maxChangedLines: 1000, maxFiles: 100 },
+          },
+        },
+      }),
+    );
+    repo.commitAll('configure review size thresholds');
+    const prompts: string[] = [];
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+      effectsFactory: () => repoEffects(repo),
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(prompts.join('\n')).toContain('Up to about 15 lookups');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('keeps blocked evidence when an engine report carries malformed coverage', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const effects = repoEffects(repo);
+    const malformed = { version: 999, nonsense: true };
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+      runAgentReviewer: async () => ({
+        status: 'needs-human',
+        reason: 'fixture engine blocked',
+        report: {
+          findings: [],
+          usage: 1,
+          coverage: malformed as never,
+          advisories: ['fixture advisory'],
+          limitations: ['fixture limitation'],
+        },
+      }),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    expect(result.report?.sources[0]).toMatchObject({
+      kind: 'agent',
+      status: 'blocked',
+      reason: 'fixture engine blocked',
+    });
+    expect(result.report?.sources[0]).not.toHaveProperty('coverage');
+    expect(result.report?.advisories).toEqual(['fixture advisory']);
+    expect(effects.logs[0]).toContain('"version":999');
+    const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+    const [recordFile] = await readdir(folder);
+    const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+      sources: { kind: string; status: string; coverage?: unknown }[];
+    };
+    expect(persisted.sources[0]).toMatchObject({ kind: 'agent', status: 'blocked' });
+    expect(persisted.sources[0]).not.toHaveProperty('coverage');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('shares the review deadline signal with intent and numstat reads', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const controller = new AbortController();
+    const inner = repoEffects(repo);
+    const contextCalls: {
+      args: readonly string[];
+      timeoutMs: number;
+      signal?: AbortSignal;
+    }[] = [];
+    const effects = {
+      ...inner,
+      runCommand: async (
+        command: string,
+        args: readonly string[],
+        options: { timeoutMs: number; cwd?: string; signal?: AbortSignal },
+      ) => {
+        if (
+          command === 'git' &&
+          (args[0] === 'log' || (args[0] === 'diff' && args.includes('--numstat')))
+        ) {
+          contextCalls.push({
+            args: [...args],
+            timeoutMs: options.timeoutMs,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+          const result = await inner.runCommand(command, args, options);
+          if (args[0] === 'diff') controller.abort(new Error('fixture cancel after numstat'));
+          return result;
+        }
+        return inner.runCommand(command, args, options);
+      },
+    };
+    const drivers = scriptedDrivers();
+    const result = await makeReviewRun({
+      drivers,
+      parentSignal: controller.signal,
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(contextCalls.map((call) => call.args[0])).toEqual(['log', 'diff']);
+    expect(contextCalls[0]?.signal).toBeDefined();
+    expect(contextCalls[0]?.signal).toBe(contextCalls[1]?.signal);
+    expect(contextCalls[1]?.signal?.aborted).toBe(true);
+    expect(contextCalls.every((call) => call.timeoutMs > 0)).toBe(true);
+    expect(drivers.resolve).not.toHaveBeenCalled();
+    expect(result.status).toBe('failed');
   } finally {
     await repo.cleanup();
   }

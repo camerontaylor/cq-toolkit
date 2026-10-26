@@ -32,7 +32,7 @@ import {
   type Finding,
   type FindingsRecord,
 } from './findings.js';
-import { makeReviewRun, type ReviewRunInput } from './run.js';
+import { makeReviewRun, type ReviewRunInput, type ReviewRunResult } from './run.js';
 import {
   makeAddressWorker,
   type AddressAttempt,
@@ -70,6 +70,8 @@ export interface ReviewAddressReport {
   reportPath: string;
   rounds: Array<{ round: number; record: FindingsRecord; run?: RunReport }>;
   findings: Finding[];
+  /** Report context only: review advisories never enter `findings` or dispatch. */
+  advisories?: string[];
   openBlocking: Finding[];
   fixes: AddressFix[];
   attempts: AddressAttempt[];
@@ -102,7 +104,7 @@ export interface ReviewAddressDeps {
   worktreeRegistry?: WorktreeRegistry;
   config?: CqConfig;
   initialRecord?: FindingsRecord;
-  review?: (input: ReviewRunInput) => Promise<OpResult<FindingsRecord>>;
+  review?: (input: ReviewRunInput) => Promise<ReviewRunResult>;
   workerFactory?: (deps: Parameters<typeof makeAddressWorker>[0]) => AddressWorker;
   disposition?: (root: string, finding: Finding) => Promise<OpResult<unknown>>;
 }
@@ -189,6 +191,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
     let persistedBookkeeping: ReturnType<typeof makeAddressBookkeepingReceipt> | undefined;
+    const noteAdvisories = (record: FindingsRecord) => {
+      if (record.advisories === undefined || record.advisories.length === 0) return;
+      report.advisories = [...new Set([...(report.advisories ?? []), ...record.advisories])];
+    };
     const noteBookkeeping = async (path: string) => {
       const canonical = await realpath(path);
       const stat = await lstat(canonical);
@@ -815,6 +821,26 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 findings.push(prior);
             return { ...record, findings };
           };
+          // Address uploads the prior round's findings with the dispositions
+          // recorded for them; `review.run` owns the config gate
+          // (review.reReview.includePriorFindings) and the whole-branch
+          // comparison. `current` overlays a fresher record (PR threads)
+          // before final dispositions are applied.
+          const priorRoundFindings = (
+            base: FindingsRecord | undefined,
+            current: readonly Finding[] = [],
+          ): Finding[] => {
+            const ordered = new Map<string, Finding>();
+            if (base !== undefined)
+              for (const finding of retainDeferred(base).findings)
+                ordered.set(identity(finding), finding);
+            for (const finding of current) ordered.set(identity(finding), finding);
+            for (const key of ordered.keys()) {
+              const disposition = dispositions.get(key);
+              if (disposition !== undefined) ordered.set(key, disposition);
+            }
+            return [...ordered.values()];
+          };
           let root = resolve(input.repoRoot);
           let previous: FindingsRecord | undefined;
           let prMetadata:
@@ -1215,11 +1241,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   })),
               };
               report.findings = retainDeferred(threads).findings;
+              noteAdvisories(threads);
               report.openBlocking = openBlocking(
                 { ...threads, findings: report.findings },
                 policy.review.blockingSeverities,
               );
               if (stop()) return await finish('needs-human', stop());
+              const priorFindings = priorRoundFindings(previous, [
+                ...threads.findings,
+                ...[...fixesById.values()].map((fix) => fix.finding),
+              ]);
               const agent = await review({
                 repoRoot: root,
                 target: input.target ?? 'merge-queue',
@@ -1231,12 +1262,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 maxTokens: Math.max(1, remainingTokens()),
                 wallMs: Math.max(1, remainingWallMs()),
                 reviewers: ['agent'],
+                ...(priorFindings.length > 0 ? { priorFindings } : {}),
               });
-              if (agent.status !== 'ok')
+              if (agent.status !== 'ok') {
+                if (agent.report) noteAdvisories(agent.report);
                 return await finish('needs-human', `PR re-review: ${issue(agent)}`);
+              }
               if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
                 return await finish('needs-human', 'PR re-review identity changed');
               previous = retainDeferred(merge([threads, agent.value]));
+              noteAdvisories(previous);
               report.rounds.push({
                 round,
                 record: previous,
@@ -1307,6 +1342,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               previous = record;
             }
             report.findings = previous.findings;
+            noteAdvisories(previous);
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             if (!isComplete(previous, policy.review.reviewers))
               return await finish('needs-human', 'review source incomplete');
@@ -1318,21 +1354,26 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             await dispatchFindings(root, previous, round);
             await publishOnExit();
             if (stop()) return await finish('needs-human', stop());
+            const priorFindings = priorRoundFindings(previous);
             const refreshed = await review({
               repoRoot: root,
               target: input.target ?? 'merge-queue',
               ...(reviewedBase ? { base: reviewedBase } : {}),
               maxTokens: Math.max(1, remainingTokens()),
               wallMs: Math.max(1, remainingWallMs()),
+              ...(priorFindings.length > 0 ? { priorFindings } : {}),
             });
-            if (refreshed.status !== 'ok')
+            if (refreshed.status !== 'ok') {
+              if (refreshed.report) noteAdvisories(refreshed.report);
               return await finish('needs-human', `re-review: ${issue(refreshed)}`);
+            }
             if (
               refreshed.value.branch !== (await branchName(root)) ||
               refreshed.value.head !== (await gitText(root, ['rev-parse', 'HEAD']))
             )
               return await finish('needs-human', 're-review identity changed');
             previous = retainDeferred(refreshed.value);
+            noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             report.rounds.push({ round, record: previous });

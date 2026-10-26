@@ -82,6 +82,8 @@ export interface PrOpenReport {
   evidenceClass: 'author';
   /** true when the PR carries a READY author-tier record; false = a DRAFT carrying the gaps. */
   ready: boolean;
+  /** Non-blocking review context, also rendered in the managed PR section. */
+  advisories?: string[];
 }
 
 /** The managed body section's START marker. */
@@ -103,6 +105,31 @@ function mdLine(text: string): string {
   )
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Use the latest cycle per reviewer for this exact comparison, never stale heads. */
+function reviewAdvisories(
+  ledger: DevLedgerFile,
+  state: { head: string; base: string; target: string; dirtySha256?: string },
+): string[] {
+  const latest = new Map<string, string[]>();
+  for (const entry of ledger.records) {
+    if (
+      entry.kind === 'cycle' &&
+      entry.head === state.head &&
+      entry.base === state.base &&
+      entry.target === state.target &&
+      (state.dirtySha256 === undefined || entry.dirtySha256 === state.dirtySha256)
+    )
+      latest.set(entry.reviewer, entry.advisories ?? []);
+  }
+  return [...new Set([...latest.values()].flat())];
+}
+
+function appendReviewAdvisories(lines: string[], advisories: readonly string[]): void {
+  if (advisories.length === 0) return;
+  lines.push('', '### Review advisories', '');
+  for (const advisory of advisories) lines.push(`- ${mdLine(advisory)}`);
 }
 
 /** The readiness record rendered as the managed body section. */
@@ -145,6 +172,7 @@ export function renderReadinessSection(
     }
     lines.push('', '</details>');
   }
+  appendReviewAdvisories(lines, reviewAdvisories(ledger, record));
   lines.push('<!-- /cq:dev-readiness -->');
   return lines.join('\n');
 }
@@ -190,6 +218,7 @@ export function renderReadinessGapsSection(
   for (const entry of dispositions) {
     lines.push(`  - \`${mdLine(entry.findingId)}\` — **${entry.action}**: ${mdLine(entry.why)}`);
   }
+  appendReviewAdvisories(lines, reviewAdvisories(ledger, { ...state, target }));
   lines.push('', '<!-- /cq:dev-readiness-gaps -->');
   return lines.join('\n');
 }
@@ -392,6 +421,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
       }
     }
 
+    const advisories = reviewAdvisories(ledger, { ...state, target });
     return {
       status: 'ok',
       value: {
@@ -403,6 +433,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
         branch,
         evidenceClass: 'author',
         ready: gaps === undefined,
+        ...(advisories.length > 0 ? { advisories } : {}),
       },
     };
   });

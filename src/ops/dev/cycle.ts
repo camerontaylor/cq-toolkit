@@ -96,6 +96,8 @@ export interface DevCycleReport {
   pushed: boolean;
   /** The PR-side continuation command for the published PR. */
   followUp: string;
+  /** Non-blocking review context from the published comparison. */
+  advisories?: string[];
 }
 
 /** The follow-up command dev.cycle reports after publishing a PR. */
@@ -429,6 +431,9 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         pr: openResult.value,
         pushed,
         followUp: followUpCommand(openResult.value.number, input.repoRoot, target),
+        ...(openResult.value.advisories === undefined
+          ? {}
+          : { advisories: openResult.value.advisories }),
       },
     };
 

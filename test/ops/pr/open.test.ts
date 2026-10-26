@@ -457,6 +457,28 @@ describe('the readiness renderers', () => {
     const body = renderDispositionsComment({ ...ledger, records: [] });
     expect(body).toContain('No findings were dispositioned');
   });
+
+  test('review advisories follow the latest matching comparison and stay markdown-safe', () => {
+    const advisoryLedger = ledgerWith([
+      cycleRecord({ reviewer: 'agent', advisories: ['superseded note'] }),
+      cycleRecord({ reviewer: 'agent', advisories: ['large change <script>\nlookups limited'] }),
+      cycleRecord({ reviewer: 'agent', head: 'different-head', advisories: ['stale head'] }),
+      cycleRecord({ reviewer: 'agent', base: 'different-base', advisories: ['stale base'] }),
+      cycleRecord({ reviewer: 'agent', target: 'different-target', advisories: ['stale target'] }),
+    ]);
+    const ready = renderReadinessSection(record, advisoryLedger, []);
+    const gaps = renderReadinessGapsSection(record, advisoryLedger, record.target, []);
+    for (const section of [ready, gaps]) {
+      expect(section).toContain('### Review advisories');
+      expect(section).toContain('- large change script lookups limited');
+      expect(section).not.toContain('<script>');
+      expect(section).not.toContain('superseded note');
+      expect(section).not.toContain('stale head');
+      expect(section).not.toContain('stale base');
+      expect(section).not.toContain('stale target');
+    }
+    expect(ready).toContain('terminal, reviewer');
+  });
 });
 
 describe('the readiness section markdown escaping', () => {

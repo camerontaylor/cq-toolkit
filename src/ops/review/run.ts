@@ -1,10 +1,14 @@
 import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DriverFactory } from '../../driver/factory.js';
-import type { Op, OpResult } from '../../kernel/types.js';
+import type { OpResult } from '../../kernel/types.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
-import { makeDevReview } from '../dev/review.js';
+import {
+  makeDevReview,
+  renderAgentReviewEvidence,
+  verifyAgentReviewCoverage,
+} from '../dev/review.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import type { DevEffects } from '../dev/effects.js';
 import type { DiffSecretScanner } from '../dev/denylist.js';
@@ -23,9 +27,11 @@ import {
   FindingsRecordSchema,
   isComplete,
   merge,
+  type Finding,
   type FindingsRecord,
   type ReviewSource,
 } from './findings.js';
+import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -35,9 +41,17 @@ export interface ReviewRunInput {
   maxTokens?: number;
   wallMs?: number;
   reviewers?: ('agent' | 'coderabbit')[];
+  /**
+   * Previous-round findings for an internal address round. The engine sees
+   * them only when `review.reReview.includePriorFindings` is true; the
+   * reviewed base and scope stay the whole branch.
+   */
+  priorFindings?: readonly Finding[];
 }
 export interface ReviewRunDeps {
   drivers: DriverFactory;
+  /** Injection seam for the engine; production binds {@link runAgentReviewer}. */
+  runAgentReviewer?: typeof runAgentReviewer;
   parentSignal?: AbortSignal;
   effectsFactory?: (repoRoot: string) => DevEffects;
   writeFindingsRecord?: (path: string, content: string) => Promise<void>;
@@ -54,6 +68,9 @@ export interface ReviewRunDeps {
   ) => DiffSecretScanner;
 }
 
+/** A blocked run still exposes the persisted record so consumers can surface advisories. */
+export type ReviewRunResult = OpResult<FindingsRecord> & { report?: FindingsRecord };
+
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
   return {
     schemaVersion: 1,
@@ -64,9 +81,75 @@ function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): 
   };
 }
 
+/** The reviewer's intent budget; the truncation marker is inside the cap. */
+const REVIEW_INTENT_CAP = 4_000;
+
+function capReviewIntent(text: string): string {
+  if (text.length <= REVIEW_INTENT_CAP) return text;
+  const marker = `\n[truncated: ${String(text.length - REVIEW_INTENT_CAP)} characters omitted]`;
+  if (marker.length >= REVIEW_INTENT_CAP) return text.slice(0, REVIEW_INTENT_CAP);
+  return text.slice(0, REVIEW_INTENT_CAP - marker.length) + marker;
+}
+
+/**
+ * The intent and file list are prompt context, not coverage pieces. The engine
+ * scans the composed session prompt before upload, so both ride the same
+ * beforeRequest gate as the diff.
+ */
+async function collectReviewContext(
+  effects: DevEffects,
+  comparison: string,
+  head: string,
+  deadline: { signal?: AbortSignal; remainingWallMs: () => number },
+): Promise<
+  { ok: true; intent: string; fileList: string } | { ok: false; fatal: boolean; reason: string }
+> {
+  const callOptions = (): { timeoutMs: number; signal?: AbortSignal } => ({
+    timeoutMs: Math.max(1, Math.min(60_000, deadline.remainingWallMs())),
+    ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
+  });
+  try {
+    deadline.signal?.throwIfAborted();
+    const log = await effects.runCommand(
+      'git',
+      ['log', '--format=%s%n%n%b', `${comparison}..${head}`],
+      callOptions(),
+    );
+    if (log.exitCode !== 0)
+      return {
+        ok: false,
+        fatal: false,
+        reason: `could not collect review intent (exit ${log.exitCode === null ? 'none (killed)' : String(log.exitCode)})`,
+      };
+    deadline.signal?.throwIfAborted();
+    const numstat = await effects.runCommand(
+      'git',
+      ['diff', '--numstat', ...HARDENED_DIFF_FLAGS, comparison],
+      callOptions(),
+    );
+    if (numstat.exitCode !== 0)
+      return {
+        ok: false,
+        fatal: false,
+        reason: `could not list review diff stats (exit ${numstat.exitCode === null ? 'none (killed)' : String(numstat.exitCode)})`,
+      };
+    deadline.signal?.throwIfAborted();
+    return { ok: true, intent: capReviewIntent(log.stdout), fileList: numstat.stdout };
+  } catch (error) {
+    return {
+      ok: false,
+      fatal: true,
+      reason: `could not collect review context — ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 /** Produce a single normalized record from the configured sources. */
-export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsRecord> {
-  return async (input): Promise<OpResult<FindingsRecord>> => {
+export function makeReviewRun(
+  deps: ReviewRunDeps,
+): (input: ReviewRunInput) => Promise<ReviewRunResult> {
+  return async (input): Promise<ReviewRunResult> => {
+    const runReview = deps.runAgentReviewer ?? runAgentReviewer;
     const started = Date.now();
     const effects =
       deps.effectsFactory?.(input.repoRoot) ?? makeSubprocessDevEffects(input.repoRoot);
@@ -250,204 +333,250 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
               ),
             );
           else {
-            const components: { component: string; path: string; text: string }[] = [];
-            let collectionFailure: string | undefined;
-            for (const path of listing.stdout.split('\0').filter(Boolean)) {
-              let patch;
-              try {
-                patch = await effects.runCommand(
-                  'git',
-                  ['diff', ...HARDENED_DIFF_FLAGS, comparison, '--', path],
-                  {
-                    timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
-                    ...(deadline.signal ? { signal: deadline.signal } : {}),
-                  },
-                );
-              } catch (error) {
-                return {
-                  status: 'failed',
-                  error: `review.run: could not collect diff for '${path}' — ${error instanceof Error ? error.message : String(error)}`,
-                };
-              }
-              if (patch.exitCode !== 0) {
-                collectionFailure = `could not collect diff for '${path}' (exit ${String(patch.exitCode)})`;
-                break;
-              }
-              components.push({ component: `tracked:${path}`, path, text: patch.stdout });
-            }
-            if (collectionFailure !== undefined) {
-              records.push(blocked('agent', collectionFailure));
+            const context = await collectReviewContext(effects, comparison, state.head, {
+              ...(deadline.signal ? { signal: deadline.signal } : {}),
+              remainingWallMs,
+            });
+            if (!context.ok && context.fatal)
+              return { status: 'failed', error: `review.run: ${context.reason}` };
+            if (!context.ok) {
+              records.push(blocked('agent', context.reason));
             } else {
-              for (const path of state.untracked) {
-                let content: Awaited<ReturnType<DevEffects['readWorktreeFile']>>;
+              const components: { component: string; path: string; text: string }[] = [];
+              let collectionFailure: string | undefined;
+              for (const path of listing.stdout.split('\0').filter(Boolean)) {
+                let patch;
                 try {
-                  content = await effects.readWorktreeFile(path, 4 * 1024 * 1024);
+                  patch = await effects.runCommand(
+                    'git',
+                    ['diff', ...HARDENED_DIFF_FLAGS, comparison, '--', path],
+                    {
+                      timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
+                      ...(deadline.signal ? { signal: deadline.signal } : {}),
+                    },
+                  );
                 } catch (error) {
                   return {
                     status: 'failed',
-                    error: `review.run: could not read untracked file '${path}' for scanning — ${error instanceof Error ? error.message : String(error)}`,
+                    error: `review.run: could not collect diff for '${path}' — ${error instanceof Error ? error.message : String(error)}`,
                   };
                 }
-                if (!content.ok)
+                if (patch.exitCode !== 0) {
+                  collectionFailure = `could not collect diff for '${path}' (exit ${String(patch.exitCode)})`;
+                  break;
+                }
+                components.push({ component: `tracked:${path}`, path, text: patch.stdout });
+              }
+              if (collectionFailure !== undefined) {
+                records.push(blocked('agent', collectionFailure));
+              } else {
+                for (const path of state.untracked) {
+                  let content: Awaited<ReturnType<DevEffects['readWorktreeFile']>>;
+                  try {
+                    content = await effects.readWorktreeFile(path, 4 * 1024 * 1024);
+                  } catch (error) {
+                    return {
+                      status: 'failed',
+                      error: `review.run: could not read untracked file '${path}' for scanning — ${error instanceof Error ? error.message : String(error)}`,
+                    };
+                  }
+                  if (!content.ok)
+                    return {
+                      status: 'needs-human',
+                      reason: `review.run: untracked file '${path}' cannot be scanned — ${content.reason}`,
+                    };
+                  components.push({ component: `untracked:${path}`, path, text: content.text });
+                }
+                let check;
+                try {
+                  check = await scanner(components);
+                } catch (error) {
                   return {
                     status: 'needs-human',
-                    reason: `review.run: untracked file '${path}' cannot be scanned — ${content.reason}`,
+                    reason: `review.run: denylist scan failed closed — ${error instanceof Error ? error.message : String(error)}`,
                   };
-                components.push({ component: `untracked:${path}`, path, text: content.text });
-              }
-              let check;
-              try {
-                check = await scanner(components);
-              } catch (error) {
-                return {
-                  status: 'needs-human',
-                  reason: `review.run: denylist scan failed closed — ${error instanceof Error ? error.message : String(error)}`,
-                };
-              }
-              if (check.some((scan) => scan.hits.length > 0))
-                return {
-                  status: 'needs-human',
-                  reason:
-                    'review.run: denylist scan found protected content; refusing reviewer upload',
-                };
-              const current = await readWorkState(effects, {
-                target,
-                ...(input.base ? { base: input.base } : {}),
-              });
-              if (
-                !current.ok ||
-                current.state.base !== state.base ||
-                current.state.head !== state.head ||
-                current.state.dirtySha256 !== state.dirtySha256
-              ) {
-                return {
-                  status: 'needs-human',
-                  reason:
-                    'review.run: repository state changed after the scan; retry on a stable tree',
-                };
-              }
-              const role = policy.roles.reviewer;
-              if (role === undefined) {
-                records.push(
-                  blocked('agent', 'cq.json roles.reviewer is required for an agent review'),
-                );
-              } else {
-                const agent = await runAgentReviewer(deps.drivers, {
-                  repoRoot: input.repoRoot,
-                  head: state.head,
-                  branch: state.branch,
-                  diff: components
-                    .map((component) => `--- ${component.path} ---\n${component.text}`)
-                    .join('\n'),
-                  components,
-                  base: input.uncommitted ? state.head : state.base,
-                  scope: input.uncommitted ? 'uncommitted' : 'full',
-                  scanSecrets: scanner,
-                  role,
-                  maxTokens: policy.budgets.run.maxTokens!,
-                  wallMs: Math.max(1, remainingWallMs()),
-                  ...(deadline.signal ? { signal: deadline.signal } : {}),
-                  severityMap: policy.review.agentSeverityMap,
+                }
+                if (check.some((scan) => scan.hits.length > 0))
+                  return {
+                    status: 'needs-human',
+                    reason:
+                      'review.run: denylist scan found protected content; refusing reviewer upload',
+                  };
+                const current = await readWorkState(effects, {
+                  target,
+                  ...(input.base ? { base: input.base } : {}),
                 });
-                let blockedReason =
-                  agent.status === 'needs-human'
-                    ? agent.reason
-                    : agent.status === 'failed'
-                      ? agent.error
-                      : agent.status === 'ok'
-                        ? undefined
-                        : `agent review did not complete (${agent.status})`;
-                if ((await driftSince(effects, state)).length > 0)
-                  blockedReason = 'repository state changed during agent review';
-                const at = effects.nowIso();
-                const report = agent.status === 'ok' ? agent.value : agent.report;
-                const agentFindings = report?.findings ?? [];
-                let logPath: string;
-                try {
-                  logPath = await effects.writeReviewLog(
-                    state.branch,
-                    `agent-${Date.now()}`,
-                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\ncoverage: ${JSON.stringify(report?.coverage)}\nusage: ${report?.usage ?? 0}\n`,
+                if (
+                  !current.ok ||
+                  current.state.base !== state.base ||
+                  current.state.head !== state.head ||
+                  current.state.dirtySha256 !== state.dirtySha256
+                ) {
+                  return {
+                    status: 'needs-human',
+                    reason:
+                      'review.run: repository state changed after the scan; retry on a stable tree',
+                  };
+                }
+                const role = policy.roles.reviewer;
+                if (role === undefined) {
+                  records.push(
+                    blocked('agent', 'cq.json roles.reviewer is required for an agent review'),
                   );
-                } catch (error) {
-                  return {
-                    status: 'indeterminate',
-                    detail: `review.run: agent review attempt was dispatched but its log outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
-                  };
-                }
-                let cycleId: string;
-                try {
-                  cycleId = await effects.openLedger(state.branch).mutate((ledger) => {
-                    const count = ledger.records.filter((entry) => entry.kind === 'cycle').length;
-                    const id = `c${String(count + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
-                    const entry: DevCycleRecord = {
-                      kind: 'cycle',
-                      cycleId: id,
-                      reviewer: 'agent:reviewer',
-                      scope: input.uncommitted ? 'uncommitted' : 'full',
-                      target,
-                      base: state.base,
-                      head: state.head,
-                      dirtySha256: state.dirtySha256,
-                      completion:
-                        blockedReason === undefined
-                          ? { kind: 'terminal' }
-                          : { kind: 'blocked', reason: blockedReason },
-                      findings: agentFindings.map((finding, index) => ({
-                        id: `${id}#f${String(index + 1)}`,
-                        severity: finding.severity,
-                        ...(finding.file ? { fileName: finding.file } : {}),
-                        excerpt: finding.text,
-                      })),
-                      logPath,
-                      untracked: state.untracked,
-                      at,
-                    };
-                    return {
-                      ledger: {
-                        version: DEV_LEDGER_VERSION,
-                        branch: ledger.branch,
-                        records: [...ledger.records, entry],
-                      },
-                      value: id,
-                    };
-                  });
-                  await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
-                } catch (error) {
-                  return {
-                    status: 'indeterminate',
-                    detail: `review.run: agent review attempt was dispatched but its dev ledger outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
-                  };
-                }
-                if (agent.status === 'ok' && blockedReason === undefined) {
-                  records.push({
-                    schemaVersion: 1,
-                    branch: state.branch,
-                    head: state.head,
-                    sources: [
-                      {
-                        kind: 'agent',
-                        status: 'terminal',
-                        cycleId,
-                        coverage: agent.value.coverage,
-                      },
-                    ],
-                    findings: agent.value.findings.map((finding, index) => ({
-                      ...finding,
-                      id: `${cycleId}#f${String(index + 1)}`,
-                    })),
-                  });
                 } else {
-                  const partial = blocked(
-                    'agent',
-                    blockedReason ?? 'agent review did not complete',
-                    cycleId,
-                  );
-                  if (report) {
-                    partial.findings = report.findings;
-                    partial.sources[0]!.coverage = report.coverage;
+                  const reviewedBase = input.uncommitted ? state.head : state.base;
+                  const reviewedScope = input.uncommitted
+                    ? ('uncommitted' as const)
+                    : ('full' as const);
+                  const agent = await runReview(deps.drivers, {
+                    repoRoot: input.repoRoot,
+                    head: state.head,
+                    branch: state.branch,
+                    diff: components
+                      .map((component) => `--- ${component.path} ---\n${component.text}`)
+                      .join('\n'),
+                    components,
+                    base: reviewedBase,
+                    scope: reviewedScope,
+                    intent: context.intent,
+                    fileList: context.fileList,
+                    session: policy.review.session,
+                    size: policy.review.size,
+                    exclude: policy.review.exclude,
+                    ...(policy.review.reReview.includePriorFindings &&
+                    input.priorFindings !== undefined
+                      ? { priorFindings: input.priorFindings }
+                      : {}),
+                    scanSecrets: scanner,
+                    role,
+                    maxTokens: policy.budgets.run.maxTokens!,
+                    wallMs: Math.max(1, remainingWallMs()),
+                    ...(deadline.signal ? { signal: deadline.signal } : {}),
+                    severityMap: policy.review.agentSeverityMap,
+                  });
+                  let blockedReason =
+                    agent.status === 'needs-human'
+                      ? agent.reason
+                      : agent.status === 'failed'
+                        ? agent.error
+                        : agent.status === 'ok'
+                          ? undefined
+                          : `agent review did not complete (${agent.status})`;
+                  if ((await driftSince(effects, state)).length > 0)
+                    blockedReason = 'repository state changed during agent review';
+                  const at = effects.nowIso();
+                  const report = agent.status === 'ok' ? agent.value : agent.report;
+                  const coverage = verifyAgentReviewCoverage(report?.coverage, {
+                    head: state.head,
+                    base: reviewedBase,
+                    scope: reviewedScope,
+                  });
+                  if (blockedReason === undefined && !coverage.ok)
+                    blockedReason = `agent review returned no verifiable coverage proof — ${coverage.reason}`;
+                  const agentFindings = report?.findings ?? [];
+                  const advisories = report?.advisories ?? [];
+                  let logPath: string;
+                  try {
+                    logPath = await effects.writeReviewLog(
+                      state.branch,
+                      `agent-${Date.now()}`,
+                      [
+                        'agent reviewer: reviewer',
+                        `head: ${state.head}`,
+                        `completion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}`,
+                        `findings: ${String(agentFindings.length)}`,
+                        ...renderAgentReviewEvidence(report),
+                        `usage: ${String(report?.usage ?? 0)}`,
+                        '',
+                      ].join('\n'),
+                    );
+                  } catch (error) {
+                    return {
+                      status: 'indeterminate',
+                      detail: `review.run: agent review attempt was dispatched but its log outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
+                    };
                   }
-                  records.push(partial);
+                  let cycleId: string;
+                  try {
+                    cycleId = await effects.openLedger(state.branch).mutate((ledger) => {
+                      const count = ledger.records.filter((entry) => entry.kind === 'cycle').length;
+                      const id = `c${String(count + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
+                      const entry: DevCycleRecord = {
+                        kind: 'cycle',
+                        cycleId: id,
+                        reviewer: 'agent:reviewer',
+                        scope: input.uncommitted ? 'uncommitted' : 'full',
+                        target,
+                        base: state.base,
+                        head: state.head,
+                        dirtySha256: state.dirtySha256,
+                        completion:
+                          blockedReason === undefined
+                            ? { kind: 'terminal' }
+                            : { kind: 'blocked', reason: blockedReason },
+                        findings: agentFindings.map((finding, index) => ({
+                          id: `${id}#f${String(index + 1)}`,
+                          severity: finding.severity,
+                          ...(finding.file ? { fileName: finding.file } : {}),
+                          excerpt: finding.text,
+                        })),
+                        ...(advisories.length > 0 ? { advisories } : {}),
+                        logPath,
+                        untracked: state.untracked,
+                        at,
+                      };
+                      return {
+                        ledger: {
+                          version: DEV_LEDGER_VERSION,
+                          branch: ledger.branch,
+                          records: [...ledger.records, entry],
+                        },
+                        value: id,
+                      };
+                    });
+                    await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+                  } catch (error) {
+                    return {
+                      status: 'indeterminate',
+                      detail: `review.run: agent review attempt was dispatched but its dev ledger outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
+                    };
+                  }
+                  if (agent.status === 'ok' && blockedReason === undefined) {
+                    records.push({
+                      schemaVersion: 1,
+                      branch: state.branch,
+                      head: state.head,
+                      sources: [
+                        {
+                          kind: 'agent',
+                          status: 'terminal',
+                          cycleId,
+                          coverage: coverage.ok ? coverage.coverage : agent.value.coverage,
+                        },
+                      ],
+                      findings: agent.value.findings.map((finding, index) => ({
+                        ...finding,
+                        id: `${cycleId}#f${String(index + 1)}`,
+                      })),
+                      ...(advisories.length > 0 ? { advisories } : {}),
+                    });
+                  } else {
+                    const partial = blocked(
+                      'agent',
+                      blockedReason ?? 'agent review did not complete',
+                      cycleId,
+                    );
+                    if (report) {
+                      partial.findings = report.findings;
+                      // A malformed coverage object must not invalidate the
+                      // blocked findings record. Valid incomplete v2 (and
+                      // legacy v1) evidence is still preserved.
+                      if (ReviewCoverageSchema.safeParse(report.coverage).success)
+                        partial.sources[0]!.coverage = report.coverage;
+                    }
+                    if (advisories.length > 0) partial.advisories = advisories;
+                    records.push(partial);
+                  }
                 }
               }
             }
@@ -523,6 +652,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
           status: 'needs-human',
           reason:
             'review.run: not every configured reviewer completed a terminal cycle; the findings record, including partial findings, was persisted',
+          report: record,
         };
       }
       return { status: 'ok', value: record };
