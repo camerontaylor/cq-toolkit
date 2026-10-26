@@ -605,3 +605,69 @@ describe('rg evidence folding into AgentReviewReport', () => {
     expect(result.report?.advisories).toEqual(['search tools unavailable: ripgrep not found']);
   });
 });
+
+describe('rg evidence folding — budget and invalid post-settle returns', () => {
+  const baseInput = {
+    repoRoot: '.',
+    branch: 'review-fixture',
+    head: 'abc123',
+    scanSecrets: cleanScan,
+    diff: 'diff',
+    role: { provider: 'mock', model: 'mock' },
+    maxTokens: 500,
+    wallMs: 1000,
+    severityMap: { high: 'major', medium: 'minor' },
+  } as const;
+  const driversOf = (run: ReturnType<typeof vi.fn>): DriverFactory =>
+    ({
+      resolve: vi.fn(() => ({
+        driver: { run },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    }) as unknown as DriverFactory;
+  const evidenceOnly = {
+    capabilities: { rg: { available: false, minimum: '11.0.0', probe: 'absent' as const } },
+    advisories: ['search tools unavailable: ripgrep not found'],
+  };
+  const baseResult = {
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+  };
+
+  it('budget-exhausted return carries the evidence', async () => {
+    let calls = 0;
+    const run = vi.fn(async () => {
+      calls++;
+      if (calls === 1)
+        return {
+          stopReason: 'complete' as const,
+          structuredOutput: {
+            findings: [{ file: 'a', line: 1, rule: 'r', severity: 'high', text: 'burn' }],
+          },
+          usage: { input: 400, output: 200, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          ...evidenceOnly,
+        };
+      return { stopReason: 'budget' as const, ...evidenceOnly };
+    });
+    const result = await runAgentReviewer(driversOf(run), baseInput);
+    expect(result.status).toBe('budget-exhausted');
+    expect(result.report?.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.report?.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+
+  it('invalid structured output return carries the evidence', async () => {
+    const run = vi.fn(async () => ({
+      stopReason: 'complete' as const,
+      structuredOutput: { findings: 'not-an-array' },
+      ...baseResult,
+      ...evidenceOnly,
+    }));
+    const result = await runAgentReviewer(driversOf(run), baseInput);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    expect(result.capabilities?.rg).toMatchObject({ available: false, probe: 'absent' });
+    expect(result.advisories).toEqual(['search tools unavailable: ripgrep not found']);
+  });
+});

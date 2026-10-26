@@ -160,30 +160,32 @@ async function runPartition(
       result.usage.cacheWrite +
       (result.usage.reasoning ?? 0),
   );
+  // rg capability seam: ONE evidence object spread into EVERY post-settle
+  // return (budget / needs-human / invalid / success) — no return drops it.
+  const evidence = {
+    ...(result.capabilities === undefined ? {} : { capabilities: result.capabilities }),
+    ...(result.advisories === undefined ? {} : { advisories: result.advisories }),
+  };
   if (result.stopReason !== 'complete') {
-    if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
+    if (result.stopReason === 'budget') return { status: 'budget-exhausted', ...evidence };
     // #484: carry the driver's failure detail (bounded + secret-redacted at
     // the seam) into the blocked reason the review log records — a bare
     // stop reason sent operators to the raw session log to find the cause.
     const detail = result.error === undefined ? '' : `: ${boundedErrorText(result.error)}`;
-    // rg capability seam: blocked evidence travels too — a withheld search
-    // tool is visible even when the partition did not complete.
     return {
       status: 'needs-human',
       reason: `agent review did not complete (${result.stopReason})${detail}`,
-      ...(result.capabilities === undefined ? {} : { capabilities: result.capabilities }),
-      ...(result.advisories === undefined ? {} : { advisories: result.advisories }),
+      ...evidence,
     };
   }
   const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
     result.structuredOutput,
   );
   if (!parsed.success)
-    return { status: 'failed', error: 'agent review returned invalid structured output' };
+    return { status: 'failed', error: 'agent review returned invalid structured output', ...evidence };
   return {
     status: 'ok',
-    ...(result.capabilities === undefined ? {} : { capabilities: result.capabilities }),
-    ...(result.advisories === undefined ? {} : { advisories: result.advisories }),
+    ...evidence,
     value: {
       usage:
         result.usage.input +
@@ -223,7 +225,12 @@ export interface AgentReviewReport {
    */
   capabilities?: WorkerResult['capabilities'];
 }
-export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
+export type AgentReviewResult = OpResult<AgentReviewReport> & {
+  report?: AgentReviewReport;
+  /** rg capability seam: evidence rides the top level too when a partition's driver observed it (failed returns carry it via runPartition). */
+  capabilities?: WorkerResult['capabilities'];
+  advisories?: string[];
+};
 
 async function scanComplete(
   scanner: DiffSecretScanner,

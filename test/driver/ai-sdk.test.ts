@@ -3142,10 +3142,11 @@ describe('rg runtime floor boundary — PRODUCTION comparator', () => {
   });
 
   test('CI guard: on CI a missing/old real rg FAILS the search-tool surface outright (no skip)', async () => {
-    if (process.env.CI !== 'true' && process.env.GITHUB_ACTIONS !== 'true') {
-      // Off CI this assertion is vacuous by design (developers may lack rg);
-      // ON CI the precondition below fails the test when rg is absent/old.
-      expect(process.env.CI === undefined || process.env.CI === 'false').toBe(true);
+    const onCi = process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false';
+    if (!onCi) {
+      // Off CI this test simply returns (developers may lack rg); ON CI the
+      // precondition below fails the test when rg is absent/old. Any truthy
+      // CI value guards (CI=1 is common).
       return;
     }
     const bin = await new Promise<string | undefined>((resolve) => {
