@@ -1846,3 +1846,55 @@ export function buildTools(
   // R4: maxTools is DATA — slice the surface to the configured count.
   return tools.slice(0, promptBudget.maxTools);
 }
+
+// ---------------------------------------------------------------------------
+// The rg capability probe (harness layer owns the clock)
+// ---------------------------------------------------------------------------
+
+/** The minimum ripgrep the search tools need at runtime (CI pins 15.2.0 separately). */
+export const RG_MINIMUM_VERSION = '11.0.0';
+
+/** Parse `rg --version` output: `ripgrep 15.2.0` (or `-rev` suffixes). */
+export const parseRgVersion = (line: string | undefined): string | undefined => {
+  const match = /^ripgrep (\d+\.\d+\.\d+)/.exec(line ?? '');
+  return match?.[1];
+};
+
+/** Numeric-major/minor/patch comparison: true when `found` >= `minimum`. */
+export const versionAtLeast = (found: string, minimum: string): boolean => {
+  const parse = (v: string): [number, number, number] => {
+    const [major, minor, patch] = v.split('.').map((n) => Number.parseInt(n, 10));
+    return [major ?? 0, minor ?? 0, patch ?? 0];
+  };
+  const [fm, fn, fp] = parse(found);
+  const [tm, tn, tp] = parse(minimum);
+  return fm !== tm ? fm > tm : fn !== tn ? fn > tn : fp >= tp;
+};
+
+export type RgProbeOutcome =
+  | { ok: true; version: string }
+  | { ok: false; reason: 'absent' | 'old'; found?: string };
+
+/**
+ * The production rg probe — HARNESS LAYER, which owns the clock legally
+ * (`runArgvCommand`'s timeoutMs kills the process group; src/driver/** owns
+ * no setTimeout/AbortController per the I8 hygiene rule). ONE bounded
+ * `rg --version` child with a 5s process-group timeout, cancellation via
+ * the run's signal. Resolves to the outcome only — never the binary path.
+ * Drivers inject this as their `resolveRg` default.
+ */
+export const probeRgVersion = (signal?: AbortSignal): Promise<RgProbeOutcome> =>
+  runArgvCommand('rg', ['--version'], {
+    env: buildChildEnv(process.env),
+    cwd: process.cwd(),
+    maxBytes: 4096,
+    timeoutMs: 5_000,
+    ...(signal === undefined ? {} : { signal }),
+  }).then((outcome): RgProbeOutcome => {
+    if (outcome.kind !== 'exit' || outcome.code !== 0) return { ok: false, reason: 'absent' };
+    const version = parseRgVersion(outcome.stdout.split('\n')[0]);
+    if (version === undefined) return { ok: false, reason: 'absent' };
+    return versionAtLeast(version, RG_MINIMUM_VERSION)
+      ? { ok: true, version }
+      : { ok: false, reason: 'old', found: version };
+  });
