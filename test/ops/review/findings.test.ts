@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { partitionReview } from '../../../src/ops/review/internal/reviewPartitions.js';
 import {
   FindingsRecordSchema,
+  FindingSchema,
   isComplete,
   merge,
   openBlocking,
@@ -393,5 +394,119 @@ describe('review advisories', () => {
     };
     expect(openBlocking(advisory)).toEqual([]);
     expect(isComplete(advisory, ['agent'])).toBe(true);
+  });
+});
+
+describe('R3S additive evidence payload', () => {
+  const evidenceV1 = {
+    version: 1 as const,
+    failureScenario: 'unvalidated redirect built from the request path',
+    primary: {
+      file: 'src/route.ts',
+      side: 'head' as const,
+      start: 12,
+      end: 14,
+      quote: 'const target = req.query.to;\nreturn redirect(target);\n}',
+    },
+    supporting: [
+      {
+        file: 'src/redirect.ts',
+        side: 'head' as const,
+        start: 3,
+        end: 3,
+        quote: 'export const redirect = (to: string) => to;',
+        relevance: 'the cited call performs no allowlist check',
+      },
+    ],
+  };
+
+  it('round-trips a payload through FindingSchema and FindingsRecordSchema unchanged', () => {
+    const parsed = FindingSchema.parse({
+      id: 'a',
+      source: 'agent',
+      severity: 'major',
+      text: 'open redirect',
+      status: 'open',
+      evidenceV1,
+    });
+    expect(parsed.evidenceV1).toEqual(evidenceV1);
+    expect(
+      FindingsRecordSchema.parse({
+        ...record('agent', 'terminal', [parsed]),
+        findings: [parsed],
+      }).findings[0]?.evidenceV1,
+    ).toEqual(evidenceV1);
+  });
+
+  it('parses a legacy finding without the payload unchanged', () => {
+    const legacy = FindingSchema.parse({
+      id: 'cr-1',
+      source: 'coderabbit',
+      severity: 'major',
+      text: 'possible null dereference',
+      status: 'open',
+    });
+    expect(legacy.evidenceV1).toBeUndefined();
+  });
+
+  it('carries the payload through merge and keeps the first copy when both sides have one', () => {
+    const other: typeof evidenceV1 = {
+      ...evidenceV1,
+      failureScenario: 'a different rewrite of the same finding',
+    };
+    const withPayload = record('agent', 'terminal', [
+      {
+        id: 'shared',
+        source: 'agent',
+        severity: 'major',
+        text: 'one',
+        status: 'open',
+        evidenceV1,
+      },
+    ]);
+    const alsoPayload = record('coderabbit', 'terminal', [
+      {
+        id: 'shared',
+        source: 'coderabbit',
+        severity: 'major',
+        text: 'two',
+        status: 'open',
+        evidenceV1: other,
+      },
+    ]);
+    const withoutPayload = record('pr-threads', 'terminal', [
+      { id: 'shared', source: 'pr-threads', severity: 'minor', text: 'three', status: 'open' },
+    ]);
+    const [merged] = merge([withPayload, alsoPayload, withoutPayload]).findings;
+    expect(merged?.evidenceV1).toEqual(evidenceV1);
+    expect(merged?.source).toBe('agent,coderabbit,pr-threads');
+  });
+
+  it('keeps a raw invalid survivor: reasons persist and blocking is untouched', () => {
+    const survivor: FindingsRecord = record('agent', 'terminal', [
+      {
+        id: 'a',
+        source: 'agent',
+        severity: 'major',
+        text: 'raw candidate kept for repair/adjudication',
+        status: 'open',
+        evidenceV1: {
+          ...evidenceV1,
+          primary: { ...evidenceV1.primary, quote: 'const target = req.query.to;' },
+          validation: {
+            status: 'invalid',
+            reasons: ['quote-mismatch', 'supporting-evidence'],
+          },
+        },
+      },
+    ]);
+    expect(survivor.findings[0]?.evidenceV1?.validation).toEqual({
+      status: 'invalid',
+      reasons: ['quote-mismatch', 'supporting-evidence'],
+    });
+    expect(openBlocking(survivor)).toHaveLength(1);
+    // Coverage is a source-level property: a finding payload never makes a
+    // source complete or incomplete by itself.
+    expect(isComplete(survivor, ['agent'])).toBe(true);
   });
 });
