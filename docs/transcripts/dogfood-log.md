@@ -356,3 +356,37 @@ multiple verified fixes. The chancellor pushed them as `00fb37ba` after the run.
 **Paused (owner, 2026-10-26):** the agent reviewer's remaining failures share #483's root
 cause, a tool-less turn told to "use the tools", and #483's redesign replaces that reviewer.
 The S7 acceptance run (dev.cycle opens a PR with a readiness record) is rerun on top of #483.
+
+## S7 dogfood attempt K: dev.cycle on the #483 session reviewer (fix/s7-dogfood-address-469-v2)
+
+The branch was rebuilt from `origin/main` `e4732cc3`, which carries #483 A–D. Ported onto it:
+#469 + P2s, includeIntegration/testFiles, the D1/D2 budget-stop publication and shared run
+budget, cq.json (reviewer `zai`/`glm-5.3-flash`, `budgets.step.wallMs` 3 600 000), and three
+minimal deltas main still lacked: the `budgets.step.wallMs` → `stepTimeoutMs` wiring, the undici
+step-fetch transport, and the finding-item key strip. Main's own versions replaced the #484
+detail and the partition retry. Same invocation as attempts E–J, detached on triton from `dist`
+at `0663e37a`. Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261027-k/`.
+
+Started 2026-10-26T22:55:53Z (06:55 SGT); exited **3** at 2026-10-27T02:24:45Z (3 h 29 m).
+
+- **dev.check:** green.
+- **review.run:** TERMINAL on both reviewers, the first clean pass on the session reviewer.
+  CodeRabbit had 1 finding. The agent reviewer had **37 findings**, coverage v2 `partitioned`
+  (1 637 changed lines / 33 files exceed the medium tier, advisory recorded), **35/35 sessions
+  complete, 33/33 pieces completed**, no limitations, 361 324 tokens. None of attempts E–J's
+  failure modes recurred: no step timeout, no undici cut, no extra-key rejection.
+- **review.address:** **7 verified fix commits** (`8fd86528`, `0699aca3`, `0e8dd36e`,
+  `0b9fad2c`, `398c2a97`, `5c09971c`, `afdb134a`; `fixesPerRun` 7) in 1 h 57 m, using 6 513 080
+  tokens (modeled cost $0.41). It stopped on its re-review: both reviewers lost the network in
+  a **host DNS outage on triton**. The agent got `getaddrinfo EAI_AGAIN api.z.ai` after 2
+  attempts; CodeRabbit got `con_err: webSocket connection failed` at 02:24:15Z. The
+  re-review sessions `ses-mvq2be0e-9b6e90d7` and `ses-mvq2bjbf-20da26da` hold only the
+  prompt. **The exit was caused by the environment, not by the product.**
+- **No push, no PR:** a blocked re-review isn't a `round-cap`/`budget` stop, so dev.cycle
+  propagated it verbatim and the 7 commits stayed local. Filed **#509**: verified fixes stay
+  unpublished when the re-review blocks (needs a decision against the earlier P1 control).
+  Also filed **#510**: `rounds[]` gets one entry per batch, each repeating the full record (20
+  entries here). #490 reproduced without a budget stop (all 38 rows `open`) and was commented.
+
+S7 acceptance (dev.cycle opens a PR with a readiness record) is still not met. Rerun once the
+host network is stable; #509 decides whether the next blocked re-review still loses the fixes.
