@@ -908,7 +908,17 @@ describe('dev.cycle', () => {
     });
     const result = await op({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).not.toContain('NOT READY');
+    // Verbatim propagation: the cycle's reason is the address leg's reason
+    // under the standard `dev.cycle (review.address)` prefix — not a
+    // rewritten, stripped, or generic message. The not.toContain guard below
+    // documents that this holds WITHOUT the cycle string-matching on the
+    // structured stop marker (this reason deliberately lacks it).
+    if (result.status === 'needs-human') {
+      expect(result.reason).toBe(
+        'dev.cycle (review.address): review.address: token or wall budget exhausted; report: /tmp/r.json',
+      );
+      expect(result.reason).not.toContain('NOT READY');
+    }
     expect(pushCalls).toBe(0);
     expect(opens).toEqual([]);
   });
