@@ -179,9 +179,35 @@ describe('--json error artifacts: usage-class sites (detected before/while parsi
     expect(error.message).toMatch(/duplicate flag --json/);
   });
 
-  test('no subcommand with a stray --json token: subcommand is the first token, still usage', async () => {
-    const run = await capture(['--json']);
-    expectErrorArtifact(run, 'usage', 2);
+  test.each(['-json', '--json'])(
+    'no subcommand with %s → usage with null subcommand',
+    async (flag) => {
+      const { error } = expectErrorArtifact(await capture([flag]), 'usage', 2);
+      expect(error.subcommand).toBeNull();
+      expect(error.message).toMatch(/^missing subcommand/);
+    },
+  );
+
+  test.each(['-json', '--json'])(
+    '%s selects machine mode before parsing finishes',
+    async (flag) => {
+      for (const argv of [
+        ['verdictfail', '--x=1', '--x=2', flag],
+        ['verdictfail', 'stray', flag],
+        ['verdictfail', '--help=x', flag],
+        ['verdictfail', '-json', '--json'],
+        ['no-such-op', flag],
+      ]) {
+        expectErrorArtifact(await capture(argv), 'usage', 2);
+      }
+    },
+  );
+
+  test.each(['-json', '--json'])('%s selects machine mode for registry failures', async (flag) => {
+    const dir = await tmpDir('cq-json-errors-registry-');
+    await writeFile(join(dir, 'package.json'), '{"type":"module"}\n');
+    await writeFile(join(dir, 'broken.js'), 'throw new Error("registry failed");\n');
+    expectErrorArtifact(await capture(['unknown', flag], { plansRoot: dir }), 'thrown', 1);
   });
 });
 
@@ -203,6 +229,99 @@ describe('human mode is unchanged: one cq: stderr line, empty stdout', () => {
 });
 
 describe('a result artifact is never joined by an error artifact', () => {
+  test.each([
+    ['verdictpass', '--json'],
+    ['failedverdict', '--json'],
+    ['throwop', '--json'],
+    ['no-such-op', '-json'],
+    ['--json'],
+    ['--help'],
+  ])('a failing stdout sink is attempted only once: %j', async (...argv) => {
+    for (const accepted of ['none', 'partial', 'full']) {
+      const out: string[] = [];
+      const err: string[] = [];
+      let writes = 0;
+      const code = await runCli(
+        argv,
+        {
+          stdout: (chunk) => {
+            writes++;
+            if (accepted !== 'none') out.push(accepted === 'partial' ? chunk.slice(0, 7) : chunk);
+            throw new Error('stdout unavailable');
+          },
+          stderr: (chunk) => err.push(chunk),
+        },
+        { opsRoot },
+      );
+      expect(code).toBe(1);
+      expect(writes).toBe(1);
+      expect(out).toHaveLength(accepted === 'none' ? 0 : 1);
+      expect(err).toEqual([]);
+      if (accepted === 'partial') expect(out.join('')).toHaveLength(7);
+      if (accepted === 'full' && !argv.includes('--help')) JSON.parse(out.join(''));
+    }
+  });
+
+  test('narration failure preserves the result and does not retry either sink', async () => {
+    const out: string[] = [];
+    let narrations = 0;
+    const code = await runCli(
+      ['failedverdict'],
+      {
+        stdout: (chunk) => out.push(chunk),
+        stderr: () => {
+          narrations++;
+          throw new Error('stderr unavailable');
+        },
+      },
+      { opsRoot },
+    );
+    expect(code).toBe(1);
+    expect(narrations).toBe(1);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out.join(''))).toEqual({ status: 'failed', error: 'deliberate' });
+  });
+
+  test('human error narration sink failure returns 1 without retrying', async () => {
+    const out: string[] = [];
+    let narrations = 0;
+    const code = await runCli([], {
+      stdout: (chunk) => out.push(chunk),
+      stderr: () => {
+        narrations++;
+        throw new Error('stderr unavailable');
+      },
+    });
+    expect(code).toBe(1);
+    expect(narrations).toBe(1);
+    expect(out).toEqual([]);
+  });
+
+  test('run-plan output failure cannot append an error artifact', async () => {
+    const dir = await tmpDir('cq-json-errors-sink-');
+    const plan = join(dir, 'plan.json');
+    await writeFile(plan, JSON.stringify({ id: 'p', jobs: [] }));
+    const out: string[] = [];
+    const code = await runCli(
+      ['run-plan', `--plan=${plan}`, `--journal-dir=${join(dir, 'journal')}`, '-json'],
+      {
+        stdout: (chunk) => {
+          out.push(chunk);
+          throw new Error('stdout accepted then failed');
+        },
+        stderr: () => {
+          throw new Error('unexpected narration');
+        },
+      },
+      { opsRoot },
+    );
+    expect(code).toBe(1);
+    expect(out).toHaveLength(1);
+    const report = JSON.parse(out.join('')) as { runId: string; jobs: unknown[] };
+    expect(report.runId).toMatch(/^p--/);
+    expect(report.jobs).toEqual([]);
+  });
+
   test('--json op results stay exactly one result object (a failed result keeps its string `error`)', async () => {
     const run = await capture(['failedverdict', '--json']);
     expect(run.code).toBe(1);
