@@ -80,7 +80,9 @@ function installFakeNpm(
     | 'populate-broken-cli'
     | 'populate-refusing-mcp'
     | 'populate-hung-mcp'
-    | 'populate-broken-exports',
+    | 'populate-broken-exports'
+    | 'populate-missing-bin-cq'
+    | 'populate-misrouted-bin-mcp',
 ): string {
   mkdirSync(binDir, { recursive: true });
   const helper = join(binDir, 'fake-npm-behavior.cjs');
@@ -96,6 +98,14 @@ function installFakeNpm(
     // fail the run instead of waiting forever. (hungMcpSource is inlined
     // below; lint cannot see the template-string reference.)
     'populate-hung-mcp': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/harness/mcp/bin.js'), ${hungMcpSourceAsJson()});`,
+    // P1-followup regression coverage (re-review on 2bd79a71): the declared
+    // bin metadata and the .bin materialization DIVERGE. Removing the cq
+    // mapping (dist target still present) must fail the cq leg; misrouting
+    // the cq-harness-mcp mapping at some other dist file must fail the mcp
+    // leg — the smoke asserts the mappings npm registered, not the dist
+    // files.
+    'populate-missing-bin-cq': `populate(prefix, ${stubs}); require('node:fs').rmSync(require('node:path').join(prefix, 'node_modules/.bin/cq'));`,
+    'populate-misrouted-bin-mcp': `populate(prefix, ${stubs}); require('node:fs').rmSync(require('node:path').join(prefix, 'node_modules/.bin/cq-harness-mcp')); require('node:fs').symlinkSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/cli.js'), require('node:path').join(prefix, 'node_modules/.bin/cq-harness-mcp'));`,
     // P1 regression coverage: dist/index.js exists but the package.json
     // exports field does not map the root — the bare-specifier SDK import
     // must fail the leg even though the dist file is present.
@@ -328,6 +338,31 @@ describe('packed-smoke failure paths', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("leg 'mcp-bin' failed");
     expect(result.stderr).toContain('leg deadline');
+    expectNoLeftoverPrefixes();
+  });
+
+  it('fails the cq leg when the .bin/cq mapping is missing while its dist target exists (re-review P2)', () => {
+    const dir = scratch();
+    const tarball = makeTarball(dir);
+    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-missing-bin-cq');
+    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], { fakeBinDir: fake });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("leg 'cli-bin' failed");
+    expect(result.stderr).toContain('bin mapping missing');
+    expectNoLeftoverPrefixes();
+  });
+
+  it('fails the mcp leg when .bin/cq-harness-mcp is misrouted at another dist file (re-review P2)', () => {
+    const dir = scratch();
+    const tarball = makeTarball(dir);
+    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-misrouted-bin-mcp');
+    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], { fakeBinDir: fake });
+    // The misrouted mapping runs dist/cli.js instead of the MCP bin: the
+    // child exits 2 with the usage artifact instead of serving JSON-RPC,
+    // so the mcp leg must fail with its early-exit verdict.
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("leg 'mcp-bin' failed");
+    expect(result.stderr).toContain('exited early');
     expectNoLeftoverPrefixes();
   });
 });
