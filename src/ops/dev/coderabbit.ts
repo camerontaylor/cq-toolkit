@@ -74,11 +74,13 @@ export interface ParsedReviewerStream {
   /**
    * The vendor error code of EVERY `error` event, in order (`Review failed:
    * con_err: …` → `con_err`; '' when an event carries no code). The CLI
-   * exposes no structured error class (`errorType` is `review` and
-   * `recoverable` is false even for a dropped connection), so the code is
-   * read with an anchored pattern, never a free-text search.
+   * exposes no structured transport class for `review` errors
+   * (`recoverable` is false even for a dropped connection), so that code
+   * uses an anchored pattern. Structured rate limits are handled separately.
    */
   errorCodes: string[];
+  /** Present only for a well-formed stream containing exclusively recoverable rate limits. */
+  rateLimitWait?: { ms: number; text: string };
   /** true when an action-required (billing-confirmation-class) event arrived. */
   sawActionRequired: boolean;
   /** The complete event's message VERBATIM, when it carried one. */
@@ -100,6 +102,14 @@ function stringAt(event: Record<string, unknown>, key: string): string | undefin
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+/** Parse the CLI's duration vocabulary; malformed/unsafe waits never authorize a retry. */
+export function parseReviewerWaitTime(text: string): number | undefined {
+  const match = /^(?:(\d+) minutes?(?: and (\d+) seconds?)?|(\d+) seconds?)$/i.exec(text.trim());
+  if (!match) return undefined;
+  const ms = (Number(match[1] ?? 0) * 60 + Number(match[2] ?? match[3] ?? 0)) * 1000;
+  return Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
+}
+
 /**
  * Parse the NDJSON stream (one JSON object per line). Lines that fail to
  * parse count as unparsed and are otherwise ignored — a non-JSON line can
@@ -117,6 +127,7 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
     sawActionRequired: false,
     unparsedLines: 0,
   };
+  const waits: { ms: number; text: string }[] = [];
   for (const line of stdout.split('\n')) {
     const text = line.trim();
     if (text === '') continue;
@@ -175,6 +186,16 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
       }
       case 'error': {
         parsed.sawError = true;
+        const metadata = event['metadata'];
+        const waitTime = isJsonObject(metadata) ? stringAt(metadata, 'waitTime') : undefined;
+        const ms = waitTime === undefined ? undefined : parseReviewerWaitTime(waitTime);
+        if (
+          event['errorType'] === 'rate_limit' &&
+          event['recoverable'] === true &&
+          ms !== undefined &&
+          waitTime !== undefined
+        )
+          waits.push({ ms, text: waitTime });
         parsed.errorCodes.push(
           /^(?:Review failed: )?([a-z]+_err):/.exec(stringAt(event, 'message') ?? '')?.[1] ?? '',
         );
@@ -204,6 +225,14 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
         break;
     }
   }
+  if (
+    waits.length > 0 &&
+    waits.length === parsed.errorCodes.length &&
+    !parsed.sawActionRequired &&
+    !parsed.sawComplete &&
+    parsed.unparsedLines === 0
+  )
+    parsed.rateLimitWait = waits.reduce((longest, wait) => (wait.ms > longest.ms ? wait : longest));
   return parsed;
 }
 
@@ -227,7 +256,10 @@ export function decideCompletion(exitCode: number, parsed: ParsedReviewerStream)
     };
   }
   if (parsed.sawError) {
-    return { kind: 'blocked', reason: 'reviewer stream carried an error event' };
+    return {
+      kind: 'blocked',
+      reason: `reviewer stream carried an error event${parsed.rateLimitWait ? ` (recoverable rate limit; wait ${parsed.rateLimitWait.text})` : ''}`,
+    };
   }
   if (parsed.sawActionRequired) {
     return {
