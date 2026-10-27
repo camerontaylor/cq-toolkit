@@ -305,7 +305,9 @@ describe('packed-smoke happy path over stubs', () => {
     const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate');
     const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], { fakeBinDir: fake });
     expect(result.status, result.stderr).toBe(0);
-    const summary = JSON.parse(result.stdout.trim().split('\n').pop() ?? '{}') as { ok: boolean };
+    // The summary is a pretty-printed multi-line document; find its start.
+    const start = result.stdout.indexOf('{\n  "ok"');
+    const summary = JSON.parse(result.stdout.slice(start)) as { ok: boolean };
     expect(summary.ok).toBe(true);
   });
 });
