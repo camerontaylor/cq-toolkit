@@ -409,19 +409,28 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // run deadline minus the publication reserve (so a budget stop can still
     // run the final gates and publish), and the tokens the metered drivers
     // have not spent. Without a cq.json the legs keep their own defaults.
-    const legBudget = (): { wallMs?: number; maxTokens?: number } => {
+    // An EXHAUSTED remainder (≤ 0) yields undefined: the caller then SKIPS
+    // the leg — an immediate budget stop that launches no driver — rather
+    // than handing it a clamped 1 ms/1 token it can only overshoot by one
+    // full driver call before its own stop() fires.
+    const legBudget = (): { wallMs?: number; maxTokens?: number } | undefined => {
       if (policy === undefined) return {};
       const reserve = Math.min(DEV_CYCLE_PUBLICATION_RESERVE_MS, Math.floor(policy.runWallMs / 4));
+      const wallMs = policy.runWallMs - reserve - (Date.now() - cycleStarted);
+      if (wallMs <= 0) return undefined;
+      const maxTokens =
+        policy.runMaxTokens === undefined ? undefined : policy.runMaxTokens - spentTokens;
+      if (maxTokens !== undefined && maxTokens <= 0) return undefined;
       return {
-        wallMs: Math.max(1, policy.runWallMs - reserve - (Date.now() - cycleStarted)),
-        ...(policy.runMaxTokens === undefined
-          ? {}
-          : { maxTokens: Math.max(1, policy.runMaxTokens - spentTokens) }),
+        wallMs,
+        ...(maxTokens === undefined ? {} : { maxTokens }),
       };
     };
 
     // --------------------------- 2. review.run ---------------------------
-    const run = await review({ repoRoot: input.repoRoot, target, ...legBudget() });
+    const runBudget = legBudget();
+    if (runBudget === undefined) return { status: 'budget-exhausted' };
+    const run = await review({ repoRoot: input.repoRoot, target, ...runBudget });
     if (run.status !== 'ok') return stepResult('review.run', run);
 
     // ------------------ 3. review.address (until clean) ------------------
@@ -430,12 +439,14 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // address leg owns the rounds and its own stop reasons. Its `push`
     // option stays OFF: the composition publishes once, at the end, after
     // the final check — never mid-loop.
+    const addressBudget = legBudget();
+    if (addressBudget === undefined) return { status: 'budget-exhausted' };
     const addressResult = await address({
       repoRoot: input.repoRoot,
       source: 'local',
       target,
       ...(run.value.reviewed === undefined ? {} : { base: run.value.reviewed.base }),
-      ...legBudget(),
+      ...addressBudget,
     });
     if (addressResult.status !== 'ok') {
       // STRUCTURED PUBLICATION STOPS: the address leg marks its designed stop with the
