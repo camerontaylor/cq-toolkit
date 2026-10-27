@@ -1497,12 +1497,13 @@ describe('mixed-worktree publication (round-3 item 11)', () => {
     expect(row!).not.toContain('not published');
   });
 
-  test('the withhold row resolves to exit-published once publication is on (engine truth amendment contract)', async () => {
+  test('the withhold row with publication on is exactly one row, for the ok changed item, and the fix run still reports (engine truth amendment contract)', async () => {
     // S6 attempt D's exact shape: T1's row ended budget-exhausted, T2's fix
     // committed and verified; the loop withheld, then the engine's exit
     // publication pushed the verified range (8f78ca91). The loop-side text
     // must never deny that outcome; the composition amendment test owns the
-    // "exit-published" resolution (address-pr push-fault suite).
+    // "exit-published" resolution (address-pr push-fault suite) — THIS test
+    // pins only the loop-side row shape under publication-on.
     const world = defaultWorld();
     world.threads = [
       actionableThread('T1', 'src/a.ts', 3, 101),
