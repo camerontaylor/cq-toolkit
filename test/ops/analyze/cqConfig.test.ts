@@ -198,14 +198,19 @@ describe('cq.json v2', () => {
     }
   });
 
-  test('toolkit root config keeps CodeRabbit first and only runs the compiler', () => {
+  test('toolkit root config keeps CodeRabbit first and runs only the compiler and the format gate', () => {
     const result = parseCqConfig(
       readFileSync(new URL('../../../cq.json', import.meta.url), 'utf8'),
     );
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (result.ok) {
       expect(result.config.review?.reviewers?.[0]).toBe('coderabbit');
-      expect(result.config.checks.map(({ adapter }) => adapter)).toEqual(['tsc-lines']);
+      // Cheap static gates only (no test suite); the format gate makes a
+      // review.address "verified" fix cover format too (S7 attempt K).
+      expect(result.config.checks.map(({ adapter }) => adapter)).toEqual([
+        'tsc-lines',
+        'oxfmt-check',
+      ]);
     }
   });
 });

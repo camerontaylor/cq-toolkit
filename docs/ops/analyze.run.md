@@ -24,7 +24,8 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "enum": [
               "vitest-json",
               "eslint-json",
-              "tsc-lines"
+              "tsc-lines",
+              "oxfmt-check"
             ],
             "type": "string"
           },
