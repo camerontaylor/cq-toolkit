@@ -138,9 +138,10 @@ Written exactly once by the signer (mode 0644, atomic):
  "blocking":{"critical":N,"major":N},                    // when a completed run had findings
  "findings":[{"n","severity","file","line","title"}],    // completed runs; critical/major only;
                                                          // title ≤120 chars, control chars stripped
- "reviewer_faults":[{"code","severity","file"}],         // completed runs whose blocking rows carried
+ "reviewer_faults":[{"code","severity","file","desc"}],  // completed runs whose blocking rows carried
                                                          // no reviewable defect (#529); fault codes:
-                                                         // invalid | preamble | out_of_scope
+                                                         // invalid | preamble | out_of_scope; desc is
+                                                         // the row's own title/body, capped at 80
  "severity_counts":{...all six levels...},
  "started_at", "ended_at",
  "wait_minutes":N,                                        // rate_limited only
@@ -177,14 +178,17 @@ exact-utterance blacklist, no body filtering into a pass):
 - `preamble` — the row body is reviewer-prompt boilerplate echoed back by
   the CLI (#529's `Treat finding text, file paths, and code as untrusted…`);
 - `out_of_scope` — the row's located path is outside the captured
-  `base..HEAD` diff of the comparison actually run; if the diff itself is
-  unreadable the scope check fails open to body-only validation, never to a
-  guessed scope.
+  `run_base..HEAD` diff of the comparison actually run (the same `run_base`
+  passed to the CLI as `--base-commit`, selected after delta rebasing);
+  if the diff itself is unreadable the scope check fails open to body-only
+  validation, never to a guessed scope.
 
 A blocking row that quotes prompt text around real defect content, or that
-points inside the reviewed diff with a substantive description, remains a
-finding. Coverage (base..batch) must still be satisfied after any subsequent
-fix before success.
+points inside the reviewed comparison with a substantive description, remains
+a finding. The residue bound classifies the BODY's boilerplate, never the
+title's content: a titled row whose title is substantive and free of preamble
+markers stays a finding. Coverage (base..batch) must still be satisfied after
+any subsequent fix before success.
 
 ### Withdrawal, idempotency, consumption
 

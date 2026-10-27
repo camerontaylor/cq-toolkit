@@ -723,17 +723,21 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     return res
 
 
-def capture_review_scope(wt: Path) -> Optional[set]:
+def capture_review_scope(wt: Path, run_base: str) -> Optional[set]:
     """The file names the CLI was actually asked to compare: `git diff
-    --name-only base..HEAD` inside the review worktree. None when the diff
-    cannot be read (fail open to body-only validation, never to a guessed
-    scope); an empty set is a real empty diff and rejects every located
-    finding as out_of_scope."""
+    --name-only run_base..HEAD` inside the review worktree, for the SAME
+    run_base passed to run_cli (--base-commit). Captured AFTER delta
+    selection: on a chained delta run a base..HEAD set would wrongly accept
+    rows for paths last touched before the delta base and wrongly reject
+    delta-only paths whose net base..batch change is empty. None when the
+    diff cannot be read (fail open to body-only validation, never to a
+    guessed scope); an empty set is a real empty diff and rejects every
+    located finding as out_of_scope."""
     try:
         return {line for line in git_in(wt, "diff", "--name-only",
-                                        "--no-ext-diff", "base..HEAD").splitlines() if line}
+                                        "--no-ext-diff", f"{run_base}..HEAD").splitlines() if line}
     except (RuntimeError, OSError):
-        audit("review-scope-unavailable")
+        audit("review-scope-unavailable", run_base=run_base)
         return None
 
 
@@ -747,7 +751,7 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
     """Why one blocking-severity finding row carries NO reviewable defect:
     `invalid` (no defect text at all, or nothing beyond `at line N`
     markers), `preamble` (the row body is reviewer-prompt boilerplate, #529),
-    or `out_of_scope` (a located path outside the captured base..HEAD diff,
+    or `out_of_scope` (a located path outside the captured run_base..HEAD diff,
     so the row does not describe this comparison). None for a substantive
     finding. Classification is structural: no exact-utterance blacklist —
     preamble markers inside a body that also carries real defect text stay
@@ -757,6 +761,8 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
     if not body and not title:
         return "invalid"
     lowered = body.lower()
+    title_text = _has_defect_text(title.lower()) \
+        and not any(marker in title.lower() for marker in CODEGEN_PREAMBLE_MARKERS)
     if any(marker in lowered for marker in CODEGEN_PREAMBLE_MARKERS):
         stem = lowered
         for marker in CODEGEN_PREAMBLE_MARKERS:
@@ -765,8 +771,12 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
         # A short residue is the preamble's own truncated continuation (#529's
         # "Verify ea"), not a defect description; a longer self-standing
         # remainder falls through to the scope check, so prompt text quoted
-        # inside a real defect stays a finding.
-        if len(residue) <= PREAMBLE_RESIDUE_MAX:
+        # inside a real defect stays a finding. A substantive title that is
+        # itself free of preamble markers keeps the row a finding: the bound
+        # classifies the BODY's boilerplate, never the title's content
+        # (review P2 — CLI/re-serialized rows carry no title, so this cannot
+        # resurrect a boilerplate-only incident row).
+        if len(residue) <= PREAMBLE_RESIDUE_MAX and not title_text:
             return "preamble"
     if not _has_defect_text(lowered) and not _has_defect_text(title.lower()):
         return "invalid"
@@ -783,11 +793,13 @@ def blocking_findings(ndjson: Path,
                       ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     """Split critical/major rows into blocking defects and reviewer faults.
     Defects keep the old shape ({n, severity, file, line, title}); faults
-    carry {code, severity, file} only. Titles are capped at 120 chars with
-    control characters stripped — never raw CLI output, which can carry auth
-    material. A fault is NEVER dropped into a clean pass (a broken reviewer
-    stream is not coverage) and NEVER minted into blocking defect evidence
-    (prompt boilerplate must not block a promotion, #529)."""
+    carry {code, severity, file, desc} only, desc a bounded (80-char) copy of
+    the row's own declared title/body for adjudication provenance. Titles are
+    capped at 120 chars with control characters stripped — never raw CLI
+    output, which can carry auth material. A fault is NEVER dropped into a
+    clean pass (a broken reviewer stream is not coverage) and NEVER minted
+    into blocking defect evidence (prompt boilerplate must not block a
+    promotion, #529)."""
     defects: List[Dict[str, Any]] = []
     faults: List[Dict[str, str]] = []
     for line in ndjson.read_text(errors="replace").splitlines():
@@ -801,7 +813,9 @@ def blocking_findings(ndjson: Path,
         fault = finding_fault(e, diff_files)
         if fault is not None:
             faults.append({"code": fault, "severity": e["severity"],
-                           "file": e.get("fileName") if isinstance(e.get("fileName"), str) else None})
+                           "file": e.get("fileName") if isinstance(e.get("fileName"), str) else None,
+                           "desc": cap(str(e.get("title") or e.get("codegenInstructions")
+                                           or e.get("comment") or ""), 80)})
             continue
         text = e.get("codegenInstructions") or e.get("comment") or ""
         m = re.search(r" at line (\d+)", text)
@@ -1485,18 +1499,24 @@ def process_request(path: Path) -> None:
 
         # Review tree: batch detached, config/guidelines restored from base.
         wt = prepare_worktree(iid, base, batch)
-        diff_files = capture_review_scope(wt)
 
         # Coverage rule: success needs clean recorded coverage of base..batch.
         runs = load_runs()
         findings: List[Dict[str, Any]] = []
         reviewer_faults: List[Dict[str, str]] = []
+        diff_files: Optional[set] = None  # set below, per-run (covered path has no run)
         counts: Dict[str, int] = {s: 0 for s in SEVERITIES}
         wait_minutes: Optional[int] = None
         if covered(base, batch, runs):
             audit("coverage-satisfied", item=iid, base=base, batch=batch)  # success WITHOUT a new run
         else:
             run_base = delta_from(base, batch, runs) or base
+            # Scope of the EXACT comparison the CLI is about to run
+            # (run_base..HEAD, its --base-commit), captured after delta
+            # selection (#529 follow-up review P1: a base..HEAD set on a
+            # chained delta would wrongly accept pre-delta paths and reject
+            # delta-only net-reverted paths).
+            diff_files = capture_review_scope(wt, run_base)
             record_start(iid, base, batch)
             audit("run-start", item=iid, run_base=run_base, full=(run_base == base))
             stamp = iso().replace(":", "").replace("-", "")
@@ -1515,8 +1535,9 @@ def process_request(path: Path) -> None:
                 # counts stay classify()'s six-level tally; findings carry the
                 # blocking rows only. #529: rows with no reviewable defect
                 # (prompt-preamble boilerplate, no description, or a location
-                # outside the captured base..HEAD diff) become reviewer_fault
-                # diagnostics — never blocking defects, never silently clean.
+                # outside the captured run_base..HEAD diff) become
+                # reviewer_fault diagnostics — never blocking defects, never
+                # silently clean.
                 findings, reviewer_faults = blocking_findings(run_dir / "review.ndjson", diff_files)
                 # Faults void clean credit exactly like blocking rows: a
                 # broken reviewer stream is not coverage (#529).
