@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { MockLanguageModelV4 } from 'ai/test';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
@@ -582,4 +583,37 @@ test('a scoped request scanner refuses lanes without the pre-send hook', async (
       beforeRequest: async () => {},
     }),
   ).toThrow('upload scanning requires the ai-sdk request gate');
+});
+test('a request stepTimeoutMs reaches the ai-sdk lane as its per-request step bound', async () => {
+  const root = await scratch();
+  // A provider that answers only after 5 s, unless its request is aborted.
+  const slow = new MockLanguageModelV4({
+    modelId: 'slow',
+    doGenerate: (options) =>
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('the step bound never fired')), 5_000);
+        options.abortSignal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(options.abortSignal?.reason);
+          },
+          { once: true },
+        );
+      }),
+  });
+  const factory = createDriverFactory({
+    sessionsDir: join(root, 'sessions'),
+    bindings: { reviewer: { slow: 'ai-sdk' } },
+    lanes: { aiSdk: { providers: { slow: () => slow } } },
+  });
+  const resolved = factory.resolve({
+    role: 'reviewer',
+    modelSpec: { provider: 'slow', model: 'slow' },
+    stepTimeoutMs: 50,
+  });
+  const verdict = await resolved.driver.run(invocation('slow', 'slow'));
+  expect(verdict.stopReason).toBe('error');
+  expect(verdict.errorClass).toBe('transient');
+  expect(verdict.error).toContain('50ms');
 });

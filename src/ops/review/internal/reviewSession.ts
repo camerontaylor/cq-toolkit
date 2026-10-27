@@ -12,18 +12,23 @@ import type { DiffSecretScanner, ScanComponentInput } from '../../dev/denylist.j
 import type { Finding } from '../findings.js';
 import type { ReviewCoverageV2 } from './reviewCoverageV2.js';
 
+// A finding item STRIPS unknown keys (S7 attempts G/H: GLM added
+// `rule_id_hint` / `rule_detail` to one finding and the strict item failed
+// the whole review); every field check and the required severity/text still
+// hold, and the top level stays strict. The emitted contract therefore
+// leaves item `additionalProperties` open: the driver validates the reply
+// against the SAME document it sent (ADR-0002 §2.3), so a closed item would
+// reject the extra key before this parse could strip it.
 const OutputSchema = z
   .object({
     findings: z.array(
-      z
-        .object({
-          file: z.string().optional(),
-          line: z.number().int().positive().optional(),
-          rule: z.string().optional(),
-          severity: z.enum(['high', 'medium', 'low']),
-          text: z.string().min(1),
-        })
-        .strict(),
+      z.object({
+        file: z.string().optional(),
+        line: z.number().int().positive().optional(),
+        rule: z.string().optional(),
+        severity: z.enum(['high', 'medium', 'low']),
+        text: z.string().min(1),
+      }),
     ),
   })
   .strict();
@@ -126,6 +131,8 @@ export async function runReviewSession(
     onUsage: (usage: Usage) => void;
     onAdvisories?: (advisories: readonly string[]) => void;
     searchTools: boolean;
+    /** Per-request step bound for the ai-sdk lane (cq.json `budgets.step.wallMs`, capped). */
+    stepTimeoutMs?: number;
   },
 ): Promise<OpResult<Finding[]>> {
   const { plan, evidence, signal } = input;
@@ -151,6 +158,7 @@ export async function runReviewSession(
   const resolved = drivers.resolve({
     role: 'reviewer',
     modelSpec: input.role,
+    ...(input.stepTimeoutMs === undefined ? {} : { stepTimeoutMs: input.stepTimeoutMs }),
     harness: {
       ...defaultHarnessConfig,
       tools: {
