@@ -1440,6 +1440,7 @@ export function buildTools(
         .split('\0')
         .filter((candidate) => candidate.length > 0)
         .sort();
+      sawExtraCandidates = rawPaths.length > SEARCH_CANDIDATE_LIMIT;
     }
     const markers: string[] = [];
 

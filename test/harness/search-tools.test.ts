@@ -710,9 +710,12 @@ describe('contained grep and glob tools', () => {
           buildTools(defaultHarnessConfig, workspace, 'read-only'),
           'grep',
         ).execute({ pattern: 'needle', include: '*.ts' }, { signal: controller.signal });
-        await Promise.resolve();
-        await Promise.resolve(); // spawn, registration and listeners settled
-        expect(spawnState.current).not.toBeNull();
+        // Deterministic spawn observation: wait until the helper's timer and
+        // abort listeners exist (spawn-observed, no sleeps, no tick counts).
+        await vi.waitFor(() => {
+          expect(spawnState.current).not.toBeNull();
+          expect(vi.getTimerCount()).toBeGreaterThan(0);
+        });
         expect(spawnState.current?.kill).not.toHaveBeenCalled();
         controller.abort();
         const result = await pending;
@@ -747,8 +750,12 @@ describe('contained grep and glob tools', () => {
             buildTools(defaultHarnessConfig, workspace, 'read-only'),
             'grep',
           ).execute({ pattern: 'needle', include: '*.ts' });
-          await Promise.resolve();
-          await Promise.resolve();
+          // Spawn-observed synchronization: the deadline timer must exist
+          // before it is advanced (vi.getTimerCount() > 0).
+          await vi.waitFor(() => {
+            expect(spawnState.current).not.toBeNull();
+            expect(vi.getTimerCount()).toBeGreaterThan(0);
+          });
           expect(spawnState.current?.kill).not.toHaveBeenCalled();
           // The enumeration deadline is SEARCH_TIMEOUT_MS (10 seconds).
           await vi.advanceTimersByTimeAsync(10_000);
