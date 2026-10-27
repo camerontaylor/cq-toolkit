@@ -330,6 +330,17 @@ export function makeDevCheck(
         status: 'failed',
         error: `dev.check: testFiles entries are file names, not options — refused: ${dashNamed}`,
       };
+    // An EMPTY named selection is refused at the same point: it would leave
+    // the test:narrow argv with no selection at all (no --base, --range or
+    // positional) while the record still claims
+    // testSelection {mode:'named', files: []} — a named gate that named
+    // nothing. Omit testFiles instead to select by base/range.
+    if (input.testFiles !== undefined && input.testFiles.length === 0)
+      return {
+        status: 'failed',
+        error:
+          'dev.check: testFiles is empty — name at least one test file, or omit testFiles for the automatic --base/--range selection',
+      };
     const target = input.target ?? DEFAULT_DEV_TARGET;
 
     // A range is resolved to commit shas; its end must BE HEAD, because the
