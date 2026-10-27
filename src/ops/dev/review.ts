@@ -59,8 +59,10 @@ import {
   DEFAULT_DEV_TARGET,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   DEV_LEDGER_VERSION,
+  findReusableCycle,
   type DevCycleRecord,
   type DevFinding,
+  type DevReuseRecord,
   type DevReviewCompletion,
 } from './record.js';
 import { DevCycleInputSchema, type DevTransportInput } from './registry.js';
@@ -259,6 +261,23 @@ export interface DevReviewReport {
   logPath: string;
   untracked: string[];
   at: string;
+  /**
+   * Q4 (#485): present only when this report settled the requirement by
+   * REUSING an earlier terminal cycle instead of a new vendor run — the
+   * explicit, auditable source-cycle evidence. The referenced cycle and
+   * every finding/disposition stay verbatim in the ledger; the reuse is
+   * author evidence, never verification or independent acceptance.
+   */
+  reuse?: {
+    /** The reuse record appended to the ledger for this selection. */
+    reuseId: string;
+    /** Why the source cycle satisfies the requirement. */
+    basis: 'exact-terminal' | 'no-fresh-tail';
+    /** The same-identity no-fresh blocked attempt this selection resolves. */
+    resolvesCycleId?: string;
+    /** The selection's own raw log (outside the repository). */
+    logPath: string;
+  };
 }
 
 /**
@@ -367,6 +386,117 @@ function makeReviewCycle(
         `secret scan found denylist-class content — review refused, remove it and re-run: ${flagged.join('; ')}`,
       );
     }
+
+    // Q4 (#485) — EXACT-TERMINAL REUSE, BEFORE any vendor dispatch. A
+    // terminal full-scope record with the EXACT requested identity (the
+    // branch ledger, target, pinned base, head, dirty identity, scope and
+    // reviewer all matching) settles this cycle with ZERO vendor calls and
+    // zero new cycles: the selection is appended as an explicit reuse
+    // record (auditable source-cycle evidence) and returned. The selection
+    // runs under its own host-lock acquisition with the same drift
+    // re-read, so a tree that changes while the ledger is read can never
+    // be attributed a review it did not hold. A same-identity affirmative
+    // no-fresh BLOCKED tail is resolved the same way (basis
+    // 'no-fresh-tail', the tail named in the reuse record, kept verbatim
+    // in the ledger); any other blocked attempt — error, auth, rate
+    // limit, malformed stream, deadline kill, or a structured
+    // vendor-failure class — is a genuine later blocker: no reuse, and the
+    // dispatch below proceeds exactly as before. Findings and
+    // dispositions are untouched; reuse is author evidence, never
+    // verification or independent acceptance.
+    let reuseReport: DevReviewReport | undefined;
+    try {
+      await effects.withHostLock(async () => {
+        signal?.throwIfAborted();
+        await refuseDrift('while the reuse ledger was read');
+        const ledger = effects.openLedger(state.branch).load();
+        const selection = findReusableCycle(ledger.records, {
+          target,
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
+          scope,
+          reviewer,
+        });
+        if (selection === null) return;
+        const resolvesCycleId =
+          selection.basis === 'no-fresh-tail' ? selection.resolvesCycleId : undefined;
+        const selectionAt = effects.nowIso();
+        const reuseCount = ledger.records.filter((entry) => entry.kind === 'reuse').length;
+        const reuseId = `r${String(reuseCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
+        const logPath = await effects.writeReviewLog(
+          state.branch,
+          `${Date.now()}`,
+          [
+            '# dev.review reuse log',
+            `basis: ${selection.basis}`,
+            `selected cycle: ${selection.cycle.cycleId}`,
+            ...(selection.basis === 'no-fresh-tail'
+              ? [`resolves blocked attempt: ${resolvesCycleId}`]
+              : []),
+            `reviewer: ${reviewer}`,
+            `target: ${target}`,
+            `base: ${state.base}`,
+            `head: ${state.head}`,
+            `dirtySha256: ${state.dirtySha256}`,
+            `scope: ${scope}`,
+            `findings preserved: ${String(selection.cycle.findings.length)}`,
+            `at: ${selectionAt}`,
+            '',
+          ].join('\n'),
+        );
+        const selectionBasis = selection.basis;
+        const entry: DevReuseRecord = {
+          kind: 'reuse',
+          reuseId,
+          cycleId: selection.cycle.cycleId,
+          basis: selectionBasis,
+          ...(resolvesCycleId === undefined ? {} : { resolvesCycleId }),
+          target,
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
+          scope,
+          reviewer,
+          logPath,
+          at: selectionAt,
+        };
+        await effects.openLedger(state.branch).mutate((current) => {
+          return {
+            ledger: {
+              version: DEV_LEDGER_VERSION,
+              branch: current.branch,
+              records: [...current.records, entry],
+            },
+            value: entry,
+          };
+        });
+        reuseReport = {
+          cycleId: selection.cycle.cycleId,
+          reviewer: selection.cycle.reviewer,
+          scope: selection.cycle.scope,
+          target: selection.cycle.target,
+          base: selection.cycle.base,
+          head: selection.cycle.head,
+          dirtySha256: selection.cycle.dirtySha256,
+          completion: selection.cycle.completion,
+          findings: selection.cycle.findings,
+          advisories: selection.cycle.advisories ?? [],
+          logPath: selection.cycle.logPath,
+          untracked: selection.cycle.untracked,
+          at: selectionAt,
+          reuse: {
+            reuseId,
+            basis: selectionBasis,
+            ...(resolvesCycleId === undefined ? {} : { resolvesCycleId }),
+            logPath,
+          },
+        };
+      }, signal);
+    } catch (err) {
+      return needsHuman(`the reuse check could not complete — ${faultText(err)}`);
+    }
+    if (reuseReport !== undefined) return { status: 'ok', value: reuseReport };
 
     // The run under the HOST lock; the completion is decided and the log
     // written inside the span, the record appended after it.
