@@ -28,8 +28,9 @@
 //     pure token fold — no scheduling primitive involved).
 //   - The main tool loop is ALWAYS step-bounded with
 //     `stepCountIs(min(maxSteps ?? DEFAULT_MAX_STEPS, DEFAULT_MAX_STEPS))`;
-//     the final schema step is tools-off, and the separate structured-output
-//     repair may add one completed step.
+//     the tool set is fixed per session: the final schema step adds a
+//     "final step: reply with only the JSON" turn (calls on it are denied),
+//     and the separate structured-output repair may add one completed step.
 //   - The prompt budget applies to the caller-owned user prompt, which is
 //     sent once as a user turn. The system message contains only driver-owned
 //     tool-aware guidance.
@@ -108,7 +109,7 @@
 //   - object obtained and it validates  → 'complete', structuredOutput =
 //     the validated plain JSON;
 //   - missing / unparseable / invalid after ONE bounded repair request
-//     (W3.4: tool-free, over the session transcript, the JSON Schema
+//     (W3.4: no tool execution, over the session transcript, the JSON Schema
 //     restated, maxRetries 0, inside the same Budget.maxTokens remainder
 //     and the same signal) → 'error', errorClass 'output-invalid', usage
 //     and derived cost KEPT (both calls' usage lands in the verdict);
@@ -718,21 +719,50 @@ export class AiSdkDriver implements Driver {
       : candidates;
     const system = this.composeSystemPrompt(selected.length > 0);
     const toolSet: ToolSet = {};
+    // Set by prepareStep on the forced final step. The tool set is fixed per
+    // session (#502), so the executors stay registered there; a call the model
+    // makes anyway must not run a tool whose result it would never see.
+    let finalStepStarted = false;
+    // The repair request carries the same definitions WITHOUT executors: the
+    // request shape stays fixed for the whole session (#502), and a stray
+    // tool call in the repair is returned unexecuted, never run.
+    const repairToolSet: ToolSet = {};
     for (const harnessTool of selected) {
       const descriptor = {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
-        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> =>
-          runTool(harnessTool, input, store, record, denials, guard, {
+        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> => {
+          if (finalStepStarted) {
+            const denial = {
+              tool: harnessTool.name,
+              reason: 'tool calls are disabled on the final step; reply with the answer',
+            };
+            denials.push(denial);
+            await store.appendMessage(record.sessionId, {
+              role: 'tool',
+              toolName: harnessTool.name,
+              content: JSON.stringify({ ok: false, denial }),
+              at: nowIso(),
+            });
+            return denial.reason;
+          }
+          return runTool(harnessTool, input, store, record, denials, guard, {
             signal: options.abortSignal,
-          }),
+          });
+        },
+      };
+      const repairDescriptor = {
+        description: harnessTool.description,
+        inputSchema: harnessTool.inputSchema,
       };
       toolSet[harnessTool.name] = tool(descriptor as Tool);
+      repairToolSet[harnessTool.name] = tool(repairDescriptor as Tool);
       // One-release aliases (the pre-F1 `run` name for `bash`) are registered
       // under their own names so a model or prompt that still calls them
       // reaches the canonical executor and denial vocabulary.
       for (const alias of ('aliases' in harnessTool ? harnessTool.aliases : undefined) ?? []) {
         toolSet[alias] = tool(descriptor as Tool);
+        repairToolSet[alias] = tool(repairDescriptor as Tool);
       }
     }
 
@@ -809,33 +839,26 @@ export class AiSdkDriver implements Driver {
           // DECOUPLE the mandatory structured object from the tool loop (#203):
           // with tools available on the final step the model tends to call one
           // more tool instead of emitting the required object, and `result.output`
-          // then throws. Disabling tools on that step nudges the model into
-          // prose the Output.object path can parse. Pure step-number function —
-          // no scheduling primitive (I8).
+          // then throws. The final step ends the loop with an instruction turn
+          // ("final step: reply with only the JSON object") rather than by
+          // changing the request (#502): tools, toolChoice and the system prompt
+          // stay fixed for the whole session. Removing the definitions or
+          // forcing toolChoice 'none' mid-session made DeepSeek answer with DSML
+          // pseudo-tool-call text (Step 4 eval, eb8f80ac and 49c3715c). A call
+          // the model makes anyway is denied by the executor backstop above.
+          // Pure step-number function — no scheduling primitive (I8).
           ...(outputSchema !== undefined && selected.length > 0
             ? {
-                prepareStep: ({ stepNumber, messages }) =>
-                  stepNumber >= effectiveStepCap - 1
-                    ? {
-                        activeTools: [],
-                        system: this.composeSystemPrompt(false),
-                        ...(prompted
-                          ? {
-                              messages: [
-                                ...messages.filter(
-                                  (message) =>
-                                    message.role !== 'user' ||
-                                    message.content !== schemaContract(outputSchema, true),
-                                ),
-                                {
-                                  role: 'user' as const,
-                                  content: schemaContract(outputSchema, false),
-                                },
-                              ],
-                            }
-                          : {}),
-                      }
-                    : undefined,
+                prepareStep: ({ stepNumber, messages }) => {
+                  if (stepNumber < effectiveStepCap - 1) return undefined;
+                  finalStepStarted = true;
+                  return {
+                    messages: [
+                      ...messages,
+                      { role: 'user' as const, content: finalStepContract(outputSchema, prompted) },
+                    ],
+                  };
+                },
               }
             : {}),
           stopWhen,
@@ -875,6 +898,7 @@ export class AiSdkDriver implements Driver {
         if (outputSchema !== undefined && NoObjectGeneratedError.isInstance(err)) {
           return await this.settleStructuredMiss({
             outputSchema,
+            repairTools: selected.length > 0 ? repairToolSet : undefined,
             rejection: `the reply carried no parseable object — ${describeError(err)}`,
             mainText: err.text ?? '',
             mainUsage: stepUsage,
@@ -943,6 +967,7 @@ export class AiSdkDriver implements Driver {
           // rejection (above) and a getter miss (here) settle identically.
           return await this.settleStructuredMiss({
             outputSchema,
+            repairTools: selected.length > 0 ? repairToolSet : undefined,
             rejection,
             mainText: text,
             mainUsage: usage,
@@ -1113,8 +1138,9 @@ export class AiSdkDriver implements Driver {
    * missing object is the cap's or cancellation's consequence, not a schema
    * violation), the provider-finish shortcut (a provider-level finish is
    * NOT a model output outcome — a repair cannot fix it), and then the W3.4
-   * repair (ADR-0002 §2.3): ONE bounded request — tool-free (no tools at
-   * all), over the session transcript so the model sees what it produced,
+   * repair (ADR-0002 §2.3): ONE bounded request — no tool execution (the
+   * session's definitions without executors, so the request shape is
+   * unchanged, #502), over the session transcript so the model sees what it produced,
    * the JSON Schema restated in the prompt, `maxRetries: 0`, one step,
    * inside the SAME budget (the `maxTokens` remainder) and the SAME signal.
    * The repair is a REAL extra model call: its usage folds into the
@@ -1124,6 +1150,8 @@ export class AiSdkDriver implements Driver {
    */
   private async settleStructuredMiss(inputs: {
     outputSchema: OutputSchema;
+    /** The session's tool definitions without executors, or undefined for a tool-less session. */
+    repairTools: ToolSet | undefined;
     /** The main call's miss reason (bounded into the verdict text). */
     rejection: string;
     mainText: string;
@@ -1146,6 +1174,7 @@ export class AiSdkDriver implements Driver {
   }): Promise<WorkerResult> {
     const {
       outputSchema,
+      repairTools,
       rejection,
       mainText,
       mainUsage,
@@ -1289,8 +1318,9 @@ export class AiSdkDriver implements Driver {
     try {
       const repair = await generateText({
         model,
-        system: this.composeSystemPrompt(false),
+        system: this.composeSystemPrompt(repairTools !== undefined),
         messages: repairMessages,
+        ...(repairTools !== undefined ? { tools: repairTools } : {}),
         // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
         // bounded, unlike the main loop.
         maxRetries: 0,
@@ -1302,7 +1332,8 @@ export class AiSdkDriver implements Driver {
           repairSteps += 1;
           repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
         },
-        // Tool-free: NO tools key at all.
+        // No tool EXECUTION: the definitions above have no executors, so a
+        // call comes back unexecuted and the reply still misses the object.
         ...(abortSignal !== undefined ? { abortSignal } : {}),
         ...(promptedSchemaProvider(modelSpec.provider)
           ? {}
@@ -1663,6 +1694,17 @@ function schemaContract(outputSchema: OutputSchema, hasTools: boolean): string {
     `${instruction} that validates against this JSON Schema ` +
     `(draft 2020-12):\n${JSON.stringify(outputSchema.schema)}`
   );
+}
+
+/** The trailing user turn on the forced final step; the request is otherwise unchanged. */
+function finalStepContract(outputSchema: OutputSchema, prompted: boolean): string {
+  const instruction =
+    'This is your final step: do not call any more tools. ' +
+    'Reply now with ONLY one JSON object — no prose, no code fences —';
+  return prompted
+    ? `${instruction} that validates against this JSON Schema ` +
+        `(draft 2020-12):\n${JSON.stringify(outputSchema.schema)}`
+    : `${instruction} matching the required response format.`;
 }
 
 /** Parse a prompted-schema reply: bare JSON, one fenced block, or the outermost object. */
