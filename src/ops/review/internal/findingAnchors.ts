@@ -89,7 +89,10 @@ function validateAnchor(
   if (text === '') return ['empty-file'];
   // Inclusive 1-based range must fit the pinned blob; `start > end` fails too.
   if (anchor.start > anchor.end || anchor.end > lineCount(text)) return ['out-of-range'];
-  const expected = text.split('\n').slice(anchor.start - 1, anchor.end).join('\n');
+  const expected = text
+    .split('\n')
+    .slice(anchor.start - 1, anchor.end)
+    .join('\n');
   if (expected !== anchor.quote) return ['quote-mismatch'];
   if (requireHunkOverlap) {
     const hunks = anchor.side === 'base' ? blob.baseHunks : blob.headHunks;

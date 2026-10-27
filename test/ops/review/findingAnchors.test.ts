@@ -125,9 +125,9 @@ describe('R3S additive evidence schema', () => {
   });
 
   it('requires a non-empty failureScenario and keeps validation strictly additive', () => {
-    expect(
-      FindingEvidenceV1Schema.safeParse({ ...evidence(), failureScenario: '' }).success,
-    ).toBe(false);
+    expect(FindingEvidenceV1Schema.safeParse({ ...evidence(), failureScenario: '' }).success).toBe(
+      false,
+    );
     const survivor: FindingEvidenceV1 = {
       ...evidence(),
       validation: { status: 'invalid', reasons: ['quote-mismatch'] },
