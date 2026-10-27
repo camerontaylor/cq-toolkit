@@ -663,7 +663,6 @@ describe('blocked re-review marker (#509)', () => {
     expect(reviews).toBe(2);
     expect(result.status).toBe('needs-human');
     expect(reportOf(result).stop).toBe('budget');
-    expect(reportOf(result).stop).not.toBe('rereview-blocked');
   });
 });
 
