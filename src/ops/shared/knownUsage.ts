@@ -19,8 +19,9 @@ export interface KnownUsageSummary {
 }
 
 function validUsage(usage: Usage): boolean {
-  return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.reasoning]
-    .every((value) => value === undefined || (Number.isSafeInteger(value) && value >= 0));
+  return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.reasoning].every(
+    (value) => value === undefined || (Number.isSafeInteger(value) && value >= 0),
+  );
 }
 
 function sameObservation(a: UsageObservation, b: UsageObservation): boolean {
