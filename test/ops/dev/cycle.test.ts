@@ -719,9 +719,21 @@ describe('dev.cycle', () => {
             return { status: 'needs-human', reason, report };
           },
           open: openFake(opens),
-          git: async () => {
-            pushes++;
-            return { code: 0, stdout: '', stderr: '' };
+          git: async (args) => {
+            // Count ONLY pushes (the adjacent publication test's
+            // args.includes('push') filter): publishHead drives BOTH the push
+            // and its ls-remote verification through this one transport, so
+            // an unfiltered counter would let any non-push git call inflate
+            // `pushes` and fail expect(pushes).toBe(0) spuriously — and a
+            // blanket empty-success answer could itself masquerade as the
+            // gate's refusal instead of the verified-head/dirty-tree one.
+            // Non-push calls get the same honest ls-remote answer the
+            // adjacent test's fake returns.
+            if (args.includes('push')) {
+              pushes++;
+              return { code: 0, stdout: '', stderr: '' };
+            }
+            return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
           },
         })({ repoRoot: repo.root });
         expect(result).toEqual({
