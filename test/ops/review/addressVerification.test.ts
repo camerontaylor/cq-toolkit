@@ -3,6 +3,7 @@ import {
   verifyClosureEvidence,
   type ClosurePacket,
   type ClosureVerification,
+  type CitedDependency,
   type VerificationCheck,
 } from '../../../src/ops/review/internal/addressVerification.js';
 
@@ -278,32 +279,36 @@ describe('review.address closure evidence verifier', () => {
     // invoking their getters, so the getter must never run, the later slot
     // must remain unchanged, and the packet is uncertain at packet-complete
     // (accessor-backed evidence is not trusted evidence).
-    const mutated = makePacket();
-    const clean = { path: 'src/clean.ts', role: 'consumer', text: "load('{}');\n" };
-    const surviving = {
+    const clean: CitedDependency = {
+      path: 'src/clean.ts',
+      role: 'consumer',
+      text: "load('{}');\n",
+    };
+    const surviving: CitedDependency = {
       path: 'src/legacy.ts',
       role: 'consumer',
       text: "if (mode === 'PARTIAL_MODE') load(raw);\n",
     };
-    mutated.dependencies = [clean, surviving];
+    const supplied: CitedDependency[] = [clean, surviving];
     let getterInvoked = false;
-    const first = {
+    const first: CitedDependency = {
       get path() {
         getterInvoked = true;
-        mutated.dependencies[1] = clean;
+        supplied[1] = clean;
         return 'src/clean.ts';
       },
       role: 'consumer',
       text: "load('{}');\n",
     };
-    mutated.dependencies[0] = first;
+    supplied[0] = first;
+    const mutated = makePacket({ dependencies: supplied });
     const result = verifyClosureEvidence(mutated);
     expect(result.verdict).toBe('uncertain');
     expect(result.reason).toBe('unavailable-evidence');
     expect(namesOf(result)).toEqual(['packet-complete']);
     expect(result.checks[0]?.detail).toContain('accessor-backed');
     expect(getterInvoked).toBe(false);
-    expect(mutated.dependencies[1]).toBe(surviving);
+    expect(supplied[1]).toBe(surviving);
   });
 
   test('an accessor-backed array slot is rejected as unavailable', () => {
