@@ -115,6 +115,62 @@ export interface DevCycleRecord {
   at: string;
 }
 
+/** The reuse basis a {@link DevReuseRecord} attests. */
+export type DevReuseBasis = 'exact-terminal' | 'no-fresh-tail';
+
+/**
+ * One deliberate reuse selection (Q4, #485): the cycle op found a terminal
+ * full-scope record with the EXACT requested identity (repository ledger,
+ * target, base, head, dirtySha256, scope and reviewer all matching) and
+ * settled the author review requirement from it — zero vendor calls, zero
+ * new cycles, every finding and disposition intact. The record is
+ * APPEND-ONLY audit trail: it never overwrites, deletes or re-labels the
+ * cycle it selects, and it is not a review run, a completion, or
+ * independent acceptance.
+ *
+ * `basis: 'no-fresh-tail'` is the narrower later case: the LEDGER'S LATEST
+ * same-identity cycle is a BLOCKED attempt whose reason is the reviewer's
+ * affirmative no-fresh notice — the vendor never reviewed, so re-running
+ * cannot create the review the earlier receipt already holds, and an
+ * unchanged retry would spend quota to record the same refusal again. The
+ * reuse record names that blocked attempt in `resolvesCycleId`, keeping it
+ * verbatim in the ledger (readiness resolves it only through the linkage,
+ * never by ignoring or rewriting the tail). Any OTHER blocked attempt —
+ * error, auth, rate limit, malformed stream, deadline kill, or a
+ * structured vendor-failure provenance — is a genuine blocker and stays
+ * one; the selector refuses it.
+ */
+export interface DevReuseRecord {
+  kind: 'reuse';
+  /** `r<NNN>-<head8>` — the NNN is the 1-based reuse count in this ledger when written. */
+  reuseId: string;
+  /** The selected source cycle. Terminal (exact-terminal) or the earlier receipt (no-fresh-tail). */
+  cycleId: string;
+  /** Why the source cycle satisfies the requirement (the selector's basis). */
+  basis: DevReuseBasis;
+  /**
+   * The same-identity no-fresh BLOCKED attempt this selection resolves —
+   * set only when `basis` is `no-fresh-tail`. It stays in the ledger verbatim.
+   */
+  resolvesCycleId?: string;
+  /** The intended PR target the selection was made against. */
+  target: string;
+  /** The pinned immutable base both the selection and the source cycle carry. */
+  base: string;
+  /** The reviewed HEAD sha both the selection and the source cycle carry. */
+  head: string;
+  /** The dirty identity both the selection and the source cycle carry. */
+  dirtySha256: string;
+  /** The diff scope of both the selection and the source cycle. */
+  scope: 'full' | 'uncommitted';
+  /** The reviewer of both the selection and the source cycle. */
+  reviewer: string;
+  /** Where the selection's own raw log was saved (outside the repository). */
+  logPath: string;
+  /** ISO-8601 timestamp. */
+  at: string;
+}
+
 /** One gate row of a dev.check run. */
 export interface DevCheckGate {
   name: string;
@@ -169,7 +225,11 @@ export interface DevDispositionRecord {
 }
 
 /** The ledger's record union — discriminated on `kind`. */
-export type DevRecord = DevCycleRecord | DevCheckRecord | DevDispositionRecord;
+export type DevRecord =
+  | DevCycleRecord
+  | DevCheckRecord
+  | DevDispositionRecord
+  | DevReuseRecord;
 
 /** The persisted dev-record file. Version 1 — the only version parse accepts. */
 export interface DevLedgerFile {
@@ -274,11 +334,122 @@ const DevDispositionRecordSchema = z
   })
   .strict();
 
+const DevReuseRecordSchema = z
+  .object({
+    kind: z.literal('reuse'),
+    reuseId: z.string().min(1),
+    cycleId: z.string().min(1),
+    basis: z.enum(['exact-terminal', 'no-fresh-tail']),
+    resolvesCycleId: z.string().min(1).exactOptional(),
+    target: z.string().min(1),
+    base: z.string().min(1),
+    head: z.string().min(1),
+    dirtySha256: z.string().min(1),
+    scope: z.enum(['full', 'uncommitted']),
+    reviewer: z.string().min(1),
+    logPath: z.string().min(1),
+    at: z.string().min(1),
+  })
+  .strict()
+  .refine(
+    (record) => record.basis !== 'exact-terminal' || record.resolvesCycleId === undefined,
+    'an exact-terminal reuse selects a terminal cycle and names no blocked attempt',
+  );
+
 const DevRecordSchema = z.discriminatedUnion('kind', [
   DevCycleRecordSchema,
   DevCheckRecordSchema,
   DevDispositionRecordSchema,
+  DevReuseRecordSchema,
 ]);
+
+/**
+ * The affirmative no-fresh/skipped notice, VERBATIM as
+ * `decideCompletion` (coderabbit.ts) records it: the blocked reason of a
+ * run the reviewer itself said never reviewed. A reuse resolution exists
+ * for exactly this tail — nothing else (an error, auth, rate limit,
+ * malformed stream, a deadline kill, or any structured vendor-failure
+ * class) may ever be selected over or resolved away.
+ */
+const NO_FRESH_TAIL_PATTERN =
+  /^reviewer completed '.+?' with an AFFIRMATIVE no-fresh\/skipped notice \(".+"\) — a fresh detailed review never ran$/u;
+
+/** The exact match {@link findReusableCycle} looks for (record.ts reuse/readiness). */
+export interface ReuseSelectionInput {
+  /** The intended PR target of the review request. */
+  target: string;
+  /** The pinned immutable base of the review request. */
+  base: string;
+  /** The HEAD sha of the review request. */
+  head: string;
+  /** The dirty identity of the review request. */
+  dirtySha256: string;
+  /** The diff scope of the review request. */
+  scope: 'full' | 'uncommitted';
+  /** The reviewer of the review request. */
+  reviewer: string;
+}
+
+/** One reuse selection: the matching cycle, why it qualifies, and the blocked tail it resolves. */
+export type ReuseSelection =
+  | { cycle: DevCycleRecord; basis: 'exact-terminal' }
+  | {
+      cycle: DevCycleRecord;
+      basis: 'no-fresh-tail';
+      /** The latest same-identity affirmative no-fresh blocked attempt. */
+      resolvesCycleId: string;
+    };
+
+/**
+ * Pure Q4 selector (#485): find the terminal full-scope cycle whose record
+ * identity EXACTLY equals the request (target, base, head, dirtySha256,
+ * scope and reviewer — the readiness anchor's identity fields plus the
+ * request shape; a dirty scope mismatch, a changed target at the same
+ * merge-base, a moved head or base, or a different reviewer never match),
+ * and classify the ledger's latest same-identity attempt:
+ *   - the latest cycle IS the selected cycle → `exact-terminal`;
+ *   - the latest cycle is an affirmative NO-FRESH blocked attempt (the
+ *     vendor itself said it never reviewed) at the same identity, and the
+ *     selected cycle precedes it → `no-fresh-tail` carrying
+ *     `resolvesCycleId` — the explicit, auditable reuse resolution; the
+ *     blocked attempt stays in the ledger verbatim;
+ *   - the latest cycle is any OTHER blocked attempt, or a terminal cycle
+ *     that is not the selection (an earlier terminal does not paper over a
+ *     newer unrelated one) → no reuse (a genuine later blocker refuses).
+ *
+ * Configuration (which reviewers count) is the readiness core's concern;
+ * the cycle op additionally re-checks its own scope emptiness before
+ * selecting, so this function deliberately reads ONLY identity and
+ * completion. `null` means: dispatch a fresh cycle.
+ */
+export function findReusableCycle(
+  records: readonly DevRecord[],
+  input: ReuseSelectionInput,
+): ReuseSelection | null {
+  const sameIdentity = (cycle: DevCycleRecord): boolean =>
+    cycle.scope === input.scope &&
+    cycle.reviewer === input.reviewer &&
+    cycle.target === input.target &&
+    cycle.base === input.base &&
+    cycle.head === input.head &&
+    cycle.dirtySha256 === input.dirtySha256;
+  const cycles = records.filter(
+    (record): record is DevCycleRecord =>
+      record.kind === 'cycle' && record.scope === 'full' && sameIdentity(record),
+  );
+  const selected = [...cycles].reverse().find((cycle) => cycle.completion.kind === 'terminal');
+  if (selected === undefined) return null;
+  const latest = cycles[cycles.length - 1];
+  if (latest === undefined) return null; // unreachable: selected came from cycles
+  if (latest.cycleId === selected.cycleId) return { cycle: selected, basis: 'exact-terminal' };
+  if (
+    latest.completion.kind === 'blocked' &&
+    NO_FRESH_TAIL_PATTERN.test(latest.completion.reason)
+  ) {
+    return { cycle: selected, basis: 'no-fresh-tail', resolvesCycleId: latest.cycleId };
+  }
+  return null;
+}
 
 const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
   .object({
@@ -288,10 +459,16 @@ const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
   })
   .strict();
 
-/** The record id of a cycle/check record (dispositions have none). */
+/**
+ * The record id of a cycle/check/reuse record (dispositions have none).
+ * The kinds share ONE uniqueness space: a duplicate id is a format error,
+ * so a hand-merged file can never slip a second cycle or reuse past the
+ * store under another record's identity.
+ */
 function recordIdOf(record: DevRecord): string | null {
   if (record.kind === 'cycle') return record.cycleId;
   if (record.kind === 'check') return record.checkId;
+  if (record.kind === 'reuse') return record.reuseId;
   return null;
 }
 
@@ -503,6 +680,13 @@ export interface DevReadinessRecord {
   cycleId: string;
   /** Which configured reviewer supplied the terminal cycle. */
   reviewer: string;
+  /**
+   * The explicit Q4 reuse selection behind this record, when readiness
+   * resolved an affirmative no-fresh blocked tail (#485) — the reuse
+   * record's id in the same ledger. Report context only: the reuse is
+   * author evidence, never verification or independent acceptance.
+   */
+  reuse?: string;
   /** The green check run the readiness rests on. */
   checkId: string;
   at: string;
@@ -541,7 +725,11 @@ export interface AssembleReadinessInput {
  *     a stale identity; a blocked or uncommitted-scope cycle never counts);
  *     a stacked branch pins its stack parent by naming it as the target;
  *   - the latest review ATTEMPT was not blocked (a blocker is reported, never
- *     papered over by an older terminal cycle);
+ *     papered over by an older terminal cycle) — with ONE Q4 exception
+ *     (#485): an affirmative NO-FRESH blocked attempt at the current
+ *     identity is resolved by an explicit reuse record that names both it
+ *     and the selected terminal cycle; any other blocked attempt, or a
+ *     reuse record for anything else, stays a gap and is reported;
  *   - zero OPEN blocking findings across EVERY cycle in the ledger, blocked
  *     attempts included: a blocking-severity finding is open until a
  *     fixed/rejected disposition names it. A newer cycle re-reviews the
@@ -598,7 +786,7 @@ export function assembleReadiness(
     if (stale.length > 0) {
       gaps.push({
         field: 'stale-review-identity',
-        detail: `review ${cycle.cycleId} is stale: ${stale.join('; ')}`,
+        detail: `review ${cycle.cycleId} (reviewer '${cycle.reviewer}', scope '${cycle.scope}') is stale: ${stale.join('; ')}`,
       });
     }
     // EVERY cycle's blocking findings — any scope, blocked attempts
@@ -641,16 +829,49 @@ export function assembleReadiness(
 
   // The LATEST review ATTEMPT overall: if it was BLOCKED, the author's most
   // recent review evidence is a failure — readiness never silently leans on
-  // an older terminal cycle past a blocked attempt.
+  // an older terminal cycle past a blocked attempt. The ONE Q4 resolution
+  // (#485): an affirmative NO-FRESH attempt at the CURRENT request identity
+  // (the vendor itself said it never reviewed — the earlier receipt is the
+  // only review that exists) is settled by an explicit reuse record naming
+  // both the blocked tail and the selected terminal cycle. That resolution
+  // is auditable, additive, and reported on the ready record; every other
+  // blocked attempt (error, auth, rate limit, malformed stream, deadline
+  // kill, or any structured vendor-failure class) stays a real gap.
   const allCycles = ledger.records.filter(
     (record): record is DevCycleRecord => record.kind === 'cycle' && isConfigured(record.reviewer),
   );
   const latestAttempt = allCycles[allCycles.length - 1];
+  const noFreshReuse =
+    ledger.records.find(
+      (record): record is DevReuseRecord =>
+        record.kind === 'reuse' && record.basis === 'no-fresh-tail',
+    ) ?? null;
   if (latestAttempt !== undefined && latestAttempt.completion.kind === 'blocked') {
-    gaps.push({
-      field: 'latest-review-blocked',
-      detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
-    });
+    const sameRequest =
+      latestAttempt.target === input.target &&
+      latestAttempt.base === identity.base &&
+      latestAttempt.head === identity.head &&
+      latestAttempt.dirtySha256 === identity.dirtySha256;
+    const reuseResolves =
+      sameRequest &&
+      NO_FRESH_TAIL_PATTERN.test(latestAttempt.completion.reason) &&
+      noFreshReuse !== null &&
+      noFreshReuse.resolvesCycleId === latestAttempt.cycleId &&
+      cycle !== undefined &&
+      noFreshReuse.cycleId === cycle.cycleId;
+    if (reuseResolves) {
+      gaps.push({
+        field: 'review-reused',
+        detail:
+          `review ${latestAttempt.cycleId} was the reviewer's affirmative no-fresh notice at the current identity; ` +
+          `readiness rests on ${noFreshReuse.cycleId} via reuse record ${noFreshReuse.reuseId} — the reuse is author evidence, not verification or independent acceptance`,
+      });
+    } else {
+      gaps.push({
+        field: 'latest-review-blocked',
+        detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
+      });
+    }
   }
 
   // The LATEST check record, WHATEVER its verdict: a green run followed by
@@ -704,6 +925,10 @@ export function assembleReadiness(
     }
     return { ready: false, gaps };
   }
+  const noFreshReuseFinal = ledger.records.find(
+    (record): record is DevReuseRecord =>
+      record.kind === 'reuse' && record.basis === 'no-fresh-tail',
+  );
   const readyRecord: DevReadinessRecord = {
     ready: true,
     evidenceClass: 'author',
@@ -715,6 +940,9 @@ export function assembleReadiness(
     dirtySha256: identity.dirtySha256,
     cycleId: cycle.cycleId,
     reviewer: cycle.reviewer,
+    ...(noFreshReuseFinal === undefined
+      ? {}
+      : { reuse: noFreshReuseFinal.reuseId }),
     checkId: check.checkId,
     at: input.nowIso,
   };

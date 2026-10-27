@@ -19,8 +19,34 @@ import type {
   DevCheckRecord,
   DevDispositionRecord,
   DevLedgerFile,
+  DevReuseRecord,
 } from '../../../src/ops/dev/record.js';
+import { findReusableCycle } from '../../../src/ops/dev/record.js';
 import { BASE, BRANCH, checkRecord, cycleRecord, dispositionRecord, HEAD } from './fakes.js';
+
+/** The affirmative no-fresh blocked reason exactly as decideCompletion records it. */
+const NO_FRESH_REASON =
+  'reviewer completed \'review_completed\' with an AFFIRMATIVE no-fresh/skipped notice ' +
+  '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
+
+/** A reuse record naming the fixture cycle (fakes.ts c001-aaaaaaaa at the fixture identity). */
+function reuseRecord(overrides: Partial<DevReuseRecord> = {}): DevReuseRecord {
+  const base: DevReuseRecord = {
+    kind: 'reuse',
+    reuseId: 'r001-aaaaaaaa',
+    cycleId: 'c001-aaaaaaaa',
+    basis: 'exact-terminal',
+    target: 'merge-queue',
+    base: BASE,
+    head: HEAD,
+    dirtySha256: 'dirty',
+    scope: 'full',
+    reviewer: 'coderabbit',
+    logPath: '/tmp/reuse-log',
+    at: '2026-10-17T00:30:00.000Z',
+  };
+  return { ...base, ...overrides } as DevReuseRecord;
+}
 
 const tmpDirs: string[] = [];
 afterEach(async () => {
@@ -63,9 +89,67 @@ describe('the dev-record format', () => {
     const file: DevLedgerFile = {
       version: DEV_LEDGER_VERSION,
       branch: BRANCH,
-      records: [cycleRecord(), checkRecord(), dispositionRecord()],
+      records: [cycleRecord(), checkRecord(), dispositionRecord(), reuseRecord()],
     };
     expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+  });
+
+  test('a reuse record round-trips with the resolvesCycleId linkage kept verbatim', () => {
+    const record = reuseRecord({
+      basis: 'no-fresh-tail',
+      resolvesCycleId: 'c002-aaaaaaaa',
+    });
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [record],
+    };
+    expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+  });
+
+  test('a reuse record id collides in the ONE shared id space', () => {
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord({ cycleId: 'r001-aaaaaaaa' }), reuseRecord()],
+    };
+    expect(() => serializeDevLedger(file)).toThrow(/duplicate record id 'r001-aaaaaaaa'/);
+    expect(() =>
+      parseDevLedger(serializeDevLedger({ ...file, records: [reuseRecord(), reuseRecord()] })),
+    ).toThrow(/duplicate record id/);
+  });
+
+  test('a hand-edited reuse record with an unknown basis or extra key refuses to parse', () => {
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          version: DEV_LEDGER_VERSION,
+          branch: BRANCH,
+          records: [reuseRecord({ basis: 'something-else' as never })],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          version: DEV_LEDGER_VERSION,
+          branch: BRANCH,
+          records: [{ ...reuseRecord(), mystery: true }],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          version: DEV_LEDGER_VERSION,
+          branch: BRANCH,
+          records: [
+            // exact-terminal with a resolvesCycleId linkage is a contradiction
+            { ...reuseRecord(), resolvesCycleId: 'c002-aaaaaaaa' },
+          ],
+        }),
+      ),
+    ).toThrow(/schema violation/);
   });
 
   test('parse fails closed: bad JSON, wrong version, unknown kind', () => {
@@ -207,7 +291,7 @@ describe('pathDevLedgerStore', () => {
 // ---------------------------------------------------------------------------
 
 function assemble(
-  ledgerRecords: (DevCycleRecord | DevCheckRecord | DevDispositionRecord)[],
+  ledgerRecords: (DevCycleRecord | DevCheckRecord | DevDispositionRecord | DevReuseRecord)[],
   untracked: string[] = [],
 ) {
   return assembleReadiness({
@@ -481,4 +565,278 @@ test('a blocked attempt keeps its major findings open after a later terminal cyc
   expect(assemble([...records, dispositionRecord({ findingId: 'c000-aaaaaaaa#f1' })]).ready).toBe(
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Q4 (#485): the reuse selector and the readiness resolution
+// ---------------------------------------------------------------------------
+
+const REQUEST = {
+  target: 'merge-queue',
+  base: BASE,
+  head: HEAD,
+  dirtySha256: 'dirty',
+  scope: 'full' as const,
+  reviewer: 'coderabbit',
+};
+
+describe('findReusableCycle', () => {
+  test('selects the exact terminal cycle at the identical identity', () => {
+    const selection = findReusableCycle([cycleRecord()], REQUEST);
+    expect(selection).not.toBeNull();
+    expect(selection).toMatchObject({ basis: 'exact-terminal', cycleId: 'c001-aaaaaaaa' });
+  });
+
+  test('no terminal cycle: null (dispatch a fresh cycle)', () => {
+    expect(
+      findReusableCycle([cycleRecord({ completion: { kind: 'blocked', reason: 'cli exit 1' } })], REQUEST),
+    ).toBeNull();
+    expect(findReusableCycle([], REQUEST)).toBeNull();
+  });
+
+  test('dirty scope mismatch never reuses', () => {
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, dirtySha256: 'other-dirty' })).toBeNull();
+  });
+
+  test('changed target at the same merge-base never reuses', () => {
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, target: 'main' })).toBeNull();
+  });
+
+  test('changed head or base never reuses', () => {
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, head: 'd'.repeat(40) })).toBeNull();
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, base: 'e'.repeat(40) })).toBeNull();
+  });
+
+  test('a different reviewer or scope never reuses', () => {
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, reviewer: 'agent:reviewer' })).toBeNull();
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, scope: 'uncommitted' })).toBeNull();
+  });
+
+  test('an uncommitted-scope terminal cycle is never a reuse anchor', () => {
+    expect(
+      findReusableCycle([cycleRecord({ scope: 'uncommitted' })], {
+        ...REQUEST,
+        scope: 'uncommitted',
+      }),
+    ).toBeNull();
+  });
+
+  test('the LATEST same-identity no-fresh tail yields the resolution with its id', () => {
+    const selection = findReusableCycle(
+      [
+        cycleRecord(),
+        cycleRecord({
+          cycleId: 'c002-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+      ],
+      REQUEST,
+    );
+    expect(selection).not.toBeNull();
+    expect(selection).toMatchObject({
+      basis: 'no-fresh-tail',
+      cycleId: 'c001-aaaaaaaa',
+      resolvesCycleId: 'c002-aaaaaaaa',
+    });
+  });
+
+  test('a genuine later blocker (error/auth/kill) refuses reuse even with an earlier terminal', () => {
+    for (const reason of [
+      'reviewer stream carried an error event',
+      'reviewer requested action (usage-limit confirmation class) — the cycle never reviewed',
+      'the reviewer CLI timed out after 1500000ms and was stopped — no review completed',
+      'reviewer stream was MALFORMED — 1 line(s) were unparsable or of an unrecognized event type',
+    ]) {
+      const selection = findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            completion: { kind: 'blocked', reason },
+          }),
+        ],
+        REQUEST,
+      );
+      expect(selection, reason).toBeNull();
+    }
+  });
+
+  test('a no-fresh-shaped reason that deviates from the recorded verdict wording refuses', () => {
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            completion: { kind: 'blocked', reason: 'no fresh review' },
+          }),
+        ],
+        REQUEST,
+      ),
+    ).toBeNull();
+  });
+
+  test('a terminal cycle NEWER than the selected one is never papered over', () => {
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'newer-head' }),
+        ],
+        REQUEST,
+      ),
+    ).toBeNull();
+  });
+
+  test('an earlier no-fresh tail that a newer same-identity terminal supersedes selects exact-terminal', () => {
+    const selection = findReusableCycle(
+      [
+        cycleRecord(),
+        cycleRecord({
+          cycleId: 'c002-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+        cycleRecord({ cycleId: 'c003-aaaaaaaa' }),
+      ],
+      REQUEST,
+    );
+    expect(selection).toMatchObject({ basis: 'exact-terminal', cycleId: 'c003-aaaaaaaa' });
+  });
+});
+
+describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
+  const blockedTail = () =>
+    cycleRecord({
+      cycleId: 'c002-aaaaaaaa',
+      completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+    });
+
+  test('a blocked tail with a resolution record settles ready and names the reuse', () => {
+    const result = assemble([
+      cycleRecord(),
+      blockedTail(),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(true);
+    if (result.ready) expect(result.record.reuse).toBe('r001-aaaaaaaa');
+  });
+
+  test('the same tail WITHOUT the resolution record stays a latest-review-blocked gap', () => {
+    const result = assemble([cycleRecord(), blockedTail(), checkRecord()]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const gap = result.gaps.find((entry) => entry.field === 'latest-review-blocked');
+      expect(gap?.detail).toContain('c002-aaaaaaaa');
+      expect(gap?.detail).toContain('AFFIRMATIVE no-fresh');
+    }
+  });
+
+  test('a resolution record that names the WRONG tail or wrong anchor never resolves', () => {
+    for (const mismatched of [
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c009-aaaaaaaa' }),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa', cycleId: 'c009-aaaaaaaa' }),
+    ]) {
+      const result = assemble([cycleRecord(), blockedTail(), mismatched, checkRecord()]);
+      expect(result.ready).toBe(false);
+      if (!result.ready)
+        expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+    }
+  });
+
+  test('a tail at a DIFFERENT identity (stale drift) is a real blocker, never resolved', () => {
+    const staleTail = cycleRecord({
+      cycleId: 'c002-aaaaaaaa',
+      completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      dirtySha256: 'older-dirty',
+    });
+    const result = assemble([
+      cycleRecord(),
+      staleTail,
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready)
+      expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+  });
+
+  test('a NON-no-fresh blocked tail is a real gap even with a resolution record present', () => {
+    const result = assemble([
+      cycleRecord(),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+      }),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready)
+      expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+  });
+
+  test('a no-fresh tail from an UNCONFIGURED reviewer is not resolved', () => {
+    const agentTail = cycleRecord({
+      cycleId: 'c002-aaaaaaaa',
+      reviewer: 'agent:unreviewer',
+      completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+    });
+    const result = assembleReadiness({
+      branch: BRANCH,
+      target: 'merge-queue',
+      identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
+      ledger: {
+        version: DEV_LEDGER_VERSION,
+        branch: BRANCH,
+        records: [
+          cycleRecord(),
+          agentTail,
+          reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+          checkRecord(),
+        ],
+      },
+      untracked: [],
+      configuredReviewers: ['coderabbit'],
+      nowIso: '2026-10-17T01:00:00.000Z',
+    });
+    expect(result.ready).toBe(false);
+    if (!result.ready)
+      expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+  });
+
+  test('blocking findings on the tail still block readiness through the resolution', () => {
+    const result = assemble([
+      cycleRecord(),
+      blockedTail(),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+      checkRecord(),
+      cycleRecord({
+        cycleId: 'c000-aaaaaaaa',
+        findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'critical' }],
+      }),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready)
+      expect(
+        result.gaps.some(
+          (gap) => gap.field === 'open-blocking-findings' && gap.detail.includes('c000-aaaaaaaa#f1'),
+        ),
+      ).toBe(true);
+  });
+
+  test('reuse evidence rides the ready record verbatim: the caveat stays authoritative', () => {
+    const result = assemble([
+      cycleRecord(),
+      blockedTail(),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(true);
+    if (result.ready) {
+      expect(result.record.evidenceClass).toBe('author');
+      expect(result.record.caveat).toContain('not verification');
+      expect(result.record.cycleId).toBe('c001-aaaaaaaa');
+    }
+  });
 });
