@@ -478,11 +478,17 @@ function makeReviewCycle(
         // completed CLI run or the driver's own timeout. Budget spend via the
         // composition's signal abort is still covered, because that abort
         // implies remainingWallMs() <= 0.
+        // Sample the wall budget exactly once and feed both the budget-stop
+        // flag and the completion choice: a second, later reading inside the
+        // ternary could observe expiry this check missed, yielding a
+        // budget-blocked span with no budgetStopped marker — and thus no
+        // report envelope — downstream.
+        const wallRemainingMs = remainingWallMs?.() ?? Infinity;
         const budgetStopped =
-          (remainingWallMs?.() ?? Infinity) <= 0 &&
+          wallRemainingMs <= 0 &&
           (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
         const completion: DevReviewCompletion =
-          signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
+          signal?.aborted || wallRemainingMs <= 0
             ? {
                 kind: 'blocked',
                 reason: `review cancelled or wall budget exhausted — ${faultText(signal?.reason ?? 'deadline elapsed')}`,
