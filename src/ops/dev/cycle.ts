@@ -373,11 +373,21 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // needs-human-with-PR — so report presence is never the trigger;
       // the structured stop is. Any other refusal propagates verbatim and
       // stops the cycle.
-      const roundCap =
-        addressResult.status === 'needs-human' &&
-        addressResult.report?.stop === 'round-cap' &&
-        addressResult.report !== undefined;
-      if (!roundCap) return stepResult('review.address', addressResult);
+      //
+      // BLOCKED RE-REVIEW (#509, owner 2026-10-27): the leg marks
+      // `stop: 'rereview-blocked'` only when its re-review stayed blocked on
+      // the network/transient class after one retry AND at least one
+      // verified fix exists. Those fixes take the SAME publication path —
+      // final gates first, then a DRAFT naming the blocked re-review — so a
+      // late network failure no longer leaves verified work unpublished. A
+      // re-review blocked on any other class (scan refusal, auth, …) still
+      // propagates verbatim.
+      const stop = addressResult.status === 'needs-human' ? addressResult.report?.stop : undefined;
+      if (
+        (stop !== 'round-cap' && stop !== 'rereview-blocked') ||
+        addressResult.report === undefined
+      )
+        return stepResult('review.address', addressResult);
 
       // The FINAL deterministic gates run BEFORE the round-cap publication
       // (the same gates the clean path re-runs at the addressed head): a fix
@@ -386,7 +396,9 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       const capCheck = await check({ repoRoot: input.repoRoot, target });
       if (capCheck.status !== 'ok') return stepResult('dev.check (final)', capCheck);
       return await finishNotReady(
-        'review round cap reached with open findings',
+        stop === 'rereview-blocked'
+          ? `the re-review was blocked after verified fixes (retried once on a network/transient class) — ${addressResult.status === 'needs-human' ? addressResult.reason : 're-review blocked'}`
+          : 'review round cap reached with open findings',
         addressResult.report,
       );
     }

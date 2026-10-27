@@ -71,6 +71,14 @@ export interface ParsedReviewerStream {
   trailingAfterComplete: number;
   /** true when an `error` event arrived. */
   sawError: boolean;
+  /**
+   * The vendor error code of the first `error` event, when its message
+   * carries one (`Review failed: con_err: …` → `con_err`). The CLI exposes
+   * no structured error class (`errorType` is `review` and `recoverable` is
+   * false even for a dropped connection), so the code is read with an
+   * anchored pattern, never a free-text search.
+   */
+  errorCode?: string;
   /** true when an action-required (billing-confirmation-class) event arrived. */
   sawActionRequired: boolean;
   /** The complete event's message VERBATIM, when it carried one. */
@@ -164,9 +172,14 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
         parsed.sawComplete = true;
         break;
       }
-      case 'error':
+      case 'error': {
         parsed.sawError = true;
+        const code = /^(?:Review failed: )?([a-z]+_err):/.exec(
+          stringAt(event, 'message') ?? '',
+        )?.[1];
+        if (code !== undefined) parsed.errorCode ??= code;
         break;
+      }
       case 'action_required':
         parsed.sawActionRequired = true;
         break;

@@ -353,3 +353,20 @@ describe('decideCompletion — the three-part protocol definition', () => {
     expect(decideCompletion(0, stream).kind).toBe('blocked');
   });
 });
+
+describe('parseReviewerStream vendor error code (#509)', () => {
+  test('reads the anchored vendor code of a failed review', () => {
+    const parsed = parseReviewerStream(
+      `${JSON.stringify({ type: 'error', errorType: 'review', message: 'Review failed: con_err: webSocket connection failed', recoverable: false })}\n`,
+    );
+    expect(parsed.sawError).toBe(true);
+    expect(parsed.errorCode).toBe('con_err');
+  });
+  test('a message without a leading vendor code carries none', () => {
+    const parsed = parseReviewerStream(
+      `${JSON.stringify({ type: 'error', message: 'rate limit reached; see con_err: docs' })}\n`,
+    );
+    expect(parsed.sawError).toBe(true);
+    expect(parsed.errorCode).toBeUndefined();
+  });
+});

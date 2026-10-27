@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { DriverFactory } from '../../../driver/factory.js';
-import type { ModelSpec, Usage, WorkerResult } from '../../../driver/types.js';
+import type { ModelSpec, Usage, WorkerErrorClass, WorkerResult } from '../../../driver/types.js';
 import { toOutputSchema } from '../../../driver/common/structured.js';
 import { boundedErrorText } from '../../../driver/error-text.js';
 import { defaultHarnessConfig } from '../../../harness/config.js';
@@ -127,7 +127,7 @@ export async function runReviewSession(
     onAdvisories?: (advisories: readonly string[]) => void;
     searchTools: boolean;
   },
-): Promise<OpResult<Finding[]>> {
+): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass }> {
   const { plan, evidence, signal } = input;
   if (evidence.deliveries.length > 0 || evidence.requests.length > 0)
     throw new Error('agent review session evidence must start empty');
@@ -274,6 +274,7 @@ export async function runReviewSession(
     return {
       status: 'needs-human',
       reason: `agent review did not complete (${result.stopReason})${detail}`,
+      ...(result.errorClass === undefined ? {} : { errorClass: result.errorClass }),
     };
   }
   const parsed = OutputSchema.safeParse(result.structuredOutput);

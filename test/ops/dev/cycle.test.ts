@@ -884,6 +884,85 @@ describe('dev.cycle', () => {
     expect(opens).toEqual([]);
   });
 
+  // ---- #509 (owner, 2026-10-27): a re-review still blocked on the
+  // network/transient class after its retry, with ≥1 verified fix, publishes
+  // a DRAFT naming the blocked re-review — final gates first.
+
+  /** The production finish() shape for the blocked-re-review stop. */
+  function rereviewBlockedAddress(state: WorkState): AddressLeg {
+    return async () => ({
+      status: 'needs-human',
+      reason:
+        'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
+      report: {
+        ...addressReport(state, [capFinding], []),
+        fixesPerRun: 1,
+        stop: 'rereview-blocked' as const,
+      },
+    });
+  }
+
+  test('#509: a blocked re-review with a verified fix runs the final gates, pushes and publishes a DRAFT naming it', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const checks: string[] = [];
+    let pushCalls = 0;
+    const { gh, bodies } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(checks),
+      review: cleanReview(state),
+      address: rereviewBlockedAddress(state),
+      open: openFake(opens),
+      gh,
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') return;
+    expect(result.reason).toContain('NOT READY');
+    expect(result.reason).toContain('the re-review was blocked after verified fixes');
+    expect(result.reason).toContain('not every configured reviewer completed');
+    expect(result.reason).toContain('draft PR #42');
+    expect(checks).toHaveLength(2);
+    expect(pushCalls).toBe(1);
+    expect(opens).toEqual([
+      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+    ]);
+    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+  });
+
+  test('#509: a red FINAL gate on the blocked-re-review path refuses verbatim — NO push, NO PR', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    let pushCalls = 0;
+    let checkRuns = 0;
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        checkRuns++;
+        if (checkRuns === 1) return greenCheck()({ ...input });
+        return { status: 'failed', error: 'dev.check: the addressed head broke format:check' };
+      },
+      review: cleanReview(state),
+      address: rereviewBlockedAddress(state),
+      open: openFake(opens),
+      git: async (args) => {
+        if (args.includes('push')) pushCalls++;
+        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+      },
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status).toBe('failed');
+    expect(pushCalls).toBe(0);
+    expect(opens).toEqual([]);
+  });
+
   test('a push failure after a clean loop is needs-human naming the branch (nothing opens)', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);

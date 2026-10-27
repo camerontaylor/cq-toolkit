@@ -96,6 +96,49 @@ describe('review.run', () => {
     }
   });
 
+  it.each([
+    [
+      'a dropped connection (con_err) is marked blockedTransient',
+      'Review failed: con_err: webSocket connection failed',
+      true,
+    ],
+    ['any other CLI error is not', 'Review failed: auth_required', false],
+  ] as const)('#509: %s', async (_label, message, transient) => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          review: { reviewers: ['coderabbit'] },
+        }),
+      );
+      repo.commitAll('configure CodeRabbit-only review');
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? {
+              exitCode: 1,
+              stdout: `${JSON.stringify({ type: 'error', errorType: 'review', message, recoverable: false })}\n`,
+              stderr: 'Error: An unexpected error occurred.',
+              timedOut: false,
+            }
+          : undefined,
+      );
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      expect(result.report?.blockedTransient).toBe(transient ? true : undefined);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('normalizes a successful CodeRabbit-only cycle and persists its finding', async () => {
     const repo = await makeTestRepo();
     try {

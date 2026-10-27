@@ -119,7 +119,12 @@ protocol: [docs/coderabbit-review.md](docs/coderabbit-review.md).
   interrupted, auth-failed, or rate-limited runs do not count: report the
   blocker — a blocker prevents opening the PR. Never replace a required
   review with another reviewer, never waive the rule, never fabricate
-  results.
+  results. One exception, for `cq dev.cycle` only (owner, 2026-10-27,
+  #509): when its address leg's re-review is blocked on a network/transient
+  class, it is retried once; if it is still blocked and at least one
+  verified fix exists, the final deterministic gates run and a DRAFT PR
+  naming the blocked re-review is published (red gates still publish
+  nothing). The draft is not a counted cycle and is never marked ready.
 - Run the deterministic gates before the cycle and after addressing it.
   Those gates are the cheap deterministic ones plus the affected tests — the
   full suite is CI's, and Knip runs per the contract's condition (see
