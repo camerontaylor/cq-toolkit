@@ -441,6 +441,18 @@ class DurableBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(mr.ReconcileRefused, "cycled"):
             self.run_inventory(forge.fetch)
 
+    def test_explicit_incomplete_or_error_flags_refuse_even_with_terminal_cursor(self):
+        for flags in ({"incomplete_results": True}, {"incomplete_results": "false"},
+                      {"truncated": True}, {"errors": [{"message": "partial data"}]}):
+            with self.subTest(flags=flags):
+                saved = []
+                page = {**cursor_page([pr(1, B)]), **flags}
+                with self.assertRaisesRegex(mr.ReconcileRefused, "incomplete"):
+                    self.run_inventory(lambda cursor: page, checkpoint_save=saved.append)
+                self.assertEqual(len(saved), 1)  # only initial frozen boundary
+                self.assertFalse(saved[0]["complete"])
+                self.assertEqual(saved[0]["pages_read"], 0)
+
     def test_corrupted_checkpoints_and_changed_query_refuse_before_fetch(self):
         first = self.run_inventory(FakeForge({None: cursor_page([pr(1, B)], "next")}).fetch,
                                    page_budget=1)

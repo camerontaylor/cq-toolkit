@@ -240,6 +240,12 @@ def reconcile_page(checkpoint: Dict[str, Any], page_records: Any) -> Dict[str, A
 
 
 def _page(value, cursor, history):
+    # Forge search/GraphQL may return usable-looking rows alongside an explicit
+    # incomplete/error indication. Neither a terminal cursor nor exit 0 cures it.
+    if isinstance(value, dict) and (
+            value.get("incomplete_results", False) is not False or
+            value.get("truncated", False) is not False or value.get("errors")):
+        raise ReconcileRefused("incomplete, truncated or errored forge result")
     if (not isinstance(value, dict) or not isinstance(value.get("records"), list) or
             type(value.get("has_next_page")) is not bool or "next_cursor" not in value or
             not _cursor(value["next_cursor"])):
