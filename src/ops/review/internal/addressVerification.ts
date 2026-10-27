@@ -515,12 +515,15 @@ export function verifyClosureEvidence(
     }
     // Removed declarations can supply counter-evidence, but their removal
     // alone does not link the patch to the finding's actual trigger.
-    if (spans.length === 0)
+    const supportedTrigger = spans.some(
+      (span) => packet.before.includes(span) && removedLines.some((line) => line.includes(span)),
+    );
+    if (!supportedTrigger)
       return {
         check: 'trigger-removed',
         outcome: 'unavailable',
         detail:
-          'finding carries no quoted trigger span; removed declarations alone do not establish finding-linked trigger evidence',
+          'no finding-quoted trigger occurs in before and a validated removed line; removed declarations alone do not establish finding-linked trigger evidence',
         reason: 'no-citable-trigger',
       };
     return {

@@ -87,10 +87,14 @@ the canonical order with at most one non-pass entry, last:
    cited dependency. Survival is concrete counter-evidence: verdict
    `unresolved`. Removed declarations supply counter-evidence only: their
    removal alone cannot establish a relationship to the finding. Without a
-   quoted finding trigger, a packet with no survival counter-evidence is
+   supported quoted finding trigger, a packet with no survival counter-evidence is
    uncertain (`no-citable-trigger`), even when an unrelated declaration was
    removed. The helper refuses to guess what the finding was about, and
-   uncertainty keeps the finding open without demanding a code edit.
+   uncertainty keeps the finding open without demanding a code edit. Positive
+   evidence requires at least one quoted finding span present in the before
+   snapshot and on a validated removed patch line. A quoted suggestion absent
+   before the patch cannot establish closure merely by remaining absent after
+   an unrelated edit. Survival checks still take precedence as counter-evidence.
    Quoted spans and unique removed declarations retain the scan caps of eight
    and sixteen. Evidence exceeding either cap is unavailable (`uncertain`),
    never silently truncated into closure. Declaration survival uses ASCII

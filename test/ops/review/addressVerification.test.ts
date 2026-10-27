@@ -555,6 +555,45 @@ describe('review.address closure evidence verifier', () => {
     );
   });
 
+  test('an absent quoted suggestion cannot close a finding after an unrelated comment edit', () => {
+    const finding = {
+      id: 'missing-validation',
+      text: 'Call `validate(input)` before executing dangerous(input)',
+      file: 'src/config.ts',
+    };
+    const before = '// old comment\ndangerous(input);';
+    const after = '// updated comment\ndangerous(input);';
+    const patch = [
+      '--- a/src/config.ts',
+      '+++ b/src/config.ts',
+      '@@ -1 +1 @@',
+      '-// old comment',
+      '+// updated comment',
+    ].join('\n');
+    const result = verifyClosureEvidence(makePacket({ finding, before, after, patch }));
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('no-citable-trigger');
+    expect(result.checks.slice(0, 3).every((check) => check.outcome === 'pass')).toBe(true);
+    expectLastCheck(result, { check: 'trigger-removed', outcome: 'unavailable' });
+    expect(result.checks[3]?.detail).toContain(
+      'no finding-quoted trigger occurs in before and a validated removed line',
+    );
+  });
+
+  test('supported quoted removal remains positive evidence alongside an absent suggestion', () => {
+    const result = verifyClosureEvidence(
+      makePacket({
+        finding: {
+          id: 'supported-removal',
+          text: 'Replace "PARTIAL_MODE" with a boolean; consider `validate(input)` too',
+          file: 'src/config.ts',
+        },
+      }),
+    );
+    expect(result.verdict).toBe('resolved');
+    expect(outcomesOf(result)).toEqual(CHECK_ORDER.map(() => 'pass'));
+  });
+
   test('an unrelated patch cannot hide a surviving trigger by omitting it from after', () => {
     const before = "const obsolete = 1;\ndangerous('PARTIAL_MODE');";
     const patch = [
