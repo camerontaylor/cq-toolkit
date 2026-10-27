@@ -1,0 +1,194 @@
+"""Authorized queue-v1 capability. Caller supplies identity/policy, never JSON.
+
+No reviewer starts, credentials, shell commands or author-grant mutations.
+Runner owns tick lock/load/save; Q1 owns immutable receipt storage.
+"""
+import base64
+import contextlib
+import copy
+import io
+import json
+import re
+
+import review_receipt as receipts
+
+MAX_BYTES = 8192
+TOKEN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}"
+SHA = r"[0-9a-f]{40}"
+READ = {"status", "report"}
+WRITE = {"enqueue", "bind", "cancel", "ack"}
+
+
+def _pairs(pairs):
+    value = {}
+    for k, v in pairs:
+        if k in value:
+            raise ValueError("duplicate JSON key")
+        value[k] = v
+    return value
+
+
+def _match(pattern, value):
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def binding(value):
+    if not isinstance(value, dict):
+        raise ValueError("invalid binding")
+    common = {"kind", "repo", "targetSelector"}
+    fields = {"producer", "head", "target"} if value.get("kind") == "deferred-author" else {"pr", "mergeSha"}
+    if set(value) != common | fields or value.get("kind") not in {"deferred-author", "merged-current"}:
+        raise ValueError("invalid binding fields")
+    if not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value["repo"]) or value["targetSelector"] not in receipts.SELECTORS:
+        raise ValueError("invalid repository or target selector")
+    if value["kind"] == "deferred-author":
+        if not all(_match(TOKEN, value[k]) for k in ("producer", "target")) or not _match(SHA, value["head"]):
+            raise ValueError("invalid producer/head/target")
+    elif type(value["pr"]) is not int or value["pr"] <= 0 or not _match(SHA, value["mergeSha"]):
+        raise ValueError("invalid merged source")
+    return value
+
+
+def decode(raw):
+    if not isinstance(raw, bytes) or len(raw) > MAX_BYTES:
+        raise ValueError("queue request exceeds bound")
+    request = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
+    if not isinstance(request, dict) or type(request.get("v")) is not int or request["v"] != 1:
+        raise ValueError("unsupported queue protocol")
+    op = request.get("op")
+    extra = {"bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
+             "ack": {"receiptId", "sha256", "chunks", "bytes"}}.get(op, set())
+    if op not in READ | WRITE or set(request) != {"v", "op", "requestId", "binding"} | extra:
+        raise ValueError("invalid queue operation/fields")
+    if not _match(TOKEN, request["requestId"]):
+        raise ValueError("invalid request id")
+    binding(request["binding"])
+    if op == "bind" and (type(request["pr"]) is not int or request["pr"] <= 0 or
+                         request["mergeSha"] is not None and not _match(SHA, request["mergeSha"])):
+        raise ValueError("invalid PR binding")
+    return request
+
+
+def _forge(verify_source, b, pr, merge_sha):
+    """Trusted adapter fetches forge metadata; compare every authorization binding."""
+    actual = verify_source(b["repo"], pr)
+    if not isinstance(actual, dict) or actual.get("repo") != b["repo"] or actual.get("pr") != pr:
+        raise ValueError("forge repository/PR mismatch")
+    if b["kind"] == "deferred-author" and any(actual.get(k) != b[k] for k in ("producer", "head", "target")):
+        raise ValueError("forge producer/head/target mismatch")
+    if merge_sha is not None and (actual.get("mergeSha") != merge_sha or actual.get("state") != "MERGED"):
+        raise ValueError("forge merge mismatch")
+
+
+def _enroll(q, b, request_id, pr, merge_sha, at):
+    receipts.enroll(q, repo=b["repo"], pr=pr, merge_sha=merge_sha, request_id=request_id,
+                    at=at, target_selector=b["targetSelector"])
+
+
+def _status(q, request_id, entry):
+    current = q.get("merged_current_requests", {}).get(request_id)
+    item = receipts.status(q, request_id) if current else None
+    state = entry["state"]
+    receipt_id = item["receipt_id"] if item else None
+    if item:
+        state = {"pending": "pending", "reviewing": "reviewing", "blocked": "blocked"}.get(item["state"], "blocked")
+        if item.get("reused_from"):
+            state = "reused"
+        # Terminal truth is read from the immutable receipt in handle, never a done label.
+    return {"state": state, "pr": entry.get("pr"), "mergeSha": entry.get("mergeSha"),
+            "itemId": item["item_id"] if item else None, "receiptId": receipt_id,
+            "consumed": receipt_id is not None and entry.get("consumed") == receipt_id,
+            "reviewed": False, "fixed": False}
+
+
+def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
+    req = decode(raw)
+    b, op, rid = req["binding"], req["op"], req["requestId"]
+    allowed = policy.get("write" if op in WRITE else "read", [])
+    if principal not in allowed or b["repo"] != policy.get("repo") or b["targetSelector"] not in policy.get("targets", []):
+        raise ValueError("queue capability denied")
+    if b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
+        raise ValueError("target branch denied")
+    if not policy.get("enabled", False):
+        return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
+
+    def locked():
+        # Work on a copy so rejected requests cannot leak partial mutations to test runners.
+        q = copy.deepcopy(runner.load_queue())
+        entries = q.setdefault("queue_client_requests", {})
+        entry = entries.get(rid)
+        if entry is not None and (entry["binding"] != b or entry["principal"] != principal):
+            raise ValueError("request binding or principal mismatch")
+        if op == "enqueue" and entry is None:
+            entry = {"binding": b, "principal": principal, "state": "awaiting-pr", "createdAt": runner.iso()}
+            if b["kind"] == "merged-current":
+                _forge(verify_source, b, b["pr"], b["mergeSha"])
+                _enroll(q, b, rid, b["pr"], b["mergeSha"], runner.iso())
+                entry.update(pr=b["pr"], mergeSha=b["mergeSha"], state="ready-current")
+            entries[rid] = entry
+        if entry is None:
+            raise ValueError("unknown queue request")
+        if op == "bind":
+            if b["kind"] != "deferred-author" or entry["state"] == "cancelled":
+                raise ValueError("intent cannot be bound")
+            pr, merge_sha = req["pr"], req["mergeSha"]
+            if entry.get("pr", pr) != pr or entry.get("mergeSha") not in (None, merge_sha):
+                raise ValueError("conflicting PR/merge binding")
+            _forge(verify_source, b, pr, merge_sha)
+            entry.update(pr=pr, state="awaiting-merge")
+            if merge_sha is not None:
+                _enroll(q, b, rid, pr, merge_sha, runner.iso())
+                entry.update(mergeSha=merge_sha, state="ready-current")
+        if op == "cancel":
+            if rid in q.get("merged_current_requests", {}):
+                raise ValueError("enrolled current work cannot be cancelled through deferred intent")
+            entry["state"] = "cancelled"
+        result = _status(q, rid, entry)
+        receipt_id = result["receiptId"]
+        if receipt_id:
+            # Bounded status excludes capture/paths/findings. Full document goes through chunks.
+            doc_manifest = receipts.read_receipt(receipt_root, receipt_id)
+            data = bytearray()
+            for i in range(doc_manifest["chunks"]):
+                data.extend(base64.b64decode(receipts.read_receipt(receipt_root, receipt_id, f"{receipt_id}:{i}")["data"]))
+            document = json.loads(data)
+            outcome = document.get("outcome") or document.get("classification", {}).get("outcome")
+            counted = document.get("classification", {}).get("counted", False)
+            result["reviewed"] = counted is True and outcome in {"completed", "completed_with_findings", "clean"}
+            result["state"] = ("terminal-with-findings" if document.get("findings") else "terminal-clean") if result["reviewed"] else {
+                "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
+        if op in {"report", "ack"}:
+            if not receipt_id or req["receiptId"] != receipt_id:
+                raise ValueError("receipt/request mismatch")
+            manifest = receipts.read_receipt(receipt_root, receipt_id)
+            progress = entry.setdefault("deliveries", {}).setdefault(receipt_id, {"manifest": False, "next": 0})
+            if op == "report":
+                page = receipts.read_receipt(receipt_root, receipt_id, req["cursor"])
+                if page["kind"] == "manifest":
+                    progress["manifest"] = True
+                else:
+                    if not progress["manifest"] or page["index"] > progress["next"]:
+                        raise ValueError("out-of-order receipt delivery")
+                    progress["next"] = max(progress["next"], page["index"] + 1)
+                result = {"page": page}
+            else:
+                if not progress["manifest"] or progress["next"] != manifest["chunks"] or any(req[k] != manifest[k] for k in ("sha256", "chunks", "bytes")):
+                    raise ValueError("complete verified receipt required before acknowledgement")
+                entry["consumed"] = receipt_id
+                result["consumed"] = True
+        encoded = _encode(req, result)
+        runner.save_queue(q)
+        return encoded
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        result = runner.with_lock(locked)
+    if not isinstance(result, bytes):
+        raise ValueError("queue lock busy; delivery unknown")
+    return result
+
+
+def _encode(req, result):
+    raw = receipts.canonical({"v": 1, "requestId": req["requestId"], "binding": req["binding"], "result": result}) + b"\n"
+    if len(raw) > MAX_BYTES:
+        raise ValueError("queue response exceeds wire bound")
+    return raw
