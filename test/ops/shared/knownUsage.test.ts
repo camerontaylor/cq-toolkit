@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createKnownUsageLedger,
   foldKnownUsageSummaries,
+  normalizeUsageObservation,
 } from '../../../src/ops/shared/knownUsage.js';
 
 describe('known usage across driver exits', () => {
@@ -75,6 +76,26 @@ describe('known usage across driver exits', () => {
     ).toThrow('invalid usage');
     expect(() => ledger.record('bad-price', { costUSD: Number.NaN })).toThrow('invalid cost');
     expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 0, unpricedCount: 0 });
+  });
+
+  it('normalizes invalid usage and cost independently before ledger settlement', () => {
+    const valid = { input: 3, output: 2, cacheRead: 1, cacheWrite: 0 };
+    const ledger = createKnownUsageLedger();
+    ledger.record(
+      'invalid-usage',
+      normalizeUsageObservation({ usage: { ...valid, input: -1 }, costUSD: 0.02 }),
+    );
+    ledger.record(
+      'invalid-cost',
+      normalizeUsageObservation({ usage: valid, costUSD: Number.POSITIVE_INFINITY }),
+    );
+    expect(ledger.snapshot()).toEqual({
+      usage: valid,
+      costUSD: 0.02,
+      knownCount: 1,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
   });
 
   it('folds mixed and unknown engine summaries without changing their dispatch counts', () => {

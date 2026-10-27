@@ -322,6 +322,56 @@ describe('runAgentReviewer v3 session engine', () => {
     expect(reports).toEqual([{ usage, costUSD: 0.012 }]);
   });
 
+  it('keeps a returned review result when its cost is invalid and retains valid usage', async () => {
+    const fake = fakeDrivers({ result: workerResult({ costUSD: Number.POSITIVE_INFINITY }) });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error(JSON.stringify(result));
+    expect(result.value.usageSummary).toEqual({
+      usage,
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+  });
+
+  it('keeps the returned partial-error reason when usage is invalid and cost is valid', async () => {
+    const fake = fakeDrivers({
+      result: workerResult({
+        stopReason: 'error',
+        error: 'original partial driver failure',
+        usage: { ...usage, input: -1 },
+        costUSD: 0.012,
+      }),
+    });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') throw new Error(JSON.stringify(result));
+    expect(result.reason).toContain('original partial driver failure');
+    expect(result.report?.usageSummary).toEqual({
+      costUSD: 0.012,
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 0,
+    });
+  });
+
+  it('keeps a thrown driver error distinct from unknown telemetry', async () => {
+    const original = Object.assign(new Error('original rejected driver failure'), {
+      usage: { ...usage, input: -1 },
+    });
+    const fake = fakeDrivers({ run: async () => Promise.reject(original) });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') throw new Error(JSON.stringify(result));
+    expect(result.reason).toContain('original rejected driver failure');
+    expect(result.report?.usageSummary).toEqual({
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
+  });
+
   it('keeps returned usage when cancellation lands before session settlement', async () => {
     const controller = new AbortController();
     const fake = fakeDrivers({

@@ -49,6 +49,20 @@ function validUsage(usage: Usage): boolean {
   );
 }
 
+/** Discard malformed provider telemetry without losing independently valid fields. */
+export function normalizeUsageObservation(observation: UsageObservation): UsageObservation {
+  return {
+    ...(observation.usage !== undefined && validUsage(observation.usage)
+      ? { usage: observation.usage }
+      : {}),
+    ...(observation.costUSD !== undefined &&
+    Number.isFinite(observation.costUSD) &&
+    observation.costUSD >= 0
+      ? { costUSD: observation.costUSD }
+      : {}),
+  };
+}
+
 function sameObservation(a: UsageObservation, b: UsageObservation): boolean {
   return (
     a.costUSD === b.costUSD &&

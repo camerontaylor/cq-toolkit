@@ -13,7 +13,12 @@ import {
   type ReviewCoverageV2,
 } from './internal/reviewCoverageV2.js';
 import { runReviewSession, scanReviewUpload, totalUsage } from './internal/reviewSession.js';
-import { createKnownUsageLedger, type KnownUsageSummary } from '../shared/knownUsage.js';
+import {
+  createKnownUsageLedger,
+  normalizeUsageObservation,
+  type KnownUsageSummary,
+  type UsageObservation,
+} from '../shared/knownUsage.js';
 
 export interface AgentReviewerInput {
   repoRoot: string;
@@ -273,6 +278,21 @@ export async function runAgentReviewer(
                 run: async (invocation, options) => {
                   const id = `${session.id}:${String(dispatch++)}`;
                   if (reportOpen) pendingUsage.add(id);
+                  const settleUsage = (read: () => UsageObservation): void => {
+                    if (!reportOpen) return;
+                    try {
+                      usageLedger.record(id, normalizeUsageObservation(read()));
+                    } catch {
+                      // A telemetry accessor or ledger failure cannot replace the driver outcome.
+                      try {
+                        usageLedger.record(id, {});
+                      } catch {
+                        // The dispatch was already recorded; retain the first observation.
+                      }
+                    } finally {
+                      pendingUsage.delete(id);
+                    }
+                  };
                   let returned = false;
                   try {
                     const value = await resolved.driver.run.call(
@@ -281,19 +301,13 @@ export async function runAgentReviewer(
                       options,
                     );
                     returned = true;
-                    if (reportOpen) {
-                      usageLedger.record(id, {
+                    settleUsage(() => ({
                         usage: value.usage,
                         ...(value.costUSD === undefined ? {} : { costUSD: value.costUSD }),
-                      });
-                      pendingUsage.delete(id);
-                    }
+                      }));
                     return value;
                   } catch (error) {
-                    if (reportOpen && !returned) {
-                      usageLedger.record(id, {});
-                      pendingUsage.delete(id);
-                    }
+                    if (!returned) settleUsage(() => ({}));
                     throw error;
                   }
                 },
