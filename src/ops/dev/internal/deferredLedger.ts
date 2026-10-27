@@ -1,5 +1,6 @@
 import type { DevEffects } from '../effects.js';
 import { createHash } from 'node:crypto';
+import { consumeDeferredVendorReport } from './deferredSettlement.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { DevCycleRecord, DevLedgerFile } from '../record.js';
 import { makeConfiguredQueueClient } from '../../review/queue.js';
@@ -41,13 +42,29 @@ export async function prepareDeferredVendorReview(
   signal?: AbortSignal,
 ): Promise<DeferredVendorDebt | undefined> {
   const ledger = effects.openLedger(state.branch).load();
-  const previous = ledger.records.filter((entry) => entry.kind === 'vendor-debt').at(-1)?.debt;
+  let previous = ledger.records.filter((entry) => entry.kind === 'vendor-debt').at(-1)?.debt;
   const vendor = ledger.records
     .filter(
       (entry): entry is DevCycleRecord => entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
     )
     .at(-1);
+  // A later genuine local outage starts its own origin; completed lineage is retained.
+  if (
+    previous?.vendorCompleted &&
+    vendor?.vendorFailure &&
+    vendor.cycleId !== previous.originAttempt.cycleId
+  )
+    previous = undefined;
   if (!previous && !vendor?.vendorFailure) return undefined;
+  // A recovered vendor requires a fresh invocation on a new head; old current-code
+  // completion never authorizes a successor outage or inherited coverage.
+  if (
+    previous?.vendorCompleted &&
+    previous.reference.binding.kind === 'deferred-author' &&
+    previous.reference.binding.head !== state.head &&
+    vendor?.cycleId === previous.originAttempt.cycleId
+  )
+    return undefined;
   if (state.dirtySha256 !== 'clean-tree')
     throw new Error('deferred vendor review requires a committed clean identity');
   if (currentLedgerDebt(ledger, target, state))
@@ -137,6 +154,13 @@ export async function prepareDeferredVendorReview(
     const prior = DeferredVendorDebtSchema.parse(previous);
     prior.queue = await queue.status(prior.reference);
     signal?.throwIfAborted();
+    if (['terminal-clean', 'terminal-with-findings', 'reused'].includes(prior.queue.state)) {
+      // Recovery may finish after HEAD moves. Settle the retained obligation,
+      // then require a real fresh vendor invocation at the new identity.
+      const completed = await consumeDeferredVendorReport(effects, queue, prior, signal);
+      await persist(completed);
+      return undefined;
+    }
     await advanceDeferredVendorDebt(queue, prior, reference, pin, persist);
   } else {
     // Enrollment is for the genuine current blocked attempt, never fabricated old-head coverage.
@@ -214,7 +238,14 @@ export async function loadCurrentDeferredVendorDebt(
   );
   if (repo.exitCode !== 0 || repo.timedOut || repo.stdout.trim() !== debt.reference.binding.repo)
     throw new Error('cannot verify the deferred debt repository');
-  const fresh = await refreshDeferredVendorDebt(client ?? makeConfiguredQueueClient(), debt);
+  const queue = client ?? makeConfiguredQueueClient();
+  let fresh = await refreshDeferredVendorDebt(queue, debt);
+  if (
+    debt.vendorCompleted ||
+    ['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state)
+  ) {
+    fresh = await consumeDeferredVendorReport(effects, queue, fresh, signal);
+  }
   signal?.throwIfAborted();
   const current = await readWorkState(effects, { target, base: state.base });
   const latest = effects.openLedger(state.branch).load();
@@ -240,6 +271,23 @@ export async function loadCurrentDeferredVendorDebt(
     })
   )
     throw new Error('queue status does not authorize deferred vendor continuation');
+  if (fresh.vendorCompleted && !isDeepStrictEqual(debt, fresh)) {
+    signal?.throwIfAborted();
+    await effects.openLedger(state.branch).mutate((retained) => {
+      if (!isDeepStrictEqual(retained, ledger))
+        throw new Error('ledger changed before vendor settlement');
+      return {
+        ledger: {
+          ...retained,
+          records: [
+            ...retained.records,
+            { kind: 'vendor-debt' as const, debt: fresh, at: effects.nowIso() },
+          ],
+        },
+        value: undefined,
+      };
+    });
+  }
   return fresh;
 }
 

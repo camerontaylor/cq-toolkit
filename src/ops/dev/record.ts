@@ -46,6 +46,7 @@ import {
   VendorFailureProvenanceSchema,
   hasPersistedVendorOutageOrigin,
   matchesDeferredVendorDebt,
+  deferredReceiptFindings,
   type DeferredVendorDebt,
   type VendorFailureProvenance,
 } from './internal/deferredReview.js';
@@ -717,7 +718,7 @@ export interface DevReadinessRecord {
   cycleId: string;
   /** Which configured reviewer supplied the terminal cycle. */
   reviewer: string;
-  /** Visible unresolved vendor obligation; grants no vendor completion credit. */
+  /** Visible vendor obligation or verified affected-current completion; never full-branch credit. */
   vendorDebt?: DeferredVendorDebt;
   /**
    * The explicit Q4 reuse selection behind this record, when readiness
@@ -906,6 +907,18 @@ export function assembleReadiness(
             : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)`,
         );
       }
+    }
+    const receipts = deferredReceiptFindings([
+      ...ledger.records.filter((entry) => entry.kind === 'vendor-debt').map((entry) => entry.debt),
+      ...(debt ? [debt] : []),
+    ]);
+    for (const finding of receipts) {
+      if (!blocking.has(finding.severity.toLowerCase())) continue;
+      const action = closed.get(finding.id);
+      if (action !== 'fixed' && action !== 'rejected')
+        open.push(
+          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)`,
+        );
     }
     if (open.length > 0) {
       gaps.push({

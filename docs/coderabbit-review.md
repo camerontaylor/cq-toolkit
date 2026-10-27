@@ -237,6 +237,21 @@ completed vendor cycle. Deterministic gates and independent exact-head
 acceptance remain required. Known substantive blocking findings, scan/tamper,
 stale identity, red CI and privileged trust remain blocking.
 
+A terminal queue status alone never settles debt. Settlement requires Q3's
+complete authorized report delivery and acknowledgement, a digest-verified local
+re-read, exact source/request (or proven equivalent reuse) binding, and Q1's
+counted terminal classifier. The immutable capture target/tree and equivalence
+must verify; missing local capture objects, partial scope, malformed findings,
+unknown outcomes or uncertain report delivery retain pending debt and block
+fresh continuation. This bounded read never fetches or dispatches a vendor.
+Persist the `vendor-completed` snapshot alongside the original pending intent
+and receipt. Its coverage remains affected-current only, with no full-branch or
+independent acceptance credit. Imported findings retain stable receipt IDs and
+raw provenance; critical/major findings need explicit fixed/rejected
+dispositions, while a deferred disposition keeps them blocking. Replaying a
+consumed receipt does not enroll again or duplicate findings. A completed old-head
+receipt cannot authorize a new-head outage or supply its current coverage.
+
 Retain visible debt on the readiness/publication record until genuine review
 or explicit current-scope disposition. Backfill completion is no universal
 merge check. Installed compatible Q1/Q3 service and healthy durable enrollment

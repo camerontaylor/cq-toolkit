@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
+import { makeQueueClient } from '../../../src/ops/review/queue.js';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
+import {
+  importQueueEvidence,
+  type QueueEvidence,
+} from '../../../src/ops/review/internal/queueEvidence.js';
+import { deferredReceiptFindings } from '../../../src/ops/dev/internal/deferredReview.js';
 import { makeTestRepo, repoEffects, type TestRepo } from './repo.js';
 import { checkRecord, cycleRecord } from './fakes.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -392,4 +401,448 @@ test('publication bind persists only verified PR identity and supports crash rep
     bindPublishedDeferredDebt(f.effects, 'merge-queue', f.state, latest, 42, f.client),
   ).rejects.toThrow('lost queue reply');
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(latest);
+});
+
+function canonicalReceipt(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonicalReceipt).join(',') + ']';
+  if (value !== null && typeof value === 'object')
+    return (
+      '{' +
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => JSON.stringify(key) + ':' + canonicalReceipt(item))
+        .join(',') +
+      '}'
+    );
+  return JSON.stringify(value);
+}
+const digestReceipt = (value: unknown) =>
+  createHash('sha256').update(canonicalReceipt(value)).digest('hex');
+
+function terminalReport(
+  f: Awaited<ReturnType<typeof fixture>>,
+  findings: Record<string, unknown>[] = [],
+) {
+  const paths = [
+    {
+      source_path: 'src/a.ts',
+      path: 'src/a.ts',
+      resolution: 'same-path-current',
+      disposition: 'included',
+      blob: f.repo.git('rev-parse', 'HEAD:src/a.ts').trim(),
+      mode: '100644',
+      bytes: 20,
+    },
+  ];
+  const captureIdentity = {
+    target: f.state.head,
+    tree: f.repo.git('rev-parse', 'HEAD^{tree}').trim(),
+    paths,
+    scope_digest: digestReceipt(paths),
+    policy: 'affected-current-additions-v1',
+    projection: 'current-affected-files/full-file-addition-projection',
+    reviewer: 'coderabbit-review-agent-committed-v1',
+    reviewer_version: 'fixture-v1',
+  };
+  const document = {
+    version: 1,
+    source: {
+      repo: 'owner/repo',
+      pr: 42,
+      merge_sha: f.state.head,
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    },
+    capture: {
+      ...captureIdentity,
+      equivalence: digestReceipt(captureIdentity),
+      captured_at: '2026-10-28T00:00:00Z',
+    },
+    item_id: 'current-fixture',
+    request_id: f.debt.reference.requestId,
+    outcome: findings.length ? 'terminal-with-findings' : 'terminal-clean',
+    counted: true,
+    classification: { counted: true, outcome: 'completed', findings: findings.length },
+    findings,
+    run_id: 'genuine-run',
+    started_at: '2026-10-28T00:00:00Z',
+    artifacts: {},
+    remediation: 'disabled/deferred',
+    independent_acceptance: false,
+    cli_functional_acceptance: 'pending-D1',
+  };
+  let receiptId = '';
+  let consumed = false;
+  let deliveries = 0;
+  const client = {
+    ...f.client,
+    status: async (): Promise<QueueStatus> => ({
+      ...f.debt.queue,
+      state: findings.length ? 'terminal-with-findings' : 'terminal-clean',
+      pr: 42,
+      mergeSha: f.state.head,
+      itemId: 'current-fixture',
+      receiptId: receiptId || createHash('sha256').update(JSON.stringify(document)).digest('hex'),
+      reviewed: true,
+      consumed,
+    }),
+    report: async (_ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      deliveries++;
+      const bytes = Buffer.from(JSON.stringify(document));
+      receiptId = createHash('sha256').update(bytes).digest('hex');
+      const evidence = await importQueueEvidence(root, receiptId, bytes);
+      consumed = true;
+      return evidence;
+    },
+  };
+  return { client, document, deliveries: () => deliveries };
+}
+
+test('terminal status alone cannot settle; verified report clean settlement is durable, scoped and replayable', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, {
+      ...f.client,
+      status: terminal.client.status,
+    }),
+  ).rejects.toThrow('report capability');
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
+  const completed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    f.state,
+    f.ledger,
+    terminal.client,
+  );
+  expect(completed).toMatchObject({
+    vendor: 'vendor-completed',
+    vendorCompleted: true,
+    completion: { fullBranchReadiness: false, independentAcceptance: false, fixed: false },
+  });
+  if (!completed?.vendorCompleted) throw new Error('missing completion');
+  expect(completed.completion.document.capture.target).toBe(f.state.head);
+  const retained = f.effects.openLedger(f.state.branch).load();
+  expect(retained.records).toHaveLength(f.ledger.records.length + 1);
+  expect(retained.records[1]).toEqual(f.ledger.records[1]); // immutable pending history
+  expect(f.assemble(retained, completed).ready).toBe(true);
+  await loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, retained, terminal.client);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(retained);
+  expect(terminal.deliveries()).toBe(2);
+  const noAgent = {
+    ...retained,
+    records: retained.records.filter(
+      (row) => row.kind !== 'cycle' || row.reviewer === 'coderabbit',
+    ),
+  };
+  expect(f.assemble(noAgent, completed).ready).toBe(false);
+});
+
+test('verified findings retain provenance, block readiness, and require explicit existing receipt dispositions', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f, [
+    { type: 'finding', severity: 'major', fileName: 'src/a.ts', excerpt: 'substantive defect' },
+  ]);
+  const completed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    f.state,
+    f.ledger,
+    terminal.client,
+  );
+  if (!completed?.vendorCompleted) throw new Error('missing completion');
+  let retained = f.effects.openLedger(f.state.branch).load();
+  expect(f.assemble(retained, completed).ready).toBe(false);
+  const finding = deferredReceiptFindings([completed])[0]!;
+  expect(finding.text).toBe('substantive defect');
+  expect(completed.completion.document.findings).toEqual(terminal.document.findings);
+  const disposition = makeDevDisposition(f.effects);
+  expect(
+    (
+      await disposition({
+        repoRoot: f.repo.root,
+        findingId: 'receipt-unknown#f1',
+        action: 'fixed',
+        why: 'typo',
+      })
+    ).status,
+  ).toBe('failed');
+  expect(
+    (
+      await disposition({
+        repoRoot: f.repo.root,
+        findingId: finding.id,
+        action: 'deferred',
+        why: 'tracked elsewhere',
+      })
+    ).status,
+  ).toBe('ok');
+  retained = f.effects.openLedger(f.state.branch).load();
+  expect(f.assemble(retained, completed).ready).toBe(false);
+  expect(
+    (
+      await disposition({
+        repoRoot: f.repo.root,
+        findingId: finding.id,
+        action: 'fixed',
+        why: 'concrete fix independently recorded',
+      })
+    ).status,
+  ).toBe('ok');
+  retained = f.effects.openLedger(f.state.branch).load();
+  expect(f.assemble(retained, completed).ready).toBe(true);
+});
+
+test.each([
+  'partial',
+  'unknown',
+  'uncounted',
+  'source',
+  'request',
+  'tree',
+  'equivalence',
+  'mixed-clean',
+])('terminal report %s cannot manufacture completion', async (fault) => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  switch (fault) {
+    case 'partial':
+      terminal.document.capture.paths[0]!.disposition = 'unsupported';
+      break;
+    case 'unknown':
+      terminal.document.outcome = 'unknown';
+      break;
+    case 'uncounted':
+      terminal.document.classification.counted = false;
+      break;
+    case 'source':
+      terminal.document.source.merge_sha = 'f'.repeat(40);
+      break;
+    case 'request':
+      terminal.document.request_id = 'other-request';
+      break;
+    case 'tree':
+      terminal.document.capture.tree = 'f'.repeat(40);
+      break;
+    case 'equivalence':
+      terminal.document.capture.equivalence = 'f'.repeat(64);
+      break;
+    case 'mixed-clean':
+      terminal.document.findings.push({ severity: 'major', excerpt: 'hidden defect' });
+      break;
+  }
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, terminal.client),
+  ).rejects.toThrow();
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
+});
+
+test('report delivery failure, digest tamper and changed identity retain pending debt without credit', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  const unavailable = {
+    ...terminal.client,
+    report: async () => {
+      throw new Error('queue authorization');
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, unavailable),
+  ).rejects.toThrow('queue authorization');
+  const tampered = {
+    ...terminal.client,
+    report: async (ref: QueueReference, root: string) => {
+      const evidence = await terminal.client.report(ref, root);
+      await writeFile(join(root, evidence.receiptId + '.json'), '{}');
+      return evidence;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, tampered),
+  ).rejects.toThrow('digest');
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
+  const g = await fixture();
+  const terminalDrift = terminalReport(g);
+  const drifted = {
+    ...terminalDrift.client,
+    report: async (ref: QueueReference, root: string) => {
+      const evidence = await terminalDrift.client.report(ref, root);
+      await g.repo.write('src/a.ts', 'changed after report');
+      return evidence;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(g.effects, 'merge-queue', g.state, g.ledger, drifted),
+  ).rejects.toThrow('identity changed');
+  expect(g.effects.openLedger(g.state.branch).load()).toEqual(g.ledger);
+});
+
+test('acknowledged report plus local settlement write failure replays the same receipt without new enrollment', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f, [{ severity: 'major', excerpt: 'retained through crash' }]);
+  let enrollments = 0;
+  const client = {
+    ...terminal.client,
+    enqueue: async () => {
+      enrollments++;
+      return f.debt.queue;
+    },
+  };
+  const store = f.effects.openLedger(f.state.branch);
+  const failedEffects = {
+    ...f.effects,
+    openLedger: () => ({
+      ...store,
+      mutate: async () => {
+        throw new Error('disk full after acknowledgement');
+      },
+    }),
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(failedEffects, 'merge-queue', f.state, f.ledger, client),
+  ).rejects.toThrow('disk full');
+  expect(store.load()).toEqual(f.ledger);
+  const completed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    f.state,
+    f.ledger,
+    client,
+  );
+  if (!completed?.vendorCompleted) throw new Error('missing completion');
+  const retained = store.load();
+  await loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, retained, client);
+  expect(store.load()).toEqual(retained);
+  expect(
+    deferredReceiptFindings(
+      retained.records.filter((row) => row.kind === 'vendor-debt').map((row) => row.debt),
+    ),
+  ).toHaveLength(1);
+  expect(enrollments).toBe(0);
+});
+
+test('late old-head completion settles that obligation without manufacturing successor coverage or enrollment', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-q', '-m', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  let enrollments = 0;
+  const client = {
+    ...terminal.client,
+    enqueue: async () => {
+      enrollments++;
+      return f.debt.queue;
+    },
+  };
+  expect(
+    await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, client),
+  ).toBeUndefined();
+  const retained = f.effects.openLedger(f.state.branch).load();
+  const completed = retained.records.at(-1);
+  expect(completed).toMatchObject({
+    kind: 'vendor-debt',
+    debt: { vendorCompleted: true, reference: f.debt.reference },
+  });
+  expect(currentLedgerDebt(retained, 'merge-queue', read.state)).toBeUndefined();
+  expect(
+    await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, client),
+  ).toBeUndefined();
+  expect(enrollments).toBe(0);
+  expect(retained.records[1]).toEqual(f.ledger.records[1]);
+});
+
+test('missing report or post-report queue identity refusal retains pending debt', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  const missing = { ...terminal.client, report: async () => null };
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, missing),
+  ).rejects.toThrow('no verified report');
+  let reads = 0;
+  const invalid = {
+    ...terminal.client,
+    status: async (): Promise<QueueStatus> => ({
+      ...(await terminal.client.status()),
+      ...(reads++ > 0
+        ? {
+            state: 'blocked',
+            reason: { source: 'queue', category: 'identity', code: 'forge-identity' },
+          }
+        : {}),
+    }),
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, invalid),
+  ).rejects.toThrow('genuine complete');
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
+});
+
+test('settlement consumes the real Q3 paged report protocol before importing substantive findings', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f, [
+    { severity: 'major', excerpt: 'bounded receipt finding '.repeat(300) },
+  ]);
+  const bytes = Buffer.from(JSON.stringify(terminal.document));
+  const receiptId = createHash('sha256').update(bytes).digest('hex');
+  const chunks = Math.ceil(bytes.length / 3072);
+  let consumed = false;
+  const delivered = new Set<number>();
+  const common = {
+    version: 1,
+    receipt_id: receiptId,
+    sha256: receiptId,
+    bytes: bytes.length,
+    chunks,
+    encoding: 'base64-utf8-json',
+  };
+  const client = makeQueueClient(async (raw) => {
+    const request = JSON.parse(raw) as Record<string, unknown>;
+    let result: unknown;
+    if (request['op'] === 'status')
+      result = { ...(await terminal.client.status()), receiptId, consumed };
+    else if (request['op'] === 'report' && request['cursor'] === null)
+      result = { page: { ...common, kind: 'manifest', cursor: receiptId + ':0' } };
+    else if (request['op'] === 'report' && typeof request['cursor'] === 'string') {
+      const index = Number(request['cursor'].slice(receiptId.length + 1));
+      if (index !== delivered.size) throw new Error('out of order fixture delivery');
+      const part = bytes.subarray(index * 3072, (index + 1) * 3072);
+      delivered.add(index);
+      result = {
+        page: {
+          ...common,
+          kind: 'chunk',
+          index,
+          chunk_sha256: createHash('sha256').update(part).digest('hex'),
+          data: part.toString('base64'),
+          next_cursor: index + 1 < chunks ? receiptId + ':' + String(index + 1) : null,
+        },
+      };
+    } else if (request['op'] === 'ack' && delivered.size === chunks) {
+      consumed = true;
+      result = { ...(await terminal.client.status()), receiptId, consumed };
+    } else
+      throw new Error('unexpected queue operation; no enrollment or vendor dispatch permitted');
+    return JSON.stringify({
+      v: 1,
+      requestId: request['requestId'],
+      binding: request['binding'],
+      result,
+    });
+  });
+  const completed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    f.state,
+    f.ledger,
+    client,
+  );
+  expect(consumed).toBe(true);
+  expect(delivered.size).toBe(chunks);
+  expect(chunks).toBeGreaterThan(1);
+  if (!completed?.vendorCompleted) throw new Error('missing completion');
+  expect(completed.completion.document.findings).toEqual(terminal.document.findings);
+  expect(f.assemble(f.effects.openLedger(f.state.branch).load(), completed).ready).toBe(false);
 });

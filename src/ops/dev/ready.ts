@@ -85,10 +85,11 @@ export async function readReadinessWithGaps(
   if (!read.ok) return { ok: false, reason: `${name}: ${read.reason}` };
   const { state } = read;
   // A malformed ledger throws; the op boundary names it.
-  const ledger = effects.openLedger(state.branch).load();
+  let ledger = effects.openLedger(state.branch).load();
   const debt = (policy?.reviewers ?? ['coderabbit', 'agent']).includes('coderabbit')
     ? await loadCurrentDeferredVendorDebt(effects, target, state, ledger, queueClient)
     : undefined;
+  if (debt?.vendorCompleted) ledger = effects.openLedger(state.branch).load();
   const assembled = assembleReadiness({
     branch: state.branch,
     target,

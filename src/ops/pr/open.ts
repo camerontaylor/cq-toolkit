@@ -175,12 +175,12 @@ export function renderReadinessSection(
       '',
       '### Deferred vendor review debt',
       '',
-      'Vendor review remains outstanding. Agent coverage and queue enrollment do not complete vendor review.',
+      'Pending obligations remain outstanding; completed entries link verified affected-current receipts only. Agent coverage and queue enrollment do not complete vendor review.',
     );
     for (const debt of debts.values()) {
       const binding = debt.reference.binding;
       lines.push(
-        `- request \`${mdLine(debt.reference.requestId)}\` · head \`${mdLine(binding.kind === 'deferred-author' ? binding.head : binding.mergeSha)}\` · queue \`${mdLine(debt.queue.state)}\` · vendor \`${mdLine(debt.vendor)}\` · vendorCompleted: false · origin \`${mdLine(debt.originAttempt.cycleId)}\`${debt.predecessor ? ` · predecessor \`${mdLine(debt.predecessor.requestId)}\`` : ''}`,
+        `- request \`${mdLine(debt.reference.requestId)}\` · head \`${mdLine(binding.kind === 'deferred-author' ? binding.head : binding.mergeSha)}\` · queue \`${mdLine(debt.queue.state)}\` · vendor \`${mdLine(debt.vendor)}\` · vendorCompleted: ${String(debt.vendorCompleted)}${debt.vendorCompleted ? ` · affected-current receipt \`${mdLine(debt.completion.receiptId)}\` (no full-branch or independent credit)` : ''} · origin \`${mdLine(debt.originAttempt.cycleId)}\`${debt.predecessor ? ` · predecessor \`${mdLine(debt.predecessor.requestId)}\`` : ''}`,
       );
     }
   }

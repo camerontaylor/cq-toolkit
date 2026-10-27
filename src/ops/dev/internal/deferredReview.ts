@@ -4,8 +4,10 @@ import {
   isComplete,
   openBlocking,
   type FindingsRecord,
+  type Finding,
   type ReviewSource,
 } from '../../review/findings.js';
+import { QueueEvidenceSchema } from '../../review/internal/queueEvidence.js';
 import {
   QueueSha,
   QueueToken,
@@ -131,13 +133,10 @@ const DeferralIdentitySchema = z
   })
   .strict();
 
-export const DeferredVendorDebtSchema = z
+const DebtIdentitySchema = z
   .object({
     reference: QueueReferenceSchema.refine((ref) => ref.binding.kind === 'deferred-author'),
     queue: QueueStatusSchema,
-    vendor: z.enum(['vendor-pending', 'vendor-blocked-transient', 'vendor-needs-action']),
-    /** Independent acceptance and required CI are separate evidence. */
-    vendorCompleted: z.literal(false),
     /** Genuine retained vendor cycle; a successor never changes this evidence. */
     originAttempt: VendorOutageOriginSchema,
     /** Current enrollment, explicitly not a vendor run. */
@@ -145,6 +144,18 @@ export const DeferredVendorDebtSchema = z
     predecessor: QueueReferenceSchema.exactOptional(),
   })
   .strict();
+export const DeferredVendorDebtSchema = z.discriminatedUnion('vendorCompleted', [
+  DebtIdentitySchema.extend({
+    vendor: z.enum(['vendor-pending', 'vendor-blocked-transient', 'vendor-needs-action']),
+    vendorCompleted: z.literal(false),
+  }).strict(),
+  DebtIdentitySchema.extend({
+    vendor: z.literal('vendor-completed'),
+    vendorCompleted: z.literal(true),
+    /** Genuine affected-current receipt; never full-branch or independent proof. */
+    completion: QueueEvidenceSchema,
+  }).strict(),
+]);
 export type DeferredVendorDebt = z.infer<typeof DeferredVendorDebtSchema>;
 
 /** A server-proven vendor outage is debt; queue/unknown failures are blockers. */
@@ -236,6 +247,7 @@ export async function advanceDeferredVendorDebt(
     before.producer !== after.producer ||
     before.target !== after.target ||
     before.targetSelector !== after.targetSelector ||
+    prior.vendorCompleted ||
     !continuableQueue(prior.queue)
   ) {
     throw new Error('successor must retain outage lineage with a new immutable head and request');
@@ -259,6 +271,11 @@ export async function bindDeferredPublication(
   debt: DeferredVendorDebt,
   pr: number,
 ): Promise<DeferredVendorDebt> {
+  if (debt.vendorCompleted) {
+    if (debt.queue.pr !== pr || !verifiedCompletedDebt(debt))
+      throw new Error('completed debt publication identity differs');
+    return debt;
+  }
   const reference = QueueReferenceSchema.parse(debt.reference);
   const queue = QueueStatusSchema.parse(await client.bind({ ...reference, pr }));
   if (queue.pr !== pr || !continuableQueue(queue)) {
@@ -294,8 +311,9 @@ export function matchesDeferredVendorDebt(
     parsed.data.originAttempt.target === identity.target &&
     parsed.data.deferral.base === identity.base &&
     parsed.data.deferral.dirtySha256 === identity.dirtySha256 &&
-    continuableQueue(parsed.data.queue) &&
-    debt.vendorCompleted === false
+    (parsed.data.vendorCompleted
+      ? verifiedCompletedDebt(parsed.data)
+      : continuableQueue(parsed.data.queue))
   );
 }
 
@@ -359,7 +377,16 @@ export function allowsDeferredVendorComposition(
 ): boolean {
   return (
     hasDeferredReviewSources(record, configured, debt, identity) &&
-    openBlocking(record, blockingSeverities).length === 0
+    openBlocking(record, blockingSeverities).length === 0 &&
+    openBlocking(
+      {
+        ...record,
+        findings: deferredReceiptFindings([debt]).map(
+          (finding) => record.findings.find((retained) => retained.id === finding.id) ?? finding,
+        ),
+      },
+      blockingSeverities,
+    ).length === 0
   );
 }
 
@@ -370,4 +397,82 @@ export async function refreshDeferredVendorDebt(
 ): Promise<DeferredVendorDebt> {
   const parsed = DeferredVendorDebtSchema.parse(debt);
   return { ...parsed, queue: QueueStatusSchema.parse(await client.status(parsed.reference)) };
+}
+
+/** Strict terminal receipt checks supplement Q3's authenticated byte/source verification.
+ * Completion covers only the captured current affected content, never this branch's full diff.
+ */
+export function verifiedCompletedDebt(debt: DeferredVendorDebt): boolean {
+  if (!debt.vendorCompleted) return false;
+  const { document, receiptId } = debt.completion;
+  const { queue, reference } = debt;
+  const binding = reference.binding;
+  const reused = Boolean(
+    queue.reusedFrom &&
+    queue.receiptSource &&
+    queue.receiptEquivalence === document.capture.equivalence &&
+    queue.receiptSource.repo === document.source.repo &&
+    queue.receiptSource.pr === document.source.pr &&
+    queue.receiptSource.mergeSha === document.source.merge_sha &&
+    queue.receiptSource.targetSelector === document.source.target_selector,
+  );
+  return (
+    binding.kind === 'deferred-author' &&
+    !queue.reason &&
+    queue.consumed &&
+    queue.reviewed &&
+    queue.receiptId === receiptId &&
+    ['terminal-clean', 'terminal-with-findings', 'reused'].includes(queue.state) &&
+    ['terminal-clean', 'terminal-with-findings'].includes(document.outcome) &&
+    document.counted &&
+    document.classification?.['counted'] === true &&
+    document.classification['outcome'] === 'completed' &&
+    document.source.repo === binding.repo &&
+    document.source.target_selector === binding.targetSelector &&
+    (reused ||
+      (document.item_id === queue.itemId &&
+        document.source.pr === queue.pr &&
+        document.source.merge_sha === queue.mergeSha &&
+        document.request_id === reference.requestId)) &&
+    document.capture.paths.length > 0 &&
+    document.capture.paths.every(
+      (path) =>
+        ['included', 'renamed'].includes(path.disposition) &&
+        typeof path['blob'] === 'string' &&
+        QueueSha.safeParse(path['blob']).success &&
+        ['100644', '100755'].includes(String(path['mode'])) &&
+        typeof path['bytes'] === 'number' &&
+        Number.isSafeInteger(path['bytes']) &&
+        path['bytes'] >= 0,
+    ) &&
+    (document.outcome !== 'terminal-clean' || document.findings.length === 0) &&
+    (document.outcome !== 'terminal-with-findings' || document.findings.length > 0) &&
+    document.findings.every(
+      (finding) =>
+        typeof finding['severity'] === 'string' &&
+        ['critical', 'major', 'minor', 'info'].includes(finding['severity']) &&
+        (typeof finding['excerpt'] === 'string' || typeof finding['text'] === 'string'),
+    )
+  );
+}
+
+/** Stable imported IDs, preserving original receipt findings in completion.document. */
+export function deferredReceiptFindings(debts: readonly DeferredVendorDebt[]): Finding[] {
+  const receipts = new Map<string, DeferredVendorDebt>();
+  for (const debt of debts)
+    if (debt.vendorCompleted && verifiedCompletedDebt(debt))
+      receipts.set(debt.completion.receiptId, debt);
+  return [...receipts.values()].flatMap((debt) =>
+    debt.vendorCompleted
+      ? debt.completion.document.findings.map((finding, index) => ({
+          id: `receipt-${debt.completion.receiptId}#f${String(index + 1)}`,
+          source: 'coderabbit',
+          severity: String(finding['severity']),
+          text: String(finding['excerpt'] ?? finding['text']),
+          status: 'open' as const,
+          ...(typeof finding['fileName'] === 'string' ? { file: finding['fileName'] } : {}),
+          evidence: debt.completion.receiptId,
+        }))
+      : [],
+  );
 }

@@ -18,6 +18,7 @@ import {
 } from '../dev/internal/deferredLedger.js';
 import {
   hasDeferredReviewSources,
+  deferredReceiptFindings,
   type DeferredVendorDebt,
 } from '../dev/internal/deferredReview.js';
 import type { DeferredQueueClient } from './internal/queueProtocol.js';
@@ -280,28 +281,44 @@ export function makeReviewRun(
               kind: 'coderabbit',
               status: 'blocked',
               cycleId: deferredVendorDebt.originAttempt.cycleId,
-              reason: 'vendor review remains outstanding under durable deferred debt',
+              reason: deferredVendorDebt.vendorCompleted
+                ? 'verified affected-current vendor completion; full-branch coverage remains agent evidence'
+                : 'vendor review remains outstanding under durable deferred debt',
             },
           ],
-          findings: ledger.records
-            .filter(
-              (entry): entry is DevCycleRecord =>
-                entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
-            )
-            .flatMap((entry) =>
-              entry.findings.map((finding) => {
-                const disposition = dispositions.get(finding.id);
-                return {
-                  id: finding.id,
-                  source: 'coderabbit',
-                  severity: finding.severity,
-                  text: finding.excerpt ?? '',
-                  ...(finding.fileName ? { file: finding.fileName } : {}),
-                  status: disposition?.action ?? 'open',
-                  ...(disposition ? { reason: disposition.why } : {}),
-                };
-              }),
-            ),
+          findings: [
+            ...deferredReceiptFindings(
+              ledger.records
+                .filter((entry) => entry.kind === 'vendor-debt')
+                .map((entry) => entry.debt),
+            ).map((finding) => {
+              const disposition = dispositions.get(finding.id);
+              return {
+                ...finding,
+                status: disposition?.action ?? finding.status,
+                ...(disposition ? { reason: disposition.why } : {}),
+              };
+            }),
+            ...ledger.records
+              .filter(
+                (entry): entry is DevCycleRecord =>
+                  entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
+              )
+              .flatMap((entry) =>
+                entry.findings.map((finding): Finding => {
+                  const disposition = dispositions.get(finding.id);
+                  return {
+                    id: finding.id,
+                    source: 'coderabbit',
+                    severity: finding.severity,
+                    text: finding.excerpt ?? '',
+                    ...(finding.fileName ? { file: finding.fileName } : {}),
+                    status: disposition?.action ?? 'open',
+                    ...(disposition ? { reason: disposition.why } : {}),
+                  };
+                }),
+              ),
+          ],
         });
       }
       if (coderabbitConfigured && !deferredVendorDebt) {
@@ -809,6 +826,27 @@ export function makeReviewRun(
             deps.queueClient,
             deadline.signal,
           );
+          const imported = deferredReceiptFindings(
+            effects
+              .openLedger(state.branch)
+              .load()
+              .records.filter((entry) => entry.kind === 'vendor-debt')
+              .map((entry) => entry.debt),
+          );
+          const unseen = imported.filter(
+            (finding) => !record.findings.some((item) => item.id === finding.id),
+          );
+          if (unseen.length > 0)
+            return {
+              status: 'needs-human',
+              reason:
+                'review.run: newly consumed vendor findings retained; re-run composition to address them',
+              report: {
+                ...record,
+                findings: [...record.findings, ...unseen],
+                ...(deferredVendorDebt ? { deferredVendorDebt } : {}),
+              },
+            };
           deferredComplete =
             deferredVendorDebt !== undefined &&
             hasDeferredReviewSources(record, policy.review.reviewers, deferredVendorDebt, {
