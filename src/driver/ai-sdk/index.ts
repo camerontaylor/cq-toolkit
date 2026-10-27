@@ -219,6 +219,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
 import { createDeepSeek } from '@ai-sdk/deepseek';
+import { fetch as undiciFetch, getGlobalDispatcher } from 'undici';
 import { deepFreeze } from '../../shared/deepFreeze.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
@@ -261,7 +262,7 @@ import type {
 import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
 import { defaultSessionsDir } from '../sessions-dir.js';
-import { createStepFetch } from './step-fetch.js';
+import { STEP_FETCH_MARGIN_MS } from './step-fetch.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -439,9 +440,14 @@ export class AiSdkDriver implements Driver {
       );
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same
-    // step bound (step-fetch.ts); injected providers are left untouched. The
-    // cut is fixed PER DRIVER INSTANCE by design (one undici dispatcher per
-    // fetch, step-fetch.ts) — and that is exactly how the per-request
+    // step bound AND routed through the live process-global dispatcher
+    // (createEgressAwareStepFetch below): the per-dispatch socket timeouts
+    // keep the step backstop while an egress dispatcher (a ProxyAgent for
+    // egress, EnvHttpProxyAgent, undici's MockAgent) keeps applying — the
+    // step bound is the default transport, never a silent bypass of either
+    // side. Injected providers are left untouched. The cut is fixed PER
+    // DRIVER INSTANCE by design (one socket bound per driver fetch, computed
+    // once here) — and that is exactly how the per-request
     // DriverRequest.stepTimeoutMs reaches it: the factory constructs a FRESH
     // lane per resolve() and passes `request.stepTimeoutMs ??
     // lanes.aiSdk.stepTimeoutMs` here, so this constructor value IS that
@@ -450,7 +456,9 @@ export class AiSdkDriver implements Driver {
     // driver constructed without the option keeps DEFAULT_STEP_TIMEOUT_MS:
     // the frozen run seam (RunOptions/Budget) carries no per-run step bound,
     // so no later path can — or needs to — retune this cut.
-    this.providers = options.providers ?? defaultProviders(createStepFetch(stepTimeoutMs));
+    this.providers =
+      options.providers ??
+      defaultProviders(createEgressAwareStepFetch(stepTimeoutMs));
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
@@ -1721,6 +1729,141 @@ function nowIso(): string {
  */
 function signalAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
+}
+
+// ---------------------------------------------------------------------------
+// The default providers' transport — step backstop over the GLOBAL dispatcher
+// ---------------------------------------------------------------------------
+
+/**
+ * The stock `globalThis.fetch` binding, captured ONCE at module load — the
+ * baseline for {@link createEgressAwareStepFetch}'s stub detection. Node
+ * never rebinds `globalThis.fetch` by itself, so a live read that DIFFERS
+ * from this baseline is a deliberate process-global replacement (a test
+ * stub, an interceptor, an egress shim) made after this module loaded, and
+ * it is honored as the transport below. A replacement installed BEFORE this
+ * module loads is indistinguishable from the stock binding and is not
+ * honored — the honest residual of identity-based detection. (The vacuous
+ * alternative — treating the always-populated
+ * `Symbol.for('undici.globalDispatcher.1')` registry as "egress customized"
+ * and flipping to `globalThis.fetch` — was tried and rejected: it silently
+ * disabled the step socket backstop on every untouched runtime.)
+ */
+const STOCK_GLOBAL_FETCH = globalThis.fetch;
+
+/** Structural duck type of a undici dispatcher — valid across undici copies. */
+interface UndiciDispatchTarget {
+  dispatch: (options: unknown, handler: unknown) => unknown;
+}
+
+/**
+ * `getGlobalDispatcher()` always yields a dispatcher (it materializes
+ * undici's stock default Agent into the shared cross-copy registry
+ * `Symbol.for('undici.globalDispatcher.1')` when the slot is empty — which
+ * is why registry PRESENCE is meaningless as a customization signal), but a
+ * direct registry write could install garbage: fail LOUDLY before any wire
+ * send instead of dispatching into a non-object.
+ */
+function asUndiciDispatchTarget(value: unknown): UndiciDispatchTarget {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    typeof (value as UndiciDispatchTarget).dispatch !== 'function'
+  ) {
+    throw new Error(
+      'ai-sdk driver: the process-global undici dispatcher does not implement dispatch()',
+    );
+  }
+  return value as UndiciDispatchTarget;
+}
+
+/**
+ * A minimal undici Dispatcher that routes EVERY dispatch through the LIVE
+ * process-global dispatcher (whatever undici copy installed it — the
+ * registry symbol is shared across copies, so npm-undici's
+ * `setGlobalDispatcher(new ProxyAgent(...))` is what Node's own fetch uses
+ * too) while overriding `headersTimeout`/`bodyTimeout` PER DISPATCH to the
+ * step socket bound. undici honors both as per-request overrides of the
+ * dispatcher's constructor defaults (documented Client.dispatch options,
+ * forwarded by Agent/Pool/ProxyAgent), so the step backstop now rides ON
+ * TOP of the global dispatcher instead of replacing it: a ProxyAgent keeps
+ * proxying, and on an untouched runtime (the stock default Agent) the
+ * overrides are the only effective timeout settings — exactly the socket
+ * behavior the dedicated bare Agent in step-fetch.ts used to provide,
+ * without that Agent's silent bypass of egress customization.
+ *
+ * Only `dispatch` is implemented: undici's fetch calls nothing else on an
+ * init-provided dispatcher, and lifecycle (`close`/`destroy`) must never
+ * reach the SHARED process-global dispatcher from here. An exotic dispatcher
+ * that drops the per-dispatch timeout options loses only the backstop (the
+ * documented residual) — it still carries the traffic, which is the fix.
+ */
+function stepBackstopDispatcher(
+  inner: UndiciDispatchTarget,
+  socketTimeoutMs: number,
+): UndiciDispatchTarget {
+  return {
+    dispatch: (options, handler) =>
+      inner.dispatch(
+        {
+          ...(options as Record<string, unknown>),
+          headersTimeout: socketTimeoutMs,
+          bodyTimeout: socketTimeoutMs,
+        },
+        handler,
+      ),
+  };
+}
+
+/**
+ * The default providers' HTTP transport: the LIVE process-global undici
+ * dispatcher underneath (an egress ProxyAgent, EnvHttpProxyAgent, undici's
+ * MockAgent, or the stock default Agent), wrapped so the per-dispatch
+ * socket timeouts keep the step backstop — bounded by
+ * `stepTimeoutMs + STEP_FETCH_MARGIN_MS` exactly as step-fetch.ts bounded
+ * its bare Agent. NOTHING about the transport is decided by whether the
+ * dispatcher registry happens to be populated: the step bound is the
+ * DEFAULT on every path, and egress customization is honored, not detected.
+ *
+ * A runtime `setGlobalDispatcher` is honored (the dispatcher is resolved
+ * per call — reading it is NOT a transport decision here, since every path
+ * below dispatches THROUGH it). If `globalThis.fetch` itself was REPLACED
+ * after module load (see STOCK_GLOBAL_FETCH), the live replacement is
+ * called instead — deliberate process-global interception wins — with the
+ * same backstop dispatcher injected as `init.dispatcher`: a pass-through
+ * stub keeps both the egress route and the socket backstop, while an
+ * opaque stub owns its transport (its socket semantics are then its own;
+ * no dispatcher can be forced through it). A registry slot that does not
+ * hold a dispatcher fails LOUDLY (asUndiciDispatchTarget) rather than
+ * silently bypassing or being bypassed.
+ */
+function createEgressAwareStepFetch(stepTimeoutMs: number): typeof globalThis.fetch {
+  const socketTimeoutMs = stepTimeoutMs + STEP_FETCH_MARGIN_MS;
+  return (input, init) => {
+    const dispatcher = stepBackstopDispatcher(
+      asUndiciDispatchTarget(getGlobalDispatcher()),
+      socketTimeoutMs,
+    );
+    if (globalThis.fetch !== STOCK_GLOBAL_FETCH) {
+      return globalThis.fetch(
+        input as Parameters<typeof globalThis.fetch>[0],
+        {
+          ...(init as Parameters<typeof globalThis.fetch>[1]),
+          dispatcher,
+        } as unknown as Parameters<typeof globalThis.fetch>[1],
+      ) as unknown as Promise<Response>;
+    }
+    // npm-undici's fetch pairs WHATWG shapes with the dispatcher duck type
+    // (as step-fetch.ts did; the bundled global fetch is a different undici
+    // copy, but the dispatcher interface is copy-agnostic by design).
+    return undiciFetch(
+      input as Parameters<typeof undiciFetch>[0],
+      {
+        ...(init as Parameters<typeof undiciFetch>[1]),
+        dispatcher,
+      } as unknown as Parameters<typeof undiciFetch>[1],
+    ) as unknown as Promise<Response>;
+  };
 }
 
 /**
