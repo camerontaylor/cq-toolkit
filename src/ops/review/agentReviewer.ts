@@ -357,7 +357,7 @@ export async function runAgentReviewer(
       rebuildFindings();
       updatePieces(report.coverage);
       if (budgetStop === 'before' && firstFailure === undefined)
-        return { status: 'budget-exhausted', report: snapshot()! };
+        return { status: 'budget-exhausted', report: { ...snapshot()!, budgetExhausted: true } };
       if (budgetStop === 'during' && firstFailure === undefined)
         return {
           status: 'needs-human',
