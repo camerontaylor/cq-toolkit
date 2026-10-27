@@ -518,6 +518,14 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
                           "provably read (explicit schema marker or author_* state "
                           "keys); operator recovery required (never restore old queue "
                           "snapshots or start incompatible binaries)")
+        # The journal predates any state written by the newly deployed runner.
+        # Recheck the live queue for the recorded prior reader under this lock.
+        live_compatibility = compatibility_record(effects, record["prior_head"])
+        if not rollback_compatible(live_compatibility):
+            raise Refused("rollback disabled: current queue state the prior target "
+                          "cannot provably read; operator recovery required "
+                          "(never restore old queue snapshots or start "
+                          "incompatible binaries)")
         drain = drain_check(effects, _runner_liveness(helper_module))
         if not drain["drained"]:
             raise Refused("cannot roll back with live/ambiguous reviews: "

@@ -555,6 +555,55 @@ class RollbackPlanTests(ControllerFixture):
                     for p in self.record_dir.glob("controller-*.json")]
         self.assertEqual([j["operation"] for j in journals], ["rollback"])
 
+    def test_post_journal_author_requests_refuse_before_drain_or_switch(self):
+        with self.fake_switch():
+            dc.deploy_plan(self.effects, host, self.target, self.tag,
+                           self.overlay_path)
+        journal_paths = list(self.record_dir.glob("controller-*.json"))
+        prior = json.loads(journal_paths[0].read_text())
+        self.assertTrue(dc.rollback_compatible(prior["rollback_compatibility"]))
+        self.write_state("queue.json", {"items": [], "starts": [],
+                                       "author_requests": {"new-request": {}}})
+        queue_bytes = (self.runner / "state/queue.json").read_bytes()
+        with mock.patch.object(dc, "drain_check") as drain:
+            with mock.patch.object(host, "switch") as helper_switch:
+                with self.assertRaisesRegex(dc.Refused, "current queue state"):
+                    dc.rollback_plan(self.effects, host, prior, self.overlay_path)
+                drain.assert_not_called()
+                helper_switch.assert_not_called()
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
+        self.assertEqual((self.runner / "state/queue.json").read_bytes(), queue_bytes)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), journal_paths)
+
+    def test_post_journal_compatible_state_rechecked_under_lock_and_rolls_back(self):
+        with self.fake_switch():
+            dc.deploy_plan(self.effects, host, self.target, self.tag,
+                           self.overlay_path)
+        prior = json.loads(next(self.record_dir.glob("controller-*.json")).read_text())
+        self.write_state("queue.json", {"items": [], "starts": [123],
+                                       "last_tick": "2026-10-28T01:00:00Z"})
+        queue_bytes = (self.runner / "state/queue.json").read_bytes()
+        real_compatibility = dc.compatibility_record
+
+        def check_locked(effects, target):
+            self.assertEqual(target, self.before)
+            with (effects.state_dir() / dc.LOCK_NAME).open("a") as competing:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return real_compatibility(effects, target)
+
+        with mock.patch.object(dc, "compatibility_record", side_effect=check_locked) as check:
+            with self.fake_switch():
+                result = dc.rollback_plan(self.effects, host, prior, self.overlay_path)
+            check.assert_called_once_with(self.effects, self.before)
+        self.assertEqual(result["rolled_back_to"], self.before)
+        self.assertEqual(result["tag"], prior["prior_tag"])
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+        self.assertEqual((self.runner / "state/queue.json").read_bytes(), queue_bytes)
+        journals = [json.loads(p.read_text())
+                    for p in self.record_dir.glob("controller-*.json")]
+        self.assertEqual(sorted(j["operation"] for j in journals), ["deploy", "rollback"])
+
     def test_schema_incompatible_prior_target_disables_automatic_rollback(self):
         self.at_target()
         incompatible = {**self.prior,
