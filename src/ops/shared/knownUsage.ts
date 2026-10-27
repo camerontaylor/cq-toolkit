@@ -18,10 +18,29 @@ export interface KnownUsageSummary {
   unpricedCount: number;
 }
 
-function validUsage(usage: Usage): boolean {
-  return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.reasoning].every(
-    (value) => value === undefined || (Number.isSafeInteger(value) && value >= 0),
+function validTokens(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validUsage(usage: unknown): usage is Usage {
+  if (typeof usage !== 'object' || usage === null) return false;
+  const fields = usage as Record<string, unknown>;
+  return (
+    [fields.input, fields.output, fields.cacheRead, fields.cacheWrite].every(validTokens) &&
+    (fields.reasoning === undefined || validTokens(fields.reasoning))
   );
+}
+
+/** Keep telemetry malformed by a provider from changing the driver outcome. */
+export function normalizeUsageObservation(observation: UsageObservation): UsageObservation {
+  return {
+    ...(validUsage(observation.usage) ? { usage: observation.usage } : {}),
+    ...(observation.costUSD !== undefined &&
+    Number.isFinite(observation.costUSD) &&
+    observation.costUSD >= 0
+      ? { costUSD: observation.costUSD }
+      : {}),
+  };
 }
 
 function sameObservation(a: UsageObservation, b: UsageObservation): boolean {

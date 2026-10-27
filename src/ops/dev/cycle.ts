@@ -70,6 +70,7 @@ import { CLEAN_TREE, readWorkState } from './internal/workState.js';
 import { DevCycleCompositionInputSchema } from './registry.js';
 import {
   createKnownUsageLedger,
+  normalizeUsageObservation,
   type KnownUsageSummary,
   type UsageObservation,
 } from '../shared/knownUsage.js';
@@ -716,7 +717,18 @@ export function meterDrivers(
         driver: {
           run: async (invocation, options) => {
             const id = `cycle:${String(dispatch++)}`;
-            observe.start(id);
+            try {
+              observe.start(id);
+            } catch {
+              // Telemetry cannot prevent a driver invocation.
+            }
+            const settle = (observation: UsageObservation): void => {
+              try {
+                observe.settle(id, normalizeUsageObservation(observation));
+              } catch {
+                // Telemetry cannot replace the driver result or error.
+              }
+            };
             const meter = (usage: Usage): void => {
               const total =
                 usage.input +
@@ -731,13 +743,18 @@ export function meterDrivers(
             try {
               result = await resolved.driver.run.call(resolved.driver, invocation, options);
             } catch (err) {
-              const partial = usageOf(err);
+              let partial: Usage | undefined;
+              try {
+                partial = usageOf(err);
+              } catch {
+                // A malformed error's usage accessor cannot replace that error.
+              }
               if (partial !== undefined) meter(partial);
-              observe.settle(id, partial === undefined ? {} : { usage: partial });
+              settle(partial === undefined ? {} : { usage: partial });
               throw err;
             }
             meter(result.usage);
-            observe.settle(id, {
+            settle({
               usage: result.usage,
               ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
             });
@@ -764,13 +781,14 @@ function usageOf(err: unknown): Usage | undefined {
   const usage: unknown = (err as { usage?: unknown }).usage;
   if (typeof usage !== 'object' || usage === null) return undefined;
   const fields = usage as Record<string, unknown>;
+  const { input, output, cacheRead, cacheWrite, reasoning } = fields;
   if (
-    typeof fields.input !== 'number' ||
-    typeof fields.output !== 'number' ||
-    typeof fields.cacheRead !== 'number' ||
-    typeof fields.cacheWrite !== 'number' ||
-    (fields.reasoning !== undefined && typeof fields.reasoning !== 'number')
+    typeof input !== 'number' ||
+    typeof output !== 'number' ||
+    typeof cacheRead !== 'number' ||
+    typeof cacheWrite !== 'number' ||
+    (reasoning !== undefined && typeof reasoning !== 'number')
   )
     return undefined;
-  return usage as Usage;
+  return { input, output, cacheRead, cacheWrite, ...(reasoning === undefined ? {} : { reasoning }) };
 }
