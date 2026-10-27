@@ -22,7 +22,7 @@
 //   different workspace directories comparable — asserted below.
 //
 //   Schema-invalid input is asserted PER TRANSPORT (the one scoped
-//   difference): stdio and core deny with 'invalid input:' and execute
+//   difference): stdio and core deny with 'INPUT_INVALID: invalid input:' and execute
 //   nothing; on claude-agent the REAL SDK pre-validates the handler's
 //   non-strict declared shape, which a mock cannot reproduce — so the test
 //   pins what the handler itself does with raw invalid input (the core
@@ -641,13 +641,19 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
         expect(texts[1]).toBe(renderRead('src/a.txt', A_BODY));
         expect(texts[2]).toBe("edited 'src/a.txt': replaced 1 occurrence");
         expect(texts[3]).toBe(renderRead('src/a.txt', 'beta\n'));
-        expect(texts[4]).toBe("path not allowed by harness config allowlist: 'secret.txt'");
-        expect(texts[5]).toBe("path escape: '../x' resolves outside the workspace");
-        expect(texts[6]).toBe("path escape: '../x' resolves outside the workspace");
-        expect(texts[7]).toBe("file not found: 'src/missing.txt'");
+        expect(texts[4]).toBe(
+          "PATH_DENIED: path not allowed by harness config allowlist: 'secret.txt'",
+        );
+        expect(texts[5]).toBe("PATH_ESCAPE: path escape: '../x' resolves outside the workspace");
+        expect(texts[6]).toBe("PATH_ESCAPE: path escape: '../x' resolves outside the workspace");
+        expect(texts[7]).toBe("FS_NOT_FOUND: file not found: 'src/missing.txt'");
         expect(texts[8]).toBe('exit 0\n--- stdout ---\nhi\n');
-        expect(texts[9]).toBe("command not allowed by harness config allowlist: 'whoami'");
-        expect(texts[10]?.startsWith('command allowlist: shell metacharacters')).toBe(true);
+        expect(texts[9]).toBe(
+          "CMD_DENIED: command not allowed by harness config allowlist: 'whoami'",
+        );
+        expect(texts[10]?.startsWith('CMD_DENIED: command allowlist: shell metacharacters')).toBe(
+          true,
+        );
         // Post-state parity: every path's edit landed identically.
         for (const ws of [core.workspace, stdio.workspace, agent.workspace]) {
           await expect(readFile(join(ws, 'src', 'a.txt'), 'utf8')).resolves.toBe('beta\n');
@@ -655,8 +661,8 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
       } else {
         expect(texts).toEqual([
           renderRead('note.txt', NOTE_BODY),
-          'sandbox: read-only',
-          'sandbox: read-only',
+          'PATH_DENIED: sandbox: read-only',
+          'PATH_DENIED: sandbox: read-only',
         ]);
         expect(core.results.map((r) => r.isError === true)).toEqual([false, true, true]);
         for (const ws of [core.workspace, stdio.workspace, agent.workspace]) {
@@ -692,25 +698,25 @@ const INVALID_STEPS: readonly Step[] = [
   },
 ];
 
-/** Every result is an 'invalid input:' denial, and the edit never executed. */
+/** Every result is an 'INPUT_INVALID: invalid input:' denial, and the edit never executed. */
 async function expectInvalidDenials(results: readonly unknown[], workspace: string): Promise<void> {
   expect(results).toHaveLength(INVALID_STEPS.length);
   for (const result of results) {
     const r = result as McpCallToolResult;
     expect(r.isError).toBe(true);
     expect(r.content).toHaveLength(1);
-    expect(r.content[0]?.text.startsWith('invalid input: ')).toBe(true);
+    expect(r.content[0]?.text.startsWith('INPUT_INVALID: invalid input: ')).toBe(true);
   }
   await expect(readFile(join(workspace, 'note.txt'), 'utf8')).resolves.toBe(NOTE_BODY);
 }
 
 describe('harness parity — schema-invalid input (per transport)', () => {
-  test('stdio server: isError "invalid input:", nothing executed', async () => {
+  test('stdio server: isError "INPUT_INVALID: invalid input:", nothing executed', async () => {
     const stdio = await stdioPhase('workspace-write', INVALID_STEPS);
     await expectInvalidDenials(stdio.results, stdio.workspace);
   }, 30_000);
 
-  test('core: isError "invalid input:", nothing executed', async () => {
+  test('core: isError "INPUT_INVALID: invalid input:", nothing executed', async () => {
     const core = await corePhase('workspace-write', INVALID_STEPS);
     await expectInvalidDenials(core.results, core.workspace);
     expect(core.denials.map((d) => d.tool)).toEqual(['read', 'read', 'edit']);
@@ -723,7 +729,7 @@ describe('harness parity — schema-invalid input (per transport)', () => {
     // call never reaches the handler, and extra keys are stripped. That
     // SDK-side validation cannot be reproduced with a mock, so this lane's
     // assertion is scoped to what the HANDLER does if raw invalid input does
-    // reach it: the shared core denies it with 'invalid input:' and
+    // reach it: the shared core denies it with 'INPUT_INVALID: invalid input:' and
     // executes nothing — the same outcome as the other transports, and
     // nothing executes on either side of the exception.
     const agent = await claudeAgentPhase('workspace-write', INVALID_STEPS);

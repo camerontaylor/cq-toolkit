@@ -99,6 +99,91 @@ async function run(
 }
 
 describe('tool failure evidence', () => {
+  test('legacy session failure kinds remain readable', () => {
+    for (const kind of [
+      'invalid-input',
+      'unknown-tool',
+      'denial',
+      'execution',
+      'final-step',
+      'repair-step',
+    ]) {
+      expect(
+        SessionLineSchema.safeParse({
+          type: 'tool-failure',
+          kind,
+          tool: 'read',
+          reason: 'legacy',
+          inputSummary: '{}',
+          step: 0,
+          at: '2026-10-27T00:00:00Z',
+        }).success,
+      ).toBe(true);
+    }
+  });
+
+  test.each([false, true])(
+    'malformed JSON gets INPUT_INVALID in main/repair requests (repair=%s)',
+    async (repair) => {
+      const malformed = {
+        ...call('read', {}),
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'malformed', toolName: 'read', input: '{' },
+        ],
+      };
+      const outcome = await run(
+        [malformed, reply(repair ? '{"ok":true}' : 'done')],
+        true,
+        repair
+          ? {
+              budget: { maxSteps: 1 },
+              outputSchema: {
+                name: 'answer',
+                schema: {
+                  type: 'object',
+                  properties: { ok: { type: 'boolean' } },
+                  required: ['ok'],
+                  additionalProperties: false,
+                },
+              },
+            }
+          : {},
+      );
+      const message = outcome.requests[1]?.prompt.find((message) => message.role === 'tool');
+      if (message?.role !== 'tool') throw new Error('missing tool message');
+      const part = message.content[0];
+      if (part?.type !== 'tool-result' || part.output.type !== 'error-text')
+        throw new Error('missing tool error');
+      expect(part.output.value).toMatch(/^INPUT_INVALID: /);
+      expect(outcome.failures[0]?.kind).toBe('INPUT_INVALID');
+    },
+  );
+
+  test('model-visible failure code and logged kind share a vocabulary', async () => {
+    const outcome = await run([call('read', { file_path: 'missing' }), reply('done')], true);
+    expect(outcome.failures[0]?.kind).toBe('FS_NOT_FOUND');
+    const tool = outcome.loaded?.messages.find((message) => message.role === 'tool');
+    expect(tool?.content).toContain('FS_NOT_FOUND: ');
+  });
+  test.each([
+    ['read', { file_path: 'sample.txt', extra: true }, 'INPUT_INVALID'],
+    ['missing_tool', {}, 'UNKNOWN_TOOL'],
+    ['bash', { command: 'pwd', run_in_background: true }, 'UNSUPPORTED'],
+  ] as const)(
+    'SDK error for %s starts with its stable code on the next request',
+    async (name, input, code) => {
+      const outcome = await run([call(name, input), reply('done')], true);
+      const messages = outcome.requests[1]?.prompt;
+      const tool = messages?.find((message) => message.role === 'tool');
+      if (tool?.role !== 'tool') throw new Error('missing tool error');
+      const part = tool.content[0];
+      if (part?.type !== 'tool-result' || part.output.type !== 'error-text')
+        throw new Error('missing error text');
+      expect(part.output.value).toMatch(new RegExp(`^${code}: `));
+      expect(outcome.failures[0]?.kind).toBe(code);
+    },
+  );
+
   test('advertises only canonical fields while aliases validate and execute', async () => {
     const { result, requests, loaded } = await run(
       [call('read', { filePath: 'sample.txt', file_path: 'sample.txt' }), reply('done')],
@@ -148,7 +233,7 @@ describe('tool failure evidence', () => {
       expect(failures).toHaveLength(flag ? 1 : 0);
       if (flag)
         expect(failures[0]).toMatchObject({
-          kind: 'invalid-input',
+          kind: 'INPUT_INVALID',
           tool: 'read',
           inputSummary: expect.stringContaining('unknown_option') as unknown,
           step: 0,
@@ -160,11 +245,11 @@ describe('tool failure evidence', () => {
   test('unknown tools and harness denials are logged once each', async () => {
     const unknown = await run([call('not_a_tool', { path: 'x' }), reply('done')], true);
     expect(unknown.result.toolFailures).toBe(1);
-    expect(unknown.failures[0]).toMatchObject({ kind: 'unknown-tool', tool: 'not_a_tool' });
+    expect(unknown.failures[0]).toMatchObject({ kind: 'UNKNOWN_TOOL', tool: 'not_a_tool' });
     const denied = await run([call('read', { file_path: '../outside' }), reply('done')], true);
     expect(denied.result.toolFailures).toBe(1);
     expect(denied.failures[0]).toMatchObject({
-      kind: 'denial',
+      kind: 'PATH_ESCAPE',
       reason: expect.stringContaining('path escape') as unknown,
     });
   });
@@ -177,7 +262,7 @@ describe('tool failure evidence', () => {
       );
       expect(result.toolFailures).toBe(command === 'false' ? 0 : 1);
       if (command === 'false') expect(failures).toHaveLength(0);
-      else expect(failures[0]).toMatchObject({ kind: 'execution' });
+      else expect(failures[0]).toMatchObject({ kind: 'TIMEOUT' });
       expect(loaded?.messages.find((message) => message.toolName === 'bash')?.description).toBe(
         'Run diagnostic',
       );
@@ -200,7 +285,7 @@ describe('tool failure evidence', () => {
       { budget: { maxSteps: 1 }, outputSchema: schema },
     );
     expect(result.toolFailures).toBe(2);
-    expect(failures.map((failure) => failure.kind)).toEqual(['final-step', 'repair-step']);
+    expect(failures.map((failure) => failure.kind)).toEqual(['FINAL_STEP', 'REPAIR_STEP']);
     expect(failures.map((failure) => failure.step)).toEqual([0, 1]);
   });
 

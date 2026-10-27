@@ -33,19 +33,8 @@
 // spawn) is a structured denial record `{ tool, reason }` — exactly
 // the FROZEN driver-seam ToolDenial shape, so denials flow into
 // WorkerResult.denials verbatim. Denial reasons are human-readable strings
-// with stable PREFIXES (the conformance suite asserts on these):
-//   'sandbox: …' | 'invalid input: …' | 'path escape: …'
-//   'path not allowed: … is inside a .git directory (toolkit invariant)'
-//   'path not allowed by harness config allowlist: …'
-//   'command not allowed by harness config allowlist: …'
-//   'command allowlist: git diff is closed-form — …'
-//   'command allowlist: git log is closed-form — …'
-//   'command allowlist: shell metacharacters not permitted with token
-//    patterns — use re: with anchoring'
-//   'file not found: …' | 'read failed: …' | 'edit refused: …'
-//   'edit failed: …' | 'write refused: …' | 'write failed: …'
-//   'bash failed: …' (the pre-F1 'run failed: …' prefix is still recognized)
-//   'cancelled: …' (surface.ts: a queued call cancelled before it ran)
+// starting with the stable failure code shared with session evidence.
+// The vocabulary lives in failures.ts and is documented in README.md.
 //
 // EDIT/WRITE CORRECTNESS (F1): edit refuses an ambiguous target unless
 // `replace_all` is true, requires a prior `read` of the same resolved file,
@@ -70,7 +59,7 @@
 // 'workspace-write' does NOT confer OS-level confinement: there is no
 // sandbox-exec/landlock/bwrap in v1 — OS-sandbox enforcement is the
 // recorded T1.8 strategy question.
-//   - 'read-only'       → `edit`/`write`/`bash` deny with 'sandbox: read-only'; `read`
+//   - 'read-only'       → `edit`/`write`/`bash` deny with 'PATH_DENIED: sandbox: read-only'; `read`
 //                         stays available.
 //   - 'none' | 'workspace-write' → tools behave per config.
 //
@@ -81,7 +70,7 @@
 // the boundary. Partial hardening: read/edit REALPATH the resolved path and
 // re-check containment when the file exists (against the workspace's own
 // realpath, so symlinked tmp roots don't false-positive) — pre-existing
-// symlinks are caught with 'path escape: … through a symlink'. A symlink
+// symlinks are caught with 'PATH_ESCAPE: path escape: … through a symlink'. A symlink
 // planted/swapped in AFTER that check is a documented TOCTOU window.
 // Mitigation: keep run command allowlists tight (never allowlist `ln`); a
 // realpath-based jail is the follow-up.
@@ -128,7 +117,7 @@
 //     newline). The exec shell would otherwise interpret sequences the
 //     token prefix never saw ('npm test ; whoami', 'npm test && curl …',
 //     'npm test $(rm -rf ~)'); such a command denies with the distinct
-//     'command allowlist: shell metacharacters …' reason pointing at
+//     'CMD_DENIED: command allowlist: shell metacharacters …' reason pointing at
 //     anchored re: patterns as the deliberate escape hatch.
 // Token patterns must contain plain shell words; git requires a literal
 // subcommand (never bare git, global options, wrapped git or a path to git).
@@ -155,6 +144,7 @@ import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { buildChildEnv } from '../shared/proc.js';
 import { messageOf } from '../shared/messageOf.js';
+import { invalidToolInput } from './failures.js';
 import { runArgvCommand, runShellCommand } from './run.js';
 import type { RunCommandOptions, RunOutcome } from './run.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
@@ -311,7 +301,10 @@ export const BashToolInputSchema = z
     checkAliases(value, ctx, ['timeout', 'timeoutMs']);
     checkAliases(value, ctx, ['workdir', 'cwd']);
     if (value.run_in_background === true)
-      ctx.addIssue({ code: 'custom', message: 'run_in_background: true is not supported' });
+      ctx.addIssue({
+        code: 'custom',
+        message: 'UNSUPPORTED: run_in_background: true is not supported',
+      });
   });
 
 /** The pre-F1 name for {@link BashToolInputSchema} — accepted for one release. */
@@ -431,59 +424,46 @@ export type ToolkitTool =
 export const AdvertisedToolInputSchemas = {
   read: z
     .object({
-      file_path: z.string().min(1).describe('Workspace file to read'),
+      file_path: z.string().min(1),
       offset: z.number().int().positive().optional().describe('First line, 1-based'),
-      limit: z.number().int().positive().optional().describe('Line count; default 2000'),
+      limit: z.number().int().positive().optional().describe('Lines; default 2000'),
     })
     .strict(),
   grep: z
     .object({
-      pattern: z.string().min(1).describe('Ripgrep regular expression'),
-      path: z.string().min(1).optional().describe('Workspace search root'),
-      glob: z.string().min(1).optional().describe('Filter candidate file paths'),
-      ignore_case: z.boolean().optional().describe('Match without case sensitivity'),
-      output_mode: z
-        .enum(['content', 'files_with_matches', 'count'])
-        .optional()
-        .describe('Lines, paths, or per-file matching-line counts'),
-      head_limit: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe('Result rows; zero uses safety cap'),
+      pattern: z.string().min(1),
+      path: z.string().min(1).optional(),
+      glob: z.string().min(1).optional(),
+      ignore_case: z.boolean().optional(),
+      output_mode: z.enum(['content', 'files_with_matches', 'count']).optional(),
+      head_limit: z.number().int().nonnegative().optional().describe('0 uses safety cap'),
     })
     .strict(),
   glob: z
     .object({
-      pattern: z.string().min(1).describe('File glob, e.g. src/**/*.ts'),
-      path: z.string().min(1).optional().describe('Workspace search root'),
+      pattern: z.string().min(1),
+      path: z.string().min(1).optional(),
     })
     .strict(),
   edit: CanonicalEditToolInputSchema.extend({
-    file_path: z.string().min(1).describe('Previously read workspace file'),
-    old_string: z.string().min(1).describe('Exact text to replace'),
-    new_string: z.string().describe('Replacement text; empty deletes'),
-    replace_all: z.boolean().optional().describe('Replace every occurrence'),
+    file_path: z.string().min(1),
+    old_string: z.string().min(1),
+    new_string: z.string(),
+    replace_all: z.boolean().optional(),
   }),
   write: z
     .object({
-      file_path: z.string().min(1).describe('Workspace file to create or replace'),
-      content: z.string().describe('Complete replacement text'),
+      file_path: z.string().min(1),
+      content: z.string(),
     })
     .strict(),
   bash: z
     .object({
-      command: z.string().min(1).describe('Allowed shell command'),
-      timeout: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe('Milliseconds; may only shorten cap'),
-      description: z.string().optional().describe('Advisory text recorded in session'),
-      workdir: z.string().min(1).optional().describe('Working directory inside workspace'),
-      run_in_background: z.boolean().optional().describe('Only false supported'),
+      command: z.string().min(1),
+      timeout: z.number().int().positive().optional(),
+      description: z.string().optional(),
+      workdir: z.string().min(1).optional(),
+      run_in_background: z.boolean().optional(),
     })
     .strict(),
 };
@@ -968,7 +948,10 @@ export function buildTools(
     tool: ToolkitToolName,
     abs: string,
   ): Extract<ToolkitToolResult, { ok: false }> =>
-    deny(tool, `path not allowed: '${relOf(abs)}' is inside a .git directory (toolkit invariant)`);
+    deny(
+      tool,
+      `PATH_DENIED: path not allowed: '${relOf(abs)}' is inside a .git directory (toolkit invariant)`,
+    );
 
   const pathAllowed = (patterns: readonly string[], abs: string): boolean =>
     compilePathPatterns(patterns).some((re) => re.test(relOf(abs)));
@@ -1001,7 +984,7 @@ export function buildTools(
   };
 
   const invalidInput = (tool: ToolkitToolName, err: z.ZodError): ToolkitToolResult =>
-    deny(tool, `invalid input: ${messageOf(err)}`);
+    deny(tool, invalidToolInput(err));
 
   type SearchFile = {
     lexicalPath: string;
@@ -1024,7 +1007,7 @@ export function buildTools(
   ): Promise<SearchFileResult> => {
     const cancelled = (): SearchFileResult => ({
       ok: false,
-      denial: deny(tool, 'cancelled: search was aborted or timed out'),
+      denial: deny(tool, 'CANCELLED: cancelled: search was aborted or timed out'),
     });
     if (isAborted(signal)) return cancelled();
     const requested = requestedPath ?? '.';
@@ -1032,7 +1015,10 @@ export function buildTools(
     if (scope === undefined) {
       return {
         ok: false,
-        denial: deny(tool, `path escape: '${requested}' resolves outside the workspace`),
+        denial: deny(
+          tool,
+          `PATH_ESCAPE: path escape: '${requested}' resolves outside the workspace`,
+        ),
       };
     }
     const effectiveScope = await resolveRealInside(scope);
@@ -1040,7 +1026,10 @@ export function buildTools(
     if (effectiveScope === undefined) {
       return {
         ok: false,
-        denial: deny(tool, `path escape: '${requested}' escapes the workspace through a symlink`),
+        denial: deny(
+          tool,
+          `PATH_ESCAPE: path escape: '${requested}' escapes the workspace through a symlink`,
+        ),
       };
     }
     if (await touchesGit(scope, effectiveScope)) {
@@ -1049,7 +1038,7 @@ export function buildTools(
     const scopeInfo = await stat(effectiveScope).catch(() => undefined);
     if (isAborted(signal)) return cancelled();
     if (scopeInfo === undefined) {
-      return { ok: false, denial: deny(tool, `path not found: '${relOf(scope)}'`) };
+      return { ok: false, denial: deny(tool, `FS_NOT_FOUND: path not found: '${relOf(scope)}'`) };
     }
 
     const scopeArg = relOf(scope) || '.';
@@ -1057,11 +1046,13 @@ export function buildTools(
       '--files',
       '--no-config',
       '--hidden',
+      ...(tool === 'glob' ? ['--no-ignore'] : []),
       '--color=never',
       '--null',
       ...(fileGlob === undefined ? [] : ['--glob', fileGlob]),
       '--glob',
       '!.git',
+      ...(tool === 'glob' ? ['--glob', '!.hg', '--glob', '!.svn'] : []),
       '--',
       scopeArg,
     ];
@@ -1073,21 +1064,32 @@ export function buildTools(
       ...(signal === undefined ? {} : { signal }),
     });
     if (listing.kind === 'killed') {
-      return cancelled();
+      return isAborted(signal)
+        ? cancelled()
+        : { ok: false, denial: deny(tool, 'TIMEOUT: search enumeration timed out') };
     }
     if (listing.kind === 'spawn-error') {
-      return { ok: false, denial: deny(tool, `search failed: ${messageOf(listing.error)}`) };
+      return {
+        ok: false,
+        denial: deny(tool, `EXECUTION_ERROR: search failed: ${messageOf(listing.error)}`),
+      };
     }
     if (listing.overflowed) {
       return {
         ok: false,
-        denial: deny(tool, 'search denied: candidate enumeration output cap exceeded'),
+        denial: deny(
+          tool,
+          'SEARCH_LIMIT: search denied: candidate enumeration output cap exceeded',
+        ),
       };
     }
     if (listing.code !== 0 && listing.code !== 1) {
       return {
         ok: false,
-        denial: deny(tool, `search failed: rg candidate enumeration exited ${listing.code}`),
+        denial: deny(
+          tool,
+          `EXECUTION_ERROR: search failed: rg candidate enumeration exited ${listing.code}`,
+        ),
       };
     }
     if (isAborted(signal)) return cancelled();
@@ -1215,7 +1217,7 @@ export function buildTools(
     tools.push({
       name: 'read',
       description: capDescription(
-        'Read a workspace UTF-8 text file. Returns numbered lines; offset is 1-based and limit defaults to 2000. Follow offset=N to continue. Binary and invalid UTF-8 files are refused. Paths must stay inside the workspace and configured allowlist.',
+        'Read a workspace text file, returning numbered lines.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: ReadToolInputSchema,
@@ -1227,7 +1229,10 @@ export function buildTools(
           parsed.data.path) as string;
         const abs = resolveInside(requested);
         if (abs === undefined) {
-          return deny('read', `path escape: '${requested}' resolves outside the workspace`);
+          return deny(
+            'read',
+            `PATH_ESCAPE: path escape: '${requested}' resolves outside the workspace`,
+          );
         }
         // ADMISSION: the preflight runs inside the ordered admission turn (see
         // admit); the body then enqueues on the canonical path's own queue.
@@ -1237,7 +1242,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('read', `path escape: '${requested}' escapes the workspace through a symlink`),
+                deny(
+                  'read',
+                  `PATH_ESCAPE: path escape: '${requested}' escapes the workspace through a symlink`,
+                ),
             };
           }
           if (await touchesGit(abs, effective)) {
@@ -1247,7 +1255,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+                deny(
+                  'read',
+                  `PATH_DENIED: path not allowed by harness config allowlist: '${relOf(abs)}'`,
+                ),
             };
           }
           return {
@@ -1259,16 +1270,22 @@ export function buildTools(
               } catch (err) {
                 const reason =
                   errorCode(err) === 'ENOENT'
-                    ? `file not found: '${relOf(abs)}'`
-                    : `read failed: ${messageOf(err)}`;
+                    ? `FS_NOT_FOUND: file not found: '${relOf(abs)}'`
+                    : `EXECUTION_ERROR: read failed: ${messageOf(err)}`;
                 return deny('read', reason);
               }
               if (isBinary(bytes)) {
-                return deny('read', `read refused: '${relOf(abs)}' is a binary file`);
+                return deny(
+                  'read',
+                  `FS_UNSUPPORTED: read refused: '${relOf(abs)}' is a binary file`,
+                );
               }
               const text = decodeUtf8(bytes);
               if (text === undefined) {
-                return deny('read', `read refused: '${relOf(abs)}' is not valid UTF-8`);
+                return deny(
+                  'read',
+                  `FS_UNSUPPORTED: read refused: '${relOf(abs)}' is not valid UTF-8`,
+                );
               }
               // Keep the F1 SHA-256 ledger tied to the whole file, even when the
               // model receives only a line window.
@@ -1332,7 +1349,7 @@ export function buildTools(
     searchTools.push({
       name: 'grep',
       description: capDescription(
-        'Search workspace text with a ripgrep regex. Returns numbered matching lines, file paths, or per-file matching-line counts via output_mode. glob filters files; ignore_case ignores case; head_limit bounds rows. Respects .gitignore and containment. Narrow path or pattern when capped; other result-changing extras are unsupported.',
+        'Search text with ripgrep default regex; respects .gitignore. Returns capped lines, paths or matching-line counts. Supports glob, ignore_case and head_limit.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: GrepToolInputSchema,
@@ -1350,7 +1367,10 @@ export function buildTools(
         );
         if (!files.ok) return files.denial;
         if (isAborted(options?.signal)) {
-          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: 'CANCELLED: cancelled: grep was aborted' },
+          };
         }
         const markers = [...files.markers];
         if (files.files.length === 0) {
@@ -1361,7 +1381,10 @@ export function buildTools(
             `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}] Narrow path or pattern to recover remaining results.`,
           );
           if (isAborted(options?.signal)) {
-            return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+            return {
+              ok: false,
+              denial: { tool: 'grep', reason: 'CANCELLED: cancelled: grep was aborted' },
+            };
           }
           return { ok: true, ...capped, truncated: markers.length > 0 || capped.truncated };
         }
@@ -1391,23 +1414,37 @@ export function buildTools(
         if (result.kind === 'killed') {
           return {
             ok: false,
-            denial: { tool: 'grep', reason: 'cancelled: grep was aborted or timed out' },
+            denial: {
+              tool: 'grep',
+              reason: isAborted(options?.signal)
+                ? 'CANCELLED: grep was aborted'
+                : 'TIMEOUT: grep timed out',
+            },
           };
         }
         if (result.kind === 'spawn-error') {
           return {
             ok: false,
-            denial: { tool: 'grep', reason: `grep failed: ${messageOf(result.error)}` },
+            denial: {
+              tool: 'grep',
+              reason: `EXECUTION_ERROR: grep failed: ${messageOf(result.error)}`,
+            },
           };
         }
         if (result.code !== 0 && result.code !== 1) {
           return {
             ok: false,
-            denial: { tool: 'grep', reason: `grep failed: rg exited ${result.code}` },
+            denial: {
+              tool: 'grep',
+              reason: `${/regex parse error|error parsing regex/i.test(result.stderr) ? 'SEARCH_INVALID_PATTERN' : 'EXECUTION_ERROR'}: grep failed: rg exited ${result.code}: ${result.stderr.trim()}`,
+            },
           };
         }
         if (isAborted(options?.signal)) {
-          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: 'CANCELLED: cancelled: grep was aborted' },
+          };
         }
 
         const byPath = new Map<string, { file: SearchFile; lines: string[]; raw: string[] }>();
@@ -1427,7 +1464,10 @@ export function buildTools(
             }
             return {
               ok: false,
-              denial: { tool: 'grep', reason: 'grep denied: rg returned malformed JSON output' },
+              denial: {
+                tool: 'grep',
+                reason: 'EXECUTION_ERROR: grep denied: rg returned malformed JSON output',
+              },
             };
           }
           if (typeof event !== 'object' || event === null || !('type' in event)) continue;
@@ -1451,7 +1491,7 @@ export function buildTools(
               ok: false,
               denial: {
                 tool: 'grep',
-                reason: 'grep denied: rg returned non-text path or match data',
+                reason: 'EXECUTION_ERROR: grep denied: rg returned non-text path or match data',
               },
             };
           }
@@ -1461,7 +1501,8 @@ export function buildTools(
               ok: false,
               denial: {
                 tool: 'grep',
-                reason: 'grep denied: rg returned a path outside the allowed file list',
+                reason:
+                  'EXECUTION_ERROR: grep denied: rg returned a path outside the allowed file list',
               },
             };
           }
@@ -1540,7 +1581,10 @@ export function buildTools(
           })),
         );
         if (isAborted(options?.signal)) {
-          return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
+          return {
+            ok: false,
+            denial: { tool: 'grep', reason: 'CANCELLED: cancelled: grep was aborted' },
+          };
         }
         return {
           ok: true,
@@ -1554,7 +1598,7 @@ export function buildTools(
     searchTools.push({
       name: 'glob',
       description: capDescription(
-        'Find workspace files by glob pattern, for example src/**/*.ts. Returns file paths in deterministic order; directories are excluded. Optional path scopes the search. Respects .gitignore, workspace containment and the configured path allowlist. Narrow path or pattern when capped.',
+        'Find files by ripgrep glob (** spans directories), including hidden and ignored files. Excludes VCS directories; results capped.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: GlobToolInputSchema,
@@ -1572,7 +1616,10 @@ export function buildTools(
         );
         if (!files.ok) return files.denial;
         if (isAborted(options?.signal)) {
-          return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
+          return {
+            ok: false,
+            denial: { tool: 'glob', reason: 'CANCELLED: cancelled: glob was aborted' },
+          };
         }
         const outputParts = files.files.map((file) => file.lexicalRel);
         if (outputParts.length === 0) outputParts.push('No files found');
@@ -1583,7 +1630,10 @@ export function buildTools(
           `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}] Narrow path or pattern to recover remaining results.`,
         );
         if (isAborted(options?.signal)) {
-          return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
+          return {
+            ok: false,
+            denial: { tool: 'glob', reason: 'CANCELLED: cancelled: glob was aborted' },
+          };
         }
         return {
           ok: true,
@@ -1600,12 +1650,12 @@ export function buildTools(
     tools.push({
       name: 'edit',
       description: capDescription(
-        'Replace literal text in an existing workspace file. Returns an edit confirmation. Read it first; changed files must be read again. old_string must match uniquely unless replace_all is true. Match content without read-output line numbers. Empty new_string deletes the match. Paths obey containment and allowlists.',
+        'Replace exact text in an existing file. Requires a prior read of that file.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: EditToolInputSchema,
       execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
-        if (sandbox === 'read-only') return deny('edit', 'sandbox: read-only');
+        if (sandbox === 'read-only') return deny('edit', 'PATH_DENIED: sandbox: read-only');
         const parsed = EditToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('edit', parsed.error);
         const path = (parsed.data.file_path ?? parsed.data.filePath ?? parsed.data.path) as string;
@@ -1618,7 +1668,7 @@ export function buildTools(
         const replaceAll = (parsed.data.replace_all ?? parsed.data.replaceAll) === true;
         const abs = resolveInside(path);
         if (abs === undefined) {
-          return deny('edit', `path escape: '${path}' resolves outside the workspace`);
+          return deny('edit', `PATH_ESCAPE: path escape: '${path}' resolves outside the workspace`);
         }
         // ADMISSION: preflight inside the ordered admission turn (see admit).
         return admit(async () => {
@@ -1627,7 +1677,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('edit', `path escape: '${path}' escapes the workspace through a symlink`),
+                deny(
+                  'edit',
+                  `PATH_ESCAPE: path escape: '${path}' escapes the workspace through a symlink`,
+                ),
             };
           }
           if (await touchesGit(abs, effective)) {
@@ -1637,7 +1690,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+                deny(
+                  'edit',
+                  `PATH_DENIED: path not allowed by harness config allowlist: '${relOf(abs)}'`,
+                ),
             };
           }
           return {
@@ -1649,24 +1705,28 @@ export function buildTools(
               } catch (err) {
                 const reason =
                   errorCode(err) === 'ENOENT'
-                    ? `file not found: '${relOf(abs)}'`
-                    : `read failed: ${messageOf(err)}`;
+                    ? `FS_NOT_FOUND: file not found: '${relOf(abs)}'`
+                    : `EXECUTION_ERROR: read failed: ${messageOf(err)}`;
                 return deny('edit', reason);
               }
               const label = relOf(abs);
-              if (isBinary(bytes)) return deny('edit', `edit refused: '${label}' is a binary file`);
+              if (isBinary(bytes))
+                return deny('edit', `FS_UNSUPPORTED: edit refused: '${label}' is a binary file`);
               const text = decodeUtf8(bytes);
               if (text === undefined) {
-                return deny('edit', `edit refused: '${label}' is not valid UTF-8`);
+                return deny('edit', `FS_UNSUPPORTED: edit refused: '${label}' is not valid UTF-8`);
               }
               const prior = readState.get(effective);
               if (prior === undefined) {
-                return deny('edit', `edit refused: '${label}' must be read before it is edited`);
+                return deny(
+                  'edit',
+                  `FS_NOT_READ: edit refused: '${label}' must be read before it is edited`,
+                );
               }
               if (prior.sha256 !== sha256(bytes)) {
                 return deny(
                   'edit',
-                  `edit refused: '${label}' changed since it was read; read it again`,
+                  `FS_STALE: edit refused: '${label}' changed since it was read; read it again`,
                 );
               }
               const bom = text.startsWith(BOM);
@@ -1681,12 +1741,15 @@ export function buildTools(
               // Only two starts are needed to establish ambiguity.
               const overlapping = findMatches(body, needle, true, 2);
               if (overlapping.length === 0) {
-                return deny('edit', `edit refused: target text not found in '${label}'`);
+                return deny(
+                  'edit',
+                  `EDIT_NO_MATCH: edit refused: target text not found in '${label}'`,
+                );
               }
               if (overlapping.length > 1 && !replaceAll) {
                 return deny(
                   'edit',
-                  `edit refused: target text is not unique in '${label}' ` +
+                  `EDIT_AMBIGUOUS: edit refused: target text is not unique in '${label}' ` +
                     '(multiple possible matches, overlapping included); ' +
                     'pass replace_all: true to replace every non-overlapping occurrence',
                 );
@@ -1707,7 +1770,7 @@ export function buildTools(
               try {
                 await writeFile(effective, output, 'utf8');
               } catch (err) {
-                return deny('edit', `edit failed: ${messageOf(err)}`);
+                return deny('edit', `EXECUTION_ERROR: edit failed: ${messageOf(err)}`);
               }
               await rememberRead(effective, Buffer.from(output, 'utf8'));
               const replaced = spans.length;
@@ -1729,19 +1792,22 @@ export function buildTools(
     writeTool = {
       name: 'write',
       description: capDescription(
-        'Create or fully replace a workspace UTF-8 text file. Returns a write confirmation. Read an existing file before overwriting it; changed files must be read again. For partial changes use edit. content is the complete replacement, including an empty string. Paths obey containment and allowlists.',
+        'Create or replace a text file. Read existing files before overwriting.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: WriteToolInputSchema,
       execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
-        if (sandbox === 'read-only') return deny('write', 'sandbox: read-only');
+        if (sandbox === 'read-only') return deny('write', 'PATH_DENIED: sandbox: read-only');
         const parsed = WriteToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('write', parsed.error);
         const path = (parsed.data.file_path ?? parsed.data.filePath ?? parsed.data.path) as string;
         const content = parsed.data.content;
         const abs = resolveInside(path);
         if (abs === undefined) {
-          return deny('write', `path escape: '${path}' resolves outside the workspace`);
+          return deny(
+            'write',
+            `PATH_ESCAPE: path escape: '${path}' resolves outside the workspace`,
+          );
         }
         // ADMISSION: preflight inside the ordered admission turn (see admit).
         return admit(async () => {
@@ -1750,7 +1816,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('write', `path escape: '${path}' escapes the workspace through a symlink`),
+                deny(
+                  'write',
+                  `PATH_ESCAPE: path escape: '${path}' escapes the workspace through a symlink`,
+                ),
             };
           }
           // A MISSING target has no realpath, so resolveRealInside fell back to
@@ -1765,7 +1834,10 @@ export function buildTools(
               return {
                 key: undefined,
                 body: async () =>
-                  deny('write', `path escape: '${path}' escapes the workspace through a symlink`),
+                  deny(
+                    'write',
+                    `PATH_ESCAPE: path escape: '${path}' escapes the workspace through a symlink`,
+                  ),
               };
             }
             effective = join(parent, basename(abs));
@@ -1773,7 +1845,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('write', `write refused: '${relOf(abs)}' is a symlink that does not resolve`),
+                deny(
+                  'write',
+                  `FS_UNSUPPORTED: write refused: '${relOf(abs)}' is a symlink that does not resolve`,
+                ),
             };
           }
           if (await touchesGit(abs, effective)) {
@@ -1783,7 +1858,10 @@ export function buildTools(
             return {
               key: undefined,
               body: async () =>
-                deny('write', `path not allowed by harness config allowlist: '${relOf(abs)}'`),
+                deny(
+                  'write',
+                  `PATH_DENIED: path not allowed by harness config allowlist: '${relOf(abs)}'`,
+                ),
             };
           }
           return {
@@ -1795,29 +1873,35 @@ export function buildTools(
                 existing = await readFile(effective);
               } catch (err) {
                 if (errorCode(err) !== 'ENOENT') {
-                  return deny('write', `write failed: ${messageOf(err)}`);
+                  return deny('write', `EXECUTION_ERROR: write failed: ${messageOf(err)}`);
                 }
               }
               let output = content;
               if (existing !== undefined) {
                 if (isBinary(existing)) {
-                  return deny('write', `write refused: '${label}' is a binary file`);
+                  return deny(
+                    'write',
+                    `FS_UNSUPPORTED: write refused: '${label}' is a binary file`,
+                  );
                 }
                 const text = decodeUtf8(existing);
                 if (text === undefined) {
-                  return deny('write', `write refused: '${label}' is not valid UTF-8`);
+                  return deny(
+                    'write',
+                    `FS_UNSUPPORTED: write refused: '${label}' is not valid UTF-8`,
+                  );
                 }
                 const prior = readState.get(effective);
                 if (prior === undefined) {
                   return deny(
                     'write',
-                    `write refused: '${label}' must be read before it is overwritten`,
+                    `FS_NOT_READ: write refused: '${label}' must be read before it is overwritten`,
                   );
                 }
                 if (prior.sha256 !== sha256(existing)) {
                   return deny(
                     'write',
-                    `write refused: '${label}' changed since it was read; read it again`,
+                    `FS_STALE: write refused: '${label}' changed since it was read; read it again`,
                   );
                 }
                 // Preserve the existing file's BOM and line-ending convention.
@@ -1830,7 +1914,7 @@ export function buildTools(
               try {
                 await writeFile(effective, output, 'utf8');
               } catch (err) {
-                return deny('write', `write failed: ${messageOf(err)}`);
+                return deny('write', `EXECUTION_ERROR: write failed: ${messageOf(err)}`);
               }
               await rememberRead(effective, Buffer.from(output, 'utf8'));
               const capped = capOutput(
@@ -1858,22 +1942,27 @@ export function buildTools(
       killed: boolean,
       stdout: string,
       stderr: string,
+      signal?: AbortSignal,
     ): string => {
-      const parts = [killed ? `killed by signal (exit ${exitCode})` : `exit ${exitCode}`];
+      const parts = [
+        killed
+          ? `${isAborted(signal) ? 'CANCELLED' : 'TIMEOUT'}: killed by signal (exit ${exitCode})`
+          : `exit ${exitCode}`,
+      ];
       if (stdout !== '') parts.push(`--- stdout ---\n${stdout}`);
       if (stderr !== '') parts.push(`--- stderr ---\n${stderr}`);
       return parts.join('\n');
     };
-    const settle = (outcome: RunOutcome): ToolkitToolResult => {
+    const settle = (outcome: RunOutcome, signal?: AbortSignal): ToolkitToolResult => {
       // Normal exits (including nonzero) and kills remain tool results.
       // Only spawn-level failures are denials.
       if (outcome.kind === 'spawn-error') {
-        return deny('bash', `bash failed: ${messageOf(outcome.error)}`);
+        return deny('bash', `EXECUTION_ERROR: bash failed: ${messageOf(outcome.error)}`);
       }
       const killed = outcome.kind === 'killed';
       const exitCode = killed ? null : outcome.code;
       const capped = capOutput(
-        formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
+        formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr, signal),
         runCfg.maxOutputChars,
       );
       return {
@@ -1887,14 +1976,14 @@ export function buildTools(
     tools.push({
       name: 'bash',
       description: capDescription(
-        'Run an allowed shell command in the workspace. Returns stdout, stderr and exit code. timeout may shorten the configured cap; workdir must remain inside the workspace. description is advisory and logged. Background execution and sandbox escalation are unsupported. Fresh shells run with host privileges; output is bounded.',
+        'Run an allowed command in a fresh shell. Cwd defaults to workspace; workdir stays inside it. timeout is milliseconds, capped. description is logged; background unsupported.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: BashToolInputSchema,
       // The pre-F1 model-facing name, accepted for one release.
       aliases: toolAliases('bash'),
       execute: async (rawInput: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult> => {
-        if (sandbox === 'read-only') return deny('bash', 'sandbox: read-only');
+        if (sandbox === 'read-only') return deny('bash', 'PATH_DENIED: sandbox: read-only');
         const parsed = BashToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('bash', parsed.error);
         const { command } = parsed.data;
@@ -1904,13 +1993,13 @@ export function buildTools(
         if (lexicalCwd === undefined)
           return deny(
             'bash',
-            `path escape: workdir '${requestedCwd}' resolves outside the workspace`,
+            `PATH_ESCAPE: path escape: workdir '${requestedCwd}' resolves outside the workspace`,
           );
         const cwd = await resolveRealInside(lexicalCwd);
         if (cwd === undefined)
           return deny(
             'bash',
-            `path escape: workdir '${requestedCwd}' escapes the workspace through a symlink`,
+            `PATH_ESCAPE: path escape: workdir '${requestedCwd}' escapes the workspace through a symlink`,
           );
         if (await touchesGit(lexicalCwd, cwd)) return gitDenial('bash', lexicalCwd);
 
@@ -1925,7 +2014,7 @@ export function buildTools(
             ...(gate.declaredEnvNames ?? []),
           ]);
         } catch (error) {
-          return deny('bash', `bash failed: ${messageOf(error)}`);
+          return deny('bash', `EXECUTION_ERROR: bash failed: ${messageOf(error)}`);
         }
         // A model-supplied timeout may only SHORTEN the config's policy bound.
         const timeoutMs =
@@ -1956,21 +2045,21 @@ export function buildTools(
           if (argv === undefined || !commandVerdict(patterns, key).allowed) {
             return deny(
               'bash',
-              `command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
+              `CMD_DENIED: command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
             );
           }
-          return settle(await runArgvCommand('git', argv, executionOptions));
+          return settle(await runArgvCommand('git', argv, executionOptions), opts?.signal);
         }
         const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
           return deny(
             'bash',
             verdict.metacharacters
-              ? 'command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring'
-              : `command not allowed by harness config allowlist: '${command}'`,
+              ? 'CMD_DENIED: command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring'
+              : `CMD_DENIED: command not allowed by harness config allowlist: '${command}'`,
           );
         }
-        return settle(await runShellCommand(command, executionOptions));
+        return settle(await runShellCommand(command, executionOptions), opts?.signal);
       },
     });
   }

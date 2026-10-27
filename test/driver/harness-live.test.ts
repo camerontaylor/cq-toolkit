@@ -20,7 +20,7 @@
 //   - A10: under ToolPolicy mode 'none' the builtins are ABSENT — nothing
 //     executes, the init surface verifies as empty, no config file is left;
 //   - A10: Read/Bash-style attempts through the harness are DENIED with
-//     harness-classified reasons ('path escape:' / 'command not allowed…');
+//     harness-classified reasons ('PATH_ESCAPE: path escape:' / 'command not allowed…');
 //   - A.5a: --json-schema structured output survives --tools "" (with the
 //     pinned StructuredOutput tool in the asserted surface);
 //   - A.5f: harness denial text reaches WorkerResult.denials verbatim;
@@ -150,13 +150,15 @@ describe.skipIf(!LIVE)(
           expect(result['stopReason']).toBe('complete');
           const denials = result['denials'] as Array<{ tool: string; reason: string }>;
           expect(
-            denials.some((d) => d.tool === 'read' && d.reason.startsWith('path escape:')),
+            denials.some(
+              (d) => d.tool === 'read' && d.reason.startsWith('PATH_ESCAPE: path escape:'),
+            ),
           ).toBe(true);
           expect(
             denials.some(
               (d) =>
                 d.tool === 'run' &&
-                d.reason.startsWith('command not allowed by harness config allowlist:'),
+                d.reason.startsWith('CMD_DENIED: command not allowed by harness config allowlist:'),
             ),
           ).toBe(true);
           expect(await mcpConfigsLeft(sessionsDir)).toEqual([]);

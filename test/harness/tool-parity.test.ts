@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { z } from 'zod';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import {
   buildTools,
@@ -67,6 +68,18 @@ describe('tool argument parity', () => {
     });
   });
   test('reviewer schemas keep a bounded canonical surface', () => {
+    const surface = buildTools(defaultHarnessConfig, '.', 'read-only').map((tool) => ({
+      type: 'function',
+      name: tool.name,
+      description: tool.description,
+      inputSchema: z.toJSONSchema(AdvertisedToolInputSchemas[tool.name]),
+    }));
+    expect(
+      Buffer.byteLength(
+        JSON.stringify(surface.filter((tool) => ['read', 'grep', 'glob'].includes(tool.name))),
+      ),
+    ).toBeLessThanOrEqual(1800);
+    expect(Buffer.byteLength(JSON.stringify(surface))).toBeLessThanOrEqual(3500);
     const shapes = {
       read: ['file_path', 'offset', 'limit'],
       grep: ['pattern', 'path', 'glob', 'ignore_case', 'output_mode', 'head_limit'],
@@ -75,6 +88,51 @@ describe('tool argument parity', () => {
     for (const name of ['read', 'grep', 'glob'] as const) {
       expect(Object.keys(AdvertisedToolInputSchemas[name].shape)).toEqual(shapes[name]);
     }
+  });
+
+  test('failures start with actionable shared codes', async () => {
+    await workspace(async (root) => {
+      await writeFile(join(root, 'a.txt'), 'old old');
+      const tools = buildTools(defaultHarnessConfig, root);
+      const get = (name: string) => tools.find((tool) => tool.name === name)!;
+      const check = async (name: string, input: unknown, code: string) => {
+        const result = await get(name).execute(input);
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.denial.reason).toMatch(new RegExp(`^${code}: `));
+      };
+      await check('read', { file_path: 'missing' }, 'FS_NOT_FOUND');
+      await check('read', { file_path: '../escape' }, 'PATH_ESCAPE');
+      await check('read', { file_path: '.git/config' }, 'PATH_DENIED');
+      await check('read', { unexpected: true }, 'INPUT_INVALID');
+      await check(
+        'edit',
+        { file_path: 'a.txt', old_string: 'old', new_string: 'new' },
+        'FS_NOT_READ',
+      );
+      await get('read').execute({ file_path: 'a.txt' });
+      await check(
+        'edit',
+        { file_path: 'a.txt', old_string: 'none', new_string: 'new' },
+        'EDIT_NO_MATCH',
+      );
+      await check(
+        'edit',
+        { file_path: 'a.txt', old_string: 'old', new_string: 'new' },
+        'EDIT_AMBIGUOUS',
+      );
+      await writeFile(join(root, 'a.txt'), 'changed');
+      await check('edit', { file_path: 'a.txt', old_string: 'old', new_string: 'new' }, 'FS_STALE');
+      await check('bash', { command: 'pwd', run_in_background: true }, 'UNSUPPORTED');
+      await check('bash', { command: 'not-allowed' }, 'CMD_DENIED');
+      const grep = buildTools(defaultHarnessConfig, root, 'read-only').find(
+        (tool) => tool.name === 'grep',
+      )!;
+      const invalid = await grep.execute({ pattern: '[' });
+      expect(invalid).toMatchObject({
+        ok: false,
+        denial: { reason: expect.stringMatching(/^SEARCH_INVALID_PATTERN: /) as unknown },
+      });
+    });
   });
 
   test('OpenCode reads, edits and writes; matching aliases compose and conflicts fail', async () => {

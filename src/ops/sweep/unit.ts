@@ -711,7 +711,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
           prompt: bindings.prompt(unit, worktree),
           modelSpec: bindings.modelSpec,
           toolPolicy: bindings.toolPolicy ?? {
-            allow: ['edit'],
+            allow: ['read', 'edit'],
             mode: 'allowlist',
           },
           sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },

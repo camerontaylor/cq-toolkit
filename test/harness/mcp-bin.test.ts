@@ -333,7 +333,7 @@ describe('SDK round-trip conformance (@modelcontextprotocol/sdk Client)', () => 
       const denied = await client.callTool({ name: 'read', arguments: { path: '../outside' } });
       expect(denied.isError).toBe(true);
       const deniedContent = denied.content as Array<{ type: string; text: string }>;
-      expect(deniedContent[0]?.text.startsWith('path escape:')).toBe(true);
+      expect(deniedContent[0]?.text.startsWith('PATH_ESCAPE: path escape:')).toBe(true);
 
       await expect(client.callTool({ name: 'edit', arguments: {} })).rejects.toThrow(
         /unknown tool 'edit'/,

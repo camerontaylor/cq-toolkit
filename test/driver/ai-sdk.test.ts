@@ -918,7 +918,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(finalDenials).toEqual([
         {
           tool: 'read',
-          reason: 'tool calls are disabled on the final step; reply with the answer',
+          reason: 'FINAL_STEP: tool calls are disabled on the final step; reply with the answer',
         },
       ]);
       // The two earlier reads ran (and were denied as absent), the final one never executed.
