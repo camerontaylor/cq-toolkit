@@ -259,12 +259,12 @@ export function verifyClosureEvidence(
     if (typeof packet.after !== 'string' || packet.after === '') problems.push('after missing');
     // The dependencies value is read exactly once: the property access is
     // captured to a local, checked against the declared array contract, then
-    // validated element by element into the snapshot array the later checks
-    // scan. A one-shot iterable or a getter that yields different elements
-    // between reads can never make packet-complete see values that later
-    // checks cannot, because no code path evaluates the property twice. Only
-    // a real array satisfies the contract; anything else (generator,
-    // iterable object, hostile value) is unavailable.
+    // each element is narrowed and its path/role/text values are captured to
+    // locals exactly once and validated, with the snapshot recording those
+    // same captured values. Element field getters are therefore read once:
+    // text that reads differently between validation and the later sweep
+    // cannot split a verdict. Only a real array of well-formed records
+    // satisfies the contract; anything else is unavailable.
     let supplied: unknown;
     try {
       supplied = packet.dependencies;
@@ -274,19 +274,32 @@ export function verifyClosureEvidence(
     if (problems.length === 0 && !Array.isArray(supplied))
       problems.push('dependencies is not an array');
     if (problems.length === 0)
-      for (const dependency of supplied as unknown[]) {
-        if (typeof dependency?.path !== 'string' || dependency.path === '')
+      for (const element of supplied) {
+        if (typeof element !== 'object' || element === null) {
+          problems.push('dependency is not an object');
+          continue;
+        }
+        const record = element as Record<string, unknown>;
+        // Capture each field value exactly once: element getters are read a
+        // single time and the snapshot stores these same captured values, so
+        // a field getter returning a trigger during validation and clean
+        // text afterwards cannot split a verdict.
+        const path: unknown = record.path;
+        const role: unknown = record.role;
+        const text: unknown = record.text;
+        if (typeof path !== 'string' || path === '') {
           problems.push('dependency path missing');
-        else if (dependency.role !== 'consumer' && dependency.role !== 'dependency')
-          problems.push(`dependency ${dependency.path} has unknown role`);
-        else if (typeof dependency.text !== 'string' || dependency.text === '')
-          problems.push(`dependency ${dependency.path} text missing`);
-        else
-          dependencies.push({
-            path: dependency.path,
-            role: dependency.role,
-            text: dependency.text,
-          });
+          continue;
+        }
+        if (typeof role !== 'string' || (role !== 'consumer' && role !== 'dependency')) {
+          problems.push(`dependency ${path} has unknown role`);
+          continue;
+        }
+        if (typeof text !== 'string' || text === '') {
+          problems.push(`dependency ${path} text missing`);
+          continue;
+        }
+        dependencies.push({ path, role, text });
       }
     if (revision === undefined) problems.push('metadata.revision missing');
     if (problems.length > 0)

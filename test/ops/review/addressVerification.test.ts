@@ -231,6 +231,65 @@ describe('review.address closure evidence verifier', () => {
     expect(reads).toBe(1);
   });
 
+  test('an element text getter read during validation then clean must stay unresolved', () => {
+    // Validation captures the text exactly once: the trigger-bearing value
+    // seen at validation is the value every later check sweeps, so the
+    // getter switching to clean content afterwards cannot split the
+    // verdict, and the read counter stays at one.
+    const split = makePacket();
+    let reads = 0;
+    const element = {
+      get path() {
+        return 'src/legacy.ts';
+      },
+      get role() {
+        return 'consumer';
+      },
+      get text() {
+        reads++;
+        return reads === 1
+          ? "if (mode === 'PARTIAL_MODE') load(raw);\n"
+          : "load('{}');\n";
+      },
+    };
+    (split as { dependencies: unknown }).dependencies = [element];
+    const result = verifyClosureEvidence(split);
+    expect(result.verdict).toBe('unresolved');
+    expect(result.reason).toBe('deleted-trigger-survives');
+    expect(result.checks[3]?.detail).toContain('PARTIAL_MODE');
+    expect(reads).toBe(1);
+  });
+
+  test('an element field getter that throws during capture yields uncertain', () => {
+    const throwing = makePacket();
+    const element = {
+      get path() {
+        return 'src/x.ts';
+      },
+      get role() {
+        return 'consumer';
+      },
+      get text() {
+        throw new Error('text storage failed');
+      },
+    };
+    (throwing as { dependencies: unknown }).dependencies = [element];
+    const result = verifyClosureEvidence(throwing);
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expect(namesOf(result)).toEqual(['packet-complete']);
+    expect(result.checks[0]?.detail).toContain('text storage failed');
+  });
+
+  test('non-object dependency elements are unavailable, not crashes', () => {
+    const packet = makePacket();
+    (packet as { dependencies: unknown }).dependencies = ['a string', 42, null];
+    const result = verifyClosureEvidence(packet);
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expect(result.checks[0]?.detail).toContain('dependency is not an object');
+  });
+
   test('a surviving quoted trigger is unresolved counter-evidence', () => {
     const survivingAfter = [
       'export function load(raw: string): Config {',
