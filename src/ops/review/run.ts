@@ -42,6 +42,7 @@ import {
   type ReviewSource,
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { foldKnownUsageSummaries, type KnownUsageSummary } from '../shared/knownUsage.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -87,12 +88,16 @@ export interface ReviewRunDeps {
  * have stopped on the engine's budget and no repository drift or parent cancel.
  * Both ride the report envelope and are never persisted.
  */
-export type ReviewRunResult = OpResult<FindingsRecord> & {
+type ReviewRunCoreResult = OpResult<FindingsRecord> & {
   report?: FindingsRecord & {
     blockedTransient?: true;
     blockedBudget?: true;
     deferredVendorDebt?: DeferredVendorDebt;
   };
+};
+export type ReviewRunResult = ReviewRunCoreResult & {
+  /** Known driver spend for this invocation, independent of persisted findings. */
+  usageSummary: KnownUsageSummary;
 };
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
@@ -172,7 +177,10 @@ async function collectReviewContext(
 export function makeReviewRun(
   deps: ReviewRunDeps,
 ): (input: ReviewRunInput) => Promise<ReviewRunResult> {
-  return async (input): Promise<ReviewRunResult> => {
+  const execute = async (
+    input: ReviewRunInput,
+    usageSummaries: KnownUsageSummary[],
+  ): Promise<ReviewRunCoreResult> => {
     const runReview = deps.runAgentReviewer ?? runAgentReviewer;
     const started = Date.now();
     const effects =
@@ -577,6 +585,9 @@ export function makeReviewRun(
                     ...(deadline.signal ? { signal: deadline.signal } : {}),
                     severityMap: policy.review.agentSeverityMap,
                   });
+                  const observed = agent.status === 'ok' ? agent.value : agent.report;
+                  if (observed?.usageSummary !== undefined)
+                    usageSummaries.push(observed.usageSummary);
                   let blockedReason =
                     agent.status === 'needs-human'
                       ? agent.reason
@@ -863,5 +874,10 @@ export function makeReviewRun(
     } finally {
       deadline.dispose();
     }
+  };
+  return async (input): Promise<ReviewRunResult> => {
+    const usageSummaries: KnownUsageSummary[] = [];
+    const result = await execute(input, usageSummaries);
+    return { ...result, usageSummary: foldKnownUsageSummaries(usageSummaries) };
   };
 }
