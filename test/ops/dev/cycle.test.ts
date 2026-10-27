@@ -735,6 +735,10 @@ describe('dev.cycle', () => {
     expect(reviewInputs[0]?.maxTokens).toBe(1000);
     // The address leg gets what the review leg left, not a fresh run budget.
     expect(addressInputs[0]?.wallMs).toBeLessThanOrEqual((reviewInputs[0]?.wallMs ?? 0) - 50);
+    // ...and the remaining wall must not be shrunk further (e.g. by subtracting
+    // the publication reserve a second time): pin a lower bound with slack for
+    // scheduling/timing slop between the legs.
+    expect(addressInputs[0]?.wallMs).toBeGreaterThan((reviewInputs[0]?.wallMs ?? 0) - 50 - 10_000);
     expect(addressInputs[0]?.maxTokens).toBe(1000);
   });
 
