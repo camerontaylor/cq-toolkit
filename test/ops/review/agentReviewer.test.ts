@@ -322,6 +322,80 @@ describe('runAgentReviewer v3 session engine', () => {
     expect(reports).toEqual([{ usage, costUSD: 0.012 }]);
   });
 
+  it('keeps returned usage when cancellation lands before session settlement', async () => {
+    const controller = new AbortController();
+    const fake = fakeDrivers({
+      run: async () => {
+        controller.abort(new Error('cancelled after driver result'));
+        return workerResult({ costUSD: 0.012 });
+      },
+    });
+    const result = await runAgentReviewer(
+      fake.drivers,
+      reviewerInput({ signal: controller.signal }),
+    );
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      report: {
+        usage: 0,
+        usageSummary: { usage, costUSD: 0.012, knownCount: 1, unknownCount: 0 },
+        coverage: { sessions: [{ status: 'aborted' }] },
+      },
+    });
+  });
+
+  it('freezes an unknown in-flight dispatch at the returned snapshot', async () => {
+    const controller = new AbortController();
+    let release!: (result: WorkerResult) => void;
+    const pending = new Promise<WorkerResult>((resolve) => {
+      release = resolve;
+    });
+    const fake = fakeDrivers({
+      skipHook: true,
+      run: async () => {
+        controller.abort(new Error('cancelled while running'));
+        return pending;
+      },
+    });
+    const result = await runAgentReviewer(
+      fake.drivers,
+      reviewerInput({ signal: controller.signal }),
+    );
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      report: { usageSummary: { knownCount: 0, unknownCount: 1 } },
+    });
+    release(workerResult({ costUSD: 0.012 }));
+    await Promise.resolve();
+    expect(result).toMatchObject({
+      report: {
+        usageSummary: { knownCount: 0, unknownCount: 1 },
+        coverage: { sessions: [{ status: 'aborted' }] },
+      },
+    });
+  });
+
+  it('counts each transient retry result once without changing the numeric debit', async () => {
+    let attempt = 0;
+    const fake = fakeDrivers({
+      run: async () =>
+        attempt++ === 0
+          ? workerResult({ stopReason: 'error', errorClass: 'transient', costUSD: 0.01 })
+          : workerResult({ costUSD: 0.02 }),
+    });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(fake.run).toHaveBeenCalledTimes(2);
+    expect(result.value.usage).toBe(12);
+    expect(result.value.usageSummary).toMatchObject({
+      usage: { input: 4, output: 6, cacheRead: 2, cacheWrite: 0 },
+      knownCount: 2,
+      unknownCount: 0,
+    });
+    expect(result.value.usageSummary.costUSD).toBeCloseTo(0.03);
+  });
+
   it('refuses a non-ai-sdk lane because it cannot attest pre-upload scanning', async () => {
     const fake = fakeDrivers({ lane: 'acp' });
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
