@@ -41,8 +41,22 @@ test('sweep rejects invalid related argv before dispatch', () => {
 
 describe('fix-run report accounting', () => {
   const branch = 'cq/run/tests-1/scratch-repo';
+  const model = { provider: 'fixture', model: 'scripted' } as const;
   const task = (overrides: Partial<FixTaskReport> = {}): FixTaskReport => ({
-    task: { id: 'cases/a.test.cjs', files: ['cases/a.test.cjs'] },
+    task: {
+      id: 'cases/a.test.cjs',
+      files: ['cases/a.test.cjs'],
+      failures: [
+        {
+          file: 'cases/a.test.cjs',
+          line: 1,
+          column: 1,
+          ruleId: null,
+          message: 'expected 1, received 2',
+          severity: 'error',
+        },
+      ],
+    },
     attempts: [],
     outcome: 'unfixed',
     branch,
@@ -69,8 +83,22 @@ describe('fix-run report accounting', () => {
         { tier: 'rescue', attempt: 1, reason: 'rescue retry' },
       ],
       attempts: [
-        { tier: 'worker', attempt: 1, invocation: 'edit', wallMs: 1, reason: 'initial task' },
-        { tier: 'rescue', attempt: 1, invocation: 'edit', wallMs: 1, reason: 'rescue retry' },
+        {
+          tier: 'worker',
+          attempt: 1,
+          invocation: 'edit',
+          model,
+          wallMs: 1,
+          reason: 'initial task',
+        },
+        {
+          tier: 'rescue',
+          attempt: 1,
+          invocation: 'edit',
+          model,
+          wallMs: 1,
+          reason: 'rescue retry',
+        },
       ],
     });
     const row = plannedTaskRowOf(report);
@@ -110,14 +138,15 @@ describe('fix-run report accounting', () => {
       task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
     );
     expect(withoutBranch.outcome).toBe('escalated-to-human');
-    expect(withoutBranch.failures[0]).toEqual({
+    const branchlessRow = withoutBranch.failures[0];
+    expect('branch' in branchlessRow).toBe(false);
+    expect(branchlessRow).toEqual({
       unit: 'tests-1/scratch-repo',
       task: 'cases/a.test.cjs',
       outcome: 'escalated-to-human',
       gate: 'none',
       reason: 'failure has no attributed file',
     });
-    expect('branch' in withoutBranch.failures[0]).toBe(false);
   });
 
   test('never-dispatched, cancelled and budget-stopped siblings refine their outcomes', () => {
@@ -140,7 +169,14 @@ describe('fix-run report accounting', () => {
         outcome: 'escalated-to-human',
         reason: 'token or wall budget exhausted',
         attempts: [
-          { tier: 'worker', attempt: 1, invocation: 'edit', wallMs: 1, reason: 'initial task' },
+          {
+            tier: 'worker',
+            attempt: 1,
+            invocation: 'edit',
+            model,
+            wallMs: 1,
+            reason: 'initial task',
+          },
         ],
       }),
     );
@@ -195,13 +231,33 @@ describe('fix-run report accounting', () => {
         outcome: 'fixed',
         commits: ['d'.repeat(40)],
         attempts: [
-          { tier: 'worker', attempt: 1, invocation: 'edit', wallMs: 1, reason: 'initial task' },
+          {
+            tier: 'worker',
+            attempt: 1,
+            invocation: 'edit',
+            model,
+            wallMs: 1,
+            reason: 'initial task',
+          },
         ],
       }),
     );
     const humanNoArtifact = plannedTaskRowOf(
       task({
-        task: { id: 'cases/x.test.cjs', files: ['cases/x.test.cjs'] },
+        task: {
+          id: 'cases/x.test.cjs',
+          files: ['cases/x.test.cjs'],
+          failures: [
+            {
+              file: 'cases/x.test.cjs',
+              line: 1,
+              column: 1,
+              ruleId: null,
+              message: 'expected 1, received 2',
+              severity: 'error',
+            },
+          ],
+        },
         outcome: 'escalated-to-human',
         reason: 'failure has no attributed file',
       }),
