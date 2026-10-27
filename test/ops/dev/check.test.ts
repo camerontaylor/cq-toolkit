@@ -342,14 +342,19 @@ describe('dev.check', () => {
   });
 
   test('a dash-prefixed test file is refused before any gate runs', async () => {
-    const effects = effectsFor();
-    const result = await makeDevCheck(effects)({
-      repoRoot: repo.root,
-      testFiles: ['test/-evil.test.ts'],
-    });
-    expect(result.status).toBe('failed');
-    if (result.status === 'failed') expect(result.error).toContain('-evil.test.ts');
-    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+    // BOTH shapes of the option-injection contract: a dash segment AFTER a
+    // '/' (path-shaped) AND a BARE dash-leading segment with no '/' at all —
+    // a validator that only rejects the path-shaped form must fail here.
+    for (const file of ['test/-evil.test.ts', '-x']) {
+      const effects = effectsFor();
+      const result = await makeDevCheck(effects)({
+        repoRoot: repo.root,
+        testFiles: [file],
+      });
+      expect(result.status, `dash-prefixed ${file} must be refused`).toBe('failed');
+      if (result.status === 'failed') expect(result.error).toContain(file);
+      expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+    }
   });
 
   test('the automatic forms record their selection mode honestly', async () => {
