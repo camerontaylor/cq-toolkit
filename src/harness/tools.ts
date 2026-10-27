@@ -1183,11 +1183,19 @@ export function buildTools(
       }
       return true;
     };
+    // A full stdout pipe keeps a killed rg's buffered bytes in the PIPE, not
+    // in rg: the group kill cannot deliver 'close' while the pipe stays full
+    // (kernel backpressure blocks rg's final write), so settlement would
+    // hang. Once a terminal condition fires, keep DRAINING and discarding
+    // stdout (overflowed stays true; no repeated cap processing) until the
+    // child closes and settles.
+    let terminal = false;
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (!consumeChunk(chunk)) {
-        child.stdout?.pause();
-        killSearchGroup();
-      }
+      if (terminal) return; // drain and discard; verdict already fixed
+      if (consumeChunk(chunk)) return;
+      terminal = true;
+      killSearchGroup();
+      // stay attached and draining — do NOT pause the stream
     });
     let stderrTail = '';
     child.stderr?.on('data', (chunk: Buffer) => {

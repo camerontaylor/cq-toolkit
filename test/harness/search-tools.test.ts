@@ -24,6 +24,11 @@ const spawnState = vi.hoisted(() => ({
     stderrChunks: Buffer[];
     exitCode: number | null; // null: never auto-closes; a kill is required
     pid: number | undefined;
+    /**
+     * Hang shape: when set, close is WITHHELD until the test drains these
+     * bytes through stdout (a full pipe keeps close blocked after a kill).
+     */
+    closeAfterDrainBytes?: Buffer[];
   },
   /** The most recent fake child (kill target for abort/timeout tests). */
   current: null as FakeChildHandle | null,
@@ -53,8 +58,26 @@ vi.mock('node:child_process', async (importOriginal) => {
     child.stderr = stderr;
     child.pid = config.pid;
     child.kill = vi.fn((): boolean => {
-      // A SIGKILL terminates the child: close follows with a null code.
-      queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+      // A SIGKILL terminates the child: close follows with a null code,
+      // UNLESS the pipe is full (hang shape): then close waits for drains.
+      const drain = config.closeAfterDrainBytes;
+      if (drain === undefined) {
+        queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+      } else {
+        queueMicrotask(() => {
+          let index = 0;
+          const pump = (): void => {
+            if (index >= drain.length) {
+              child.emit('close', null, 'SIGKILL');
+              return;
+            }
+            stdout.emit('data', drain[index]);
+            index += 1;
+            queueMicrotask(pump);
+          };
+          pump();
+        });
+      }
       return true;
     });
     spawnState.current = { kill: child.kill, pid: config.pid };
@@ -774,5 +797,48 @@ describe('contained grep and glob tools', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test('overflow with a buffered pipe settles: drain keeps flowing after the kill', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'hit.ts'), 'needle\n', 'utf8');
+      // The P1 hang shape: the first chunk exceeds the scanned-bytes cap
+      // (terminal: kill fires), and close is withheld until MORE stdout is
+      // drained out of the pipe. The helper must keep consuming that stdout
+      // (discard-only) so close arrives and the search settles promptly
+      // with the truthful SEARCH_LIMIT denial.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.alloc(33 * 1_024 * 1_024, 0x61)],
+        stderrChunks: [],
+        exitCode: null,
+        pid: 4246,
+        closeAfterDrainBytes: [
+          Buffer.alloc(1024, 0x62),
+          Buffer.alloc(1024, 0x63),
+          Buffer.alloc(1024, 0x64),
+        ],
+      };
+      const registeredBefore = signalCleanupState.registered;
+      const unregisteredBefore = signalCleanupState.unregistered;
+      try {
+        const result = await tool(
+          buildTools(defaultHarnessConfig, workspace, 'read-only'),
+          'grep',
+        ).execute({ pattern: 'needle', include: '*.ts' });
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: candidate enumeration work cap exceeded',
+          );
+        }
+        expect(spawnState.current?.kill).toHaveBeenCalled();
+        expect(signalCleanupState.registered - registeredBefore).toBe(1);
+        expect(signalCleanupState.unregistered - unregisteredBefore).toBe(1);
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+    });
   });
 });
