@@ -340,28 +340,54 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         counts[severity] = counts.get(severity, 0) + 1
     res: Dict[str, Any] = {"exit": exit_code, "events": len(events), "bad_lines": bad_lines,
                            "findings": len(findings), "severity_counts": counts}
+    # Authorization is derived from every structured cause, never message text.
+    causes = []
+    proof_complete = ndjson.exists() and bad_lines == 0 and type(exit_code) is int
+    def hard(code):
+        causes.append({"source": "queue", "category": "unknown", "code": code})
+    for _ in range(bad_lines):
+        hard("malformed-stream")
+    for e in events:
+        if e.get("type") == "error":
+            if e.get("errorType") == "rate_limit" and e.get("recoverable") is True:
+                causes.append({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"})
+            else:
+                code = e.get("errorType")
+                hard(code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", code)
+                     else "unknown-error")
+        if e.get("type") == "action_required" or e.get("status") == "awaiting_confirmation":
+            hard("action-required")
+        # Unknown status values are not evidence of a harmless progress event.
+        # In particular scan/budget/cancel statuses must survive a vendor error.
+        if e.get("type") == "finding" and isinstance(e.get("severity"), str) and e["severity"] in BLOCKING_SEVERITIES:
+            hard("blocking-finding")
+        if e.get("type") != "complete" and e.get("status") is not None:
+            status = e["status"]
+            hard(status if isinstance(status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", status)
+                 else "unrecognized-status")
+            proof_complete = False
+    if errors and complete:
+        hard("conflicting-terminal")
+    vendor_only = bool(causes) and all(c["source"] == "vendor" for c in causes)
+    if type(exit_code) is not int:
+        hard("missing-exit")
+    elif exit_code != 0 and not (exit_code == 1 and vendor_only):
+        hard("unexpected-exit")
     if actions:
-        res.update(outcome="action_required", message=str(actions[0])[:400])
+        res.update(outcome="action_required", message="structured action required")
     elif errors:
-        e = errors[0]
-        et = str(e.get("errorType", "")).lower()
-        msg = str(e.get("message", ""))
-        res["message"] = f"{e.get('errorType')}: {msg}"[:400]
-        if SIZE_REFUSAL.search(f"{et} {msg}"):
-            res.update(outcome="too_large")
-        elif "rate" in et or "limit" in et or "quota" in et or "rate limit" in msg.lower():
-            metadata = e.get("metadata")
-            wait = str(metadata.get("waitTime", "")) if isinstance(metadata, dict) else ""
-            m = re.search(r"(\d+)\s*(second|minute|hour)", wait)
-            mins = None
-            if m:
-                k = {"second": 1 / 60, "minute": 1, "hour": 60}[m.group(2)]
-                mins = int(int(m.group(1)) * k) + 1
-            res.update(outcome="rate_limited", wait_minutes=mins)
-        elif "auth" in et or "login" in msg.lower() or "unauthor" in msg.lower():
-            res.update(outcome="auth")
+        if vendor_only and proof_complete and type(exit_code) is int and exit_code in (0, 1):
+            res.update(outcome="rate_limited")
+            waits = []
+            for e in errors:
+                metadata = e.get("metadata")
+                wait = metadata.get("waitTime") if isinstance(metadata, dict) else None
+                m = re.fullmatch(r"(\d+)\s*(second|minute|hour)s?", wait) if isinstance(wait, str) else None
+                if m:
+                    waits.append(int(int(m.group(1)) * {"second": 1 / 60, "minute": 1, "hour": 60}[m.group(2)]) + 1)
+            res["wait_minutes"] = max(waits) if waits else None
         else:
-            res.update(outcome="error")
+            res.update(outcome="error", message="structured failure; see failure provenance")
     elif exit_code is None:
         res.update(outcome="interrupted", message="no exit status recorded")
     elif exit_code != 0:
@@ -379,6 +405,12 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         reviewed = last.get("reviewedFiles") or []
         count = len(reviewed) if isinstance(reviewed, list) else reviewed if isinstance(reviewed, int) and not isinstance(reviewed, bool) and reviewed >= 0 else 0
         res.update(outcome="completed", reviewed_files=count)
+    if not errors and not actions and res["outcome"] != "completed":
+        hard("nonterminal-review")
+    # Unknown statuses also invalidate an otherwise apparently successful stream.
+    if causes and res["outcome"] == "completed":
+        res.update(outcome="malformed", message="stream contains an unrecognized status")
+    res["failure_provenance"] = {"version": 1, "complete": proof_complete, "causes": causes}
     res["counted"] = res["outcome"] == "completed"
     return res
 

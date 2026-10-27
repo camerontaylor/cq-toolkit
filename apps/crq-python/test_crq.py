@@ -54,6 +54,61 @@ class ClassifierTest(unittest.TestCase):
                 self.assertFalse(crq.classify(path, 0)["counted"])
 
 
+    def test_all_causes_exact_vendor_vocabulary_and_exit_contract(self):
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True,
+                  "metadata": {"waitTime": "2 minutes"}}
+        cause = {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for exit_code in (0, 1):
+                path.write_text(json.dumps(vendor) + "\n" + json.dumps(vendor))
+                cls = crq.classify(path, exit_code)
+                self.assertEqual(cls["outcome"], "rate_limited")
+                self.assertFalse(cls["counted"])
+                self.assertEqual(cls["wait_minutes"], 3)
+                self.assertEqual(cls["failure_provenance"],
+                    {"version": 1, "complete": True, "causes": [cause, cause]})
+            hard_events = [
+                {"type": "error", "errorType": "scan", "message": "rate limit auth login quota"},
+                {"type": "error", "errorType": "budget"},
+                {"type": "error", "errorType": "cancel"},
+                {"type": "error", "errorType": "unknown"},
+                {"type": "error", "errorType": "rate_limit", "recoverable": False},
+                {"type": "error", "errorType": "rate_limit", "recoverable": 1},
+                {"type": "error", "errorType": "RATE_LIMIT", "recoverable": True},
+                {"type": "action_required"}, {"type": "status", "status": "cancelled"},
+                {"type": "status", "status": "budget_exhausted"},
+                {"type": "status", "status": "scan_failed"},
+                {"type": "finding", "severity": "major"}, COMPLETE]
+            for hard_event in hard_events:
+                for events in ([vendor, hard_event], [hard_event, vendor]):
+                    with self.subTest(events=events):
+                        path.write_text("\n".join(json.dumps(e) for e in events))
+                        cls = crq.classify(path, 0)
+                        self.assertNotEqual(cls["outcome"], "rate_limited")
+                        self.assertFalse(cls["counted"])
+                        causes = cls["failure_provenance"]["causes"]
+                        self.assertIn(cause, causes)
+                        self.assertTrue(any(c["source"] == "queue" for c in causes))
+            for exit_code in (None, True, "1", -15, 2, 124, 137):
+                with self.subTest(exit_code=exit_code):
+                    path.write_text(json.dumps(vendor))
+                    cls = crq.classify(path, exit_code)
+                    self.assertNotEqual(cls["outcome"], "rate_limited")
+                    self.assertTrue(any(c["source"] == "queue" for c in cls["failure_provenance"]["causes"]))
+            for malformed in ("bad", json.dumps({"type": "unknown"})):
+                path.write_text(json.dumps(vendor) + "\n" + malformed)
+                cls = crq.classify(path, 1)
+                self.assertFalse(cls["failure_provenance"]["complete"])
+                self.assertNotEqual(cls["outcome"], "rate_limited")
+            for error_type in ("review", "auth", "file_limit", "quota", "rate_limit_error"):
+                path.write_text(json.dumps({"type": "error", "errorType": error_type,
+                    "message": "rate limit: login required", "recoverable": True}))
+                cls = crq.classify(path, 1)
+                self.assertEqual(cls["outcome"], "error")
+                self.assertEqual(cls["failure_provenance"]["causes"][0]["source"], "queue")
+
+
 class CurrentTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -622,3 +677,18 @@ class CurrentTest(unittest.TestCase):
                 crq.gh_json(["api", "fixture"])
             run.assert_called_once()
         self.assertIsNone(crq._FORGE_BUDGET)
+
+
+    def test_receipt_preserves_all_classification_causes(self):
+        item = self.enroll()
+        rdir = self.launch_item(item)
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        (rdir / "review.ndjson").write_text(json.dumps(vendor) + "\n" +
+            json.dumps({"type": "error", "errorType": "scan"}))
+        self.harvest(item)
+        document = self.document(item)
+        self.assertEqual(document["outcome"], "error")
+        self.assertFalse(document["counted"])
+        self.assertEqual(document["classification"]["failure_provenance"]["causes"], [
+            {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"},
+            {"source": "queue", "category": "unknown", "code": "scan"}])
