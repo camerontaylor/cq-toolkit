@@ -140,6 +140,74 @@ describe('dev.cycle known usage', () => {
     });
   });
 
+  it('returns a partial driver result with null usage and retains its valid cost', async () => {
+    const ledger = createKnownUsageLedger();
+    const original: WorkerResult = {
+      stopReason: 'error',
+      error: 'original partial result',
+      usage: null as unknown as Usage,
+      costUSD: 0.02,
+      denials: [],
+    };
+    const driver = { run: async (): Promise<WorkerResult> => original };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    let spent = 0;
+    const resolved = meterDrivers(factory, (tokens) => (spent += tokens), {
+      start: () => {},
+      settle: (id, observation) => ledger.record(id, observation),
+    }).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    const actual = await resolved.driver.run(invocation);
+    expect(actual).toBe(original);
+    expect(actual.stopReason).toBe('error');
+    expect(actual.error).toBe('original partial result');
+    expect(spent).toBe(0);
+    expect(ledger.snapshot()).toEqual({
+      costUSD: 0.02,
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 0,
+    });
+  });
+
+  it('returns the original result when its usage accessor throws and keeps valid cost', async () => {
+    const ledger = createKnownUsageLedger();
+    const original = {
+      stopReason: 'error',
+      error: 'original accessor result',
+      costUSD: 0.03,
+      denials: [],
+    } as WorkerResult;
+    Object.defineProperty(original, 'usage', {
+      get: () => {
+        throw new Error('bad usage accessor');
+      },
+    });
+    const driver = { run: async (): Promise<WorkerResult> => original };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    let spent = 0;
+    const resolved = meterDrivers(factory, (tokens) => (spent += tokens), {
+      start: () => {},
+      settle: (id, observation) => ledger.record(id, observation),
+    }).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    const actual = await resolved.driver.run(invocation);
+    expect(actual).toBe(original);
+    expect(actual.stopReason).toBe('error');
+    expect(actual.error).toBe('original accessor result');
+    expect(spent).toBe(0);
+    expect(ledger.snapshot()).toEqual({
+      costUSD: 0.03,
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 0,
+    });
+  });
+
   it('attaches a typed empty summary to a pre-dispatch validation failure', async () => {
     const cycle = makeDevCycle({ effects: {} as DevEffects });
     const result = await cycle({ repoRoot: '' });

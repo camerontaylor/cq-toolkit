@@ -753,10 +753,22 @@ export function meterDrivers(
               settle(partial === undefined ? {} : { usage: partial });
               throw err;
             }
-            meter(result.usage);
+            let measured: Usage | undefined;
+            try {
+              measured = normalizeUsageObservation({ usage: result.usage }).usage;
+            } catch {
+              // A malformed usage accessor cannot replace the driver result.
+            }
+            let costUSD: number | undefined;
+            try {
+              costUSD = normalizeUsageObservation({ costUSD: result.costUSD }).costUSD;
+            } catch {
+              // Cost remains independent of malformed usage telemetry.
+            }
+            if (measured !== undefined) meter(measured);
             settle({
-              usage: result.usage,
-              ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
+              ...(measured === undefined ? {} : { usage: measured }),
+              ...(costUSD === undefined ? {} : { costUSD }),
             });
             return result;
           },
