@@ -142,9 +142,18 @@ export function resolveChecks(
       error: `analyze.run: '${configPath}' ${parsed.reason}${parsed.migrationRequired === true ? '' : `; fix it, or regenerate it with \`cq analyze.init --dir=${dir} --force\``}`,
     };
   }
+  const checks = parsed.config.checks
+    .filter((check) => check.addressOnly !== true)
+    .map(({ adapter, command }) => ({ adapter, command }));
+  if (checks.length === 0)
+    return {
+      ok: false,
+      error:
+        'analyze.run: no repository checks configured (address-only checks require finding-file scope)',
+    };
   return {
     ok: true,
-    checks: parsed.config.checks.map(({ adapter, command }) => ({ adapter, command })),
+    checks,
     configPath,
   };
 }

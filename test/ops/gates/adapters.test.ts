@@ -730,7 +730,10 @@ describe('test-narrow gate', () => {
       {
         name: 'test/a.test.ts',
         status: 'failed',
-        assertionResults: [{ status: 'failed', fullName: 'stable test identity' }],
+        assertionResults: [
+          { status: 'failed', fullName: 'stable test identity' },
+          { status: 'passed', fullName: 'existing pass' },
+        ],
       },
     ],
   };
@@ -808,5 +811,80 @@ test.each([
 ])('bounded test gate never guesses from incomplete output: %s', (stdout) => {
   expect(
     parseCheckOutput(adapterByName('test-narrow'), { stdout, stderr: '', exitCode: 0 }).verdict,
+  ).toBe('indeterminate');
+});
+
+test.each([
+  'test:narrow advisory="no related tests mapped"\ntest:narrow result="pass" exit=0 files=0 tests=- failed=9',
+  'test:narrow result="refused" exit=2\ntest:narrow advisory="no related tests mapped"\ntest:narrow result="pass" exit=0 files=0 tests=- failed=-',
+  ...[
+    { total: 1, passed: 2, status: 'passed' },
+    { total: 1, passed: 1, status: 'mystery' },
+    { total: 2, passed: 2, status: 'passed' },
+  ].map(
+    ({ total, passed, status }) =>
+      'test:narrow report=' +
+      JSON.stringify({
+        success: true,
+        numTotalTests: total,
+        numPassedTests: passed,
+        numFailedTests: 0,
+        testResults: [
+          {
+            name: 'test/a.test.ts',
+            status: 'passed',
+            assertionResults: [{ status, fullName: 'ok' }],
+          },
+        ],
+      }) +
+      '\ntest:narrow result="pass" exit=0 files=1 tests="' +
+      passed +
+      '/' +
+      total +
+      '" failed=0',
+  ),
+])('contradictory bounded wrapper evidence is indeterminate: %s', (stdout) => {
+  expect(
+    parseCheckOutput(adapterByName('test-narrow'), { stdout, stderr: '', exitCode: 0 }).verdict,
+  ).toBe('indeterminate');
+});
+
+test('bounded reports preserve consistent skipped and todo totals', () => {
+  const report = {
+    success: true,
+    numTotalTests: 3,
+    numPassedTests: 1,
+    numFailedTests: 0,
+    numPendingTests: 1,
+    numTodoTests: 1,
+    testResults: [
+      {
+        name: 'test/a.test.ts',
+        status: 'passed',
+        assertionResults: [
+          { status: 'passed', fullName: 'ok' },
+          { status: 'pending', fullName: 'skip' },
+          { status: 'todo', fullName: 'later' },
+        ],
+      },
+    ],
+  };
+  const output =
+    'test:narrow report=' +
+    JSON.stringify(report) +
+    '\ntest:narrow result="pass" exit=0 files=1 tests="1/3" failed=0 skipped=';
+  expect(
+    parseCheckOutput(adapterByName('test-narrow'), {
+      stdout: output + '2',
+      stderr: '',
+      exitCode: 0,
+    }).verdict,
+  ).toBe('parsed');
+  expect(
+    parseCheckOutput(adapterByName('test-narrow'), {
+      stdout: output + '9',
+      stderr: '',
+      exitCode: 0,
+    }).verdict,
   ).toBe('indeterminate');
 });

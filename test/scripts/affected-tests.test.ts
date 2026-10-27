@@ -341,3 +341,12 @@ describe('bounded per-fix related mapping', () => {
     ]);
   });
 });
+
+it('maps gate adapters to their shared owner suite despite layout differences', () => {
+  expect(
+    selectRelatedTests(
+      ['src/ops/gates/adapters/testNarrow.ts'],
+      ['test/ops/gates/adapters.test.ts', 'test/ops/gates/protectedPaths.test.ts'],
+    ).files,
+  ).toContain('test/ops/gates/adapters.test.ts');
+});

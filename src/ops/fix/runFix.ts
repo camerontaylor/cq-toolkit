@@ -600,12 +600,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
  * something fix.run repairs; it still gates every candidate wherever the
  * full check list runs (review.address validation, dev.check).
  */
-export function fixSourceChecks<T extends { kind?: string; adapter: string }>(
-  checks: readonly T[],
-  source: string,
-): T[] {
+export function fixSourceChecks<
+  T extends { kind?: string; adapter: string; addressOnly?: boolean },
+>(checks: readonly T[], source: string): T[] {
   return checks.filter(
     (check) =>
+      check.addressOnly !== true &&
       check.kind === source &&
       !['oxfmt-check', 'oxlint-json', 'test-narrow'].includes(check.adapter),
   );

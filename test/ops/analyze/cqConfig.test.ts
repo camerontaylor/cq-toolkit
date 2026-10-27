@@ -198,7 +198,7 @@ describe('cq.json v2', () => {
     }
   });
 
-  test('toolkit root config keeps CodeRabbit first and runs only the compiler and the format gate', () => {
+  test('toolkit root config keeps CodeRabbit first and pins repository and address verification checks', () => {
     const result = parseCqConfig(
       readFileSync(new URL('../../../cq.json', import.meta.url), 'utf8'),
     );
@@ -231,6 +231,7 @@ describe('cq.json v2', () => {
       expect(lint.relatedArgs).toEqual([...lint.command.args.slice(0, 8), '{files}']);
       expect(result.config.checks.find((check) => check.adapter === 'test-narrow')).toMatchObject({
         kind: 'tests',
+        addressOnly: true,
         command: { command: 'node', args: ['scripts/check-related-tests.mjs'] },
         relatedArgs: ['scripts/check-related-tests.mjs', '{files}'],
       });

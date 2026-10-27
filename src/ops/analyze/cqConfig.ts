@@ -66,6 +66,8 @@ const ReviewReReviewSchema = z
 /** Config-only metadata is removed before dispatch to gates.checkRunner. */
 export const CqCheckSchema = CheckRunnerInputObject.extend({
   kind: z.enum(['tests', 'static']).exactOptional(),
+  // Requires review.address's explicit finding-file scope; repository consumers skip it.
+  addressOnly: z.boolean().exactOptional(),
   // Each standalone {files} token expands to separate argv entries, not shell text.
   relatedArgs: z.array(z.string()).exactOptional(),
 });
@@ -156,7 +158,7 @@ export const CqConfigSchema = z
 /** Library callers may omit the check command's boundary timeout default. */
 export type CqConfig = Omit<z.input<typeof CqConfigSchema>, 'checks'> & { checks: CqCheck[] };
 export type CqCheck = CheckRunnerInput &
-  Pick<z.input<typeof CqCheckSchema>, 'kind' | 'relatedArgs'>;
+  Pick<z.input<typeof CqCheckSchema>, 'kind' | 'relatedArgs' | 'addressOnly'>;
 export type CqSeverity = z.output<typeof SeveritySchema>;
 
 function schemaReason(error: z.ZodError): string {

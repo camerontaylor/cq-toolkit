@@ -365,8 +365,15 @@ export function makeDevCheck(
       config?.ok === true &&
       config.config.checks.length > 0 &&
       packageName !== '@camerontaylor/cq-toolkit'
-        ? config.config.checks
+        ? config.config.checks.filter((check) => check.addressOnly !== true)
         : null;
+    if (configuredChecks?.length === 0) {
+      return {
+        status: 'needs-human',
+        reason:
+          'dev.check: no repository checks configured (address-only checks require finding-file scope)',
+      };
+    }
     const configuredPatternsFile =
       configuredChecks !== null ? config?.config.review?.denylistPatternsFile : undefined;
     const configuredPatternsPath =

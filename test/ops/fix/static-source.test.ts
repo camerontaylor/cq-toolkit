@@ -158,3 +158,9 @@ test('typed lint scopes code with its full typed flags and falls back for non-co
     staticRelatedCheckCommand(command, 'oxlint-json', ['README.md'], ['--type-aware', '{files}']),
   ).toEqual(command);
 });
+
+test('address-only checks never become fix sources regardless of adapter', () => {
+  expect(
+    fixSourceChecks([{ kind: 'static', adapter: 'tsc-lines', addressOnly: true }], 'static'),
+  ).toEqual([]);
+});

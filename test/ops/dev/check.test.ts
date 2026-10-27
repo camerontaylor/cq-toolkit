@@ -59,13 +59,18 @@ describe('rangeFault and knipTrigger', () => {
 });
 
 describe('dev.check', () => {
-  test('runs cq.json checks for adopter repos without the cq-toolkit legacy set', async () => {
+  test('runs repository cq.json checks and skips address-only checks for adopters', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(
       'cq.json',
       JSON.stringify({
         schemaVersion: 2,
         checks: [
+          {
+            adapter: 'test-narrow',
+            addressOnly: true,
+            command: { command: 'must-not-run', args: [] },
+          },
           {
             adapter: 'tsc-lines',
             command: {
@@ -96,6 +101,7 @@ describe('dev.check', () => {
     expect(result.value.gates.map((gate) => gate.name)).toContain('cq.json:1:tsc-lines');
     expect(result.value.gates.map((gate) => gate.name)).not.toContain('check:static');
     expect(effects.calls).toContainEqual({ command: 'fake-check', args: ['--strict'] });
+    expect(effects.calls.some(({ command }) => command === 'must-not-run')).toBe(false);
     expect(configuredCwd).toBe(join(repo.root, 'packages/app'));
     expect(configuredTimeout).toBe(12_345);
   });
@@ -400,4 +406,27 @@ describe('dev.check', () => {
     const second = await makeDevCheck(effects)({ repoRoot: repo.root });
     expect(second.status === 'ok' && second.value.checkId.startsWith('k002-')).toBe(true);
   });
+});
+
+test('dev.check refuses an adopter config with only address checks', async () => {
+  await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+  await repo.write(
+    'cq.json',
+    JSON.stringify({
+      schemaVersion: 2,
+      checks: [
+        {
+          adapter: 'test-narrow',
+          addressOnly: true,
+          command: { command: 'must-not-run', args: [] },
+        },
+      ],
+    }),
+  );
+  repo.commitAll('configure only scoped verification');
+  const effects = effectsFor();
+  const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+  expect(result.status).toBe('needs-human');
+  if (result.status === 'needs-human') expect(result.reason).toContain('no repository checks');
+  expect(effects.calls.some(({ command }) => command === 'must-not-run')).toBe(false);
 });

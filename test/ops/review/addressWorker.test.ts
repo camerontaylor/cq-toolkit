@@ -1857,6 +1857,7 @@ if (n === ${wanted}) {
 describe('verification gate regressions', () => {
   test.each([
     ['oxlint-json', false],
+    ['oxlint-json', true],
     ['test-narrow', false],
     ['test-narrow', true],
   ] as const)(

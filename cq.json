@@ -55,6 +55,7 @@
     {
       "adapter": "test-narrow",
       "kind": "tests",
+      "addressOnly": true,
       "command": { "command": "node", "args": ["scripts/check-related-tests.mjs"], "cwd": "." },
       "relatedArgs": ["scripts/check-related-tests.mjs", "{files}"]
     }
