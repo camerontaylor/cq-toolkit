@@ -196,10 +196,12 @@ interoperable with an external ledger; a shared cross-language canonical
 projection protocol does not exist and is an activation blocker for that
 bridge. With no hook the shared token allowance is enforced per-invocation
 only — a named gap, not a whole-job claim.
-The one driver-side temporal bound is the SDK call's per-request
-`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (600 s; `AiSdkDriverOptions.stepTimeoutMs`) — NOT a run deadline,
-but a bound on each step of the tool loop so a hung HTTP request cannot
-stall the loop.
+The driver-side temporal bound is the per-step step bound — NOT a run
+deadline, but a bound on each step of the tool loop so a hung HTTP request
+cannot stall the loop — and it is enforced twice, at two layers: at the SDK
+call's per-request `timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (600 s;
+`AiSdkDriverOptions.stepTimeoutMs`) and at the transport dispatcher (the
+undici layer described next).
 The production default providers fetch through a per-driver undici
 dispatcher (`ai-sdk/step-fetch.ts`) whose header and body timeouts are the
 step bound plus `STEP_FETCH_MARGIN_MS`: Node's bundled fetch otherwise gives
