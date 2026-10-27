@@ -58,6 +58,8 @@ export const ReviewCoverageV2Schema = z
             })
             .strict(),
           steps: Count.optional(),
+          /** Driver attempts when a transient failure was retried once; usage/steps sum them. */
+          attempts: Count.optional(),
           /** Actual driver transcript ID, for tool-result/truncation audit evidence. */
           driverSessionId: z.string().min(1).optional(),
           /** Recoverable tool denials are visible evidence, not a completeness input. */

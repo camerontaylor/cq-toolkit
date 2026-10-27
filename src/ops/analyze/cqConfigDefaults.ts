@@ -75,6 +75,10 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
           f.review?.session?.maxSteps ??
           c.review?.session?.maxSteps ??
           REVIEW_SESSION_DEFAULTS.maxSteps,
+        concurrency:
+          f.review?.session?.concurrency ??
+          c.review?.session?.concurrency ??
+          REVIEW_SESSION_DEFAULTS.concurrency,
       },
       size: {
         small: {

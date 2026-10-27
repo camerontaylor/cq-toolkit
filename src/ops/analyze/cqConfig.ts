@@ -13,7 +13,12 @@ const SeveritySchema = z.enum(['critical', 'major', 'minor', 'trivial', 'info', 
 const RoleSchema = z.object({ provider: z.string().min(1), model: z.string().min(1) }).strict();
 
 /** Documented review-session bounds; resolution fills omitted config fields. */
-export const REVIEW_SESSION_DEFAULTS = { maxInputChars: 60_000, maxSteps: 15 } as const;
+export const REVIEW_SESSION_DEFAULTS = {
+  maxInputChars: 60_000,
+  maxSteps: 15,
+  /** Independent partition sessions in flight at once. */
+  concurrency: 4,
+} as const;
 
 /** Documented size tiers; a medium threshold may equal its small counterpart, never undercut it. */
 export const REVIEW_SIZE_DEFAULTS = {
@@ -125,6 +130,7 @@ export const CqConfigSchema = z
           .object({
             maxInputChars: PositiveInteger.exactOptional(),
             maxSteps: PositiveInteger.exactOptional(),
+            concurrency: PositiveInteger.exactOptional(),
           })
           .strict()
           .exactOptional(),

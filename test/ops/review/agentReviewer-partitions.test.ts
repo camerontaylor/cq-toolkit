@@ -80,7 +80,7 @@ function fakeDrivers(options: FakeOptions = {}) {
   let calls = 0;
   let sends = 0;
   const run = async (invocation: OpInvocation): Promise<WorkerResult> => {
-    calls++;
+    const call = ++calls;
     invocations.push(invocation);
     const request = requests.at(-1)!;
     if (options.onHook) await options.onHook(request, invocation);
@@ -97,7 +97,7 @@ function fakeDrivers(options: FakeOptions = {}) {
         });
       sends++;
     }
-    return options.result?.(invocation, calls) ?? result();
+    return options.result?.(invocation, call) ?? result();
   };
   const drivers: DriverFactory = {
     resolve: (request) => {
@@ -206,6 +206,7 @@ it('subtracts completed session token usage and blocks with honest partial cover
       diff: large,
       components: [{ component: 'tracked:src/a.ts', path: 'src/a.ts', text: large }],
       maxTokens: 10,
+      session: { concurrency: 1 },
     }),
   );
   expect(outcome.status).toBe('budget-exhausted');
@@ -571,8 +572,148 @@ it('stops after two consecutive failed sessions instead of spending the rest of 
   });
   const outcome = await runAgentReviewer(
     fake.drivers,
-    baseInput({ diff: large, components: [{ ...small, text: large }], maxTokens: 1_000_000 }),
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 1_000_000,
+      session: { concurrency: 1 },
+    }),
   );
   expect(outcome.status).toBe('needs-human');
+  expect(fake.calls()).toBe(2);
+});
+
+it('runs partitions concurrently up to the limit and merges findings in plan order', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fake = fakeDrivers({
+    onHook: async (_request, invocation) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Later partitions finish first: completion order differs from plan order.
+      const marker = /UTF-16 range (\d+):/.exec(invocation.prompt)?.[1] ?? '0';
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(1, 30 - Number(marker) / 20_000)),
+      );
+      inFlight--;
+    },
+    result: (invocation) =>
+      result({}, [
+        {
+          file: small.path,
+          line: 2,
+          rule: 'order',
+          severity: 'high',
+          text: `at ${/UTF-16 range (\d+):/.exec(invocation.prompt)?.[1] ?? '?'}`,
+        },
+      ]),
+  });
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 1_000_000,
+      session: { concurrency: 3 },
+    }),
+  );
+  expect(outcome.status).toBe('ok');
+  if (outcome.status !== 'ok') throw new Error('expected ok');
+  expect(maxInFlight).toBeGreaterThan(1);
+  expect(maxInFlight).toBeLessThanOrEqual(3);
+  const starts = outcome.value.findings.map((finding) => Number(/at (\d+)/.exec(finding.text)![1]));
+  expect(starts).toEqual([...starts].sort((a, b) => a - b));
+  expect(outcome.value.coverage.sessions.map((session) => session.id)).toEqual(
+    outcome.value.coverage.sessions.map((_s, index) => `partition-${index + 1}`),
+  );
+});
+
+it('splits the remaining token allowance across concurrent sessions', async () => {
+  const fake = fakeDrivers();
+  await runAgentReviewer(
+    fake.drivers,
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 400,
+      session: { concurrency: 4 },
+    }),
+  );
+  expect(fake.invocations[0]!.budget.maxTokens).toBe(100);
+  // Concurrent sessions reserve disjoint shares: 400 -> 100 + 100 + 100 + 100.
+  const first = fake.invocations.slice(0, 4).map((invocation) => invocation.budget.maxTokens!);
+  expect(first.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(400);
+});
+
+it('retries a transient session failure once, counting both attempts, but not other failures', async () => {
+  const transient = fakeDrivers({
+    result: (_invocation, call) =>
+      call === 1
+        ? result({
+            stopReason: 'error',
+            error: 'step timeout',
+            errorClass: 'transient',
+            structuredOutput: undefined,
+          })
+        : result(),
+  });
+  const outcome = await runAgentReviewer(transient.drivers, baseInput());
+  expect(outcome.status).toBe('ok');
+  if (outcome.status !== 'ok') throw new Error('expected ok');
+  expect(transient.calls()).toBe(2);
+  const session = outcome.value.coverage.sessions[0]!;
+  expect(session).toMatchObject({ status: 'complete', attempts: 2 });
+  expect(session.usage.input).toBe(usage.input * 2);
+  expect(session.deliveries).toHaveLength(1);
+  expect(outcome.value.usage).toBe(
+    2 * (usage.input + usage.output + usage.cacheRead + usage.cacheWrite),
+  );
+
+  const persistent = fakeDrivers({
+    result: () =>
+      result({
+        stopReason: 'error',
+        error: 'step timeout',
+        errorClass: 'transient',
+        structuredOutput: undefined,
+      }),
+  });
+  const failed = await runAgentReviewer(persistent.drivers, baseInput());
+  expect(failed.status).toBe('needs-human');
+  expect(persistent.calls()).toBe(2);
+
+  const deterministic = fakeDrivers({
+    result: () =>
+      result({
+        stopReason: 'error',
+        error: 'bad request',
+        errorClass: 'unknown',
+        structuredOutput: undefined,
+      }),
+  });
+  await runAgentReviewer(deterministic.drivers, baseInput());
+  expect(deterministic.calls()).toBe(1);
+});
+
+it("keeps completed sessions' findings and halts the pool when a later session hits a hard error", async () => {
+  let calls = 0;
+  const scanner: DiffSecretScanner = async (components) => {
+    if (components.some(({ component }) => component === 'review-prompt') && ++calls === 3)
+      throw new Error('scanner unavailable');
+    return clean(components);
+  };
+  const fake = fakeDrivers();
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 1_000_000,
+      scanSecrets: scanner,
+      session: { concurrency: 1 },
+    }),
+  );
+  expect(outcome.status).toBe('needs-human');
+  expect(outcome.report?.findings.length).toBeGreaterThan(0);
   expect(fake.calls()).toBe(2);
 });

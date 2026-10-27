@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { DriverFactory } from '../../../driver/factory.js';
-import type { ModelSpec, Usage } from '../../../driver/types.js';
+import type { ModelSpec, Usage, WorkerResult } from '../../../driver/types.js';
 import { toOutputSchema } from '../../../driver/common/structured.js';
 import { boundedErrorText } from '../../../driver/error-text.js';
 import { defaultHarnessConfig } from '../../../harness/config.js';
@@ -27,6 +27,19 @@ const OutputSchema = z
     ),
   })
   .strict();
+
+export const totalUsage = (usage: Usage): number =>
+  usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
+
+const sumUsage = (a: ReviewCoverageV2['sessions'][number]['usage'], b: Usage): Usage => ({
+  input: a.input + b.input,
+  output: a.output + b.output,
+  cacheRead: a.cacheRead + b.cacheRead,
+  cacheWrite: a.cacheWrite + b.cacheWrite,
+  ...(a.reasoning === undefined && b.reasoning === undefined
+    ? {}
+    : { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }),
+});
 
 export interface PlannedReviewSession {
   id: string;
@@ -201,37 +214,59 @@ export async function runReviewSession(
       status: 'needs-human',
       reason: 'agent review requires the ai-sdk pre-upload scan lane',
     };
-  const result = await resolved.driver.run(
-    {
-      prompt: plan.prompt,
-      modelSpec: resolved.modelSpec,
-      toolPolicy: {
-        mode: plan.tools ? 'allowlist' : 'none',
-        allow: plan.tools ? (input.searchTools ? ['read', 'grep', 'glob'] : ['read']) : [],
+  const runDriver = (maxTokens: number) =>
+    resolved.driver.run(
+      {
+        prompt: plan.prompt,
+        modelSpec: resolved.modelSpec,
+        toolPolicy: {
+          mode: plan.tools ? 'allowlist' : 'none',
+          allow: plan.tools ? (input.searchTools ? ['read', 'grep', 'glob'] : ['read']) : [],
+        },
+        sandboxPolicy: { level: 'read-only' },
+        workspace: { path: resolve(input.repoRoot) },
+        budget: { maxTokens, maxSteps: plan.maxSteps ?? input.maxSteps },
+        outputSchema: toOutputSchema('review.agent/v3', OutputSchema),
       },
-      sandboxPolicy: { level: 'read-only' },
-      workspace: { path: resolve(input.repoRoot) },
-      budget: { maxTokens: input.maxTokens, maxSteps: plan.maxSteps ?? input.maxSteps },
-      outputSchema: toOutputSchema('review.agent/v3', OutputSchema),
-    },
-    { signal },
-  );
+      { signal },
+    );
   // Settled spend still belongs to the governor after cancellation. The outer
   // run may already have returned a snapshot; do not mutate its local report or
-  // session evidence after that boundary.
-  currentJobContext()?.reportResult({
-    usage: result.usage,
-    ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
-  });
-  signal.throwIfAborted();
-  evidence.usage = { ...result.usage };
-  if (result.steps !== undefined) evidence.steps = result.steps;
-  if (result.sessionId !== undefined) evidence.driverSessionId = result.sessionId;
-  evidence.denials = result.denials.length;
-  if (result.capabilities !== undefined)
-    evidence.capabilities = structuredClone(result.capabilities);
-  if (result.advisories !== undefined) input.onAdvisories?.(result.advisories);
-  input.onUsage(result.usage);
+  // session evidence after that boundary. Usage and steps sum across attempts.
+  let spent = 0;
+  const settle = (attempt: WorkerResult): void => {
+    currentJobContext()?.reportResult({
+      usage: attempt.usage,
+      ...(attempt.costUSD === undefined ? {} : { costUSD: attempt.costUSD }),
+    });
+    signal.throwIfAborted();
+    evidence.usage = sumUsage(evidence.usage, attempt.usage);
+    if (attempt.steps !== undefined) evidence.steps = (evidence.steps ?? 0) + attempt.steps;
+    if (attempt.sessionId !== undefined) evidence.driverSessionId = attempt.sessionId;
+    evidence.denials = (evidence.denials ?? 0) + attempt.denials.length;
+    if (attempt.capabilities !== undefined)
+      evidence.capabilities = structuredClone(attempt.capabilities);
+    if (attempt.advisories !== undefined) input.onAdvisories?.(attempt.advisories);
+    input.onUsage(attempt.usage);
+    spent += totalUsage(attempt.usage);
+  };
+  let result = await runDriver(input.maxTokens);
+  settle(result);
+  // One retry for a transient driver failure (step timeout, network): never for
+  // budget, abort, refusals or model output problems. The failed attempt's
+  // deliveries are discarded so the retry is the single delivery of the ranges;
+  // its spend stays counted and the remaining budget bounds the retry.
+  if (
+    result.stopReason === 'error' &&
+    result.errorClass === 'transient' &&
+    input.maxTokens - spent > 0
+  ) {
+    evidence.deliveries = [];
+    evidence.requests = [];
+    evidence.attempts = 2;
+    result = await runDriver(input.maxTokens - spent);
+    settle(result);
+  }
   evidence.status = result.stopReason;
   if (result.stopReason !== 'complete') {
     if (result.stopReason === 'budget') return { status: 'budget-exhausted' };

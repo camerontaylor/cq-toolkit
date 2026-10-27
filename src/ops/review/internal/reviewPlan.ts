@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { compilePathPatterns } from '../../../harness/tools.js';
+import { ANCHOR_INSTRUCTION, headLineAnchors } from './lineAnchors.js';
 import { REVIEW_SESSION_DEFAULTS, REVIEW_SIZE_DEFAULTS } from '../../analyze/cqConfig.js';
 import type { ScanComponentInput } from '../../dev/denylist.js';
 import type { Finding } from '../findings.js';
@@ -64,7 +65,7 @@ export interface CreateReviewPlanInput {
   intent?: string;
   fileList?: string;
   priorFindings?: readonly Finding[];
-  session?: { maxInputChars?: number; maxSteps?: number };
+  session?: { maxInputChars?: number; maxSteps?: number; concurrency?: number };
   size?: { small?: ReviewPlanSizeTier; medium?: ReviewPlanSizeTier };
   exclude?: readonly { pattern: string; assuredBy?: string }[];
 }
@@ -143,6 +144,11 @@ function resolveBounds(input: CreateReviewPlanInput): Bounds {
   const maxSteps = input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps;
   requireInteger('session.maxInputChars', maxInputChars, 1);
   requireInteger('session.maxSteps', maxSteps, 1);
+  requireInteger(
+    'session.concurrency',
+    input.session?.concurrency ?? REVIEW_SESSION_DEFAULTS.concurrency,
+    1,
+  );
   const small = {
     maxChangedLines:
       input.size?.small?.maxChangedLines ?? REVIEW_SIZE_DEFAULTS.small.maxChangedLines,
@@ -351,6 +357,7 @@ function buildSessionPrompt(input: {
   builder.line(
     `You have a budget of ${String(input.maxSteps)} model steps in total, including tool calls; the last step has no tools and is your JSON answer. Use tools only for targeted verification of the changed code and its direct callers; do not explore the repository broadly. Stop and answer as soon as the changed contracts and their callers are checked.`,
   );
+  builder.line(ANCHOR_INSTRUCTION);
   builder.line(FINDINGS_INSTRUCTION);
   builder.line();
 
@@ -358,6 +365,14 @@ function buildSessionPrompt(input: {
   builder.line();
   const placements: ReviewPlacement[] = [];
   for (const component of input.components) {
+    const anchors = component.component.startsWith('untracked:')
+      ? ''
+      : headLineAnchors(component.text);
+    if (anchors !== '') {
+      builder.line(`### Head line anchors for ${component.path}`);
+      builder.push(anchors);
+      builder.line();
+    }
     builder.line(
       `### ${component.path} (component ${component.component}, UTF-16 range 0:${String(component.text.length)})`,
     );

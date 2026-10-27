@@ -203,7 +203,14 @@ surrogate-safe UTF-16 boundaries. There are no area sessions or cross-session
 retries. A session that fails (for example a step timeout) does not stop the
 remaining independent partitions; the result is still `needs-human` naming the
 first failure and the incomplete pieces, but carries every other session's
-findings. Two consecutive failed sessions stop the run. Repeated findings are deduplicated.
+findings. Two consecutive failed sessions stop dispatch. Independent partitions run
+concurrently (`review.session.concurrency`, default 4): coverage and findings
+merge in plan order and the token allowance is split across the slots. A session
+that fails with a transient driver error (step timeout, network) is retried
+once, both attempts' usage counted; other failures are not retried. Every
+review prompt lists head-file line anchors (added lines and the nearest
+surviving line of removed runs) ahead of the untouched diff bytes, and partition
+prompts start with a byte-identical prefix so provider prefix caches hit. Repeated findings are deduplicated.
 
 Coverage v2 retains every original component's path, hash, size and state:
 `planned`, `delivered`, `completed` or `excluded`. Only a clean `model-request`
