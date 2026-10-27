@@ -127,6 +127,13 @@ one. Cancellation and budget exhaustion are therefore observable as
 `uncertain`, never as success. A no-op gate (or no gate) gives a complete
 evaluation; the packet is pure data and every check is local computation.
 
+Diagnostic reads and non-Error string conversion are captured once inside a
+catch guard. If a message getter or coercion hook throws, the detail falls
+back to `verification diagnostic unavailable`. A gate refusal retains the
+stable `verification gate refused` reason in that case; evidence failures
+retain `unavailable-evidence`. Ordinary Error messages and non-Error string
+details are preserved. Diagnostic failure cannot establish closure.
+
 ## Integration contract (for the later single writer)
 
 - Assemble the packet from the pinned execution revision: `before`/`after`

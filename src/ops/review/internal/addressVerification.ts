@@ -107,12 +107,17 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : 'verification gate refused';
-}
-
-function detailOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** Diagnostic reads/coercion are untrusted too; capture once inside the guard. */
+function diagnosticOf(error: unknown): { detail: string; reason: string } {
+  try {
+    if (error instanceof Error) {
+      const message: unknown = error.message;
+      if (typeof message === 'string') return { detail: message, reason: message };
+    } else return { detail: String(error), reason: 'verification gate refused' };
+  } catch {
+    // A diagnostic failure must not escape the evidence/gate catch path.
+  }
+  return { detail: 'verification diagnostic unavailable', reason: 'verification gate refused' };
 }
 
 function oneLine(text: string): string {
@@ -266,11 +271,12 @@ export function verifyClosureEvidence(
     try {
       gate?.admit();
     } catch (error) {
+      const diagnostic = diagnosticOf(error);
       checks.push({
         check: name,
         outcome: 'unavailable',
-        detail: detailOf(error),
-        reason: messageOf(error),
+        detail: diagnostic.detail,
+        reason: diagnostic.reason,
       });
       stopped = true;
       return;
@@ -278,10 +284,11 @@ export function verifyClosureEvidence(
     try {
       checks.push(work());
     } catch (error) {
+      const diagnostic = diagnosticOf(error);
       checks.push({
         check: name,
         outcome: 'unavailable',
-        detail: detailOf(error),
+        detail: diagnostic.detail,
         reason: 'unavailable-evidence',
       });
     }
@@ -313,7 +320,7 @@ export function verifyClosureEvidence(
     try {
       supplied = packet.dependencies;
     } catch (error) {
-      problems.push(`dependencies unavailable: ${detailOf(error)}`);
+      problems.push(`dependencies unavailable: ${diagnosticOf(error).detail}`);
     }
     if (problems.length === 0) {
       // The array check lexically encloses the iteration so the compiler
