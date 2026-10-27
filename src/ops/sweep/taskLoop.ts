@@ -81,6 +81,9 @@ export interface FailedAttemptInput {
   runPrefix: string;
   kind: string;
   slug: string;
+  /** Raw unit names, kept separate from the resolved display segments. */
+  kindIdentity?: string;
+  slugIdentity?: string;
   task: string;
   /** Full logical identity for compact task IDs (for example static clusters). */
   taskIdentity?: string;
@@ -274,6 +277,8 @@ async function runTaskLoopInner(
           runPrefix: bindings.runPrefix,
           kind,
           slug,
+          kindIdentity: unit.fixer,
+          slugIdentity: unit.package,
           task: task.id,
           taskIdentity: task.signature ?? task.id,
           parent,
@@ -884,7 +889,11 @@ export async function commitFailedAttempt(
   input: FailedAttemptInput,
 ): Promise<FailedAttempt> {
   const identity = Buffer.from(
-    JSON.stringify([input.kind, input.slug, input.taskIdentity ?? input.task]),
+    JSON.stringify([
+      input.kindIdentity ?? input.kind,
+      input.slugIdentity ?? input.slug,
+      input.taskIdentity ?? input.task,
+    ]),
   ).toString('base64url');
   const component = (display: string, raw: string, digits: number): string => {
     const readable = display.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'id';
@@ -898,7 +907,7 @@ export async function commitFailedAttempt(
   let digits = 16;
   let attempt = input.firstAttempt;
   for (;;) {
-    const base = `${input.runPrefix}/failed/${component(input.kind, input.kind, digits)}/${component(input.slug, input.slug, digits)}/${component(input.task, input.taskIdentity ?? input.task, digits)}`;
+    const base = `${input.runPrefix}/failed/${component(input.kind, input.kindIdentity ?? input.kind, digits)}/${component(input.slug, input.slugIdentity ?? input.slug, digits)}/${component(input.task, input.taskIdentity ?? input.task, digits)}`;
     const existing = await git(['for-each-ref', '--format=%(refname)', `refs/heads/${base}/`]);
     let conflict = false;
     const occupied = new Set<number>();
@@ -909,7 +918,10 @@ export async function commitFailedAttempt(
         break;
       }
       const message = await git(['show', '-s', '--format=%B', ref]);
-      if (!message.split('\n').includes(`Cq-Ref-Identity: ${identity}`)) {
+      const identityTrailers = message
+        .split('\n')
+        .filter((line) => line.startsWith('Cq-Ref-Identity:'));
+      if (identityTrailers.length !== 1 || identityTrailers[0] !== `Cq-Ref-Identity: ${identity}`) {
         conflict = true;
         break;
       }

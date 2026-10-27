@@ -344,3 +344,106 @@ test('a conflicting recorded identity extends the digest instead of consuming an
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('resolved unit segments keep distinct raw unit names on real Git refs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-task-unit-identities-'));
+  const git = async (args: string[]) => (await exec('git', ['-C', root, ...args])).stdout.trim();
+  try {
+    await git(['init', '-b', 'main']);
+    await git(['config', 'user.name', 'Fixture']);
+    await git(['config', 'user.email', 'fixture@invalid']);
+    await writeFile(join(root, 'file.ts'), 'base');
+    await git(['add', 'file.ts']);
+    await git(['commit', '-m', 'base']);
+    const parent = await git(['rev-parse', 'HEAD']);
+    await writeFile(join(root, 'file.ts'), 'changed');
+    await git(['add', 'file.ts']);
+    const input = {
+      runPrefix: 'run',
+      kind: 'a-b',
+      slug: 'pkg-a',
+      task: 'file.ts',
+      parent,
+      firstAttempt: 1,
+      tier: 'worker' as const,
+      model: { provider: 'fixture', model: 'scripted' },
+      gate: 'related' as const,
+      outcome: 'unfixed' as const,
+      reason: 'fixture',
+      pushFailed: false,
+    };
+    const first = await commitFailedAttempt(git, {
+      ...input,
+      kindIdentity: 'a-b',
+      slugIdentity: '@pkg/a',
+    });
+    const second = await commitFailedAttempt(git, {
+      ...input,
+      kindIdentity: 'a_b',
+      slugIdentity: 'pkg.a',
+    });
+    expect(first.branch).not.toBe(second.branch);
+    expect(first.branch.endsWith('/a1')).toBe(true);
+    expect(second.branch.endsWith('/a1')).toBe(true);
+    for (const [attempt, rawKind, rawSlug] of [
+      [first, 'a-b', '@pkg/a'],
+      [second, 'a_b', 'pkg.a'],
+    ] as const) {
+      expect(await git(['check-ref-format', '--branch', attempt.branch])).toBe(attempt.branch);
+      expect(await git(['rev-parse', `refs/heads/${attempt.branch}`])).toBe(attempt.sha);
+      const message = await git(['show', '-s', '--format=%B', attempt.sha]);
+      expect(message).toContain(
+        `Cq-Ref-Identity: ${Buffer.from(JSON.stringify([rawKind, rawSlug, 'file.ts'])).toString('base64url')}`,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('duplicate or conflicting identity trailers do not consume an attempt number', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-task-ambiguous-trailers-'));
+  const git = async (args: string[]) => (await exec('git', ['-C', root, ...args])).stdout.trim();
+  try {
+    await git(['init', '-b', 'main']);
+    await git(['config', 'user.name', 'Fixture']);
+    await git(['config', 'user.email', 'fixture@invalid']);
+    await writeFile(join(root, 'file.ts'), 'base');
+    await git(['add', 'file.ts']);
+    await git(['commit', '-m', 'base']);
+    const parent = await git(['rev-parse', 'HEAD']);
+    await writeFile(join(root, 'file.ts'), 'changed');
+    await git(['add', 'file.ts']);
+    const tree = await git(['write-tree']);
+    const digest = (raw: string) => createHash('sha256').update(raw).digest('hex').slice(0, 16);
+    const common = `run/failed/tests-${digest('tests')}/pkg-${digest('pkg')}`;
+    for (const [task, extra] of [
+      ['duplicate.ts', 'same'],
+      ['conflicting.ts', 'different'],
+    ] as const) {
+      const expected = `Cq-Ref-Identity: ${Buffer.from(JSON.stringify(['tests', 'pkg', task])).toString('base64url')}`;
+      const message = `fixture\n\n${expected}\n${extra === 'same' ? expected : 'Cq-Ref-Identity: other'}`;
+      const occupiedSha = await git(['commit-tree', tree, '-p', parent, '-m', message]);
+      const occupied = `${common}/${task.replace('.', '-')}-${digest(task)}/a1`;
+      await git(['update-ref', `refs/heads/${occupied}`, occupiedSha, '0'.repeat(40)]);
+      const result = await commitFailedAttempt(git, {
+        runPrefix: 'run',
+        kind: 'tests',
+        slug: 'pkg',
+        task,
+        parent,
+        firstAttempt: 1,
+        tier: 'worker',
+        model: { provider: 'fixture', model: 'scripted' },
+        gate: 'related',
+        outcome: 'unfixed',
+        reason: 'fixture',
+        pushFailed: false,
+      });
+      expect(result.branch).toMatch(/-[0-9a-f]{24}\/a1$/);
+      expect(await git(['rev-parse', `refs/heads/${occupied}`])).toBe(occupiedSha);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
