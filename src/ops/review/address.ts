@@ -288,7 +288,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       //   - a failed exit publication → the row names the failure and that
       //     the commit stays local (the outcome reason carries it too);
       //   - a run with no push → "publication is off": the commit truly is
-      //     unpublished (the one state where the old text was right).
+      //     unpublished (the one state where the old text was right);
+      //   - a --push run whose exit publication never ran (finish's guard
+      //     skips publishOnExit on a parent cancel) → "no engine publication
+      //     ran": the dead run can never publish, so the verified commit
+      //     stays local.
       const settleWithholdRows = (tail: string) => {
         for (const [index, row] of report.reasons.entries()) {
           if (row.includes('publish-withheld-mixed-worktree')) {
@@ -312,6 +316,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       } else if (input.push !== true) {
         settleWithholdRows(
           '; publication is off for this run (no --push) — the verified commit stays unpublished in the worktree',
+        );
+      } else {
+        // --push was requested, yet no exit publication ever ran: finish's
+        // guard above skips publishOnExit when the parent cancelled (and the
+        // publication's own early-returns never witness a push), so this dead
+        // run can never publish. The loop's stale "publication may still
+        // happen at engine exit" claim would stand forever — replace it with
+        // the engine's terminal truth: the row's own premise is that the loop
+        // pushed nothing, so with no engine push either, the verified commit
+        // stays local.
+        settleWithholdRows(
+          '; no engine publication ran for this run — the verified commit stays local',
         );
       }
       // Jobs cancelled by the enclosing runner still retain independently
