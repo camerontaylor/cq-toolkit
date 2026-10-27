@@ -43,6 +43,7 @@ import {
   type ReviewSource,
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { collectBoundedReviewContext } from './internal/reviewContext.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -104,69 +105,6 @@ function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): 
     sources: [{ kind, status: 'blocked', reason, ...(cycleId ? { cycleId } : {}) }],
     findings: [],
   };
-}
-
-/** The reviewer's intent budget; the truncation marker is inside the cap. */
-const REVIEW_INTENT_CAP = 4_000;
-
-function capReviewIntent(text: string): string {
-  if (text.length <= REVIEW_INTENT_CAP) return text;
-  const marker = `\n[truncated: ${String(text.length - REVIEW_INTENT_CAP)} characters omitted]`;
-  if (marker.length >= REVIEW_INTENT_CAP) return text.slice(0, REVIEW_INTENT_CAP);
-  return text.slice(0, REVIEW_INTENT_CAP - marker.length) + marker;
-}
-
-/**
- * The intent and file list are prompt context, not coverage pieces. The engine
- * scans the composed session prompt before upload, so both ride the same
- * beforeRequest gate as the diff.
- */
-async function collectReviewContext(
-  effects: DevEffects,
-  comparison: string,
-  head: string,
-  deadline: { signal?: AbortSignal; remainingWallMs: () => number },
-): Promise<
-  { ok: true; intent: string; fileList: string } | { ok: false; fatal: boolean; reason: string }
-> {
-  const callOptions = (): { timeoutMs: number; signal?: AbortSignal } => ({
-    timeoutMs: Math.max(1, Math.min(60_000, deadline.remainingWallMs())),
-    ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
-  });
-  try {
-    deadline.signal?.throwIfAborted();
-    const log = await effects.runCommand(
-      'git',
-      ['log', '--format=%s%n%n%b', `${comparison}..${head}`],
-      callOptions(),
-    );
-    if (log.exitCode !== 0)
-      return {
-        ok: false,
-        fatal: false,
-        reason: `could not collect review intent (exit ${log.exitCode === null ? 'none (killed)' : String(log.exitCode)})`,
-      };
-    deadline.signal?.throwIfAborted();
-    const numstat = await effects.runCommand(
-      'git',
-      ['diff', '--numstat', ...HARDENED_DIFF_FLAGS, comparison],
-      callOptions(),
-    );
-    if (numstat.exitCode !== 0)
-      return {
-        ok: false,
-        fatal: false,
-        reason: `could not list review diff stats (exit ${numstat.exitCode === null ? 'none (killed)' : String(numstat.exitCode)})`,
-      };
-    deadline.signal?.throwIfAborted();
-    return { ok: true, intent: capReviewIntent(log.stdout), fileList: numstat.stdout };
-  } catch (error) {
-    return {
-      ok: false,
-      fatal: true,
-      reason: `could not collect review context — ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
 }
 
 /** Produce a single normalized record from the configured sources. */
@@ -467,10 +405,13 @@ export function makeReviewRun(
               ),
             );
           else {
-            const context = await collectReviewContext(effects, comparison, state.head, {
-              ...(deadline.signal ? { signal: deadline.signal } : {}),
-              remainingWallMs,
-            });
+            const context = await collectBoundedReviewContext(
+              effects,
+              comparison,
+              state.head,
+              input.uncommitted ? 'uncommitted' : 'full',
+              { ...(deadline.signal ? { signal: deadline.signal } : {}), remainingWallMs },
+            );
             if (!context.ok && context.fatal)
               return { status: 'failed', error: `review.run: ${context.reason}` };
             if (!context.ok) {
@@ -572,8 +513,8 @@ export function makeReviewRun(
                     components,
                     base: reviewedBase,
                     scope: reviewedScope,
-                    intent: context.intent,
-                    fileList: context.fileList,
+                    intent: context.context.intent,
+                    fileList: context.context.fileList,
                     searchTools: policy.review.searchTools,
                     logToolFailures: policy.harness.logToolFailures,
                     session: policy.review.session,

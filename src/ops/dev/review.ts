@@ -38,6 +38,7 @@
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentReviewReport, AgentReviewResult } from '../review/agentReviewer.js';
+import { collectBoundedReviewContext } from '../review/internal/reviewContext.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
@@ -240,6 +241,8 @@ export interface DevReviewDeps {
     components: readonly ScanComponentInput[];
     base: string;
     scope: 'full' | 'uncommitted';
+    intent?: string;
+    fileList?: string;
   }) => Promise<AgentReviewResult>;
   /**
    * The author-admission transport (admission actions). When omitted, the
@@ -332,6 +335,8 @@ function makeReviewCycle(
   remainingWallMs?: () => number,
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
+    const contextDeadlineAt = Date.now() + DEFAULT_REVIEWER_TIMEOUT_MS;
+    const contextRemaining = remainingWallMs ?? (() => contextDeadlineAt - Date.now());
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const scope = input.uncommitted === true ? 'uncommitted' : 'full';
     const reviewer = input.reviewer ?? CODERABBIT_REVIEWER;
@@ -528,6 +533,19 @@ function makeReviewCycle(
         if (isAgent) {
           const role = reviewer.slice('agent:'.length);
           if (!role) throw new Error('agent reviewer role is empty');
+          const context = await collectBoundedReviewContext(
+            effects,
+            scope === 'uncommitted' ? 'HEAD' : state.base,
+            state.head,
+            scope,
+            { ...(signal ? { signal } : {}), remainingWallMs: contextRemaining },
+          );
+          if (!context.ok) throw new Error(context.reason);
+          await refuseDrift('while the review context was read');
+          signal?.throwIfAborted();
+          const remaining = contextRemaining();
+          if (!Number.isFinite(remaining) || remaining <= 0)
+            throw new Error('review wall budget exhausted before agent dispatch');
           const result = await runAgentReviewer!({
             repoRoot: input.repoRoot,
             head: state.head,
@@ -537,6 +555,8 @@ function makeReviewCycle(
             components: collected.components,
             base: scope === 'uncommitted' ? state.head : state.base,
             scope,
+            intent: context.context.intent,
+            fileList: context.context.fileList,
           });
           await refuseDrift('during the agent review run');
           const report = result.status === 'ok' ? result.value : result.report;

@@ -2160,3 +2160,44 @@ it.each(['current', 'changed', 'queue-auth'] as const)(
     }
   },
 );
+
+it.each(['full', 'uncommitted'] as const)(
+  'collects bounded %s context at the reviewed comparison',
+  async (scope) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/committed-context.ts', 'export const committed = 1;\n');
+      repo.commitAll('RUN_CONTEXT_COMMITTED\n\n' + 'x'.repeat(5000));
+      await repo.write('src/dirty-context.ts', 'export const dirty = 1;\n');
+      repo.git('add', 'src/dirty-context.ts');
+      const review = vi.fn<
+        typeof import('../../../src/ops/review/agentReviewer.js').runAgentReviewer
+      >(async () => ({ status: 'needs-human' as const, reason: 'fixture context captured' }));
+      await makeReviewRun({
+        drivers: scriptedDrivers(),
+        runAgentReviewer: review,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, ...(scope === 'uncommitted' ? { uncommitted: true } : {}) });
+      expect(review).toHaveBeenCalledOnce();
+      const input = review.mock.calls[0]!;
+      expect(input[1].scope).toBe(scope);
+      expect(input[1].intent!.length).toBeLessThanOrEqual(4000);
+      expect(input[1].fileList!.length).toBeLessThanOrEqual(4000);
+      expect(input[1].fileList).toContain('src/dirty-context.ts');
+      if (scope === 'full') {
+        expect(input[1].intent).toContain('RUN_CONTEXT_COMMITTED');
+        expect(input[1].intent).toContain('[truncated:');
+        expect(input[1].fileList).toContain('src/committed-context.ts');
+      } else {
+        expect(input[1].intent).toBe('');
+        expect(input[1].fileList).not.toContain('src/committed-context.ts');
+        expect(input[1].base).toBe(repo.git('rev-parse', 'HEAD').trim());
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
