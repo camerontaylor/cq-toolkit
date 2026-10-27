@@ -1853,3 +1853,38 @@ if (n === ${wanted}) {
     }
   },
 );
+
+describe('verification gate regressions', () => {
+  test.each([
+    ['oxlint-json', false],
+    ['oxlint-json', true],
+    ['test-narrow', false],
+    ['test-narrow', true],
+  ] as const)(
+    'a fix using %s preserves baseline comparison (pre-existing=%s)',
+    async (adapter, preExisting) => {
+      const script = `const changed = ${preExisting} || require('node:fs').readFileSync('src/a.ts', 'utf8').includes('GOOD');
+      if (${JSON.stringify(adapter)} === 'oxlint-json') console.log(JSON.stringify({number_of_files: 1, diagnostics: changed ? [{filename:'src/a.ts', message:'bad await', code:'typescript(await-thenable)', severity:'error', labels:[{span:{line:1,column:1}}]}] : []}));
+      else { const report = {success:!changed,numTotalTests:1,numPassedTests:changed?0:1,numFailedTests:changed?1:0,testResults:[{name:'test/a.test.ts',status:changed?'failed':'passed',assertionResults:[{status:changed?'failed':'passed',fullName:'related regression'}]}]}; console.log('test:narrow report='+JSON.stringify(report)); console.log('test:narrow result='+JSON.stringify(changed?'fail':'pass')+' exit='+(changed?1:0)+' files=1 tests='+JSON.stringify(changed?'0/1':'1/1')+' failed='+(changed?1:0)); }
+      process.exitCode=changed?1:0;`;
+      const f = await fixture(undefined, script, {
+        configure: (config) => {
+          config.checks[0]!.adapter = adapter;
+          config.checks[0]!.kind = adapter === 'test-narrow' ? 'tests' : 'static';
+          config.checks[0]!.relatedArgs = ['scripts/check.cjs', '{files}'];
+        },
+      });
+      try {
+        const result = await f.engine.fix(finding(), 0);
+        if (preExisting) {
+          expect(result.commit).toMatch(/^[a-f0-9]{40}$/);
+        } else {
+          expect(result.commit).toBeUndefined();
+          expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+        }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+});

@@ -1,3 +1,4 @@
+import { selectRelatedTests } from '../../scripts/lib/related-tests.mjs';
 // Mapping and fallback logic for the advisory affected-test selector
 // (scripts/lib/affected-tests.mjs). Pure: no git, no vitest invocation.
 import { describe, expect, it } from 'vitest';
@@ -306,4 +307,46 @@ describe('selectAffected', () => {
     expect(result).toMatchObject({ fallback: true, reason: 'import-graph query failed' });
     expect(result.files).toEqual(allTests);
   });
+});
+
+describe('bounded per-fix related mapping', () => {
+  const tests = [
+    'test/ops/dev/check.test.ts',
+    'test/ops/dev/check-affected.test.ts',
+    'test/ops/review/run.test.ts',
+  ];
+  it('maps source prefixes and touched tests, deduplicated', () => {
+    expect(selectRelatedTests(['src/ops/dev/check.ts', tests[0]!], tests)).toEqual({
+      files: tests.slice(0, 2).sort(),
+      advisory: undefined,
+    });
+  });
+  it('records an advisory when none map', () => {
+    expect(selectRelatedTests(['README.md'], tests)).toEqual({
+      files: [],
+      advisory: 'no related tests mapped',
+    });
+  });
+  it('refuses beyond the wrapper cap instead of silently dropping files', () => {
+    expect(() =>
+      selectRelatedTests(
+        ['src/a.ts'],
+        Array.from({ length: 11 }, (_, i) => `test/a${i}.test.ts`),
+      ),
+    ).toThrow(/cap.*10/);
+  });
+  it('reuses non-import mappings', () => {
+    expect(selectRelatedTests(['knip.json'], ['test/scripts/knip.test.ts']).files).toEqual([
+      'test/scripts/knip.test.ts',
+    ]);
+  });
+});
+
+it('maps gate adapters to their shared owner suite despite layout differences', () => {
+  expect(
+    selectRelatedTests(
+      ['src/ops/gates/adapters/testNarrow.ts'],
+      ['test/ops/gates/adapters.test.ts', 'test/ops/gates/protectedPaths.test.ts'],
+    ).files,
+  ).toContain('test/ops/gates/adapters.test.ts');
 });

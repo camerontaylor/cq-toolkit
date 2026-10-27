@@ -16,6 +16,8 @@
 
 /** [path pattern, test-file patterns]; first matching rows all contribute. */
 export const NON_IMPORT_MAP = [
+  // All gate adapters share one owner suite rather than matching the source layout.
+  [/^src\/ops\/gates\/adapters\//, [/^test\/ops\/gates\/adapters\.test\.ts$/]],
   [/^src\/.*\.prompt$/, [/^test\/(driver|kernel|plans|ops)\//]],
   // Fixtures are consumed across areas (sweep, ratchet-baseline, ...) and
   // fixture paths are not part of the related-source query: select every test.

@@ -26,6 +26,8 @@ export interface AgentReviewerInput {
   fileList?: string;
   priorFindings?: readonly Finding[];
   session?: { maxInputChars?: number; maxSteps?: number; concurrency?: number };
+  /** Partition-fallback tool access; default fixed bounded read-only tools (#508). */
+  partitionTools?: false | { steps?: number };
   size?: {
     small?: { maxChangedLines?: number; maxFiles?: number };
     medium?: { maxChangedLines?: number; maxFiles?: number };
@@ -156,6 +158,8 @@ export async function runAgentReviewer(
         ...(input.fileList === undefined ? {} : { fileList: input.fileList }),
         ...(input.priorFindings === undefined ? {} : { priorFindings: input.priorFindings }),
         ...(input.session === undefined ? {} : { session: input.session }),
+        ...(input.partitionTools === undefined ? {} : { partitionTools: input.partitionTools }),
+        searchTools: input.searchTools ?? true,
         ...(input.size === undefined ? {} : { size: input.size }),
         ...(input.exclude === undefined ? {} : { exclude: input.exclude }),
       });
@@ -262,6 +266,7 @@ export async function runAgentReviewer(
               input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars,
             ),
             signal: controller.signal,
+            remainingWallMs: () => deadline - Date.now(),
             scanSecrets: input.scanSecrets,
             components,
             plan: session,

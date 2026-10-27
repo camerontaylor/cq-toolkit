@@ -304,7 +304,14 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
       .exactOptional(),
     check: z
       .object({
-        adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines', 'oxfmt-check']),
+        adapter: z.enum([
+          'vitest-json',
+          'eslint-json',
+          'tsc-lines',
+          'oxfmt-check',
+          'oxlint-json',
+          'test-narrow',
+        ]),
         cwd: z
           .string()
           .refine(
