@@ -153,7 +153,9 @@ describe('planRun', () => {
     // is a refusal too, never an empty `result=nothing` success.
     const only = planRun({ selection: selection(['test/i.test.ts']), manifest, include: [] });
     expect(!only.ok && only.reason).toContain('pass --include-integration to run them');
-    expect(!only.ok && only.reason).toContain('re-run with --include-integration');
+    // The closing paren anchors the suffix: 're-run with --include-integration'
+    // alone is a prefix of the two-flag variant and would pass either way.
+    expect(!only.ok && only.reason).toContain('re-run with --include-integration)');
     // One opted-in class still refuses the other.
     const half = planRun({ selection: selection(files), manifest, include: ['integration'] });
     expect(!half.ok && half.reason).toBe(
