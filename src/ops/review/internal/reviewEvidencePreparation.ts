@@ -135,8 +135,4 @@ export function prepareFindingEvidence(input: {
 
 // Re-exported pin types so callers can build contexts without importing the
 // validator module directly; the types are the same objects.
-export type {
-  AnchorBlobInput,
-  AnchorInvalidReason,
-  AnchorValidationContext,
-};
+export type { AnchorBlobInput, AnchorInvalidReason, AnchorValidationContext };

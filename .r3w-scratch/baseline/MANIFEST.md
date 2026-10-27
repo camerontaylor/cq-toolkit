@@ -24,30 +24,30 @@ until its writer handoff lands.
 
 ## Captured artifacts (SHA256 over captured file, sha256sum MANIFEST.sha256)
 
-- reviewPlan.ts        - reviewer planner: session prompt builder, tiers, partition
+- reviewPlan.ts - reviewer planner: session prompt builder, tiers, partition
   fallback trigger, ANCHOR_INSTRUCTION + FINDINGS_INSTRUCTION emission (the production
   reviewer prompt), PlannedReviewSession shape
-- reviewSession.ts     - session producer: OutputSchema "review.agent/v3" (the production
+- reviewSession.ts - session producer: OutputSchema "review.agent/v3" (the production
   agent payload contract: file, line, rule, severity, text), tool policy
   (allowlist read/grep/glob vs none), maxTools 3, transient retry, scan hooks
-- lineAnchors.ts       - head line anchor extraction (ANCHOR_INSTRUCTION text lives here
+- lineAnchors.ts - head line anchor extraction (ANCHOR_INSTRUCTION text lives here
   at the pin)
-- reviewPartitions.ts  - partitioned fallback rendering
-- reviewCoverageV2.ts  - coverage v2 schema
-- agentReviewer.ts     - engine: budget/wall/concurrency, outcome folding
-- run.ts               - review.run op: reviewer wiring, severity map use, exits
-- registry.ts          - review family registry (input schemas, CLI surface)
-- findings.ts          - findings record v1 (no evidenceV1 at the queue pin)
+- reviewPartitions.ts - partitioned fallback rendering
+- reviewCoverageV2.ts - coverage v2 schema
+- agentReviewer.ts - engine: budget/wall/concurrency, outcome folding
+- run.ts - review.run op: reviewer wiring, severity map use, exits
+- registry.ts - review family registry (input schemas, CLI surface)
+- findings.ts - findings record v1 (no evidenceV1 at the queue pin)
 - defaultFixPrompt.ts, fix.default.md - fixer prompt assets (unchanged by R3W prep)
-- cq.json              - production routes: roles.reviewer = opencode-go /
+- cq.json - production routes: roles.reviewer = opencode-go /
   deepseek-v4.1-flash; review.reviewers = [coderabbit, agent]; budgets.run
   maxTokens 25000000 wallMs 14400000; budgets.step.wallMs 1200000
-- cqConfigDefaults.ts  - REVIEW_SESSION_DEFAULTS maxInputChars 60000 maxSteps 15
+- cqConfigDefaults.ts - REVIEW_SESSION_DEFAULTS maxInputChars 60000 maxSteps 15
   concurrency 4; REVIEW_SIZE_DEFAULTS; agentSeverityMap default high->major,
   medium->minor; review.searchTools default true
 - dev-review.ts, dev-agentReview.ts - session/dev.review consumers of the same seams
 - package.json + pnpm-lock-head.txt + deps-summary.json - toolchain and dependency pins
-- oxfmtrc.json         - formatter config pin
+- oxfmtrc.json - formatter config pin
 
 ## Integrity
 
