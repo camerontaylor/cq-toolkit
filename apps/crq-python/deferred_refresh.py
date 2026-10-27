@@ -25,7 +25,7 @@ def _verified(actual, binding, pr=None):
     return actual
 
 
-def refresh_deferred(q, *, verify_source, find_source, at, limit=20):
+def refresh_deferred(q, *, verify_source, find_source, at, limit=20, may_continue=lambda: True):
     """Refresh at most limit intents, fairly across ticks, without Q2 discovery.
 
     verify_source(repo, pr) and find_source(repo, producer, head, target, limit)
@@ -44,6 +44,8 @@ def refresh_deferred(q, *, verify_source, find_source, at, limit=20):
     ordered = [rid for rid in ids if rid > cursor] + [rid for rid in ids if rid <= cursor]
     refreshed = []
     for rid in ordered[:limit]:
+        if not may_continue():
+            break  # aggregate deadline/request cap: leave cursor and debt untouched
         entry = entries[rid]
         b = entry["binding"]
         q["deferred_refresh_cursor"] = rid

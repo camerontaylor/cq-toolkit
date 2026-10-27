@@ -34,6 +34,10 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_PAGE_BUDGET = 200
 MAX_PAGE_RECORDS = 100
 MAX_CURSOR_BYTES = 4096
+MAX_INVENTORY = 5000
+MAX_PAGES = 1000
+MAX_REPOSITORY_NUMBER = 20000
+NUMBER_WINDOW = 50
 
 
 class ReconcileRefused(Exception):
@@ -157,6 +161,8 @@ def load_checkpoint(raw: Any, interval: Dict[str, str], page_budget: int,
             not _cursor(raw["cursor"]) or not isinstance(raw["seen"], dict) or
             any(not isinstance(raw[k], list) for k in ("inventory", "record_keys", "cursor_history", "steps"))):
         raise ReconcileRefused("checkpoint state malformed")
+    if len(raw["inventory"]) > MAX_INVENTORY or raw["pages_read"] > MAX_PAGES:
+        raise ReconcileRefused("checkpoint resource cap exceeded; partition the interval")
     keys, history = raw["record_keys"], raw["cursor_history"]
     if (any(not isinstance(k, str) or not re.fullmatch(r"[0-9a-f]{64}", k) for k in keys) or
             len(set(keys)) != len(keys) or len(keys) != len(raw["inventory"]) or
@@ -233,6 +239,8 @@ def reconcile_page(checkpoint: Dict[str, Any], page_records: Any) -> Dict[str, A
                             "prior": prior, "observed": {"merge_sha": identity["merge_sha"], "merged_at": at}}
             else:
                 updated["seen"][str(identity["pr"])] = {"merge_sha": identity["merge_sha"], "merged_at": at}
+        if len(updated["inventory"]) >= MAX_INVENTORY:
+            raise ReconcileRefused("inventory cap reached; partition the interval")
         updated["inventory"].append(identity)
     updated["inventory"].sort(key=lambda e: (e.get("merged_at", ""), e.get("pr", 0), e.get("reason", "")))
     updated["pages_read"] += 1
@@ -290,6 +298,8 @@ def reconcile(effects, page_fetch: Callable[[Optional[str]], Dict[str, Any]],
 
     persist()
     for _ in range(budget):
+        if checkpoint["pages_read"] >= MAX_PAGES:
+            raise ReconcileRefused("page cap reached; restart with a smaller repository universe")
         cursor = checkpoint["cursor"]
         try:
             page = page_fetch(cursor)
@@ -357,3 +367,101 @@ def enrollment_plan(result, *, repo, existing_requests=(), dry_run=True):
         entries.append({"disposition": disposition, "binding": binding, "request_id": request_id})
     return {"version": VERSION, "dry_run": dry_run, "after": result["after"], "before": result["before"],
             "inventory_digest": result["digest"], "entries": entries, "reviewed": 0}
+
+
+# Numeric keysets over ALL issue/PR slots: merging, closing and appending cannot
+# shift an existing number. Missing/invisible/deleted slots refuse completeness.
+# Assumptions: immutable monotonically allocated repository numbers and truthful
+# mergedAt metadata. Administrative history rewrites/eventual consistency require
+# operator overlap replay; this is not a snapshot of mutable GitHub search.
+def _repository(response, repo):
+    if (not isinstance(response, dict) or response.get("errors") or
+            response.get("incomplete_results", False) is not False or
+            response.get("truncated", False) is not False):
+        raise ReconcileRefused("forge returned errors or incomplete data")
+    data = response.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    if (not isinstance(repository, dict) or repository.get("nameWithOwner") != repo or
+            not isinstance(repository.get("id"), str) or not repository["id"]):
+        raise ReconcileRefused("forge repository identity missing or changed")
+    return repository
+
+
+def _query(repo, body):
+    owner, name = repo.split("/")
+    return "query { repository(owner: " + json.dumps(owner) + ", name: " + json.dumps(name) + ") { id nameWithOwner " + body + " } }"
+
+
+def freeze_source(forge, *, repo, base):
+    """Pin a finite all-state universe, never a merged/search result offset."""
+    body = ("issues(last:1, orderBy:{field:CREATED_AT,direction:ASC}) { totalCount nodes { number } } "
+            "pullRequests(last:1, orderBy:{field:CREATED_AT,direction:ASC}) { totalCount nodes { number } }")
+    repository = _repository(forge(_query(repo, body)), repo)
+    numbers = []
+    total = 0
+    for field in ("issues", "pullRequests"):
+        connection = repository.get(field)
+        nodes = connection.get("nodes") if isinstance(connection, dict) else None
+        count = connection.get("totalCount") if isinstance(connection, dict) else None
+        if type(count) is not int or count < 0:
+            raise ReconcileRefused("forge ceiling count missing")
+        total += count
+        if not isinstance(nodes, list) or len(nodes) > 1 or bool(nodes) != bool(count):
+            raise ReconcileRefused("forge ceiling connection incomplete")
+        for node in nodes:
+            number = node.get("number") if isinstance(node, dict) else None
+            if type(number) is not int or number <= 0:
+                raise ReconcileRefused("forge ceiling number malformed")
+            numbers.append(number)
+    ceiling = max(numbers, default=0)
+    if total != ceiling:
+        raise ReconcileRefused("ceiling/count mismatch; repository universe not proven")
+    if ceiling > MAX_REPOSITORY_NUMBER:
+        raise ReconcileRefused("repository number cap exceeded; operator partition required")
+    return {"version": 1, "method": "all-number-slots-v1", "repo": repo, "base": base,
+            "repository_id": repository["id"], "ceiling": ceiling, "window": NUMBER_WINDOW}
+
+
+def number_page(forge, source, cursor, *, repo, base):
+    """Validate every slot; cursor binds the repository/ceiling/query identity."""
+    if (not isinstance(source, dict) or source.get("version") != 1 or
+            source.get("method") != "all-number-slots-v1" or source.get("repo") != repo or
+            source.get("base") != base or source.get("window") != NUMBER_WINDOW or
+            not isinstance(source.get("repository_id"), str) or
+            type(source.get("ceiling")) is not int or not 0 <= source["ceiling"] <= MAX_REPOSITORY_NUMBER):
+        raise ReconcileRefused("source query identity changed")
+    start = 1
+    if cursor is not None:
+        try:
+            decoded = json.loads(cursor)
+            start = decoded["next"]
+            if (decoded != {"source": checkpoint_digest(source), "next": start} or
+                    type(start) is not int or not 1 < start <= source["ceiling"] or
+                    (start - 1) % NUMBER_WINDOW):
+                raise ValueError()
+        except (ValueError, TypeError, KeyError):
+            raise ReconcileRefused("numeric cursor does not bind this source") from None
+    stop = min(source["ceiling"], start + NUMBER_WINDOW - 1)
+    fields = []
+    for number in range(start, stop + 1):
+        fields.append("n%d: issueOrPullRequest(number:%d) { __typename ... on Issue { number } "
+                      "... on PullRequest { number baseRefName mergedAt headRefOid mergeCommit { oid } } }"
+                      % (number, number))
+    repository = _repository(forge(_query(repo, " ".join(fields))), repo)
+    if repository["id"] != source["repository_id"]:
+        raise ReconcileRefused("repository was replaced")
+    records = []
+    for number in range(start, stop + 1):
+        node = repository.get("n" + str(number))
+        if (not isinstance(node, dict) or type(node.get("number")) is not int or
+                node["number"] != number or node.get("__typename") not in ("Issue", "PullRequest")):
+            raise ReconcileRefused("missing or mismatched numeric slot; completeness unavailable")
+        if node["__typename"] == "PullRequest":
+            if not isinstance(node.get("baseRefName"), str) or "mergedAt" not in node:
+                raise ReconcileRefused("PR state metadata incomplete")
+            if node["mergedAt"] is not None and node["baseRefName"] == base:
+                records.append(node)
+    following = stop + 1 if stop < source["ceiling"] else None
+    return {"records": records, "has_next_page": following is not None,
+            "next_cursor": json.dumps({"source": checkpoint_digest(source), "next": following},
+                                      sort_keys=True) if following is not None else None}

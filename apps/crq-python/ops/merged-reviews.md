@@ -124,3 +124,59 @@ requires a v1 terminal counted classifier and verifies the retained equivalence;
 callers first verify immutable bytes through `read_receipt`. An original author
 full-diff report, grant or lease alone cannot satisfy this current-content proof.
 A partial-scope receipt retains its explicit omissions when referenced.
+
+
+## Complete interval reconciliation (Q2)
+
+```sh
+python3 apps/crq-python/crq.py reconcile-merged --after=2026-10-01T00:00:00Z --before=2026-10-27T00:00:00Z --page-budget=4 --dry-run
+```
+
+Remove `--dry-run` to persist and enroll; repeat the same flags to resume.
+Bounds mean `(after, before]`. The command prints one JSON discovery summary,
+holds the existing tick lock, and never dispatches a provider or repair. An
+incomplete result retains its cursor and enrolls nothing. A completed inventory
+enrolls supported sources through the Q1 API, deduplicating exact source bindings
+even when legacy records were skipped, synthetic or done. Unsupported identities
+remain represented with reasons in the checkpoint inventory. Discovery is not
+review credit. A completed manual interval never advances the natural watermark.
+
+The adapter first freezes an all-state repository number ceiling and repository
+node identity, checking that issue plus PR counts agree with the ceiling. It then
+queries every numeric slot in windows of 50 using `issueOrPullRequest(number)`.
+Changing merge order cannot shift those numeric windows. New higher-numbered PRs
+belong to a later interval. Every slot must resolve with matching number/type;
+missing, deleted, invisible, errored, truncated, misidentified or count-inconsistent
+responses refuse completeness. It relies on forge number immutability and
+authoritative merge timestamps; imported or administratively rewritten history
+and delayed visibility require operator replay. It cannot certify a hostile or
+internally inconsistent forge. Current base-ref metadata supplies the target
+filter, so administrative base/history changes also require replay.
+
+Source identity, frozen bounds, page cursor and inventory are atomically persisted
+under `state/reconcile/<interval-digest>.json` before the next read. The wrapper
+binds source and checkpoint with a corruption-detection digest; this is trusted
+local state, not an authorization signature. On complete discovery, enrollment
+is atomically saved before advancing the natural watermark. The natural
+non-dry, nonselective tick uses the same adapter and replays five minutes before
+its last independently complete watermark. A crash after page completion or
+enrollment replays idempotently. Source-head loss stays explicit unsupported debt.
+
+Discovery and deferred refresh share at most 24 requests / 30 seconds under the
+tick lock, with at most ten seconds per request and four discovery pages per tick.
+Budget exhaustion retains incomplete cursor/debt and leaves review scheduling
+independent. Other existing scheduler operations retain their own limits; this
+budget covers recovery reads. Source scans cap at 20,000 repository numbers,
+1,000 pages and 5,000 represented identities. Caps refuse rather than truncate;
+oversized inventories require smaller time intervals, and repository-universe
+cap refusal requires a separately reviewed adapter. This bounds repeated
+checkpoint serialization; it is not a new unbounded inventory service.
+
+Status separates complete discovery from pending, reviewing, blocked, unsupported,
+unverified, no-current-code, partial-scope and proven terminal receipts. Receipt
+bytes, subject and captured scope must verify before earning terminal credit.
+Path exclusions and retained capture targets are reported; no receipt asserts
+coverage at today's target. Legacy done/skipped/synthetic entries cannot earn
+current-code review credit. Existing cycles/findings remain retained. Open work
+uses one review per proven equivalent full range; same-head or pure-restack
+inferences without versioned scope evidence conservatively require a full review.

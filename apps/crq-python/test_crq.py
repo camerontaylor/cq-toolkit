@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -123,13 +124,15 @@ class CurrentTest(unittest.TestCase):
         self.g("update-ref", "refs/remotes/origin/main", target)
         return target
 
-    def tick(self, dry=False, only=None):
+    def tick(self, dry=False, only=None, discovery=False):
         real_popen = subprocess.Popen
         def fake_child(argv, **kw):
             if argv[0] == sys.executable and "_review" in argv:
                 return SimpleNamespace(pid=919191)
             return real_popen(argv, **kw)
         with contextlib.ExitStack() as stack:
+            if not discovery:
+                stack.enter_context(mock.patch.object(crq, "discover_merged", return_value=[]))
             for name in ("fetch", "write_status", "write_heartbeat", "notify_owner"):
                 stack.enter_context(mock.patch.object(crq, name))
             for name in ("enroll", "promotion_audit", "promotion_tick"):
@@ -400,6 +403,7 @@ class CurrentTest(unittest.TestCase):
     def test_selective_start_refuses_and_caps_prevent_capture(self):
         item = self.enroll()
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \
+             mock.patch.object(crq, "discover_merged", return_value=[]), \
              mock.patch.object(crq, "write_status"), mock.patch.object(crq, "write_heartbeat"), \
              mock.patch.object(crq, "promotion_tick", return_value=[]), \
              mock.patch.object(crq, "promotion_audit", return_value=[]), \
@@ -576,3 +580,160 @@ class CurrentTest(unittest.TestCase):
             q = crq.load_queue()
             self.assertTrue(all("refreshedAt" in e for e in q["queue_client_requests"].values()))
             self.assertEqual(q["items"], [])
+
+
+    def forge_inventory(self, count=125):
+        def forge(args):
+            query = args[-1]
+            repository = {"id": "repo-id", "nameWithOwner": crq.REPO}
+            if "issues(last:" in query:
+                repository.update(issues={"totalCount": 0, "nodes": []},
+                                  pullRequests={"totalCount": count, "nodes": [{"number": count}]})
+            else:
+                for value in re.findall(r"issueOrPullRequest\(number:(\d+)\)", query):
+                    number = int(value)
+                    repository["n" + value] = {"__typename": "PullRequest", "number": number,
+                        "baseRefName": "merge-queue", "mergedAt": "2026-10-02T00:00:00Z",
+                        "mergeCommit": {"oid": self.merge}, "headRefOid": self.merge}
+            return {"data": {"repository": repository}}
+        return forge
+
+    def reconcile_inventory(self, budget=1, dry=False):
+        return crq.with_lock(crq.reconcile_merged, self.q, after="2026-10-01T00:00:00Z",
+            before="2026-10-03T00:00:00Z", page_budget=budget, dry_run=dry)
+
+    def test_inventory_restart_all_125_and_idempotent_legacy_states_no_credit(self):
+        self.q["items"] = [{"id": "old", "kind": "merged", "pr": 1, "state": "skipped",
+                           "cycles": [], "order": 0}]
+        crq.save_queue(self.q)
+        forge = self.forge_inventory()
+        with mock.patch.object(crq, "gh_json", side_effect=forge) as calls,              mock.patch.object(crq, "launch") as launch:
+            first = self.reconcile_inventory()
+            self.assertFalse(first["complete"])
+            self.assertEqual(len(crq.load_queue()["items"]), 1)
+            self.q = crq.load_queue()
+            self.assertFalse(self.reconcile_inventory()["complete"])
+            self.q = crq.load_queue()
+            final = self.reconcile_inventory()
+            self.assertTrue(final["complete"])
+            self.assertEqual(final["represented"], 125)
+            self.assertEqual(final["reviewed"], 0)
+            self.assertEqual(len(crq.load_queue()["items"]), 126)
+            calls.reset_mock()
+            self.q = crq.load_queue()
+            self.reconcile_inventory()
+            calls.assert_not_called()
+            launch.assert_not_called()
+        self.assertEqual(crq.load_queue()["items"][0]["state"], "skipped")
+        self.assertNotIn("merged_watermark", crq.load_queue())
+
+    def test_inventory_page_atomic_before_next_fetch_and_save_failure_stops(self):
+        actual = self.forge_inventory()
+        observed = []
+        def forge(args):
+            if "issueOrPullRequest(number:51)" in args[-1]:
+                wrappers = list((self.state / "reconcile").glob("*.json"))
+                checkpoint = json.loads(wrappers[0].read_text())["checkpoint"]
+                self.assertEqual(checkpoint["pages_read"], 1)
+                self.assertFalse(checkpoint["complete"])
+                observed.append(True)
+            return actual(args)
+        with mock.patch.object(crq, "gh_json", side_effect=forge):
+            self.assertTrue(self.reconcile_inventory(budget=4)["complete"])
+        self.assertEqual(observed, [True])
+        # New isolated interval state: first source persistence fails before page1.
+        for path in (self.state / "reconcile").glob("*.json"):
+            path.unlink()
+        with mock.patch.object(crq, "gh_json", side_effect=actual) as calls,              mock.patch.object(crq.repair_tick, "atomic", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.reconcile_inventory(budget=4)
+            self.assertEqual(calls.call_count, 1)
+
+    def test_inventory_dry_run_and_transient_resume_no_enrollment(self):
+        before = crq.QUEUE.read_bytes()
+        with mock.patch.object(crq, "gh_json", side_effect=self.forge_inventory()):
+            self.assertTrue(self.reconcile_inventory(budget=4, dry=True)["complete"])
+        self.assertEqual(crq.QUEUE.read_bytes(), before)
+        self.assertFalse((self.state / "reconcile").exists())
+        actual = self.forge_inventory()
+        def fail(args):
+            if "issueOrPullRequest(number:51)" in args[-1]:
+                raise RuntimeError("offline")
+            return actual(args)
+        with mock.patch.object(crq, "gh_json", side_effect=fail):
+            result = self.reconcile_inventory(budget=4)
+        self.assertFalse(result["complete"])
+        cursor = result["next_cursor"]
+        self.assertEqual(crq.load_queue()["items"], [])
+        self.q = crq.load_queue()
+        with mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+            result = self.reconcile_inventory(budget=4)
+        self.assertIn("number:51)", forge.call_args_list[0].args[0][-1])
+        self.assertIsNotNone(cursor)
+        self.assertTrue(result["complete"])
+
+    def test_natural_discovery_overlap_watermark_and_dry_selective_gating(self):
+        actual = self.forge_inventory()
+        self.q["created_at"] = "2026-10-01T00:00:00Z"
+        crq.save_queue(self.q)
+        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+            self.tick(dry=True, discovery=True)
+            self.tick(only="selection", discovery=True)
+            self.assertNotIn("merged_watermark", crq.load_queue())
+            self.tick(discovery=True)
+        q = crq.load_queue()
+        watermark = q["merged_watermark"]
+        self.assertEqual(q["merged_reconcile"]["represented"], 125)
+        self.assertEqual(q["merged_discovery"]["before"], watermark)
+        # Advancing an interval replays 5 minutes; request bindings dedupe.
+        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+            self.tick(discovery=True)
+        q = crq.load_queue()
+        self.assertEqual(q["merged_reconcile"]["after"],
+                         crq.iso(crq.parse_iso(watermark) - crq.dt.timedelta(minutes=5)))
+        self.assertEqual(len(q["items"]), 125)
+
+    def test_aggregate_budget_request_timeout_and_deferred_cursor_retained(self):
+        clock = mock.Mock(return_value=10.0)
+        budget = crq.ForgeBudget(requests=1, seconds=3, clock=clock)
+        with crq.forge_window(budget), mock.patch.object(crq, "run", return_value=SimpleNamespace(stdout="{}")) as run:
+            crq.gh_json(["api", "fixture"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            with self.assertRaises(crq.merged_reconcile.PageFailed):
+                crq.gh_json(["api", "fixture"])
+            self.assertEqual(run.call_count, 1)
+        self.deferred_entry()
+        initial = copy.deepcopy(self.q)
+        ids = crq.deferred_refresh.refresh_deferred(self.q,
+            verify_source=lambda *a: self.fail("must not fetch"), find_source=lambda *a: [],
+            at=crq.iso(), may_continue=budget.available)
+        self.assertEqual(ids, [])
+        self.assertEqual(self.q, initial)
+        clock.return_value = 14
+        self.assertFalse(crq.ForgeBudget(requests=2, seconds=0, clock=clock).available())
+
+    def test_once_per_range_preserves_restacked_cycles_and_refuses_same_head_shortcut(self):
+        info = {"state": "OPEN", "isDraft": False, "headRefOid": self.merge,
+                "baseRefName": "merge-queue", "headRefName": "fixture"}
+        item = {"pr": 42, "cycles": [{"run_id": "legacy", "base": self.pre, "head": self.merge,
+                                    "findings": 2}], "prior_cycles": 1, "pinned_base": self.pre}
+        saved = copy.deepcopy(item["cycles"])
+        plan = crq.plan_open(item, info, False)
+        self.assertEqual(item["cycles"], saved)
+        self.assertEqual(plan["label"], "one review of captured range")
+        # Same-head legacy credit has no scope policy; full review is still owed.
+        self.assertEqual(crq.plan_delta(item, info, False)["base"], self.merge)
+        item["cycles"].append({"run_id": "proven", "base": self.merge, "head": self.merge,
+                              "dirty_diff": "clean tree", "range_policy": "full-range-once-v1"})
+        with self.assertRaises(crq.NothingToReview):
+            crq.plan_open(item, info, False)
+        crq.advance_open(item)
+        self.assertEqual(item["state"], "done")
+
+    def test_reconcile_cli_flags_only_and_one_json_result_no_dispatch(self):
+        with mock.patch.object(sys, "argv", ["crq", "reconcile-merged", "--after=2026-10-01T00:00:00Z",
+             "--before=2026-10-03T00:00:00Z", "--page-budget=4", "--dry-run"]),              mock.patch.object(crq, "gh_json", side_effect=self.forge_inventory()),              mock.patch.object(crq, "launch") as launch, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(crq.main(), 0)
+        self.assertTrue(json.loads(out.getvalue())["complete"])
+        self.assertEqual(crq.load_queue()["items"], [])
+        launch.assert_not_called()

@@ -1,6 +1,7 @@
 """Atomic, allow-listed fleet summary; no review launches or git fetches."""
 import datetime as dt
 import coverage
+import review_receipt
 import repair_tick
 import json
 import os
@@ -26,6 +27,58 @@ def command(argv, timeout):
     if result.returncode:
         raise RuntimeError(f"{Path(argv[0]).name} probe exited {result.returncode}")
     return result.stdout
+
+
+def merged_current(queue, receipt_root=None):
+    """Discovery truth and verified receipt truth remain separate, at retained T."""
+    counts = {key: 0 for key in ("pending", "reviewing", "blocked", "unverified",
+        "proven_terminal", "no_current_code", "partial_scope", "unsupported")}
+    exclusions = {}
+    targets = set()
+    for item in queue["items"]:
+        if item["kind"] != review_receipt.KIND:
+            continue
+        state = item["state"]
+        if state in ("pending", "reviewing", "blocked"):
+            counts[state] += 1
+            continue
+        try:
+            receipt_id = item["receipt_id"]
+            if receipt_root is None:
+                raise ValueError("receipt bytes unavailable")
+            review_receipt.read_receipt(receipt_root, receipt_id)
+            document = read(Path(receipt_root) / (receipt_id + ".json"))
+            capture = document["capture"]
+            if (document.get("source") != item.get("subject") or
+                    capture != item.get("capture") or
+                    capture.get("equivalence") != review_receipt.current_equivalence(capture)):
+                raise ValueError("receipt binding mismatch")
+            outcome = document["outcome"]
+            if state == "done" and review_receipt.reusable_current(document, capture):
+                category = "partial_scope" if outcome == "partial-scope" else "proven_terminal"
+            elif (state == "no-current-code" and outcome == "no-current-code" and
+                  all(p.get("disposition") in ("deleted", "empty") for p in capture["paths"])):
+                category = "no_current_code"
+            elif state == "unsupported" and outcome == "unsupported":
+                category = "unsupported"
+            else:
+                raise ValueError("terminal state lacks proof")
+            counts[category] += 1
+            targets.add(capture["target"])
+            for path in capture["paths"]:
+                disposition = path.get("disposition", "unknown")
+                if disposition not in ("included", "renamed"):
+                    exclusions[disposition] = exclusions.get(disposition, 0) + 1
+        except (KeyError, TypeError, ValueError, OSError):
+            counts["unverified"] += 1
+    discovery = queue.get("merged_reconcile") or {}
+    allowed = ("after", "before", "complete", "complete_through", "next_cursor", "represented",
+               "intents", "unsupported", "duplicates_seen", "records_read", "inventory_digest")
+    return {"discovery": {key: discovery[key] for key in allowed if key in discovery},
+            "watermark": queue.get("merged_watermark"), "receipts": counts,
+            "path_exclusions": exclusions, "captured_targets": sorted(targets)[:32],
+            "additional_captured_targets": max(0, len(targets) - 32),
+            "coverage_at_today_target": "unverified", "legacy_done_is_review_proof": False}
 
 
 def summarize(status, queue, heartbeat, config, events, now):
@@ -58,6 +111,7 @@ def summarize(status, queue, heartbeat, config, events, now):
     # Freshness must follow completed ticks, never status-file writes or probes.
     timestamp(last_tick)
     return {
+        "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
         "starts_60m": sum(now - 3600 <= timestamp(s) <= now for s in queue.get("starts", [])),
@@ -168,6 +222,7 @@ def publish(root, queue, config, schedule, home=None, now=None, *, promotion_mod
                      config, read_events(root / "state/events.jsonl"), now)
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
+    data["merged_current"] = merged_current(queue, root / "state" / "receipts")
     data.update(schema_version=2, generated_at=generated)
     data["promotion"]["mode"] = promotion_mode
     data["systemd_timers"], data["systemd_services"] = systemd_activity()

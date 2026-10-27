@@ -135,3 +135,50 @@ class SummaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergedCurrentSummaryTest(unittest.TestCase):
+    def test_discovery_and_legacy_done_do_not_count_as_current_review(self):
+        q = {"items": [{"kind": "merged", "state": "done"},
+                       {"kind": "merged-current", "state": "done"},
+                       {"kind": "merged-current", "state": "pending"}],
+             "merged_reconcile": {"complete": True, "represented": 125,
+                                  "source": "private", "secret": "not exported"}}
+        summary = adapter.merged_current(q)
+        self.assertEqual(summary["receipts"]["unverified"], 1)
+        self.assertEqual(summary["receipts"]["pending"], 1)
+        self.assertEqual(summary["receipts"]["proven_terminal"], 0)
+        self.assertEqual(summary["coverage_at_today_target"], "unverified")
+        self.assertNotIn("private", json.dumps(summary))
+
+    def test_only_bound_verified_receipts_count_at_retained_target_with_exclusions(self):
+        rr = adapter.review_receipt
+        paths = [{"path": "gone.py", "disposition": "deleted"}]
+        capture = {"target": "a" * 40, "tree": "b" * 40, "paths": paths,
+                   "scope_digest": rr.digest(paths), "policy": rr.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1", "reviewer_version": "fixture"}
+        capture["equivalence"] = rr.current_equivalence(capture)
+        subject = {"repo": "owner/repo", "pr": 1}
+        document = {"version": 1, "source": subject, "capture": capture, "outcome": "no-current-code",
+                    "counted": False, "classification": None}
+        with tempfile.TemporaryDirectory() as td:
+            receipt_id = rr.write_receipt(td, document)
+            item = {"kind": "merged-current", "state": "no-current-code", "subject": subject,
+                    "capture": capture, "receipt_id": receipt_id}
+            summary = adapter.merged_current({"items": [item]}, td)
+            self.assertEqual(summary["receipts"]["no_current_code"], 1)
+            self.assertEqual(summary["receipts"]["proven_terminal"], 0)
+            self.assertEqual(summary["captured_targets"], ["a" * 40])
+            self.assertEqual(summary["path_exclusions"], {"deleted": 1})
+            document.update(outcome="partial-scope", counted=True,
+                            classification={"counted": True, "outcome": "completed"})
+            item.update(state="done", receipt_id=rr.write_receipt(td, document))
+            self.assertEqual(adapter.merged_current({"items": [item]}, td)["receipts"]["partial_scope"], 1)
+            document["outcome"] = "terminal-with-findings"
+            item["receipt_id"] = rr.write_receipt(td, document)
+            self.assertEqual(adapter.merged_current({"items": [item]}, td)["receipts"]["proven_terminal"], 1)
+            (Path(td) / (item["receipt_id"] + ".json")).write_text("{}")
+            summary = adapter.merged_current({"items": [item]}, td)
+            self.assertEqual(summary["receipts"]["unverified"], 1)
+            self.assertEqual(summary["receipts"]["proven_terminal"], 0)
