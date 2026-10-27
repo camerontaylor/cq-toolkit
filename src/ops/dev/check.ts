@@ -68,7 +68,9 @@ export interface DevCheckInput {
   /**
    * Name the EXACT test files the gate runs (the wrapper's own escape for
    * a too-broad automatic selection, S7 dogfood attempt B): replaces the
-   * `--base`/`--range` selection entirely. The names ride argv positionals
+   * `--base`/`--range` selection entirely, so a `range` supplied alongside
+   * is refused — the record must never pair a range with the
+   * named-selection disclosure. The names ride argv positionals
    * after the flags, so a dash-prefixed value is refused here (option
    * injection); the record discloses the narrowing as
    * `testSelection: { mode: 'named', files }` — a reader must be able to
@@ -317,6 +319,18 @@ export function makeDevCheck(
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
+    // A named selection REPLACES the `--base`/`--range` selection entirely,
+    // so a range supplied alongside it would run no `--range` gate while the
+    // record still carried `range` next to `testSelection: { mode: 'named' }`
+    // — a reader could not tell which selection actually ran. The two
+    // selection inputs are mutually exclusive; refused BEFORE any gate runs,
+    // like the named-selection checks below.
+    if (input.range !== undefined && input.testFiles !== undefined)
+      return {
+        status: 'failed',
+        error:
+          'dev.check: range and testFiles are conflicting selections — testFiles replaces the range entirely; supply the range or the named files, not both',
+      };
     // Named files ride argv as positionals AFTER the flags, so any
     // dash-leading segment ("-x" or "test/-evil.test.ts" — a basename
     // starting with '-' reaches getopt once the shell expands it) could be
