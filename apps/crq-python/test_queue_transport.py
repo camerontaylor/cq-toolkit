@@ -7,6 +7,7 @@ from pathlib import Path
 
 import queue_transport as transport
 import review_receipt as receipts
+import capability_dispatcher as dispatcher
 
 
 class QueueTransportTests(unittest.TestCase):
@@ -44,7 +45,7 @@ class QueueTransportTests(unittest.TestCase):
         item = self.merged()
         doc = {"version": 1, "source": item["subject"], "capture": {"target_sha": "c" * 40,
                "target_tree": "d" * 40, "paths": [{"path": "src/a.ts", "disposition": "included"}]},
-               "classification": {"counted": True, "outcome": "completed"},
+               "classification": {"counted": True, "outcome": "completed"}, "counted": True, "outcome": "terminal-with-findings",
                "findings": [{"text": "large finding " * 3000}], "artifacts": {},
                "remediation": {"enabled": False}}
         rid = receipts.write_receipt(self.tmp.name, doc)
@@ -104,3 +105,79 @@ class QueueTransportTests(unittest.TestCase):
     def test_strict_decode_wire_and_author_protocol_separation(self):
         for raw in [b'{"v":1,"v":1}', b"x" * 8193, b'{"v":2}', b'{"v":1,"op":"fallback"}']:
             with self.assertRaises(ValueError): transport.decode(raw)
+
+    def test_exact_command_dispatch_only(self):
+        calls = []
+        self.assertEqual(dispatcher.dispatch("author-v1", lambda: calls.append("author") or 0, lambda: 1), 0)
+        self.assertEqual(dispatcher.dispatch("queue-v1", lambda: 0, lambda: calls.append("queue") or 1), 1)
+        for command in [None, "queue-v1 ", "author-v1; id", "queue-v1 --path=/tmp", "sh"]:
+            with self.assertRaises(ValueError): dispatcher.dispatch(command, lambda: 0, lambda: 0)
+        self.assertEqual(calls, ["author", "queue"])
+
+    def test_read_write_capabilities_repository_target_and_request_caps(self):
+        self.call("enqueue")
+        self.policy["read"] = []
+        with self.assertRaisesRegex(ValueError, "denied"): self.call("status")
+        self.policy["read"] = ["developer"]
+        self.policy["targets"] = ["merge-queue"]
+        with self.assertRaisesRegex(ValueError, "denied"): self.call("status")
+        self.policy["targets"] = ["promoted-main"]
+        self.policy["repo"] = "another/repo"
+        with self.assertRaisesRegex(ValueError, "denied"): self.call("status")
+        self.policy["repo"] = "owner/repo"
+        self.policy["branches"] = ["main"]
+        with self.assertRaisesRegex(ValueError, "denied"): self.call("status")
+
+    def test_structured_vendor_reason_and_unknown_fail_closed(self):
+        rid, doc = self.receipt()
+        for outcome, category in [("rate_limited", "vendor-rate-limited"), ("auth", "vendor-needs-action"), ("error", "unknown"), ("blocked-secret-scan", "scan")]:
+            doc.update(outcome=outcome, counted=False)
+            self.q["items"][0]["receipt_id"] = receipts.write_receipt(self.tmp.name, doc)
+            result = self.call("status")
+            self.assertEqual(result["state"], "blocked")
+            self.assertEqual(result["reason"]["category"], category)
+            self.assertFalse(result["reviewed"])
+
+    def test_persisted_identity_block_survives_reads_and_exact_revalidation_clears(self):
+        self.call("enqueue")
+        reason = {"source": "queue", "category": "identity", "code": "forge-identity"}
+        self.q["queue_client_requests"]["request-1"]["reason"] = reason
+        self.assertEqual(self.call("status")["reason"], reason)
+        self.assertEqual(self.call("status")["state"], "blocked")
+        self.forge["head"] = "e" * 40
+        with self.assertRaises(ValueError): self.call("bind", pr=12, mergeSha=None)
+        self.assertEqual(self.call("status")["reason"], reason)
+        self.forge["head"] = self.b["head"]
+        self.assertIsNone(self.call("bind", pr=12, mergeSha=None)["reason"])
+        self.assertEqual(self.call("status")["state"], "awaiting-merge")
+
+
+def bridge(root, raw):
+    """Cross-language offline SDK fixture; each request restarts the server process.
+
+    fixture-tick is a test-only natural-runner stand-in; never a wire operation.
+    It publishes Q1 receipt bytes without a provider or remote host.
+    """
+    root = Path(root)
+    queue_path = root / "queue.json"
+    q = json.loads(queue_path.read_text()) if queue_path.exists() else {"items": []}
+    if raw == b"fixture-tick":
+        document = json.loads((root / "fixture-document.json").read_text())
+        receipt_id = receipts.write_receipt(root / "receipts", document)
+        q["items"][0].update(state="done", receipt_id=receipt_id)
+        queue_path.write_bytes(receipts.canonical(q))
+        return b"{}"
+    class Runner:
+        def load_queue(self): return q
+        def save_queue(self, value): queue_path.write_bytes(receipts.canonical(value))
+        def iso(self): return "2026-10-28T00:00:00Z"
+        def with_lock(self, fn):
+            import fcntl
+            with (root / "tick.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return fn()
+    policy = {"enabled": True, "repo": "owner/repo", "targets": ["promoted-main"],
+              "branches": ["merge-queue"], "read": ["developer"], "write": ["developer"]}
+    return transport.handle(raw, Runner(), principal="developer", policy=policy,
+        verify_source=lambda repo, pr: {"repo": repo, "pr": pr, "target": "merge-queue", "state": "MERGED", "mergeSha": "b" * 40},
+        receipt_root=root / "receipts")

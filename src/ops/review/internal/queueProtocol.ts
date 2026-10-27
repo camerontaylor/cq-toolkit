@@ -61,6 +61,23 @@ export const QueueStateSchema = z.enum([
   'unsupported',
 ]);
 export type QueueState = z.infer<typeof QueueStateSchema>;
+/** Structured producer classification only; consumers never infer authority from prose. */
+export const QueueReasonSchema = z
+  .object({
+    source: z.enum(['vendor', 'queue']),
+    category: z.enum([
+      'vendor-unavailable',
+      'vendor-rate-limited',
+      'vendor-needs-action',
+      'scan',
+      'identity',
+      'persistence',
+      'unknown',
+    ]),
+    code: QueueToken,
+  })
+  .strict();
+export type QueueReason = z.infer<typeof QueueReasonSchema>;
 export const QueueStatusSchema = z
   .object({
     state: QueueStateSchema,
@@ -69,8 +86,13 @@ export const QueueStatusSchema = z
     itemId: z.string().nullable(),
     receiptId: QueueDigest.nullable(),
     consumed: z.boolean(),
+    enqueued: z.boolean().exactOptional(),
     reviewed: z.boolean(),
     fixed: z.literal(false),
+    reason: QueueReasonSchema.nullable().exactOptional(),
+    reusedFrom: z.string().nullable().exactOptional(),
+    receiptSource: MergedBindingSchema.nullable().exactOptional(),
+    receiptEquivalence: QueueDigest.nullable().exactOptional(),
   })
   .strict();
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;
@@ -84,3 +106,15 @@ export interface DeferredQueueClient {
   cancel(input: QueueReference): Promise<QueueStatus>;
   status(input: QueueReference): Promise<QueueStatus>;
 }
+
+/** JSON-valued --binding plus flags only; no positional arguments. */
+export const QueueEnqueueInputSchema = QueueReferenceSchema.extend({
+  action: z.enum(['enqueue', 'bind', 'cancel']).exactOptional(),
+  pr: z.number().int().positive().exactOptional(),
+  mergeSha: QueueSha.exactOptional(),
+}).strict();
+export const QueueReportInputSchema = QueueReferenceSchema.extend({
+  evidenceDir: z.string().min(1),
+}).strict();
+export type QueueEnqueueInput = z.infer<typeof QueueEnqueueInputSchema>;
+export type QueueReportInput = z.infer<typeof QueueReportInputSchema>;

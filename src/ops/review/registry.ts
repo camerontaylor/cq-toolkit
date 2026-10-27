@@ -72,6 +72,11 @@ import type { PrSnapshot } from '../../adapters/forge-github/snapshotPrState.js'
 import type { ReviewRunInput } from './run.js';
 import type { ReviewAddressInput } from './address.js';
 import { FindingSchema } from './findings.js';
+import {
+  QueueEnqueueInputSchema,
+  QueueReferenceSchema,
+  QueueReportInputSchema,
+} from './internal/queueProtocol.js';
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
@@ -542,6 +547,25 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
   .strict();
 
 export const registry: OpRegistryEntry[] = [
+  // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
+  {
+    name: 'review.enqueue',
+    inputSchema: QueueEnqueueInputSchema,
+    importer: async () =>
+      (await import('./queue.js')).makeQueueOps().enqueue as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.queueStatus',
+    inputSchema: QueueReferenceSchema,
+    importer: async () =>
+      (await import('./queue.js')).makeQueueOps().queueStatus as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.report',
+    inputSchema: QueueReportInputSchema,
+    importer: async () =>
+      (await import('./queue.js')).makeQueueOps().report as Op<unknown, unknown>,
+  },
   {
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
