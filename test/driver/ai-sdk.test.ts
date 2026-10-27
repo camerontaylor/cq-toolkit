@@ -1586,7 +1586,7 @@ describe('ai-sdk driver failure classes (#210)', () => {
       // the exhausted-retry error still names the attempt count and last
       // error (and the bound is per step, so ≤ DEFAULT_MAX_STEPS per run).
       expect(args.maxRetries).toBe(1);
-      // Per-request bound for EACH step of the tool loop.
+      // Bound for EACH step of the tool loop.
       expect(args.timeout).toEqual({ stepMs: DEFAULT_STEP_TIMEOUT_MS });
       expect(DEFAULT_STEP_TIMEOUT_MS).toBe(1_200_000);
       // The bound is configurable per driver and validated.

@@ -30,7 +30,7 @@ functions" for the last two, `index.js` ~5597):
   cleared by the first **output chunk**. This is time-to-first-byte.
 - `chunkMs`: re-armed on **every output chunk**; fires if no output chunk
   arrives for that long. Output chunks (`isOutputChunk2`, ~9252) are non-empty
-  `text-delta`, **`reasoning-delta`**, `tool-input-delta`, `tool-call`, `file`.
+  `text-delta`, **`reasoning-delta`**, `tool-input-delta`, `tool-call`, `file`, `reasoning-file`.
 - `stepMs`/`totalMs` behave as in generateText; the step timer likewise spans
   tool execution (cleared at `cleanupStepTimeouts`, ~10903).
 - All timers are `setAbortTimeout` inside the SDK, so I8 (no raw timers in
@@ -82,12 +82,29 @@ middleware (`transformParams`), which applies to `doStream` too. Work and risk:
 Do option 2, then 3. Prerequisite: map `reasoning_content` for opencode-go
 (openai-compatible). Defaults for the streaming path:
 
-| bound                 | default | rationale                                                                                                                                                                  |
-| --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `firstChunkMs` (TTFB) | 180 s   | probes saw 1.4-2.9 s on a tiny prompt; a 130k-token prompt prefill plus queueing is tens of seconds; 3 min is generous yet catches a dead connection 7x sooner than 20 min |
-| `chunkMs` (stall)     | 120 s   | both providers emit reasoning/text continuously (max gap = TTFB); only a tool-argument stream or a gateway hiccup pauses, and 2 min is far above any healthy gap           |
-| `stepMs`              | 20 min  | unchanged runaway cap while chunks keep flowing                                                                                                                            |
-| `totalMs`             | unset   | the review wall budget and token budget own the run                                                                                                                        |
+| bound                 | default | rationale                                                                                                                                                                        |
+| --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `firstChunkMs` (TTFB) | 180 s   | probes saw 1.4-2.9 s on a tiny prompt; a 130k-token prompt prefill plus queueing is tens of seconds; 3 min is generous yet catches a dead connection about 7x sooner than 20 min |
+| `chunkMs` (stall)     | 120 s   | both providers emit reasoning/text continuously (max gap = TTFB); only a tool-argument stream or a gateway hiccup pauses, and 2 min is far above any healthy gap                 |
+| `stepMs`              | 20 min  | unchanged runaway cap while chunks keep flowing                                                                                                                                  |
+| `totalMs`             | unset   | the review wall budget and token budget own the run                                                                                                                              |
+
+**Tool hazard (prerequisite for option 2).** In streamText the chunk timer is
+re-armed only by output chunks and cleared only at step end
+(`cleanupStepTimeouts`, ~10903), while tools run _during_ the stream
+(`invokeToolCallbacksFromStream`, ~10603). After the last `tool-call` chunk the
+stall timer stays armed while the tool executes, so a tool slower than `chunkMs`
+would abort a healthy step. Set `chunkMs` above the longest tool timeout, or
+find a way to pause it during tool execution, before enabling streaming.
+
+**Relation to the review wall budget.** Under defaults the 20 min step timeout
+equals `budgets.run.wallMs` (1_200_000) and `budgets.step.wallMs`, so it only
+acts as a backstop when the run budget is raised (this repo's `cq.json`: 4 h).
+
+**Probes.** Plain `fetch` SSE scripts (a reasoning prompt, `stream: true`,
+`max_tokens: 1500`; opencode-go also needs an `x-opencode-session` header)
+measuring headers/first-delta/first-text times and the largest inter-chunk gap.
+They are not committed; numbers are one-shot and indicative.
 
 Estimate: ~2 PRs. PR 1 (~300 LOC): openai-compatible for opencode-go, streaming
 option in the driver incl. error/abort mapping, timer options, ceiling

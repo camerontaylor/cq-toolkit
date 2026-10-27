@@ -19,9 +19,9 @@
 // cancellation source. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED here — the governor's escalation ladder
 //     is the wall-clock owner; a driver-owned deadline would duplicate and
-//     races it. The SDK call's per-request `timeout.stepMs`
-//     (DEFAULT_STEP_TIMEOUT_MS) is NOT a run deadline — it bounds one HTTP
-//     request so a hung connection cannot stall the loop; WHEN to abort the
+//     races it. The SDK call's `timeout.stepMs`
+//     (DEFAULT_STEP_TIMEOUT_MS) is NOT a run deadline — it bounds one step
+//     (model call, its retry and tool runs) so a hung step cannot stall the loop; WHEN to abort the
 //     RUN remains the governor's decision.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
@@ -176,7 +176,7 @@
 // and its exhausted-retry error names the attempt count and the last error
 // (`Failed after N attempts. Last error: …`), so the cause still reaches
 // WorkerResult.error. Each step of the tool loop is also bounded by
-// DEFAULT_STEP_TIMEOUT_MS (a hung HTTP request cannot stall the loop); that
+// DEFAULT_STEP_TIMEOUT_MS (a hung step cannot stall the loop); that
 // per-request step-timeout abort is NOT SDK-retryable and therefore
 // classifies as 'transient' (the TimeoutError error class name).
 //
@@ -335,8 +335,8 @@ export interface AiSdkDriverOptions {
     { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
   >;
   /**
-   * Per-request bound for each SDK step, in ms (`timeout.stepMs`). It catches
-   * a hung request, not a slow long answer; default DEFAULT_STEP_TIMEOUT_MS.
+   * Bound for each SDK step, in ms (`timeout.stepMs`; the model call incl. its
+   * retry and the step's tool runs). It catches a hung step, not a slow answer; default DEFAULT_STEP_TIMEOUT_MS.
    */
   stepTimeoutMs?: number;
   /**
@@ -806,8 +806,8 @@ export class AiSdkDriver implements Driver {
           // api-equivalent caveat the modeled label records, not a hidden
           // second charge.
           maxRetries: 1,
-          // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
-          // hung request cannot stall the loop. The step-timeout abort is not
+          // Bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
+          // hung step cannot stall the loop. The step-timeout abort is not
           // SDK-retryable; it classifies as 'transient' (TimeoutError name).
           timeout: { stepMs: this.stepTimeoutMs },
           ...(selected.length > 0 ? { tools: toolSet } : {}),
