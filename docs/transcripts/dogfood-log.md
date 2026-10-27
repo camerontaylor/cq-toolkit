@@ -157,7 +157,7 @@ the open human-decision thread stays open.
 This is positive measured live acceptance: fixesPerRun over the S6 dogfood runs
 is 1 (A 0, B 0, C 0, D 1).
 
-## S7 dogfood — dev.cycle on fix/s7-dogfood-address-469
+## S7 dogfood attempt A — dev.cycle on fix/s7-dogfood-address-469
 
 First live `dev.cycle` run (the composition's own first run against a real
 diff; #470's evidence was fixture-only). Code work landed first as commit
