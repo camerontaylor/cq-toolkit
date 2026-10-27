@@ -524,10 +524,11 @@ test('one failing task has a failed-attempt commit while a passing sibling remai
     expect(reportOf(result).tasks[1]?.failedAttempt?.branch).toMatch(
       /^cq\/fixture\/failed\/tests-1\/scratch-repo\/.*\/a\d+$/,
     );
-    expect(reportOf(result).failed.map((attempt) => attempt.branch.split('/').at(-1))).toEqual([
-      'a1',
-      'a2',
-    ]);
+    expect(
+      reportOf(result)
+        .failed.filter((attempt) => attempt.branch !== undefined)
+        .map((attempt) => attempt.branch!.split('/').at(-1)),
+    ).toEqual(['a1', 'a2']);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
