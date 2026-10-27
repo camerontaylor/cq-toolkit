@@ -48,7 +48,7 @@ export interface AgentReviewReport {
   findings: Finding[];
   usage: number;
   /** Driver results observed before this report's terminal snapshot. */
-  usageSummary: KnownUsageSummary;
+  usageSummary?: KnownUsageSummary;
   coverage: ReviewCoverageV2;
   advisories: string[];
   limitations: string[];
