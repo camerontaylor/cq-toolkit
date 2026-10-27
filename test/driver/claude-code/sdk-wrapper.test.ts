@@ -111,6 +111,9 @@ test.skipIf(!peerPresent)(
       expect(read?.inputSchema.required).toEqual(['file_path']);
       expect(read?.inputSchema.additionalProperties).toBe(false);
       expect(read?.inputSchema.properties).not.toHaveProperty('path');
+      const bash = listed.tools.find((tool) => tool.name === 'bash');
+      expect(bash?.inputSchema.required).toEqual(['command']);
+      expect(bash?.inputSchema.additionalProperties).toBe(false);
       expect(
         (await client.callTool({ name: 'read', arguments: { path: 'a.txt' } })).isError,
       ).not.toBe(true);
