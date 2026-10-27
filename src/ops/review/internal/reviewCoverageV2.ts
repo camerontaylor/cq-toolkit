@@ -81,7 +81,7 @@ export const ReviewCoverageV2Schema = z
             .strict()
             .optional(),
           deliveries: z.array(DeliverySchema),
-          /** Clean model-send hooks; refused scans and tool-output guards are not sends. */
+          /** Clean model sends across all attempts; refused scans/tool guards are not sends. */
           requests: z.array(z.object({ serializedChars: Count, decodedChars: Count }).strict()),
         })
         .strict(),

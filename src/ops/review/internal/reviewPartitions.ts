@@ -174,19 +174,48 @@ export function partitionReview(input: {
       const context = start === 0 ? '' : `${hunk}\n${source.text.slice(contextStart, start)}`;
       let oldLine: number | undefined;
       let newLine: number | undefined;
+      let previousHeadLine: number | undefined;
+      let oldRemaining: number | undefined;
+      let newRemaining: number | undefined;
+      const resetHunk = () => {
+        oldLine = undefined;
+        newLine = undefined;
+        previousHeadLine = undefined;
+        oldRemaining = undefined;
+        newRemaining = undefined;
+      };
       for (const line of prefix.split('\n').slice(0, -1)) {
-        const marker = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
+        const marker = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
         if (marker) {
           oldLine = Number(marker[1]);
-          newLine = Number(marker[2]);
+          newLine = Number(marker[3]);
+          oldRemaining = Number(marker[2] ?? 1);
+          newRemaining = Number(marker[4] ?? 1);
+          const preceding = newRemaining === 0 ? newLine : newLine - 1;
+          previousHeadLine = preceding > 0 ? preceding : undefined;
         } else if (oldLine !== undefined && newLine !== undefined) {
-          if (line.startsWith('-')) oldLine++;
-          else if (line.startsWith('+')) newLine++;
-          else if (line.startsWith(' ')) {
+          if (line.startsWith('\\ No newline at end of file')) continue;
+          const consumesOld = line.startsWith('-') || line.startsWith(' ') || line === '';
+          const consumesNew = line.startsWith('+') || line.startsWith(' ') || line === '';
+          if (
+            (!consumesOld && !consumesNew) ||
+            (consumesOld && oldRemaining === 0) ||
+            (consumesNew && newRemaining === 0)
+          ) {
+            resetHunk();
+            continue;
+          }
+          if (consumesOld) {
             oldLine++;
+            if (oldRemaining !== undefined) oldRemaining--;
+          }
+          if (consumesNew) {
+            previousHeadLine = newLine;
             newLine++;
+            if (newRemaining !== undefined) newRemaining--;
           }
         }
+        if (oldRemaining === 0 && newRemaining === 0) resetHunk();
       }
       if (untracked) {
         oldLine = undefined;
@@ -207,7 +236,16 @@ export function partitionReview(input: {
         const receiptLine = requireReceipt ? `receipt: ${receipt}\n` : '';
         // A partition that starts inside an over-long line has no reliable counters.
         const midLine = start > 0 && source.text.charAt(start - 1) !== '\n';
-        const anchors = untracked || midLine ? '' : headLineAnchors(text, { oldLine, newLine });
+        const anchors =
+          untracked || midLine
+            ? ''
+            : headLineAnchors(text, {
+                oldLine,
+                newLine,
+                previousHeadLine,
+                oldRemaining,
+                newRemaining,
+              });
         const anchorSection = anchors === '' ? '' : `head line anchors:\n${anchors}`;
         return {
           receipt,

@@ -156,6 +156,15 @@ per-package rescue cap 10. There is no token budget default:
 `budgets.run.maxTokens` when absent. Bulk query defaults are computed by the forge consumer
 from the current user and repository at run time.
 
+Partition review stops dispatching after two failures in completion order with no
+success between them; already-running sessions finish. With concurrency, the set of
+later sessions dispatched can therefore vary with provider timing. A deterministic
+lane or missing-delivery refusal stops dispatch immediately. Session results retain
+their own verdict when aggregate spend exceeds the run guard. Token reservations
+limit dispatch allowances, but cannot account for unsettled in-flight usage or prevent
+one driver step from overshooting. Retry requests and usage cover both attempts;
+coverage deliveries describe only the final attempt.
+
 This repository's root config declares the compiler check as argv.
 Lint is omitted: Oxlint 1.83 has no ESLint-format output; an `oxlint-json` adapter is a follow-up.
 Tests are omitted until a config check can honour the `test:narrow` host-wide lock and file selection.
