@@ -589,65 +589,98 @@ describe('dev.cycle', () => {
 
   // ---- BEFORE controls (P1 thread 7kNb + 7lxL): report presence is NOT
   // a publication trigger. Blocked re-reviews and admission failures carry a
-  // report too; only the STRUCTURED stops — 'round-cap' and (S7 attempt H,
-  // the spec's never-unpublished invariant) 'budget' — publish a draft.
+  // report too; only the STRUCTURED stops — 'round-cap', 'budget' (S7
+  // attempt H, the spec's never-unpublished invariant) and #532's
+  // 'rereview-blocked' — publish a draft.
 
-  /** An address leg that stopped on the BUDGET: the production finish() shape, structured marker inside. */
-  function budgetStopAddress(
+  /**
+   * An address leg that stopped on a STRUCTURED stop: the production
+   * finish() shape — the needs-human reason carries the '; report: <path>'
+   * suffix and the structured marker rides INSIDE the report envelope.
+   * Production pairs each stop value with its own reason (address.ts
+   * finish()): a run-budget stop marks stop:'budget' behind 'token or wall
+   * budget exhausted', and a re-review still blocked after verified fixes
+   * (#532) marks stop:'rereview-blocked' behind 're-review: …' — one
+   * reason/stop pairing each, never a budget marker under a re-review
+   * reason.
+   */
+  function structuredStopAddress(
     state: WorkState,
-    reason = 'review.address: token or wall budget exhausted; report: /tmp/r.json',
+    stop: Exclude<ReviewAddressReport['stop'], undefined>,
+    reason: string,
   ): AddressLeg {
     return async () => ({
       status: 'needs-human',
       reason,
-      report: { ...addressReport(state, [capFinding], []), stop: 'budget' as const },
+      report: { ...addressReport(state, [capFinding], []), stop },
     });
   }
 
   test.each([
-    'review.address: token or wall budget exhausted; report: /tmp/r.json',
-    'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
-  ])('an address budget stop publishes a DRAFT with the original reason: %s', async (reason) => {
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    const opens: PrOpenInput[] = [];
-    const checks: string[] = [];
-    let pushCalls = 0;
-    const { gh, bodies } = ghFake();
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(checks),
-      review: cleanReview(state),
-      address: budgetStopAddress(state, reason),
-      open: openFake(opens),
-      gh,
-      git: async (args) => {
-        if (args.includes('push')) {
-          pushCalls++;
-          expect(args.at(-1)).toBe(`${state.head}:refs/heads/feature/x`);
-        }
-        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
-      },
-    });
-    const result = await op({ repoRoot: repo.root });
-    expect(result.status).toBe('needs-human');
-    if (result.status !== 'needs-human') return;
-    expect(result.reason).toContain('NOT READY');
-    expect(result.reason).toContain(reason);
-    expect(result.reason).toContain('draft PR #42');
-    // The final gates ran before the publication (first check + final check).
-    expect(checks).toHaveLength(2);
-    expect(pushCalls).toBe(1);
-    expect(opens).toEqual([
-      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
-    ]);
-    // The open findings ride the draft like the round cap's.
-    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
-    expect(bodies[0]).toContain('c001-aaaaaaaa#f1');
-    expect(bodies[0]).toContain('stopped on the run budget');
-    expect(bodies[0]).not.toContain('round cap');
-    expect(bodies[0]).not.toContain('blocked re-review');
-  });
+    ['budget', 'review.address: token or wall budget exhausted; report: /tmp/r.json'],
+    [
+      'rereview-blocked',
+      'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
+    ],
+  ] as const)(
+    'an address %s stop publishes a DRAFT with the original reason: %s',
+    async (stop, reason) => {
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      const opens: PrOpenInput[] = [];
+      const checks: string[] = [];
+      let pushCalls = 0;
+      const { gh, bodies } = ghFake();
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(checks),
+        review: cleanReview(state),
+        address: structuredStopAddress(state, stop, reason),
+        open: openFake(opens),
+        gh,
+        git: async (args) => {
+          if (args.includes('push')) {
+            pushCalls++;
+            expect(args.at(-1)).toBe(`${state.head}:refs/heads/feature/x`);
+          }
+          return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+        },
+      });
+      const result = await op({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('NOT READY');
+      expect(result.reason).toContain(reason);
+      expect(result.reason).toContain('draft PR #42');
+      // The composition frames the stop exactly as production finish() named
+      // it — the run-budget framing for 'budget', the blocked-re-review
+      // framing for 'rereview-blocked'.
+      expect(result.reason).toContain(
+        stop === 'budget'
+          ? 'review.address stopped on the run budget'
+          : 'the re-review was blocked after verified fixes',
+      );
+      // The final gates ran before the publication (first check + final check).
+      expect(checks).toHaveLength(2);
+      expect(pushCalls).toBe(1);
+      expect(opens).toEqual([
+        { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+      ]);
+      // The open findings ride the draft like the round cap's, and the
+      // section names ITS OWN structured stop — a blocked re-review must not
+      // masquerade under the run-budget heading (or vice versa).
+      expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+      expect(bodies[0]).toContain('c001-aaaaaaaa#f1');
+      expect(bodies[0]).not.toContain('round cap');
+      if (stop === 'budget') {
+        expect(bodies[0]).toContain('stopped on the run budget');
+        expect(bodies[0]).not.toContain('blocked re-review');
+      } else {
+        expect(bodies[0]).toContain('blocked re-review');
+        expect(bodies[0]).not.toContain('stopped on the run budget');
+      }
+    },
+  );
 
   test.each(['budget', 'rereview-blocked'] as const)(
     '#532: %s publication refuses a changed head, dirty tree, or missing verified head',
@@ -806,7 +839,11 @@ describe('dev.cycle', () => {
         return { status: 'failed', error: 'dev.check: the addressed head broke format:check' };
       },
       review: cleanReview(state),
-      address: budgetStopAddress(state),
+      address: structuredStopAddress(
+        state,
+        'budget',
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      ),
       open: openFake(opens),
       git: async (args) => {
         if (args.includes('push')) pushCalls++;
