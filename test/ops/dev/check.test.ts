@@ -363,6 +363,17 @@ describe('dev.check', () => {
     expect(result.status, JSON.stringify(result)).toBe('ok');
     const [record] = effects.openLedger('feature/x').load().records;
     expect(record?.kind === 'check' && record.testSelection).toEqual({ mode: 'base' });
+    // The other automatic (non-named) selection: the --range form's record
+    // must disclose { mode: 'range' } just as honestly.
+    const ranged = await makeDevCheck(effects)({ repoRoot: repo.root, range: 'HEAD~1..HEAD' });
+    expect(ranged.status, JSON.stringify(ranged)).toBe('ok');
+    // The ledger is a disk file shared by every effects over one repoRoot,
+    // so the second run APPENDS record #2: the range disclosure is the LAST
+    // record — destructuring [first] here would re-read the base record.
+    const records = effects.openLedger('feature/x').load().records;
+    expect(records).toHaveLength(2);
+    const rangeRecord = records.at(-1);
+    expect(rangeRecord?.kind === 'check' && rangeRecord.testSelection).toEqual({ mode: 'range' });
   });
 
   test('a ledger written before testSelection existed still loads (field evolution)', async () => {
