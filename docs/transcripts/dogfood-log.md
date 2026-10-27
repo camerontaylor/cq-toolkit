@@ -416,7 +416,7 @@ This is source integration, not a new live acceptance attempt.
 Re-read on triton: L's start.txt names runtime head `07397c69` and
 2026-10-27T10:03:00Z; exit.txt records EXIT=3 at 13:53:01Z.
 stdout.log points to address report
-`/home/ctaylor/repos/worktrees/.cq-address-runs/e106122c-7d6a-4fac-88b0-349873779cd0/review-address-report.json`.
+`<worktrees>/.cq-address-runs/e106122c-7d6a-4fac-88b0-349873779cd0/review-address-report.json`.
 That report has fixesPerRun=25, one round, no stop marker and 27 open rows.
 No successful publication or O2 acceptance is claimed.
 
@@ -476,7 +476,7 @@ M was discovered after it had run; S7I did not launch it. Its retained head is
 `485c0734b02114b4a5ce55c4db657bea082d5b32`, on runtime/source
 `2f2a1dcfd7efe185d6f07b5e010a44b4f3467c35`. The parked worktree and ref
 are preserved. The existing address report
-`/home/ctaylor/repos/worktrees/.cq-address-runs/9c002450-626f-4383-9c23-6e88fc3d63ea/review-address-report.json`
+`<worktrees>/.cq-address-runs/9c002450-626f-4383-9c23-6e88fc3d63ea/review-address-report.json`
 records 30 verified fixes and stop=budget; final gates were red and nothing
 was published. Its lost temporary report cannot establish the original failed
 assertion.
