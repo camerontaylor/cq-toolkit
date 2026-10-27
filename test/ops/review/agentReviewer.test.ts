@@ -326,8 +326,14 @@ describe('runAgentReviewer v3 session engine', () => {
     const controller = new AbortController();
     const fake = fakeDrivers({
       run: async () => {
-        controller.abort(new Error('cancelled after driver result'));
-        return workerResult({ costUSD: 0.012 });
+        const result = workerResult({ costUSD: 0.012 });
+        Object.defineProperty(result, 'usage', {
+          get: () => {
+            controller.abort(new Error('cancelled after driver result'));
+            return usage;
+          },
+        });
+        return result;
       },
     });
     const result = await runAgentReviewer(
