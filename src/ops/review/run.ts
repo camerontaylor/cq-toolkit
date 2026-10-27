@@ -326,8 +326,12 @@ export function makeReviewRun(
         if (budgetStopped()) budgetBlocks.add('agent');
       } else if (agentConfigured) {
         const budgetStop = requireAgenticTokenBudget(policy);
-        if (budgetStop !== undefined) records.push(blocked('agent', budgetStop.reason));
-        else {
+        if (budgetStop !== undefined) {
+          // The source stopped on the engine's token budget, so it must be
+          // attributed to budgetBlocks for the blockedBudget classification.
+          budgetBlocks.add('agent');
+          records.push(blocked('agent', budgetStop.reason));
+        } else {
           const comparison = input.uncommitted ? 'HEAD' : state.base;
           let listing;
           try {
