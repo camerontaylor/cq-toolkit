@@ -452,10 +452,13 @@ describe('packed-smoke failure paths', () => {
     const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate');
     // Plant a foreign cq-packed-consumer-* leftover in the SHARED system
     // temp, as an interrupted run would: this test's own cleanup verdict
-    // must stay independent of it.
+    // must stay independent of it. The leftover is its OWN mkdtemp result —
+    // a unique path nothing else owns — so cleanup removes only what this
+    // test created, never pre-existing content.
     const sharedTmp = realpathSync(tmpdir());
-    const foreign = join(sharedTmp, 'cq-packed-consumer-foreign-leftover');
-    mkdirSync(foreign, { recursive: true });
+    const foreign = realpathSync(
+      mkdtempSync(join(sharedTmp, 'cq-packed-consumer-foreign-leftover-')),
+    );
     try {
       const out = join(dir, 'summary.json');
       const result = runSmoke([`--tarball=${tarball}`, `--out=${out}`, '--timeout-ms=20000'], {
