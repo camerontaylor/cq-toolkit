@@ -93,3 +93,15 @@ class DeferredRefreshTests(unittest.TestCase):
         for limit in [0, 51, True]:
             with self.assertRaises(ValueError):
                 self.run_refresh(limit=limit)
+
+    def test_exhausted_budget_preserves_current_intent_and_cursor(self):
+        self.q["deferred_refresh_cursor"] = "before"
+        before = copy.deepcopy(self.q)
+        self.assertEqual(self.run_refresh(may_continue=lambda: False), [])
+        self.assertEqual(self.q, before)
+        def exhausted(*args):
+            raise refresh.RefreshExhausted("no more reads")
+        result = refresh.refresh_deferred(self.q, verify_source=exhausted,
+            find_source=exhausted, at="later")
+        self.assertEqual(result, [])
+        self.assertEqual(self.q, before)
