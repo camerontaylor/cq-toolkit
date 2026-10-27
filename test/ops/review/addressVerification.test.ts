@@ -247,9 +247,7 @@ describe('review.address closure evidence verifier', () => {
       },
       get text() {
         reads++;
-        return reads === 1
-          ? "if (mode === 'PARTIAL_MODE') load(raw);\n"
-          : "load('{}');\n";
+        return reads === 1 ? "if (mode === 'PARTIAL_MODE') load(raw);\n" : "load('{}');\n";
       },
     };
     (split as { dependencies: unknown }).dependencies = [element];
