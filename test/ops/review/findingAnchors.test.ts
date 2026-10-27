@@ -29,14 +29,9 @@ const addedHead = 'export const fresh = 3;\n';
 const deletedText = 'export const gone = 4;\n';
 const dependencyText = 'export const dep = 0;\nexport const dep2 = 1;\n';
 
-const renamedBlob: AnchorBlobInput = {
-  // One input, both spellings: base fields describe the old path, head the new.
-  base: renamedBase,
-  head: renamedHead,
-  baseHunks: [{ start: 1, end: 2 }],
-  headHunks: [{ start: 1, end: 3 }],
-};
-
+// Path-specific pins: {file, side} is normative, so the base content of the
+// renamed pair lives under the OLD path and the head content under the NEW
+// path, each pin carrying only the sides that path actually has.
 const blobs = new Map<string, AnchorBlobInput>([
   [
     MODIFIED,
@@ -47,8 +42,11 @@ const blobs = new Map<string, AnchorBlobInput>([
       headHunks: [{ start: 3, end: 4 }],
     },
   ],
-  [OLD_NAME, renamedBlob],
-  [NEW_NAME, renamedBlob],
+  [OLD_NAME, { base: renamedBase, head: undefined, baseHunks: [{ start: 1, end: 2 }], headHunks: [] }],
+  [
+    NEW_NAME,
+    { base: undefined, head: renamedHead, baseHunks: [], headHunks: [{ start: 1, end: 3 }] },
+  ],
   [ADDED, { base: undefined, head: addedHead, baseHunks: [], headHunks: [{ start: 1, end: 2 }] }],
   [
     DELETED,
@@ -241,7 +239,7 @@ describe('R3S anchor validator: pinned quote integrity', () => {
     ).toEqual(['unknown-base-path']);
   });
 
-  it('rejects a head-side range on a deleted path', () => {
+  it('rejects a head-side range on a deleted path even with an identical quote on the base side', () => {
     expect(
       invalidReasons(
         validateFindingEvidence(
@@ -258,6 +256,36 @@ describe('R3S anchor validator: pinned quote integrity', () => {
         ),
       ),
     ).toEqual(['unknown-head-path']);
+  });
+
+  it('accepts an unchanged-path supporting anchor and rejects an unchanged-path primary as hunk-less', () => {
+    // Control: DEPENDENCY is not part of the change. As supporting evidence
+    // it validates (exact quote, no hunk requirement); as a primary anchor it
+    // fails hunk checks, so a finding can never anchor its defect outside
+    // the change.
+    valid(
+      validateFindingEvidence(
+        evidence({
+          supporting: [
+            {
+              ...anchor({ file: DEPENDENCY, start: 1, end: 1, quote: 'export const dep = 0;' }),
+              relevance: 'unchanged dependency cited as context',
+            },
+          ],
+        }),
+        context,
+      ),
+    );
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            primary: anchor({ file: DEPENDENCY, start: 1, end: 1, quote: 'export const dep = 0;' }),
+          }),
+          context,
+        ),
+      ),
+    ).toEqual(['no-hunk-information']);
   });
 
   it('rejects a range past the end of the pinned blob and an inverted range', () => {
@@ -282,9 +310,9 @@ describe('R3S anchor validator: pinned quote integrity', () => {
       headHunks: [{ start: 1, end: 1 }],
     });
     const emptyContext: AnchorValidationContext = { blobs: empty, renames: context.renames };
-    // An empty blob has no line 1, so the range is out of range no matter
-    // what quote the candidate carries; the validator must not fabricate a
-    // match against content that does not exist.
+    // The empty-file guard runs before range/quote checks: a 0-line blob has
+    // no citable range at all, and the validator must not fabricate a match
+    // against content that does not exist.
     expect(
       invalidReasons(
         validateFindingEvidence(
@@ -292,7 +320,7 @@ describe('R3S anchor validator: pinned quote integrity', () => {
           emptyContext,
         ),
       ),
-    ).toContain('out-of-range');
+    ).toEqual(['empty-file']);
   });
 });
 
@@ -316,23 +344,6 @@ describe('R3S anchor validator: path, rename and deletion handling', () => {
     ).toEqual(['malformed-path']);
   });
 
-  it('resolves a head-side anchor cited through the old rename name', () => {
-    valid(
-      validateFindingEvidence(
-        evidence({
-          primary: anchor({
-            file: OLD_NAME,
-            side: 'head',
-            start: 2,
-            end: 2,
-            quote: 'export const movedExtra = 2;',
-          }),
-        }),
-        context,
-      ),
-    );
-  });
-
   it('accepts a base-side anchor cited through the old rename name', () => {
     valid(
       validateFindingEvidence(
@@ -350,12 +361,36 @@ describe('R3S anchor validator: path, rename and deletion handling', () => {
     );
   });
 
-  it('rejects a base-side anchor keyed by the new rename name', () => {
-    // The dual-registered blob pins its base content under the old spelling;
-    // a base citation through the new name sees base === undefined.
-    const single = new Map(context.blobs);
-    single.delete(OLD_NAME);
-    const singleContext: AnchorValidationContext = { blobs: single, renames: context.renames };
+  it('resolves a NEW_NAME primary whose pin is registered only under the old spelling', () => {
+    // Spelling repair: the map resolves NEW_NAME back to OLD_NAME's pin, but
+    // the side checks still apply to the resolved pin.
+    const unregisteredNew = new Map(context.blobs);
+    unregisteredNew.delete(NEW_NAME);
+    const unregisteredContext: AnchorValidationContext = {
+      blobs: unregisteredNew,
+      renames: context.renames,
+    };
+    valid(
+      validateFindingEvidence(
+        evidence({
+          primary: anchor({
+            file: NEW_NAME,
+            side: 'base',
+            start: 1,
+            end: 1,
+            quote: 'export const moved = true;',
+          }),
+        }),
+        unregisteredContext,
+      ),
+    );
+  });
+
+  it('rejects a base-side anchor keyed by the new rename name: the side is absent there', () => {
+    // Normative {file, side}: NEW_NAME's pin has no base tree. The quoted
+    // bytes exist verbatim in the base of the OLD path, but the citation
+    // names the wrong path for the chosen side and must reject; the rename
+    // map repairs spelling, it never fabricates side existence.
     expect(
       invalidReasons(
         validateFindingEvidence(
@@ -368,10 +403,32 @@ describe('R3S anchor validator: path, rename and deletion handling', () => {
               quote: 'export const moved = true;',
             }),
           }),
-          singleContext,
+          context,
         ),
       ),
     ).toEqual(['unknown-base-path']);
+  });
+
+  it('rejects a head-side anchor keyed by the old rename name: the side is absent there', () => {
+    // Mirror case: OLD_NAME's pin has no head tree. NEW_NAME holds the same
+    // bytes on the head side, but {file: OLD_NAME, side: head} names the
+    // wrong path for that tree.
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            primary: anchor({
+              file: OLD_NAME,
+              side: 'head',
+              start: 2,
+              end: 2,
+              quote: 'export const movedExtra = 2;',
+            }),
+          }),
+          context,
+        ),
+      ),
+    ).toEqual(['unknown-head-path']);
   });
 });
 
@@ -448,22 +505,44 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
     );
   });
 
-  it('collapses an invalid supporting anchor into one supporting-evidence reason', () => {
+  it('collapses duplicate supporting failure kinds but preserves every distinct typed reason verbatim', () => {
+    // Two supporting anchors fail with the same out-of-range reason: the
+    // typed reason stays (deduplicated), followed by the marker. The why is
+    // never dropped in favor of the what.
     expect(
       invalidReasons(
         validateFindingEvidence(
           evidence({
             supporting: [
               { ...anchor({ file: DEPENDENCY, start: 9, end: 9 }), relevance: 'out of range' },
+              { ...anchor({ file: DEPENDENCY, start: 8, end: 9 }), relevance: 'also out of range' },
             ],
           }),
           context,
         ),
       ),
-    ).toEqual(['supporting-evidence']);
+    ).toEqual(['out-of-range', 'supporting-evidence']);
   });
 
-  it('reports primary reasons first and supporting-evidence last, never silently dropping either', () => {
+  it('keeps a distinct supporting reason kind next to its marker', () => {
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            supporting: [
+              {
+                ...anchor({ file: DEPENDENCY, start: 1, end: 1, quote: 'not the pinned line' }),
+                relevance: 'wrong quote',
+              },
+            ],
+          }),
+          context,
+        ),
+      ),
+    ).toEqual(['quote-mismatch', 'supporting-evidence']);
+  });
+
+  it('reports primary reasons first, then distinct supporting reasons, then the marker', () => {
     expect(
       invalidReasons(
         validateFindingEvidence(
@@ -476,7 +555,7 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
           context,
         ),
       ),
-    ).toEqual(['out-of-range', 'supporting-evidence']);
+    ).toEqual(['out-of-range', 'out-of-range', 'supporting-evidence']);
   });
 });
 

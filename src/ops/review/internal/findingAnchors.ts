@@ -33,10 +33,14 @@ export interface AnchorBlobInput {
 /** The caller's view of one reviewed comparison. */
 export interface AnchorValidationContext {
   /**
-   * Blob inputs keyed by path. For a rename pair, register the SAME input
-   * under both spellings: its `base` fields describe the old path and its
-   * `head` fields the new path. The `renames` map is only consulted when a
-   * citation names a path that was not registered.
+   * Blob pins keyed by path. `{file, side}` is normative: an anchor names the
+   * exact path it cites in the chosen tree, so pin the base blob under the
+   * path it belongs to and the head blob under its own. For a renamed pair
+   * that is two registrations — base content under the old path, head
+   * content under the new. The `renames` map never relocates evidence and
+   * never fabricates side existence: it only repairs a path spelling, and a
+   * side absent from the resolved pin still rejects (wrong-side anchors fail
+   * even when the quoted bytes exist in the other tree).
    */
   blobs: ReadonlyMap<string, AnchorBlobInput>;
   /** `old -> new` pairs for every renamed path in the comparison. */
@@ -63,6 +67,15 @@ const lineCount = (text: string): number => text.split('\n').length;
 /** NUL and newline bytes are git plumbing separators, never path text. */
 const isMalformedPath = (path: string): boolean => path.includes('\0') || path.includes('\n');
 
+/** The new name citing the old spelling, when the map pins that direction. */
+const reverseRename = (
+  renames: ReadonlyMap<string, string>,
+  newPath: string,
+): string | undefined => {
+  for (const [oldPath, target] of renames) if (target === newPath) return oldPath;
+  return undefined;
+};
+
 function validateAnchor(
   anchor: FindingAnchor,
   context: AnchorValidationContext,
@@ -72,21 +85,24 @@ function validateAnchor(
   let file = anchor.file;
   let blob = context.blobs.get(file);
   if (blob === undefined) {
-    // Citation through an unregistered spelling of a renamed path: resolve to
-    // the new name; anything else is simply unknown to this comparison.
-    const target = context.renames.get(file);
-    if (target === undefined) return ['unknown-path'];
-    file = target;
-    blob = context.blobs.get(file);
+    // The path itself is unknown to the comparison. A rename pair may be
+    // cited under either spelling: resolve to the other name. This repairs
+    // spelling only — it never moves evidence between paths and the side
+    // checks below still apply to the resolved pin.
+    const other = context.renames.get(file) ?? reverseRename(context.renames, file);
+    if (other === undefined) return ['unknown-path'];
+    blob = context.blobs.get(other);
     if (blob === undefined) return ['unknown-path'];
+    file = other;
   }
-  // A base-side range must be keyed by a blob that actually pins the base
-  // tree. Absence of base content means the path was renamed away or newly
-  // added in this comparison; the engine building the context keys the base
-  // blob under the old spelling, so the citation must quote that spelling.
+  // {file, side} is normative: the resolved pin must actually contain the
+  // cited side. A base-side anchor on a renamed-away or newly added path
+  // names a path the base tree never had, and a head-side anchor on a
+  // deleted path names a path the head tree no longer has; both reject even
+  // when the same bytes exist on the opposite side.
   if (anchor.side === 'base' && blob.base === undefined) return ['unknown-base-path'];
+  if (anchor.side === 'head' && blob.head === undefined) return ['unknown-head-path'];
   const text = anchor.side === 'base' ? blob.base : blob.head;
-  if (text === undefined) return ['unknown-head-path'];
   if (text === '') return ['empty-file'];
   // Inclusive 1-based range must fit the pinned blob; `start > end` fails too.
   if (anchor.start > anchor.end || anchor.end > lineCount(text)) return ['out-of-range'];
@@ -106,8 +122,10 @@ function validateAnchor(
  * primary anchor must be a real, quoted, changed-hunk-overlapping range; each
  * supporting anchor must be a real quoted range but may cite unchanged
  * dependency code (that is what supporting evidence is for). Failure reasons
- * are kept in full: primary reasons first, then one `supporting-evidence`
- * marker when any supporting anchor failed. A persisted
+ * are never silently dropped: every typed primary reason is kept, and each
+ * distinct supporting-anchor failure reason is also preserved verbatim after
+ * the primary reasons, followed by the `supporting-evidence` marker so
+ * callers can see which half failed without losing the why. A persisted
  * `validation: { status: 'invalid' }` marker on the input records a previous
  * engine outcome and never influences this verdict: re-running the validator
  * over a marked candidate still reports what its anchors prove today, so a
@@ -126,6 +144,10 @@ export function validateFindingEvidence(
   if (primary.length === 0 && supporting.length === 0) return { status: 'valid' };
   return {
     status: 'invalid',
-    reasons: [...primary, ...(supporting.length > 0 ? ['supporting-evidence' as const] : [])],
+    reasons: [
+      ...primary,
+      ...supporting,
+      ...(supporting.length > 0 ? ['supporting-evidence' as const] : []),
+    ],
   };
 }
