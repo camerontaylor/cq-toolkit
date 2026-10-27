@@ -266,6 +266,7 @@ export async function runAgentReviewer(
               input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars,
             ),
             signal: controller.signal,
+            remainingWallMs: () => deadline - Date.now(),
             scanSecrets: input.scanSecrets,
             components,
             plan: session,
