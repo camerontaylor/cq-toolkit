@@ -94,19 +94,24 @@ export interface DevCycleCompositionInput {
   /** PR title; default is the head commit's subject (pr.open's rule). */
   title?: string;
   /**
-   * Opt BOTH dev.check legs' test:narrow gate into the integration suite
-   * (`--include-integration`); the choice is recorded in each check record.
-   * The `--base`/`--range` selector's closure can name gated e2e files for
-   * plain src changes, and the wrapper's refusal cannot be satisfied from
-   * inside dev.check — the caller opts in explicitly (S7 dogfood attempt A).
-   * Default off.
+   * Opt EVERY dev.check invocation the cycle makes into the integration
+   * suite (`--include-integration`) — the opening check, the stopped-run
+   * re-check and the final check at the addressed head share one step
+   * input, so the choice reaches all three and is recorded in each check
+   * record. The `--base`/`--range` selector's closure can name gated e2e
+   * files for plain src changes, and the wrapper's refusal cannot be
+   * satisfied from inside dev.check — the caller opts in explicitly (S7
+   * dogfood attempt A). Default off.
    */
   includeIntegration?: boolean;
   /**
-   * Name the EXACT test files BOTH dev.check legs run (the wrapper's own
-   * escape for a too-broad automatic selection): replaces their `--base`
-   * selection; every check record discloses the narrowing via
-   * `testSelection: { mode: 'named', files }`.
+   * Name the EXACT test files EVERY dev.check invocation the cycle makes
+   * run — the opening check, the stopped-run re-check and the final check
+   * at the addressed head share this step input (the wrapper's own escape
+   * for a too-broad automatic selection): replaces the `--base`/`--range`
+   * selection entirely, matching dev.check's own contract (a `range`
+   * supplied alongside is refused); every check record discloses the
+   * narrowing via `testSelection: { mode: 'named', files }`.
    */
   testFiles?: string[];
 }
