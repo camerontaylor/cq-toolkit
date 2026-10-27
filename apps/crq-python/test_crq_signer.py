@@ -421,6 +421,19 @@ class ReviewPreambleFault(SignerTest):
         self.assertEqual(posts, ['pending', 'failure'])
         self.assertEqual(out.get('reviewer_faults'), None)
 
+    def test_malformed_event_row_mints_nothing_and_propagates_terminal_error(self):
+        # A malformed (non-JSON) event line makes classify() fail closed to
+        # outcome=error: no finding, no fault, no clean credit, and the
+        # terminal error outcome propagates to the posted status.
+        review = ndjson('major', codegen='Real defect description. at line 2') \
+            + '{"type": "finding", "severity": "critical", not-json\n'
+        posts, out, ledger = self.run_item(review, diff_files={'src/x.ts'})
+        self.assertEqual(posts, ['pending', 'error'])
+        self.assertEqual(out['outcome'], 'error')
+        self.assertEqual(out.get('findings'), None)
+        self.assertEqual(out.get('reviewer_faults'), None)
+        self.assertFalse(ledger['clean'])
+
 
 class QueueUnknownReasonCode(unittest.TestCase):
     """Queue-side guard: an unknown signer reason_code (reviewer_fault) must
