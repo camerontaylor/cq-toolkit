@@ -223,7 +223,19 @@ async function prepareOfflineFixtureDependencies(
   await symlink(join(deps, 'node_modules'), join(tree, 'node_modules'), 'dir');
 }
 
-const fixtureGit = vi.hoisted(() => ({ executable: '' }));
+const fixtureGit = vi.hoisted(() => ({
+  executable: '',
+  environment: (supplied?: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
+    ...supplied,
+    PATH: '',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_NO_REPLACE_OBJECTS: '1',
+  }),
+}));
 
 // Forward to REAL processes; bind the existing adapter's bare git calls without
 // changing production code or consulting PATH during subject extraction.
@@ -236,15 +248,7 @@ vi.mock('node:child_process', async (importOriginal) => {
       if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
       return {
         ...value,
-        env: {
-          PATH: '',
-          GIT_CONFIG_GLOBAL: '/dev/null',
-          GIT_CONFIG_SYSTEM: '/dev/null',
-          GIT_CONFIG_NOSYSTEM: '1',
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_OPTIONAL_LOCKS: '0',
-          GIT_NO_REPLACE_OBJECTS: '1',
-        },
+        env: fixtureGit.environment((value as { env?: NodeJS.ProcessEnv }).env),
       };
     });
     return Reflect.apply(actual[method], actual, [fixtureGit.executable, ...bound]);
@@ -308,53 +312,66 @@ function discoverHelper(name: string): string {
   throw new Error(`missing provisioned fixture helper: ${name}`);
 }
 const trustedGit = discoverHelper('git');
-const trustedTar = discoverHelper('tar');
-const trustedGzip = discoverHelper('gzip');
-const trustedNode = verifiedExecutable(process.execPath);
-// package.json has no engines; the checked-in ratchet workflow provisions Node24.
-const repoManifest = JSON.parse(
-  readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'),
-) as {
-  packageManager: string;
-  engines?: unknown;
-};
-if (repoManifest.engines !== undefined)
-  throw new Error('fixture Node engines contract needs review');
-if (process.versions.node.split('.')[0] !== '24')
-  throw new Error('fixture requires repository CI Node24');
-const packageManager = /^pnpm@([0-9]+\.[0-9]+\.[0-9]+)$/.exec(repoManifest.packageManager);
-if (!packageManager) throw new Error('unsupported repository packageManager contract');
-const requiredPnpmVersion = packageManager[1]!;
-// pnpm run/exec exports the provisioned entrypoint, avoiding mise/corepack shims.
-const pnpmEntrypoint = verifiedExecutable(process.env['npm_execpath'] ?? '');
-const header = Buffer.alloc(128);
-const descriptor = openSync(pnpmEntrypoint, 'r');
-let headerBytes: number;
-try {
-  headerBytes = readSync(descriptor, header, 0, header.length, 0);
-} finally {
-  closeSync(descriptor);
-}
-const isNativePnpm =
-  pnpmLauncherKind(header.subarray(0, headerBytes), process.platform, process.arch) === 'native';
-const nativePnpm = isNativePnpm ? pnpmEntrypoint : trustedNode;
-const pnpmPrefix = isNativePnpm ? [] : [pnpmEntrypoint];
 fixtureGit.executable = trustedGit;
-console.info(
-  'H1 preflight helpers:',
-  JSON.stringify({
-    git: trustedGit,
-    tar: trustedTar,
-    gzip: trustedGzip,
-    node: trustedNode,
-    nodeVersion: process.versions.node,
-    pnpmEntrypoint,
-    pnpmExecutable: nativePnpm,
+
+// Called only by boundary setup; import/collection needs no Node/pnpm preflight.
+function boundaryPreflight() {
+  const trustedTar = discoverHelper('tar');
+  const trustedGzip = discoverHelper('gzip');
+  const trustedNode = verifiedExecutable(process.execPath);
+  // package.json has no engines; the checked-in ratchet workflow provisions Node24.
+  const repoManifest = JSON.parse(
+    readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'),
+  ) as {
+    packageManager: string;
+    engines?: unknown;
+  };
+  if (repoManifest.engines !== undefined)
+    throw new Error('fixture Node engines contract needs review');
+  if (process.versions.node.split('.')[0] !== '24')
+    throw new Error('fixture requires repository CI Node24');
+  const packageManager = /^pnpm@([0-9]+\.[0-9]+\.[0-9]+)$/.exec(repoManifest.packageManager);
+  if (!packageManager) throw new Error('unsupported repository packageManager contract');
+  const requiredPnpmVersion = packageManager[1]!;
+  // pnpm run/exec exports the provisioned entrypoint, avoiding mise/corepack shims.
+  const pnpmEntrypoint = verifiedExecutable(process.env['npm_execpath'] ?? '');
+  const header = Buffer.alloc(128);
+  const descriptor = openSync(pnpmEntrypoint, 'r');
+  let headerBytes: number;
+  try {
+    headerBytes = readSync(descriptor, header, 0, header.length, 0);
+  } finally {
+    closeSync(descriptor);
+  }
+  const isNativePnpm =
+    pnpmLauncherKind(header.subarray(0, headerBytes), process.platform, process.arch) === 'native';
+  const nativePnpm = isNativePnpm ? pnpmEntrypoint : trustedNode;
+  const pnpmPrefix = isNativePnpm ? [] : [pnpmEntrypoint];
+  console.info(
+    'H1 preflight helpers:',
+    JSON.stringify({
+      git: trustedGit,
+      tar: trustedTar,
+      gzip: trustedGzip,
+      node: trustedNode,
+      nodeVersion: process.versions.node,
+      pnpmEntrypoint,
+      pnpmExecutable: nativePnpm,
+      pnpmPrefix,
+      requiredPnpmVersion,
+      packageManager: repoManifest.packageManager,
+    }),
+  );
+  return {
+    trustedTar,
+    trustedGzip,
+    trustedNode,
+    nativePnpm,
     pnpmPrefix,
     requiredPnpmVersion,
-    packageManager: repoManifest.packageManager,
-  }),
-);
+    pnpmEntrypoint,
+  };
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync(trustedGit, args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
@@ -462,8 +479,74 @@ describe('recomputeTypecheck', { timeout: 60_000 }, () => {
   });
 });
 
+describe('fixture preflight and Git forwarding isolation', () => {
+  test('rejects missing pnpm only when boundary preflight is invoked', () => {
+    vi.stubEnv('npm_execpath', '');
+    expect(() => boundaryPreflight()).toThrow('fixture executable must be absolute');
+  });
+
+  test('preserves supplied Git fields while forced isolation takes precedence', () => {
+    vi.stubEnv('CQ_BOUNDARY_SECRET', 'fake-canary');
+    const supplied = {
+      CQ_GIT_FORWARD_CANARY: 'nonsecret-preserved',
+      PATH: 'untrusted-path',
+      GIT_CONFIG_GLOBAL: 'untrusted-global',
+      GIT_CONFIG_SYSTEM: 'untrusted-system',
+      GIT_CONFIG_NOSYSTEM: '0',
+      GIT_TERMINAL_PROMPT: '1',
+      GIT_OPTIONAL_LOCKS: '1',
+      GIT_NO_REPLACE_OBJECTS: '0',
+    };
+    const env = fixtureGit.environment(supplied);
+    expect(env['CQ_GIT_FORWARD_CANARY']).toBe('nonsecret-preserved');
+    expect(env['PATH']).toBe('');
+    expect(env['GIT_CONFIG_GLOBAL']).toBe('/dev/null');
+    expect(env['GIT_CONFIG_SYSTEM']).toBe('/dev/null');
+    expect(env['GIT_CONFIG_NOSYSTEM']).toBe('1');
+    expect(env['GIT_TERMINAL_PROMPT']).toBe('0');
+    expect(env['GIT_OPTIONAL_LOCKS']).toBe('0');
+    expect(env['GIT_NO_REPLACE_OBJECTS']).toBe('1');
+    expect(env['CQ_BOUNDARY_SECRET'] !== undefined).toBe(false);
+    expect(fixtureGit.environment()['CQ_BOUNDARY_SECRET'] !== undefined).toBe(false);
+    expect(supplied.PATH).toBe('untrusted-path');
+  });
+
+  test('forwards the supplied nonsecret Git identity to the real child', async () => {
+    const output = await new Promise<string>((resolve, reject) => {
+      execFile(
+        'git',
+        ['var', 'GIT_AUTHOR_IDENT'],
+        {
+          cwd: repo,
+          env: {
+            GIT_AUTHOR_NAME: 'h1-forwarded',
+            GIT_AUTHOR_EMAIL: 'fixture@example.test',
+            GIT_CONFIG_GLOBAL: join(tmp, 'must-not-be-read.gitconfig'),
+          },
+        },
+        (error, stdout) => (error ? reject(error) : resolve(stdout)),
+      );
+    });
+    expect(output).toMatch(/^h1-forwarded <fixture@example\.test>/);
+  });
+});
+
 describe('offline subject dependency boundary', { timeout: 60_000 }, () => {
+  let tools: ReturnType<typeof boundaryPreflight>;
+  beforeAll(() => {
+    tools = boundaryPreflight();
+  });
+
   test('real TS2307 is fixed by subject graph without executing scripts, hooks or compiler', async () => {
+    const {
+      trustedTar,
+      trustedGzip,
+      trustedNode,
+      nativePnpm,
+      pnpmPrefix,
+      requiredPnpmVersion,
+      pnpmEntrypoint,
+    } = tools;
     const tsc = realpathSync(join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc'));
     accessSync(tsc, constants.R_OK);
     const base = join(tmp, 'boundary');
