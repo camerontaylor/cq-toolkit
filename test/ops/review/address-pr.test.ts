@@ -34,6 +34,13 @@ async function world(
     failer?: boolean;
   } = {},
 ) {
+  // The failer knob only has a defined thread order inside the default
+  // ordering (its T3 crasher and the human-conditional T2 tail are appended
+  // there); combined with human/sameFile/fileless it would silently drop or
+  // reorder a thread, so refuse the combination instead of testing the
+  // wrong world.
+  if (options.failer && (human || options.sameFile || options.fileless))
+    throw new Error('world(): failer cannot be combined with human, sameFile or fileless');
   const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
   const worktree = join(root, 'git', 'cq-review-worktrees', 'worker');
   await mkdir(worktree, { recursive: true });
@@ -74,9 +81,7 @@ async function world(
       ? ['T2', 'T1']
       : options.fileless === 'last'
         ? ['T1', 'T2']
-        : options.failer
-          ? ['T1', 'T3']
-          : ['T1', ...(human ? ['T2'] : [])];
+        : ['T1', ...(options.failer ? ['T3'] : []), ...(human ? ['T2'] : [])];
   const threads = order.map((id, i) => ({
     id,
     isResolved: false,
@@ -85,7 +90,9 @@ async function world(
       options.fileless && id === 'T2'
         ? null
         : id === 'T3'
-          ? `src/${i === 0 ? 'a' : 'b'}.ts`
+          ? // T3 targets src/b.ts by identity, never by its position in the
+            // order above, so a reordering cannot silently retarget its file.
+            'src/b.ts'
           : `src/${!options.sameFile && id === 'T2' ? 'b' : 'a'}.ts`,
     line: 1,
     comments: {
@@ -452,15 +459,14 @@ async function world(
     /**
      * Arm a persistent git-push fault: EVERY git push after this call
      * returns exit 1 with the scripted stderr, and nothing disarms the
-     * fault (the name says "next", the contract is "all subsequent" — a
-     * deliberate choice, not drift). The push-fault test below relies on
+     * fault. The push-fault test below relies on
      * the fault riding every push of the run: the loop's stage-5 publish,
      * replyAndResolve's push-before-post, and the engine's publishOnExit
      * push through finish(). Disarming after the first firing would let
      * those later pushes succeed and the "verified publication failed"
      * outcome rewrite would never fire (PR #470 verdict P2 #1).
      */
-    failNextPush: (script: () => string) => {
+    failEveryPush: (script: () => string) => {
       pushFault = script;
     },
     changeLogin: () => {
@@ -714,7 +720,7 @@ describe('review.address PR phase-one orchestration', () => {
       // reaches the same fault through publishOnExit when the loop already
       // rewrote its own outcome. Either way the ONLY rewrite left is the
       // engine's.
-      w.failNextPush(() => {
+      w.failEveryPush(() => {
         exitPushSeen = true;
         return 'exit push: disk quota exceeded (scripted)';
       });

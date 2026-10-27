@@ -157,7 +157,7 @@ the open human-decision thread stays open.
 This is positive measured live acceptance: fixesPerRun over the S6 dogfood runs
 is 1 (A 0, B 0, C 0, D 1).
 
-## S7 dogfood — dev.cycle on fix/s7-dogfood-address-469
+## S7 dogfood attempt A — dev.cycle on fix/s7-dogfood-address-469
 
 First live `dev.cycle` run (the composition's own first run against a real
 diff; #470's evidence was fixture-only). Code work landed first as commit
@@ -425,8 +425,9 @@ including its production reviewer route and budgets. Do not port v3's experiment
 GLM route or one-hour step override. Queue's #534 structured publication,
 verified-head checks and newer CLI stream-refusal precedence are preserved.
 The old v3 review/run.ts and agentReviewer.ts differences are omitted because
-queue has newer fatal-stop/tool-failure handling. dev/review.ts receives only
-the missing DevCycleInput includeIntegration/testFiles fields; Q4/Q5 owns
+queue has newer fatal-stop/tool-failure handling. dev/review.ts receives the
+missing DevCycleInput includeIntegration/testFiles fields plus the explicitly
+authorized M wall-attribution/sampling region described below. Q4/Q5 owns
 future dev.review behavior and context extraction.
 
 **Parked L applicability inventory:** all 25 changes remain applicable to the
@@ -458,14 +459,98 @@ branch history or changing its ref.
 | d0949e5d | c002 f18 | Assert both base and range record modes                              |
 | f8aaa5ef | c002 f22 | Assert cycle result before wall-budget comparisons                   |
 | c9a4f6b5 | c002 f24 | Document persistent scripted push fault                              |
-| 8040ba18 | c002 f23 | Bound address wall remainder on both sides                           |
+| 8040ba18 | c002 f23 | Pin the exact unmarked budget-like refusal reason                    |
 | 7179405f | c002 f25 | Keep unrelated loop reasons from satisfying withhold assertions      |
 | 50ea6393 | c002 f26 | Assert opt-in guidance against ordinary refusal text                 |
 
 Already landed and not reimported: v3's shared cycle budget, reserve,
 structured budget-stop publication and associated address tests are in #534.
 The publication-truth changes here settle existing mixed-worktree reason rows;
-they do not implement #490's final disposition/delivery redesign. Attempt M
-and live provider evaluation remain deferred.
+they do not implement #490's final disposition/delivery redesign. No further live attempt or provider evaluation is authorized.
 
 Integration fixture adaptations: L f17 now accepts the shared-schema diagnostic for bare options while requiring refusal before gates; L f22 uses a CodeRabbit-configured fixture to match its seeded readiness ledger. The initial named run failed on those two mismatches (324/326); production guards were retained.
+
+### Existing M: bounded fixture reconciliation
+
+M was discovered after it had run; S7I did not launch it. Its retained head is
+`485c0734b02114b4a5ce55c4db657bea082d5b32`, on runtime/source
+`2f2a1dcfd7efe185d6f07b5e010a44b4f3467c35`. The parked worktree and ref
+are preserved. The existing address report
+`/home/ctaylor/repos/worktrees/.cq-address-runs/9c002450-626f-4383-9c23-6e88fc3d63ea/review-address-report.json`
+records 30 verified fixes and stop=budget; final gates were red and nothing
+was published. Its lost temporary report cannot establish the original failed
+assertion.
+
+A named fixture reproduction on current queue source isolated M f21's faulty
+first-row lookup: the second run appends a range record, but the first row
+still says base. Reintroducing only that lookup produced
+`expected { mode: 'base' } to deeply equal { mode: 'range' }`.
+The existing L d0949e5d last-row fix was restored afterward. This is causal
+fixture evidence, not recovery of the missing original test artifact.
+
+Exact reproduction result:
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="38/39" failed=1 skipped=0 wait="0.0s" duration="8.1s" nice=5 load="1.7" uptime="841310s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/dev/check.test.ts"
+```
+
+The scoped M review/run fixture delta passed against queue source (63/63).
+Its added await on synchronous repo.git was removed to address M's recorded
+await-thenable lint failure. No M review/run.ts or agentReviewer.ts source was
+imported.
+
+**M applicability inventory (all 30 retained fixes):**
+
+| M commit | Disposition in S7I                                                                             |
+| -------- | ---------------------------------------------------------------------------------------------- |
+| a6ca4115 | Already covered by L04ae16c8 legacy-only scope disclosure                                      |
+| a049ba7d | Apply explicit attempt A log heading                                                           |
+| b8e6857c | Omit duplicate comment clarification; current legacy-only comment is accurate                  |
+| 6903f833 | Apply guarded publication work-state re-read failure diagnostics                               |
+| 1ec084b3 | Already covered by Lc4d8a12d empty selection guard                                             |
+| de0b9031 | Already covered by Lf4d5af5a rejected-driver usage metering                                    |
+| 531b1735 | Apply wall-only budget attribution under explicit narrow authorization; preserve streamRefusal |
+| 11bedcc1 | Apply finite total guard; retain L's strict structural Usage validation                        |
+| 5879e99e | Apply single completion-time wall sample for marker and completion                             |
+| b1f939b9 | Apply late budget-stop reason recording without changing cancellation guards                   |
+| 9701bdd3 | Omit expanded comment; queue verified-head guard retained                                      |
+| fb392247 | Omit reviewer-engine delta outside owned source seam; queue implementation retained            |
+| 2e7f372e | Omit reviewer-engine budget marker delta outside owned seam                                    |
+| d0a5cf5e | Already covered by Lcb0b106a published-witness preservation                                    |
+| ef6313ca | Defer reviewer-engine budget/transient classification outside owned seam                       |
+| 567e8f68 | Already covered by Lb0f303e4 publication-truth settlement                                      |
+| 46965dfa | Omit defective first-row assertion; retain Ld0949e5d last-row assertion                        |
+| a9d63cce | Defer reviewer-engine admission attribution outside owned seam                                 |
+| 787a7f7a | Already covered by L6fd3eb91 undefined integration opt-in assertion                            |
+| e2a5a241 | Apply persistent push-fault helper rename; retain L's accurate persistent-fault comment        |
+| 88ade437 | Apply incompatible fixture knob guard and identity-based T3 file                               |
+| 576557ef | Apply production reason/structured-stop pairing and distinct draft headings                    |
+| b48b3505 | Omit redundant assertion removal; current stronger assertions retained                         |
+| b99208d8 | Apply two-check-leg proof for verified-head refusal matrix                                     |
+| d966bb3b | Apply push-only transport counter and honest non-push response                                 |
+| 255d41d2 | Apply real thrown-driver fixture instead of an injected reviewer throw                         |
+| ab31ab70 | Apply unmasked structured-result assertions; remove erroneous synchronous await                |
+| 488f5268 | Omit temporary-repo hard reset; existing per-case fixture cleanup retained                     |
+| afa9651e | Apply exact propagated refusal reason, strengthening L8040ba18                                 |
+| 485c0734 | Already covered by L7179405f accurate loop-only text/title assertions                          |
+
+M f7/f8 do not remove DevCycleInput fields. The earlier removal claim was
+corrected after directly comparing v3 and M. The coordinator subsequently
+authorized only their exact budgetStopped/completion-sampling region beyond
+the fields-only change. The port samples wall remaining once, requires actual
+wall exhaustion for budgetStopped, and retains queue's streamRefusal guard and
+streamRefusal ?? completion precedence. No transient/refusal handling changes.
+
+Direct named fixtures cover terminal and killed CLI results for parent
+cancellation with positive wall remaining, wall exhaustion alone, and both
+simultaneously; existing explicit error/action/skipped/no-fresh expiry fixtures
+remain. Parent cancellation with wall remaining stays blocked without a budget
+marker. When both cancellation and wall expiry are observed, a qualifying
+terminal/killed CLI receives the wall marker absent an explicit stream refusal;
+this does not prove which event caused the stop. Parent cancellation still
+has the address engine's independent publication exclusion. No stronger
+causal cancellation guarantee is claimed.
+
+Reviewer-engine omissions remain reported to the coordinator. No
+planner/partition/session/driver source or production route configuration
+is changed.

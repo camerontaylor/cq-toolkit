@@ -484,13 +484,16 @@ function makeReviewCycle(
             : undefined;
         const ordinaryCompletion =
           raw.exitCode === null ? undefined : decideCompletion(raw.exitCode, parsed);
+        // Use one wall sample for attribution and completion. Parent cancellation
+        // alone is blocked without budget eligibility; explicit refusals still win.
+        const wallRemainingMs = remainingWallMs?.() ?? Infinity;
         const budgetStopped =
           streamRefusal === undefined &&
-          (signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0) &&
+          wallRemainingMs <= 0 &&
           (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
         const completion: DevReviewCompletion =
           streamRefusal ??
-          (signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
+          (signal?.aborted || wallRemainingMs <= 0
             ? {
                 kind: 'blocked',
                 reason: `review cancelled or wall budget exhausted — ${faultText(signal?.reason ?? 'deadline elapsed')}`,
