@@ -752,13 +752,17 @@ describe('dev.cycle', () => {
         // iterations of this matrix actually reach the gate (cycle.ts keeps
         // the gate two-legged: capCheck, then finishNotReady's re-read).
         expect(checks).toBe(2);
-        // Restore only fixture changes so the next named case has a clean seed.
-        if (mode === 'staged' || mode === 'unstaged') {
-          await repo.write('src/a.ts', 'export const a = 1;\n');
-          repo.git('add', 'src/a.ts');
-          repo.git('commit', '--allow-empty', '-m', 'restore fixture');
-        }
+        // Restore every fixture change so the next named case has a clean
+        // seed: seed() layers its ledger onto the CURRENT head (it never
+        // hard-resets), so the leftover probe commits ('concurrent head'
+        // from the head mode, 'changed during final gates' from the
+        // final-gate mode) and the staged/unstaged debris must be undone
+        // here or the next named case seeds on top of a mutated branch.
+        // reset --hard returns the branch to the seeded head exactly —
+        // restoring src/a.ts, unstaging, and dropping the probe commits —
+        // but leaves untracked files alone, so unexpected.txt goes via rm.
         if (mode === 'untracked') await rm(`${repo.root}/unexpected.txt`);
+        else repo.git('reset', '--hard', state.head);
       }
     },
   );
