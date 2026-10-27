@@ -39,7 +39,7 @@ import type { RegressionGateInput } from './regressionGate.js';
  */
 export const CheckRunnerInputObject = z
   .object({
-    adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
+    adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines', 'oxfmt-check']),
     // Strict: an unknown key inside command (a typo'd timeoutMS) must fail
     // loudly, not be silently stripped into an uncapped-looking input.
     command: z

@@ -1,6 +1,7 @@
 import { expect, test, vi } from 'vitest';
 import { FixRunInputSchema } from '../../../src/ops/fix/registry.js';
 import { validateFix } from '../../../src/ops/fix/validate.js';
+import { fixSourceChecks } from '../../../src/ops/fix/runFix.js';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
 import type { CheckFailure, FailureSet } from '../../../src/ops/gates/checkRunner.js';
 import {
@@ -115,4 +116,29 @@ test('static CLI schema accepts adapter aliases and arrays, rejects unknown chec
   for (const checks of ['tsc', ['tsc', 'eslint']])
     expect(FixRunInputSchema.safeParse({ ...input, checks }).success).toBe(true);
   expect(FixRunInputSchema.safeParse({ ...input, checks: 'unknown' }).success).toBe(false);
+});
+
+test('oxfmt-check: related runs scope to the task files through a {files} template; otherwise the full check', () => {
+  const oxfmt = { command: 'node_modules/.bin/oxfmt', args: ['--check', '.'] };
+  expect(
+    staticRelatedCheckCommand(oxfmt, 'oxfmt-check', ['src/a.ts'], ['--check', '{files}']).args,
+  ).toEqual(['--check', 'src/a.ts']);
+  expect(staticRelatedCheckCommand(oxfmt, 'oxfmt-check', ['src/a.ts'])).toEqual(oxfmt);
+  expect(staticRelatedCheckCommand(oxfmt, 'oxfmt-check', [], ['--check', '{files}'])).toEqual(
+    oxfmt,
+  );
+});
+
+test('fix sources never offer the gate-only format check', () => {
+  const tsc = {
+    adapter: 'tsc-lines' as const,
+    kind: 'static' as const,
+    command: { command: 'tsc', args: [] },
+  };
+  const fmt = {
+    adapter: 'oxfmt-check' as const,
+    kind: 'static' as const,
+    command: { command: 'oxfmt', args: ['--check', '.'] },
+  };
+  expect(fixSourceChecks([tsc, fmt], 'static')).toEqual([tsc]);
 });
