@@ -1009,6 +1009,117 @@ test.each(['denylist hit', 'scanner fault'] as const)(
   },
 );
 
+test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless failure and never-started', async () => {
+  const f = await fixture(1000);
+  try {
+    // A third failing task the run never reaches: the budget stop lands after
+    // the second task's first worker call, so tasks one (fixed), two (failed
+    // with a retained branch) and the never-started remainder are all visible.
+    await writeFile(join(f.repo, 'cases', 'c.test.cjs'), 'module.exports = { actual: 1, expected: 2 };\n');
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'seed third failing task');
+    // Worker contract: fix a.test.cjs, fail b.test.cjs with a retained patch,
+    // and stop honestly with a budget stopReason before touching c.
+    const calls: string[] = [];
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (invocation) => {
+            if (!invocation.workspace) throw new Error('fixture requires a workspace');
+            const line = invocation.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            calls.push(task.files[0] ?? '');
+            if (task.files.some((file) => file.includes('a.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/a.test.cjs'),
+                'module.exports = { actual: 1, expected: 1 };\n',
+              );
+            if (task.files.some((file) => file.includes('b.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/b.test.cjs'),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+            if (calls.length >= 2 && invocation.prompt.includes('Tier: worker')) {
+              // The run budget (below) exhausts after this call settles.
+              return {
+                stopReason: 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'broken-test',
+                  summary: 'attempt',
+                  confidence: 0.8,
+                },
+              };
+            }
+            return {
+              stopReason: 'complete',
+              denials: [],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              structuredOutput: {
+                outcome: 'broken-test',
+                summary: 'correct fixture expectation',
+                confidence: 0.8,
+              },
+            };
+          },
+        },
+      }),
+    };
+    // Five tokens total: a(2), b(2) settle; c never starts (b's feedback or
+    // the next invocation breaches the budget first).
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      budgets?: { run: { maxTokens: number } };
+    };
+    config.budgets = { run: { maxTokens: 5 } };
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure tighter budget');
+    const result = await makeFixRun({ drivers })({ ...input(f), push: true });
+    const report = reportOf(result);
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const outcomes = report.planned.map((row) => [row.task.id, row.outcome] as const);
+    // Every planned row appears exactly once with a truthful outcome.
+    expect(outcomes).toContainEqual(['cases/a.test.cjs', 'fixed']);
+    expect(outcomes).toContainEqual(['cases/b.test.cjs', 'unfixed']);
+    const outstanding = report.planned.filter((row) => row.outcome !== 'fixed');
+    expect(outstanding.length).toBeGreaterThanOrEqual(2);
+    // The fixed row keeps its verified evidence and the legacy metric.
+    const fixed = report.planned.find((row) => row.outcome === 'fixed');
+    expect(fixed?.commits).toHaveLength(1);
+    expect(fixed?.attempts.length).toBeGreaterThan(0);
+    // The failed task's retained branch survives in both views; the failed
+    // row's failures carry branch and sha while every branchless row omits
+    // both (no invented artifact).
+    const failedWithBranch = report.planned.find(
+      (row) => row.outcome === 'unfixed' && row.failures.some((failure) => failure.sha !== undefined),
+    );
+    expect(failedWithBranch?.failures[0]?.branch).toMatch(/^cq\/fixture\/failed\//);
+    expect(failedWithBranch?.failures[0]?.sha).toMatch(/^[0-9a-f]{40}$/);
+    for (const row of outstanding)
+      for (const failure of row.failures)
+        if (failure.sha === undefined) {
+          expect(failure.branch).toBeUndefined();
+          expect(failure.reason).toBeTruthy();
+        }
+    // Explicit denominators: planned = fixed + unresolved.
+    expect(report.counters.planned).toBe(report.planned.length);
+    expect(report.counters.fixed).toBe(1);
+    expect(report.counters.unresolved).toBe(report.counters.planned - 1);
+    expect(report.counters.attempted).toBeGreaterThanOrEqual(1);
+    // The legacy failed evidence still carries the retained branch row.
+    expect(report.failed.some((row) => 'sha' in row && row.sha !== undefined)).toBe(true);
+    // fixesPerRun keeps its meaning: verified fixes only.
+    expect(report.fixesPerRun).toBe(1);
+    // The persisted artifact matches the returned report exactly.
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test.each(['absolute', 'relative'] as const)(
   'nested check cwd preserves repo-root task identity (%s failure names)',
   async (names) => {
