@@ -378,4 +378,113 @@ describe('contained grep and glob tools', () => {
       if (!aborted.ok) expect(aborted.denial.reason).toContain('cancelled:');
     });
   });
+
+  test('grep enumeration argv never carries the user include glob (#491)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'keep.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'drop.js'), 'needle\n', 'utf8');
+      const original = runner.runArgvCommand;
+      const enumerateGlobValues: string[][] = [];
+      const spy = vi
+        .spyOn(runner, 'runArgvCommand')
+        .mockImplementation(async (file, args, options) => {
+          if (file === 'rg' && !args.includes('--json')) {
+            const values: string[] = [];
+            for (const [index, arg] of args.entries()) {
+              if (arg === '--glob') values.push(args[index + 1] as string);
+            }
+            enumerateGlobValues.push(values);
+          }
+          return original(file, args, options);
+        });
+      try {
+        const result = await tool(
+          buildTools(defaultHarnessConfig, workspace, 'read-only'),
+          'grep',
+        ).execute({ pattern: 'needle', include: '*.ts' });
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.output).toContain('keep.ts');
+          expect(result.output).not.toContain('drop.js');
+        }
+        expect(enumerateGlobValues.length).toBeGreaterThan(0);
+        const fixed = new Set(['!.git', '!.hg', '!.svn']);
+        for (const values of enumerateGlobValues) {
+          for (const value of values) expect(fixed.has(value)).toBe(true);
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  test('grep include narrows results and .gitignore wins over the include (#491)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await mkdir(join(workspace, 'data'), { recursive: true });
+      await mkdir(join(workspace, 'src'), { recursive: true });
+      await writeFile(join(workspace, '.gitignore'), 'data/\n', 'utf8');
+      await writeFile(join(workspace, 'data', 'big.log'), 'needle-in-log\n', 'utf8');
+      await writeFile(join(workspace, 'src', 'keep.ts'), 'needle-ts\n', 'utf8');
+      await writeFile(join(workspace, 'src', 'drop.js'), 'needle-js\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const includeLog = await grep.execute({ pattern: 'needle', include: '*.log' });
+      expect(includeLog.ok).toBe(true);
+      if (includeLog.ok) {
+        expect(includeLog.output).toBe('No matches');
+        expect(includeLog.truncated).toBe(false);
+      }
+      const includeTs = await grep.execute({ pattern: 'needle', glob: '*.ts' });
+      expect(includeTs.ok).toBe(true);
+      if (includeTs.ok) {
+        expect(includeTs.output).toContain('--- src/keep.ts ---');
+        expect(includeTs.output).not.toContain('drop.js');
+        expect(includeTs.output).not.toContain('big.log');
+      }
+      const rooted = await grep.execute({ pattern: 'needle', include: 'src/*.ts' });
+      expect(rooted.ok).toBe(true);
+      if (rooted.ok) {
+        expect(rooted.output).toContain('--- src/keep.ts ---');
+        expect(rooted.output).not.toContain('big.log');
+      }
+    });
+  });
+
+  test('an oversized early candidate is skipped and later files still search (#493)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'aaa-big.bin'), Buffer.alloc(20 * 1_024 * 1_024 + 1, 0x78));
+      await writeFile(join(workspace, 'zzz-small.txt'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({ pattern: 'needle' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('--- zzz-small.txt ---');
+        expect(result.output).toContain('1: needle');
+        expect(result.output).toContain(
+          `[truncated: searched bytes cap ${20 * 1_024 * 1_024}]`,
+        );
+        expect(result.output).toContain('[truncated: skipped oversized candidate aaa-big.bin');
+        expect(result.truncated).toBe(true);
+      }
+    });
+  });
+
+  test('glob discovery reports oversized files without a byte-budget stop (#494)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'aaa-big.bin'), Buffer.alloc(20 * 1_024 * 1_024 + 1, 0x78));
+      await writeFile(join(workspace, 'zzz-small.txt'), 'needle\n', 'utf8');
+      const glob = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'glob');
+      const result = await glob.execute({ pattern: '*' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('aaa-big.bin');
+        expect(result.output).toContain('zzz-small.txt');
+        expect(result.output).not.toContain('searched bytes cap');
+        expect(result.truncated).toBe(false);
+      }
+    });
+  });
 });

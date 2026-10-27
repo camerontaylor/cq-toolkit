@@ -1042,6 +1042,18 @@ export function buildTools(
     }
 
     const scopeArg = relOf(scope) || '.';
+    // IGNORE CONTRACT (issues #491/#493/#494; glob semantics per #528):
+    //  - grep NEVER passes its include glob into rg. rg applies explicit
+    //    --globs BEFORE ignore files (a whitelisting glob can resurrect
+    //    .gitignore-excluded paths, and the precedence is version-dependent),
+    //    so grep's enumeration stays ignore-aware — --files + --hidden, no
+    //    user glob — and the include filter is applied in TypeScript below
+    //    via compilePathPatterns. .gitignore wins, as the tool promises.
+    //  - glob keeps its #528 documented semantics: --no-ignore makes the
+    //    enumeration hidden/ignored-INCLUSIVE and version-stable (no ignore
+    //    files can interfere with a --glob there), the request's pattern rides
+    //    as an ordinary --glob with full ripgrep glob syntax, and the fixed
+    //    VCS-directory exclusion globs stay later in the list so they win.
     const enumerateArgs = [
       '--files',
       '--no-config',
@@ -1049,7 +1061,7 @@ export function buildTools(
       ...(tool === 'glob' ? ['--no-ignore'] : []),
       '--color=never',
       '--null',
-      ...(fileGlob === undefined ? [] : ['--glob', fileGlob]),
+      ...(tool === 'glob' && fileGlob !== undefined ? ['--glob', fileGlob] : []),
       '--glob',
       '!.git',
       ...(tool === 'glob' ? ['--glob', '!.hg', '--glob', '!.svn'] : []),
@@ -1099,8 +1111,30 @@ export function buildTools(
       .filter((candidate) => candidate.length > 0)
       .sort();
     const markers: string[] = [];
-    const boundedPaths = rawPaths.slice(0, SEARCH_CANDIDATE_LIMIT);
-    if (rawPaths.length > SEARCH_CANDIDATE_LIMIT) {
+
+    // Pattern filter (grep, #491 remainder): compilePathPatterns is FULL-match
+    // (see the header's PATH PATTERN SEMANTICS), so a bare '*.ts' include — a
+    // BASENAME filter in the rg/Claude-Code convention — is treated as
+    // '**/*.ts' here. Every other pattern keeps its plain full-match reading,
+    // so rooted patterns ('src/**') filter exactly as they enumerate. The
+    // filter runs BEFORE the candidate-count cap, mirroring the previous
+    // order (rg applied the requested glob during traversal, before the cap
+    // sliced candidates), so narrowing with an include still reaches matching
+    // files beyond 1,000 non-matching candidates. The filter is lexical —
+    // no fs syscalls; containment still gates every kept candidate below.
+    const includeFilter: RegExp | undefined =
+      tool === 'grep' && fileGlob !== undefined
+        ? compilePathPatterns(fileGlob.includes('/') ? [fileGlob] : [`**/${fileGlob}`])[0]
+        : undefined;
+    const matchedPaths =
+      includeFilter === undefined
+        ? rawPaths
+        : rawPaths.filter((candidate) => {
+            const lexicalPath = resolveInside(candidate);
+            return lexicalPath !== undefined && includeFilter.test(relOf(lexicalPath));
+          });
+    const boundedPaths = matchedPaths.slice(0, SEARCH_CANDIDATE_LIMIT);
+    if (matchedPaths.length > SEARCH_CANDIDATE_LIMIT) {
       markers.push(`[truncated: candidate files cap ${SEARCH_CANDIDATE_LIMIT}]`);
     }
 
@@ -1133,16 +1167,37 @@ export function buildTools(
       });
     }
 
+    // DISCOVERY vs CONTENT budgets (#493/#494): filename discovery is its own
+    // budget — bounded by the candidate-count cap above — and is never ended
+    // by the CONTENT byte budget. `glob` reads no file contents, so the byte
+    // budget does not bind it at all. `grep` — the only consumer that opens
+    // the gated files — applies the budget per candidate: a candidate that
+    // does not fit the REMAINING budget is SKIPPED and the loop continues, so
+    // one large file never starves later small ones (the total budget still
+    // binds across kept candidates). Skips are reported with truthful,
+    // bounded aggregate evidence — never silently.
     const files: SearchFile[] = [];
     let searchedBytes = 0;
+    let skippedOverBudget = 0;
+    let firstSkipped: string | undefined;
     for (const file of allowed) {
       if (isAborted(signal)) return cancelled();
-      if (file.size > SEARCH_BYTES_LIMIT - searchedBytes) {
-        markers.push(`[truncated: searched bytes cap ${SEARCH_BYTES_LIMIT}]`);
-        break;
+      if (tool === 'grep' && file.size > SEARCH_BYTES_LIMIT - searchedBytes) {
+        skippedOverBudget += 1;
+        firstSkipped ??= file.lexicalRel;
+        continue; // #493: never end the loop on one non-fitting candidate
       }
       files.push(file);
       searchedBytes += file.size;
+    }
+    if (skippedOverBudget > 0) {
+      markers.push(`[truncated: searched bytes cap ${SEARCH_BYTES_LIMIT}]`);
+      markers.push(
+        skippedOverBudget === 1
+          ? `[truncated: skipped oversized candidate ${firstSkipped} over the remaining searched-bytes budget]`
+          : `[truncated: skipped ${skippedOverBudget} candidates over the remaining ` +
+              `searched-bytes budget, first: ${firstSkipped}]`,
+      );
     }
     if (isAborted(signal)) return cancelled();
     return { ok: true, files, markers };
