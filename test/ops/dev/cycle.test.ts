@@ -515,6 +515,7 @@ describe('dev.cycle', () => {
     expect(result).toEqual({
       status: 'failed',
       error: 'dev.cycle (dev.check): dev.check: 1 gate(s) red (check:static)',
+      report: { usageSummary: { knownCount: 0, unknownCount: 0, unpricedCount: 0 } },
     });
   });
 
@@ -739,6 +740,7 @@ describe('dev.cycle', () => {
         expect(result).toEqual({
           status: 'needs-human',
           reason: `dev.cycle (review.address): ${reason}`,
+          report: { usageSummary: { knownCount: 0, unknownCount: 0, unpricedCount: 0 } },
         });
         expect(pushes).toBe(0);
         expect(opens).toEqual([]);
