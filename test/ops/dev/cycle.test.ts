@@ -728,7 +728,13 @@ describe('dev.cycle', () => {
       open: openFake([]),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
-    await op({ repoRoot: repo.root });
+    const result = await op({ repoRoot: repo.root });
+    // Pin the cycle outcome before the budget assertions: if a leg refuses
+    // (failed gate, review failure), fail on the actual status/reason —
+    // serialized into the message — instead of undefined comparisons
+    // against leg inputs that were never recorded.
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    if (result.status === 'ok') expect(result.value.pushed).toBe(true);
     const budget = 3_600_000 - DEV_CYCLE_PUBLICATION_RESERVE_MS;
     expect(reviewInputs[0]?.wallMs).toBeLessThanOrEqual(budget);
     expect(reviewInputs[0]?.wallMs).toBeGreaterThan(budget - 10_000);
