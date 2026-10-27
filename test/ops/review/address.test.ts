@@ -145,6 +145,8 @@ describe('review.address composition', () => {
       });
       expect(reportOf(result).costUSD).toBe(0.25);
       expect(reportOf(result).reasons.join(' ')).toMatch(/budget/);
+      // S7 H (D1): the structured budget marker a composition publishes on.
+      expect(reportOf(result).stop).toBe('budget');
       expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
         reportOf(result),
       );
@@ -212,6 +214,8 @@ describe('review.address composition', () => {
         const result = await makeReviewAddress({ ...f.deps, initialRecord: record })(f.input);
         expect(result.status).toBe('needs-human');
         expect(f.calls).toEqual([]);
+        // A refusal that is not a budget stop never carries the budget marker.
+        expect(reportOf(result).stop).toBeUndefined();
       }
     } finally {
       await f.cleanup();
@@ -564,10 +568,16 @@ describe('blocked re-review marker (#509)', () => {
     reason: 'review.run: not every configured reviewer completed a terminal cycle',
     report: { ...record, blockedTransient: true as const },
   });
-  /** One verified fix, then a re-review blocked on the transient class twice. */
-  const run = async (spendOnRetry: number) => {
+  /** One verified fix, then a blocked re-review (with one retry for transient blocks). */
+  const run = async (
+    spendOnRetry: number,
+    firstBlock?: 'wall' | 'tokens' | 'remaining' | 'claimed-budget',
+  ) => {
     const f = await fixture();
+    const realNow = Date.now;
+    let clock = realNow();
     try {
+      if (firstBlock === 'wall') Date.now = () => clock;
       let account: ((result: WorkerResult) => void) | undefined;
       let reviews = 0;
       const result = await makeReviewAddress({
@@ -587,20 +597,59 @@ describe('blocked re-review marker (#509)', () => {
         },
         review: async () => {
           reviews += 1;
+          if (firstBlock === 'wall') clock += 1001;
+          if (firstBlock === 'tokens')
+            account?.({
+              stopReason: 'error',
+              usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            });
           if (reviews === 2 && spendOnRetry > 0)
             account?.({
               stopReason: 'error',
               usage: { input: spendOnRetry, output: 0, cacheRead: 0, cacheWrite: 0 },
               denials: [],
             });
-          return blockedTransient(f.record());
+          return firstBlock
+            ? {
+                status: 'needs-human' as const,
+                reason: 'review.run: not every configured reviewer completed a terminal cycle',
+                report: {
+                  ...f.record(),
+                  ...(firstBlock !== 'remaining' ? { blockedBudget: true as const } : {}),
+                },
+              }
+            : blockedTransient(f.record());
         },
-      })({ ...f.input, maxTokens: 100, rounds: 1 });
+      })({ ...f.input, maxTokens: 100, wallMs: firstBlock === 'wall' ? 1000 : 60000, rounds: 1 });
       return { result, reviews };
     } finally {
+      Date.now = realNow;
       await f.cleanup();
     }
   };
+
+  test.each(['wall', 'tokens'] as const)(
+    '#532: a non-transient re-review block after exhausting %s carries budget',
+    async (budget) => {
+      const { result, reviews } = await run(0, budget);
+      expect(reviews).toBe(1);
+      expect(result.status).toBe('needs-human');
+      expect(reportOf(result).fixes).toEqual([expect.objectContaining({ commit: 'a'.repeat(40) })]);
+      expect(reportOf(result).stop).toBe('budget');
+      expect(reportOf(result).verifiedHead).toBe('a'.repeat(40));
+    },
+  );
+
+  test.each(['remaining', 'claimed-budget'] as const)(
+    '#532: a %s block with leg budget remaining has no marker',
+    async (mode) => {
+      const { result, reviews } = await run(0, mode);
+      expect(reviews).toBe(1);
+      expect(result.status).toBe('needs-human');
+      expect(reportOf(result).stop).toBeUndefined();
+    },
+  );
 
   test('still blocked after the retry with a verified fix: marked rereview-blocked', async () => {
     const { result, reviews } = await run(0);
@@ -609,10 +658,72 @@ describe('blocked re-review marker (#509)', () => {
     expect(reportOf(result).stop).toBe('rereview-blocked');
   });
 
-  test('a retry that exhausts the token budget never carries the marker', async () => {
+  test('a retry that exhausts the token budget carries budget, never rereview-blocked', async () => {
     const { result, reviews } = await run(100);
     expect(reviews).toBe(2);
     expect(result.status).toBe('needs-human');
-    expect(reportOf(result).stop).toBeUndefined();
+    expect(reportOf(result).stop).toBe('budget');
+    expect(reportOf(result).stop).not.toBe('rereview-blocked');
   });
 });
+
+test.each(['identity', 'admission', 'scan', 'thrown'] as const)(
+  '#532: %s refusal coinciding with the deadline stays unmarked',
+  async (mode) => {
+    const f = await fixture();
+    const realNow = Date.now;
+    let clock = realNow();
+    try {
+      Date.now = () => clock;
+      const record = f.record();
+      const result = await makeReviewAddress({
+        ...f.deps,
+        initialRecord:
+          mode === 'admission'
+            ? {
+                ...record,
+                get head() {
+                  clock += 1001;
+                  return 'b'.repeat(40);
+                },
+              }
+            : record,
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (item) => ({
+            finding: { ...item, status: 'fixed', reason: 'verified' },
+            commit: record.head,
+            observedHead: record.head,
+            reason: 'verified',
+            validation: [],
+          }),
+        }),
+        review: async () => {
+          clock += 1001;
+          if (mode === 'thrown') throw new Error('unexpected reviewer fault');
+          if (mode === 'scan')
+            return {
+              status: 'needs-human',
+              reason: 'review.run: denylist scan found protected content; refusing reviewer upload',
+            };
+          f.repo.git('commit', '--allow-empty', '-m', 'concurrent checkout');
+          return { status: 'ok', value: record };
+        },
+      })({ ...f.input, wallMs: 1000 });
+      expect(result.status).toBe('needs-human');
+      expect(reportOf(result).stop).toBeUndefined();
+      expect(reportOf(result).reasons.join(' ')).toMatch(
+        mode === 'identity'
+          ? /identity changed/
+          : mode === 'admission'
+            ? /does not match/
+            : mode === 'scan'
+              ? /protected content/
+              : /unexpected reviewer fault/,
+      );
+    } finally {
+      Date.now = realNow;
+      await f.cleanup();
+    }
+  },
+);
