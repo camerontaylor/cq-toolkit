@@ -462,9 +462,7 @@ describe('contained grep and glob tools', () => {
       if (result.ok) {
         expect(result.output).toContain('--- zzz-small.txt ---');
         expect(result.output).toContain('1: needle');
-        expect(result.output).toContain(
-          `[truncated: searched bytes cap ${20 * 1_024 * 1_024}]`,
-        );
+        expect(result.output).toContain(`[truncated: searched bytes cap ${20 * 1_024 * 1_024}]`);
         expect(result.output).toContain('[truncated: skipped oversized candidate aaa-big.bin');
         expect(result.truncated).toBe(true);
       }
