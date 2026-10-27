@@ -361,11 +361,17 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         # In particular scan/budget/cancel statuses must survive a vendor error.
         if e.get("type") == "finding" and isinstance(e.get("severity"), str) and e["severity"] in BLOCKING_SEVERITIES:
             hard("blocking-finding")
-        if e.get("type") != "complete" and e.get("status") is not None:
+        if e.get("type") != "complete" and "status" in e:
             status = e["status"]
-            hard(status if isinstance(status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", status)
-                 else "unrecognized-status")
-            proof_complete = False
+            # Explicit protocol progress is neutral, never completion/vendor proof.
+            # TS fixtures: status/scanning, reviewing, writing; heartbeat/reviewing.
+            progress = (e["type"] == "status" and isinstance(status, str) and
+                        status in ("scanning", "reviewing", "writing") or
+                        e["type"] == "heartbeat" and status == "reviewing")
+            if not progress:
+                hard(status if isinstance(status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", status)
+                     else "unrecognized-status")
+                proof_complete = False
     if errors and complete:
         hard("conflicting-terminal")
     vendor_only = bool(causes) and all(c["source"] == "vendor" for c in causes)

@@ -110,6 +110,97 @@ class ClassifierTest(unittest.TestCase):
                 self.assertEqual(cls["failure_provenance"]["causes"][0]["source"], "queue")
 
 
+    def test_recognized_progress_preserves_truthful_terminal_and_findings(self):
+        progress_events = [{"type": "status", "status": status}
+                           for status in ("scanning", "reviewing", "writing")]
+        progress_events.append({"type": "heartbeat", "status": "reviewing"})
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for progress in progress_events:
+                for severity in (None, "minor", "major"):
+                    with self.subTest(progress=progress, severity=severity):
+                        findings = [{"type": "finding", "severity": severity}] if severity else []
+                        path.write_text("\n".join(json.dumps(e) for e in [progress, *findings, COMPLETE]))
+                        cls = crq.classify(path, 0)
+                        self.assertEqual(cls["outcome"], "completed")
+                        self.assertTrue(cls["counted"])
+                        self.assertEqual(cls["findings"], len(findings))
+                        self.assertEqual(cls["failure_provenance"], {"version": 1, "complete": True,
+                            "causes": [{"source": "queue", "category": "unknown", "code": "blocking-finding"}]
+                            if severity == "major" else []})
+
+    def test_progress_alone_trailing_progress_and_missing_exit_never_count(self):
+        progress = {"type": "status", "status": "reviewing"}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for events, exit_code in (([progress], 0), ([COMPLETE, progress], 0),
+                    ([progress, COMPLETE, COMPLETE], 0), ([progress, COMPLETE], None),
+                    ([progress, COMPLETE], True), ([progress, COMPLETE], 1),
+                    ([progress, {**COMPLETE, "status": "review_skipped"}], 0),
+                    ([progress, {**COMPLETE, "message": "No fresh detailed file review"}], 0)):
+                with self.subTest(events=events, exit_code=exit_code):
+                    path.write_text("\n".join(json.dumps(e) for e in events))
+                    cls = crq.classify(path, exit_code)
+                    self.assertFalse(cls["counted"])
+                    self.assertNotEqual(cls["outcome"], "rate_limited")
+                    self.assertTrue(cls["failure_provenance"]["causes"])
+                    if type(exit_code) is not int:
+                        self.assertFalse(cls["failure_provenance"]["complete"])
+
+    def test_unknown_malformed_and_wrong_type_statuses_stay_incomplete(self):
+        bad_events = [{"type": "status", "status": status} for status in
+            ("unknown", "REVIEWING", "reviewing ", "scan_failed", "budget_exhausted",
+             "cancelled", "awaiting_confirmation", None, [], {}, 1, True)]
+        bad_events += [{"type": "review_context", "status": "reviewing"},
+                       {"type": "finding", "severity": "minor", "status": "reviewing"},
+                       {"type": "heartbeat", "status": "scanning"}]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for bad in bad_events:
+                with self.subTest(bad=bad):
+                    path.write_text("\n".join(json.dumps(e) for e in
+                        [{"type": "status", "status": "reviewing"}, bad, COMPLETE]))
+                    cls = crq.classify(path, 0)
+                    self.assertFalse(cls["counted"])
+                    self.assertFalse(cls["failure_provenance"]["complete"])
+                    self.assertTrue(all(c["source"] == "queue" for c in cls["failure_provenance"]["causes"]))
+
+    def test_progress_preserves_all_ordered_failure_causes_without_authorizing_them(self):
+        progress = {"type": "status", "status": "reviewing"}
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        vendor_cause = {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            path.write_text(json.dumps(progress) + "\n" + json.dumps(vendor))
+            cls = crq.classify(path, 1)
+            self.assertEqual(cls["outcome"], "rate_limited")
+            self.assertFalse(cls["counted"])
+            self.assertEqual(cls["failure_provenance"],
+                             {"version": 1, "complete": True, "causes": [vendor_cause]})
+            for code in ("unknown", "scan", "budget", "cancel"):
+                hard_event = {"type": "error", "errorType": code}
+                hard_cause = {"source": "queue", "category": "unknown", "code": code}
+                for failures, causes in (([vendor, hard_event], [vendor_cause, hard_cause]),
+                                         ([hard_event, vendor], [hard_cause, vendor_cause])):
+                    with self.subTest(code=code, failures=failures):
+                        path.write_text("\n".join(json.dumps(e) for e in [progress, *failures]))
+                        cls = crq.classify(path, 0)
+                        self.assertEqual(cls["outcome"], "error")
+                        self.assertFalse(cls["counted"])
+                        self.assertEqual(cls["failure_provenance"]["causes"], causes)
+            for failure in ({"type": "action_required"}, {"type": "status", "status": "scan_failed"}):
+                path.write_text("\n".join(json.dumps(e) for e in [progress, vendor, failure]))
+                cls = crq.classify(path, 0)
+                self.assertNotEqual(cls["outcome"], "rate_limited")
+                self.assertFalse(cls["counted"])
+                self.assertEqual(cls["failure_provenance"]["causes"][0], vendor_cause)
+                self.assertTrue(any(c["source"] == "queue" for c in cls["failure_provenance"]["causes"]))
+            path.write_text(json.dumps(progress) + "\nbad\n" + json.dumps(vendor))
+            cls = crq.classify(path, 1)
+            self.assertFalse(cls["failure_provenance"]["complete"])
+            self.assertNotEqual(cls["outcome"], "rate_limited")
+
+
 class CurrentTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
