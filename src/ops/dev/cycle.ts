@@ -49,6 +49,7 @@ import { join } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
+import type { Usage } from '../../driver/types.js';
 import { composeSection, mdSafe, type PrEffects } from '../pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.js';
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
@@ -621,6 +622,15 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
  * tokens (input + output + cache + reasoning) to `spend`, so the cycle can
  * hand each agentic leg what is left of the one run token budget. The Driver
  * seam is `run()` only, so the wrapper is the whole driver.
+ *
+ * A FAILED run is metered too. A driver run can consume tokens before it
+ * fails — and failure is a normal, not exceptional, occurrence here (the
+ * transient class the legs retry once, a cancel on the wall budget). The
+ * meter wraps the run in try/catch: the resolved result's usage on the
+ * success path, and whatever usage the rejection carries on the error path
+ * ({@link usageOf}) — spent BEFORE the error propagates, so a failed attempt
+ * still shrinks the unspent remainder instead of inflating the next leg's
+ * token budget. The error itself is never swallowed or reshaped.
  */
 function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): DriverFactory {
   return {
@@ -630,19 +640,53 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
         ...resolved,
         driver: {
           run: async (invocation, options) => {
-            const result = await resolved.driver.run(invocation, options);
-            const { usage } = result;
-            spend(
-              usage.input +
-                usage.output +
-                usage.cacheRead +
-                usage.cacheWrite +
-                (usage.reasoning ?? 0),
-            );
-            return result;
+            const meter = (usage: Usage): void => {
+              spend(
+                usage.input +
+                  usage.output +
+                  usage.cacheRead +
+                  usage.cacheWrite +
+                  (usage.reasoning ?? 0),
+              );
+            };
+            try {
+              const result = await resolved.driver.run(invocation, options);
+              meter(result.usage);
+              return result;
+            } catch (err) {
+              const partial = usageOf(err);
+              if (partial !== undefined) meter(partial);
+              throw err;
+            }
           },
         },
       };
     },
   };
+}
+
+/**
+ * The Usage a rejecting driver run attached, if any. The seam's lanes are
+ * taught to settle a mid-run failure as a result (stopReason 'error' with the
+ * completed steps' usage folded), so a reject is the exceptional path — but a
+ * lane that does reject WITH the partial usage it completed must still reach
+ * the meter. Structurally checked against the frozen Usage shape (numeric
+ * input/output/cacheRead/cacheWrite, optional numeric reasoning); anything
+ * else — including a `usage` field of a different shape — contributes zero,
+ * never a guess.
+ */
+function usageOf(err: unknown): Usage | undefined {
+  if (typeof err !== 'object' || err === null || !('usage' in err)) return undefined;
+  const usage: unknown = (err as { usage?: unknown }).usage;
+  if (typeof usage !== 'object' || usage === null) return undefined;
+  const fields = usage as Record<string, unknown>;
+  if (
+    typeof fields.input !== 'number' ||
+    typeof fields.output !== 'number' ||
+    typeof fields.cacheRead !== 'number' ||
+    typeof fields.cacheWrite !== 'number' ||
+    (fields.reasoning !== undefined && typeof fields.reasoning !== 'number')
+  )
+    return undefined;
+  return usage as Usage;
 }
