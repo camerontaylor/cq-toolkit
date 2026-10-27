@@ -7,12 +7,15 @@ import base64
 import contextlib
 import copy
 import io
+import hashlib
+from pathlib import Path
 import json
 import re
 
 import review_receipt as receipts
 
 MAX_BYTES = 8192
+MAX_RECEIPT_BYTES = 64 * 1024 * 1024
 TOKEN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}"
 SHA = r"[0-9a-f]{40}"
 READ = {"status", "report"}
@@ -30,6 +33,46 @@ def _pairs(pairs):
 
 def _match(pattern, value):
     return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+class _ReceiptSnapshot:
+    """Verify once per authorized request; never trust verification across requests.
+
+    Keep the exact verified bytes for both source checks and Q1-compatible pages.
+    A cursor selects bytes from this snapshot and grants no read authority.
+    """
+    def __init__(self, root, receipt_id):
+        if not _match(r"[0-9a-f]{64}", receipt_id):
+            raise ValueError("invalid receipt id")
+        with (Path(root) / (receipt_id + ".json")).open("rb") as stream:
+            self.data = stream.read(MAX_RECEIPT_BYTES + 1)
+        if len(self.data) > MAX_RECEIPT_BYTES:
+            raise ValueError("receipt exceeds supported client capacity")
+        if hashlib.sha256(self.data).hexdigest() != receipt_id:
+            raise ValueError("receipt digest mismatch")
+        self.document = json.loads(self.data, object_pairs_hook=_pairs)
+        if not isinstance(self.document, dict):
+            raise ValueError("invalid receipt document")
+        self.receipt_id = receipt_id
+        self.count = max(1, (len(self.data) + receipts.CHUNK_BYTES - 1) // receipts.CHUNK_BYTES)
+
+    def page(self, cursor=None):
+        common = {"version": receipts.VERSION, "receipt_id": self.receipt_id,
+                  "sha256": self.receipt_id, "bytes": len(self.data),
+                  "chunks": self.count, "encoding": "base64-utf8-json"}
+        if cursor is None:
+            return {**common, "kind": "manifest", "cursor": self.receipt_id + ":0"}
+        if not isinstance(cursor, str):
+            raise ValueError("invalid or mixed-snapshot cursor")
+        match = re.fullmatch(re.escape(self.receipt_id) + r":(0|[1-9][0-9]{0,9})", cursor)
+        if not match or int(match[1]) >= self.count:
+            raise ValueError("invalid or mixed-snapshot cursor")
+        index = int(match[1])
+        chunk = self.data[index * receipts.CHUNK_BYTES:(index + 1) * receipts.CHUNK_BYTES]
+        return {**common, "kind": "chunk", "index": index,
+                "chunk_sha256": hashlib.sha256(chunk).hexdigest(),
+                "data": base64.b64encode(chunk).decode("ascii"),
+                "next_cursor": self.receipt_id + ":" + str(index + 1) if index + 1 < self.count else None}
 
 
 def validate_policy(policy):
@@ -183,13 +226,8 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         if receipt_id:
             item = receipts.status(q, rid)
             # Bounded status excludes capture/paths/findings. Full document goes through chunks.
-            doc_manifest = receipts.read_receipt(receipt_root, receipt_id)
-            if doc_manifest["bytes"] > 64 * 1024 * 1024:
-                raise ValueError("receipt exceeds supported client capacity")
-            data = bytearray()
-            for i in range(doc_manifest["chunks"]):
-                data.extend(base64.b64decode(receipts.read_receipt(receipt_root, receipt_id, f"{receipt_id}:{i}")["data"]))
-            document = json.loads(data)
+            snapshot = _ReceiptSnapshot(receipt_root, receipt_id)
+            document = snapshot.document
             source = document.get("source", {})
             if source.get("repo") != b["repo"] or source.get("target_selector") != b["targetSelector"]:
                 raise ValueError("receipt source repository/target mismatch")
@@ -223,10 +261,10 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         if op in {"report", "ack"}:
             if not receipt_id or req["receiptId"] != receipt_id:
                 raise ValueError("receipt/request mismatch")
-            manifest = receipts.read_receipt(receipt_root, receipt_id)
+            manifest = snapshot.page()
             progress = entry.setdefault("deliveries", {}).setdefault(receipt_id, {"manifest": False, "next": 0})
             if op == "report":
-                page = receipts.read_receipt(receipt_root, receipt_id, req["cursor"])
+                page = snapshot.page(req["cursor"])
                 if page["kind"] == "manifest":
                     progress["manifest"] = True
                 else:
