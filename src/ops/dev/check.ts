@@ -524,13 +524,22 @@ export function makeDevCheck(
           head: state.head,
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
-          ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
-          testSelection:
-            input.testFiles !== undefined
-              ? { mode: 'named', files: [...input.testFiles] }
-              : input.range !== undefined
-                ? { mode: 'range' }
-                : { mode: 'base' },
+          // Only the legacy test:narrow gate consumes these inputs; with
+          // configured checks (cq.json) no test gate runs, so the record
+          // must not claim a test scope it never had.
+          ...(configuredChecks === null && input.includeIntegration === true
+            ? { includeIntegration: true }
+            : {}),
+          ...(configuredChecks === null
+            ? {
+                testSelection:
+                  input.testFiles !== undefined
+                    ? { mode: 'named', files: [...input.testFiles] }
+                    : input.range !== undefined
+                      ? { mode: 'range' }
+                      : { mode: 'base' },
+              }
+            : {}),
           passed,
           gates,
           loadStamp,
