@@ -526,9 +526,11 @@ export function makeDevCheck(
           head: state.head,
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
-          // Both fields describe the legacy test:narrow gate only: a
-          // configured-checks run has no test gate, so the record must not
-          // claim an integration opt-in or a selection never executed.
+          // Both fields describe the legacy test:narrow gate, which runs
+          // only when configuredChecks is null; for a configured-checks run
+          // (no test gate) both are omitted. testSelection is OPTIONAL: it
+          // is recorded only when that gate runs, naming the selection the
+          // gate actually executed (named files, range, or base).
           ...(configuredChecks === null && input.includeIntegration === true
             ? { includeIntegration: true }
             : {}),
