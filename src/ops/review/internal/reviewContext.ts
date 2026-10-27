@@ -106,7 +106,11 @@ export async function collectBoundedReviewContext(
     const remaining = deadline.remainingWallMs();
     if (!Number.isFinite(remaining) || remaining <= 0) {
       throw new Error(
-        'review wall budget ' + when + ' — review context not collected (' + String(remaining) + 'ms remaining)',
+        'review wall budget ' +
+          when +
+          ' — review context not collected (' +
+          String(remaining) +
+          'ms remaining)',
       );
     }
     return {

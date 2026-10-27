@@ -122,10 +122,13 @@ describe('collectBoundedReviewContext (real git)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.context.intent.length).toBeLessThanOrEqual(REVIEW_CONTEXT_INTENT_CAP);
-    const omitted = Number(/\[truncated: (\d+) characters omitted\]/.exec(result.context.intent)?.[1]);
+    const omitted = Number(
+      /\[truncated: (\d+) characters omitted\]/.exec(result.context.intent)?.[1],
+    );
     const kept = result.context.intent.indexOf('\n[truncated:');
     const rawIntent = repo.git(
-      'log', '--format=%s%n%n%b',
+      'log',
+      '--format=%s%n%n%b',
       repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim() + '..HEAD',
     );
     expect(kept).toBeGreaterThan(0);
@@ -182,10 +185,16 @@ describe('collectBoundedReviewContext (real git)', () => {
       }
       return undefined;
     });
-    const result = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
-      signal: controller.signal,
-      remainingWallMs: () => 60_000,
-    });
+    const result = await collectBoundedReviewContext(
+      effects,
+      'HEAD',
+      repo.git('rev-parse', 'HEAD').trim(),
+      'full',
+      {
+        signal: controller.signal,
+        remainingWallMs: () => 60_000,
+      },
+    );
     expect(result).toMatchObject({ ok: false, fatal: true });
     if (!result.ok) expect(result.reason).toContain('could not collect review context');
   });
@@ -212,7 +221,9 @@ describe('collectBoundedReviewContext (real git)', () => {
             if (args[0] === collapseAfter) remaining = expired;
             return {
               exitCode: args[0] === 'log' && collapseAfter === 'diff' ? 0 : exitCode,
-              stdout: '', stderr: '', timedOut: false,
+              stdout: '',
+              stderr: '',
+              timedOut: false,
             };
           });
           const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
@@ -267,21 +278,29 @@ describe('collectBoundedReviewContext (real git)', () => {
     expect(effects.calls).toEqual([]);
   });
 
-  it.each(['log', 'diff'])('cancellation during failed %s overrides its exit code', async (cancelAfter) => {
-    const controller = new AbortController();
-    const effects = scriptedRepoEffects(repo, (_command, args) => {
-      if (args[0] === cancelAfter) controller.abort(new Error('cancelled during read'));
-      return { exitCode: args[0] === cancelAfter ? 128 : 0, stdout: '', stderr: '', timedOut: false };
-    });
-    const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
-      signal: controller.signal,
-      remainingWallMs: () => 5_000,
-    });
-    expect(result).toMatchObject({ ok: false, fatal: true });
-    expect(effects.calls.map((call) => call.args[0])).toEqual(
-      cancelAfter === 'log' ? ['log'] : ['log', 'diff'],
-    );
-  });
+  it.each(['log', 'diff'])(
+    'cancellation during failed %s overrides its exit code',
+    async (cancelAfter) => {
+      const controller = new AbortController();
+      const effects = scriptedRepoEffects(repo, (_command, args) => {
+        if (args[0] === cancelAfter) controller.abort(new Error('cancelled during read'));
+        return {
+          exitCode: args[0] === cancelAfter ? 128 : 0,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+        };
+      });
+      const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
+        signal: controller.signal,
+        remainingWallMs: () => 5_000,
+      });
+      expect(result).toMatchObject({ ok: false, fatal: true });
+      expect(effects.calls.map((call) => call.args[0])).toEqual(
+        cancelAfter === 'log' ? ['log'] : ['log', 'diff'],
+      );
+    },
+  );
 
   it('uses each validated budget sample for the next read and stops when it collapses', async () => {
     let remaining = 5_000;
@@ -314,10 +333,16 @@ describe('collectBoundedReviewContext (real git)', () => {
         return base.runCommand(command, args, opts);
       },
     };
-    const result = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
-      signal: controller.signal,
-      remainingWallMs: () => 5_000,
-    });
+    const result = await collectBoundedReviewContext(
+      effects,
+      'HEAD',
+      repo.git('rev-parse', 'HEAD').trim(),
+      'full',
+      {
+        signal: controller.signal,
+        remainingWallMs: () => 5_000,
+      },
+    );
     expect(result.ok).toBe(true);
     expect(seen.length).toBe(2);
     for (const call of seen) {
