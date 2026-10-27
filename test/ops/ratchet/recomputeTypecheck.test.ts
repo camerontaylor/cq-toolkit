@@ -273,6 +273,29 @@ function verifiedExecutable(path: string): string {
   return executable;
 }
 
+// This classifies a trusted provisioned entrypoint, not arbitrary subject bytes.
+// Darwin support is limited to the thin64LE shape in official pnpm12.8.1 artifacts.
+function pnpmLauncherKind(
+  header: Buffer,
+  platform: NodeJS.Platform,
+  arch: string,
+): 'native' | 'node' {
+  const elf = header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  if (elf) return 'native'; // Preserve existing ELF recognition.
+  const cpu = arch === 'arm64' ? 0x0100000c : arch === 'x64' ? 0x01000007 : null;
+  if (
+    platform === 'darwin' &&
+    cpu !== null &&
+    header.length >= 32 &&
+    header.readUInt32LE(0) === 0xfeedfacf &&
+    header.readUInt32LE(4) === cpu &&
+    header.readUInt32LE(12) === 2
+  )
+    return 'native';
+  if (/^#![^\n]*\bnode(?:\s|$)/.test(header.toString('utf8'))) return 'node';
+  throw new Error('unsupported provisioned pnpm launcher');
+}
+
 // Discover only during trusted preflight, before subject configuration/canaries.
 // No shell or SHELL is required, and no child executes a bare helper name.
 function discoverHelper(name: string): string {
@@ -306,14 +329,14 @@ const requiredPnpmVersion = packageManager[1]!;
 const pnpmEntrypoint = verifiedExecutable(process.env['npm_execpath'] ?? '');
 const header = Buffer.alloc(128);
 const descriptor = openSync(pnpmEntrypoint, 'r');
+let headerBytes: number;
 try {
-  readSync(descriptor, header, 0, header.length, 0);
+  headerBytes = readSync(descriptor, header, 0, header.length, 0);
 } finally {
   closeSync(descriptor);
 }
-const isNativePnpm = header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
-const isNodePnpm = /^#![^\n]*\bnode(?:\s|$)/.test(header.toString('utf8'));
-if (!isNativePnpm && !isNodePnpm) throw new Error('unsupported provisioned pnpm launcher');
+const isNativePnpm =
+  pnpmLauncherKind(header.subarray(0, headerBytes), process.platform, process.arch) === 'native';
 const nativePnpm = isNativePnpm ? pnpmEntrypoint : trustedNode;
 const pnpmPrefix = isNativePnpm ? [] : [pnpmEntrypoint];
 fixtureGit.executable = trustedGit;
@@ -666,17 +689,31 @@ setTimeout(() => process.exit(3), 30000).unref();
     expect(red).toContain('TS2307');
     expect(existsSync(sentinel)).toBe(false);
     console.info('H1 reached: trusted compiler TS2307 before install and canary assertion');
-    const childEnv: unknown = JSON.parse(
-      execFileSync(trustedNode, ['-e', 'process.stdout.write(JSON.stringify(process.env))'], {
-        cwd: tree,
-        env: dependencyChildEnv(compilerHome),
-        encoding: 'utf8',
-      }),
+    const canaryPresence: unknown = JSON.parse(
+      execFileSync(
+        trustedNode,
+        [
+          '-e',
+          `process.stdout.write(JSON.stringify({
+        secretPresent: process.env['CQ_BOUNDARY_SECRET'] !== undefined,
+        proxyPresent: process.env['HTTPS_PROXY'] !== undefined,
+        registryPresent: process.env['npm_config_registry'] !== undefined,
+        loaderPresent: process.env['NODE_OPTIONS'] !== undefined,
+      }))`,
+        ],
+        {
+          cwd: tree,
+          env: dependencyChildEnv(compilerHome),
+          encoding: 'utf8',
+        },
+      ),
     );
-    expect(childEnv).not.toHaveProperty('CQ_BOUNDARY_SECRET');
-    expect(childEnv).not.toHaveProperty('HTTPS_PROXY');
-    expect(childEnv).not.toHaveProperty('npm_config_registry');
-    expect(childEnv).not.toHaveProperty('NODE_OPTIONS');
+    expect(canaryPresence).toEqual({
+      secretPresent: false,
+      proxyPresent: false,
+      registryPresent: false,
+      loaderPresent: false,
+    });
     console.info('H1 reached: scrubbed child environment assertions');
     const plan = subjectDependencyPlan(manifest, lockfile);
     expect(plan.lockfile).toBe(lockfile);
@@ -819,5 +856,44 @@ setTimeout(() => process.exit(3), 30000).unref();
     ).toThrow('origin');
     expect(existsSync(sentinel)).toBe(false);
     console.info('H1 reached: rejected origin and final canary assertions');
+  });
+});
+
+// These synthetic bytes test recognition only; they do not simulate executable
+// output or establish which header the failing CI runner actually encountered.
+describe('provisioned pnpm launcher recognition', () => {
+  const macho = (cpu: number, filetype = 2): Buffer => {
+    const header = Buffer.alloc(32);
+    header.writeUInt32LE(0xfeedfacf, 0);
+    header.writeUInt32LE(cpu, 4);
+    header.writeUInt32LE(filetype, 12);
+    return header;
+  };
+  test('preserves ELF and Node entrypoint recognition', () => {
+    expect(pnpmLauncherKind(Buffer.from('7f454c46', 'hex'), 'linux', 'x64')).toBe('native');
+    expect(pnpmLauncherKind(Buffer.from('#!/usr/bin/env node\n'), 'linux', 'x64')).toBe('node');
+  });
+  test('accepts only supported Darwin thin64LE executable headers for the host CPU', () => {
+    expect(pnpmLauncherKind(macho(0x0100000c), 'darwin', 'arm64')).toBe('native');
+    expect(pnpmLauncherKind(macho(0x01000007), 'darwin', 'x64')).toBe('native');
+  });
+  test('rejects unsupported, truncated, wrong-platform/CPU and nonexecutable shapes', () => {
+    const rejected: [Buffer, NodeJS.Platform, string][] = [
+      [Buffer.alloc(0), 'darwin', 'arm64'],
+      [macho(0x0100000c).subarray(0, 31), 'darwin', 'arm64'],
+      [macho(0x0100000c), 'linux', 'arm64'],
+      [macho(0x0100000c), 'darwin', 'x64'],
+      [macho(0x01000007), 'darwin', 'arm64'],
+      [macho(0x0100000c), 'darwin', 'ia32'],
+      [macho(0x0100000c, 6), 'darwin', 'arm64'],
+      [Buffer.from('feedfacf000000000000000000000002', 'hex'), 'darwin', 'arm64'],
+      [Buffer.from('cafebabe00000001', 'hex'), 'darwin', 'arm64'],
+      [Buffer.from('#!/bin/sh\nexec pnpm "$@"\n'), 'darwin', 'arm64'],
+    ];
+    for (const [header, platform, arch] of rejected) {
+      expect(() => pnpmLauncherKind(header, platform, arch)).toThrow(
+        'unsupported provisioned pnpm launcher',
+      );
+    }
   });
 });

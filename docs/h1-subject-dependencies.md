@@ -428,3 +428,70 @@ there is no skip path or successful unavailable evidence.
 source hashes remain identical to the previous P1 correction. Final format/diff
 checks and hashes are supplied in the handoff. No production wiring, commit,
 push, PR or CodeRabbit cycle. Stop for the same independent reviewer.
+
+## PR569 macOS launcher recognition repair
+
+CI run40581884064 attempt1 job122463141887 step6 failed in module-load
+preflight with unsupported provisioned pnpm launcher. That bounded failure
+log does not identify the runner's actual launcher format. This repair does
+not claim it does. The reviewed head remains 5d8f23a33acdf501a7e93e8f83e2d69e679a6b33.
+
+The checked-in macos-venue.yml provisions the manifest-pinned pnpm action and
+Node24 before frozen install and the shared static-gate action. The pinned
+[action provisioner source](https://github.com/pnpm/action-setup/blob/ea17c68df8912ef543352723c149a84f56e3d413/src/install-pnpm/run.ts)
+selects its native path for pnpm12. Official registry metadata for
+[pnpm12.8.1](https://registry.npmjs.org/pnpm/12.8.1),
+[Darwin arm64](https://registry.npmjs.org/@pnpm/exe.darwin-arm64/12.8.1) and
+[Darwin x64](https://registry.npmjs.org/@pnpm/exe.darwin-x64/12.8.1) was read
+without installing or executing those artifacts. Each platform tarball's
+SHA512 was verified against its official metadata before inspecting package/pnpm.
+Both official executables begin cffaedfe. Verified archive integrities:
+
+- arm64: sha512-/rwavvMQJsl2RIxOHBnDF+4Gk+fhQFAY4M3PQZoKskJOEnaJcygG9p1xby6wcQcbS4d9dIubv09CQhufTgfmpw==
+- x64: sha512-htYt2gN7zqJKLhC99Ft6EUiO7myjZAZXfmGCTJUL1v+o7vE9hZdE1+fAkk4Oj1ZHNRti6b2woOxEkRkAusi8OQ==
+
+Apple's [Mach-O loader definition](https://github.com/apple-oss-distributions/cctools/blob/main/include/mach-o/loader.h)
+specifies the 32-byte mach_header_64, MH_MAGIC_64 and MH_EXECUTE. The bounded
+classifier adds only Darwin thin64LE recognition with a complete32-byte header,
+filetype2 and cputype matching arm64 (0x0100000c) or x64 (0x01000007). Existing
+ELF and direct Node-shebang behavior is retained. Actual read length is used so
+zero-padding cannot turn a truncated header into a complete one. Other CPU/OS,
+universal, swapped, truncated, nonexecutable or shell-wrapper forms fail closed.
+Synthetic headers exercise recognition/rejection only, never executable output.
+The OS loader and exact pnpm version check still run the real provisioned tool.
+
+Canonical npm_execpath realpath/X_OK, trusted process.execPath, exact repository
+packageManager version, scrubbed child environment, no ambient execution PATH
+and no skip/mock-output behavior remain required. No production source,
+workflow, schema or authority changes are made. The original production source
+remains byte-for-byte unchanged; #517 is not fixed by this proof-only repair.
+Linux execution and synthetic Darwin recognition are distinct from real macOS
+CI execution, which remains to be established by successor CI. No CI rerun,
+CodeRabbit retry or merge is requested.
+
+S1 provenance containment: the existing child-environment probe now emits only
+four named Boolean canary-presence checks, preserving absence assertions without
+serializing an environment object or exposing values. No credentials, account
+settings or unrelated transcripts are inspected.
+
+### macOS recognition repair actual local evidence
+
+The trusted checkout's offline frozen no-scripts/no-pnpmfile install succeeded
+with pnpm12.8.1. Exactly one existing named ratchet selection ran on the
+authorized validation host; no full suite, watch, coverage or provider calls.
+Log: `/tmp/h1-macos-repair-narrow.log`. Actual final wrapper line:
+
+```text
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="58/58" failed=0 skipped=0 wait="0.0s" duration="5.5s" nice=5 load="5.3" uptime="851562s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+```
+
+All nine existing boundary checkpoints were reached, alongside three new
+recognition tests preserving ELF/Node behavior, accepting supported Darwin
+headers, and rejecting unsupported/truncated/wrong-OS/CPU/nonexecutable forms.
+No synthetic executable output was used. Real Node24.22.0 and exact pnpm12.8.1
+ran the Linux fixture. Static verification passed with zero compiler/lint
+errors (`/tmp/h1-macos-repair-static.log`), and Knip passed exit0
+(`/tmp/h1-macos-repair-knip.log`). Header assertions do not establish the
+original failed CI launcher's bytes or successful macOS execution. All earlier
+helper-success and production-supply limitations remain unchanged. Final
+format/diff/scans and successor hashes are supplied in the handoff.
