@@ -16,6 +16,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "includeIntegration": {
+      "type": "boolean"
+    },
     "push": {
       "type": "boolean"
     },
@@ -26,6 +29,15 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "target": {
       "minLength": 1,
       "type": "string"
+    },
+    "testFiles": {
+      "items": {
+        "minLength": 1,
+        "pattern": "^[^-]",
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "title": {
       "minLength": 1,

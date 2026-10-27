@@ -104,6 +104,18 @@ describe('#386: non-canonical numeric-looking tokens stay raw strings', () => {
 });
 
 describe('parseFlags mechanics unchanged', () => {
+  test.each(['-json', '--json'])('%s has the same parsed key and execution mode', async (flag) => {
+    expect(parseFlags([flag])).toEqual({ flags: { json: true }, unknown: [] });
+    const run = await capture(['echo', '--msg=alias', flag]);
+    expect(run.code).toBe(0);
+    expect(run.err).toBe('');
+    expect(JSON.parse(run.out)).toEqual({ status: 'ok', value: { echo: 'alias' } });
+  });
+
+  test('mixed JSON aliases are duplicate keys', () => {
+    expect(() => parseFlags(['-json', '--json'])).toThrow(/duplicate flag --json/);
+  });
+
   test('bare flags, verbatim keys, positionals, duplicates (i1 parity)', () => {
     expect(parseFlags(['--flag'])).toEqual({ flags: { flag: true }, unknown: [] });
     expect(parseFlags(['positional'])).toEqual({ flags: {}, unknown: ['positional'] });
