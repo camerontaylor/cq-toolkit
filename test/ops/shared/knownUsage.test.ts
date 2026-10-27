@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { createKnownUsageLedger } from '../../../src/ops/shared/knownUsage.js';
+import {
+  createKnownUsageLedger,
+  foldKnownUsageSummaries,
+} from '../../../src/ops/shared/knownUsage.js';
 
 describe('known usage across driver exits', () => {
   it('keeps success, failure, cancellation, budget and repair measurements after a later throw', () => {
@@ -72,5 +75,24 @@ describe('known usage across driver exits', () => {
     ).toThrow('invalid usage');
     expect(() => ledger.record('bad-price', { costUSD: Number.NaN })).toThrow('invalid cost');
     expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 0, unpricedCount: 0 });
+  });
+
+  it('folds mixed and unknown engine summaries without changing their dispatch counts', () => {
+    const mixed = {
+      usage: { input: 4, output: 1, cacheRead: 2, cacheWrite: 0 },
+      costUSD: 0.02,
+      knownCount: 2,
+      unknownCount: 1,
+      unpricedCount: 2,
+    };
+    const unknown = { knownCount: 0, unknownCount: 1, unpricedCount: 1 };
+    expect(foldKnownUsageSummaries([mixed, unknown, mixed])).toEqual({
+      usage: { input: 8, output: 2, cacheRead: 4, cacheWrite: 0 },
+      costUSD: 0.04,
+      knownCount: 4,
+      unknownCount: 3,
+      unpricedCount: 5,
+    });
+    expect(mixed.usage.input).toBe(4);
   });
 });
