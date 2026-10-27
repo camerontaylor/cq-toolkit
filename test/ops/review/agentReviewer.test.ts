@@ -335,7 +335,7 @@ describe('runAgentReviewer v3 session engine', () => {
     });
   });
 
-  it('keeps the returned partial-error reason when usage is invalid and cost is valid', async () => {
+  it('keeps valid cost when returned usage is invalid and leaves session validation in charge', async () => {
     const fake = fakeDrivers({
       result: workerResult({
         stopReason: 'error',
@@ -347,12 +347,33 @@ describe('runAgentReviewer v3 session engine', () => {
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(result.status).toBe('needs-human');
     if (result.status !== 'needs-human') throw new Error(JSON.stringify(result));
-    expect(result.reason).toContain('original partial driver failure');
+    expect(result.reason).toContain('Too small: expected number to be >=0');
+    expect(result.reason).not.toContain('invalid usage for dispatch');
     expect(result.report?.usageSummary).toEqual({
       costUSD: 0.012,
       knownCount: 0,
       unknownCount: 1,
       unpricedCount: 0,
+    });
+  });
+
+  it('keeps a returned partial-error reason when only cost is invalid', async () => {
+    const fake = fakeDrivers({
+      result: workerResult({
+        stopReason: 'error',
+        error: 'original partial driver failure',
+        costUSD: Number.NaN,
+      }),
+    });
+    const result = await runAgentReviewer(fake.drivers, reviewerInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status !== 'needs-human') throw new Error(JSON.stringify(result));
+    expect(result.reason).toContain('original partial driver failure');
+    expect(result.report?.usageSummary).toEqual({
+      usage,
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
     });
   });
 
