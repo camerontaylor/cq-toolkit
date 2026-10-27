@@ -1,0 +1,24 @@
+{
+ "packageManager": "pnpm@12.8.1",
+ "deps": [
+  "@ai-sdk/anthropic",
+  "@ai-sdk/deepseek",
+  "@ai-sdk/openai",
+  "@ai-sdk/provider",
+  "@ai-sdk/zai",
+  "@modelcontextprotocol/sdk",
+  "@types/node",
+  "@vitest/coverage-v8",
+  "ai",
+  "knip",
+  "oxfmt",
+  "oxlint",
+  "oxlint-tsgolint",
+  "p-limit",
+  "proper-lockfile",
+  "typescript",
+  "undici",
+  "vitest",
+  "zod"
+ ]
+}
