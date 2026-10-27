@@ -174,6 +174,29 @@ def _status(q, request_id, entry):
             "receiptSource": None, "receiptEquivalence": None}
 
 
+def _vendor_rate_limit(document):
+    """Only a complete all-causes proof can authorize vendor-only continuation.
+
+    The producer sources rate_limit only from exact errorType + recoverable=True.
+    Legacy outcomes/messages and missing or mixed causes convey no authority.
+    """
+    cls = document.get("classification")
+    if (document.get("outcome") != "rate_limited" or document.get("counted") is not False
+            or type(cls) is not dict or cls.get("outcome") != "rate_limited"
+            or cls.get("counted") is not False or type(cls.get("exit")) is not int
+            or cls["exit"] not in (0, 1) or type(cls.get("bad_lines")) is not int
+            or cls["bad_lines"] != 0):
+        return False
+    proof = cls.get("failure_provenance")
+    if (type(proof) is not dict or set(proof) != {"version", "complete", "causes"}
+            or type(proof.get("version")) is not int or proof["version"] != 1
+            or proof.get("complete") is not True or type(proof.get("causes")) is not list
+            or not proof["causes"]):
+        return False
+    allowed = {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+    return all(type(cause) is dict and cause == allowed for cause in proof["causes"])
+
+
 def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     policy = validate_policy(policy)
     req = decode(raw)
@@ -244,11 +267,10 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             result["state"] = ("reused" if item.get("reused_from") else outcome) if result["reviewed"] else {
                 "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
             if result["state"] == "blocked":
-                # Only trusted structured classifier outcomes, never last_error string matching.
-                category = {"rate_limited": "vendor-rate-limited", "auth": "vendor-needs-action",
-                            "action_required": "vendor-needs-action"}.get(outcome)
-                result["reason"] = {"source": "vendor" if category else "queue",
-                                    "category": category or "unknown", "code": outcome if category else "unclassified"}
+                # Never upgrade a lossy first-error outcome into vendor authority.
+                result["reason"] = ({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+                                    if _vendor_rate_limit(document) else
+                                    {"source": "queue", "category": "unknown", "code": "unclassified"})
         elif result["state"] == "blocked" and result["reason"] is None:
             result["reason"] = {"source": "queue", "category": "unknown", "code": "no-receipt"}
         if entry.get("reason") is not None:

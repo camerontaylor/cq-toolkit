@@ -61,9 +61,20 @@ It never writes a findings-v1 record. Each supported receipt is at most 64 MiB;
 larger receipts refuse explicitly without truncation or acknowledgement.
 
 Status separates enqueued/reviewed/consumed/fixed. `reason` is typed provenance
-(`source`, `category`, `code`); only trusted structured vendor outcomes produce
-vendor availability categories. Unknown errors never become availability debt
-through message matching. Persistent Q6 `forge-identity` reasons project blocked
+(`source`, `category`, `code`). Vendor continuation requires the runner's
+`classification.failure_provenance` v1 proof with `complete: true` and a nonempty
+`causes` list. Every cause must be exactly
+`{source: "vendor", category: "vendor-rate-limited", code: "rate_limit"}`;
+the runner sources this only from literal `errorType: "rate_limit"` plus
+`recoverable: true`. Root and classifier outcomes must both be `rate_limited`,
+both counted flags false, exit an integer 0 or 1, and `bad_lines` integer 0.
+Missing, incomplete, malformed, mixed or unknown causes remain queue blockers.
+Legacy outcome labels, prose, auth and unavailable guesses grant no vendor
+continuation; older runners require the reviewed provenance producer update.
+All error/action and hard causes must be retained by that producer. The proof
+stays in the immutable receipt; status exposes one bounded reason.
+
+Persistent Q6 `forge-identity` reasons project blocked
 and prohibit receipt consumption until exact successful forge revalidation clears them. Full capture paths/findings are absent from status.
 Receipt request IDs may name the original enqueue; durable alias bindings and
 verified equivalence authorize reuse, never the cursor or original ID alone.
