@@ -40,6 +40,15 @@ import {
   type AddressWorker,
 } from './addressWorker.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
+import {
+  resolveDeferredVendorContext,
+  type DeferredVendorContextRequest,
+  type DeferredVendorContext,
+} from './internal/addressDeferred.js';
+import {
+  hasDeferredReviewSources,
+  type DeferredVendorDebt,
+} from '../dev/internal/deferredReview.js';
 import type { AddressFailedAttempt } from './internal/addressEvidence.js';
 import { FixReviewItemInputSchema } from './registry.js';
 import {
@@ -97,6 +106,8 @@ export interface ReviewAddressReport {
   stop?: 'round-cap' | 'budget' | 'rereview-blocked';
   /** Last admitted head, advanced only by verified fix commits. */
   verifiedHead?: string;
+  /** Durable author debt remains explicit; address success is not vendor completion. */
+  deferredVendorDebt?: DeferredVendorDebt;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -111,6 +122,9 @@ export interface ReviewAddressDeps {
   review?: (input: ReviewRunInput) => Promise<ReviewRunResult>;
   workerFactory?: (deps: Parameters<typeof makeAddressWorker>[0]) => AddressWorker;
   disposition?: (root: string, finding: Finding) => Promise<OpResult<unknown>>;
+  resolveDeferredVendorContext?: (
+    request: DeferredVendorContextRequest,
+  ) => Promise<DeferredVendorContext | undefined>;
 }
 
 /** Deterministic file-disjoint waves. Missing scope is handled explicitly, never fanned out. */
@@ -632,6 +646,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let rereviewStillTransient = false;
           const review = async (request: ReviewRunInput) => {
             const first = await reviewOnce(request);
+            if (
+              first.status === 'needs-human' &&
+              first.report?.deferredVendorDebt &&
+              first.report.blockedBudget !== true &&
+              !stop() &&
+              (await hasRequiredSources(request.repoRoot, first.report))
+            )
+              return first;
             if (first.status !== 'needs-human' || first.report?.blockedTransient !== true || stop())
               return first;
             report.reasons.push('re-review blocked on a network/transient class; retrying once');
@@ -793,6 +815,50 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const dispositions = new Map<string, Finding>();
           let bookkeepingFailed = false;
           let reviewedBase: string | undefined;
+          const hasRequiredSources = async (root: string, record: FindingsRecord) => {
+            if (stop()) return false;
+            const complete = isComplete(record, policy.review.reviewers);
+            if (!policy.review.reviewers.includes('coderabbit')) return complete;
+            return withBookkeepingAccess(root, async () => {
+              if (stop()) return false;
+              const context = await (
+                deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
+              )({
+                repoRoot: root,
+                target: input.target ?? 'merge-queue',
+                base: reviewedBase,
+                record,
+                ...(parent ? { signal: parent } : {}),
+              });
+              if (!deps.resolveDeferredVendorContext && context)
+                await noteBookkeeping(devLedgerPath(root, record.branch));
+              if (stop()) return false;
+              if (!context) {
+                if (complete) delete report.deferredVendorDebt;
+                return complete;
+              }
+              if (
+                !complete &&
+                !hasDeferredReviewSources(
+                  record,
+                  policy.review.reviewers,
+                  context.debt,
+                  context.identity,
+                )
+              )
+                return false;
+              // New receipt findings enter the normal dispatcher. Existing
+              // dispositions remain bound to their retained finding IDs.
+              record.findings = [
+                ...record.findings,
+                ...context.findings.filter(
+                  (finding) => !record.findings.some((item) => item.id === finding.id),
+                ),
+              ];
+              report.deferredVendorDebt = context.debt;
+              return true;
+            });
+          };
           const admitCleanRecord = async (root: string, record: FindingsRecord) => {
             const effects = makeSubprocessDevEffects(root);
             const read = await readWorkState(effects, {
@@ -1547,8 +1613,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             report.findings = previous.findings;
             noteAdvisories(previous);
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-            if (!isComplete(previous, policy.review.reviewers))
+            if (!(await hasRequiredSources(root, previous)))
               return await finish('needs-human', 'review source incomplete');
+            if (stop()) return await finish('needs-human', stop());
+            report.findings = previous.findings;
+            report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             const pending = previous.findings.filter((f) => f.status === 'open');
             if (!pending.length && !report.openBlocking.length && !bookkeepingFailed) {
               await admitCleanRecord(root, previous);
@@ -1566,7 +1635,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               wallMs: Math.max(1, remainingWallMs()),
               ...(priorFindings.length > 0 ? { priorFindings } : {}),
             });
-            if (refreshed.status !== 'ok') {
+            const refreshedRecord =
+              refreshed.status === 'ok'
+                ? refreshed.value
+                : refreshed.status === 'needs-human' &&
+                    refreshed.report?.deferredVendorDebt &&
+                    refreshed.report.blockedBudget !== true &&
+                    !stop() &&
+                    (await hasRequiredSources(root, refreshed.report))
+                  ? FindingsRecordSchema.strip().parse(refreshed.report)
+                  : undefined;
+            if (!refreshedRecord) {
               if (refreshed.report) noteAdvisories(refreshed.report);
               return await finish(
                 'needs-human',
@@ -1575,20 +1654,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               );
             }
             if (
-              refreshed.value.branch !== (await branchName(root)) ||
-              refreshed.value.head !== (await gitText(root, ['rev-parse', 'HEAD']))
+              refreshedRecord.branch !== (await branchName(root)) ||
+              refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
             )
               return await finish('needs-human', 're-review identity changed');
-            previous = retainDeferred(refreshed.value);
+            previous = retainDeferred(refreshedRecord);
+            const complete = await hasRequiredSources(root, previous);
+            if (stop()) return await finish('needs-human', stop());
             noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             noteRound(round, previous).record = previous;
-            if (
-              isComplete(previous, policy.review.reviewers) &&
-              !report.openBlocking.length &&
-              !bookkeepingFailed
-            ) {
+            if (complete && !report.openBlocking.length && !bookkeepingFailed) {
               await admitCleanRecord(root, previous);
               return await finish('ok');
             }
