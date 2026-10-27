@@ -171,9 +171,15 @@ export async function runReviewSession(
       },
       promptBudget: {
         ...defaultHarnessConfig.promptBudget,
-        maxTools: 3,
-        // This legacy field also bounds the operation's user prompt. The
-        // driver keeps that prompt out of the system message (prompt-once).
+        // The session surface is read plus the two read-only search tools
+        // when allowed: `selectTools` orders edit/bash/write first, so a
+        // tighter budget would silently hide the offered search tools and
+        // the rg-capability probe with them. Withheld search (rg absent or
+        // too old) stays visible as capability evidence, not a smaller
+        // configured surface. This legacy field also bounds the operation's
+        // user prompt; the driver keeps that prompt out of the system
+        // message (prompt-once).
+        maxTools: plan.tools && input.searchTools ? 3 : 1,
         maxSystemPromptChars: input.maxPromptChars,
       },
     },
