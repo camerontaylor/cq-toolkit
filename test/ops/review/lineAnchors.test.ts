@@ -39,6 +39,11 @@ describe('headLineAnchors', () => {
     expect(headLineAnchors(text)).toBe('L2 + added\n');
   });
 
+  it('anchors a trailing deletion to the preceding surviving line', () => {
+    const text = '@@ -1,4 +1,3 @@\n one\n two\n three\n-four\n';
+    expect(headLineAnchors(text)).toBe('removed after L3 (1 line): four\n');
+  });
+
   it('truncates long excerpts and caps the section', () => {
     const long = `@@ -1 +1,400 @@\n${'+x'.repeat(100)}\n`.repeat(1) + '+y\n'.repeat(1_500);
     const out = headLineAnchors(long);

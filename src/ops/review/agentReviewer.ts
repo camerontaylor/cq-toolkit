@@ -162,8 +162,8 @@ export async function runAgentReviewer(
       ensureActive();
       // Partition sessions are independent, so up to `concurrency` run at once.
       // Results are merged by plan index (deterministic coverage and finding
-      // order). The token allowance is split across the concurrent slots (a
-      // guard against runaway spend, not an exact joint bound).
+      // order). Each session reserves a share of the unreserved token allowance
+      // until it settles, so replacements cannot reuse promised budget.
       const sessions = plan.sessions;
       const concurrency = Math.max(
         1,
@@ -178,7 +178,8 @@ export async function runAgentReviewer(
       let nextIndex = 0;
       let halted = false;
       let budgetStop: 'before' | 'during' | undefined;
-      let finished = 0;
+      let inFlight = 0;
+      let reserved = 0;
       // Findings are rebuilt from the per-session outcomes in plan order every
       // time a session lands, so a later throw or abort still reports them.
       const rebuildFindings = (): void => {
@@ -206,6 +207,15 @@ export async function runAgentReviewer(
           halted = true;
           return;
         }
+        // Reserve this session's allowance out of what no in-flight sibling has
+        // already been promised; it is released when the session settles.
+        const freeSlots = Math.max(1, concurrency - inFlight);
+        const allowance = Math.max(
+          1,
+          Math.floor((input.maxTokens - report!.usage - reserved) / freeSlots),
+        );
+        inFlight += 1;
+        reserved += allowance;
         const evidence: ReviewCoverageV2['sessions'][number] = {
           id: session.id,
           status: 'error',
@@ -215,40 +225,40 @@ export async function runAgentReviewer(
         };
         active.add(evidence);
         report!.coverage.sessions.push(evidence);
-        await scanReviewUpload(input.scanSecrets, [
-          { component: 'review-prompt', path: 'review-request.txt', text: session.prompt },
-        ]);
-        ensureActive();
-        const result = await runReviewSession(drivers, {
-          repoRoot: input.repoRoot,
-          role: input.role,
-          severityMap: input.severityMap,
-          maxTokens: Math.max(
-            1,
-            Math.floor(
-              (input.maxTokens - report!.usage) / Math.min(concurrency, sessions.length - finished),
+        let result: Awaited<ReturnType<typeof runReviewSession>>;
+        try {
+          await scanReviewUpload(input.scanSecrets, [
+            { component: 'review-prompt', path: 'review-request.txt', text: session.prompt },
+          ]);
+          ensureActive();
+          result = await runReviewSession(drivers, {
+            repoRoot: input.repoRoot,
+            role: input.role,
+            severityMap: input.severityMap,
+            maxTokens: allowance,
+            maxSteps: input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps,
+            maxPromptChars: Math.max(
+              20_000,
+              input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars,
             ),
-          ),
-          maxSteps: input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps,
-          maxPromptChars: Math.max(
-            20_000,
-            input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars,
-          ),
-          signal: controller.signal,
-          scanSecrets: input.scanSecrets,
-          components,
-          plan: session,
-          evidence,
-          onUsage: (usage) => {
-            report!.usage += totalUsage(usage);
-          },
-          onAdvisories: (advisories) => {
-            report!.advisories = [...new Set([...report!.advisories, ...advisories])];
-          },
-          searchTools: input.searchTools ?? true,
-        });
+            signal: controller.signal,
+            scanSecrets: input.scanSecrets,
+            components,
+            plan: session,
+            evidence,
+            onUsage: (usage) => {
+              report!.usage += totalUsage(usage);
+            },
+            onAdvisories: (advisories) => {
+              report!.advisories = [...new Set([...report!.advisories, ...advisories])];
+            },
+            searchTools: input.searchTools ?? true,
+          });
+        } finally {
+          inFlight -= 1;
+          reserved -= allowance;
+        }
         ensureActive();
-        finished += 1;
         if (report!.usage > input.maxTokens) evidence.status = 'budget';
         updatePieces(report!.coverage);
         active.delete(evidence);

@@ -601,6 +601,12 @@ describe('createReviewPlan boundary validation', () => {
       /session\.maxSteps/,
     );
     expect(() =>
+      createReviewPlan(planInput([component], { session: { concurrency: Number.NaN } })),
+    ).toThrow(/session\.concurrency/);
+    expect(() => createReviewPlan(planInput([component], { session: { concurrency: 0 } }))).toThrow(
+      /session\.concurrency/,
+    );
+    expect(() =>
       createReviewPlan(planInput([component], { session: { maxInputChars: Number.NaN } })),
     ).toThrow(/session\.maxInputChars/);
   });

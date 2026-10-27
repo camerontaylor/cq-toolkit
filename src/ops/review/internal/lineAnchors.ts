@@ -32,10 +32,17 @@ export function headLineAnchors(
   let { oldLine, newLine } = start;
   const rows: string[] = [];
   let removed: { before: number; count: number; first: string } | undefined;
-  const flush = () => {
+  // `survivor`: a surviving head line follows the run inside its hunk. A
+  // trailing deletion (end of hunk) anchors to the preceding surviving line
+  // instead, since the next-line cursor may be past the end of the file.
+  const flush = (survivor = false) => {
     if (removed === undefined) return;
+    const where =
+      survivor || removed.before <= 1
+        ? `before L${removed.before}`
+        : `after L${removed.before - 1}`;
     rows.push(
-      `removed before L${removed.before} (${removed.count} line${removed.count === 1 ? '' : 's'}): ${excerpt(removed.first)}`,
+      `removed ${where} (${removed.count} line${removed.count === 1 ? '' : 's'}): ${excerpt(removed.first)}`,
     );
     removed = undefined;
   };
@@ -60,16 +67,16 @@ export function headLineAnchors(
       removed.count++;
       oldLine++;
     } else if (line.startsWith('+')) {
-      flush();
+      flush(true);
       rows.push(`L${newLine} + ${excerpt(line.slice(1))}`);
       newLine++;
     } else if (line.startsWith(' ')) {
-      flush();
+      flush(true);
       oldLine++;
       newLine++;
     } else if (line === '' && index < lines.length - 1) {
       // A blank context line whose leading space was stripped.
-      flush();
+      flush(true);
       oldLine++;
       newLine++;
     } else flush();

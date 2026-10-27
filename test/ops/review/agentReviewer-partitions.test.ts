@@ -640,6 +640,9 @@ it('splits the remaining token allowance across concurrent sessions', async () =
     }),
   );
   expect(fake.invocations[0]!.budget.maxTokens).toBe(100);
+  // Concurrent sessions reserve disjoint shares: 400 -> 100 + 100 + 100 + 100.
+  const first = fake.invocations.slice(0, 4).map((invocation) => invocation.budget.maxTokens!);
+  expect(first.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(400);
 });
 
 it('retries a transient session failure once, counting both attempts, but not other failures', async () => {

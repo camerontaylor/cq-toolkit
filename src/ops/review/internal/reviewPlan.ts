@@ -144,6 +144,11 @@ function resolveBounds(input: CreateReviewPlanInput): Bounds {
   const maxSteps = input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps;
   requireInteger('session.maxInputChars', maxInputChars, 1);
   requireInteger('session.maxSteps', maxSteps, 1);
+  requireInteger(
+    'session.concurrency',
+    input.session?.concurrency ?? REVIEW_SESSION_DEFAULTS.concurrency,
+    1,
+  );
   const small = {
     maxChangedLines:
       input.size?.small?.maxChangedLines ?? REVIEW_SIZE_DEFAULTS.small.maxChangedLines,
