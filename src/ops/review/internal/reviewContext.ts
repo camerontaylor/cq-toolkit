@@ -21,8 +21,8 @@
 // prompt that the engine scans before upload, exactly like the diff. The
 // helper adds nothing to them — no interpretation, no filtering beyond the
 // caps — so the existing scan-before-upload gate keeps covering every byte.
-import type { DevEffects } from '../dev/effects.js';
-import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
+import type { DevEffects } from '../../dev/effects.js';
+import { HARDENED_DIFF_FLAGS } from '../../../shared/gitHarden.js';
 
 /** The commit-intent cap; the truncation marker fits inside it. */
 export const REVIEW_CONTEXT_INTENT_CAP = 4_000;
@@ -97,32 +97,31 @@ export async function collectBoundedReviewContext(
   scope: ReviewContextScope,
   deadline: { signal?: AbortSignal; remainingWallMs: () => number },
 ): Promise<{ ok: true; context: BoundedReviewContext } | ReviewContextFault> {
-  const callOptions = (): { timeoutMs: number; signal?: AbortSignal } => ({
-    timeoutMs: Math.max(1, Math.min(CONTEXT_READ_TIMEOUT_MS, deadline.remainingWallMs())),
-    ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
-  });
-  // A DEADLINE GUARD, not a clamp: an exhausted (<= 0) or non-finite
-  // remaining budget is FATAL before and after every await. A successful
-  // git exit must never settle a context read the caller's budget could
-  // not cover — the wall budget, not the subprocess exit, is the gate.
-  const budgetGuard = (when: string): ReviewContextFault | null => {
+  // A finite, positive caller budget is mandatory; Infinity is not an
+  // unlimited-budget sentinel. Validate each sample once and use that SAME
+  // sample for the next timeout, avoiding a second unchecked budget read.
+  // After every await, cancellation/budget wins over any git exit status.
+  const callOptions = (when: string): { timeoutMs: number; signal?: AbortSignal } => {
+    deadline.signal?.throwIfAborted();
     const remaining = deadline.remainingWallMs();
-    if (!Number.isFinite(remaining) || remaining > 0) return null;
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      throw new Error(
+        'review wall budget ' + when + ' — review context not collected (' + String(remaining) + 'ms remaining)',
+      );
+    }
     return {
-      ok: false,
-      fatal: true,
-      reason: `review wall budget ${when} — review context not collected (${String(remaining)}ms remaining)`,
+      timeoutMs: Math.max(1, Math.min(CONTEXT_READ_TIMEOUT_MS, remaining)),
+      ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
     };
   };
   try {
-    const before = budgetGuard('was exhausted before the context reads');
-    if (before !== null) return before;
-    deadline.signal?.throwIfAborted();
+    const intentOptions = callOptions('was exhausted before the context reads');
     const log = await effects.runCommand(
       'git',
       ['log', '--format=%s%n%n%b', `${comparison}..${head}`],
-      callOptions(),
+      intentOptions,
     );
+    const fileListOptions = callOptions('was exhausted after the intent read');
     if (log.exitCode !== 0) {
       return {
         ok: false,
@@ -130,15 +129,12 @@ export async function collectBoundedReviewContext(
         reason: `could not collect review intent (exit ${log.exitCode === null ? 'none (killed)' : String(log.exitCode)})`,
       };
     }
-    deadline.signal?.throwIfAborted();
-    const afterLog = budgetGuard('was exhausted after the intent read');
-    if (afterLog !== null) return afterLog;
-    deadline.signal?.throwIfAborted();
     const numstat = await effects.runCommand(
       'git',
       ['diff', '--numstat', ...HARDENED_DIFF_FLAGS, comparison],
-      callOptions(),
+      fileListOptions,
     );
+    callOptions('was exhausted after the file-list read');
     if (numstat.exitCode !== 0) {
       return {
         ok: false,
@@ -146,9 +142,6 @@ export async function collectBoundedReviewContext(
         reason: `could not list review diff stats (exit ${numstat.exitCode === null ? 'none (killed)' : String(numstat.exitCode)})`,
       };
     }
-    deadline.signal?.throwIfAborted();
-    const afterNumstat = budgetGuard('was exhausted after the file-list read');
-    if (afterNumstat !== null) return afterNumstat;
     return {
       ok: true,
       context: {

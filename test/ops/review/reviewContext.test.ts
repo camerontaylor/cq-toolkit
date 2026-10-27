@@ -9,7 +9,7 @@ import {
   REVIEW_CONTEXT_INTENT_CAP,
   capBoundedContext,
   collectBoundedReviewContext,
-} from '../../../src/ops/review/reviewContext.js';
+} from '../../../src/ops/review/internal/reviewContext.js';
 import type { CommandResult, DevEffects } from '../../../src/ops/dev/effects.js';
 import { makeTestRepo, repoEffects, type TestRepo } from '../dev/repo.js';
 
@@ -17,10 +17,8 @@ import { makeTestRepo, repoEffects, type TestRepo } from '../dev/repo.js';
 function scriptedRepoEffects(
   repo: TestRepo,
   handler: (command: string, args: readonly string[]) => CommandResult | undefined,
-): DevEffects & { commands: { command: string; args: readonly string[] }[] } {
-  return repoEffects(repo, (command, args) => handler(command, args)) as unknown as DevEffects & {
-    commands: { command: string; args: readonly string[] }[];
-  };
+) {
+  return repoEffects(repo, (command, args) => handler(command, args));
 }
 
 const DEADLINE = { remainingWallMs: () => 60_000 };
@@ -123,12 +121,20 @@ describe('collectBoundedReviewContext (real git)', () => {
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.context.intent.length).toBe(REVIEW_CONTEXT_INTENT_CAP);
+    expect(result.context.intent.length).toBeLessThanOrEqual(REVIEW_CONTEXT_INTENT_CAP);
+    const omitted = Number(/\[truncated: (\d+) characters omitted\]/.exec(result.context.intent)?.[1]);
+    const kept = result.context.intent.indexOf('\n[truncated:');
+    const rawIntent = repo.git(
+      'log', '--format=%s%n%n%b',
+      repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim() + '..HEAD',
+    );
+    expect(kept).toBeGreaterThan(0);
+    expect(kept + omitted).toBe(rawIntent.length);
     expect(result.context.intent).toContain('[truncated:');
   });
 
   it('a non-zero git log exit is a NON-fatal fault naming the command class', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
+    await repo.write('src/a.ts', 'export const a = 2;\n');
     repo.commitAll('base work');
     const effects = scriptedRepoEffects(repo, (command, args) =>
       command === 'git' && args[0] === 'log'
@@ -147,7 +153,7 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('a non-zero numstat exit is a NON-fatal fault naming the stats read', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
+    await repo.write('src/a.ts', 'export const a = 2;\n');
     repo.commitAll('base work');
     const effects = scriptedRepoEffects(repo, (command, args) =>
       command === 'git' && args[0] === 'diff' && args.includes('--numstat')
@@ -166,7 +172,7 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('an aborted signal is FATAL: the caller deadline stops the review, no degraded run', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
+    await repo.write('src/a.ts', 'export const a = 2;\n');
     repo.commitAll('base work');
     const controller = new AbortController();
     const effects = scriptedRepoEffects(repo, (command, args) => {
@@ -184,64 +190,119 @@ describe('collectBoundedReviewContext (real git)', () => {
     if (!result.ok) expect(result.reason).toContain('could not collect review context');
   });
 
-  it('an exhausted wall budget is FATAL even when the reads would succeed', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
-    repo.commitAll('base work');
-    let runs = 0;
-    const base = repoEffects(repo);
-    const effects: DevEffects = {
-      ...base,
-      runCommand: async (command, args, opts) => {
-        runs += 1;
-        return base.runCommand(command, args, opts);
-      },
-    };
-    const result = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
-      remainingWallMs: () => 0,
-    });
-    expect(result).toMatchObject({ ok: false, fatal: true });
-    expect(runs).toBe(0);
+  it.each([0, -1, Number.NaN, Infinity, -Infinity])(
+    'rejects invalid caller budget %s before spawning any command',
+    async (remaining) => {
+      const effects = repoEffects(repo);
+      const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
+        remainingWallMs: () => remaining,
+      });
+      expect(result).toMatchObject({ ok: false, fatal: true });
+      expect(effects.calls).toEqual([]);
+    },
+  );
+
+  it.each(['log', 'diff'])(
+    'checks exhausted/nonfinite budget after %s even on failed git exits',
+    async (collapseAfter) => {
+      for (const exitCode of [0, 128]) {
+        for (const expired of [0, Number.NaN, Infinity]) {
+          let remaining = 5_000;
+          const effects = scriptedRepoEffects(repo, (_command, args) => {
+            if (args[0] === collapseAfter) remaining = expired;
+            return {
+              exitCode: args[0] === 'log' && collapseAfter === 'diff' ? 0 : exitCode,
+              stdout: '', stderr: '', timedOut: false,
+            };
+          });
+          const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
+            remainingWallMs: () => remaining,
+          });
+          expect(result).toMatchObject({ ok: false, fatal: true });
+          if (!result.ok) expect(result.reason).toContain('after the');
+          expect(effects.calls.map((call) => call.args[0])).toEqual(
+            collapseAfter === 'log' ? ['log'] : ['log', 'diff'],
+          );
+        }
+      }
+    },
+  );
+
+  it.each(['log', 'diff'])(
+    'denies a successful REAL git read when the budget expires during %s',
+    async (collapseAfter) => {
+      let remaining = 5_000;
+      const effects = repoEffects(repo);
+      const run = effects.runCommand;
+      effects.runCommand = async (command, args, opts) => {
+        const result = await run(command, args, opts);
+        if (args[0] === collapseAfter) remaining = 0;
+        return result;
+      };
+      const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
+        remainingWallMs: () => remaining,
+      });
+      expect(result).toMatchObject({ ok: false, fatal: true });
+      expect(effects.calls.map((call) => call.args[0])).toEqual(
+        collapseAfter === 'log' ? ['log'] : ['log', 'diff'],
+      );
+    },
+  );
+
+  it('returns empty context for an empty real Git comparison', async () => {
+    const effects = repoEffects(repo);
+    const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', DEADLINE);
+    expect(result).toEqual({ ok: true, context: { intent: '', fileList: '', scope: 'full' } });
   });
 
-  it('a NON-FINITE remaining budget is FATAL, never an unbounded run', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
-    repo.commitAll('base work');
-    const result = await collectBoundedReviewContext(repoEffects(repo), 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
-      remainingWallMs: () => Number.NaN,
+  it('does not spawn when already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('already cancelled'));
+    const effects = repoEffects(repo);
+    const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
+      signal: controller.signal,
+      remainingWallMs: () => 5_000,
     });
     expect(result).toMatchObject({ ok: false, fatal: true });
+    expect(effects.calls).toEqual([]);
   });
 
-  it('a budget exhausted AFTER the intent read is FATAL before the file-list read', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
-    repo.commitAll('base work');
-    const seen: string[] = [];
-    const base = repoEffects(repo);
-    const effects: DevEffects = {
-      ...base,
-      runCommand: async (command, args, opts) => {
-        const first = args[0];
-        if (first !== undefined) seen.push(first);
-        return base.runCommand(command, args, opts);
-      },
+  it.each(['log', 'diff'])('cancellation during failed %s overrides its exit code', async (cancelAfter) => {
+    const controller = new AbortController();
+    const effects = scriptedRepoEffects(repo, (_command, args) => {
+      if (args[0] === cancelAfter) controller.abort(new Error('cancelled during read'));
+      return { exitCode: args[0] === cancelAfter ? 128 : 0, stdout: '', stderr: '', timedOut: false };
+    });
+    const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
+      signal: controller.signal,
+      remainingWallMs: () => 5_000,
+    });
+    expect(result).toMatchObject({ ok: false, fatal: true });
+    expect(effects.calls.map((call) => call.args[0])).toEqual(
+      cancelAfter === 'log' ? ['log'] : ['log', 'diff'],
+    );
+  });
+
+  it('uses each validated budget sample for the next read and stops when it collapses', async () => {
+    let remaining = 5_000;
+    const seen: number[] = [];
+    const effects = repoEffects(repo);
+    const run = effects.runCommand;
+    effects.runCommand = async (command, args, opts) => {
+      seen.push(opts.timeoutMs);
+      const result = await run(command, args, opts);
+      remaining = args[0] === 'log' ? 2_000 : 0;
+      return result;
     };
-    let remaining = 60_000;
-    const result = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
+    const result = await collectBoundedReviewContext(effects, 'HEAD', 'HEAD', 'full', {
       remainingWallMs: () => remaining,
     });
-    expect(result.ok).toBe(true);
-    expect(seen).toEqual(['log', 'diff']);
-    // The after-read guard path: the budget collapses mid-collection.
-    remaining = 0;
-    const second = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
-      remainingWallMs: () => remaining,
-    });
-    expect(second).toMatchObject({ ok: false, fatal: true });
-    expect(seen).toEqual(['log', 'diff']);
+    expect(result).toMatchObject({ ok: false, fatal: true });
+    expect(seen).toEqual([5_000, 2_000]);
   });
 
   it('both reads share the caller deadline: options carry the signal and bounded timeout', async () => {
-    await repo.write('src/a.ts', 'export const a = 1;\n');
+    await repo.write('src/a.ts', 'export const a = 2;\n');
     repo.commitAll('base work');
     const controller = new AbortController();
     const seen: { timeoutMs: number; signal?: AbortSignal }[] = [];
