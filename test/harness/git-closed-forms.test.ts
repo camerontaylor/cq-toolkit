@@ -14,9 +14,11 @@ import type { ToolkitTool } from '../../src/harness/tools.js';
 import { reviewFixHarness } from '../../src/ops/review/fixReviewItem.js';
 
 const execFileAsync = promisify(execFile);
-const closedDiffPrefix = 'command allowlist: git diff is closed-form — use exactly one of:';
-const closedLogPrefix = 'command allowlist: git log is closed-form — use exactly one of:';
-const plainPrefix = 'command not allowed by harness config allowlist:';
+const closedDiffPrefix =
+  'CMD_DENIED: command allowlist: git diff is closed-form — use exactly one of:';
+const closedLogPrefix =
+  'CMD_DENIED: command allowlist: git log is closed-form — use exactly one of:';
+const plainPrefix = 'CMD_DENIED: command not allowed by harness config allowlist:';
 const braceExpands = execFileSync('/bin/sh', ['-c', "printf '%s' {a,b}"]).toString() === 'ab';
 
 function runConfig(commandPatterns: string[]): HarnessConfig {
