@@ -568,10 +568,13 @@ describe('blocked re-review marker (#509)', () => {
     reason: 'review.run: not every configured reviewer completed a terminal cycle',
     report: { ...record, blockedTransient: true as const },
   });
-  /** One verified fix, then a re-review blocked on the transient class twice. */
-  const run = async (spendOnRetry: number) => {
+  /** One verified fix, then a blocked re-review (with one retry for transient blocks). */
+  const run = async (spendOnRetry: number, firstBlock?: 'wall' | 'tokens' | 'remaining') => {
     const f = await fixture();
+    const realNow = Date.now;
+    let clock = realNow();
     try {
+      if (firstBlock === 'wall') Date.now = () => clock;
       let account: ((result: WorkerResult) => void) | undefined;
       let reviews = 0;
       const result = await makeReviewAddress({
@@ -591,20 +594,52 @@ describe('blocked re-review marker (#509)', () => {
         },
         review: async () => {
           reviews += 1;
+          if (firstBlock === 'wall') clock += 1001;
+          if (firstBlock === 'tokens')
+            account?.({
+              stopReason: 'error',
+              usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            });
           if (reviews === 2 && spendOnRetry > 0)
             account?.({
               stopReason: 'error',
               usage: { input: spendOnRetry, output: 0, cacheRead: 0, cacheWrite: 0 },
               denials: [],
             });
-          return blockedTransient(f.record());
+          return firstBlock
+            ? {
+                status: 'needs-human' as const,
+                reason: 'review.run: not every configured reviewer completed a terminal cycle',
+                report: f.record(),
+              }
+            : blockedTransient(f.record());
         },
-      })({ ...f.input, maxTokens: 100, rounds: 1 });
+      })({ ...f.input, maxTokens: 100, wallMs: firstBlock === 'wall' ? 1000 : 60000, rounds: 1 });
       return { result, reviews };
     } finally {
+      Date.now = realNow;
       await f.cleanup();
     }
   };
+
+  test.each(['wall', 'tokens'] as const)(
+    '#532: a non-transient re-review block after exhausting %s carries budget',
+    async (budget) => {
+      const { result, reviews } = await run(0, budget);
+      expect(reviews).toBe(1);
+      expect(result.status).toBe('needs-human');
+      expect(reportOf(result).fixes).toEqual([expect.objectContaining({ commit: 'a'.repeat(40) })]);
+      expect(reportOf(result).stop).toBe('budget');
+    },
+  );
+
+  test('#532: a non-transient re-review block with budget remaining has no marker', async () => {
+    const { result, reviews } = await run(0, 'remaining');
+    expect(reviews).toBe(1);
+    expect(result.status).toBe('needs-human');
+    expect(reportOf(result).stop).toBeUndefined();
+  });
 
   test('still blocked after the retry with a verified fix: marked rereview-blocked', async () => {
     const { result, reviews } = await run(0);

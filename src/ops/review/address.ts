@@ -263,12 +263,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       if (
         marker === undefined &&
         status === 'needs-human' &&
-        budgetSpent &&
         !publicationFailed &&
         !bookkeepingTampered &&
         !parent?.aborted
-      )
-        marker = 'budget';
+      ) {
+        // A blocked re-review can return without checking stop() after its
+        // final provider call. Observe the exit budget before deciding its marker.
+        cleanStop?.();
+        if (budgetSpent) marker = 'budget';
+      }
       // The structured round-cap marker rides the report envelope — the
       // kernel-sanctioned extension the CLI strips before the strict
       // OpResultSchema parse. It must be assigned BEFORE the report is
