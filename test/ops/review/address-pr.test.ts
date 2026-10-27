@@ -450,11 +450,15 @@ async function world(
     reviewerCalls: () => reviewerCalls,
     replies,
     /**
-     * Arm a one-shot git-push fault (the scripted stderr is returned with
-     * exit 1). Used to drive publishOnExit's failure through the real
-     * engine's finish() (PR #470 verdict P2 #1).
+     * Arm a git-push fault that fails EVERY push for the life of this world:
+     * each push invokes the script and returns its stderr with exit 1, and
+     * the fault is deliberately never cleared (it is not one-shot). Used to
+     * drive publishOnExit's failure through the real engine's finish()
+     * (PR #470 verdict P2 #1); both the loop's stage-5 push and finish()'s
+     * publishOnExit push hit it, so the outcome rewrite under test stays the
+     * engine's no matter which push carries the verified commit.
      */
-    failNextPush: (script: () => string) => {
+    failEveryPush: (script: () => string) => {
       pushFault = script;
     },
     changeLogin: () => {
@@ -707,8 +711,10 @@ describe('review.address PR phase-one orchestration', () => {
       // rides THE push that carries the verified commit, and finish()
       // reaches the same fault through publishOnExit when the loop already
       // rewrote its own outcome. Either way the ONLY rewrite left is the
-      // engine's.
-      w.failNextPush(() => {
+      // engine's. This pin leans on the fault being persistent (see
+      // failEveryPush): making it one-shot would let publishOnExit succeed
+      // and shift which component's rewrite the assertions hold.
+      w.failEveryPush(() => {
         exitPushSeen = true;
         return 'exit push: disk quota exceeded (scripted)';
       });
