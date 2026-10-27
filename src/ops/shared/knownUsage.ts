@@ -43,18 +43,23 @@ export function foldKnownUsageSummaries(
   return folded;
 }
 
-function validUsage(usage: Usage): boolean {
-  return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.reasoning].every(
-    (value) => value === undefined || (Number.isSafeInteger(value) && value >= 0),
+function validTokens(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validUsage(usage: unknown): usage is Usage {
+  if (typeof usage !== 'object' || usage === null) return false;
+  const fields = usage as Record<string, unknown>;
+  return (
+    [fields.input, fields.output, fields.cacheRead, fields.cacheWrite].every(validTokens) &&
+    (fields.reasoning === undefined || validTokens(fields.reasoning))
   );
 }
 
 /** Discard malformed provider telemetry without losing independently valid fields. */
 export function normalizeUsageObservation(observation: UsageObservation): UsageObservation {
   return {
-    ...(observation.usage !== undefined && validUsage(observation.usage)
-      ? { usage: observation.usage }
-      : {}),
+    ...(validUsage(observation.usage) ? { usage: observation.usage } : {}),
     ...(observation.costUSD !== undefined &&
     Number.isFinite(observation.costUSD) &&
     observation.costUSD >= 0

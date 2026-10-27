@@ -89,11 +89,19 @@ describe('known usage across driver exits', () => {
       'invalid-cost',
       normalizeUsageObservation({ usage: valid, costUSD: Number.POSITIVE_INFINITY }),
     );
+    ledger.record(
+      'missing-fields',
+      normalizeUsageObservation({ usage: {} as typeof valid, costUSD: 0.03 }),
+    );
+    ledger.record(
+      'null-usage',
+      normalizeUsageObservation({ usage: null as unknown as typeof valid, costUSD: 0.04 }),
+    );
     expect(ledger.snapshot()).toEqual({
       usage: valid,
-      costUSD: 0.02,
+      costUSD: 0.09,
       knownCount: 1,
-      unknownCount: 1,
+      unknownCount: 3,
       unpricedCount: 1,
     });
   });
