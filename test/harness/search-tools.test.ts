@@ -710,11 +710,12 @@ describe('contained grep and glob tools', () => {
           buildTools(defaultHarnessConfig, workspace, 'read-only'),
           'grep',
         ).execute({ pattern: 'needle', include: '*.ts' }, { signal: controller.signal });
-        // Deterministic spawn observation: wait until the helper's timer and
-        // abort listeners exist (spawn-observed, no sleeps, no tick counts).
+        // Deterministic spawn observation (REAL timers here): the abort
+        // listener is attached synchronously inside the helper right after
+        // spawn, so observing the child is sufficient readiness. No fake
+        // timer API is used in this test.
         await vi.waitFor(() => {
           expect(spawnState.current).not.toBeNull();
-          expect(vi.getTimerCount()).toBeGreaterThan(0);
         });
         expect(spawnState.current?.kill).not.toHaveBeenCalled();
         controller.abort();
