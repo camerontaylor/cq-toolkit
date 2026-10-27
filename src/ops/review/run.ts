@@ -63,6 +63,8 @@ export interface ReviewRunInput {
 export interface ReviewRunDeps {
   drivers: DriverFactory;
   queueClient?: DeferredQueueClient;
+  /** Abortable CodeRabbit backoff, injected by deterministic tests. */
+  sleep?: import('../dev/review.js').DevReviewDeps['sleep'];
   /** Injection seam for the engine; production binds {@link runAgentReviewer}. */
   runAgentReviewer?: typeof runAgentReviewer;
   parentSignal?: AbortSignal;
@@ -264,6 +266,7 @@ export function makeReviewRun(
           effects,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
           remainingWallMs,
+          ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
           scanSecrets: scanner,
           ...(policy.review.denylistPatternsFile === undefined
             ? {}

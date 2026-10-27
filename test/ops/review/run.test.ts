@@ -2217,3 +2217,51 @@ it.each(['full', 'uncommitted'] as const)(
     }
   },
 );
+it('#551: review.run completes after the scripted CodeRabbit rate limit', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        review: { reviewers: ['coderabbit'] },
+      }),
+    );
+    repo.commitAll('configure review');
+    let calls = 0;
+    const effects = repoEffects(repo, (command) =>
+      command !== 'coderabbit'
+        ? undefined
+        : {
+            exitCode: ++calls === 1 ? 1 : 0,
+            stdout: JSON.stringify(
+              calls === 1
+                ? {
+                    type: 'error',
+                    errorType: 'rate_limit',
+                    recoverable: true,
+                    metadata: { waitTime: '1 second' },
+                  }
+                : { type: 'complete', status: 'review_completed' },
+            ),
+            stderr: '',
+            timedOut: false,
+          },
+    );
+    const sleep = vi.fn(async () => undefined);
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      sleep,
+      scannerFactory: () => async (components) =>
+        components.map((c) => ({ component: c.component, hits: [] })),
+    })({ repoRoot: repo.root, wallMs: 60_000 });
+    expect(result.status).toBe('ok');
+    expect(calls).toBe(2);
+    expect(sleep).toHaveBeenCalledExactlyOnceWith(16_000, expect.any(AbortSignal));
+    if (result.status === 'ok') expect(result.value.sources[0]?.status).toBe('terminal');
+  } finally {
+    await repo.cleanup();
+  }
+});

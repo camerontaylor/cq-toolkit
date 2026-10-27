@@ -35,6 +35,7 @@
 // cycle; `enroll | status | fallback` runs the author-admission transport
 // (review-transport.ts, unchanged from #332 — same wire shapes, same crq
 // invocation `cq dev.review --action=enroll …`).
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentReviewReport, AgentReviewResult } from '../review/agentReviewer.js';
@@ -231,6 +232,8 @@ export interface DevReviewDeps {
   /** Composition-owned cancellation/deadline; cleanup and evidence writes remain enabled. */
   signal?: AbortSignal;
   remainingWallMs?: () => number;
+  /** Abortable backoff; injectable so rate-limit tests never sleep in real time. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** The composed pre-upload secret scanner (cycle action only). */
   scanSecrets: DiffSecretScanner;
   /** Configured rule corpus, excluded from scan input and refused if changed. */
@@ -306,6 +309,7 @@ export function makeDevReview(
     deps.patternsFile,
     deps.signal,
     deps.remainingWallMs,
+    deps.sleep,
   );
   return async (input) => {
     if (isAdmissionInput(input)) {
@@ -337,6 +341,9 @@ function makeReviewCycle(
   patternsFile?: string,
   signal?: AbortSignal,
   remainingWallMs?: () => number,
+  sleep: NonNullable<DevReviewDeps['sleep']> = async (ms, signal) => {
+    await delay(ms, undefined, { signal });
+  },
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const contextDeadlineAt = Date.now() + DEFAULT_REVIEWER_TIMEOUT_MS;
@@ -628,13 +635,75 @@ function makeReviewCycle(
         }
         const timeoutMs = Math.min(DEFAULT_REVIEWER_TIMEOUT_MS, remainingWallMs?.() ?? Infinity);
         if (timeoutMs <= 0) throw new Error('review wall budget exhausted before dispatch');
-        const raw = await runReviewer(effects, argv, timeoutMs, signal);
+        // Both attempts and their wait share one per-reviewer timeout.
+        const reviewerDeadline = Date.now() + timeoutMs;
+        let raw = await runReviewer(effects, argv, timeoutMs, signal);
         await refuseDrift(
           'during the review run (content the scan never saw may have been uploaded)',
         );
         // A killed run is blocked, but whatever findings it emitted before
         // the kill are still recorded: they stay open until dispositioned.
-        const parsed = parseReviewerStream(raw.stdout);
+        let parsed = parseReviewerStream(raw.stdout);
+        const attemptLog: string[] = [];
+        const priorFindings: Omit<DevFinding, 'id'>[] = [];
+        const wait = parsed.rateLimitWait;
+        if (wait !== undefined && raw.exitCode !== null && !raw.timedOut) {
+          const waitMs = wait.ms + 15_000;
+          const available = Math.min(
+            reviewerDeadline - Date.now(),
+            remainingWallMs?.() ?? Infinity,
+          );
+          if (!signal?.aborted && waitMs < available) {
+            attemptLog.push(
+              '# --- attempt 1 stdout (NDJSON) ---',
+              raw.stdout,
+              '# --- attempt 1 stderr ---',
+              raw.stderr,
+              `rate-limit wait: ${wait.text} + 15000ms margin; retry 1 after ${String(waitMs)}ms`,
+            );
+            // Keep evidence even if the wait is cancelled or the retry's guards refuse.
+            await effects.writeReviewLog(
+              state.branch,
+              `${Date.now()}`,
+              [
+                `base: ${state.base}`,
+                `head: ${state.head}`,
+                `dirtySha256: ${state.dirtySha256}`,
+                ...attemptLog,
+              ].join('\n'),
+            );
+            try {
+              await sleep(waitMs, signal);
+            } catch (error) {
+              if (!signal?.aborted) throw error;
+              attemptLog.push(`retry 1 cancelled: ${faultText(error)}`);
+            }
+            if (!signal?.aborted) {
+              await refuseDrift('during the rate-limit wait');
+              const retryScans = await scanSecrets(collected.components);
+              if (retryScans.some((scan) => scan.hits.length > 0))
+                throw new Error(
+                  'secret scan found denylist-class content before retry — review refused',
+                );
+              await refuseDrift('during the retry secret scan');
+              signal?.throwIfAborted();
+              const retryTimeoutMs = Math.min(
+                reviewerDeadline - Date.now(),
+                remainingWallMs?.() ?? Infinity,
+              );
+              if (retryTimeoutMs > 0) {
+                priorFindings.push(...parsed.findings);
+                raw = await runReviewer(effects, argv, retryTimeoutMs, signal);
+                await refuseDrift('during the review retry run');
+                parsed = parseReviewerStream(raw.stdout);
+                attemptLog.push('retry 1 dispatched');
+              } else attemptLog.push('retry 1 refused: remaining reviewer/wall budget exhausted');
+            }
+          } else
+            attemptLog.push(
+              `retry 1 refused: wait ${wait.text} + 15000ms margin exceeds remaining reviewer/wall budget or review cancelled`,
+            );
+        }
         // Explicit refusals survive a later deadline kill. Use the stream
         // verdict independently of the exit code so a killed process cannot
         // erase an error, required action, or skipped/no-fresh completion.
@@ -686,6 +755,7 @@ function makeReviewCycle(
             `timedOut: ${String(raw.timedOut)}`,
             `at: ${at}`,
             '',
+            ...attemptLog,
             '# --- stdout (NDJSON) ---',
             raw.stdout,
             '# --- stderr ---',
@@ -722,7 +792,7 @@ function makeReviewCycle(
         return {
           completion,
           logPath,
-          findings: parsed.findings,
+          findings: [...priorFindings, ...parsed.findings],
           advisories: [],
           ...(vendorFailure === undefined ? {} : { vendorFailure }),
           ...(transient ? { transient: true } : {}),
