@@ -29,13 +29,17 @@ Grep accepts `ignore_case` (`-i` or `ignoreCase`), `output_mode` (`content`,
 `files_with_matches`, `count`), and `head_limit` (0 uses the safety cap).
 Glob includes hidden and ignored files, excluding `.git`, `.hg` and `.svn` directories.
 Grep respects `.gitignore`; both retain workspace containment and path allowlists.
-The grep `glob`/`include` filter is applied after ignore-aware enumeration, so
-`.gitignore` wins over a request's include pattern; the filter is a full-path
-match where a bare `*.ext` means any depth. Discovery and content are budgeted
-separately: filename discovery is bounded by the candidate-count cap for both
-tools, while the 20 MiB searched-bytes budget binds only grep — an oversized
-candidate is skipped and the search continues, with a truncation marker naming
-the skip.
+The grep `glob`/`include` filter is applied during a bounded streaming
+enumeration, so `.gitignore` wins over a request's include pattern; the
+filter is a full-path match where a bare `*.ext` means any depth, brace
+alternatives (`*.{ts,tsx}`) expand bounded (over 64 alternatives is a
+fail-closed `SEARCH_LIMIT` denial), and a large workspace with a narrow
+include streams instead of loading one whole-output buffer — traversal still
+fails closed at honest scanned-bytes/paths caps. Discovery and content are
+budgeted separately: filename discovery is bounded by the candidate-count cap
+for both tools, while the 20 MiB searched-bytes budget binds only grep — an
+oversized candidate is skipped and the search continues, with a truncation
+marker naming the skip.
 Counts are matching lines within the existing search limits; truncation
 markers identify partial results; capped count rows use `+` for lower bounds. Bash accepts `timeoutMs` for `timeout`,
 `workdir`/`cwd` within the workspace (lexical and symlink containment), and

@@ -138,6 +138,7 @@
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { lstat, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
@@ -147,10 +148,14 @@ import { messageOf } from '../shared/messageOf.js';
 import { invalidToolInput } from './failures.js';
 import { runArgvCommand, runShellCommand } from './run.js';
 import type { RunCommandOptions, RunOutcome } from './run.js';
+import { registerProcessSignalCleanup } from '../shared/process-signals.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
 import type { HarnessRunGate } from '../sandbox/index.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
+
+/** POSIX platforms get process-group kill semantics (mirror of run.ts). */
+const POSIX_SEARCH = process.platform !== 'win32';
 
 /**
  * Per-stream retention bound for `run` when the config sets no output cap:
@@ -162,6 +167,12 @@ const DEFAULT_READ_LIMIT = 2_000;
 const MAX_READ_LINE_CHARS = 2_000;
 const SEARCH_CANDIDATE_LIMIT = 1_000;
 const SEARCH_CANDIDATE_OUTPUT_BYTES = 4 * 1_024 * 1_024;
+// Streaming include-path enumeration bounds (CR @5ef68b24): TRAVERSAL WORK
+// limits, not retention — how much rg output may be CONSUMED (streamed and
+// discarded) while looking for matching candidates, before failing closed.
+// Retention stays bounded separately (lexical top-N match buffer).
+const SEARCH_GREP_ENUM_STREAM_BYTES = 32 * 1_024 * 1_024;
+const SEARCH_GREP_ENUM_STREAM_PATHS = 1_000_000;
 const SEARCH_BYTES_LIMIT = 20 * 1_024 * 1_024;
 const SEARCH_MATCH_LIMIT = 100;
 const SEARCH_OUTPUT_CHARS = 50_000;
@@ -998,6 +1009,219 @@ export function buildTools(
     | { ok: true; files: SearchFile[]; markers: string[] }
     | { ok: false; denial: Extract<ToolkitToolResult, { ok: false }> };
 
+  /**
+   * Bounded brace expansion for a grep include pattern (CR @5ef68b24): a
+   * model-supplied include like '*.{ts,tsx}' must be an alternation, not a
+   * literal-dot match. Recursive descent: the FIRST balanced {...} group,
+   * split on its top-level commas, nested groups flattened across rounds.
+   * A >64-alternative expansion is FAIL-CLOSED (SearchEnumerationStop with
+   * `limit: 'expansion'`) — a literal fallback would keep the false-negative
+   * class the CR rejects; the denial names the cap with bounded evidence.
+   */
+  const SEARCH_INCLUDE_EXPANSION_LIMIT = 64;
+  type IncludeExpansion = { overflow: true } | { overflow: false; alternatives: string[] };
+  const expandIncludeAlternatives = (pattern: string): IncludeExpansion => {
+    const overflow: IncludeExpansion = { overflow: true };
+    const expand = (rest: string, acc: string[]): string[] | undefined => {
+      const open = rest.indexOf('{');
+      if (open === -1) {
+        if (!acc.includes(rest)) acc.push(rest);
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+      }
+      let depth = 0;
+      let close = -1;
+      for (let i = open; i < rest.length; i += 1) {
+        if (rest[i] === '{') depth += 1;
+        else if (rest[i] === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            close = i;
+            break;
+          }
+        }
+      }
+      if (close === -1) {
+        // Unbalanced braces stay literal (rg glob-consistent, no expansion).
+        if (!acc.includes(rest)) acc.push(rest);
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+      }
+      const inner = rest.slice(open + 1, close);
+      const parts: string[] = [];
+      let partDepth = 0;
+      let current = '';
+      for (const ch of inner) {
+        if (ch === '{') partDepth += 1;
+        else if (ch === '}') partDepth -= 1;
+        if (ch === ',' && partDepth === 0) {
+          parts.push(current);
+          current = '';
+        } else current += ch;
+      }
+      parts.push(current);
+      if (parts.length === 1) {
+        if (!acc.includes(rest)) acc.push(rest);
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+      }
+      const prefix = rest.slice(0, open);
+      const suffix = rest.slice(close + 1);
+      for (const part of parts) {
+        const next = expand(prefix + part + suffix, acc);
+        if (next === undefined) return undefined;
+      }
+      return acc;
+    };
+    const out = expand(pattern, []);
+    if (out === undefined) return overflow;
+    return { overflow: false, alternatives: out };
+  };
+
+  /**
+   * Streaming candidate enumeration for the grep include path (CR @5ef68b24).
+   * `runArgvCommand` retains the WHOLE output up front, so a narrow include
+   * over a large workspace could overflow the enumeration output cap before
+   * the include filter ever ran — a false SEARCH_LIMIT for a cheaper,
+   * narrower request. This helper mirrors `spawnAndCollect` (src/harness/
+   * run.ts) — spawn with shell:false, POSIX process group, the same
+   * registerProcessSignalCleanup registration, clearTimeout, abort listener
+   * and unregister-in-close settlement — but feeds each NUL-separated path
+   * to `onEntry` AS IT ARRIVES and retains only what the caller keeps:
+   *   - scanned paths and scanned bytes are counted and fail closed at the
+   *     caller-configured work bounds (bounded traversal work, one honest
+   *     termination reason);
+   *   - `stop-early` reports a deliberate stop (caller hit its match cap);
+   *     rg is killed via the same group kill and the exit code is ignored;
+   *   - a path crossing the chunk boundary is carried over; a final segment
+   *     longer than 4096 bytes without a NUL exceeds the path bound (fail
+   *     closed) — real workspace paths are far shorter;
+   *   - stderr is retained to a 4096-byte tail (rg diagnostics only).
+   * No full-output buffer ever exists: memory is the retained matches plus
+   * one chunk plus one carried partial path.
+   */
+  type SearchEnumerationOutcome =
+    | { kind: 'exit'; code: number }
+    | { kind: 'killed' }
+    | { kind: 'spawn-error'; error: unknown }
+    | { kind: 'overflow' }
+    | { kind: 'stop-early' };
+  const streamRgEnumeration = async (
+    args: readonly string[],
+    opts: {
+      cwd: string;
+      env: Readonly<Record<string, string>>;
+      timeoutMs: number;
+      signal: AbortSignal | undefined;
+      maxScannedPaths: number;
+      maxScannedBytes: number;
+      onEntry: (path: string) => boolean;
+    },
+  ): Promise<SearchEnumerationOutcome> => {
+    if (opts.signal?.aborted === true) return { kind: 'killed' };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn('rg', [...args], {
+        cwd: opts.cwd,
+        shell: false,
+        env: opts.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        ...(POSIX_SEARCH ? { detached: true } : {}),
+      });
+    } catch (err) {
+      return { kind: 'spawn-error', error: err };
+    }
+    let scannedPaths = 0;
+    let scannedBytes = 0;
+    let overflowed = false;
+    let stoppedEarly = false;
+    let carry: Buffer = Buffer.alloc(0);
+    const CARRY_LIMIT_BYTES = 4_096;
+    const killSearchGroup = (): void => {
+      if (POSIX_SEARCH && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+          return;
+        } catch {
+          // group already gone — fall through to the direct kill
+        }
+      }
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    };
+    const consumeChunk = (chunk: Buffer): boolean => {
+      // Returns false once a work bound or the caller cap ends the stream.
+      // Splitting happens on BYTES (NUL = 0x00) so a multibyte character
+      // crossing a chunk boundary can never corrupt an entry.
+      scannedBytes += chunk.length;
+      if (scannedBytes > opts.maxScannedBytes) {
+        overflowed = true;
+        return false;
+      }
+      const merged = carry.length === 0 ? chunk : Buffer.concat([carry, chunk]);
+      const lastNul = merged.lastIndexOf(0);
+      if (lastNul === -1) {
+        carry = merged;
+        return true;
+      }
+      carry = merged.subarray(lastNul + 1);
+      let start = 0;
+      while (start <= lastNul) {
+        const nul = merged.indexOf(0, start);
+        const entry = merged.subarray(start, nul);
+        start = nul + 1;
+        if (entry.length === 0) continue;
+        scannedPaths += 1;
+        if (scannedPaths > opts.maxScannedPaths) {
+          overflowed = true;
+          return false;
+        }
+        if (!opts.onEntry(entry.toString('utf8'))) {
+          stoppedEarly = true;
+          return false;
+        }
+      }
+      return true;
+    };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (!consumeChunk(chunk)) {
+        child.stdout?.pause();
+        killSearchGroup();
+      }
+    });
+    let stderrTail = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrTail = (stderrTail + chunk.toString('utf8')).slice(-4_096);
+    });
+    let spawnError: unknown;
+    child.on('error', (e: unknown) => {
+      spawnError = e;
+    });
+    return new Promise<SearchEnumerationOutcome>((settle) => {
+      const unregister = registerProcessSignalCleanup(() => {
+        killSearchGroup();
+        return undefined;
+      });
+      const timer = setTimeout(killSearchGroup, opts.timeoutMs);
+      opts.signal?.addEventListener('abort', killSearchGroup, { once: true });
+      child.on('close', (code) => {
+        unregister();
+        clearTimeout(timer);
+        opts.signal?.removeEventListener('abort', killSearchGroup);
+        if (carry.length > CARRY_LIMIT_BYTES) {
+          // An unterminated tail past the path bound: output was cut, fail closed.
+          overflowed = true;
+        }
+        if (stoppedEarly) return settle({ kind: 'stop-early' });
+        if (overflowed) return settle({ kind: 'overflow' });
+        if (spawnError !== undefined && child.pid === undefined)
+          return settle({ kind: 'spawn-error', error: spawnError });
+        if (code === null) return settle({ kind: 'killed' });
+        return settle({ kind: 'exit', code });
+      });
+    });
+  };
+
   /** Enumerate first, gate every bounded candidate, and return only safe files. */
   const collectSearchFiles = async (
     tool: 'grep' | 'glob',
@@ -1068,73 +1292,170 @@ export function buildTools(
       '--',
       scopeArg,
     ];
-    const listing = await runArgvCommand('rg', enumerateArgs, {
-      env: buildChildEnv(process.env),
-      cwd: workspaceAbs,
-      maxBytes: SEARCH_CANDIDATE_OUTPUT_BYTES,
-      timeoutMs: SEARCH_TIMEOUT_MS,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    if (listing.kind === 'killed') {
-      return isAborted(signal)
-        ? cancelled()
-        : { ok: false, denial: deny(tool, 'TIMEOUT: search enumeration timed out') };
+    const enumerationEnv = buildChildEnv(process.env);
+    // BRACE EXPANSION (CR @5ef68b24): a grep include is expanded into bounded
+    // full-match pattern alternatives before filtering; >64 alternatives is a
+    // fail-closed SEARCH_LIMIT denial, never a literal fallback.
+    type GrepIncludeMatcher = {
+      patterns: RegExp[];
+      matches: (rel: string) => boolean;
+    };
+    let grepInclude: GrepIncludeMatcher | undefined;
+    if (tool === 'grep' && fileGlob !== undefined) {
+      const expansion = expandIncludeAlternatives(fileGlob);
+      if (expansion.overflow) {
+        return {
+          ok: false,
+          denial: deny(
+            tool,
+            `SEARCH_LIMIT: search denied: include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_LIMIT} alternatives`,
+          ),
+        };
+      }
+      const toPatterns = (candidates: readonly string[]): RegExp[] =>
+        compilePathPatterns(
+          candidates.map((candidate) => (candidate.includes('/') ? candidate : `**/${candidate}`)),
+        );
+      const patterns = toPatterns(expansion.alternatives);
+      grepInclude = { patterns, matches: (rel) => patterns.some((re) => re.test(rel)) };
     }
-    if (listing.kind === 'spawn-error') {
-      return {
-        ok: false,
-        denial: deny(tool, `EXECUTION_ERROR: search failed: ${messageOf(listing.error)}`),
-      };
-    }
-    if (listing.overflowed) {
-      return {
-        ok: false,
-        denial: deny(
-          tool,
-          'SEARCH_LIMIT: search denied: candidate enumeration output cap exceeded',
-        ),
-      };
-    }
-    if (listing.code !== 0 && listing.code !== 1) {
-      return {
-        ok: false,
-        denial: deny(
-          tool,
-          `EXECUTION_ERROR: search failed: rg candidate enumeration exited ${listing.code}`,
-        ),
-      };
-    }
+
     if (isAborted(signal)) return cancelled();
 
-    const rawPaths = listing.stdout
-      .split('\0')
-      .filter((candidate) => candidate.length > 0)
-      .sort();
+    let rawPaths: string[];
+    let sawExtraCandidates = false;
+    if (grepInclude !== undefined) {
+      // STREAMING include path (CR @5ef68b24): the user glob never rode into
+      // rg (#491), so a narrow include over a large workspace must not
+      // overflow the 4 MiB whole-output cap before the filter runs. Stream
+      // rg's NUL-separated output, filter per path, and retain only the
+      // lexical top-1001 matches in a bounded buffer (the same order the
+      // whole-output path produces with its sort-then-slice). Traversal is
+      // still bounded: scanned bytes/paths fail closed with the honest
+      // SEARCH_LIMIT denial, and the same SEARCH_TIMEOUT_MS / abort / group
+      // kill as runArgvCommand applies.
+      type MatchSlot = { rel: string; raw: string };
+      const slots: MatchSlot[] = [];
+      const pushMatch = (rel: string, raw: string): void => {
+        slots.push({ rel, raw });
+        if (slots.length <= SEARCH_CANDIDATE_LIMIT + 1) return;
+        // Drop the lexically largest: the survivors stay the true top-N.
+        let largest = 0;
+        for (let i = 1; i < slots.length; i += 1) {
+          if (slots[i]!.rel > slots[largest]!.rel) largest = i;
+        }
+        slots.splice(largest, 1);
+      };
+      const include = grepInclude;
+      const outcome = await streamRgEnumeration(enumerateArgs, {
+        cwd: workspaceAbs,
+        env: enumerationEnv,
+        timeoutMs: SEARCH_TIMEOUT_MS,
+        signal,
+        maxScannedBytes: SEARCH_GREP_ENUM_STREAM_BYTES,
+        maxScannedPaths: SEARCH_GREP_ENUM_STREAM_PATHS,
+        onEntry: (candidate) => {
+          const lexicalPath = resolveInside(candidate);
+          if (lexicalPath === undefined) return true;
+          const rel = relOf(lexicalPath);
+          if (!include.matches(rel)) return true;
+          pushMatch(rel, candidate);
+          return slots.length <= SEARCH_CANDIDATE_LIMIT + 1;
+        },
+      });
+      if (outcome.kind === 'killed') {
+        return isAborted(signal)
+          ? cancelled()
+          : { ok: false, denial: deny(tool, 'TIMEOUT: search enumeration timed out') };
+      }
+      if (outcome.kind === 'spawn-error') {
+        return {
+          ok: false,
+          denial: deny(tool, `EXECUTION_ERROR: search failed: ${messageOf(outcome.error)}`),
+        };
+      }
+      if (outcome.kind === 'overflow') {
+        return {
+          ok: false,
+          denial: deny(
+            tool,
+            'SEARCH_LIMIT: search denied: candidate enumeration work cap exceeded',
+          ),
+        };
+      }
+      if (outcome.kind === 'exit' && outcome.code !== 0 && outcome.code !== 1) {
+        const detail = stderrTail.trim();
+        return {
+          ok: false,
+          denial: deny(
+            tool,
+            `EXECUTION_ERROR: search failed: rg candidate enumeration exited ${outcome.code}` +
+              (detail === '' ? '' : `: ${detail}`),
+          ),
+        };
+      }
+      if (isAborted(signal)) return cancelled();
+      slots.sort((left, right) => left.rel.localeCompare(right.rel));
+      rawPaths = slots.map((slot) => slot.raw);
+      sawExtraCandidates = slots.length > SEARCH_CANDIDATE_LIMIT;
+    } else {
+      const listing = await runArgvCommand('rg', enumerateArgs, {
+        env: enumerationEnv,
+        cwd: workspaceAbs,
+        maxBytes: SEARCH_CANDIDATE_OUTPUT_BYTES,
+        timeoutMs: SEARCH_TIMEOUT_MS,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (listing.kind === 'killed') {
+        return isAborted(signal)
+          ? cancelled()
+          : { ok: false, denial: deny(tool, 'TIMEOUT: search enumeration timed out') };
+      }
+      if (listing.kind === 'spawn-error') {
+        return {
+          ok: false,
+          denial: deny(tool, `EXECUTION_ERROR: search failed: ${messageOf(listing.error)}`),
+        };
+      }
+      if (listing.overflowed) {
+        return {
+          ok: false,
+          denial: deny(
+            tool,
+            'SEARCH_LIMIT: search denied: candidate enumeration output cap exceeded',
+          ),
+        };
+      }
+      if (listing.code !== 0 && listing.code !== 1) {
+        return {
+          ok: false,
+          denial: deny(
+            tool,
+            `EXECUTION_ERROR: search failed: rg candidate enumeration exited ${listing.code}`,
+          ),
+        };
+      }
+      if (isAborted(signal)) return cancelled();
+      rawPaths = listing.stdout
+        .split('\0')
+        .filter((candidate) => candidate.length > 0)
+        .sort();
+    }
     const markers: string[] = [];
 
-    // Pattern filter (grep, #491 remainder): compilePathPatterns is FULL-match
-    // (see the header's PATH PATTERN SEMANTICS), so a bare '*.ts' include — a
-    // BASENAME filter in the rg/Claude-Code convention — is treated as
-    // '**/*.ts' here. Every other pattern keeps its plain full-match reading,
-    // so rooted patterns ('src/**') filter exactly as they enumerate. The
-    // filter runs BEFORE the candidate-count cap, mirroring the previous
-    // order (rg applied the requested glob during traversal, before the cap
-    // sliced candidates), so narrowing with an include still reaches matching
-    // files beyond 1,000 non-matching candidates. The filter is lexical —
-    // no fs syscalls; containment still gates every kept candidate below.
-    const includeFilter: RegExp | undefined =
-      tool === 'grep' && fileGlob !== undefined
-        ? compilePathPatterns(fileGlob.includes('/') ? [fileGlob] : [`**/${fileGlob}`])[0]
-        : undefined;
-    const matchedPaths =
-      includeFilter === undefined
-        ? rawPaths
-        : rawPaths.filter((candidate) => {
-            const lexicalPath = resolveInside(candidate);
-            return lexicalPath !== undefined && includeFilter.test(relOf(lexicalPath));
-          });
+    // The include filter (grep, #491 remainder) ran during enumeration when
+    // present (streaming path above); the whole-output path (glob, or grep
+    // without an include) flows every candidate through unchanged. Filter
+    // semantics: a bare '*.ts' include is a BASENAME filter ('**/*.ts');
+    // rooted patterns filter exactly as they enumerate. The filter runs
+    // BEFORE the candidate-count cap, mirroring the base order.
+    const matchedPaths = rawPaths;
+
+    // Candidate-count cap (#491 ordering preserved): the include filter has
+    // already run during enumeration, so this slice keeps the lexical
+    // top-1000 matches and the marker reports the truncation truthfully.
     const boundedPaths = matchedPaths.slice(0, SEARCH_CANDIDATE_LIMIT);
-    if (matchedPaths.length > SEARCH_CANDIDATE_LIMIT) {
+    if (sawExtraCandidates) {
       markers.push(`[truncated: candidate files cap ${SEARCH_CANDIDATE_LIMIT}]`);
     }
 

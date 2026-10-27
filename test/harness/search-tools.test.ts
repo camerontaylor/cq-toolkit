@@ -8,6 +8,23 @@ import type { HarnessConfig } from '../../src/harness/config.js';
 import { buildTools } from '../../src/harness/tools.js';
 import type { ToolkitTool } from '../../src/harness/tools.js';
 
+/** Every spawn this test process makes, recorded at the child_process seam. */
+const spawnState = vi.hoisted(() => ({
+  calls: [] as { file: string; args: string[] }[],
+}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const spawn = (file: unknown, args: unknown, ...rest: unknown[]) => {
+    spawnState.calls.push({
+      file: String(file),
+      args: (Array.isArray(args) ? args : []).map((arg) => String(arg)),
+    });
+    type SpawnFn = (...parts: unknown[]) => ReturnType<typeof actual.spawn>;
+    return (actual.spawn as SpawnFn)(file, args, ...rest);
+  };
+  return { ...actual, spawn };
+});
+
 async function withWorkspace(body: (workspace: string) => Promise<void>): Promise<void> {
   const workspace = await mkdtemp(join(tmpdir(), 'cq-search-tools-'));
   try {
@@ -384,37 +401,25 @@ describe('contained grep and glob tools', () => {
       await mkdir(join(workspace, '.git'), { recursive: true });
       await writeFile(join(workspace, 'keep.ts'), 'needle\n', 'utf8');
       await writeFile(join(workspace, 'drop.js'), 'needle\n', 'utf8');
-      const original = runner.runArgvCommand;
-      const enumerateGlobValues: string[][] = [];
-      const spy = vi
-        .spyOn(runner, 'runArgvCommand')
-        .mockImplementation(async (file, args, options) => {
-          if (file === 'rg' && !args.includes('--json')) {
-            const values: string[] = [];
-            for (const [index, arg] of args.entries()) {
-              if (arg === '--glob') values.push(args[index + 1] as string);
-            }
-            enumerateGlobValues.push(values);
-          }
-          return original(file, args, options);
-        });
-      try {
-        const result = await tool(
-          buildTools(defaultHarnessConfig, workspace, 'read-only'),
-          'grep',
-        ).execute({ pattern: 'needle', include: '*.ts' });
-        expect(result.ok).toBe(true);
-        if (result.ok) {
-          expect(result.output).toContain('keep.ts');
-          expect(result.output).not.toContain('drop.js');
+      spawnState.calls.length = 0;
+      const result = await tool(
+        buildTools(defaultHarnessConfig, workspace, 'read-only'),
+        'grep',
+      ).execute({ pattern: 'needle', include: '*.ts' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('keep.ts');
+        expect(result.output).not.toContain('drop.js');
+      }
+      const enumerations = spawnState.calls.filter(
+        (call) => call.file === 'rg' && !call.args.includes('--json'),
+      );
+      expect(enumerations.length).toBeGreaterThan(0);
+      const fixed = new Set(['!.git', '!.hg', '!.svn']);
+      for (const call of enumerations) {
+        for (const [index, arg] of call.args.entries()) {
+          if (arg === '--glob') expect(fixed.has(call.args[index + 1] ?? '')).toBe(true);
         }
-        expect(enumerateGlobValues.length).toBeGreaterThan(0);
-        const fixed = new Set(['!.git', '!.hg', '!.svn']);
-        for (const values of enumerateGlobValues) {
-          for (const value of values) expect(fixed.has(value)).toBe(true);
-        }
-      } finally {
-        spy.mockRestore();
       }
     });
   });
@@ -482,6 +487,75 @@ describe('contained grep and glob tools', () => {
         expect(result.output).toContain('zzz-small.txt');
         expect(result.output).not.toContain('searched bytes cap');
         expect(result.truncated).toBe(false);
+      }
+    });
+  });
+
+  test('brace include finds matches past a huge unrelated enumeration (streaming, CR MAJOR 1+2)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await mkdir(join(workspace, 'bulk'), { recursive: true });
+      // Over 4 MiB of rg --files ENUMERATION OUTPUT from unrelated
+      // filenames (the old whole-output cap): ~21k long names, only two
+      // matching files. At 5ef68b24 this request denies with SEARCH_LIMIT
+      // before the include filter ever runs; the streaming path finds both.
+      await Promise.all(
+        Array.from({ length: 21_000 }, (_, index) =>
+          writeFile(
+            join(workspace, 'bulk', `${'u'.repeat(200)}-${String(index).padStart(6, '0')}.dat`),
+            'unrelated\n',
+            'utf8',
+          ),
+        ),
+      );
+      await writeFile(join(workspace, 'hit-a.ts'), 'brace-needle\n', 'utf8');
+      await writeFile(join(workspace, 'hit-b.tsx'), 'brace-needle\n', 'utf8');
+      await writeFile(join(workspace, 'miss.md'), 'brace-needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({ pattern: 'brace-needle', include: '*.{ts,tsx}' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('--- hit-a.ts ---');
+        expect(result.output).toContain('--- hit-b.tsx ---');
+        expect(result.output).not.toContain('miss.md');
+        expect(result.output).not.toContain('SEARCH_LIMIT');
+        expect(result.truncated).toBe(false);
+      }
+    });
+  });
+
+  test('expansion beyond 64 alternatives fails closed without literal fallback (CR MAJOR 1)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'x.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const wide = `*.{${Array.from({ length: 65 }, (_, i) => `e${i}`).join(',')}}`;
+      const result = await grep.execute({ pattern: 'needle', include: wide });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.denial.reason).toMatch(/^SEARCH_LIMIT: /);
+        expect(result.denial.reason).toContain('include expansion exceeds 64 alternatives');
+      }
+    });
+  });
+
+  test('nested braces expand and rootless brace alternatives stay basename filters', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await mkdir(join(workspace, 'src'), { recursive: true });
+      await writeFile(join(workspace, 'src', 'a.ts'), 'nested-needle\n', 'utf8');
+      await writeFile(join(workspace, 'src', 'b.js'), 'nested-needle\n', 'utf8');
+      await writeFile(join(workspace, 'c.rs'), 'nested-needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({
+        pattern: 'nested-needle',
+        include: '{src/*.{ts,js},*.rs}',
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('--- src/a.ts ---');
+        expect(result.output).toContain('--- src/b.js ---');
+        expect(result.output).toContain('--- c.rs ---');
       }
     });
   });
