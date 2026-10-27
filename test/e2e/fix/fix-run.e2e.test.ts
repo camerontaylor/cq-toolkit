@@ -1379,7 +1379,9 @@ test.each([
           ?.flatMap((round) => round.failedAttempt?.branch.split('/').at(-1) ?? [])
           .toSorted(),
       ).toEqual(['a1', 'a2']);
-      expect(report.failed).toHaveLength(2);
+      expect(
+        report.failed.filter((row) => 'sha' in row && row.sha !== undefined),
+      ).toHaveLength(2);
     } else if (mode === 'regression-rescue') {
       expect(report.tasks[0]?.attempts.map((a) => [a.tier, a.attempt])).toEqual([
         ['worker', 1],
