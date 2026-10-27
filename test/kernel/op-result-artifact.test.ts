@@ -90,9 +90,9 @@ describe('typed result artifact usage summary', () => {
     expect((await execute(valid)).jobs[0]?.result).toEqual(valid);
 
     const lossy = { status: 'ok', value: new Map(), usageSummary };
-    expect((await execute(lossy)).jobs[0]?.result).toMatchObject({
-      status: 'failed',
-      error: expect.stringMatching(/non-serializable/),
-    });
+    const lossyResult = (await execute(lossy)).jobs[0]?.result;
+    expect(lossyResult?.status).toBe('failed');
+    if (lossyResult?.status !== 'failed') throw new Error('expected failed result');
+    expect(lossyResult.error).toMatch(/non-serializable/);
   });
 });
