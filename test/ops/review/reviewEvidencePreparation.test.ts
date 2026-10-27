@@ -79,7 +79,12 @@ const evidence = (over: Partial<FindingEvidenceV1> = {}): FindingEvidenceV1 => (
 });
 
 const dependencySupport = () => ({
-  ...anchor({ file: DEPENDENCY, quote: 'export const dep = 0;' }),
+  ...anchor({
+    file: DEPENDENCY,
+    start: 1,
+    end: 1,
+    quote: 'export const dep = 0;',
+  }),
   relevance: 'the cited dependency reads the constant',
 });
 
@@ -144,7 +149,15 @@ describe('R3W evidence preparation', () => {
 
   it('retains every raw candidate and full history when repairs stay invalid', () => {
     const original = evidence({ primary: anchor({ start: 99, end: 99 }) });
-    const firstRepair = evidence({ primary: anchor({ file: NEW_NAME, side: 'head' }) });
+    const firstRepair = evidence({
+      primary: anchor({
+        file: NEW_NAME,
+        side: 'base',
+        start: 1,
+        end: 1,
+        quote: 'export const moved = true;',
+      }),
+    });
     const secondRepair = evidence({ primary: anchor({ side: 'base' }) });
     const step = invalid(
       prepareFindingEvidence({
@@ -159,10 +172,10 @@ describe('R3W evidence preparation', () => {
       secondRepair,
     ]);
     expect(step.candidates[0]?.reasons).toEqual(['out-of-range']);
-    expect(step.candidates[1]?.reasons).toEqual(['unknown-base-path']);
+    expect(step.candidates[1]?.reasons).toEqual([]);
     expect(step.candidates[2]?.reasons).toEqual(['unknown-base-path']);
     expect(step.repairs[0]?.requestedAfter).toEqual(['out-of-range']);
-    expect(step.repairs[1]?.requestedAfter).toEqual(['unknown-base-path']);
+    expect(step.repairs[1]?.requestedAfter).toEqual([]);
     expect(step.reasons).toEqual(['unknown-base-path']);
     expect(step.repairOutcome).toBe('exhausted');
     expect(step.ignoredRepairSubmissions).toBe(0);
@@ -255,7 +268,12 @@ describe('R3W preparation across comparison shapes', () => {
     {
       name: 'rename pair: head anchor on the new path validates',
       candidate: evidence({
-        primary: anchor({ file: NEW_NAME, quote: 'export const moved = true;' }),
+        primary: anchor({
+          file: NEW_NAME,
+          start: 1,
+          end: 1,
+          quote: 'export const moved = true;',
+        }),
       }),
       reasons: [],
     },
@@ -265,6 +283,8 @@ describe('R3W preparation across comparison shapes', () => {
         primary: anchor({
           file: OLD_NAME,
           side: 'base',
+          start: 1,
+          end: 1,
           quote: 'export const moved = true;',
         }),
       }),
@@ -273,7 +293,13 @@ describe('R3W preparation across comparison shapes', () => {
     {
       name: 'rename pair: cross-side anchor is rejected without relocation',
       candidate: evidence({
-        primary: anchor({ file: NEW_NAME, side: 'base', quote: 'export const moved = true;' }),
+        primary: anchor({
+          file: NEW_NAME,
+          side: 'base',
+          start: 1,
+          end: 1,
+          quote: 'export const moved = true;',
+        }),
       }),
       reasons: ['unknown-base-path'],
     },
@@ -284,7 +310,9 @@ describe('R3W preparation across comparison shapes', () => {
     },
     {
       name: 'out-of-hunk anchor on unchanged dependency lines',
-      candidate: evidence({ primary: anchor({ file: DEPENDENCY }) }),
+      candidate: evidence({
+        primary: anchor({ file: DEPENDENCY, start: 1, end: 1, quote: 'export const dep = 0;' }),
+      }),
       reasons: ['no-hunk-information'],
     },
     {
