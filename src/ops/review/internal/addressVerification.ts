@@ -204,6 +204,10 @@ export function verifyClosureEvidence(
   gate?: VerificationGate,
 ): ClosureVerification {
   const checks: VerificationCheck[] = [];
+  // The validated dependency records captured by packet-complete; every later
+  // check scans this snapshot, never packet.dependencies again, so validation
+  // and use always see the same records exactly once each.
+  const dependencies: CitedDependency[] = [];
   let stopped = false;
   let revision: RevisionIdentity | undefined;
   try {
@@ -253,16 +257,37 @@ export function verifyClosureEvidence(
     if (typeof packet.patch !== 'string' || packet.patch === '') problems.push('patch missing');
     if (typeof packet.before !== 'string' || packet.before === '') problems.push('before missing');
     if (typeof packet.after !== 'string' || packet.after === '') problems.push('after missing');
-    // Field access is validated per element; a non-iterable or hostile
-    // dependencies value throws here and the step records it as unavailable.
-    for (const dependency of packet.dependencies) {
-      if (typeof dependency?.path !== 'string' || dependency.path === '')
-        problems.push('dependency path missing');
-      else if (dependency.role !== 'consumer' && dependency.role !== 'dependency')
-        problems.push(`dependency ${dependency.path} has unknown role`);
-      else if (typeof dependency.text !== 'string' || dependency.text === '')
-        problems.push(`dependency ${dependency.path} text missing`);
+    // The dependencies value is read exactly once: the property access is
+    // captured to a local, checked against the declared array contract, then
+    // validated element by element into the snapshot array the later checks
+    // scan. A one-shot iterable or a getter that yields different elements
+    // between reads can never make packet-complete see values that later
+    // checks cannot, because no code path evaluates the property twice. Only
+    // a real array satisfies the contract; anything else (generator,
+    // iterable object, hostile value) is unavailable.
+    let supplied: unknown;
+    try {
+      supplied = packet.dependencies;
+    } catch (error) {
+      problems.push(`dependencies unavailable: ${detailOf(error)}`);
     }
+    if (problems.length === 0 && !Array.isArray(supplied))
+      problems.push('dependencies is not an array');
+    if (problems.length === 0)
+      for (const dependency of supplied as unknown[]) {
+        if (typeof dependency?.path !== 'string' || dependency.path === '')
+          problems.push('dependency path missing');
+        else if (dependency.role !== 'consumer' && dependency.role !== 'dependency')
+          problems.push(`dependency ${dependency.path} has unknown role`);
+        else if (typeof dependency.text !== 'string' || dependency.text === '')
+          problems.push(`dependency ${dependency.path} text missing`);
+        else
+          dependencies.push({
+            path: dependency.path,
+            role: dependency.role,
+            text: dependency.text,
+          });
+      }
     if (revision === undefined) problems.push('metadata.revision missing');
     if (problems.length > 0)
       return {
@@ -271,7 +296,11 @@ export function verifyClosureEvidence(
         detail: problems.join('; '),
         reason: 'unavailable-evidence',
       };
-    return { check: 'packet-complete', outcome: 'pass', detail: 'packet fields present' };
+    return {
+      check: 'packet-complete',
+      outcome: 'pass',
+      detail: `packet fields present; ${dependencies.length} dependencies captured`,
+    };
   };
 
   const pinned = (): VerificationCheck => {
@@ -370,7 +399,7 @@ export function verifyClosureEvidence(
           detail: `quoted trigger survives in after content: ${oneLine(span)}`,
           reason: 'deleted-trigger-survives',
         };
-      for (const dependency of packet.dependencies) {
+      for (const dependency of dependencies) {
         if (dependency.text.includes(span))
           return {
             check: 'trigger-removed',
@@ -391,7 +420,7 @@ export function verifyClosureEvidence(
           detail: `removed declaration re-declared in after content: ${symbol}`,
           reason: 'deleted-trigger-survives',
         };
-      for (const dependency of packet.dependencies) {
+      for (const dependency of dependencies) {
         if (redeclared.test(dependency.text))
           return {
             check: 'trigger-removed',
@@ -429,7 +458,7 @@ export function verifyClosureEvidence(
       check: 'dependencies-covered',
       outcome: 'pass',
       detail:
-        `packet attests ${packet.dependencies.length} cited dependencies ` +
+        `packet attests ${dependencies.length} cited dependencies ` +
         'complete at the pinned revision',
     };
   };

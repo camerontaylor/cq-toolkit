@@ -152,6 +152,85 @@ describe('review.address closure evidence verifier', () => {
     expect(result.checks[3]?.detail).toContain('src/flags.ts');
   });
 
+  test('a one-shot iterable dependencies value is unavailable, never resolved', () => {
+    // A generator (or any one-shot iterable) would be exhausted by the first
+    // pass, leaving later checks with an empty scan and minting false
+    // closure. The declared contract is a real array; anything else is
+    // unavailable evidence.
+    const oneShot = makePacket();
+    const iterable = {
+      *[Symbol.iterator]() {
+        yield {
+          path: 'src/legacy.ts',
+          role: 'consumer',
+          text: "if (mode === 'PARTIAL_MODE') load(raw);\n",
+        };
+      },
+    };
+    (oneShot as { dependencies: unknown }).dependencies = iterable;
+    const result = verifyClosureEvidence(oneShot);
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expect(namesOf(result)).toEqual(['packet-complete']);
+    expect(result.checks[0]?.detail).toContain('not an array');
+  });
+
+  test('a getter yielding different dependencies per read scans one snapshot', () => {
+    // First read (validation) must be the only read: the mutating getter
+    // serves a clean consumer first and the surviving trigger afterwards.
+    const mutating = makePacket();
+    let reads = 0;
+    Object.defineProperty(mutating, 'dependencies', {
+      get() {
+        reads++;
+        return reads === 1
+          ? [
+              {
+                path: 'src/clean.ts',
+                role: 'consumer',
+                text: "load('{}');\n",
+              },
+            ]
+          : [
+              {
+                path: 'src/legacy.ts',
+                role: 'consumer',
+                text: "if (mode === 'PARTIAL_MODE') load(raw);\n",
+              },
+            ];
+      },
+    });
+    const result = verifyClosureEvidence(mutating);
+    expect(result.verdict).toBe('resolved');
+    expect(result.checks[0]?.detail).toContain('1 dependencies captured');
+    expect(reads).toBe(1);
+  });
+
+  test('a getter turning dependencies hostile after validation cannot crash later checks', () => {
+    // Validation captured the record; the getter then poisons the property.
+    // Later checks must still scan the captured snapshot deterministically.
+    const hostile = makePacket();
+    let reads = 0;
+    Object.defineProperty(hostile, 'dependencies', {
+      get() {
+        reads++;
+        if (reads === 1)
+          return [
+            {
+              path: 'src/clean.ts',
+              role: 'consumer',
+              text: "load('{}');\n",
+            },
+          ];
+        throw new Error('dependencies withdrawn');
+      },
+    });
+    const result = verifyClosureEvidence(hostile);
+    expect(result.verdict).toBe('resolved');
+    expect(result.checks[0]?.detail).toContain('1 dependencies captured');
+    expect(reads).toBe(1);
+  });
+
   test('a surviving quoted trigger is unresolved counter-evidence', () => {
     const survivingAfter = [
       'export function load(raw: string): Config {',
