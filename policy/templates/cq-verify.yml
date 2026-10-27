@@ -421,6 +421,8 @@ jobs:
     # The verdict signer's environment (Decision 6): its only secret is the
     # verdict App key, reached only by the mint step below.
     environment: cq-verdict
+    env:
+      CQ_MERGE_PROTECTED_PATHS: ${{ vars.CQ_MERGE_PROTECTED_PATHS }}
     # F5: `checks: write` is the verdict's own scope. The trust ref, the
     # subject objects and the base all arrive in the `cq-verify-source`
     # bundle, so no git credential is needed (ADR-0004 D-G.3). The read

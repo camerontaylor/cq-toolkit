@@ -30,7 +30,12 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
 import type { D11Authorization } from '../ops/gates/d11Authorization.js';
-import { verifyRatchet, type VerifyRatchetOutcome } from '../ops/ratchet/verifyRatchet.js';
+import { resolveProtectedPathsConfig } from '../ops/gates/policyConfig.js';
+import {
+  createVerifyRatchet,
+  verifyRatchet,
+  type VerifyRatchetOutcome,
+} from '../ops/ratchet/verifyRatchet.js';
 import { ghNameOk, makeGhRunner, type GhFn } from '../adapters/forge-github/gh.js';
 import { EntryUsageError, parseEntryArgs, runEntry } from './trusted-entry.js';
 import { bindQueueAuthorization, realGateGit, type GateGit } from './promote-gate.js';
@@ -132,6 +137,7 @@ export async function verifyWithAuthorization(
 }
 
 export interface VerifyMainDeps extends Pick<VerifyDeps, 'bind' | 'verify'> {
+  env?: Readonly<Record<string, string | undefined>>;
   makeGh: () => GhFn;
   git: GateGit;
   write: (line: string) => void;
@@ -146,7 +152,9 @@ export function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise
         gh: deps.makeGh(),
         git: deps.git,
         ...(deps.bind === undefined ? {} : { bind: deps.bind }),
-        ...(deps.verify === undefined ? {} : { verify: deps.verify }),
+        verify:
+          deps.verify ??
+          createVerifyRatchet(resolveProtectedPathsConfig({ env: deps.env ?? process.env })),
       },
       args,
     );
