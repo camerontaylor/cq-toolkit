@@ -118,7 +118,7 @@ function installFakeNpm(
     npm,
     [
       '#!/bin/sh',
-      '// The smoke always calls: npm install --prefix <prefix> <tarball> ...',
+      '# The smoke always calls: npm install --prefix <prefix> <tarball> ...',
       'prefix=""',
       'prefix_next=0',
       'for arg in "$@"; do',
