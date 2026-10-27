@@ -40,8 +40,21 @@ const VALID_PATCH = [
   "-  if (parsed.partialMode === 'PARTIAL_MODE') enablePartial();",
   '+  if (parsed.partial === true) enablePartial();',
   '   return normalize(parsed);',
-  '}',
+  ' }',
 ].join('\n');
+
+// Literal full-file replacement fixture; deliberately includes every snapshot line.
+const replacementPatch = (before: string, after: string): string => {
+  const oldLines = before.split('\n');
+  const newLines = after.split('\n');
+  return [
+    '--- a/src/config.ts',
+    '+++ b/src/config.ts',
+    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ].join('\n');
+};
 
 const CHECK_ORDER = [
   'packet-complete',
@@ -355,7 +368,7 @@ describe('review.address closure evidence verifier', () => {
       '+  // partial handling left as-is below',
       "   if (parsed.partialMode === 'PARTIAL_MODE') enablePartial();",
       '   return normalize(parsed);',
-      '}',
+      ' }',
     ].join('\n');
     const result = verifyClosureEvidence(makePacket({ patch, after: survivingAfter }));
     expect(result.verdict).toBe('unresolved');
@@ -408,7 +421,7 @@ describe('review.address closure evidence verifier', () => {
       '     }',
       '   }',
       '   return sharedNormalize(JSON.parse(raw));',
-      '}',
+      ' }',
     ].join('\n');
     const result = verifyClosureEvidence(makePacket({ finding, before, after, patch }));
     expect(result.verdict).toBe('unresolved');
@@ -436,7 +449,7 @@ describe('review.address closure evidence verifier', () => {
       '-export const RETIRED_FLAG = 1;',
       ' export function load(raw: string): Config {',
       '   return normalize(JSON.parse(raw));',
-      '}',
+      ' }',
     ].join('\n');
     const dependencies = [
       {
@@ -467,7 +480,7 @@ describe('review.address closure evidence verifier', () => {
       '   const parsed = JSON.parse(raw);',
       "-  if (parsed.partialMode === 'PARTIAL_MODE') enablePartial();",
       '   return normalize(parsed);',
-      '}',
+      ' }',
     ].join('\n');
     const result = verifyClosureEvidence(makePacket({ patch, after }));
     expect(result.verdict).toBe('uncertain');
@@ -504,7 +517,7 @@ describe('review.address closure evidence verifier', () => {
       '   const parsed = JSON.parse(raw);',
       '-  enablePartial();',
       '   return normalize(parsed);',
-      '}',
+      ' }',
     ].join('\n');
     const result = verifyClosureEvidence(makePacket({ finding, patch, before, after }));
     expect(result.verdict).toBe('uncertain');
@@ -540,6 +553,178 @@ describe('review.address closure evidence verifier', () => {
     expect(result.checks[3]?.detail).toContain(
       'removed declarations alone do not establish finding-linked trigger evidence',
     );
+  });
+
+  test('an unrelated patch cannot hide a surviving trigger by omitting it from after', () => {
+    const before = "const obsolete = 1;\ndangerous('PARTIAL_MODE');";
+    const patch = [
+      '--- a/src/config.ts',
+      '+++ b/src/config.ts',
+      '@@ -1 +1 @@',
+      '-const obsolete = 1;',
+      '+// obsolete removed',
+    ].join('\n');
+    const result = verifyClosureEvidence(
+      makePacket({ before, after: '// obsolete removed', patch }),
+    );
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expectLastCheck(result, { check: 'patch-coherent', outcome: 'unavailable' });
+    expect(result.checks[2]?.detail).toContain('does not produce after snapshot');
+  });
+
+  test.each([
+    [
+      'context',
+      VALID_PATCH.replace('   const parsed = JSON.parse(raw);', '   const parsed = wrong;'),
+    ],
+    ['count', VALID_PATCH.replace('@@ -1,5 +1,5 @@', '@@ -1,6 +1,5 @@')],
+    ['old position', VALID_PATCH.replace('@@ -1,5 +1,5 @@', '@@ -2,5 +1,5 @@')],
+    ['new position', VALID_PATCH.replace('@@ -1,5 +1,5 @@', '@@ -1,5 +2,5 @@')],
+    ['malformed range', VALID_PATCH.replace('@@ -1,5 +1,5 @@', '@@ bad @@')],
+    ['multiple files', `${VALID_PATCH}\n${VALID_PATCH}`],
+    ['newline marker', `${VALID_PATCH}\n\\ No newline at end of file`],
+  ])('unsupported or inconsistent %s fails closed', (_name, patch) => {
+    const result = verifyClosureEvidence(makePacket({ patch }));
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expectLastCheck(result, { check: 'patch-coherent', outcome: 'unavailable' });
+  });
+
+  test('ordered separated hunks preserve untouched lines and exact final newline', () => {
+    const before = "prefix\nuse('PARTIAL_MODE');\nuntouched\nversion = 1;\nsuffix\n";
+    const after = 'prefix\nuse(true);\nuntouched\nversion = 2;\nsuffix\n';
+    const patch = [
+      '--- a/src/config.ts',
+      '+++ b/src/config.ts',
+      '@@ -2 +2 @@',
+      "-use('PARTIAL_MODE');",
+      '+use(true);',
+      '@@ -4 +4 @@',
+      '-version = 1;',
+      '+version = 2;',
+    ].join('\n');
+    const packet = makePacket({
+      before,
+      after,
+      patch,
+    });
+    expect(verifyClosureEvidence(packet).verdict).toBe('resolved');
+    const omitted = verifyClosureEvidence({
+      ...packet,
+      after: packet.after.replace('untouched\n', ''),
+    });
+    expect(omitted.verdict).toBe('uncertain');
+    const newline = verifyClosureEvidence({ ...packet, after: packet.after.slice(0, -1) });
+    expect(newline.verdict).toBe('uncertain');
+    expect(newline.checks[2]?.detail).toContain('final newline');
+  });
+
+  test('zero-count insertion and deletion ranges preserve exact positions', () => {
+    const before = "use('PARTIAL_MODE');\nobsolete();\nend();";
+    const after = 'use(true);\nend();\nappend();';
+    const patch = [
+      '--- a/src/config.ts',
+      '+++ b/src/config.ts',
+      '@@ -1 +1 @@',
+      "-use('PARTIAL_MODE');",
+      '+use(true);',
+      '@@ -2 +1,0 @@',
+      '-obsolete();',
+      '@@ -3,0 +3 @@',
+      '+append();',
+    ].join('\n');
+    expect(verifyClosureEvidence(makePacket({ before, after, patch })).verdict).toBe('resolved');
+    const overlap = patch.replace('@@ -3,0 +3 @@', '@@ -1,0 +3 @@');
+    expect(verifyClosureEvidence(makePacket({ before, after, patch: overlap })).verdict).toBe(
+      'uncertain',
+    );
+  });
+
+  test.each([8, 9])(
+    '%i quoted spans respect the exact scan cap without silent truncation',
+    (count) => {
+      const spans = Array.from({ length: count }, (_, index) => `trigger-${index}`);
+      const before = spans.map((span) => `consume('${span}');`).join('\n');
+      const after = count === 9 ? `consume('${spans[8]}');` : 'consume(true);';
+      const finding = { id: 'span-limit', text: spans.map((span) => `"${span}"`).join(' ') };
+      const result = verifyClosureEvidence(
+        makePacket({
+          finding,
+          before,
+          after,
+          patch: replacementPatch(before, after),
+        }),
+      );
+      expect(result.verdict).toBe(count === 8 ? 'resolved' : 'uncertain');
+      if (count === 9) {
+        expect(result.reason).toBe('unavailable-evidence');
+        expectLastCheck(result, { check: 'trigger-removed', outcome: 'unavailable' });
+        expect(result.checks[3]?.detail).toContain('exceeds scan limits');
+      }
+    },
+  );
+
+  test.each([16, 17])('%i removed declarations respect the exact scan cap', (count) => {
+    const declarations = Array.from({ length: count }, (_, index) => `const retired${index} = 1;`);
+    const before = [...declarations, "consume('PARTIAL_MODE');"].join('\n');
+    const after = count === 17 ? `${declarations[16]}\nconsume(true);` : 'consume(true);';
+    const result = verifyClosureEvidence(
+      makePacket({
+        before,
+        after,
+        patch: replacementPatch(before, after),
+      }),
+    );
+    expect(result.verdict).toBe(count === 16 ? 'resolved' : 'uncertain');
+    if (count === 17) {
+      expect(result.reason).toBe('unavailable-evidence');
+      expectLastCheck(result, { check: 'trigger-removed', outcome: 'unavailable' });
+      expect(result.checks[3]?.detail).toContain('exceeds scan limits');
+    }
+  });
+
+  test.each(['after', 'consumer', 'dependency'] as const)(
+    'a dollar-ending declaration surviving in %s is unresolved',
+    (location) => {
+      const before = "const retired$ = 1;\nconsume('PARTIAL_MODE');";
+      const after = location === 'after' ? 'const retired$ = 2;\nconsume(true);' : 'consume(true);';
+      const dependencies: CitedDependency[] =
+        location === 'after'
+          ? []
+          : [
+              {
+                path: 'src/legacy.ts',
+                role: location,
+                text: 'const retired$ = 2;',
+              },
+            ];
+      const result = verifyClosureEvidence(
+        makePacket({
+          before,
+          after,
+          dependencies,
+          patch: replacementPatch(before, after),
+        }),
+      );
+      expect(result.verdict).toBe('unresolved');
+      expect(result.reason).toBe('deleted-trigger-survives');
+      expect(result.checks[3]?.detail).toContain('retired$');
+    },
+  );
+
+  test('a longer dollar identifier is not the removed declaration', () => {
+    const before = "const retired$ = 1;\nconsume('PARTIAL_MODE');";
+    const after = 'const retired$extra = 2;\nconsume(true);';
+    expect(
+      verifyClosureEvidence(
+        makePacket({
+          before,
+          after,
+          patch: replacementPatch(before, after),
+        }),
+      ).verdict,
+    ).toBe('resolved');
   });
 
   test('unpinned revision identity yields uncertain', () => {
@@ -603,7 +788,7 @@ describe('review.address closure evidence verifier', () => {
       makePacket({ after: AFTER.replace('  if (parsed.partial === true) enablePartial();\n', '') }),
     );
     expect(missingAdded.verdict).toBe('uncertain');
-    expect(missingAdded.checks[2]?.detail).toContain('added lines absent');
+    expect(missingAdded.checks[2]?.detail).toContain('does not produce after snapshot');
 
     const missingRemoved = verifyClosureEvidence(
       makePacket({
@@ -614,7 +799,7 @@ describe('review.address closure evidence verifier', () => {
       }),
     );
     expect(missingRemoved.verdict).toBe('uncertain');
-    expect(missingRemoved.checks[2]?.detail).toContain('removed lines absent');
+    expect(missingRemoved.checks[2]?.detail).toContain('does not match before snapshot');
 
     const wrongFile = verifyClosureEvidence(
       makePacket({ finding: { id: 'F1', text: 'x', file: 'src/other.ts' } }),

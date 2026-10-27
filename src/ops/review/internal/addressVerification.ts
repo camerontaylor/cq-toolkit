@@ -98,7 +98,7 @@ const DECLARATION_LINE = new RegExp(
 const QUOTED_SPAN = /"([^"\n]{3,200})"|'([^'\n]{3,200})'|`([^`\n]{3,200})`/g;
 const DECLARATION_SURVIVAL = (symbol: string): RegExp =>
   new RegExp(
-    `(?:function\\*?|class|interface|type|enum|const|let|var)\\s+${escapeRegExp(symbol)}\\b`,
+    `(?:function\\*?|class|interface|type|enum|const|let|var)\\s+${escapeRegExp(symbol)}(?![A-Za-z0-9_$])`,
   );
 const MAX_SPANS = 8;
 const MAX_DECLARATIONS = 16;
@@ -120,24 +120,24 @@ function oneLine(text: string): string {
 }
 
 /** Quoted spans from the finding text: the defect's citable trigger fragments. */
-function quotedSpans(text: string): string[] {
+function quotedSpans(text: string): string[] | undefined {
   const spans: string[] = [];
   for (const match of text.matchAll(QUOTED_SPAN)) {
     const span = match[1] ?? match[2] ?? match[3];
     if (span !== undefined) spans.push(span);
-    if (spans.length >= MAX_SPANS) break;
+    if (spans.length > MAX_SPANS) return undefined;
   }
   return spans;
 }
 
 /** Symbols declared on removed patch lines: candidates for surviving triggers. */
-function removedDeclarations(removedLines: readonly string[]): string[] {
+function removedDeclarations(removedLines: readonly string[]): string[] | undefined {
   const symbols: string[] = [];
   for (const line of removedLines) {
     const match = DECLARATION_LINE.exec(line);
     const symbol = match?.[1];
     if (symbol !== undefined && !symbols.includes(symbol)) symbols.push(symbol);
-    if (symbols.length >= MAX_DECLARATIONS) break;
+    if (symbols.length > MAX_DECLARATIONS) return undefined;
   }
   return symbols;
 }
@@ -150,38 +150,79 @@ interface PatchShape {
   deletionOnly: boolean;
 }
 
-function parsePatchShape(patch: string): PatchShape | string {
+/** Only ordinary single-file unified hunks are supported; no fuzzy application. */
+function parsePatchShape(patch: string, before: string, after: string): PatchShape | string {
   const lines = patch.split('\n');
-  let oldPath: string | undefined;
-  let newPath: string | undefined;
-  let hunks = 0;
+  if (lines.at(-1) === '') lines.pop();
+  let index = 0;
+  const diff = lines[index]?.startsWith('diff --git ') ? lines[index++] : undefined;
+  if (lines[index]?.startsWith('index ')) {
+    if (!/^index [0-9a-f]+\.\.[0-9a-f]+(?: [0-7]{6})?$/.test(lines[index] ?? ''))
+      return 'unsupported patch index header';
+    index++;
+  }
+  const oldPath = /^--- a\/(\S+)$/.exec(lines[index++] ?? '')?.[1];
+  const newPath = /^\+\+\+ b\/(\S+)$/.exec(lines[index++] ?? '')?.[1];
+  if (oldPath === undefined || newPath === undefined) return 'unsupported single-file headers';
+  if (oldPath !== newPath) return 'rename patches are not verified yet';
+  if (diff !== undefined && diff !== `diff --git a/${oldPath} b/${newPath}`)
+    return 'patch file headers disagree';
+  // Newline transitions/markers, binary patches, modes and file creation or
+  // deletion are unsupported. Preserve the snapshot's existing final newline.
+  const trailingNewline = before.endsWith('\n');
+  if (trailingNewline !== after.endsWith('\n')) return 'unsupported final newline change';
+  const beforeLines = before.split('\n');
+  if (trailingNewline) beforeLines.pop();
+  const output: string[] = [];
   const addedLines: string[] = [];
   const removedLines: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith('diff --git ')) continue;
-    if (line.startsWith('--- ')) {
-      const path = line.slice(4).trim();
-      oldPath = path === '/dev/null' ? undefined : path.replace(/^a\//, '');
-      continue;
+  let cursor = 0;
+  let hunks = 0;
+  while (index < lines.length) {
+    const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/.exec(
+      lines[index++] ?? '',
+    );
+    if (header === null) return 'unsupported or malformed hunk header';
+    const oldStart = Number(header[1]);
+    const oldCount = Number(header[2] ?? 1);
+    const newStart = Number(header[3]);
+    const newCount = Number(header[4] ?? 1);
+    if (![oldStart, oldCount, newStart, newCount].every(Number.isSafeInteger))
+      return 'invalid hunk range';
+    const oldIndex = oldCount === 0 ? oldStart : oldStart - 1;
+    const newIndex = newCount === 0 ? newStart : newStart - 1;
+    if (oldIndex < cursor || oldIndex > beforeLines.length) return 'invalid old hunk position';
+    output.push(...beforeLines.slice(cursor, oldIndex));
+    cursor = oldIndex;
+    if (newIndex !== output.length) return 'invalid new hunk position';
+    let consumed = 0;
+    let produced = 0;
+    while (index < lines.length && !lines[index]?.startsWith('@@')) {
+      const line = lines[index++] ?? '';
+      const marker = line[0];
+      const content = line.slice(1);
+      if (marker !== ' ' && marker !== '+' && marker !== '-') return 'unsupported hunk content';
+      if (marker !== '+') {
+        if (cursor >= beforeLines.length || beforeLines[cursor] !== content)
+          return 'hunk context or removal does not match before snapshot';
+        cursor++;
+        consumed++;
+      }
+      if (marker !== '-') {
+        output.push(content);
+        produced++;
+      }
+      if (marker === '+') addedLines.push(content);
+      if (marker === '-') removedLines.push(content);
     }
-    if (line.startsWith('+++ ')) {
-      const path = line.slice(4).trim();
-      newPath = path === '/dev/null' ? undefined : path.replace(/^b\//, '');
-      continue;
-    }
-    if (line.startsWith('@@')) {
-      hunks++;
-      continue;
-    }
-    if (hunks === 0) continue;
-    if (line.startsWith('+')) addedLines.push(line.slice(1));
-    else if (line.startsWith('-')) removedLines.push(line.slice(1));
+    if (consumed !== oldCount || produced !== newCount) return 'hunk line counts disagree';
+    hunks++;
   }
   if (hunks === 0) return 'patch has no change hunks';
-  if (oldPath === undefined && newPath === undefined) return 'patch has no file header';
-  if (oldPath !== undefined && newPath !== undefined && oldPath !== newPath)
-    return 'rename patches are not verified yet';
   if (addedLines.length === 0 && removedLines.length === 0) return 'patch has no changed lines';
+  output.push(...beforeLines.slice(cursor));
+  if (output.join('\n') + (trailingNewline ? '\n' : '') !== after)
+    return 'applying patch does not produce after snapshot';
   return {
     oldPath,
     newPath,
@@ -378,8 +419,9 @@ export function verifyClosureEvidence(
   };
 
   let deletionOnly = false;
+  let removedLines: readonly string[] = [];
   const coherent = (): VerificationCheck => {
-    const shape = parsePatchShape(packet.patch);
+    const shape = parsePatchShape(packet.patch, packet.before, packet.after);
     if (typeof shape === 'string')
       return {
         check: 'patch-coherent',
@@ -402,29 +444,8 @@ export function verifyClosureEvidence(
         detail: 'before and after content are identical',
         reason: 'unavailable-evidence',
       };
-    const beforeLines = new Set(packet.before.split('\n'));
-    const afterLines = new Set(packet.after.split('\n'));
-    const missingFromBefore = shape.removedLines.filter(
-      (line) => line !== '' && !beforeLines.has(line),
-    );
-    if (missingFromBefore.length > 0)
-      return {
-        check: 'patch-coherent',
-        outcome: 'unavailable',
-        detail: `removed lines absent from before content: ${oneLine(missingFromBefore[0] ?? '')}`,
-        reason: 'unavailable-evidence',
-      };
-    const missingFromAfter = shape.addedLines.filter(
-      (line) => line !== '' && !afterLines.has(line),
-    );
-    if (missingFromAfter.length > 0)
-      return {
-        check: 'patch-coherent',
-        outcome: 'unavailable',
-        detail: `added lines absent from after content: ${oneLine(missingFromAfter[0] ?? '')}`,
-        reason: 'unavailable-evidence',
-      };
     deletionOnly = shape.deletionOnly;
+    removedLines = shape.removedLines;
     return {
       check: 'patch-coherent',
       outcome: 'pass',
@@ -436,8 +457,14 @@ export function verifyClosureEvidence(
 
   const trigger = (): VerificationCheck => {
     const spans = quotedSpans(packet.finding.text);
-    const shape = parsePatchShape(packet.patch);
-    const symbols = typeof shape === 'string' ? [] : removedDeclarations(shape.removedLines);
+    const symbols = removedDeclarations(removedLines);
+    if (spans === undefined || symbols === undefined)
+      return {
+        check: 'trigger-removed',
+        outcome: 'unavailable',
+        detail: `trigger evidence exceeds scan limits (${MAX_SPANS} quoted spans, ${MAX_DECLARATIONS} declarations)`,
+        reason: 'unavailable-evidence',
+      };
     for (const span of spans) {
       if (packet.after.includes(span))
         return {

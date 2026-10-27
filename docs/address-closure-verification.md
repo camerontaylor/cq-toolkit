@@ -73,9 +73,14 @@ the canonical order with at most one non-pass entry, last:
 2. `revision-pinned`: head and parent are full SHA-1/SHA-256 literals and
    distinct. An unpinned packet cannot tie its contents to a revision.
 3. `patch-coherent`: the patch parses, touches the finding's cited file when
-   it cites one, changes something, and its removed/added lines appear in the
-   before/after content. Renames are refused as unverified. Incoherent
-   packets are `unavailable`: the evidence contradicts itself.
+   it cites one, and changes something. Ordered single-file unified hunks must
+   match the exact before context/removals, positions and line counts, then
+   reconstruct the complete after snapshot including untouched regions. Only
+   ordinary existing-file text patches with matching literal paths are
+   supported. Renames, multiple files, binary/mode changes, creation/deletion,
+   newline markers/transitions and malformed hunks are unavailable; there is
+   no fuzzy application or fallback to line membership. An unchanged final
+   newline is preserved. Incoherent packets are `unavailable`.
 4. `trigger-removed`: quoted spans from the finding text must not survive in
    the after content or in any cited dependency's content; symbols declared
    on removed lines must not be re-declared in the after content or in any
@@ -86,6 +91,11 @@ the canonical order with at most one non-pass entry, last:
    uncertain (`no-citable-trigger`), even when an unrelated declaration was
    removed. The helper refuses to guess what the finding was about, and
    uncertainty keeps the finding open without demanding a code edit.
+   Quoted spans and unique removed declarations retain the scan caps of eight
+   and sixteen. Evidence exceeding either cap is unavailable (`uncertain`),
+   never silently truncated into closure. Declaration survival uses ASCII
+   identifier continuation (letters, digits, underscore and dollar), so a
+   dollar-ending name matches itself but not a longer identifier.
 5. `dependencies-covered`: a deletion-only patch can never resolve (a
    deleted line alone never establishes closure), and the completeness
    attestation must be present. Otherwise pass.
