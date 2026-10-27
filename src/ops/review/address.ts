@@ -68,7 +68,8 @@ export interface ReviewAddressInput {
 export interface ReviewAddressReport {
   source: string;
   reportPath: string;
-  rounds: Array<{ round: number; record: FindingsRecord; run?: RunReport }>;
+  /** One entry per round; the latest reviewed record and all settled batch runs. */
+  rounds: Array<{ round: number; record: FindingsRecord; runs: RunReport[] }>;
   findings: Finding[];
   /** Report context only: review advisories never enter `findings` or dispatch. */
   advisories?: string[];
@@ -768,6 +769,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return false;
             }
           };
+          const noteRound = (round: number, record: FindingsRecord, run?: RunReport) => {
+            let entry = report.rounds.find((entry) => entry.round === round);
+            if (!entry) {
+              entry = { round, record, runs: [] };
+              report.rounds.push(entry);
+            }
+            if (run) entry.runs.push(run);
+            return entry;
+          };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
@@ -832,7 +842,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 const fix = row.result.value as AddressFix;
                 if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
               }
-              report.rounds.push({ round, record, run });
+              noteRound(round, record, run);
             }
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
@@ -1021,6 +1031,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (prMetadata) {
               const meta = prMetadata;
               const fixesById = new Map<string, AddressFix>();
+              const dispatchedFindings: Finding[] = [];
+              let dispatchedRecord: FindingsRecord | undefined;
               let admissionRefused = false;
               const entry: OpRegistryEntry = {
                 name: 'review.fixItem',
@@ -1048,13 +1060,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const admit = async (head: string) => {
                     if ((await branchName(root)) !== item.worktree.branch)
                       throw new Error('worker execution branch changed');
-                    await admitRecord(root, {
+                    const record: FindingsRecord = {
                       schemaVersion: 1,
                       branch: item.worktree.branch,
                       head,
                       sources: [{ kind: 'pr-threads', status: 'terminal' }],
                       findings: [finding],
-                    });
+                    };
+                    await admitRecord(root, record);
+                    dispatchedRecord ??= record;
                   };
                   try {
                     if (bound.withVerifiedHead) await bound.withVerifiedHead(admit);
@@ -1066,6 +1080,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     admissionRefused = true;
                     throw error;
                   }
+                  dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
@@ -1126,6 +1141,22 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 engineOwnedConcurrency: policy.review.addressConcurrency,
                 publish: input.push === true,
                 publicationTreeClean,
+                onFixRunSettled: (run) => {
+                  // Retain the settled run before later Git/forge work can throw.
+                  // An initial refusal has no admitted work to record; a refused
+                  // sibling must not erase the history of earlier admitted work.
+                  if (!dispatchedRecord || dispatchedFindings.length === 0) return;
+                  noteRound(
+                    round,
+                    {
+                      ...dispatchedRecord,
+                      findings: dispatchedFindings.map(
+                        (finding) => fixesById.get(finding.id)?.finding ?? finding,
+                      ),
+                    },
+                    run,
+                  );
+                },
                 onWorktreeStaleRefresh: async () => {
                   // The refresh removal refused on untracked files. Clear
                   // ONLY what the existing receipt strictly attests as
@@ -1306,11 +1337,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 return await finish('needs-human', 'PR re-review identity changed');
               previous = retainDeferred(merge([threads, agent.value]));
               noteAdvisories(previous);
-              report.rounds.push({
-                round,
-                record: previous,
-                ...(loop.fixReport ? { run: loop.fixReport } : {}),
-              });
+              noteRound(round, previous).record = previous;
               report.findings = previous.findings;
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
               if (
@@ -1410,7 +1437,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-            report.rounds.push({ round, record: previous });
+            noteRound(round, previous).record = previous;
             if (
               isComplete(previous, policy.review.reviewers) &&
               !report.openBlocking.length &&

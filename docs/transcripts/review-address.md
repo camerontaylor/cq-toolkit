@@ -727,3 +727,23 @@ test:narrow result="pass" exit=0 files=2 projects="pure" tests="26/26" failed=0 
 Final static checking passes with zero errors against baseline zero; typed lint,
 Knip, formatting and generated operation docs (54) pass. The red batch remains an
 explicit local verification limitation for independent delta review and CI.
+
+## Round report format (#510)
+
+`review-address-report.json` and the SDK report expose one `rounds[]` entry
+per round that has a settled batch or completed re-review. Each entry is
+`{ round, record, runs }`: `record` is the latest findings record for that
+round (replaced by a successful re-review), and `runs` contains every settled
+batch `RunReport` in dispatch order, including PR-thread and local-agent
+batches. A round without dispatched work has `runs: []`. A stop before
+re-review retains the dispatched record and all settled batch runs. PR runs
+are retained immediately when the governed run settles, before post-fix Git
+verification, publication or snapshots can throw. A refused sibling cannot
+erase earlier admitted work; an initial refusal before any admitted work
+still records zero rounds. The settled-run callback aggregates each run once.
+`rounds.length` therefore counts recorded rounds, rather than dispatch batches.
+
+This intentionally changes the persisted greenfield report format:
+consumers of the former optional `rounds[].run` must iterate `rounds[].runs`.
+`dev.cycle` renders its attempt log from the run-wide `attempts` array and
+does not consume per-round runs.
