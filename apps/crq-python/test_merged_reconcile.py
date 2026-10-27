@@ -497,6 +497,33 @@ class DurableBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(mr.ReconcileRefused, "repository/base"):
             mr.enrollment_plan(result, repo="other/repo")
 
+    def test_real_q1_enroll_survives_lost_response_and_overlapping_interval(self):
+        receipt_spec = importlib.util.spec_from_file_location("q2_q1_receipt", ROOT / "review_receipt.py")
+        receipt = importlib.util.module_from_spec(receipt_spec)
+        receipt_spec.loader.exec_module(receipt)
+        queue = {"items": [{"id": "pr1-merged", "pr": 1, "state": "skipped",
+                            "kind": "merged", "cycles": []}]}
+        inventory = self.run_inventory(lambda cursor: cursor_page([pr(1, B)]))
+        first = mr.enrollment_plan(inventory, repo="org/repo", dry_run=False)["entries"][0]
+
+        def apply(entry):
+            binding = {k: v for k, v in entry["binding"].items() if k != "policy"}
+            return receipt.enroll(queue, **binding, request_id=entry["request_id"], at=B)
+
+        self.assertTrue(apply(first)["created"])
+        # Queue saved but caller lost the enrollment response; a new inventory
+        # with a different overlapping interval still produces the same binding.
+        queue = json.loads(json.dumps(queue))
+        overlap = mr.reconcile(None, lambda cursor: cursor_page([pr(1, B)]),
+                               repo="org/repo", after="2026-10-02T00:00:00Z", before=B, page_budget=1)
+        replay = mr.enrollment_plan(overlap, repo="org/repo", dry_run=False)["entries"][0]
+        self.assertEqual(first["request_id"], replay["request_id"])
+        self.assertFalse(apply(replay)["created"])
+        self.assertEqual(len(queue["items"]), 2)
+        self.assertEqual(queue["items"][0]["state"], "skipped")
+        self.assertEqual(queue["items"][1]["state"], "pending")
+        self.assertEqual(queue["items"][1]["cycles"], [])
+
     def test_invalid_calendar_and_typed_merge_metadata_are_explicit_unsupported(self):
         records = [{**pr(1, B), "mergedAt": "2026-02-30T00:00:00Z"},
                    {**pr(2, B), "mergeCommit": {"oid": []}}]
