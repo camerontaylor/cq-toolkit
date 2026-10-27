@@ -19,9 +19,9 @@
 // cancellation source. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED here — the governor's escalation ladder
 //     is the wall-clock owner; a driver-owned deadline would duplicate and
-//     races it. The SDK call's per-request `timeout.stepMs`
-//     (DEFAULT_STEP_TIMEOUT_MS) is NOT a run deadline — it bounds one HTTP
-//     request so a hung connection cannot stall the loop; WHEN to abort the
+//     races it. The SDK call's `timeout.stepMs`
+//     (DEFAULT_STEP_TIMEOUT_MS) is NOT a run deadline — it bounds one step
+//     (model call, its retry and tool runs) so a hung step cannot stall the loop; WHEN to abort the
 //     RUN remains the governor's decision.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
@@ -177,8 +177,8 @@
 // and its exhausted-retry error names the attempt count and the last error
 // (`Failed after N attempts. Last error: …`), so the cause still reaches
 // WorkerResult.error. Each step of the tool loop is also bounded by
-// DEFAULT_STEP_TIMEOUT_MS (a hung HTTP request cannot stall the loop); that
-// per-request step-timeout abort is NOT SDK-retryable and therefore
+// DEFAULT_STEP_TIMEOUT_MS (a hung step cannot stall the loop); that
+// step-timeout abort is NOT SDK-retryable and therefore
 // classifies as 'transient' (the TimeoutError error class name).
 //
 // COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
@@ -284,18 +284,23 @@ export type ProviderFactory = (modelId: string, sessionId?: string) => LanguageM
 export const DEFAULT_MAX_STEPS = 40;
 
 /**
- * Per-request wall-clock bound for EACH step of the SDK tool loop
- * (`timeout.stepMs`, ai@7.0.99). This is NOT a run deadline — the governor's
- * escalation ladder owns WHEN to abort the run (I8; Budget.wallClockMs is
- * ignored here). It bounds a single provider HTTP request so a hung
- * connection cannot stall the loop indefinitely; the SDK aborts that step
- * and surfaces the cause, which the classifier maps to [endpoint-timeout].
- * The default is generous because a non-streaming step legitimately waits for
- * its whole output (a 48k-token review answer exceeded the old 120 s); ai@7's
- * `chunkMs` applies to streaming only, so it cannot serve this path.
- * Override per driver with `AiSdkDriverOptions.stepTimeoutMs`.
+ * Wall-clock bound for EACH step of the SDK tool loop (`timeout.stepMs`,
+ * ai@7.0.99). ai's generateText arms ONE timer per loop iteration
+ * (`setAbortTimeout`, dist/index.js ~5810) and clears it only after the step's
+ * tool execution (~6286), so it covers the model call INCLUDING its SDK retry
+ * and the step's tool runs — not a single HTTP request, and not the whole turn
+ * (`timeout.totalMs`, unset here). It is NOT a run deadline — the governor
+ * and the review wall budget own that (I8; Budget.wallClockMs is ignored
+ * here). It catches a hung step; the SDK aborts it and surfaces the cause,
+ * which the classifier maps to [endpoint-timeout]. The default is generous
+ * because a non-streaming step legitimately waits for its whole output (a
+ * 48k-token review answer exceeded 120 s, a slow-but-steady GLM piece
+ * exceeded 600 s): limits stop runaways, not slow working runs. ai@7's
+ * `chunkMs`/`firstChunkMs` apply to streamText only (generateText warns
+ * "only supported by streaming functions"). Override per driver with
+ * `AiSdkDriverOptions.stepTimeoutMs`.
  */
-export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
+export const DEFAULT_STEP_TIMEOUT_MS = 1_200_000;
 
 /**
  * The minimum ripgrep the search tools need at runtime: 11.0.0 (the CI
@@ -332,8 +337,8 @@ export interface AiSdkDriverOptions {
     { ok: true; version: string } | { ok: false; reason: 'absent' | 'old'; found?: string }
   >;
   /**
-   * Per-request bound for each SDK step, in ms (`timeout.stepMs`). It catches
-   * a hung request, not a slow long answer; default DEFAULT_STEP_TIMEOUT_MS.
+   * Bound for each SDK step, in ms (`timeout.stepMs`; the model call incl. its
+   * retry and the step's tool runs). It catches a hung step, not a slow answer; default DEFAULT_STEP_TIMEOUT_MS.
    */
   stepTimeoutMs?: number;
   /**
@@ -834,8 +839,8 @@ export class AiSdkDriver implements Driver {
           // api-equivalent caveat the modeled label records, not a hidden
           // second charge.
           maxRetries: 1,
-          // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
-          // hung request cannot stall the loop. The step-timeout abort is not
+          // Bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
+          // hung step cannot stall the loop. The step-timeout abort is not
           // SDK-retryable; it classifies as 'transient' (TimeoutError name).
           timeout: { stepMs: this.stepTimeoutMs },
           ...(selected.length > 0 ? { tools: toolSet } : {}),

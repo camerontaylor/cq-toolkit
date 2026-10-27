@@ -196,16 +196,18 @@ interoperable with an external ledger; a shared cross-language canonical
 projection protocol does not exist and is an activation blocker for that
 bridge. With no hook the shared token allowance is enforced per-invocation
 only — a named gap, not a whole-job claim.
-The one driver-side temporal bound is the SDK call's per-request
-`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (600 s; `AiSdkDriverOptions.stepTimeoutMs`) — NOT a run deadline,
-but a bound on each step of the tool loop so a hung HTTP request cannot
-stall the loop.
+The one driver-side temporal bound is the SDK call's
+`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (20 min; `AiSdkDriverOptions.stepTimeoutMs`) — NOT a run deadline,
+but a bound on each step of the tool loop so a hung step (model call, its retry and
+tool runs) cannot stall the loop.
 The production default providers fetch through a per-driver undici
 dispatcher (`ai-sdk/step-fetch.ts`) whose header and body timeouts are the
 step bound plus `STEP_FETCH_MARGIN_MS`: Node's bundled fetch otherwise gives
 up on a non-streaming request after undici's default 300 s, below the step
-bound (S7 attempt F). Injected providers keep their own transport. The
-factory takes the bound per request (`DriverRequest.stepTimeoutMs`) or per
+bound (S7 attempt F). These socket timeouts apply to each HTTP request and
+cannot fire before the step bound, even on a retry: the SDK's step timer
+spans the retry. Injected providers keep their own transport. The
+factory takes the bound from `DriverRequest.stepTimeoutMs` or per
 lane (`lanes.aiSdk.stepTimeoutMs`); the agent reviewer passes cq.json
 `budgets.step.wallMs`, capped at the remaining review wall time.
 

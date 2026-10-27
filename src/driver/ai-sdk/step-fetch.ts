@@ -1,14 +1,17 @@
 // The default providers' HTTP transport, bounded by the driver's step bound.
 //
-// The SDK's per-request `timeout.stepMs` is the INTENDED bound on one
-// provider request, but Node's bundled fetch also enforces undici's default
+// The SDK's `timeout.stepMs` bounds a whole step: the model call including
+// its SDK retry and the step's tool runs. Node's bundled fetch also enforces undici's default
 // `headersTimeout`/`bodyTimeout` of 300 s. A non-streaming request receives
 // no response headers until the model has finished, so a reasoning model
 // that legitimately spends > 5 min on one request died at the socket with
 // `Headers Timeout Error`, whatever `stepTimeoutMs` said (S7 attempt F).
 //
 // The socket timeouts are set to the step bound PLUS a margin rather than 0
-// (disabled): the SDK's step abort fires first and stays the one classified
+// (disabled). Each HTTP request's socket timeouts use the step bound plus
+// 5 s by default, so they cannot fire before the step bound, even for the
+// step's second (retry) request: the SDK's step timer spans the retry.
+// The SDK's step abort fires first and stays the one classified
 // cause ('transient', TimeoutError), while the socket timeouts remain a
 // backstop for a request that somehow escapes the abort signal — but for
 // stalls only. `headersTimeout` bounds time-to-headers, and `bodyTimeout` is
