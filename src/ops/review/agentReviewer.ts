@@ -271,7 +271,11 @@ export async function runAgentReviewer(
                   if (reportOpen) pendingUsage.add(id);
                   let returned = false;
                   try {
-                    const value = await resolved.driver.run.call(resolved.driver, invocation, options);
+                    const value = await resolved.driver.run.call(
+                      resolved.driver,
+                      invocation,
+                      options,
+                    );
                     returned = true;
                     if (reportOpen) {
                       usageLedger.record(id, {
