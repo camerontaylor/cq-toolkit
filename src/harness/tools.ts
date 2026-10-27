@@ -1098,8 +1098,8 @@ export function buildTools(
    * one chunk plus one carried partial path.
    */
   type SearchEnumerationOutcome =
-    | { kind: 'exit'; code: number }
-    | { kind: 'killed' }
+    | { kind: 'exit'; code: number; stderrTail: string }
+    | { kind: 'killed'; stderrTail: string }
     | { kind: 'spawn-error'; error: unknown }
     | { kind: 'overflow' }
     | { kind: 'stop-early' };
@@ -1216,8 +1216,8 @@ export function buildTools(
         if (overflowed) return settle({ kind: 'overflow' });
         if (spawnError !== undefined && child.pid === undefined)
           return settle({ kind: 'spawn-error', error: spawnError });
-        if (code === null) return settle({ kind: 'killed' });
-        return settle({ kind: 'exit', code });
+        if (code === null) return settle({ kind: 'killed', stderrTail });
+        return settle({ kind: 'exit', code, stderrTail });
       });
     });
   };
@@ -1384,7 +1384,7 @@ export function buildTools(
         };
       }
       if (outcome.kind === 'exit' && outcome.code !== 0 && outcome.code !== 1) {
-        const detail = stderrTail.trim();
+        const detail = outcome.stderrTail.trim();
         return {
           ok: false,
           denial: deny(

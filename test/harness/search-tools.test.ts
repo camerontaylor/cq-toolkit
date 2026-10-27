@@ -8,9 +8,24 @@ import type { HarnessConfig } from '../../src/harness/config.js';
 import { buildTools } from '../../src/harness/tools.js';
 import type { ToolkitTool } from '../../src/harness/tools.js';
 
+/** Handle of the most recent fake child (kill target for assertions). */
+interface FakeChildHandle {
+  kill: () => boolean;
+  pid: number | undefined;
+}
+
 /** Every spawn this test process makes, recorded at the child_process seam. */
 const spawnState = vi.hoisted(() => ({
   calls: [] as { file: string; args: string[] }[],
+  /** When set, spawn returns a deterministic fake child instead of rg. */
+  fake: null as null | {
+    stdoutChunks: Buffer[];
+    stderrChunks: Buffer[];
+    exitCode: number | null; // null: never auto-closes; a kill is required
+    pid: number | undefined;
+  },
+  /** The most recent fake child (kill target for abort/timeout tests). */
+  current: null as FakeChildHandle | null,
 }));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -19,10 +34,60 @@ vi.mock('node:child_process', async (importOriginal) => {
       file: String(file),
       args: (Array.isArray(args) ? args : []).map((arg) => String(arg)),
     });
-    type SpawnFn = (...parts: unknown[]) => ReturnType<typeof actual.spawn>;
-    return (actual.spawn as SpawnFn)(file, args, ...rest);
+    if (spawnState.fake === null) {
+      type SpawnFn = (...parts: unknown[]) => ReturnType<typeof actual.spawn>;
+      return (actual.spawn as SpawnFn)(file, args, ...rest);
+    }
+    const config = spawnState.fake;
+    const { EventEmitter } = actual;
+    const stdout = new EventEmitter() as EventEmitter & { pause: () => void };
+    stdout.pause = () => {};
+    const stderr = new EventEmitter();
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: typeof stdout;
+      stderr: typeof stderr;
+      pid: number | undefined;
+      kill: (signal?: string) => boolean;
+    };
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.pid = config.pid;
+    child.kill = vi.fn((): boolean => {
+      // A SIGKILL terminates the child: close follows with a null code.
+      queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+      return true;
+    });
+    spawnState.current = { kill: child.kill, pid: config.pid };
+    queueMicrotask(() => {
+      for (const chunk of config.stdoutChunks) stdout.emit('data', chunk);
+      for (const chunk of config.stderrChunks) stderr.emit('data', chunk);
+      if (config.exitCode !== null) queueMicrotask(() => child.emit('close', config.exitCode));
+    });
+    return child as unknown as ReturnType<typeof actual.spawn>;
   };
   return { ...actual, spawn };
+});
+
+/**
+ * Registration counts for the streaming helper's cleanup contract: the
+ * enumeration registers on spawn and must unregister in the close
+ * settlement. Deltas are asserted around a single call (other modules
+ * register at import time and stay registered).
+ */
+const signalCleanupState = vi.hoisted(() => ({ registered: 0, unregistered: 0 }));
+vi.mock('../../src/shared/process-signals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/shared/process-signals.js')>();
+  return {
+    ...actual,
+    registerProcessSignalCleanup: (prepare: () => (() => void) | undefined) => {
+      signalCleanupState.registered += 1;
+      const dispose = actual.registerProcessSignalCleanup(prepare);
+      return () => {
+        signalCleanupState.unregistered += 1;
+        dispose();
+      };
+    },
+  };
 });
 
 async function withWorkspace(body: (workspace: string) => Promise<void>): Promise<void> {
@@ -558,5 +623,148 @@ describe('contained grep and glob tools', () => {
         expect(result.output).toContain('--- c.rs ---');
       }
     });
+  });
+
+  test('streaming include enumeration fails closed at the scanned-bytes work cap', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'hit.ts'), 'needle\n', 'utf8');
+      // One 33 MiB chunk exceeds the 32 MiB scanned-bytes traversal cap
+      // before any path is complete: the outcome must be a denial, and the
+      // child must have been killed (it would never close on its own).
+      spawnState.fake = {
+        stdoutChunks: [Buffer.alloc(33 * 1_024 * 1_024, 0x61)],
+        stderrChunks: [],
+        exitCode: null,
+        pid: 4242,
+      };
+      const registeredBefore = signalCleanupState.registered;
+      const unregisteredBefore = signalCleanupState.unregistered;
+      try {
+        const result = await tool(
+          buildTools(defaultHarnessConfig, workspace, 'read-only'),
+          'grep',
+        ).execute({ pattern: 'needle', include: '*.ts' });
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: candidate enumeration work cap exceeded',
+          );
+        }
+        expect(spawnState.current?.kill).toHaveBeenCalled();
+        expect(signalCleanupState.registered - registeredBefore).toBe(1);
+        expect(signalCleanupState.unregistered - unregisteredBefore).toBe(1);
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+    });
+  });
+
+  test('streaming include enumeration fails closed at the scanned-paths work cap', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'hit.ts'), 'needle\n', 'utf8');
+      // 1,000,001 complete paths in one bounded (~2 MiB) chunk: one past the
+      // traversal path cap. The include matches nothing, so nothing is kept.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from('unrelated.dat\0'.repeat(1_000_001))],
+        stderrChunks: [],
+        exitCode: null,
+        pid: 4243,
+      };
+      try {
+        const result = await tool(
+          buildTools(defaultHarnessConfig, workspace, 'read-only'),
+          'grep',
+        ).execute({ pattern: 'needle', include: '*.ts' });
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: candidate enumeration work cap exceeded',
+          );
+        }
+        expect(spawnState.current?.kill).toHaveBeenCalled();
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+    });
+  });
+
+  test('aborting a streaming include enumeration cancels, kills the child and unregisters', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'hit.ts'), 'needle\n', 'utf8');
+      spawnState.fake = {
+        stdoutChunks: [], // never emits; only the abort can end the wait
+        stderrChunks: [],
+        exitCode: null,
+        pid: 4244,
+      };
+      const controller = new AbortController();
+      const registeredBefore = signalCleanupState.registered;
+      const unregisteredBefore = signalCleanupState.unregistered;
+      try {
+        const pending = tool(
+          buildTools(defaultHarnessConfig, workspace, 'read-only'),
+          'grep',
+        ).execute({ pattern: 'needle', include: '*.ts' }, { signal: controller.signal });
+        await Promise.resolve();
+        await Promise.resolve(); // spawn, registration and listeners settled
+        expect(spawnState.current).not.toBeNull();
+        expect(spawnState.current?.kill).not.toHaveBeenCalled();
+        controller.abort();
+        const result = await pending;
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.denial.reason).toMatch(/^CANCELLED: /);
+        expect(spawnState.current?.kill).toHaveBeenCalled();
+        expect(signalCleanupState.registered - registeredBefore).toBe(1);
+        expect(signalCleanupState.unregistered - unregisteredBefore).toBe(1);
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+    });
+  });
+
+  test('an enumeration deadline kills the child and reports TIMEOUT, not CANCELLED', async () => {
+    vi.useFakeTimers();
+    try {
+      await withWorkspace(async (workspace) => {
+        await mkdir(join(workspace, '.git'), { recursive: true });
+        await writeFile(join(workspace, 'hit.ts'), 'needle\n', 'utf8');
+        spawnState.fake = {
+          stdoutChunks: [],
+          stderrChunks: [],
+          exitCode: null,
+          pid: 4245,
+        };
+        const registeredBefore = signalCleanupState.registered;
+        const unregisteredBefore = signalCleanupState.unregistered;
+        try {
+          const pending = tool(
+            buildTools(defaultHarnessConfig, workspace, 'read-only'),
+            'grep',
+          ).execute({ pattern: 'needle', include: '*.ts' });
+          await Promise.resolve();
+          await Promise.resolve();
+          expect(spawnState.current?.kill).not.toHaveBeenCalled();
+          // The enumeration deadline is SEARCH_TIMEOUT_MS (10 seconds).
+          await vi.advanceTimersByTimeAsync(10_000);
+          const result = await pending;
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.denial.reason).toMatch(/^TIMEOUT: /);
+          expect(spawnState.current?.kill).toHaveBeenCalled();
+          expect(signalCleanupState.registered - registeredBefore).toBe(1);
+          expect(signalCleanupState.unregistered - unregisteredBefore).toBe(1);
+        } finally {
+          spawnState.fake = null;
+          spawnState.current = null;
+        }
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
