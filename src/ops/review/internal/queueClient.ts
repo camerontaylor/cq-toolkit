@@ -11,6 +11,7 @@ import {
   type QueueReference,
   type QueueTransport,
   type QueueBindInput,
+  type QueueLifetimeOptions,
 } from './queueProtocol.js';
 import {
   importQueueEvidence,
@@ -46,6 +47,71 @@ const ChunkSchema = CommonPage.extend({
 export class QueueUnsupported extends Error {}
 export class QueueConfigurationError extends Error {}
 
+/** A monotonic total cap, including filesystem import and acknowledgement.
+ * The callback budget may shrink further, but can never extend this deadline.
+ */
+export async function withQueueLifetime<T>(
+  options: QueueLifetimeOptions | undefined,
+  action: (lifetime: {
+    options: QueueLifetimeOptions;
+    remainingMs: () => number;
+    wait: <V>(start: () => Promise<V>) => Promise<V>;
+  }) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const started = performance.now();
+  const initial = options?.remainingMs?.() ?? 45_000;
+  if (!Number.isFinite(initial) || initial <= 0)
+    throw new Error('queue delivery unknown: deadline exhausted');
+  const deadline = started + Math.min(45_000, initial);
+  const remainingMs = () => {
+    const caller = options?.remainingMs?.() ?? 45_000;
+    if (!Number.isFinite(caller)) return 0;
+    return Math.min(deadline - performance.now(), caller);
+  };
+  const check = () => {
+    if (remainingMs() <= 0 && !controller.signal.aborted)
+      controller.abort(new Error('queue delivery unknown: deadline exhausted'));
+    controller.signal.throwIfAborted();
+  };
+  const onAbort = () => controller.abort(options?.signal?.reason);
+  options?.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options?.signal?.aborted) onAbort();
+  const timer = setTimeout(
+    () => {
+      controller.abort(new Error('queue delivery unknown: deadline exhausted'));
+    },
+    Math.max(0, remainingMs()),
+  );
+  const wait = async <V>(start: () => Promise<V>): Promise<V> => {
+    check();
+    let aborted!: () => void;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      aborted = () => reject(controller.signal.reason);
+      controller.signal.addEventListener('abort', aborted, { once: true });
+    });
+    try {
+      const value = await Promise.race([start(), interrupted]);
+      check();
+      return value;
+    } finally {
+      controller.signal.removeEventListener('abort', aborted);
+    }
+  };
+  try {
+    return await wait(() =>
+      action({
+        options: { signal: controller.signal, remainingMs },
+        remainingMs,
+        wait,
+      }),
+    );
+  } finally {
+    clearTimeout(timer);
+    options?.signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /** Production factory shared by Q6; configuration never rides caller JSON. */
 export function makeConfiguredQueueClient() {
   const alias = process.env['CQ_QUEUE_SSH_ALIAS'];
@@ -59,195 +125,257 @@ export function makeConfiguredQueueClient() {
 /** Fixed capability only; alias is operator configured, never a request field. */
 export function sshQueueTransport(alias: string): QueueTransport {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(alias)) throw new Error('invalid queue SSH alias');
-  return (request) =>
-    new Promise((resolve, reject) => {
-      if (Buffer.byteLength(request) > QUEUE_WIRE_BYTES) {
-        reject(new Error('oversized queue request'));
-        return;
-      }
-      const child = spawn(
-        'ssh',
-        [
-          '-T',
-          '-S',
-          'none',
-          '-o',
-          'BatchMode=yes',
-          '-o',
-          'IdentitiesOnly=yes',
-          '-o',
-          'ConnectTimeout=15',
-          '-o',
-          'ConnectionAttempts=1',
-          '-o',
-          'ClearAllForwardings=yes',
-          '-o',
-          'RequestTTY=no',
-          '--',
-          alias,
-          'queue-v1',
-        ],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      const chunks: Buffer[] = [];
-      let size = 0;
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        reject(new Error('queue delivery unknown: timeout'));
-      }, 45000);
-      child.stdout.on('data', (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > QUEUE_WIRE_BYTES) {
-          child.kill('SIGKILL');
-          reject(new Error('oversized queue response'));
-        } else chunks.push(chunk);
-      });
-      child.stderr.resume();
-      child.stdin.on('error', () => undefined);
-      child.on('error', () => {
-        clearTimeout(timer);
-        reject(new Error('queue transport unavailable'));
-      });
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0 && size <= QUEUE_WIRE_BYTES) resolve(Buffer.concat(chunks).toString('utf8'));
-        else
-          reject(
-            new Error('queue delivery unknown: refused or interrupted; deployment may be required'),
+  return (request, options) =>
+    withQueueLifetime(
+      options,
+      (lifetime) =>
+        new Promise<string>((resolve, reject) => {
+          if (Buffer.byteLength(request) > QUEUE_WIRE_BYTES) {
+            reject(new Error('oversized queue request'));
+            return;
+          }
+          const child = spawn(
+            'ssh',
+            [
+              '-T',
+              '-S',
+              'none',
+              '-o',
+              'BatchMode=yes',
+              '-o',
+              'IdentitiesOnly=yes',
+              '-o',
+              'ConnectTimeout=15',
+              '-o',
+              'ConnectionAttempts=1',
+              '-o',
+              'ClearAllForwardings=yes',
+              '-o',
+              'RequestTTY=no',
+              '--',
+              alias,
+              'queue-v1',
+            ],
+            { stdio: ['pipe', 'pipe', 'pipe'] },
           );
-      });
-      child.stdin.end(request);
-    });
+          const chunks: Buffer[] = [];
+          let size = 0;
+          let settled = false;
+          const ignoreInputError = () => undefined;
+          const cleanup = () => {
+            lifetime.options.signal!.removeEventListener('abort', onAbort);
+            child.stdout.removeListener('data', onData);
+          };
+          const finish = (error?: Error, value?: string) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            if (error) {
+              child.kill('SIGKILL');
+              child.stdin.destroy();
+              child.stdout.destroy();
+              child.stderr.destroy();
+              reject(error);
+            } else resolve(value!);
+          };
+          const onAbort = () => {
+            const reason: unknown = lifetime.options.signal!.reason;
+            finish(
+              reason instanceof Error
+                ? reason
+                : new Error('queue delivery aborted', { cause: reason }),
+            );
+          };
+          const onData = (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > QUEUE_WIRE_BYTES) finish(new Error('oversized queue response'));
+            else chunks.push(chunk);
+          };
+          const onError = () => finish(new Error('queue transport unavailable'));
+          const onClose = (code: number | null) => {
+            child.removeListener('error', onError);
+            child.stdin.removeListener('error', ignoreInputError);
+            if (code === 0 && size <= QUEUE_WIRE_BYTES)
+              finish(undefined, Buffer.concat(chunks).toString('utf8'));
+            else
+              finish(
+                new Error(
+                  'queue delivery unknown: refused or interrupted; deployment may be required',
+                ),
+              );
+          };
+          child.stdout.on('data', onData);
+          child.stderr.resume();
+          // Keep error handlers until close so late spawn/pipe errors after cancellation are handled.
+          child.stdin.on('error', ignoreInputError);
+          child.on('error', onError);
+          child.once('close', onClose);
+          lifetime.options.signal!.addEventListener('abort', onAbort, { once: true });
+          if (lifetime.options.signal!.aborted) {
+            onAbort();
+            return;
+          }
+          child.stdin.end(request);
+        }),
+    );
 }
 
 export function makeQueueClient(transport: QueueTransport): DeferredQueueClient & {
-  report(input: QueueReference, evidenceDir: string): Promise<QueueEvidence | null>;
+  report(
+    input: QueueReference,
+    evidenceDir: string,
+    options?: QueueLifetimeOptions,
+  ): Promise<QueueEvidence | null>;
 } {
   async function request(
     op: string,
     input: QueueReference,
     extra: Record<string, unknown> = {},
+    options?: QueueLifetimeOptions,
   ): Promise<unknown> {
-    const ref = QueueReferenceSchema.parse(input);
-    const wire = JSON.stringify({ v: 1, op, ...ref, ...extra }) + '\n';
-    if (Buffer.byteLength(wire) > QUEUE_WIRE_BYTES) throw new Error('oversized queue request');
-    const raw = await transport(wire);
-    if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized queue response');
-    const envelope = z
-      .object({
-        v: z.literal(1),
-        requestId: z.string(),
-        binding: QueueReferenceSchema.shape.binding,
-        result: z.unknown(),
-      })
-      .strict()
-      .parse(JSON.parse(raw));
-    if (envelope.requestId !== ref.requestId || !isDeepStrictEqual(envelope.binding, ref.binding))
-      throw new Error('queue response binding mismatch');
-    if (
-      typeof envelope.result === 'object' &&
-      envelope.result !== null &&
-      'unsupported' in envelope.result
-    )
-      throw new QueueUnsupported(
-        'Compatible Q1 runner and reviewed D1C queue-v1 deployment required',
-      );
-    return envelope.result;
+    return withQueueLifetime(options, async (lifetime) => {
+      const ref = QueueReferenceSchema.parse(input);
+      const wire = JSON.stringify({ v: 1, op, ...ref, ...extra }) + '\n';
+      if (Buffer.byteLength(wire) > QUEUE_WIRE_BYTES) throw new Error('oversized queue request');
+      const raw = await lifetime.wait(() => transport(wire, lifetime.options));
+      if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized queue response');
+      const envelope = z
+        .object({
+          v: z.literal(1),
+          requestId: z.string(),
+          binding: QueueReferenceSchema.shape.binding,
+          result: z.unknown(),
+        })
+        .strict()
+        .parse(JSON.parse(raw));
+      if (envelope.requestId !== ref.requestId || !isDeepStrictEqual(envelope.binding, ref.binding))
+        throw new Error('queue response binding mismatch');
+      if (
+        typeof envelope.result === 'object' &&
+        envelope.result !== null &&
+        'unsupported' in envelope.result
+      )
+        throw new QueueUnsupported(
+          'Compatible Q1 runner and reviewed D1C queue-v1 deployment required',
+        );
+      return envelope.result;
+    });
   }
-  const status = async (input: QueueReference) =>
-    QueueStatusSchema.parse(await request('status', input));
+  const status = async (input: QueueReference, options?: QueueLifetimeOptions) =>
+    QueueStatusSchema.parse(await request('status', input, {}, options));
   return {
-    enqueue: async (input) => QueueStatusSchema.parse(await request('enqueue', input)),
+    enqueue: async (input, options) =>
+      QueueStatusSchema.parse(await request('enqueue', input, {}, options)),
     status,
-    bind: async (input: QueueBindInput) => {
+    bind: async (input: QueueBindInput, options) => {
       const i = QueueBindSchema.parse(input);
       return QueueStatusSchema.parse(
         await request(
           'bind',
           { requestId: i.requestId, binding: i.binding },
           { pr: i.pr, mergeSha: i.mergeSha ?? null },
+          options,
         ),
       );
     },
-    cancel: async (input) => QueueStatusSchema.parse(await request('cancel', input)),
-    report: async (input, evidenceDir) => {
-      const current = await status(input);
-      if (!current.receiptId) return null;
-      const receiptId = current.receiptId;
-      const manifest = ManifestSchema.parse(
-        z
-          .object({ page: ManifestSchema })
-          .strict()
-          .parse(await request('report', input, { receiptId, cursor: null })).page,
-      );
-      if (
-        manifest.receipt_id !== receiptId ||
-        manifest.sha256 !== receiptId ||
-        manifest.cursor !== receiptId + ':0' ||
-        manifest.chunks !== Math.ceil(manifest.bytes / 3072)
-      )
-        throw new Error('invalid queue manifest');
-      const chunks: Buffer[] = [];
-      for (let index = 0; index < manifest.chunks; index++) {
-        const page = z
-          .object({ page: ChunkSchema })
-          .strict()
-          .parse(
-            await request('report', input, { receiptId, cursor: receiptId + ':' + index }),
-          ).page;
+    cancel: async (input, options) =>
+      QueueStatusSchema.parse(await request('cancel', input, {}, options)),
+    report: async (input, evidenceDir, options) =>
+      withQueueLifetime(options, async (lifetime) => {
+        const shared = lifetime.options;
+        const current = await lifetime.wait(() => status(input, shared));
+        if (!current.receiptId) return null;
+        const receiptId = current.receiptId;
+        const manifest = ManifestSchema.parse(
+          z
+            .object({ page: ManifestSchema })
+            .strict()
+            .parse(
+              await lifetime.wait(() =>
+                request('report', input, { receiptId, cursor: null }, shared),
+              ),
+            ).page,
+        );
         if (
-          page.receipt_id !== receiptId ||
-          page.sha256 !== receiptId ||
-          page.bytes !== manifest.bytes ||
-          page.chunks !== manifest.chunks ||
-          page.index !== index ||
-          page.next_cursor !== (index + 1 < manifest.chunks ? receiptId + ':' + (index + 1) : null)
+          manifest.receipt_id !== receiptId ||
+          manifest.sha256 !== receiptId ||
+          manifest.cursor !== receiptId + ':0' ||
+          manifest.chunks !== Math.ceil(manifest.bytes / 3072)
         )
-          throw new Error('mixed or out-of-order queue page');
-        const bytes = Buffer.from(page.data, 'base64');
+          throw new Error('invalid queue manifest');
+        const chunks: Buffer[] = [];
+        for (let index = 0; index < manifest.chunks; index++) {
+          const page = z
+            .object({ page: ChunkSchema })
+            .strict()
+            .parse(
+              await lifetime.wait(() =>
+                request('report', input, { receiptId, cursor: receiptId + ':' + index }, shared),
+              ),
+            ).page;
+          if (
+            page.receipt_id !== receiptId ||
+            page.sha256 !== receiptId ||
+            page.bytes !== manifest.bytes ||
+            page.chunks !== manifest.chunks ||
+            page.index !== index ||
+            page.next_cursor !==
+              (index + 1 < manifest.chunks ? receiptId + ':' + (index + 1) : null)
+          )
+            throw new Error('mixed or out-of-order queue page');
+          const bytes = Buffer.from(page.data, 'base64');
+          if (
+            bytes.toString('base64') !== page.data ||
+            bytes.length !== Math.min(3072, manifest.bytes - index * 3072) ||
+            sha256(bytes) !== page.chunk_sha256
+          )
+            throw new Error('invalid queue chunk digest/size');
+          chunks.push(bytes);
+        }
+        const bytes = Buffer.concat(chunks);
+        if (bytes.length !== manifest.bytes || sha256(bytes) !== receiptId)
+          throw new Error('queue receipt digest mismatch');
+        const document = parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
+        const b = input.binding;
+        const reused =
+          current.reusedFrom &&
+          current.receiptSource &&
+          current.receiptEquivalence === document.capture.equivalence &&
+          current.receiptSource.repo === document.source.repo &&
+          current.receiptSource.pr === document.source.pr &&
+          current.receiptSource.mergeSha === document.source.merge_sha &&
+          current.receiptSource.targetSelector === document.source.target_selector;
         if (
-          bytes.toString('base64') !== page.data ||
-          bytes.length !== Math.min(3072, manifest.bytes - index * 3072) ||
-          sha256(bytes) !== page.chunk_sha256
+          document.source.repo !== b.repo ||
+          document.source.target_selector !== b.targetSelector ||
+          (!reused &&
+            (document.source.pr !== current.pr ||
+              document.source.merge_sha !== current.mergeSha ||
+              (b.kind === 'merged-current' &&
+                (document.source.pr !== b.pr || document.source.merge_sha !== b.mergeSha))))
         )
-          throw new Error('invalid queue chunk digest/size');
-        chunks.push(bytes);
-      }
-      const bytes = Buffer.concat(chunks);
-      if (bytes.length !== manifest.bytes || sha256(bytes) !== receiptId)
-        throw new Error('queue receipt digest mismatch');
-      const document = parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
-      const b = input.binding;
-      const reused =
-        current.reusedFrom &&
-        current.receiptSource &&
-        current.receiptEquivalence === document.capture.equivalence &&
-        current.receiptSource.repo === document.source.repo &&
-        current.receiptSource.pr === document.source.pr &&
-        current.receiptSource.mergeSha === document.source.merge_sha &&
-        current.receiptSource.targetSelector === document.source.target_selector;
-      if (
-        document.source.repo !== b.repo ||
-        document.source.target_selector !== b.targetSelector ||
-        (!reused &&
-          (document.source.pr !== current.pr ||
-            document.source.merge_sha !== current.mergeSha ||
-            (b.kind === 'merged-current' &&
-              (document.source.pr !== b.pr || document.source.merge_sha !== b.mergeSha))))
-      )
-        throw new Error('receipt source binding mismatch');
-      const evidence = await importQueueEvidence(evidenceDir, receiptId, bytes);
-      const ack = QueueStatusSchema.parse(
-        await request('ack', input, {
-          receiptId,
-          sha256: receiptId,
-          chunks: manifest.chunks,
-          bytes: manifest.bytes,
-        }),
-      );
-      if (!ack.consumed || ack.receiptId !== receiptId)
-        throw new Error('queue acknowledgement mismatch');
-      return evidence;
-    },
+          throw new Error('receipt source binding mismatch');
+        const evidence = await lifetime.wait(() =>
+          importQueueEvidence(evidenceDir, receiptId, bytes),
+        );
+        const ack = QueueStatusSchema.parse(
+          await lifetime.wait(() =>
+            request(
+              'ack',
+              input,
+              {
+                receiptId,
+                sha256: receiptId,
+                chunks: manifest.chunks,
+                bytes: manifest.bytes,
+              },
+              shared,
+            ),
+          ),
+        );
+        if (!ack.consumed || ack.receiptId !== receiptId)
+          throw new Error('queue acknowledgement mismatch');
+        return evidence;
+      }),
   };
 }
