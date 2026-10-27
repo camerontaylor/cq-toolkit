@@ -463,6 +463,10 @@ export function makeReviewRun(
                     role,
                     maxTokens: policy.budgets.run.maxTokens!,
                     wallMs: Math.max(1, remainingWallMs()),
+                    stepWallMs: Math.max(
+                      1,
+                      Math.min(policy.budgets.step.wallMs, remainingWallMs()),
+                    ),
                     ...(deadline.signal ? { signal: deadline.signal } : {}),
                     severityMap: policy.review.agentSeverityMap,
                   });

@@ -61,6 +61,7 @@ export function makeAgentReviewRunner(deps: {
       role: roleSpec,
       maxTokens: policy.budgets.run.maxTokens!,
       wallMs: policy.budgets.run.wallMs,
+      stepWallMs: Math.min(policy.budgets.step.wallMs, policy.budgets.run.wallMs),
       severityMap: policy.review.agentSeverityMap,
       searchTools: policy.review.searchTools,
       session: policy.review.session,
