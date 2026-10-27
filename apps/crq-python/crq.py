@@ -408,7 +408,7 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     if not errors and not actions and res["outcome"] != "completed":
         hard("nonterminal-review")
     # Unknown statuses also invalidate an otherwise apparently successful stream.
-    if causes and res["outcome"] == "completed":
+    if not proof_complete and res["outcome"] == "completed":
         res.update(outcome="malformed", message="stream contains an unrecognized status")
     res["failure_provenance"] = {"version": 1, "complete": proof_complete, "causes": causes}
     res["counted"] = res["outcome"] == "completed"
