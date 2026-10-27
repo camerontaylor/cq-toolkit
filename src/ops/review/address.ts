@@ -40,6 +40,7 @@ import {
   type AddressWorker,
 } from './addressWorker.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
+import { sameFindingContent } from './internal/durableDisposition.js';
 import {
   resolveDeferredVendorContext,
   type DeferredVendorContextRequest,
@@ -854,6 +855,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               record.findings = [
                 ...record.findings.map((finding) => {
                   const current = retained.get(finding.id);
+                  if (current && !sameFindingContent(finding, current))
+                    throw new Error(`conflicting retained finding identity: ${finding.id}`);
                   return current ? { ...finding, ...current, reason: current.reason } : finding;
                 }),
                 ...context.findings.filter(

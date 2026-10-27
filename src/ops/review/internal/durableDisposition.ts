@@ -48,9 +48,7 @@ export function restoreDurableDisposition(finding: Finding, ledger: DevLedgerFil
       for (const retained of deferredReceiptFindings([record.debt])) observe(retained);
     } else if (record.kind === 'disposition' && record.findingId === finding.id) {
       disposition =
-        witnessed && !ambiguous
-          ? { status: record.action, reason: record.why }
-          : undefined;
+        witnessed && !ambiguous ? { status: record.action, reason: record.why } : undefined;
     }
   }
   return !ambiguous && disposition ? { ...open, ...disposition } : open;

@@ -44,6 +44,7 @@ import {
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { collectBoundedReviewContext } from './internal/reviewContext.js';
+import { restoreDurableDisposition } from './internal/durableDisposition.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -283,19 +284,25 @@ export function makeReviewRun(
             cycleId: string;
             findings: Array<{ id: string; severity: string; fileName?: string; excerpt?: string }>;
           };
+          const ledger = effects.openLedger(state.branch).load();
           records.push({
             schemaVersion: 1,
             branch: state.branch,
             head: state.head,
             sources: [{ kind: 'coderabbit', status: 'terminal', cycleId: value.cycleId }],
-            findings: value.findings.map((item) => ({
-              id: item.id,
-              source: 'coderabbit',
-              ...(item.fileName ? { file: item.fileName } : {}),
-              severity: item.severity,
-              text: item.excerpt ?? '',
-              status: 'open',
-            })),
+            findings: value.findings.map((item) =>
+              restoreDurableDisposition(
+                {
+                  id: item.id,
+                  source: 'coderabbit',
+                  ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                  severity: item.severity,
+                  text: item.excerpt ?? '',
+                  status: 'open',
+                },
+                ledger,
+              ),
+            ),
           });
         } else {
           const reason =
