@@ -32,6 +32,26 @@ def _match(pattern, value):
     return isinstance(value, str) and re.fullmatch(pattern, value) is not None
 
 
+def validate_policy(policy):
+    """Operator policy is typed configuration, never truthy activation or substring ACLs."""
+    if type(policy) is not dict:
+        raise ValueError("invalid queue policy object")
+    if "enabled" in policy and type(policy["enabled"]) is not bool:
+        raise ValueError("invalid queue policy enabled boolean")
+    if not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", policy.get("repo")):
+        raise ValueError("invalid queue policy repository")
+    for key in ("read", "write", "targets", "branches"):
+        values = policy.get(key, [])
+        if type(values) is not list or any(type(value) is not str or not value for value in values):
+            raise ValueError("invalid queue policy allowlist")
+    if any(target not in receipts.SELECTORS for target in policy.get("targets", [])):
+        raise ValueError("invalid queue policy target")
+    limit = policy.get("max_requests", 10000)
+    if type(limit) is not int or not 1 <= limit <= 100000:
+        raise ValueError("invalid queue policy capacity")
+    return policy
+
+
 def binding(value):
     if not isinstance(value, dict):
         raise ValueError("invalid binding")
@@ -112,6 +132,7 @@ def _status(q, request_id, entry):
 
 
 def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
+    policy = validate_policy(policy)
     req = decode(raw)
     b, op, rid = req["binding"], req["op"], req["requestId"]
     allowed = policy.get("write" if op in WRITE else "read", [])
@@ -119,7 +140,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         raise ValueError("queue capability denied")
     if b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
         raise ValueError("target branch denied")
-    if not policy.get("enabled", False):
+    if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
 
     def locked():

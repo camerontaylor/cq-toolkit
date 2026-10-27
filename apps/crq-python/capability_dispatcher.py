@@ -31,9 +31,10 @@ def queue_main():
         signal.alarm(30)
         raw = sys.stdin.buffer.read(queue_transport.MAX_BYTES + 1)
         queue_transport.decode(raw)
-        policy = json.loads(Path(os.environ["CRQ_QUEUE_POLICY"]).read_text())
+        policy = queue_transport.validate_policy(
+            json.loads(Path(os.environ["CRQ_QUEUE_POLICY"]).read_text()))
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
-        if not policy.get("enabled", False):
+        if policy.get("enabled") is not True:
             sys.stdout.buffer.write(queue_transport.handle(raw, None, principal=principal,
                 policy=policy, verify_source=None, receipt_root=None))
             return 0

@@ -1,7 +1,7 @@
 # Queue client protocol (Q3)
 
 Stack parent/base: `queue/q1-merged-current` at
-`063b9f1d4c41f87a470180e352f977ba867ca670` (preserving the frozen
+`c088ec6eb720d01d4c4739695ba71adc91384ef8` (Q1 documentation correction; preserving the frozen
 `f3944022a8cebc622742c397cd7a756d818943cf` helper API). Queue baseline:
 `1eea0b5b323de8b23a9388a72da4e97f8e631450`.
 
@@ -80,7 +80,11 @@ path `CRQ_QUEUE_POLICY` through the existing trusted forced-command boundary.
 Do not accept these environment variables from SSH clients. Example policy
 keys: `enabled` (defaults false), `repo`, `read` and `write` principal lists,
 `targets` selector list, `branches` forge base-branch list, `max_requests`
-(default 10000). Read covers status/report; write covers enqueue/bind/cancel/ack.
+(default 10000). Both the dispatcher and transport validate policy types before
+runner import or queue access: activation requires JSON boolean `true`; missing
+or boolean `false` remains unsupported. Other activation types, non-object
+policies, malformed repository/selector/capacity values, and allowlists that are
+not arrays of nonempty strings refuse. Read covers status/report; write covers enqueue/bind/cancel/ack.
 Requests are permanently principal/repository/source/target bound. Forge source
 metadata is fetched with fixed API argv before attachment or Q1 enrollment.
 The existing tick lock/process-group supervisor bounds each operation, and
