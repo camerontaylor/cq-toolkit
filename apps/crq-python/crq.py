@@ -123,7 +123,15 @@ def event(kind: str, **data: Any) -> None:
 
 
 def load_queue() -> Dict[str, Any]:
-    return json.loads(QUEUE.read_text())
+    q = json.loads(QUEUE.read_text())
+    # Idempotently retire the superseded second-cycle debt. Explicit optional
+    # requeues survive reload; running reviews still have to be harvested.
+    for item in q["items"]:
+        item.pop("boost", None)
+        if (item.get("kind") == "open" and completed_open_cycles(item) >= 1
+                and item.get("state") in ("pending", "blocked") and not item.get("optional_cycle")):
+            item.update(state="done", not_before=None, last_error=None)
+    return q
 
 
 def save_queue(q: Dict[str, Any]) -> None:
@@ -810,11 +818,11 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     if item.get("pinned_base"):
         # The merge-base only moves when the PR absorbs newer target commits
         # (restack/rebase/merge-in). Then old-pin..head would drag unrelated
-        # target changes into the review, so the old pair cannot complete.
+        # target changes into the review, so prior review evidence is stale.
         # (Ancestry alone is not enough: an old target pin stays an ancestor.)
         if pin != item["pinned_base"]:
             notes.append(f"base drift: merge-base moved {item['pinned_base'][:10]} → {pin[:10]} (PR restacked) "
-                         f"→ earlier cycles void, re-pinned, 2 cycles owed")
+                         f"→ earlier cycles void, re-pinned, 1 cycle owed")
             if not dry:
                 item.setdefault("voided_cycles", []).extend(item.get("cycles", []))
                 item["cycles"] = []
@@ -825,15 +833,15 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     else:
         if item.get("prior_cycles") and item.get("prior_base") and item["prior_base"] != pin:
             notes.append(f"prior cycle-1 base {item['prior_base'][:10]} ≠ current merge-base {pin[:10]} "
-                         f"→ prior cycle cannot pair with a new one; 2 cycles owed")
+                         f"→ prior cycle invalid on this base; 1 cycle owed")
             if not dry:
                 item["voided_prior_cycles"] = item["prior_cycles"]
                 item["prior_cycles"] = 0
         if not dry:
             item["pinned_base"] = pin
             item["target_ref"] = target
-    cycle = item.get("prior_cycles", 0) + len(item.get("cycles", [])) + 1
-    return {"base": pin, "head": head, "target": target, "label": f"cycle {cycle} of 2", "cycle": cycle,
+    cycle = completed_open_cycles(item) + 1
+    return {"base": pin, "head": head, "target": target, "label": "cycle 1 (required)" if cycle == 1 else "additional cycle (optional)", "cycle": cycle,
             "notes": notes, "branch": info["headRefName"], "review_pin": pin}
 
 
@@ -1339,13 +1347,30 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     return f"{item['id']}: {o} (not counted) → {item['state']}"
 
 
+def completed_open_cycles(item: Dict[str, Any]) -> int:
+    # Historical prior_cycles credits have no reviewed head. Preserve that
+    # metadata, but only recorded terminal cycles satisfy the head review.
+    return len(item.get("cycles", []))
+
+
+def optional_open(item: Dict[str, Any]) -> bool:
+    return item["kind"] == "open" and completed_open_cycles(item) >= 1
+
+
+def additional_cycle(item: Dict[str, Any]) -> bool:
+    return optional_open(item) or (item["kind"] == author_quota.AUTHOR_KIND
+                                   and (item.get("author") or {}).get("cycle", 1) > 1)
+
+
+def optional_wait(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    return additional_cycle(item) and any(
+        i["state"] == "pending" and rank(i) <= 3 for i in q["items"] if i is not item)
+
+
 def advance_open(item: Dict[str, Any]) -> None:
-    done = item.get("prior_cycles", 0) + len(item.get("cycles", []))
-    if done >= 2:
-        item["state"] = "done"
-    else:
-        item["state"] = "pending"
-        item["boost"] = True  # finish the PR's pair on the same pin before starting new PRs
+    item["state"] = "done" if completed_open_cycles(item) >= 1 else "pending"
+    item.pop("boost", None)
+    item.pop("optional_cycle", None)
 
 
 def ledger_append(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any], rdir: Path) -> None:
@@ -2491,10 +2516,12 @@ def plan_promotion(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def rank(item: Dict[str, Any]) -> int:
-    """0 open PR cycles · 1 open-PR deltas (both awaiting merge) · 2 newly merged
-    follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog ·
-    4 author items and lowest-priority coverage (author dispatches; coverage is
-    only reached by the fallback)."""
+    """Required open 0, open delta 1, merged follow-ups/current 2, backlog 3,
+    author/coverage 4, optional additional cycles 5."""
+    if additional_cycle(item):
+        return 5
+    if item["kind"] == review_receipt.KIND:
+        return 2
     if item["kind"] == "coverage":
         return coverage.COVERAGE_RANK
     if item["kind"] == author_quota.AUTHOR_KIND:
@@ -2508,7 +2535,7 @@ def rank(item: Dict[str, Any]) -> int:
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
     # promotion (and its delta) takes the next start slot ahead of everything (docs/promotion-policy.md)
-    return (0 if item["kind"] == "promotion" else 1, 0 if item.get("boost") else 1, rank(item), item.get("order", 999))
+    return (0 if item["kind"] == "promotion" else 1, 0 if item.get("operator_priority") else 1, rank(item), item.get("order", 999))
 
 
 # ----------------------------------------------------------- enrollment
@@ -2542,6 +2569,8 @@ def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dic
     dup = next((i for i in q["items"] if i["id"] == fields.get("id")), None)
     if dup is not None:  # ids are unique: an existing item (even skipped) is sticky
         return dup
+    if fields.get("kind") == "open":
+        fields["prior_cycles"] = 0  # new PRs always owe a real completed review
     item = {"order": next_order(q), "state": "pending", "cycles": [], "attempts": [], **fields}
     item["notes"] = [f"{iso()} auto-enrolled: {fields.get('why', '')}"]
     item.pop("why", None)
@@ -2554,7 +2583,7 @@ def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dic
 
 def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
     """Each tick: (1) open non-draft PRs into merge-queue (or stacked on a chain
-    ending there) that are not enrolled → open item, two cycles; (2) a PR whose
+    ending there) that are not enrolled → open item, one required cycle; (2) a PR whose
     head moved past its last CLI review, with nothing in flight → one delta item
     for the new commits; (3) PRs merged into merge-queue after the seed →
     never CLI-reviewed: merged-tier item (supersession filter); reviewed at an
@@ -2576,10 +2605,10 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
         if not mine:
             stacked = "" if p["baseRefName"] == "merge-queue" else f", stacked on {p['baseRefName']}"
-            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=(2 - CONFIG["repair"].get("fix_pr_cycles", 1)) if p["headRefName"].startswith("crq/fix-") else 0,
+            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
                      why=f"open PR not yet enrolled{stacked}")
             continue
-        if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") for i in mine):
+        if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") and not optional_open(i) for i in mine):
             continue
         last = last_reviewed(q, n)
         own = False
@@ -2629,7 +2658,7 @@ def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     if not dep:
         return True
     d = next((i for i in q["items"] if i["id"] == dep), None)
-    return d is None or d["state"] in ("done", "skipped")
+    return d is None or d["state"] in ("done", "skipped") or additional_cycle(d)
 
 
 def coverage_fallback(q, log, dry, only):
@@ -2656,7 +2685,7 @@ def coverage_fallback(q, log, dry, only):
             q["items"].append(candidate)
             candidates = [candidate]
     available = False
-    for item in candidates:
+    for item in sorted(candidates, key=sort_key):
         if item.get("not_before") and parse_iso(item["not_before"]) > now() or not deps_met(q, item):
             continue
         available = True
@@ -2747,11 +2776,15 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG['max_inflight']})")
     else:
         for item in sorted(q["items"], key=sort_key):
-            if item["kind"] == "coverage":
-                continue
             if only and item["id"] != only:
                 continue
             if item["state"] != "pending":
+                continue
+            if item["kind"] == "coverage":
+                if item.get("operator_priority"):
+                    started, has_coverage = coverage_fallback(q, log, dry, only)
+                    if started or (dry and has_coverage):
+                        break
                 continue
             if only and item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) and not dry:
                 # Author enrollment is PENDING NATURAL-ONLY by design. A selective
@@ -2763,6 +2796,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 log.append(f"{item['id']}: selective start refused — author items start only "
                            f"from the natural tick (pending natural-only)")
                 break
+            if optional_wait(q, item):
+                item["wait_reason"] = "optional cycle waits until no rank <=3 work is pending"
+                continue
+            if additional_cycle(item):
+                # Coverage gets first refusal even though it uses a fallback.
+                started, has_coverage = coverage_fallback(q, log, dry, only)
+                if started or (dry and has_coverage):
+                    break
             if item["kind"] == "merged" and any(i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"]
                                                   for i in q["items"]):
                 item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
@@ -2871,12 +2912,12 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
 
 def write_status(q: Dict[str, Any]) -> None:
     items = sorted(q["items"], key=sort_key)
-    owed_open = sum(max(0, 1 - len(i.get("cycles", []))) for i in items
+    owed_open = sum(max(0, 1 - completed_open_cycles(i)) for i in items
                     if i["kind"] == "open" and i["state"] not in ("skipped",))
     rows = []
     for i in items:
         if i["kind"] == "open":
-            cyc = f"{i.get('prior_cycles', 0) + len(i.get('cycles', []))}/2"
+            cyc = f"{completed_open_cycles(i)}/1"
         elif i["kind"] == "promotion":
             cyc = f"{len(i.get('cycles', []))}/1"
             unresolved = sum(1 for b in i.get("blocking", []) if not b.get("resolution"))
@@ -2974,7 +3015,7 @@ def write_status(q: Dict[str, Any]) -> None:
                                                    "promotion_gate_alerts": [x for x in st_p.get("gate_alerts", [])
                                                                              if not x.get("acked")],
                                                    "items": [{k: i.get(k) for k in ("id", "kind", "state",
-                                                              "prior_cycles", "cycles", "pinned_base", "last_error",
+                                                              "prior_cycles", "cycles", "operator_priority", "optional_cycle", "pinned_base", "last_error",
                                                               "wait_reason", "gate_stalled_at")} for i in items]}, indent=2) + "\n")
     try:
         status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=mode)
@@ -3147,7 +3188,16 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
             sys.exit(f"no item {item_id}")
         if action == "requeue" and item["kind"] == review_receipt.KIND:
             raise ValueError("merged-current retries require explicit lineage/ownership authorization; needs-human")
-        if action == "requeue":
+        if action in ("prioritize", "deprioritize"):
+            if item["state"] != "pending":
+                raise ValueError("operator priority requires a pending item")
+            if action == "prioritize":
+                item["operator_priority"] = True
+            else:
+                item.pop("operator_priority", None)
+        elif action == "requeue":
+            if optional_open(item):
+                item["optional_cycle"] = True
             item.update(state="pending", not_before=None, failures=0, last_error=None)
         elif action == "skip":
             item.update(state="skipped", last_error=reason or "skipped by owner")
@@ -3289,7 +3339,7 @@ def main() -> int:
     p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
     p.add_argument("finding", help="finding number, or all")
     p.add_argument("disposition")
-    for a in ("requeue", "skip", "block"):
+    for a in ("requeue", "skip", "block", "prioritize", "deprioritize"):
         p = sub.add_parser(a)
         p.add_argument("item")
         p.add_argument("reason", nargs="?")
