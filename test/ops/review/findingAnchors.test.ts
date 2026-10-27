@@ -477,6 +477,79 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
     ).toContain('outside-changed-hunks');
   });
 
+  it('rejects an anchor whose only hunk data is a zero-length insertion point', () => {
+    // A [n, n) hunk names a boundary (base insertion point / head deletion
+    // point) and changes no line, so an anchor spanning that boundary proves
+    // no changed content even when its quote matches the blob exactly.
+    const boundary = new Map(context.blobs);
+    boundary.set(MODIFIED, {
+      base: modifiedBase,
+      head: modifiedHead,
+      baseHunks: [{ start: 2, end: 2 }],
+      headHunks: [{ start: 2, end: 2 }],
+    });
+    const boundaryContext: AnchorValidationContext = { blobs: boundary, renames: context.renames };
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            primary: anchor({
+              start: 1,
+              end: 2,
+              quote: 'import { parse } from \"./parser.js\";\n',
+            }),
+          }),
+          boundaryContext,
+        ),
+      ),
+    ).toContain('no-hunk-information');
+  });
+
+  it('rejects a hunk list mixing valid ranges with a zero-length point', () => {
+    const mixed = new Map(context.blobs);
+    mixed.set(MODIFIED, {
+      base: modifiedBase,
+      head: modifiedHead,
+      baseHunks: [{ start: 1, end: 2 }],
+      headHunks: [
+        { start: 1, end: 2 },
+        { start: 4, end: 4 },
+      ],
+    });
+    const mixedContext: AnchorValidationContext = { blobs: mixed, renames: context.renames };
+    expect(invalidReasons(validateFindingEvidence(evidence(), mixedContext))).toContain(
+      'no-hunk-information',
+    );
+  });
+
+  it('accepts a primary anchor against non-empty positive hunk controls on both sides', () => {
+    // Controls: real half-open hunks with changed lines on each side anchor
+    // normally  14 base side against a deleted line, head side against an
+    // added line.
+    const positive = new Map(context.blobs);
+    positive.set(MODIFIED, {
+      base: modifiedBase,
+      head: modifiedHead,
+      baseHunks: [{ start: 3, end: 4 }],
+      headHunks: [{ start: 3, end: 4 }],
+    });
+    const positiveContext: AnchorValidationContext = { blobs: positive, renames: context.renames };
+    valid(
+      validateFindingEvidence(
+        evidence({
+          primary: anchor({
+            side: 'base',
+            start: 3,
+            end: 3,
+            quote: 'export const before = 1;',
+          }),
+        }),
+        positiveContext,
+      ),
+    );
+    valid(validateFindingEvidence(evidence(), positiveContext));
+  });
+
   it('requires hunk information: a file with no hunks cannot prove a primary anchor', () => {
     const hunkless = new Map(context.blobs);
     hunkless.set(MODIFIED, {
