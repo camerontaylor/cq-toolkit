@@ -27,6 +27,51 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+
+def current_equivalence(capture):
+    """Exact current-content identity, independent of request and synthetic IDs.
+
+    Raises ValueError for incomplete/legacy scope. Source path dispositions stay
+    in the identity: conservatively refuse reuse when their provenance differs.
+    Callers must verify retained receipt bytes with read_receipt before reuse.
+    """
+    fields = ("target", "tree", "paths", "scope_digest", "policy", "projection",
+              "reviewer", "reviewer_version")
+    if not isinstance(capture, dict) or any(k not in capture for k in fields):
+        raise ValueError("incomplete current capture")
+    if any(not isinstance(capture[k], str) or not re.fullmatch(r"[0-9a-f]{40}", capture[k])
+           for k in ("target", "tree")):
+        raise ValueError("invalid current target/tree")
+    if (not isinstance(capture["paths"], list) or
+            capture["scope_digest"] != digest(capture["paths"]) or
+            capture["policy"] != POLICY or
+            capture["projection"] != "current-affected-files/full-file-addition-projection" or
+            capture["reviewer"] != "coderabbit-review-agent-committed-v1" or
+            not isinstance(capture["reviewer_version"], str) or not capture["reviewer_version"]):
+        raise ValueError("unsupported current scope/policy/reviewer")
+    return digest({k: capture[k] for k in fields})
+
+
+def reusable_current(document, capture):
+    """Countable equivalent v1 current-only evidence; no legacy/author upgrade.
+
+    This is a semantic predicate, not authorization or a disk integrity check.
+    Retain the original document/source/findings; link its receipt ID separately.
+    Partial scope remains partial and grants no omitted-file coverage.
+    """
+    try:
+        wanted = current_equivalence(capture)
+        retained = current_equivalence(document["capture"])
+        cls = document["classification"]
+        return (document.get("version") == VERSION and wanted == retained and
+                document["capture"].get("equivalence") == retained and
+                document.get("counted") is True and isinstance(cls, dict) and
+                cls.get("counted") is True and cls.get("outcome") == "completed" and
+                document.get("outcome") in ("terminal-clean", "terminal-with-findings", "partial-scope"))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def enroll(q, *, repo, pr, merge_sha, request_id, at, target_selector="promoted-main"):
     """Bind a request id permanently; equal provenance shares one pending item.
 
@@ -52,7 +97,7 @@ def enroll(q, *, repo, pr, merge_sha, request_id, at, target_selector="promoted-
     created = item is None
     if created:
         item = {"id": item_id, "kind": KIND, "pr": pr, "merge_commit": merge_sha,
-                "subject": binding, "state": "pending", "created_at": at,
+                "subject": binding, "request_id": request_id, "state": "pending", "created_at": at,
                 "order": max((i.get("order", 0) for i in q["items"]), default=0) + 1,
                 "cycles": [], "attempts": [], "failures": 0, "depends_on": []}
         q["items"].append(item)

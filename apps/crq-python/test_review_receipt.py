@@ -45,3 +45,20 @@ class ReceiptTest(unittest.TestCase):
             (Path(td) / (identity + ".json")).write_text("tampered")
             with self.assertRaises(ValueError):
                 receipt.read_receipt(td, identity)
+
+    def test_current_equivalence_never_upgrades_legacy_or_changes_target(self):
+        capture = dict(target="a" * 40, tree="b" * 40, paths=[], scope_digest=receipt.digest([]),
+                       policy=receipt.POLICY, projection="current-affected-files/full-file-addition-projection",
+                       reviewer="coderabbit-review-agent-committed-v1", reviewer_version="0.8.2")
+        capture["equivalence"] = receipt.current_equivalence(capture)
+        doc = dict(version=1, capture=capture, counted=True, outcome="terminal-clean",
+                   classification=dict(counted=True, outcome="completed"))
+        self.assertTrue(receipt.reusable_current(doc, capture))
+        timestamp = dict(capture, captured_at="later", base="c" * 40, head="d" * 40)
+        self.assertEqual(receipt.current_equivalence(timestamp), capture["equivalence"])
+        for field, value in (("target", "f" * 40), ("tree", "f" * 40), ("reviewer_version", "next")):
+            self.assertFalse(receipt.reusable_current(doc, dict(capture, **{field: value})))
+        self.assertFalse(receipt.reusable_current(dict(doc, capture={"equivalence": capture["equivalence"]}), capture))
+        self.assertFalse(receipt.reusable_current(dict(doc, classification=dict(counted=False, outcome="skipped")), capture))
+        self.assertFalse(receipt.reusable_current(dict(doc, outcome="no-current-code"), capture))
+        self.assertFalse(receipt.reusable_current(dict(doc, capture=dict(capture, paths=["forged"])), capture))
