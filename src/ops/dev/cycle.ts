@@ -605,35 +605,78 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
  * Meter a driver factory: every resolved driver reports its run's total
  * tokens (input + output + cache + reasoning) to `spend`, so the cycle can
  * hand each agentic leg what is left of the one run token budget. The Driver
- * seam is `run()` only, so the wrapper is the whole driver.
+ * seam is `run()` only, so the wrapper is the whole driver. Metering runs on
+ * BOTH settle paths: a run that REJECTS mid-run (a timeout, a provider
+ * error) has already consumed tokens, so the thrown value's partial usage —
+ * when it carries one — reaches `spend` too; a run that consumed nothing
+ * meters nothing and the rejection propagates unchanged.
  */
 function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): DriverFactory {
   return {
     resolve: (request) => {
       const resolved = factory.resolve(request);
+      // ONE metering pass, shape-guarded: every component must be a number
+      // (a non-number — or a missing one — reads as 0), so neither a lane
+      // that omits a field, nor a hand-scripted test driver, nor a
+      // duck-typed usage fold off a rejection can poison the sum. The
+      // finite check is the second half of the guard: a NaN/Infinity sum
+      // that reached `spend` would make `spentTokens` NaN, and
+      // `Math.max(1, NaN)` in legBudget() returns NaN — silently disabling
+      // the shared run token budget. A non-finite reading is dropped rather
+      // than spent (this op has no narration channel; --json keeps stderr
+      // empty).
+      const meter = (usage: unknown): void => {
+        const read =
+          typeof usage === 'object' && usage !== null
+            ? (usage as {
+                input?: unknown;
+                output?: unknown;
+                cacheRead?: unknown;
+                cacheWrite?: unknown;
+                reasoning?: unknown;
+              })
+            : {};
+        const num = (value: unknown): number => (typeof value === 'number' ? value : 0);
+        const total =
+          num(read.input) +
+          num(read.output) +
+          num(read.cacheRead) +
+          num(read.cacheWrite) +
+          num(read.reasoning);
+        if (Number.isFinite(total)) spend(total);
+      };
       return {
         ...resolved,
         driver: {
           run: async (invocation, options) => {
-            const result = await resolved.driver.run(invocation, options);
-            const { usage } = result;
-            // Every component is null-guarded (like `reasoning`): a lane
-            // that omits a field — or a hand-scripted test driver — must
-            // not poison the sum with undefined. The finite check is the
-            // second half of the guard: a NaN/Infinity sum that reached
-            // `spend` would make `spentTokens` NaN, and `Math.max(1, NaN)`
-            // in legBudget() returns NaN — silently disabling the shared
-            // run token budget. A non-finite reading is dropped rather
-            // than spent (this op has no narration channel; --json keeps
-            // stderr empty).
-            const total =
-              (usage.input ?? 0) +
-              (usage.output ?? 0) +
-              (usage.cacheRead ?? 0) +
-              (usage.cacheWrite ?? 0) +
-              (usage.reasoning ?? 0);
-            if (Number.isFinite(total)) spend(total);
-            return result;
+            // `metered` keeps the resolve path from spending twice when
+            // `spend` itself throws and the rejection flows into the catch.
+            let metered = false;
+            try {
+              const result = await resolved.driver.run(invocation, options);
+              meter(result.usage);
+              metered = true;
+              return result;
+            } catch (err) {
+              // THE ERROR PATH SETTLES TOO: the seam's lanes settle
+              // driver-level failures as results that keep the partial
+              // per-step usage fold (never a mid-run rejection), but this
+              // factory accepts ANY injected lane/wrapper — one that does
+              // reject mid-run may attach the tokens it already burned to
+              // the thrown value. Duck-typed and shape-guarded above: a
+              // plain Error (a pre-dispatch config/auth throw consumed
+              // nothing, or nothing was reported) meters zero and stays
+              // honest — never a guess — while undercounting the shared
+              // budget here would hand the next leg inflated maxTokens.
+              if (!metered) {
+                const carried =
+                  typeof err === 'object' && err !== null && 'usage' in err
+                    ? (err as { usage?: unknown }).usage
+                    : undefined;
+                meter(carried);
+              }
+              throw err;
+            }
           },
         },
       };
