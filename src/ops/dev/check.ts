@@ -57,12 +57,15 @@ export interface DevCheckInput {
   /** Explicit `a..b` commit range replacing the default merge-base pin; `b` must be HEAD. */
   range?: string;
   /**
-   * Opt the automated test:narrow gate INTO the integration suite
-   * (`--include-integration`), for both the --base and --range forms. The
-   * selector's closure can name e2e files for plain src changes, and the
-   * gate refusal can never be satisfied from inside dev.check — the caller
-   * must opt in (S7 dogfood attempt A). Default off; the record carries the
-   * choice (includeIntegration: true) so readers can see the opt-in.
+   * Opt the test:narrow gate INTO the integration suite
+   * (`--include-integration`), for every selection form: the automatic
+   * --base and --range forms AND the named testFiles form — the two inputs
+   * are NOT mutually exclusive. test:narrow's gated-class check runs on the
+   * FINAL selection, so explicitly named e2e files are refused without this
+   * opt-in exactly like selector-chosen ones, and that refusal can never be
+   * satisfied from inside dev.check — the caller must opt in (S7 dogfood
+   * attempt A). Default off; the record carries the choice
+   * (includeIntegration: true) so readers can see the opt-in.
    */
   includeIntegration?: boolean;
   /**
@@ -467,6 +470,10 @@ export function makeDevCheck(
           'pnpm',
           [
             'test:narrow',
+            // Emitted for every selection form, testFiles included: the
+            // gated-class check applies to the FINAL selection, so named e2e
+            // files need the same opt-in as selector-chosen ones (see
+            // DevCheckInput.includeIntegration).
             ...(input.includeIntegration === true ? ['--include-integration'] : []),
             ...(input.testFiles !== undefined
               ? input.testFiles
