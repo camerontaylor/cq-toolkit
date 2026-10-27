@@ -1115,7 +1115,7 @@ export function buildTools(
       onEntry: (path: string) => boolean;
     },
   ): Promise<SearchEnumerationOutcome> => {
-    if (opts.signal?.aborted === true) return { kind: 'killed' };
+    if (opts.signal?.aborted === true) return { kind: 'killed', stderrTail: '' };
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn('rg', [...args], {
