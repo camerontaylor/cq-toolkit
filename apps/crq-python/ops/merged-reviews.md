@@ -52,7 +52,7 @@ scanned before worktree/reservation/spawn. The runner retains the pair under
 `refs/crq/current/<item-id>/`, the full manifest/blob/mode/byte dispositions,
 manifest digest, policy, CLI version and equivalence identity.
 
-Local feasibility observation on pluto: installed CodeRabbit CLI `0.8.2` help
+Local feasibility observation on an authorized worker host: installed CodeRabbit CLI `0.8.2` help
 advertises `review --agent --committed --base-commit <commit>`. The runner uses
 that documented argv on its clean synthetic worktree. Only version/help were
 invoked during implementation. Offline temporary Git fixtures prove the exact
