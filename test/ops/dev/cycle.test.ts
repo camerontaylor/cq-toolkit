@@ -690,7 +690,12 @@ describe('dev.cycle', () => {
     });
     const result = await op({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).not.toContain('NOT READY');
+    if (result.status === 'needs-human') {
+      expect(result.reason).not.toContain('NOT READY');
+      expect(result.reason).toContain(
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      );
+    }
     expect(pushCalls).toBe(0);
     expect(opens).toEqual([]);
   });
