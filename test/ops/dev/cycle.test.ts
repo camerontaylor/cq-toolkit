@@ -931,13 +931,14 @@ describe('dev.cycle', () => {
     const reviewInputs: ReviewRunInput[] = [];
     const addressInputs: ReviewAddressInput[] = [];
     const review = cleanReview(state);
+    let clock = Date.now();
     const op = makeDevCycle({
       effects: effects(),
       check: greenCheck(),
       review: async (input) => {
         reviewInputs.push(input);
         // The review leg spends 50 ms of the shared run wall.
-        await new Promise((done) => setTimeout(done, 50));
+        clock += 50;
         return review(input);
       },
       address: async (input) => {
@@ -947,24 +948,21 @@ describe('dev.cycle', () => {
       open: openFake([]),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
-    const result = await op({ repoRoot: repo.root });
-    // Pin the cycle outcome before the budget assertions: if a leg refuses
-    // (failed gate, review failure), fail on the actual status/reason —
-    // serialized into the message — instead of undefined comparisons
-    // against leg inputs that were never recorded.
-    expect(result.status, JSON.stringify(result)).toBe('ok');
-    if (result.status === 'ok') expect(result.value.pushed).toBe(true);
-    const budget = 3_600_000 - DEV_CYCLE_PUBLICATION_RESERVE_MS;
-    expect(reviewInputs[0]?.wallMs).toBeLessThanOrEqual(budget);
-    expect(reviewInputs[0]?.wallMs).toBeGreaterThan(budget - 10_000);
-    expect(reviewInputs[0]?.maxTokens).toBe(1000);
-    // The address leg gets what the review leg left, not a fresh run budget.
-    expect(addressInputs[0]?.wallMs).toBeLessThanOrEqual((reviewInputs[0]?.wallMs ?? 0) - 50);
-    // ...and the remaining wall must not be shrunk further (e.g. by subtracting
-    // the publication reserve a second time): pin a lower bound with slack for
-    // scheduling/timing slop between the legs.
-    expect(addressInputs[0]?.wallMs).toBeGreaterThan((reviewInputs[0]?.wallMs ?? 0) - 50 - 10_000);
-    expect(addressInputs[0]?.maxTokens).toBe(1000);
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      const result = await op({ repoRoot: repo.root });
+      // Pin the outcome so missing leg inputs report the actual failure.
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      if (result.status === 'ok') expect(result.value.pushed).toBe(true);
+      const budget = 3_600_000 - DEV_CYCLE_PUBLICATION_RESERVE_MS;
+      expect(reviewInputs[0]?.wallMs).toBe(budget);
+      expect(reviewInputs[0]?.maxTokens).toBe(1000);
+      // Charge review time exactly once and reserve publication time exactly once.
+      expect(addressInputs[0]?.wallMs).toBe(budget - 50);
+      expect(addressInputs[0]?.maxTokens).toBe(1000);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   test("S7 H (D2): tokens the review leg spent through the cycle's drivers are gone from the address leg's budget", async () => {
