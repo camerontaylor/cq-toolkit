@@ -178,16 +178,24 @@ def compatibility_record(effects: Effects, target_sha: str) -> dict:
     under state/runs are append-only artifacts both versions read
     defensively.
     """
-    record = {"checked": True, "schema_observations": [], "queue_schema": "unmarked"}
+    record = {"checked": True, "schema_observations": [],
+              "schema_marker_present": False, "queue_schema": None}
     if effects.exists("queue.json"):
         try:
             queue = effects.read_json("queue.json")
-            record["queue_schema"] = queue.get("schema_version", "unmarked")
+            if "schema_version" in queue:
+                # Presence is recorded separately from the value: ANY explicit
+                # marker (including the literal string "unmarked" or another
+                # unknown value) disables automatic rollback, because the
+                # prior target's reader was never proven against it.
+                record["schema_marker_present"] = True
+                record["queue_schema"] = queue["schema_version"]
             for key in sorted(queue):
                 if key.startswith("author_"):
                     record["schema_observations"].append(key)
         except (ValueError, OSError) as exc:
             record["queue_schema"] = "unreadable: " + str(exc)[:120]
+            record["schema_marker_present"] = True  # unprovable: fail closed
     record["target_sha"] = target_sha
     return record
 
@@ -360,16 +368,24 @@ def two_slot_health(effects: Effects, observe) -> dict:
 
 
 def rollback_compatible(record: dict) -> bool:
-    """Automatic rollback is permitted only against an UNMARKED queue with no
-    schema-advancing state keys: the one shape the recorded prior target is
-    known to read. Any explicit schema_version marker, any ``author_*``
-    state key, and any unreadable queue disable automatic rollback; the
-    operator decides instead. A missing/unchecked record refuses."""
+    """Automatic rollback is permitted only against a queue with NO explicit
+    schema_version marker and no ``author_*`` state keys: the one shape the
+    recorded prior target is known to read.
+
+    The marker's PRESENCE is a boolean recorded by ``compatibility_record``;
+    its VALUE is never interpreted (an explicit ``"unmarked"`` string or any
+    other unknown marker is still an explicit marker). Fail closed: a
+    missing/unchecked/malformed record, a truthy observation list, a present
+    marker of any value, or a non-boolean presence field all disable
+    automatic rollback; the operator decides instead."""
     if not isinstance(record, dict) or not record.get("checked"):
         return False
     if record.get("schema_observations"):
         return False
-    return record.get("queue_schema", "unmarked") == "unmarked"
+    present = record.get("schema_marker_present")
+    if present is not False:  # only a literal boolean False proves absence
+        return False
+    return True
 
 
 # --------------------------------------------------------------------- plan

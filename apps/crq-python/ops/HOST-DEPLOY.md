@@ -170,13 +170,16 @@ Ordering and guarantees:
    across the switch; any difference refuses the deployment with the file
    names. State is never restored, migrated or rewritten by the controller.
 5. **Rollback compatibility** — recorded before and after: automatic
-   rollback is permitted only against an **unmarked** queue (no explicit
-   `schema_version`, no `author_*` state keys, queue readable) — the one
-   shape the recorded prior target is known to read. Any explicit schema
-   marker (e.g. `schema_version: 2`), any `author_*` state key, or an
-   unreadable queue disables automatic rollback — fail stopped with an
-   explicit operator recovery action, never an old-snapshot restore or an
-   incompatible binary start.
+   rollback is permitted only when the queue carries **no explicit
+   `schema_version` marker at all** (presence is recorded as the boolean
+   `schema_marker_present`; the marker's VALUE is never interpreted, so even
+   an explicit `"unmarked"` or unknown string is an explicit marker), no
+   `author_*` state keys, and a readable queue — the one shape the recorded
+   prior target is known to read. A present marker of any value, `author_*`
+   keys, an unreadable queue, a missing/unchecked record, or a malformed
+   presence field (only literal boolean `false` proves absence) disables
+   automatic rollback — fail stopped with an explicit operator recovery
+   action, never an old-snapshot restore or an incompatible binary start.
 6. **Health** — `health` requires `last_tick` to advance for TWO consecutive
    observations (strictly increasing UTC timestamps; one slot seen twice is
    not two slots) and samples up to ten `state/runs/*/meta.json` receipts for

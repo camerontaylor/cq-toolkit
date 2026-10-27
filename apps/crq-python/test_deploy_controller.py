@@ -314,31 +314,55 @@ class HealthTests(ControllerFixture):
 
 
 class RollbackDecisionTests(unittest.TestCase):
-    def test_unmarked_queue_without_author_keys_permits_rollback(self):
+    def test_absent_marker_with_clean_state_permits_rollback(self):
         self.assertTrue(dc.rollback_compatible(
-            {"checked": True, "schema_observations": [], "queue_schema": "unmarked"}))
+            {"checked": True, "schema_observations": [],
+             "schema_marker_present": False, "queue_schema": None}))
 
     def test_every_unprovable_shape_disables_automatic_rollback(self):
+        absent = {"checked": True, "schema_observations": [],
+                  "schema_marker_present": False, "queue_schema": None}
         for record in [
-                {"checked": True, "schema_observations": [], "queue_schema": 2},
-                {"checked": True, "schema_observations": [], "queue_schema": 1},
-                {"checked": True, "schema_observations": [], "queue_schema": "unreadable: boom"},
-                {"checked": True, "schema_observations": ["author_requests"],
+                # explicit marker of ANY value, including the old sentinel string
+                {**absent, "schema_marker_present": True, "queue_schema": 2},
+                {**absent, "schema_marker_present": True, "queue_schema": 1},
+                {**absent, "schema_marker_present": True,
                  "queue_schema": "unmarked"},
-                {"checked": True, "schema_observations": ["author_observations"],
-                 "queue_schema": "unmarked"},
-                {"checked": False, "schema_observations": [], "queue_schema": "unmarked"},
+                {**absent, "schema_marker_present": True,
+                 "queue_schema": "unreadable: boom"},
+                {**absent, "schema_marker_present": True, "queue_schema": None},
+                {"checked": True, "schema_observations": [],
+                 "schema_marker_present": True, "queue_schema": "unmarked"},
+                # author_* state keys
+                {**absent, "schema_observations": ["author_requests"]},
+                {**absent, "schema_observations": ["author_observations"]},
+                # missing/unchecked/malformed records fail closed
+                {"checked": False, "schema_observations": [],
+                 "schema_marker_present": False},
                 {},
-                None]:
+                None,
+                # malformed presence values: only literal False proves absence
+                {**absent, "schema_marker_present": None},
+                {**absent, "schema_marker_present": 0},
+                {**absent, "schema_marker_present": "False"},
+                {**absent, "schema_marker_present": 1}]:
             with self.subTest(record=record):
                 self.assertFalse(dc.rollback_compatible(record))
 
+    def test_record_without_presence_field_fails_closed(self):
+        # An old-shape journal that predates schema_marker_present must not
+        # be accepted: absence must be PROVEN by an explicit boolean.
+        self.assertFalse(dc.rollback_compatible(
+            {"checked": True, "schema_observations": [],
+             "queue_schema": "unmarked"}))
+
 
 class CompatibilityRecordTests(ControllerFixture):
-    def test_untagged_shape_records_unmarked_and_permits_rollback(self):
+    def test_untagged_shape_records_absence_and_permits_rollback(self):
         self.write_state("queue.json", {"items": [], "starts": []})
         record = dc.compatibility_record(self.effects, self.target)
-        self.assertEqual(record["queue_schema"], "unmarked")
+        self.assertIs(record["schema_marker_present"], False)
+        self.assertIsNone(record["queue_schema"])
         self.assertEqual(record["schema_observations"], [])
         self.assertTrue(dc.rollback_compatible(record))
 
@@ -351,17 +375,25 @@ class CompatibilityRecordTests(ControllerFixture):
                          ["author_observations", "author_requests"])
         self.assertFalse(dc.rollback_compatible(record))
 
-    def test_explicit_schema_marker_is_recorded(self):
-        self.write_state("queue.json", {"items": [], "schema_version": 2})
-        record = dc.compatibility_record(self.effects, self.target)
-        self.assertEqual(record["queue_schema"], 2)
+    def test_explicit_schema_marker_is_recorded_with_presence(self):
+        for marker in [2, 1, "unmarked", "legacy-v0", None, True]:
+            with self.subTest(marker=marker):
+                self.write_state("queue.json",
+                                 {"items": [], "schema_version": marker})
+                record = dc.compatibility_record(self.effects, self.target)
+                self.assertIs(record["schema_marker_present"], True)
+                self.assertEqual(record["queue_schema"], marker)
+                # ANY explicit marker value disables rollback, even "unmarked".
+                self.assertFalse(dc.rollback_compatible(record))
 
-    def test_unreadable_queue_is_recorded_not_crashed(self):
+    def test_unreadable_queue_is_recorded_not_crashed_and_fails_closed(self):
         state = self.runner / "state"
         state.mkdir(exist_ok=True)
         (state / "queue.json").write_text("[[[")
         record = dc.compatibility_record(self.effects, self.target)
         self.assertIn("unreadable", record["queue_schema"])
+        self.assertIs(record["schema_marker_present"], True)
+        self.assertFalse(dc.rollback_compatible(record))
 
 
 class DeployPlanTests(ControllerFixture):
@@ -496,7 +528,8 @@ class RollbackPlanTests(ControllerFixture):
                       "tag": self.tag,
                       "rollback_compatibility": {"checked": True,
                                                  "schema_observations": [],
-                                                 "queue_schema": "unmarked"}}
+                                                 "schema_marker_present": False,
+                                                 "queue_schema": None}}
         self.command("tag", "-a", "crq-runner/20261027-9", self.before,
                      "-m", "prior fixture approval")
 
@@ -527,6 +560,7 @@ class RollbackPlanTests(ControllerFixture):
         incompatible = {**self.prior,
                         "rollback_compatibility": {"checked": True,
                                                    "schema_observations": [],
+                                                   "schema_marker_present": True,
                                                    "queue_schema": 2}}
         with mock.patch.object(host, "switch") as helper_switch:
             with self.assertRaisesRegex(dc.Refused, "rollback disabled"):
@@ -594,7 +628,8 @@ class RollbackPlanTests(ControllerFixture):
                 "steps": [],
                 "rollback_compatibility_after": {"checked": True,
                                                  "schema_observations": [],
-                                                 "queue_schema": "unmarked"},
+                                                 "schema_marker_present": False,
+                                                 "queue_schema": None},
                 "automatic_rollback_permitted": True}
         journal = dc.deploy_journal(
             plan["preflight"]["state"], self.target, self.tag, plan,
