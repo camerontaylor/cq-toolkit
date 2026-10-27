@@ -40,7 +40,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { assertJsonLossless } from '../../src/cli/output.js';
-import { OpResultSchema } from '../../src/kernel/schema.js';
+import { KnownUsageSummarySchema, OpResultSchema } from '../../src/kernel/schema.js';
 import { clusterErrorsOp } from '../../src/ops/analyze/clusterErrors.js';
 import { collectFailuresOp } from '../../src/ops/analyze/collectFailures.js';
 import { hackDetector } from '../../src/ops/gates/hackDetector.js';
@@ -191,8 +191,10 @@ describe('pure sample: op results are JSON-serializable (OpResultSchema + the CL
     '%s: result passes OpResultSchema and round-trips JSON',
     async (_name, run) => {
       const result = await run();
-      const { report, ...base } = result as Record<string, unknown>;
+      const { report, usageSummary, ...base } = result as Record<string, unknown>;
       expect(OpResultSchema.safeParse(base).success).toBe(true);
+      if (Object.hasOwn(result as object, 'usageSummary'))
+        expect(KnownUsageSummarySchema.safeParse(usageSummary).success).toBe(true);
       if ('report' in (result as object)) {
         JSON.stringify(report, (_key, value: unknown) => {
           if (value === undefined) throw new Error('report must be JSON-lossless');
@@ -293,8 +295,10 @@ describe('every registry entry: the op result JSON-serializes (hermetic fail-fas
         return;
       }
       outcomes.push({ name, kind: 'result' });
-      const { report, ...base } = result as Record<string, unknown>;
+      const { report, usageSummary, ...base } = result as Record<string, unknown>;
       expect(OpResultSchema.safeParse(base).success).toBe(true);
+      if (Object.hasOwn(result as object, 'usageSummary'))
+        expect(KnownUsageSummarySchema.safeParse(usageSummary).success).toBe(true);
       if ('report' in (result as object)) {
         JSON.stringify(report, (_key, value: unknown) => {
           if (value === undefined) throw new Error('report must be JSON-lossless');
