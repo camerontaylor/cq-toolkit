@@ -2672,6 +2672,7 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
       ]);
       expect(mcpConfigArgOf(calls[0]?.args ?? [])).toBeUndefined();
       expect(result.denials).toEqual([{ tool: 'read', reason: "file not found: 'missing.txt'" }]);
+      expect(result.toolFailures).toBe(1);
       const record = await store.load(result.sessionId as string);
       expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
       // No init surface is asserted on the stock surface.

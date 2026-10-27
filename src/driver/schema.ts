@@ -231,6 +231,7 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     nativeSessionId: z.string().min(1).exactOptional(),
     nativeSessionPath: z.string().min(1).exactOptional(),
     denials: z.array(ToolDenialSchema),
+    toolFailures: z.number().int().nonnegative().exactOptional(),
     // rg capability seam: populated only by a lane that observed the probe
     // (today ai-sdk); absent elsewhere — permissive-by-key, strict-by-shape.
     capabilities: z

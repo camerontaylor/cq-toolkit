@@ -32,6 +32,7 @@ export interface AgentReviewerInput {
   };
   exclude?: readonly { pattern: string; assuredBy?: string }[];
   searchTools?: boolean;
+  logToolFailures?: boolean;
   scanSecrets: DiffSecretScanner;
   role: ModelSpec;
   maxTokens: number;
@@ -246,6 +247,7 @@ export async function runAgentReviewer(
             components,
             plan: session,
             evidence,
+            logToolFailures: input.logToolFailures ?? false,
             onUsage: (usage) => {
               report!.usage += totalUsage(usage);
             },

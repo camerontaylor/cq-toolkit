@@ -64,6 +64,7 @@ export const ReviewCoverageV2Schema = z
           driverSessionId: z.string().min(1).optional(),
           /** Recoverable tool denials are visible evidence, not a completeness input. */
           denials: Count.optional(),
+          toolFailures: Count.optional(),
           /** Host capability evidence only; missing search never changes coverage completeness. */
           capabilities: z
             .object({

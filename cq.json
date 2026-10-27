@@ -1,5 +1,6 @@
 {
   "schemaVersion": 2,
+  "harness": { "logToolFailures": true },
   "checks": [
     {
       "adapter": "tsc-lines",

@@ -16,6 +16,42 @@ Land: phase 1 (WS-B).
   JSON-RPC, zero runtime dependencies) the claude-code lane's CLI transport launches.
 - `session.ts` — the session store and temp workspaces (I6).
 
+## Optional tool arguments and failure evidence
+
+File tools accept `filePath` or `path` for `file_path`. Edit also accepts
+`oldString`/`oldText`, `newString`/`newText`, and `replaceAll`. Equal alias
+values may be supplied together; conflicting values fail validation. Schemas
+remain strict: unrecognised options are rejected. The ai-sdk request advertises
+only canonical fields with short field help; compatibility aliases are checked
+and normalized by the schema validator before execution. Denial and command
+failure results carry typed `tool-failure` hints.
+
+Grep accepts `ignore_case` (`-i` or `ignoreCase`), `output_mode` (`content`,
+`files_with_matches`, `count`), and `head_limit` (0 uses the safety cap).
+Counts are matching lines within the existing search limits; truncation
+markers identify partial results; capped count rows use `+` for lower bounds. Bash accepts `timeoutMs` for `timeout`,
+`workdir`/`cwd` within the workspace (lexical and symlink containment), and
+an advisory `description`. Its command allowlist still applies. Background
+execution (`run_in_background: true`) is explicitly unsupported.
+
+`HarnessConfig.logToolFailures` defaults to false. `cq.json` exposes the
+same `harness.logToolFailures` switch for `review.run` agent sessions; this
+repository enables it. When enabled, the ai-sdk driver appends bounded
+`type: "tool-failure"` lines with kind, tool, reason, input summary and
+zero-based step. The configured scan hook examines diagnostics before they
+are bounded and persisted; a refused scan redacts the record. Without a
+scanner, input values and error details are omitted. Bash descriptions use
+the same scan rule and appear on their tool message. Diagnostic lines share
+the store's serialized append and torn-tail recovery, and are not replayed
+as conversation turns. Old sessions remain readable.
+
+`WorkerResult.toolFailures` counts ai-sdk failures even when logging is off,
+including SDK validation failures, unknown tools, execution errors/timeouts, and
+unexecuted final/repair calls. Ordinary nonzero shell exits remain results. Review coverage and logs carry the count.
+Claude Code CLI and ACP also expose their existing observed failure counts;
+they retain their native transcript formats. Claude Code SDK transport and
+native-lane structured diagnostic logging remain separate work.
+
 ## Closed-form git commands
 
 The `bash` tool (legacy `run` alias) accepts exactly these forms after whitespace normalization,

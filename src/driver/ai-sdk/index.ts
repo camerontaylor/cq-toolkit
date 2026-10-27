@@ -216,6 +216,7 @@ import type {
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -225,6 +226,8 @@ import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import {
   buildTools,
+  AdvertisedToolInputSchemas,
+  normalizeToolInput,
   canonicalToolName,
   probeRgVersion,
   RG_MINIMUM_VERSION as HARNESS_RG_FLOOR,
@@ -233,7 +236,8 @@ import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool, ToolExecuteOptions } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
-import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import type { SessionMessage, SessionRecord, ToolFailureLine } from '../../harness/session.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
@@ -455,6 +459,16 @@ export class AiSdkDriver implements Driver {
 
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
+    const failures = { count: 0 };
+    const result = await this.runObserved(opInvocation, options, failures);
+    return { ...result, toolFailures: failures.count };
+  }
+
+  private async runObserved(
+    opInvocation: OpInvocation,
+    options: RunOptions | undefined,
+    failures: { count: number },
+  ): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
     const strictBudget = budget.strictTokenBudget;
     // The run signal is read ONCE here; both the ENTRY and LATE checks read the
@@ -658,6 +672,102 @@ export class AiSdkDriver implements Driver {
     // harness surfaces. With no explicit config, preserve the pre-W1.11
     // no-policy behavior; an expressed environment is resolved by the gate.
     const denials: ToolDenial[] = [];
+    const failedCalls = new Set<string>();
+    let toolStep = 0;
+    const recordFailure = async (
+      id: string,
+      toolName: string,
+      input: unknown,
+      kind: ToolFailureLine['kind'],
+      reason: string,
+      step = toolStep,
+    ): Promise<void> => {
+      const key = `${step}:${id}`;
+      if (failedCalls.has(key)) return;
+      failedCalls.add(key);
+      failures.count += 1;
+      if (this.harnessConfig.logToolFailures !== true) return;
+      // Scan complete diagnostics before bounding them. Without a configured
+      // scanner retain only a shape summary; values and vendor errors may contain secrets.
+      let tool = boundedErrorText(toolName).slice(0, 128);
+      let inputSummary = '[values omitted: no scanner]';
+      let safeReason = boundedErrorText(reason).slice(0, 1024);
+      if (this.beforeRequest !== undefined) {
+        const serialized = JSON.stringify(input) ?? 'undefined';
+        try {
+          await this.beforeRequest(
+            JSON.stringify({ tool: toolName, reason, input: serialized }),
+            undefined,
+            {
+              kind: 'tool-output',
+            },
+          );
+          inputSummary = boundedErrorText(serialized).slice(0, 2048);
+        } catch {
+          tool = '[redacted]';
+          safeReason = '[redacted: diagnostic scan refused]';
+          inputSummary = '[redacted: diagnostic scan refused]';
+        }
+      } else {
+        // No scan means no input values or interpolated error strings on disk.
+        safeReason = `${kind}: details omitted (no scanner)`;
+        if (
+          !selected.some(
+            (candidate) =>
+              candidate.name === toolName ||
+              (('aliases' in candidate ? candidate.aliases : undefined) ?? []).includes(toolName),
+          )
+        )
+          tool = '[unknown tool]';
+      }
+      await store.appendToolFailure(record.sessionId, {
+        type: 'tool-failure',
+        kind,
+        tool,
+        reason: safeReason,
+        inputSummary,
+        step,
+        at: nowIso(),
+      });
+    };
+    const observeToolStep = async (
+      step: { content: readonly unknown[] },
+      repair: boolean,
+      stepNumber: number,
+    ): Promise<void> => {
+      for (const item of step.content) {
+        if (typeof item !== 'object' || item === null) continue;
+        const part = item as {
+          type?: string;
+          toolCallId?: string;
+          toolName?: string;
+          input?: unknown;
+          invalid?: boolean;
+          error?: unknown;
+        };
+        if (part.type !== 'tool-call' && part.type !== 'tool-error') continue;
+        if (!repair && part.type !== 'tool-error' && part.invalid !== true) continue;
+        const name = part.toolName ?? 'unknown';
+        const kind = repair
+          ? 'repair-step'
+          : !Object.hasOwn(toolSet, name)
+            ? 'unknown-tool'
+            : part.invalid === true || part.type === 'tool-call'
+              ? 'invalid-input'
+              : 'execution';
+        await recordFailure(
+          part.toolCallId ?? `${stepNumber}:${name}`,
+          name,
+          part.input,
+          kind,
+          repair
+            ? 'tool calls are disabled during structured-output repair'
+            : describeError(part.error ?? 'invalid tool input'),
+          stepNumber,
+        );
+      }
+    };
+
     const harnessTools = buildTools(
       this.harnessConfig,
       record.workspace,
@@ -733,32 +843,68 @@ export class AiSdkDriver implements Driver {
     // tool call in the repair is returned unexecuted, never run.
     const repairToolSet: ToolSet = {};
     for (const harnessTool of selected) {
+      const inputSchema = jsonSchema<Record<string, unknown>>(
+        z.toJSONSchema(AdvertisedToolInputSchemas[harnessTool.name]) as JSONSchema7,
+        {
+          validate: (value) => {
+            try {
+              return { success: true, value: normalizeToolInput(harnessTool, value) };
+            } catch (error) {
+              return {
+                success: false,
+                error: new Error(`[tool-failure:invalid-input] ${messageOf(error)}`),
+              };
+            }
+          },
+        },
+      );
       const descriptor = {
         description: harnessTool.description,
-        inputSchema: harnessTool.inputSchema,
-        execute: async (input: unknown, options: { abortSignal: AbortSignal }): Promise<string> => {
+        inputSchema,
+        execute: async (
+          input: unknown,
+          options: { abortSignal: AbortSignal; toolCallId: string },
+        ): Promise<string> => {
           if (finalStepStarted) {
             const denial = {
               tool: harnessTool.name,
               reason: 'tool calls are disabled on the final step; reply with the answer',
             };
             denials.push(denial);
+            await recordFailure(
+              options.toolCallId,
+              harnessTool.name,
+              input,
+              'final-step',
+              denial.reason,
+            );
             await store.appendMessage(record.sessionId, {
               role: 'tool',
               toolName: harnessTool.name,
               content: JSON.stringify({ ok: false, denial }),
               at: nowIso(),
             });
-            return denial.reason;
+            return `[tool-failure:final-step] ${denial.reason}`;
           }
-          return runTool(harnessTool, input, store, record, denials, guard, {
-            signal: options.abortSignal,
-          });
+          return runTool(
+            harnessTool,
+            input,
+            store,
+            record,
+            denials,
+            guard,
+            {
+              signal: options.abortSignal,
+            },
+            async (reason, kind) =>
+              recordFailure(options.toolCallId, harnessTool.name, input, kind, reason),
+            this.beforeRequest,
+          );
         },
       };
       const repairDescriptor = {
         description: harnessTool.description,
-        inputSchema: harnessTool.inputSchema,
+        inputSchema,
       };
       toolSet[harnessTool.name] = tool(descriptor as Tool);
       repairToolSet[harnessTool.name] = tool(repairDescriptor as Tool);
@@ -855,6 +1001,7 @@ export class AiSdkDriver implements Driver {
           ...(outputSchema !== undefined && selected.length > 0
             ? {
                 prepareStep: ({ stepNumber, messages }) => {
+                  toolStep = stepNumber;
                   if (stepNumber < effectiveStepCap - 1) return undefined;
                   finalStepStarted = true;
                   return {
@@ -867,8 +1014,10 @@ export class AiSdkDriver implements Driver {
               }
             : {}),
           stopWhen,
-          onStepFinish: (step) => {
+          onStepFinish: async (step) => {
+            await observeToolStep(step, false, completedSteps);
             completedSteps += 1;
+            toolStep = completedSteps;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             responseMessages.push(...step.response.messages);
             lastStep = {
@@ -903,6 +1052,7 @@ export class AiSdkDriver implements Driver {
         if (outputSchema !== undefined && NoObjectGeneratedError.isInstance(err)) {
           return await this.settleStructuredMiss({
             outputSchema,
+            observeToolStep,
             repairTools: selected.length > 0 ? repairToolSet : undefined,
             rejection: `the reply carried no parseable object — ${describeError(err)}`,
             mainText: err.text ?? '',
@@ -972,6 +1122,7 @@ export class AiSdkDriver implements Driver {
           // rejection (above) and a getter miss (here) settle identically.
           return await this.settleStructuredMiss({
             outputSchema,
+            observeToolStep,
             repairTools: selected.length > 0 ? repairToolSet : undefined,
             rejection,
             mainText: text,
@@ -1157,6 +1308,11 @@ export class AiSdkDriver implements Driver {
     outputSchema: OutputSchema;
     /** The session's tool definitions without executors, or undefined for a tool-less session. */
     repairTools: ToolSet | undefined;
+    observeToolStep: (
+      step: { content: readonly unknown[] },
+      repair: boolean,
+      stepNumber: number,
+    ) => Promise<void>;
     /** The main call's miss reason (bounded into the verdict text). */
     rejection: string;
     mainText: string;
@@ -1333,7 +1489,8 @@ export class AiSdkDriver implements Driver {
         ...(remainingTokens !== undefined
           ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
           : { stopWhen: [stepCountIs(1)] }),
-        onStepFinish: (step) => {
+        onStepFinish: async (step) => {
+          await inputs.observeToolStep(step, true, mainSteps + repairSteps);
           repairSteps += 1;
           repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
         },
@@ -1875,8 +2032,12 @@ async function runTool(
   denials: ToolDenial[],
   guard?: AiSdkDriverOptions['beforeRequest'],
   options?: ToolExecuteOptions,
+  onFailure?: (reason: string, kind: ToolFailureLine['kind']) => Promise<void>,
+  scanDiagnostic?: AiSdkDriverOptions['beforeRequest'],
 ): Promise<string> {
   const result = await harnessTool.execute(input, options);
+  if (!result.ok) await onFailure?.(result.denial.reason, 'denial');
+  else if (result.killed) await onFailure?.('tool execution timed out or was killed', 'execution');
   if (guard !== undefined && result.ok) {
     const contents: { text: string; path?: string }[] = [{ text: result.output }];
     if (
@@ -1900,17 +2061,36 @@ async function runTool(
           return rest;
         })()
       : result;
+  let description: string | undefined;
+  if (
+    harnessTool.name === 'bash' &&
+    typeof input === 'object' &&
+    input !== null &&
+    'description' in input &&
+    typeof input.description === 'string'
+  ) {
+    description = '[description omitted: no scanner]';
+    if (scanDiagnostic !== undefined) {
+      try {
+        await scanDiagnostic(input.description, undefined, { kind: 'tool-output' });
+        description = boundedErrorText(input.description).slice(0, 1024);
+      } catch {
+        description = '[redacted: description scan refused]';
+      }
+    }
+  }
   await store.appendMessage(record.sessionId, {
     role: 'tool',
+    ...(description === undefined ? {} : { description }),
     toolName: harnessTool.name,
     content: JSON.stringify(persistable),
     at: nowIso(),
   });
   if (result.ok) {
-    return result.output;
+    return result.killed ? `[tool-failure:execution] ${result.output}` : result.output;
   }
   denials.push(result.denial);
-  return result.denial.reason;
+  return `[tool-failure:denial] ${result.denial.reason}`;
 }
 
 /** Our session transcript → SDK messages (plain text replay; tool turns folded into user turns). */

@@ -20,6 +20,7 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
   const f = flags;
   const maxTokens = f.maxTokens ?? f.budgets?.run?.maxTokens ?? c.budgets?.run?.maxTokens;
   return {
+    harness: { logToolFailures: f.harness?.logToolFailures ?? c.harness?.logToolFailures ?? false },
     packages: f.packages ?? c.packages ?? [{ name: f.packageName, path: '.' }],
     checks: c.checks.map((check) => ({
       ...check,

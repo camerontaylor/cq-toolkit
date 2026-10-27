@@ -183,29 +183,31 @@ const SEARCH_TIMEOUT_MS = 10_000;
 // Tool inputs — zod schemas, exported for driver adapters
 // ---------------------------------------------------------------------------
 
+/** Aliases may repeat the same value, but never select a conflicting value. */
+function checkAliases(
+  value: Record<string, unknown>,
+  ctx: z.RefinementCtx,
+  names: readonly string[],
+  required = false,
+): void {
+  const supplied = names.filter((name) => value[name] !== undefined);
+  if (required && supplied.length === 0)
+    ctx.addIssue({ code: 'custom', message: `requires ${names[0]}`, path: [names[0]!] });
+  if (supplied.some((name) => value[name] !== value[supplied[0]!]))
+    ctx.addIssue({ code: 'custom', message: `conflicting aliases: ${names.join('/')}` });
+}
+
 export const ReadToolInputSchema = z
   .object({
     file_path: z.string().min(1).optional(),
+    filePath: z.string().min(1).optional(),
     path: z.string().min(1).optional(),
     offset: z.number().int().positive().optional(),
     limit: z.number().int().positive().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.file_path === undefined && value.path === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'read requires file_path (or path)',
-        path: ['file_path'],
-      });
-    }
-    if (value.file_path !== undefined && value.path !== undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'read accepts file_path or the path alias, not both',
-        path: ['path'],
-      });
-    }
+    checkAliases(value, ctx, ['file_path', 'filePath', 'path'], true);
   });
 
 export const GrepToolInputSchema = z
@@ -214,16 +216,16 @@ export const GrepToolInputSchema = z
     path: z.string().min(1).optional(),
     glob: z.string().min(1).optional(),
     include: z.string().min(1).optional(),
+    ignore_case: z.boolean().optional(),
+    '-i': z.boolean().optional(),
+    ignoreCase: z.boolean().optional(),
+    output_mode: z.enum(['content', 'files_with_matches', 'count']).optional(),
+    head_limit: z.number().int().nonnegative().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.glob !== undefined && value.include !== undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'grep accepts glob or the include alias, not both',
-        path: ['include'],
-      });
-    }
+    checkAliases(value, ctx, ['glob', 'include']);
+    checkAliases(value, ctx, ['ignore_case', '-i', 'ignoreCase']);
   });
 
 export const GlobToolInputSchema = z
@@ -255,7 +257,7 @@ export const LegacyEditToolInputSchema = z
   .strict();
 
 /**
- * The advertised edit shape. Every field is optional at the JSON-schema
+ * The compatibility edit shape. Every field is optional at the JSON-schema
  * level so ONE object can carry either argument spelling (a union would
  * break the Claude SDK's raw-shape registration); the refinement below
  * enforces the required combination, and the executor re-checks it.
@@ -263,104 +265,54 @@ export const LegacyEditToolInputSchema = z
 export const EditToolInputSchema = z
   .object({
     file_path: z.string().min(1).optional(),
-    old_string: z.string().min(1).optional(),
-    new_string: z.string().optional(),
-    replace_all: z.boolean().optional(),
+    filePath: z.string().min(1).optional(),
     path: z.string().min(1).optional(),
+    old_string: z.string().min(1).optional(),
+    oldString: z.string().min(1).optional(),
     oldText: z.string().min(1).optional(),
+    new_string: z.string().optional(),
+    newString: z.string().optional(),
     newText: z.string().optional(),
+    replace_all: z.boolean().optional(),
+    replaceAll: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    const canonical =
-      value.file_path !== undefined ||
-      value.old_string !== undefined ||
-      value.new_string !== undefined ||
-      value.replace_all !== undefined;
-    const legacy =
-      value.path !== undefined || value.oldText !== undefined || value.newText !== undefined;
-    if (canonical && legacy) {
-      ctx.addIssue({
-        code: 'custom',
-        message:
-          'edit accepts either file_path/old_string/new_string/replace_all or the legacy path/oldText/newText, not both',
-      });
-      return;
-    }
-    if (canonical) {
-      if (value.file_path === undefined) {
-        ctx.addIssue({ code: 'custom', message: 'edit requires file_path', path: ['file_path'] });
-      }
-      if (value.old_string === undefined) {
-        ctx.addIssue({ code: 'custom', message: 'edit requires old_string', path: ['old_string'] });
-      }
-      if (value.new_string === undefined) {
-        ctx.addIssue({ code: 'custom', message: 'edit requires new_string', path: ['new_string'] });
-      }
-      return;
-    }
-    if (value.path === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'edit requires file_path (or path)',
-        path: ['path'],
-      });
-    }
-    if (value.oldText === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'edit requires old_string (or oldText)',
-        path: ['oldText'],
-      });
-    }
-    if (value.newText === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'edit requires new_string (or newText)',
-        path: ['newText'],
-      });
-    }
+    checkAliases(value, ctx, ['file_path', 'filePath', 'path'], true);
+    checkAliases(value, ctx, ['old_string', 'oldString', 'oldText'], true);
+    checkAliases(value, ctx, ['new_string', 'newString', 'newText'], true);
+    checkAliases(value, ctx, ['replace_all', 'replaceAll']);
   });
 
-/**
- * `write {file_path, content}` — canonical, with `path` accepted as the
- * one-release argument-repair alias (§6b).
- */
 export const WriteToolInputSchema = z
   .object({
     file_path: z.string().min(1).optional(),
+    filePath: z.string().min(1).optional(),
     path: z.string().min(1).optional(),
     content: z.string(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.file_path === undefined && value.path === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'write requires file_path (or path)',
-        path: ['file_path'],
-      });
-    }
-    if (value.file_path !== undefined && value.path !== undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'write accepts file_path or the legacy path alias, not both',
-        path: ['path'],
-      });
-    }
+    checkAliases(value, ctx, ['file_path', 'filePath', 'path'], true);
   });
 
-/**
- * `bash {command, timeout?}` — `timeout` is a per-call bound in ms that may
- * only SHORTEN the config's policy timeout. The pre-F1 `run` tool had the
- * same `{command}` shape, so no argument alias is needed.
- */
 export const BashToolInputSchema = z
   .object({
     command: z.string().min(1),
     timeout: z.number().int().positive().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    description: z.string().optional(),
+    workdir: z.string().min(1).optional(),
+    cwd: z.string().min(1).optional(),
+    run_in_background: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    checkAliases(value, ctx, ['timeout', 'timeoutMs']);
+    checkAliases(value, ctx, ['workdir', 'cwd']);
+    if (value.run_in_background === true)
+      ctx.addIssue({ code: 'custom', message: 'run_in_background: true is not supported' });
+  });
 
 /** The pre-F1 name for {@link BashToolInputSchema} — accepted for one release. */
 export const RunToolInputSchema = BashToolInputSchema;
@@ -474,6 +426,105 @@ export type ToolkitTool =
       inputSchema: typeof GlobToolInputSchema;
       execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     };
+
+/** Canonical request schemas exclude compatibility aliases from the model prompt. */
+export const AdvertisedToolInputSchemas = {
+  read: z
+    .object({
+      file_path: z.string().min(1).describe('Workspace file to read'),
+      offset: z.number().int().positive().optional().describe('First line, 1-based'),
+      limit: z.number().int().positive().optional().describe('Line count; default 2000'),
+    })
+    .strict(),
+  grep: z
+    .object({
+      pattern: z.string().min(1).describe('Ripgrep regular expression'),
+      path: z.string().min(1).optional().describe('Workspace search root'),
+      glob: z.string().min(1).optional().describe('Filter candidate file paths'),
+      ignore_case: z.boolean().optional().describe('Match without case sensitivity'),
+      output_mode: z
+        .enum(['content', 'files_with_matches', 'count'])
+        .optional()
+        .describe('Lines, paths, or per-file matching-line counts'),
+      head_limit: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Result rows; zero uses safety cap'),
+    })
+    .strict(),
+  glob: z
+    .object({
+      pattern: z.string().min(1).describe('File glob, e.g. src/**/*.ts'),
+      path: z.string().min(1).optional().describe('Workspace search root'),
+    })
+    .strict(),
+  edit: CanonicalEditToolInputSchema.extend({
+    file_path: z.string().min(1).describe('Previously read workspace file'),
+    old_string: z.string().min(1).describe('Exact text to replace'),
+    new_string: z.string().describe('Replacement text; empty deletes'),
+    replace_all: z.boolean().optional().describe('Replace every occurrence'),
+  }),
+  write: z
+    .object({
+      file_path: z.string().min(1).describe('Workspace file to create or replace'),
+      content: z.string().describe('Complete replacement text'),
+    })
+    .strict(),
+  bash: z
+    .object({
+      command: z.string().min(1).describe('Allowed shell command'),
+      timeout: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Milliseconds; may only shorten cap'),
+      description: z.string().optional().describe('Advisory text recorded in session'),
+      workdir: z.string().min(1).optional().describe('Working directory inside workspace'),
+      run_in_background: z.boolean().optional().describe('Only false supported'),
+    })
+    .strict(),
+};
+
+/** Validate the strict compatibility surface before removing any alias keys. */
+export function normalizeToolInput(tool: ToolkitTool, value: unknown): Record<string, unknown> {
+  const parsed = tool.inputSchema.parse(value);
+  const normalized: Record<string, unknown> = { ...parsed };
+  const groups =
+    tool.name === 'grep'
+      ? [
+          ['glob', 'include'],
+          ['ignore_case', '-i', 'ignoreCase'],
+        ]
+      : tool.name === 'bash'
+        ? [
+            ['timeout', 'timeoutMs'],
+            ['workdir', 'cwd'],
+          ]
+        : tool.name === 'glob'
+          ? []
+          : [
+              ['file_path', 'filePath', 'path'],
+              ...(tool.name === 'edit'
+                ? [
+                    ['old_string', 'oldString', 'oldText'],
+                    ['new_string', 'newString', 'newText'],
+                    ['replace_all', 'replaceAll'],
+                  ]
+                : []),
+            ];
+  for (const [canonical, ...aliases] of groups) {
+    if (canonical === undefined) continue;
+    for (const alias of aliases) {
+      if (normalized[canonical] === undefined && normalized[alias] !== undefined)
+        normalized[canonical] = normalized[alias];
+      delete normalized[alias];
+    }
+  }
+  return normalized;
+}
 
 // ---------------------------------------------------------------------------
 // Pattern compilers
@@ -1164,15 +1215,16 @@ export function buildTools(
     tools.push({
       name: 'read',
       description: capDescription(
-        'Read a text file from the workspace. Input: { file_path, offset?, limit? }. ' +
-          'offset is 1-based; limit defaults to 2000 lines. Use the path alias if needed.',
+        'Read a workspace UTF-8 text file. Returns numbered lines; offset is 1-based and limit defaults to 2000. Follow offset=N to continue. Binary and invalid UTF-8 files are refused. Paths must stay inside the workspace and configured allowlist.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: ReadToolInputSchema,
       execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
         const parsed = ReadToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('read', parsed.error);
-        const requested = (parsed.data.file_path ?? parsed.data.path) as string;
+        const requested = (parsed.data.file_path ??
+          parsed.data.filePath ??
+          parsed.data.path) as string;
         const abs = resolveInside(requested);
         if (abs === undefined) {
           return deny('read', `path escape: '${requested}' resolves outside the workspace`);
@@ -1235,13 +1287,17 @@ export function buildTools(
               const nextOffset = offset + selected.length;
               const windowTruncated = nextOffset <= lines.length;
               const parts = [`--- ${relOf(abs)} ---`, ...numbered];
-              if (windowTruncated) {
+              if (
+                windowTruncated &&
+                (fileCfg.maxOutputChars === undefined ||
+                  parts.join('\n').length + 80 <= fileCfg.maxOutputChars)
+              ) {
                 parts.push(`… (truncated; use offset=${nextOffset} to continue)`);
               }
               const capped = capOutputWithMarker(
                 parts.join('\n'),
                 fileCfg.maxOutputChars,
-                `[truncated: output chars cap ${fileCfg.maxOutputChars}]`,
+                `[truncated: output chars cap ${fileCfg.maxOutputChars}] retry offset=${offset} with a smaller limit`,
               );
               const output = capped.output;
               const root = await workspaceRealRoot();
@@ -1276,8 +1332,7 @@ export function buildTools(
     searchTools.push({
       name: 'grep',
       description: capDescription(
-        'Search workspace text for a regex. Input: { pattern, path?, glob? }. ' +
-          'Use include as an alias for glob. Search is bounded and respects .gitignore.',
+        'Search workspace text with a ripgrep regex. Returns numbered matching lines, file paths, or per-file matching-line counts via output_mode. glob filters files; ignore_case ignores case; head_limit bounds rows. Respects .gitignore and containment. Narrow path or pattern when capped; other result-changing extras are unsupported.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: GrepToolInputSchema,
@@ -1303,7 +1358,7 @@ export function buildTools(
           const capped = capOutputWithMarker(
             output,
             SEARCH_OUTPUT_CHARS,
-            `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+            `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}] Narrow path or pattern to recover remaining results.`,
           );
           if (isAborted(options?.signal)) {
             return { ok: false, denial: { tool: 'grep', reason: 'cancelled: grep was aborted' } };
@@ -1313,6 +1368,9 @@ export function buildTools(
 
         const args = [
           '--json',
+          ...((parsed.data.ignore_case ?? parsed.data['-i'] ?? parsed.data.ignoreCase) === true
+            ? ['-i']
+            : []),
           '--no-config',
           '--hidden',
           '--color=never',
@@ -1430,7 +1488,11 @@ export function buildTools(
         );
         const allMatches = groups.reduce((count, group) => count + group.lines.length, 0);
         const keptGroups: { file: SearchFile; lines: string[]; raw: string[] }[] = [];
-        let remaining = SEARCH_MATCH_LIMIT;
+        const matchLimit =
+          parsed.data.output_mode === undefined || parsed.data.output_mode === 'content'
+            ? Math.min(parsed.data.head_limit || SEARCH_MATCH_LIMIT, SEARCH_MATCH_LIMIT)
+            : SEARCH_MATCH_LIMIT;
+        let remaining = matchLimit;
         for (const group of groups) {
           if (remaining <= 0) break;
           const lines = group.lines.slice(0, remaining);
@@ -1438,22 +1500,35 @@ export function buildTools(
           keptGroups.push({ file: group.file, lines, raw });
           remaining -= lines.length;
         }
-        if (allMatches > SEARCH_MATCH_LIMIT) {
-          markers.push(`[truncated: matches cap ${SEARCH_MATCH_LIMIT}]`);
+        if (allMatches > matchLimit) {
+          markers.push(`[truncated: matches cap ${matchLimit}]`);
         }
         if (truncatedLine) markers.push(`[truncated: per-line chars cap ${SEARCH_LINE_CHARS}]`);
 
-        const outputParts = keptGroups.flatMap(({ file, lines }) => [
-          `--- ${file.lexicalRel} ---`,
-          ...lines,
-        ]);
+        const mode = parsed.data.output_mode ?? 'content';
+        const rows =
+          mode === 'content'
+            ? keptGroups.flatMap(({ file, lines }) => [`--- ${file.lexicalRel} ---`, ...lines])
+            : keptGroups.map(({ file, lines }) =>
+                mode === 'count'
+                  ? `${file.lexicalRel}:${lines.length}${markers.length > 0 ? '+' : ''}`
+                  : file.lexicalRel,
+              );
+        if (mode === 'count' && markers.length > 0)
+          markers.push('[truncated: counts marked + are lower bounds within search limits]');
+        const rowLimit = parsed.data.head_limit || rows.length;
+        const outputParts = mode === 'content' ? rows : rows.slice(0, rowLimit);
+        if (mode !== 'content' && rows.length > rowLimit)
+          markers.push(`[truncated: head_limit ${rowLimit}]`);
         if (outputParts.length === 0) outputParts.push('No matches');
+        if (markers.length > 0)
+          markers.push('[truncated: narrow path or pattern to recover remaining results]');
         outputParts.push(...markers);
         const outputBeforeCap = outputParts.join('\n');
         const capped = capOutputWithMarker(
           outputBeforeCap,
           SEARCH_OUTPUT_CHARS,
-          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}] Narrow path or pattern to recover remaining results.`,
         );
         // Scan-source provenance is the RAW unformatted matched lines (the
         // scan guard sees anchorable source text); the numbered display rides
@@ -1479,8 +1554,7 @@ export function buildTools(
     searchTools.push({
       name: 'glob',
       description: capDescription(
-        'List workspace files matching a glob. Input: { pattern, path? }. ' +
-          'Search is bounded and respects .gitignore.',
+        'Find workspace files by glob pattern, for example src/**/*.ts. Returns file paths in deterministic order; directories are excluded. Optional path scopes the search. Respects .gitignore, workspace containment and the configured path allowlist. Narrow path or pattern when capped.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: GlobToolInputSchema,
@@ -1506,7 +1580,7 @@ export function buildTools(
         const capped = capOutputWithMarker(
           outputParts.join('\n'),
           SEARCH_OUTPUT_CHARS,
-          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}]`,
+          `[truncated: output chars cap ${SEARCH_OUTPUT_CHARS}] Narrow path or pattern to recover remaining results.`,
         );
         if (isAborted(options?.signal)) {
           return { ok: false, denial: { tool: 'glob', reason: 'cancelled: glob was aborted' } };
@@ -1526,9 +1600,7 @@ export function buildTools(
     tools.push({
       name: 'edit',
       description: capDescription(
-        'Edit a workspace text file. Input: { file_path, old_string, new_string, replace_all? }. ' +
-          'Read the file first: the edit is refused when it was not read, or when it changed since. ' +
-          'An ambiguous old_string is refused unless replace_all is true.',
+        'Replace literal text in an existing workspace file. Returns an edit confirmation. Read it first; changed files must be read again. old_string must match uniquely unless replace_all is true. Match content without read-output line numbers. Empty new_string deletes the match. Paths obey containment and allowlists.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: EditToolInputSchema,
@@ -1536,17 +1608,14 @@ export function buildTools(
         if (sandbox === 'read-only') return deny('edit', 'sandbox: read-only');
         const parsed = EditToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('edit', parsed.error);
-        // The schema's refinement guarantees exactly one complete argument
-        // set; the casts below only recover that guarantee for the compiler.
-        const canonical =
-          parsed.data.file_path !== undefined ||
-          parsed.data.old_string !== undefined ||
-          parsed.data.new_string !== undefined ||
-          parsed.data.replace_all !== undefined;
-        const path = (canonical ? parsed.data.file_path : parsed.data.path) as string;
-        const oldString = (canonical ? parsed.data.old_string : parsed.data.oldText) as string;
-        const newString = (canonical ? parsed.data.new_string : parsed.data.newText) as string;
-        const replaceAll = canonical && parsed.data.replace_all === true;
+        const path = (parsed.data.file_path ?? parsed.data.filePath ?? parsed.data.path) as string;
+        const oldString = (parsed.data.old_string ??
+          parsed.data.oldString ??
+          parsed.data.oldText) as string;
+        const newString = (parsed.data.new_string ??
+          parsed.data.newString ??
+          parsed.data.newText) as string;
+        const replaceAll = (parsed.data.replace_all ?? parsed.data.replaceAll) === true;
         const abs = resolveInside(path);
         if (abs === undefined) {
           return deny('edit', `path escape: '${path}' resolves outside the workspace`);
@@ -1660,9 +1729,7 @@ export function buildTools(
     writeTool = {
       name: 'write',
       description: capDescription(
-        'Create or overwrite a workspace text file. Input: { file_path, content }. ' +
-          'Creating a new file needs no prior read; overwriting an existing file is refused ' +
-          'unless it was read and has not changed since.',
+        'Create or fully replace a workspace UTF-8 text file. Returns a write confirmation. Read an existing file before overwriting it; changed files must be read again. For partial changes use edit. content is the complete replacement, including an empty string. Paths obey containment and allowlists.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: WriteToolInputSchema,
@@ -1670,7 +1737,7 @@ export function buildTools(
         if (sandbox === 'read-only') return deny('write', 'sandbox: read-only');
         const parsed = WriteToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('write', parsed.error);
-        const path = (parsed.data.file_path ?? parsed.data.path) as string;
+        const path = (parsed.data.file_path ?? parsed.data.filePath ?? parsed.data.path) as string;
         const content = parsed.data.content;
         const abs = resolveInside(path);
         if (abs === undefined) {
@@ -1820,11 +1887,7 @@ export function buildTools(
     tools.push({
       name: 'bash',
       description: capDescription(
-        'Execute a shell command inside the workspace and capture its stdout, stderr, and exit code. ' +
-          'Input: { command, timeout? }. TRUST BOUNDARY: commands run with HOST privileges, scoped to the ' +
-          'workspace-cwd convention only — the configured allowlist, timeout, and output cap are ' +
-          'gates over what may run, not an OS sandbox. Allowlist syntax: whitespace token prefixes, ' +
-          'or anchored re: patterns as the deliberate metacharacter escape hatch.',
+        'Run an allowed shell command in the workspace. Returns stdout, stderr and exit code. timeout may shorten the configured cap; workdir must remain inside the workspace. description is advisory and logged. Background execution and sandbox escalation are unsupported. Fresh shells run with host privileges; output is bounded.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: BashToolInputSchema,
@@ -1834,7 +1897,23 @@ export function buildTools(
         if (sandbox === 'read-only') return deny('bash', 'sandbox: read-only');
         const parsed = BashToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('bash', parsed.error);
-        const { command, timeout } = parsed.data;
+        const { command } = parsed.data;
+        const timeout = parsed.data.timeout ?? parsed.data.timeoutMs;
+        const requestedCwd = parsed.data.workdir ?? parsed.data.cwd ?? '.';
+        const lexicalCwd = resolveInside(requestedCwd);
+        if (lexicalCwd === undefined)
+          return deny(
+            'bash',
+            `path escape: workdir '${requestedCwd}' resolves outside the workspace`,
+          );
+        const cwd = await resolveRealInside(lexicalCwd);
+        if (cwd === undefined)
+          return deny(
+            'bash',
+            `path escape: workdir '${requestedCwd}' escapes the workspace through a symlink`,
+          );
+        if (await touchesGit(lexicalCwd, cwd)) return gitDenial('bash', lexicalCwd);
+
         let env: Record<string, string>;
         try {
           // Scrub at the shared core on every transport; never depend on an
@@ -1856,7 +1935,7 @@ export function buildTools(
               ? runCfg.timeoutMs
               : Math.min(runCfg.timeoutMs, timeout);
         const executionOptions: RunCommandOptions = {
-          cwd: workspaceAbs,
+          cwd,
           env,
           // Retain UTF-8 and wrapper slack above the configured character cap.
           maxBytes:

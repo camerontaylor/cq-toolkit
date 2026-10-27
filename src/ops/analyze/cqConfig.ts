@@ -74,6 +74,7 @@ export const CqConfigSchema = z
   .object({
     schemaVersion: z.literal(CQ_CONFIG_SCHEMA_VERSION),
     checks: z.array(CqCheckSchema).min(1),
+    harness: z.object({ logToolFailures: z.boolean().exactOptional() }).strict().exactOptional(),
     packages: z
       .array(z.object({ name: z.string().min(1), path: z.string().min(1) }).strict())
       .min(1)

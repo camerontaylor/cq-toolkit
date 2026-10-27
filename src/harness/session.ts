@@ -25,6 +25,7 @@
 // per line, discriminated on `type`):
 //   line 1:   { type: 'session', sessionId, createdAt, workspace }  (header)
 //   lines 2+: { type: 'message', message: SessionMessage }
+//          or { type: 'tool-failure', kind, tool, reason, inputSummary, step, at }
 // Every line is validated against its schema BEFORE it hits disk (an invalid
 // record is a loud error, not silent evidence rot). `load` folds the lines
 // into a SessionRecord: the header line supplies identity facts, message
@@ -71,6 +72,7 @@ export const SessionMessageSchema = z
     role: z.enum(['user', 'assistant', 'tool']),
     content: z.string(),
     toolName: z.string().optional(),
+    description: z.string().max(1024).optional(),
     usage: z
       .object({
         input: z.number().int().nonnegative(),
@@ -123,9 +125,32 @@ export const SessionMessageLineSchema = z
   })
   .strict();
 
+/** Additive diagnostic line; never replayed as a conversation turn. */
+const ToolFailureLineSchema = z
+  .object({
+    type: z.literal('tool-failure'),
+    kind: z.enum([
+      'invalid-input',
+      'unknown-tool',
+      'denial',
+      'execution',
+      'final-step',
+      'repair-step',
+    ]),
+    tool: z.string().max(128),
+    reason: z.string().max(1024),
+    inputSummary: z.string().max(2048),
+    step: z.number().int().nonnegative(),
+    at: z.string(),
+  })
+  .strict();
+
+export type ToolFailureLine = z.infer<typeof ToolFailureLineSchema>;
+
 export const SessionLineSchema = z.discriminatedUnion('type', [
   SessionHeaderLineSchema,
   SessionMessageLineSchema,
+  ToolFailureLineSchema,
 ]);
 
 export type SessionHeaderLine = z.infer<typeof SessionHeaderLineSchema>;
@@ -213,7 +238,15 @@ export class SessionStore {
   async appendMessage(sessionId: string, message: SessionMessage): Promise<void> {
     assertSafeSessionId(sessionId);
     const parsed: SessionMessage = SessionMessageSchema.parse(message);
-    const line: SessionMessageLine = { type: 'message', message: parsed };
+    await this.appendLine(sessionId, { type: 'message', message: parsed });
+  }
+
+  async appendToolFailure(sessionId: string, failure: ToolFailureLine): Promise<void> {
+    await this.appendLine(sessionId, ToolFailureLineSchema.parse(failure));
+  }
+
+  private async appendLine(sessionId: string, line: SessionLine): Promise<void> {
+    assertSafeSessionId(sessionId);
     const write = async (): Promise<void> => {
       // Existence + torn-tail recovery INSIDE the chain (issue #18): run
       // before joining it, a recovery could interleave with an in-flight
@@ -342,7 +375,7 @@ export class SessionStore {
             `session: message before header at line ${i + 1} of ${this.pathFor(sessionId)}`,
           );
         }
-        messages.push(parsed.message);
+        if (parsed.type === 'message') messages.push(parsed.message);
       }
     }
     if (header === undefined) return undefined; // only a torn header — never a real session

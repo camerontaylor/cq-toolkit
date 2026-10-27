@@ -26,7 +26,7 @@ async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>
   repo.commitAll('fixture agent review setup');
 }
 
-function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
+function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailures = 0) {
   return {
     resolve: vi.fn(
       (request: {
@@ -55,6 +55,7 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
               },
               usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
               denials: [],
+              toolFailures,
             };
           },
         },
@@ -1767,6 +1768,36 @@ it('shares the review deadline signal with intent and numstat reads', async () =
     expect(contextCalls.every((call) => call.timeoutMs > 0)).toBe(true);
     expect(drivers.resolve).not.toHaveBeenCalled();
     expect(result.status).toBe('failed');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+it('forwards cq.json failure logging and sums driver failures into the review log', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await configureAgentRepo(repo);
+    const config = JSON.parse(await readFile(join(repo.root, 'cq.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    await repo.write('cq.json', JSON.stringify({ ...config, harness: { logToolFailures: true } }));
+    repo.commitAll('enable diagnostic logging');
+    const drivers = scriptedDrivers(undefined, 3);
+    const effects = repoEffects(repo);
+    const result = await makeReviewRun({
+      drivers,
+      effectsFactory: () => effects,
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(drivers.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        harness: expect.objectContaining({ logToolFailures: true }) as unknown,
+      }),
+    );
+    expect(effects.logs[0]).toContain('tool failures: 3');
   } finally {
     await repo.cleanup();
   }
