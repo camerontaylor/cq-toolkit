@@ -238,6 +238,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
      * loop-side guess, is the only witness of what was actually pushed.
      */
     let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
+    /**
+     * True only from the moment the CURRENT publishOnExit attempt's own git
+     * push has left this process until that attempt returns or throws. The
+     * inner resets it at entry and sets it right after the push; the
+     * wrapper's and finish()'s catches consult it so a post-push throw (the
+     * rev-parse baseline update, unpublished.clear()) cannot demote the
+     * already-set 'published' witness — the commit is on the remote, and a
+     * 'failed' witness would make the persisted withhold rows claim it
+     * "stays local".
+     */
+    let exitPushed = false;
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -250,7 +261,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           await publishOnExit();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          exitPublication = { state: 'failed', error: message };
+          // Same no-demotion rule as the publishOnExit wrapper: once the
+          // attempt's push left this process, the witness stays 'published'
+          // even though the outcome rewrite below still reports the failure.
+          if (!exitPushed) exitPublication = { state: 'failed', error: message };
           status = 'needs-human';
           reason = `verified publication failed: ${message}`;
           report.reasons.push(reason);
@@ -734,6 +748,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             }
           };
           const publishOnExitInner = async (): Promise<void> => {
+            exitPushed = false;
             if (!input.push || unpublished.size === 0 || parent?.aborted) return;
             if (!publishedBase) throw new Error('publication baseline unavailable');
             const range = (await gitText(workerRoot, ['rev-list', `${publishedBase}..HEAD`]))
@@ -751,10 +766,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const branch = publishBranch ?? (await branchName(workerRoot));
             if (parent?.aborted) throw new Error('parent cancelled');
             await gitText(workerRoot, ['push', publishRemote, `HEAD:refs/heads/${branch}`]);
+            exitPushed = true;
             // The engine's own witness: a push actually left the process, so
             // the withhold rows' commit is out (#469). Set ONLY here — an
             // early return (no push run, nothing unpublished) never counts
-            // as published.
+            // as published. The follow-up bookkeeping below must never be
+            // able to demote this witness: if the rev-parse baseline update
+            // or the clear throws, the wrapper/finish catches keep
+            // 'published' (only a pushless attempt lets them write
+            // 'failed'), because the commit is already on the remote and
+            // settleWithholdRows would otherwise persist "… stays local"
+            // over a pushed commit.
             exitPublication = { state: 'published' };
             publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
             unpublished.clear();
@@ -767,10 +789,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             try {
               await publishOnExitInner();
             } catch (error) {
-              exitPublication = {
-                state: 'failed',
-                error: error instanceof Error ? error.message : String(error),
-              };
+              // Record 'failed' only when THIS attempt never pushed. A
+              // post-push throw (rev-parse baseline update,
+              // unpublished.clear()) means the verified range is already on
+              // the remote: demoting the witness would make
+              // settleWithholdRows persist "exit publication failed … the
+              // verified commit stays local" for a pushed commit. The
+              // rethrow still reaches finish()'s outcome rewrite, so the
+              // run-level failure reporting is unchanged.
+              if (!exitPushed)
+                exitPublication = {
+                  state: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                };
               throw error;
             }
           };
