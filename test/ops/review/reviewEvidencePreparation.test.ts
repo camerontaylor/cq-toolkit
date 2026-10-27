@@ -126,9 +126,7 @@ describe('R3W evidence preparation', () => {
   it('stops at the first valid repair and stores it verbatim with its trigger', () => {
     const original = evidence({ primary: anchor({ quote: 'wrong bytes' }) });
     const repair = evidence({ failureScenario: 're-anchored after rereading the hunk' });
-    const step = valid(
-      prepareFindingEvidence({ candidate: original, context, repairs: [repair] }),
-    );
+    const step = valid(prepareFindingEvidence({ candidate: original, context, repairs: [repair] }));
     expect(step.evidence).toBe(repair);
     expect(step.candidates.map((row) => row.evidence)).toEqual([original, repair]);
     expect(step.repairs).toEqual([
