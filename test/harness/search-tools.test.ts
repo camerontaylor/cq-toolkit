@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
@@ -39,7 +40,6 @@ vi.mock('node:child_process', async (importOriginal) => {
       return (actual.spawn as SpawnFn)(file, args, ...rest);
     }
     const config = spawnState.fake;
-    const { EventEmitter } = actual;
     const stdout = new EventEmitter() as EventEmitter & { pause: () => void };
     stdout.pause = () => {};
     const stderr = new EventEmitter();
