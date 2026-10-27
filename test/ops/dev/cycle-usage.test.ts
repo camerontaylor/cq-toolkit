@@ -113,6 +113,33 @@ describe('dev.cycle known usage', () => {
     });
   });
 
+  it('returns the original driver result when usage is invalid, keeping valid cost', async () => {
+    const ledger = createKnownUsageLedger();
+    const original: WorkerResult = {
+      stopReason: 'error',
+      error: 'original partial result',
+      usage: { ...usage, input: -1 },
+      costUSD: 0.02,
+      denials: [],
+    };
+    const driver = { run: async (): Promise<WorkerResult> => original };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    const resolved = meterDrivers(factory, () => {}, {
+      start: () => {},
+      settle: (id, observation) => ledger.record(id, observation),
+    }).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    expect(await resolved.driver.run(invocation)).toBe(original);
+    expect(ledger.snapshot()).toEqual({
+      costUSD: 0.02,
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 0,
+    });
+  });
+
   it('attaches a typed empty summary to a pre-dispatch validation failure', async () => {
     const cycle = makeDevCycle({ effects: {} as DevEffects });
     const result = await cycle({ repoRoot: '' });
