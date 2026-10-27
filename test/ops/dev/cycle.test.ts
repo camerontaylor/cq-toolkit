@@ -325,11 +325,11 @@ describe('dev.cycle', () => {
   test('includeIntegration absent keeps the check legs bare', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
-    const seen: boolean[] = [];
+    const seen: Array<boolean | undefined> = [];
     const op = makeDevCycle({
       effects: effects(),
       check: async (input) => {
-        seen.push(input.includeIntegration === true);
+        seen.push(input.includeIntegration);
         return greenCheck([])(input);
       },
       review: cleanReview(state),
@@ -339,7 +339,7 @@ describe('dev.cycle', () => {
     });
     const result = await op({ repoRoot: repo.root });
     expect(result.status, JSON.stringify(result)).toBe('ok');
-    expect(seen).toEqual([false, false]);
+    expect(seen).toEqual([undefined, undefined]);
   });
 
   test('push:false skips the verified push (the branch stays local; pr.open still runs)', async () => {
