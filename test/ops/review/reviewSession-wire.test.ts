@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AiSdkDriver, serializeRequestForScan } from '../../../src/driver/ai-sdk/index.js';
+import {
+  AiSdkDriver,
+  RG_MINIMUM_VERSION,
+  serializeRequestForScan,
+  type AiSdkDriverOptions,
+} from '../../../src/driver/ai-sdk/index.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
@@ -132,12 +137,20 @@ function expectUserPrompt(serialized: string, prompt: string): void {
   expect(texts).toContain(prompt);
 }
 
-function wireFactory(root: string, model: MockLanguageModelV4, calls: WireCall[]): DriverFactory {
+function wireFactory(
+  root: string,
+  model: MockLanguageModelV4,
+  calls: WireCall[],
+  options: { resolveRg?: AiSdkDriverOptions['resolveRg'] } = {},
+): DriverFactory {
   return {
     resolve: (request) => {
       const driver = new AiSdkDriver({
         sessionsDir: join(root, 'sessions'),
         ...(request.harness === undefined ? {} : { harnessConfig: request.harness }),
+        // Deterministic probe default; tests inject their own when they need
+        // a specific capability outcome.
+        resolveRg: options.resolveRg ?? (async () => ({ ok: true, version: RG_MINIMUM_VERSION })),
         beforeRequest: async (text, contents = [], context) => {
           calls.push({
             text,
@@ -461,6 +474,66 @@ describe('review session wire hook', () => {
     expect(evidence.requests).toHaveLength(1);
     expect(evidence.deliveries).toHaveLength(0);
     expect(evidence.status).toBe('error');
+  });
+
+  it('offers the fixed read-only reference surface and records the rg capability when search is allowed', async () => {
+    const root = await scratch();
+    await writeFile(join(root, 'src/dep.ts'), 'export const dep = 1;\n', 'utf8');
+    const calls: WireCall[] = [];
+    const scanCalls: ScanComponentInput[][] = [];
+    const plan = planFor();
+    let generated = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        generated += 1;
+        if (generated === 1) return toolCallResult('read', { path: 'src/dep.ts' });
+        return textResult(JSON.stringify({ findings: [] }));
+      },
+    });
+    const evidence = evidenceFor();
+    const result = await runReviewSession(wireFactory(root, model, calls), {
+      ...runInput(root, plan, evidence),
+      searchTools: true,
+      scanSecrets: recordingScanner(scanCalls),
+      onUsage: () => undefined,
+    });
+    expect(result.status).toBe('ok');
+    expect(generated).toBe(2);
+    expect(evidence.status).toBe('complete');
+    expect(evidence.deliveries).toHaveLength(1);
+    // The injected probe's outcome rides the session evidence: search tools
+    // were offered and the capability was observed.
+    expect(evidence.capabilities).toEqual({
+      rg: {
+        available: true,
+        version: RG_MINIMUM_VERSION,
+        minimum: RG_MINIMUM_VERSION,
+        probe: 'ok',
+      },
+    });
+  });
+
+  it('keeps a read-only file-only surface and no capability record when searchTools is false', async () => {
+    const root = await scratch();
+    const calls: WireCall[] = [];
+    const scanCalls: ScanComponentInput[][] = [];
+    const plan = planFor();
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => textResult(JSON.stringify({ findings: [] })),
+    });
+    const evidence = evidenceFor();
+    const result = await runReviewSession(wireFactory(root, model, calls), {
+      ...runInput(root, plan, evidence),
+      searchTools: false,
+      scanSecrets: recordingScanner(scanCalls),
+      onUsage: () => undefined,
+    });
+    expect(result.status).toBe('ok');
+    expect(evidence.status).toBe('complete');
+    // A session without any search tool never probes: no capability record.
+    expect(evidence.capabilities).toBeUndefined();
   });
 
   it('refuses a path-scoped component before dispatch through the outer reviewer', async () => {
