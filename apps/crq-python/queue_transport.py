@@ -173,21 +173,23 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             if source.get("repo") != b["repo"] or source.get("target_selector") != b["targetSelector"]:
                 raise ValueError("receipt source repository/target mismatch")
             if source.get("pr") != entry.get("pr") or source.get("merge_sha") != entry.get("mergeSha"):
-                if not item.get("reused_from") or not item.get("capture") or item["capture"].get("equivalence") != document.get("capture", {}).get("equivalence"):
+                if not item.get("reused_from") or not receipts.reusable_current(document, item.get("capture")):
                     raise ValueError("receipt source mismatch without proven equivalent reuse")
             result["receiptSource"] = {"kind": "merged-current", "repo": source["repo"], "pr": source["pr"],
                                        "mergeSha": source["merge_sha"], "targetSelector": source["target_selector"]}
             result["receiptEquivalence"] = document.get("capture", {}).get("equivalence")
             outcome = document.get("outcome")
             counted = document.get("counted", False)
-            result["reviewed"] = counted is True and outcome in {"terminal-clean", "terminal-with-findings", "partial-scope"}
-            result["state"] = outcome if result["reviewed"] else {
+            classification = document.get("classification")
+            result["reviewed"] = counted is True and isinstance(classification, dict) and classification.get("counted") is True and classification.get("outcome") == "completed" and outcome in {"terminal-clean", "terminal-with-findings", "partial-scope"}
+            result["state"] = ("reused" if item.get("reused_from") else outcome) if result["reviewed"] else {
                 "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
             if result["state"] == "blocked":
                 # Only trusted structured classifier outcomes, never last_error string matching.
-                category = {"rate_limited": "vendor-rate-limited", "auth": "vendor-needs-action"}.get(outcome)
+                category = {"rate_limited": "vendor-rate-limited", "auth": "vendor-needs-action",
+                            "action_required": "vendor-needs-action"}.get(outcome)
                 result["reason"] = {"source": "vendor" if category else "queue",
-                                    "category": category or "unknown", "code": "rate_limited" if outcome == "rate_limited" else "auth" if outcome == "auth" else "unclassified"}
+                                    "category": category or "unknown", "code": outcome if category else "unclassified"}
         elif result["state"] == "blocked" and result["reason"] is None:
             result["reason"] = {"source": "queue", "category": "unknown", "code": "no-receipt"}
         if entry.get("reason") is not None:

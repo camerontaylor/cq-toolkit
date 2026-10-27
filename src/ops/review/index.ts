@@ -12,6 +12,8 @@ export {
   makeQueueOps,
   makeQueueClient,
   makeConfiguredQueueClient,
+  QueueUnsupported,
+  QueueConfigurationError,
   sshQueueTransport,
   importQueueEvidence,
   readQueueEvidence,
