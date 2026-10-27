@@ -450,9 +450,15 @@ async function world(
     reviewerCalls: () => reviewerCalls,
     replies,
     /**
-     * Arm a one-shot git-push fault (the scripted stderr is returned with
-     * exit 1). Used to drive publishOnExit's failure through the real
-     * engine's finish() (PR #470 verdict P2 #1).
+     * Arm a persistent git-push fault: EVERY git push after this call
+     * returns exit 1 with the scripted stderr, and nothing disarms the
+     * fault (the name says "next", the contract is "all subsequent" — a
+     * deliberate choice, not drift). The push-fault test below relies on
+     * the fault riding every push of the run: the loop's stage-5 publish,
+     * replyAndResolve's push-before-post, and the engine's publishOnExit
+     * push through finish(). Disarming after the first firing would let
+     * those later pushes succeed and the "verified publication failed"
+     * outcome rewrite would never fire (PR #470 verdict P2 #1).
      */
     failNextPush: (script: () => string) => {
       pushFault = script;
