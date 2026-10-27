@@ -339,6 +339,16 @@ describe('dev.check', () => {
     expect(result.status, JSON.stringify(result)).toBe('ok');
     const [record] = effects.openLedger('feature/x').load().records;
     expect(record?.kind === 'check' && record.testSelection).toEqual({ mode: 'base' });
+
+    // The other automatic form: a range-only run must disclose mode 'range'.
+    const rangeEffects = effectsFor();
+    const ranged = await makeDevCheck(rangeEffects)({
+      repoRoot: repo.root,
+      range: 'HEAD~1..HEAD',
+    });
+    expect(ranged.status, JSON.stringify(ranged)).toBe('ok');
+    const [rangedRecord] = rangeEffects.openLedger('feature/x').load().records;
+    expect(rangedRecord?.kind === 'check' && rangedRecord.testSelection).toEqual({ mode: 'range' });
   });
 
   test('a ledger written before testSelection existed still loads (field evolution)', async () => {
