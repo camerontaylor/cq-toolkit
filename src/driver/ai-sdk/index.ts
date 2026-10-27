@@ -439,7 +439,17 @@ export class AiSdkDriver implements Driver {
       );
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same
-    // step bound (step-fetch.ts); injected providers are left untouched.
+    // step bound (step-fetch.ts); injected providers are left untouched. The
+    // cut is fixed PER DRIVER INSTANCE by design (one undici dispatcher per
+    // fetch, step-fetch.ts) — and that is exactly how the per-request
+    // DriverRequest.stepTimeoutMs reaches it: the factory constructs a FRESH
+    // lane per resolve() and passes `request.stepTimeoutMs ??
+    // lanes.aiSdk.stepTimeoutMs` here, so this constructor value IS that
+    // request's effective capped step wall (the agent reviewer supplies
+    // cq.json budgets.step.wallMs capped at the remaining review wall). A
+    // driver constructed without the option keeps DEFAULT_STEP_TIMEOUT_MS:
+    // the frozen run seam (RunOptions/Budget) carries no per-run step bound,
+    // so no later path can — or needs to — retune this cut.
     this.providers = options.providers ?? defaultProviders(createStepFetch(stepTimeoutMs));
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
