@@ -345,7 +345,8 @@ export function verifyClosureEvidence(
     return {
       check: 'patch-coherent',
       outcome: 'pass',
-      detail: `patch coherent: +${shape.addedLines.length}/-${shape.removedLines.length}` +
+      detail:
+        `patch coherent: +${shape.addedLines.length}/-${shape.removedLines.length}` +
         ` on ${String(touched)}`,
     };
   };
@@ -442,8 +443,7 @@ export function verifyClosureEvidence(
   const last = checks[checks.length - 1];
   if (last === undefined)
     return { verdict: 'uncertain', reason: 'unavailable-evidence', checks, revision };
-  const allPass =
-    checks.length === 5 && checks.every((entry) => entry.outcome === 'pass');
+  const allPass = checks.length === 5 && checks.every((entry) => entry.outcome === 'pass');
   if (allPass)
     return {
       verdict: 'resolved',
