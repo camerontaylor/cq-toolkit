@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { DriverFactory } from '../../../driver/factory.js';
-import type { ModelSpec, Usage, WorkerResult } from '../../../driver/types.js';
+import type { ModelSpec, Usage, WorkerErrorClass, WorkerResult } from '../../../driver/types.js';
 import { toOutputSchema } from '../../../driver/common/structured.js';
 import { boundedErrorText } from '../../../driver/error-text.js';
 import { defaultHarnessConfig } from '../../../harness/config.js';
@@ -12,18 +12,23 @@ import type { DiffSecretScanner, ScanComponentInput } from '../../dev/denylist.j
 import type { Finding } from '../findings.js';
 import type { ReviewCoverageV2 } from './reviewCoverageV2.js';
 
+// A finding item STRIPS unknown keys (S7 attempts G/H: GLM added
+// `rule_id_hint` / `rule_detail` to one finding and the strict item failed
+// the whole review); every field check and the required severity/text still
+// hold, and the top level stays strict. The emitted contract therefore
+// leaves item `additionalProperties` open: the driver validates the reply
+// against the SAME document it sent (ADR-0002 §2.3), so a closed item would
+// reject the extra key before this parse could strip it.
 const OutputSchema = z
   .object({
     findings: z.array(
-      z
-        .object({
-          file: z.string().optional(),
-          line: z.number().int().positive().optional(),
-          rule: z.string().optional(),
-          severity: z.enum(['high', 'medium', 'low']),
-          text: z.string().min(1),
-        })
-        .strict(),
+      z.object({
+        file: z.string().optional(),
+        line: z.number().int().positive().optional(),
+        rule: z.string().optional(),
+        severity: z.enum(['high', 'medium', 'low']),
+        text: z.string().min(1),
+      }),
     ),
   })
   .strict();
@@ -127,8 +132,10 @@ export async function runReviewSession(
     onAdvisories?: (advisories: readonly string[]) => void;
     searchTools: boolean;
     logToolFailures?: boolean;
+    /** Per-request step bound for the ai-sdk lane (cq.json `budgets.step.wallMs`, capped). */
+    stepTimeoutMs?: number;
   },
-): Promise<OpResult<Finding[]>> {
+): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass }> {
   const { plan, evidence, signal } = input;
   if (evidence.deliveries.length > 0 || evidence.requests.length > 0)
     throw new Error('agent review session evidence must start empty');
@@ -152,6 +159,7 @@ export async function runReviewSession(
   const resolved = drivers.resolve({
     role: 'reviewer',
     modelSpec: input.role,
+    ...(input.stepTimeoutMs === undefined ? {} : { stepTimeoutMs: input.stepTimeoutMs }),
     harness: {
       ...defaultHarnessConfig,
       logToolFailures: input.logToolFailures ?? false,
@@ -278,6 +286,7 @@ export async function runReviewSession(
     return {
       status: 'needs-human',
       reason: `agent review did not complete (${result.stopReason})${detail}`,
+      ...(result.errorClass === undefined ? {} : { errorClass: result.errorClass }),
     };
   }
   const parsed = OutputSchema.safeParse(result.structuredOutput);

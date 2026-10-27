@@ -21,6 +21,9 @@ const ok = (value: unknown): GhResult => ({
 async function world(
   human = false,
   options: {
+    runBudget?: number;
+    refuseAdmissionAt?: number;
+    postFixSnapshotFailure?: boolean;
     sameFile?: boolean;
     fileless?: 'first' | 'last';
     bot?: boolean;
@@ -38,6 +41,7 @@ async function world(
   let failResolve = options.recoverResolution === true;
   let login = 'responder';
   let reviewerCalls = 0;
+  let admissionCalls = 0;
   const reports: string[] = [];
   const replies: Array<{
     id: number;
@@ -146,7 +150,11 @@ async function world(
       }
       return ok({ id: 1001 });
     }
-    if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remote } });
+    if (endpoint === 'repos/octo/widget/pulls/7') {
+      if (options.postFixSnapshotFailure && head === fixed)
+        throw new Error('scripted post-fix snapshot failure');
+      return ok({ head: { sha: remote } });
+    }
     if (options.recoverResolution && endpoint.includes('/pulls/7/comments'))
       return ok([
         ...threads.map((thread) => ({
@@ -357,8 +365,12 @@ async function world(
         },
       ],
       roles: { worker: role, reviewer: role },
-      budgets: { run: { maxTokens: 1000 } },
-      review: { rounds: 1, reviewers: ['agent'] },
+      budgets: { run: { maxTokens: options.runBudget ?? 1000 } },
+      review: {
+        rounds: 1,
+        reviewers: ['agent'],
+        ...(options.refuseAdmissionAt ? { addressConcurrency: 1 } : {}),
+      },
       escalation: { workerAttempts: 1, rescueBase: 0 },
     },
     disposition: async () => ({ status: 'ok', value: {} }),
@@ -394,12 +406,21 @@ async function world(
             },
           };
     },
-    workerFactory: (deps) =>
-      makeAddressWorker({
+    workerFactory: (deps) => {
+      const worker = makeAddressWorker({
         ...deps,
         scanner: async (components) =>
           components.map((c) => ({ component: c.component, hits: [] })),
-      }),
+      });
+      return {
+        ...worker,
+        async withVerifiedHead<T>(action: (head: string) => Promise<T>) {
+          if (++admissionCalls === options.refuseAdmissionAt)
+            throw new Error('scripted admission ownership changed');
+          return worker.withVerifiedHead!(action);
+        },
+      };
+    },
   });
   return {
     root,
@@ -433,6 +454,41 @@ async function world(
   };
 }
 describe('review.address PR phase-one orchestration', () => {
+  test.each(['initial-refusal', 'sibling-refusal', 'snapshot-failure'] as const)(
+    'settled PR run retention survives %s',
+    async (mode) => {
+      const w = await world(mode === 'sibling-refusal', {
+        ...(mode === 'snapshot-failure'
+          ? { postFixSnapshotFailure: true }
+          : { refuseAdmissionAt: mode === 'initial-refusal' ? 1 : 2 }),
+      });
+      try {
+        const result = await w.run();
+        expect(result.status).toBe('needs-human');
+        const report = result.status === 'ok' ? result.value : result.report!;
+        expect(report.reasons.join(' ')).toMatch(
+          mode === 'snapshot-failure' ? /scripted post-fix snapshot failure/ : /admission refused/,
+        );
+        expect(w.reviewerCalls()).toBe(0);
+        if (mode === 'initial-refusal') {
+          expect(w.prompts).toEqual([]);
+          expect(report.rounds).toEqual([]);
+        } else {
+          expect(report.fixes.map((fix) => fix.finding.id)).toEqual(['T1']);
+          expect(report.rounds).toHaveLength(1);
+          expect(report.rounds[0]?.record.findings).toMatchObject([{ id: 'T1' }]);
+          expect(report.rounds[0]?.runs).toHaveLength(1);
+          const jobs = report.rounds[0]!.runs[0]!.jobs;
+          expect(jobs).toHaveLength(mode === 'sibling-refusal' ? 2 : 1);
+          expect(jobs[0]?.result.status).toBe('ok');
+          if (mode === 'sibling-refusal') expect(jobs[1]?.result.status).toBe('failed');
+        }
+        expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+      } finally {
+        await w.cleanup();
+      }
+    },
+  );
   test.each(['failed', 'wrong-head', 'open-finding'] as const)(
     'verified PR work is retained but fresh %s re-review cannot announce clean',
     async (reviewOutcome) => {
@@ -442,10 +498,18 @@ describe('review.address PR phase-one orchestration', () => {
         expect(result.status).toBe('needs-human');
         const report = result.status === 'ok' ? result.value : result.report!;
         expect(report.fixesPerRun).toBe(1);
+        expect(report.rounds).toHaveLength(1);
+        expect(report.rounds[0]?.runs.length).toBeGreaterThan(0);
         expect(w.actions).toContain('push');
         expect(w.actions).not.toContain('rerequest');
         expect(report.reasons.join(' ')).toMatch(/PR re-review|round cap/);
         if (reviewOutcome === 'open-finding') {
+          expect(report.rounds).toHaveLength(1);
+          expect(report.rounds[0]?.runs).toHaveLength(2);
+          expect(report.rounds[0]?.record.sources.map((source) => source.kind).sort()).toEqual([
+            'agent',
+            'pr-threads',
+          ]);
           expect(w.prompts.some((p) => p.includes('agent-follow-up'))).toBe(true);
           expect(report.openBlocking.some((f) => f.id === 'agent-follow-up')).toBe(true);
         }
@@ -455,6 +519,22 @@ describe('review.address PR phase-one orchestration', () => {
       }
     },
   );
+  test('a budget stop before PR re-review retains the settled run and dispatched findings', async () => {
+    const w = await world(false, { runBudget: 9 });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(w.reviewerCalls()).toBe(0);
+      expect(report.reasons.join(' ')).toMatch(/budget/);
+      expect(report.rounds).toHaveLength(1);
+      expect(report.rounds[0]?.runs).toHaveLength(1);
+      expect(report.rounds[0]?.record.findings).toMatchObject([{ id: 'T1' }]);
+      expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+    } finally {
+      await w.cleanup();
+    }
+  });
   test('current follow-up discussion reaches edit, mandatory feedback and candidate closure', async () => {
     const w = await world(false, { discussion: true });
     try {
@@ -500,7 +580,9 @@ describe('review.address PR phase-one orchestration', () => {
           },
         ]);
         expect(
-          result.report?.rounds[0]?.run?.jobs.every((row) => row.result.status !== 'failed'),
+          result.report?.rounds[0]?.runs.every((run) =>
+            run.jobs.every((row) => row.result.status !== 'failed'),
+          ),
         ).toBe(true);
       } finally {
         await w.cleanup();

@@ -265,7 +265,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             ? input.checks
             : [input.checks];
       const aliases = { tsc: 'tsc-lines', eslint: 'eslint-json', vitest: 'vitest-json' } as const;
-      const available = policy.checks.filter((check) => check.kind === input.source);
+      const available = fixSourceChecks(policy.checks, input.source);
       if (selected?.some((alias) => !available.some((check) => check.adapter === aliases[alias])))
         return await finish(
           'needs-human',
@@ -592,4 +592,17 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       return await finish('failed', String(error));
     }
   };
+}
+
+/**
+ * The cq.json checks a fix source may draw on: those of the source's kind,
+ * minus the gate-only format check (`oxfmt-check`). A format failure is not
+ * something fix.run repairs; it still gates every candidate wherever the
+ * full check list runs (review.address validation, dev.check).
+ */
+export function fixSourceChecks<T extends { kind?: string; adapter: string }>(
+  checks: readonly T[],
+  source: string,
+): T[] {
+  return checks.filter((check) => check.kind === source && check.adapter !== 'oxfmt-check');
 }

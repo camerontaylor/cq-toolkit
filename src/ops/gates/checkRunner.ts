@@ -20,6 +20,7 @@ import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import { eslintJsonAdapter } from './adapters/eslint.js';
 import { tscLinesAdapter } from './adapters/tsc.js';
+import { oxfmtCheckAdapter } from './adapters/oxfmt.js';
 import { vitestJsonAdapter } from './adapters/vitest.js';
 
 /** The command a check op asks its injected runner to execute. */
@@ -111,7 +112,7 @@ export type CheckParseResult =
  * Adapter names shipped as JSON-describable config. Each names a wire
  * format the toolkit parses; the wire knowledge itself lives in ./adapters.
  */
-export type AdapterName = 'vitest-json' | 'eslint-json' | 'tsc-lines';
+export type AdapterName = 'vitest-json' | 'eslint-json' | 'tsc-lines' | 'oxfmt-check';
 
 /**
  * Output-shape adapter: the ONLY home of tool-specific wire knowledge.
@@ -139,6 +140,8 @@ export function adapterByName(name: AdapterName): CheckAdapter {
       return eslintJsonAdapter;
     case 'tsc-lines':
       return tscLinesAdapter;
+    case 'oxfmt-check':
+      return oxfmtCheckAdapter;
   }
 }
 

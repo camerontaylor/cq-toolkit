@@ -37,6 +37,8 @@ export interface AgentReviewerInput {
   role: ModelSpec;
   maxTokens: number;
   wallMs: number;
+  /** cq.json `budgets.step.wallMs`: the per-request step bound, capped at the remaining `wallMs`. */
+  stepWallMs?: number;
   signal?: AbortSignal;
   severityMap: { high: string; medium: string; low?: string };
 }
@@ -47,6 +49,12 @@ export interface AgentReviewReport {
   coverage: ReviewCoverageV2;
   advisories: string[];
   limitations: string[];
+  /**
+   * #509: set on a failed review whose every failed session stopped on the
+   * driver's `transient` class (network, timeout, 5xx) — the class a caller
+   * may retry. Absent otherwise.
+   */
+  transient?: boolean;
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
 
@@ -176,6 +184,8 @@ export async function runAgentReviewer(
       const outcomes: (Finding[] | undefined)[] = sessions.map(() => undefined);
       let firstFailure: string | undefined;
       let consecutiveFailures = 0;
+      // #509: every failed session was the driver's transient class.
+      let allFailuresTransient = true;
       let nextIndex = 0;
       let halted = false;
       let budgetStop: 'before' | 'during' | undefined;
@@ -255,6 +265,14 @@ export async function runAgentReviewer(
               report!.advisories = [...new Set([...report!.advisories, ...advisories])];
             },
             searchTools: input.searchTools ?? true,
+            ...(input.stepWallMs === undefined
+              ? {}
+              : {
+                  stepTimeoutMs: Math.max(
+                    1,
+                    Math.floor(Math.min(input.stepWallMs, deadline - Date.now())),
+                  ),
+                }),
           });
         } finally {
           inFlight -= 1;
@@ -281,6 +299,8 @@ export async function runAgentReviewer(
           // provider itself is unhealthy: dispatch nothing further. In-flight
           // sessions finish and keep their evidence.
           firstFailure ??= detail;
+          if (!(result.status === 'needs-human' && result.errorClass === 'transient'))
+            allFailuresTransient = false;
           consecutiveFailures += 1;
           if (consecutiveFailures >= 2) halted = true;
           return;
@@ -326,7 +346,7 @@ export async function runAgentReviewer(
         return {
           status: 'needs-human',
           reason: `${firstFailure}; ${incompleteReason(report.coverage)}`,
-          report: snapshot()!,
+          report: { ...snapshot()!, ...(allFailuresTransient ? { transient: true } : {}) },
         };
       if (!isCoverageV2Complete(report.coverage))
         return {

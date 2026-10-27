@@ -49,6 +49,7 @@ import {
   CODERABBIT_REVIEWER,
   coderabbitReviewArgv,
   decideCompletion,
+  isTransientReviewerFailure,
   parseReviewerStream,
 } from './coderabbit.js';
 import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
@@ -376,6 +377,8 @@ function makeReviewCycle(
       logPath: string;
       findings: Omit<DevFinding, 'id'>[];
       advisories: string[];
+      /** The block came from the network/transient class (#509): a re-review may retry it. */
+      transient?: boolean;
     };
     try {
       span = await effects.withHostLock(async () => {
@@ -447,6 +450,9 @@ function makeReviewCycle(
               excerpt: finding.text,
             })),
             advisories,
+            ...(result.status === 'needs-human' && report?.transient === true
+              ? { transient: true }
+              : {}),
           };
         }
         const timeoutMs = Math.min(DEFAULT_REVIEWER_TIMEOUT_MS, remainingWallMs?.() ?? Infinity);
@@ -494,7 +500,20 @@ function makeReviewCycle(
             '',
           ].join('\n'),
         );
-        return { completion, logPath, findings: parsed.findings, advisories: [] };
+        // #509: a dropped CLI connection (`con_err`) is the network class; a
+        // cancelled or out-of-wall run never is.
+        const transient =
+          completion.kind === 'blocked' &&
+          !signal?.aborted &&
+          (remainingWallMs?.() ?? Infinity) > 0 &&
+          isTransientReviewerFailure(parsed, raw);
+        return {
+          completion,
+          logPath,
+          findings: parsed.findings,
+          advisories: [],
+          ...(transient ? { transient: true } : {}),
+        };
       }, signal);
     } catch (err) {
       // A host-lock, drift, or log-write fault: nothing is recorded, and
@@ -556,9 +575,12 @@ function makeReviewCycle(
     }
 
     if (record.completion.kind === 'blocked') {
-      return needsHuman(
+      const blocked = needsHuman(
         `review cycle ${record.cycleId} was BLOCKED (${record.completion.reason}) — the cycle is recorded with ${String(record.findings.length)} finding(s); log: ${record.logPath}`,
       );
+      // The class rides the report envelope (stripped before the strict
+      // OpResult parse), never the persisted cycle record.
+      return span.transient === true ? { ...blocked, report: { transient: true } } : blocked;
     }
     return {
       status: 'ok',

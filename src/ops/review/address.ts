@@ -68,7 +68,8 @@ export interface ReviewAddressInput {
 export interface ReviewAddressReport {
   source: string;
   reportPath: string;
-  rounds: Array<{ round: number; record: FindingsRecord; run?: RunReport }>;
+  /** One entry per round; the latest reviewed record and all settled batch runs. */
+  rounds: Array<{ round: number; record: FindingsRecord; runs: RunReport[] }>;
   findings: Finding[];
   /** Report context only: review advisories never enter `findings` or dispatch. */
   advisories?: string[];
@@ -84,7 +85,9 @@ export interface ReviewAddressReport {
   escalation?: ReturnType<AddressWorker['escalation']>;
   /**
    * The leg's STRUCTURED terminal outcome, set on the round-cap stop only
-   * ('round-cap'): the machine-checkable discriminator a composition uses
+   * ('round-cap'), and on a re-review still blocked on the network/transient
+   * class after its one retry while at least one verified fix exists
+   * ('rereview-blocked', #509): the machine-checkable discriminator a composition uses
    * to decide the spec's draft-at-cap publication. Deliberately NOT parsed
    * out of `reason` — finish() appends '; report: <path>' to every
    * needs-human reason, so string-matching the reason can never be exact.
@@ -92,7 +95,7 @@ export interface ReviewAddressReport {
    * before the strict OpResultSchema base parse) — a top-level result field
    * would be an unrecognized key and trip the frozen taxonomy.
    */
-  stop?: 'round-cap';
+  stop?: 'round-cap' | 'rereview-blocked';
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -214,7 +217,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
-      structuredStop?: 'round-cap',
+      structuredStop?: 'round-cap' | 'rereview-blocked',
     ): Promise<ReviewAddressResult> => {
       if (reason) report.reasons.push(reason);
       if (publishOnExit && !parent?.aborted) {
@@ -241,6 +244,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // persisted below so the written artifact agrees with the returned
       // envelope (and the publication-failure clearing above, which erases
       // the marker, is included in both).
+      // #509: a stopped run (parent cancelled, bookkeeping tampered, budget
+      // spent) never carries the blocked-re-review publication marker.
+      if (structuredStop === 'rereview-blocked' && (parent?.aborted || cleanStop?.() !== undefined))
+        structuredStop = undefined;
       if (structuredStop !== undefined) report.stop = structuredStop;
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
@@ -504,7 +511,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             bookkeepingWrites = pending.catch(() => undefined);
             return pending;
           };
-          const review = (request: ReviewRunInput) =>
+          const reviewOnce = (request: ReviewRunInput) =>
             withBookkeepingAccess(request.repoRoot, async () => {
               // Review.run legitimately appends to the same ledger. Check ownership
               // before its write, then register only that engine-produced revision.
@@ -513,6 +520,34 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 await noteBookkeeping(devLedgerPath(request.repoRoot, result.value.branch));
               return result;
             });
+          // #509 (owner, 2026-10-27): a re-review blocked on the network/
+          // transient class (review.run's structured `blockedTransient`) is
+          // retried ONCE within the remaining budgets. If the retry is still
+          // blocked on that class, `rereviewStillTransient` lets the exit mark
+          // the run for a draft publication when verified fixes exist.
+          let rereviewStillTransient = false;
+          const review = async (request: ReviewRunInput) => {
+            const first = await reviewOnce(request);
+            if (first.status !== 'needs-human' || first.report?.blockedTransient !== true || stop())
+              return first;
+            report.reasons.push('re-review blocked on a network/transient class; retrying once');
+            const second = await reviewOnce({
+              ...request,
+              maxTokens: Math.max(1, remainingTokens()),
+              wallMs: Math.max(1, remainingWallMs()),
+            });
+            // A budget, cancellation or bookkeeping stop observed after the
+            // retry outranks it: never mark a draft over a stopped run.
+            rereviewStillTransient =
+              second.status === 'needs-human' &&
+              second.report?.blockedTransient === true &&
+              stop() === undefined;
+            return second;
+          };
+          const rereviewStop = (): 'rereview-blocked' | undefined =>
+            rereviewStillTransient && report.fixes.some((fix) => fix.commit !== undefined)
+              ? 'rereview-blocked'
+              : undefined;
           // Blocked/failed re-reviews still write engine-owned ledger cycles.
           // reviewImplementation only runs inside review()'s bookkeeping FIFO
           // slot, so this registration must NOT re-enter that queue (it would
@@ -734,6 +769,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return false;
             }
           };
+          const noteRound = (round: number, record: FindingsRecord, run?: RunReport) => {
+            let entry = report.rounds.find((entry) => entry.round === round);
+            if (!entry) {
+              entry = { round, record, runs: [] };
+              report.rounds.push(entry);
+            }
+            if (run) entry.runs.push(run);
+            return entry;
+          };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
@@ -798,7 +842,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 const fix = row.result.value as AddressFix;
                 if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
               }
-              report.rounds.push({ round, record, run });
+              noteRound(round, record, run);
             }
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
@@ -987,6 +1031,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (prMetadata) {
               const meta = prMetadata;
               const fixesById = new Map<string, AddressFix>();
+              const dispatchedFindings: Finding[] = [];
+              let dispatchedRecord: FindingsRecord | undefined;
               let admissionRefused = false;
               const entry: OpRegistryEntry = {
                 name: 'review.fixItem',
@@ -1014,13 +1060,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const admit = async (head: string) => {
                     if ((await branchName(root)) !== item.worktree.branch)
                       throw new Error('worker execution branch changed');
-                    await admitRecord(root, {
+                    const record: FindingsRecord = {
                       schemaVersion: 1,
                       branch: item.worktree.branch,
                       head,
                       sources: [{ kind: 'pr-threads', status: 'terminal' }],
                       findings: [finding],
-                    });
+                    };
+                    await admitRecord(root, record);
+                    dispatchedRecord ??= record;
                   };
                   try {
                     if (bound.withVerifiedHead) await bound.withVerifiedHead(admit);
@@ -1032,6 +1080,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     admissionRefused = true;
                     throw error;
                   }
+                  dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
@@ -1092,6 +1141,22 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 engineOwnedConcurrency: policy.review.addressConcurrency,
                 publish: input.push === true,
                 publicationTreeClean,
+                onFixRunSettled: (run) => {
+                  // Retain the settled run before later Git/forge work can throw.
+                  // An initial refusal has no admitted work to record; a refused
+                  // sibling must not erase the history of earlier admitted work.
+                  if (!dispatchedRecord || dispatchedFindings.length === 0) return;
+                  noteRound(
+                    round,
+                    {
+                      ...dispatchedRecord,
+                      findings: dispatchedFindings.map(
+                        (finding) => fixesById.get(finding.id)?.finding ?? finding,
+                      ),
+                    },
+                    run,
+                  );
+                },
                 onWorktreeStaleRefresh: async () => {
                   // The refresh removal refused on untracked files. Clear
                   // ONLY what the existing receipt strictly attests as
@@ -1266,17 +1331,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               });
               if (agent.status !== 'ok') {
                 if (agent.report) noteAdvisories(agent.report);
-                return await finish('needs-human', `PR re-review: ${issue(agent)}`);
+                return await finish('needs-human', `PR re-review: ${issue(agent)}`, rereviewStop());
               }
               if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
                 return await finish('needs-human', 'PR re-review identity changed');
               previous = retainDeferred(merge([threads, agent.value]));
               noteAdvisories(previous);
-              report.rounds.push({
-                round,
-                record: previous,
-                ...(loop.fixReport ? { run: loop.fixReport } : {}),
-              });
+              noteRound(round, previous).record = previous;
               report.findings = previous.findings;
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
               if (
@@ -1365,7 +1426,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             });
             if (refreshed.status !== 'ok') {
               if (refreshed.report) noteAdvisories(refreshed.report);
-              return await finish('needs-human', `re-review: ${issue(refreshed)}`);
+              return await finish('needs-human', `re-review: ${issue(refreshed)}`, rereviewStop());
             }
             if (
               refreshed.value.branch !== (await branchName(root)) ||
@@ -1376,7 +1437,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-            report.rounds.push({ round, record: previous });
+            noteRound(round, previous).record = previous;
             if (
               isComplete(previous, policy.review.reviewers) &&
               !report.openBlocking.length &&

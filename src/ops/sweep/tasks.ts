@@ -76,6 +76,12 @@ export function staticRelatedCheckCommand(
   relatedArgs?: readonly string[],
 ): CheckCommand {
   if (adapter === 'tsc-lines') return { ...check, args: [...check.args] };
+  // The format gate scopes to the task files only through an explicit
+  // {files} template; otherwise it checks the whole configured scope.
+  if (adapter === 'oxfmt-check')
+    return files.length > 0 && relatedArgs?.includes('{files}') === true
+      ? relatedCheckCommand(check, files, relatedArgs)
+      : { ...check, args: [...check.args] };
   if (adapter !== 'eslint-json' || files.length === 0 || !isScopedEslintTemplate(relatedArgs))
     throw new Error(
       'static ESLint requires relatedArgs with a standalone {files} token, no broad . or ./ operands, and attributed task files',

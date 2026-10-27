@@ -657,8 +657,11 @@ test.each([
       ).toBe(
         'Review fixture <review-fixture@example.invalid>|Review fixture <review-fixture@example.invalid>',
       );
-      expect(report.rounds).toHaveLength(tampered ? 0 : 1);
-      if (!tampered) expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
+      // Every case here completed admitted work: later disposition/publication
+      // bookkeeping refusals must retain that settled run exactly once.
+      expect(report.rounds).toHaveLength(1);
+      expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
+      expect(report.rounds[0]?.runs).toHaveLength(1);
       if (!earlyTamper)
         expect(report.reasons.join('\n')).not.toMatch(
           /identity changed|admission|branch changed|unknown finding|disposition persistence|could not be persisted/,

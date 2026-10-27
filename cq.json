@@ -11,6 +11,12 @@
         "cwd": "."
       },
       "relatedArgs": ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"]
+    },
+    {
+      "adapter": "oxfmt-check",
+      "kind": "static",
+      "command": { "command": "node_modules/.bin/oxfmt", "args": ["--check", "."], "cwd": "." },
+      "relatedArgs": ["--check", "{files}"]
     }
   ],
   "roles": {

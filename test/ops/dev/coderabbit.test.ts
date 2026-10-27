@@ -8,6 +8,7 @@ import {
   coderabbitReviewArgv,
   CODERABBIT_REVIEWER,
   decideCompletion,
+  isTransientReviewerFailure,
   parseReviewerStream,
 } from '../../../src/ops/dev/coderabbit.js';
 
@@ -351,5 +352,52 @@ describe('decideCompletion — the three-part protocol definition', () => {
     expect(stream.findings).toHaveLength(0);
     expect(stream.unparsedLines).toBe(1);
     expect(decideCompletion(0, stream).kind).toBe('blocked');
+  });
+});
+
+describe('CodeRabbit transient classification (#509)', () => {
+  const event = (value: object) => `${JSON.stringify(value)}\n`;
+  const conErr = event({
+    type: 'error',
+    errorType: 'review',
+    message: 'Review failed: con_err: webSocket connection failed',
+    recoverable: false,
+  });
+  const exited = { exitCode: 1, timedOut: false };
+
+  test('reads the anchored vendor code of every error event', () => {
+    const parsed = parseReviewerStream(
+      conErr + event({ type: 'error', message: 'rate limit reached; see con_err: docs' }),
+    );
+    expect(parsed.errorCodes).toEqual(['con_err', '']);
+  });
+
+  test('a wholly dropped-connection stream that exited on its own is transient', () => {
+    expect(isTransientReviewerFailure(parseReviewerStream(conErr), exited)).toBe(true);
+    expect(isTransientReviewerFailure(parseReviewerStream(conErr + conErr), exited)).toBe(true);
+  });
+
+  test.each([
+    [
+      'a later auth error',
+      conErr + event({ type: 'error', message: 'Review failed: auth_err: login required' }),
+    ],
+    ['an error with no vendor code', conErr + event({ type: 'error', message: 'unexpected' })],
+    [
+      'an action-required event',
+      conErr + event({ type: 'action_required', message: 'confirm billing' }),
+    ],
+    ['an unparsed line', `${conErr}not json\n`],
+    ['no error event at all', event({ type: 'status', status: 'reviewing' })],
+  ])('%s vetoes the transient class', (_label, stdout) => {
+    expect(isTransientReviewerFailure(parseReviewerStream(stdout), exited)).toBe(false);
+  });
+
+  test.each([
+    ['a killed process', { exitCode: null, timedOut: false }],
+    ['a timed-out process', { exitCode: null, timedOut: true }],
+    ['a clean exit', { exitCode: 0, timedOut: false }],
+  ])('%s vetoes the transient class', (_label, raw) => {
+    expect(isTransientReviewerFailure(parseReviewerStream(conErr), raw)).toBe(false);
   });
 });
