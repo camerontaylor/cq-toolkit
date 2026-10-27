@@ -42,7 +42,10 @@ const blobs = new Map<string, AnchorBlobInput>([
       headHunks: [{ start: 3, end: 4 }],
     },
   ],
-  [OLD_NAME, { base: renamedBase, head: undefined, baseHunks: [{ start: 1, end: 2 }], headHunks: [] }],
+  [
+    OLD_NAME,
+    { base: renamedBase, head: undefined, baseHunks: [{ start: 1, end: 2 }], headHunks: [] },
+  ],
   [
     NEW_NAME,
     { base: undefined, head: renamedHead, baseHunks: [], headHunks: [{ start: 1, end: 3 }] },
@@ -204,7 +207,10 @@ describe('R3S anchor validator: pinned quote integrity', () => {
     );
     expect(
       invalidReasons(
-        validateFindingEvidence(evidence({ primary: anchor({ quote: 'export const after=2;' }) }), context),
+        validateFindingEvidence(
+          evidence({ primary: anchor({ quote: 'export const after=2;' }) }),
+          context,
+        ),
       ),
     ).toContain('quote-mismatch');
   });
@@ -239,7 +245,7 @@ describe('R3S anchor validator: pinned quote integrity', () => {
     ).toEqual(['unknown-base-path']);
   });
 
-  it('rejects a head-side range on a deleted path even with an identical quote on the base side', () => {
+  it('rejects a head-side range on a deleted path even with the bytes on the base side', () => {
     expect(
       invalidReasons(
         validateFindingEvidence(
@@ -258,7 +264,7 @@ describe('R3S anchor validator: pinned quote integrity', () => {
     ).toEqual(['unknown-head-path']);
   });
 
-  it('accepts an unchanged-path supporting anchor and rejects an unchanged-path primary as hunk-less', () => {
+  it('accepts an unchanged-path supporting anchor and rejects that primary as hunk-less', () => {
     // Control: DEPENDENCY is not part of the change. As supporting evidence
     // it validates (exact quote, no hunk requirement); as a primary anchor it
     // fails hunk checks, so a finding can never anchor its defect outside
@@ -328,7 +334,10 @@ describe('R3S anchor validator: path, rename and deletion handling', () => {
   it('rejects an unknown path and a traversal-shaped path', () => {
     expect(
       invalidReasons(
-        validateFindingEvidence(evidence({ primary: anchor({ file: '../outside/secrets.ts' }) }), context),
+        validateFindingEvidence(
+          evidence({ primary: anchor({ file: '../outside/secrets.ts' }) }),
+          context,
+        ),
       ),
     ).toEqual(['unknown-path']);
   });
@@ -344,7 +353,10 @@ describe('R3S anchor validator: path, rename and deletion handling', () => {
     ).toEqual(['malformed-path']);
   });
 
-  it('accepts a base-side anchor cited through the old rename name', () => {
+  it('rejects a citation whose literal path has no pin, even when a rename pair exists', () => {
+    // No alias fallback: the renames map is caller metadata, never a lookup
+    // path. OLD_NAME/base validates (pin exists, side present); NEW_NAME/base
+    // with NEW_NAME unregistered is an unknown path and rejects outright.
     valid(
       validateFindingEvidence(
         evidence({
@@ -359,31 +371,50 @@ describe('R3S anchor validator: path, rename and deletion handling', () => {
         context,
       ),
     );
-  });
-
-  it('resolves a NEW_NAME primary whose pin is registered only under the old spelling', () => {
-    // Spelling repair: the map resolves NEW_NAME back to OLD_NAME's pin, but
-    // the side checks still apply to the resolved pin.
     const unregisteredNew = new Map(context.blobs);
     unregisteredNew.delete(NEW_NAME);
     const unregisteredContext: AnchorValidationContext = {
       blobs: unregisteredNew,
       renames: context.renames,
     };
-    valid(
-      validateFindingEvidence(
-        evidence({
-          primary: anchor({
-            file: NEW_NAME,
-            side: 'base',
-            start: 1,
-            end: 1,
-            quote: 'export const moved = true;',
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            primary: anchor({
+              file: NEW_NAME,
+              side: 'base',
+              start: 1,
+              end: 1,
+              quote: 'export const moved = true;',
+            }),
           }),
-        }),
-        unregisteredContext,
+          unregisteredContext,
+        ),
       ),
-    );
+    ).toEqual(['unknown-path']);
+    const unregisteredOld = new Map(context.blobs);
+    unregisteredOld.delete(OLD_NAME);
+    const unregisteredOldContext: AnchorValidationContext = {
+      blobs: unregisteredOld,
+      renames: context.renames,
+    };
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            primary: anchor({
+              file: OLD_NAME,
+              side: 'base',
+              start: 1,
+              end: 1,
+              quote: 'export const moved = true;',
+            }),
+          }),
+          unregisteredOldContext,
+        ),
+      ),
+    ).toEqual(['unknown-path']);
   });
 
   it('rejects a base-side anchor keyed by the new rename name: the side is absent there', () => {
@@ -446,16 +477,21 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
     ).toContain('outside-changed-hunks');
   });
 
-  it('requires hunk information: a modified file with no hunks cannot prove a primary anchor', () => {
+  it('requires hunk information: a file with no hunks cannot prove a primary anchor', () => {
     const hunkless = new Map(context.blobs);
-    hunkless.set(MODIFIED, { base: modifiedBase, head: modifiedHead, baseHunks: [], headHunks: [] });
+    hunkless.set(MODIFIED, {
+      base: modifiedBase,
+      head: modifiedHead,
+      baseHunks: [],
+      headHunks: [],
+    });
     const hunklessContext: AnchorValidationContext = { blobs: hunkless, renames: context.renames };
     expect(invalidReasons(validateFindingEvidence(evidence(), hunklessContext))).toContain(
       'no-hunk-information',
     );
   });
 
-  it('accepts a primary anchor partially overlapping a hunk and one spanning adjacent hunks', () => {
+  it('accepts a primary anchor partially overlapping a hunk or spanning adjacent hunks', () => {
     const two = new Map(context.blobs);
     two.set(MODIFIED, {
       base: modifiedBase,
@@ -505,7 +541,7 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
     );
   });
 
-  it('collapses duplicate supporting failure kinds but preserves every distinct typed reason verbatim', () => {
+  it('collapses duplicate supporting kinds but preserves each distinct typed reason', () => {
     // Two supporting anchors fail with the same out-of-range reason: the
     // typed reason stays (deduplicated), followed by the marker. The why is
     // never dropped in favor of the what.
@@ -560,7 +596,7 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
 });
 
 describe('R3S anchor validator: survivor semantics', () => {
-  it('ignores a persisted invalid marker: the verdict describes the anchors, not the marker', () => {
+  it('ignores a persisted marker: the verdict describes the anchors, not the marker', () => {
     const marked: FindingEvidenceV1 = {
       ...evidence(),
       validation: { status: 'invalid', reasons: ['quote-mismatch'] },

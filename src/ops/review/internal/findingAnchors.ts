@@ -33,14 +33,13 @@ export interface AnchorBlobInput {
 /** The caller's view of one reviewed comparison. */
 export interface AnchorValidationContext {
   /**
-   * Blob pins keyed by path. `{file, side}` is normative: an anchor names the
-   * exact path it cites in the chosen tree, so pin the base blob under the
-   * path it belongs to and the head blob under its own. For a renamed pair
-   * that is two registrations — base content under the old path, head
-   * content under the new. The `renames` map never relocates evidence and
-   * never fabricates side existence: it only repairs a path spelling, and a
-   * side absent from the resolved pin still rejects (wrong-side anchors fail
-   * even when the quoted bytes exist in the other tree).
+   * Blob pins keyed by literal path. `{file, side}` is normative: an anchor
+   * is validated only against the pin registered under exactly its own
+   * `file` — an absent literal pin is `unknown-path`, and a pin whose cited
+   * side is `undefined` is `unknown-base-path`/`unknown-head-path`. There is
+   * no alias or counterpart lookup: the `renames` map is caller metadata for
+   * building these pins and diagnostics; validation never uses it to
+   * relocate a candidate between paths.
    */
   blobs: ReadonlyMap<string, AnchorBlobInput>;
   /** `old -> new` pairs for every renamed path in the comparison. */
@@ -59,7 +58,9 @@ export type AnchorInvalidReason =
   | 'no-hunk-information'
   | 'supporting-evidence';
 
-export type AnchorVerdict = { status: 'valid' } | { status: 'invalid'; reasons: AnchorInvalidReason[] };
+export type AnchorVerdict =
+  | { status: 'valid' }
+  | { status: 'invalid'; reasons: AnchorInvalidReason[] };
 
 /** `end` is exclusive, so an empty file has no valid line range at all. */
 const lineCount = (text: string): number => text.split('\n').length;
@@ -67,42 +68,24 @@ const lineCount = (text: string): number => text.split('\n').length;
 /** NUL and newline bytes are git plumbing separators, never path text. */
 const isMalformedPath = (path: string): boolean => path.includes('\0') || path.includes('\n');
 
-/** The new name citing the old spelling, when the map pins that direction. */
-const reverseRename = (
-  renames: ReadonlyMap<string, string>,
-  newPath: string,
-): string | undefined => {
-  for (const [oldPath, target] of renames) if (target === newPath) return oldPath;
-  return undefined;
-};
-
 function validateAnchor(
   anchor: FindingAnchor,
   context: AnchorValidationContext,
   requireHunkOverlap: boolean,
 ): AnchorInvalidReason[] {
   if (isMalformedPath(anchor.file)) return ['malformed-path'];
-  let file = anchor.file;
-  let blob = context.blobs.get(file);
-  if (blob === undefined) {
-    // The path itself is unknown to the comparison. A rename pair may be
-    // cited under either spelling: resolve to the other name. This repairs
-    // spelling only — it never moves evidence between paths and the side
-    // checks below still apply to the resolved pin.
-    const other = context.renames.get(file) ?? reverseRename(context.renames, file);
-    if (other === undefined) return ['unknown-path'];
-    blob = context.blobs.get(other);
-    if (blob === undefined) return ['unknown-path'];
-    file = other;
-  }
-  // {file, side} is normative: the resolved pin must actually contain the
-  // cited side. A base-side anchor on a renamed-away or newly added path
-  // names a path the base tree never had, and a head-side anchor on a
-  // deleted path names a path the head tree no longer has; both reject even
-  // when the same bytes exist on the opposite side.
-  if (anchor.side === 'base' && blob.base === undefined) return ['unknown-base-path'];
-  if (anchor.side === 'head' && blob.head === undefined) return ['unknown-head-path'];
+  // Literal lookup only. No rename/alias fallback exists: relocating a
+  // candidate to a counterpart path would silently re-anchor evidence.
+  const blob = context.blobs.get(anchor.file);
+  if (blob === undefined) return ['unknown-path'];
+  // {file, side} is normative: the pin must actually contain the cited side.
+  // A base-side anchor on a renamed-away or newly added path names a path the
+  // base tree never had, and a head-side anchor on a deleted path names a
+  // path the head tree no longer has; both reject even when the same bytes
+  // exist on the opposite side of a rename pair.
   const text = anchor.side === 'base' ? blob.base : blob.head;
+  if (text === undefined)
+    return anchor.side === 'base' ? ['unknown-base-path'] : ['unknown-head-path'];
   if (text === '') return ['empty-file'];
   // Inclusive 1-based range must fit the pinned blob; `start > end` fails too.
   if (anchor.start > anchor.end || anchor.end > lineCount(text)) return ['out-of-range'];
