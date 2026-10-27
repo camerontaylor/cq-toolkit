@@ -307,6 +307,8 @@ export const DEFAULT_MAX_STEPS = 40;
  * `AiSdkDriverOptions.stepTimeoutMs`.
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 1_200_000;
+// Node timers overflow above this signed 32-bit ceiling and run after 1 ms.
+const MAX_STEP_TIMEOUT_MS = 2_147_483_647;
 
 /**
  * The minimum ripgrep the search tools need at runtime: 11.0.0 (the CI
@@ -344,7 +346,9 @@ export interface AiSdkDriverOptions {
   >;
   /**
    * Bound for each SDK step, in ms (`timeout.stepMs`; the model call incl. its
-   * retry and the step's tool runs). It catches a hung step, not a slow answer; default DEFAULT_STEP_TIMEOUT_MS.
+   * retry and the step's tool runs). It catches a hung step, not a slow answer;
+   * default DEFAULT_STEP_TIMEOUT_MS. Must be an integer from 1 through
+   * 2_147_483_647 (Node's timer ceiling), inclusive.
    */
   stepTimeoutMs?: number;
   /**
@@ -445,9 +449,13 @@ export class AiSdkDriver implements Driver {
     this.sessionsDir = options.sessionsDir;
     this.beforeRequest = options.beforeRequest;
     const stepTimeoutMs = options.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
-    if (!Number.isInteger(stepTimeoutMs) || stepTimeoutMs <= 0)
+    if (
+      !Number.isInteger(stepTimeoutMs) ||
+      stepTimeoutMs <= 0 ||
+      stepTimeoutMs > MAX_STEP_TIMEOUT_MS
+    )
       throw new Error(
-        `ai-sdk driver: stepTimeoutMs must be a positive integer, got ${String(stepTimeoutMs)}`,
+        `ai-sdk driver: stepTimeoutMs must be a positive integer <= ${MAX_STEP_TIMEOUT_MS}, got ${String(stepTimeoutMs)}`,
       );
     this.stepTimeoutMs = stepTimeoutMs;
     // The production providers fetch through a transport bounded by the same

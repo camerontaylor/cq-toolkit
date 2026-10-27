@@ -7,11 +7,14 @@ const EXCERPT_CHARS = 48;
 const MAX_ANCHOR_CHARS = 6_000;
 
 export const ANCHOR_INSTRUCTION =
-  'Head line anchors list the head-file line number of each added line and, for removed code, the nearest surviving head line. Cite these numbers as finding lines; anchor a finding about deleted code to the nearest surviving head line.';
+  'Head line anchors list the head-file line number of each added line and, for removed code, the nearest surviving head line. Cite these numbers as finding lines; anchor a finding about deleted code to the nearest surviving head line. A removal without a surviving head-line anchor supplies no citable head line.';
 
 export interface HunkPosition {
   oldLine: number | undefined;
   newLine: number | undefined;
+  previousHeadLine?: number | undefined;
+  oldRemaining?: number | undefined;
+  newRemaining?: number | undefined;
 }
 
 const excerpt = (text: string): string => {
@@ -29,57 +32,83 @@ export function headLineAnchors(
   text: string,
   start: HunkPosition = { oldLine: undefined, newLine: undefined },
 ): string {
-  let { oldLine, newLine } = start;
+  let { oldLine, newLine, oldRemaining, newRemaining } = start;
+  let previousHeadLine =
+    start.previousHeadLine ?? (newLine !== undefined && newLine > 1 ? newLine - 1 : undefined);
   const rows: string[] = [];
-  let removed: { before: number; count: number; first: string } | undefined;
-  // `survivor`: a surviving head line follows the run inside its hunk. A
-  // trailing deletion (end of hunk) anchors to the preceding surviving line
-  // instead, since the next-line cursor may be past the end of the file.
-  const flush = (survivor = false) => {
+  let removed: { count: number; first: string } | undefined;
+  const flush = (nextHeadLine?: number) => {
     if (removed === undefined) return;
     const where =
-      survivor || removed.before <= 1
-        ? `before L${removed.before}`
-        : `after L${removed.before - 1}`;
+      nextHeadLine !== undefined
+        ? `before L${nextHeadLine}`
+        : previousHeadLine !== undefined
+          ? `after L${previousHeadLine}`
+          : 'without a surviving head-line anchor';
     rows.push(
       `removed ${where} (${removed.count} line${removed.count === 1 ? '' : 's'}): ${excerpt(removed.first)}`,
     );
     removed = undefined;
   };
+  const reset = () => {
+    flush();
+    oldLine = undefined;
+    newLine = undefined;
+    oldRemaining = undefined;
+    newRemaining = undefined;
+    previousHeadLine = undefined;
+  };
   const lines = text.split('\n');
   for (const [index, line] of lines.entries()) {
     if (line.startsWith('diff --git ')) {
-      flush();
-      oldLine = undefined;
-      newLine = undefined;
+      reset();
       continue;
     }
-    const marker = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
+    const marker = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (marker) {
-      flush();
+      reset();
       oldLine = Number(marker[1]);
-      newLine = Number(marker[2]);
+      newLine = Number(marker[3]);
+      oldRemaining = Number(marker[2] ?? 1);
+      newRemaining = Number(marker[4] ?? 1);
+      // A zero-length head range names the line BEFORE the deletion, not a
+      // following line. +0,0 represents an empty head and has no line anchor.
+      const preceding = newRemaining === 0 ? newLine : newLine - 1;
+      previousHeadLine = preceding > 0 ? preceding : undefined;
       continue;
     }
     if (oldLine === undefined || newLine === undefined) continue;
-    if (line.startsWith('-')) {
-      removed ??= { before: newLine, count: 0, first: line.slice(1) };
+    if (line.startsWith('\\ No newline at end of file')) continue;
+    const removedLine = line.startsWith('-');
+    const addedLine = line.startsWith('+');
+    const contextLine = line.startsWith(' ') || (line === '' && index < lines.length - 1);
+    const consumesOld = removedLine || contextLine;
+    const consumesNew = addedLine || contextLine;
+    if (
+      (!consumesOld && !consumesNew) ||
+      (consumesOld && oldRemaining === 0) ||
+      (consumesNew && newRemaining === 0)
+    ) {
+      reset();
+      continue;
+    }
+    if (removedLine) {
+      removed ??= { count: 0, first: line.slice(1) };
       removed.count++;
+    } else {
+      flush(newLine);
+      previousHeadLine = newLine;
+      if (addedLine) rows.push(`L${newLine} + ${excerpt(line.slice(1))}`);
+    }
+    if (consumesOld) {
       oldLine++;
-    } else if (line.startsWith('+')) {
-      flush(true);
-      rows.push(`L${newLine} + ${excerpt(line.slice(1))}`);
+      if (oldRemaining !== undefined) oldRemaining--;
+    }
+    if (consumesNew) {
       newLine++;
-    } else if (line.startsWith(' ')) {
-      flush(true);
-      oldLine++;
-      newLine++;
-    } else if (line === '' && index < lines.length - 1) {
-      // A blank context line whose leading space was stripped.
-      flush(true);
-      oldLine++;
-      newLine++;
-    } else flush();
+      if (newRemaining !== undefined) newRemaining--;
+    }
+    if (oldRemaining === 0 && newRemaining === 0) reset();
   }
   flush();
   if (rows.length === 0) return '';

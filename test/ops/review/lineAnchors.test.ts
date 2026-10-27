@@ -44,8 +44,76 @@ describe('headLineAnchors', () => {
     expect(headLineAnchors(text)).toBe('removed after L3 (1 line): four\n');
   });
 
+  it('leaves deletion of the whole file explicitly unanchored', () => {
+    expect(headLineAnchors('@@ -1,2 +0,0 @@\n-one\n-two\n')).toBe(
+      'removed without a surviving head-line anchor (2 lines): one\n',
+    );
+  });
+
+  it('uses the preceding line for an EOF deletion with no head context', () => {
+    expect(headLineAnchors('@@ -4,2 +3,0 @@\n-four\n-five\n')).toBe(
+      'removed after L3 (2 lines): four\n',
+    );
+  });
+
+  it('stops at hunk bounds before file headers, metadata, or extra diff lines', () => {
+    const text = [
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '--- a/next.ts',
+      '+++ b/next.ts',
+      '+outside',
+      '@@ -5 +7 @@',
+      '-old next',
+      '+new next',
+      '+also outside',
+      '',
+    ].join('\n');
+    expect(headLineAnchors(text)).toBe(
+      'removed before L1 (1 line): old\nL1 + new\n' +
+        'removed before L7 (1 line): old next\nL7 + new next\n',
+    );
+  });
+
+  it('does not carry surviving-line knowledge into another file or hunk', () => {
+    const text = '@@ -1 +1 @@\n one\ndiff --git a/b b/b\n@@ -1 +0,0 @@\n-only\n';
+    expect(headLineAnchors(text)).toBe(
+      'removed without a surviving head-line anchor (1 line): only\n',
+    );
+  });
+
+  it('respects remaining hunk lengths in a continuation slice', () => {
+    expect(
+      headLineAnchors('-last\n+++ b/next\n+outside\n', {
+        oldLine: 4,
+        newLine: 4,
+        oldRemaining: 1,
+        newRemaining: 0,
+      }),
+    ).toBe('removed after L3 (1 line): last\n');
+  });
+
+  it('preserves the preceding line for a zero-length head continuation', () => {
+    expect(
+      headLineAnchors('-last\n+outside\n', {
+        oldLine: 5,
+        newLine: 3,
+        previousHeadLine: 3,
+        oldRemaining: 1,
+        newRemaining: 0,
+      }),
+    ).toBe('removed after L3 (1 line): last\n');
+  });
+
+  it('keeps no-newline markers from interrupting a replacement anchor', () => {
+    expect(headLineAnchors('@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n')).toBe(
+      'removed before L1 (1 line): old\nL1 + new\n',
+    );
+  });
+
   it('truncates long excerpts and caps the section', () => {
-    const long = `@@ -1 +1,400 @@\n${'+x'.repeat(100)}\n`.repeat(1) + '+y\n'.repeat(1_500);
+    const long = `@@ -1 +1,1501 @@\n${'+x'.repeat(100)}\n${'+y\n'.repeat(1_500)}`;
     const out = headLineAnchors(long);
     expect(out.length).toBeLessThan(6_100);
     expect(out).toContain('…');
@@ -67,6 +135,26 @@ describe('anchors and the stable prefix in the review prompts', () => {
     const placement = session.placements[0]!;
     expect(session.prompt.slice(placement.offset, placement.offset + diff.length)).toBe(diff);
     expect(session.prompt.indexOf('Head line anchors for')).toBeLessThan(placement.offset);
+  });
+
+  it('keeps zero-head deletion anchors correct across partition continuations', () => {
+    const text = `@@ -4,1500 +3,0 @@\n${'-deleted content from an EOF-only hunk\n'.repeat(1_500)}+outside exhausted hunk\n`;
+    const { partitions } = partitionReview({
+      head,
+      base,
+      scope: 'full',
+      components: [{ component: 'tracked:src/a.ts', path: 'src/a.ts', text }],
+      requireReceipt: false,
+    });
+    expect(partitions.length).toBeGreaterThan(1);
+    for (const part of partitions) {
+      const anchors = part.prompt.split('head line anchors:\n')[1]?.split('partition data')[0];
+      if (anchors !== undefined) {
+        expect(anchors).toContain('removed after L3');
+        expect(anchors).not.toContain('before L');
+        expect(anchors).not.toContain('outside exhausted hunk');
+      }
+    }
   });
 
   it('shares a byte-identical prefix across partitions and keeps data last', () => {

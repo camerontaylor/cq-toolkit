@@ -135,7 +135,7 @@ export async function runReviewSession(
     /** Per-request step bound for the ai-sdk lane (cq.json `budgets.step.wallMs`, capped). */
     stepTimeoutMs?: number;
   },
-): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass }> {
+): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass; fatal?: boolean }> {
   const { plan, evidence, signal } = input;
   if (evidence.deliveries.length > 0 || evidence.requests.length > 0)
     throw new Error('agent review session evidence must start empty');
@@ -223,6 +223,7 @@ export async function runReviewSession(
     return {
       status: 'needs-human',
       reason: 'agent review requires the ai-sdk pre-upload scan lane',
+      fatal: true,
     };
   const runDriver = (maxTokens: number) =>
     resolved.driver.run(
@@ -267,14 +268,14 @@ export async function runReviewSession(
   // One retry for a transient driver failure (step timeout, network): never for
   // budget, abort, refusals or model output problems. The failed attempt's
   // deliveries are discarded so the retry is the single delivery of the ranges;
-  // its spend stays counted and the remaining budget bounds the retry.
+  // requests and spend cover both attempts; only deliveries describe the final
+  // attempt. The remaining token allowance guards the retry.
   if (
     result.stopReason === 'error' &&
     result.errorClass === 'transient' &&
     input.maxTokens - spent > 0
   ) {
     evidence.deliveries = [];
-    evidence.requests = [];
     evidence.attempts = 2;
     result = await runDriver(input.maxTokens - spent);
     settle(result);
@@ -299,6 +300,7 @@ export async function runReviewSession(
     return {
       status: 'needs-human',
       reason: 'agent review completed without scanned content delivery',
+      fatal: true,
     };
   }
   return {

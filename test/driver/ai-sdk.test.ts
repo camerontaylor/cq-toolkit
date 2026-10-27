@@ -1769,6 +1769,22 @@ describe('ai-sdk driver specifics (mock model)', () => {
 // ---------------------------------------------------------------------------
 
 describe('ai-sdk driver failure classes (#210)', () => {
+  test.each([0, -1, 0.5, NaN, Infinity, -Infinity, 2_147_483_648, Number.MAX_SAFE_INTEGER])(
+    'rejects unsupported stepTimeoutMs %s before constructing a timer',
+    (stepTimeoutMs) => {
+      expect(() => new AiSdkDriver({ stepTimeoutMs })).toThrow(
+        /stepTimeoutMs must be a positive integer <= 2147483647/,
+      );
+    },
+  );
+
+  test.each([1, 1_200_000, 86_400_000, 2_147_483_647])(
+    'accepts supported stepTimeoutMs %s, including long-running steps',
+    (stepTimeoutMs) => {
+      expect(() => new AiSdkDriver({ stepTimeoutMs })).not.toThrow();
+    },
+  );
+
   test('the SDK call runs one retry per step request and a per-request step timeout', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {

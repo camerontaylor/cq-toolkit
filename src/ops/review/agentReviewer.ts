@@ -172,7 +172,9 @@ export async function runAgentReviewer(
       // Partition sessions are independent, so up to `concurrency` run at once.
       // Results are merged by plan index (deterministic coverage and finding
       // order). Each session reserves a share of the unreserved token allowance
-      // until it settles, so replacements cannot reuse promised budget.
+      // until it settles, so replacements cannot reuse promised budget. This is a
+      // dispatch guard, not an exact joint ceiling: in-flight usage is invisible
+      // until settle and a driver step can overshoot its allowance.
       const sessions = plan.sessions;
       const concurrency = Math.max(
         1,
@@ -279,7 +281,6 @@ export async function runAgentReviewer(
           reserved -= allowance;
         }
         ensureActive();
-        if (report!.usage > input.maxTokens) evidence.status = 'budget';
         updatePieces(report!.coverage);
         active.delete(evidence);
         if (result.status === 'budget-exhausted') {
@@ -302,7 +303,7 @@ export async function runAgentReviewer(
           if (!(result.status === 'needs-human' && result.errorClass === 'transient'))
             allFailuresTransient = false;
           consecutiveFailures += 1;
-          if (consecutiveFailures >= 2) halted = true;
+          if (result.fatal || consecutiveFailures >= 2) halted = true;
           return;
         }
         consecutiveFailures = 0;

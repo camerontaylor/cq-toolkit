@@ -31,6 +31,7 @@ const large =
 type HookKind = 'model-request' | 'tool-output' | 'missing';
 type FakeOptions = {
   scanner?: DiffSecretScanner;
+  lane?: 'ai-sdk' | 'acp';
   skipHook?: boolean;
   hookKind?: HookKind;
   hookPrompt?: string;
@@ -104,7 +105,7 @@ function fakeDrivers(options: FakeOptions = {}) {
       requests.push(request);
       return {
         driver: { run },
-        lane: 'ai-sdk',
+        lane: options.lane ?? 'ai-sdk',
         modelSpec: request.modelSpec,
       };
     },
@@ -665,6 +666,7 @@ it('retries a transient session failure once, counting both attempts, but not ot
   expect(session).toMatchObject({ status: 'complete', attempts: 2 });
   expect(session.usage.input).toBe(usage.input * 2);
   expect(session.deliveries).toHaveLength(1);
+  expect(session.requests).toHaveLength(2);
   expect(outcome.value.usage).toBe(
     2 * (usage.input + usage.output + usage.cacheRead + usage.cacheWrite),
   );
@@ -716,4 +718,55 @@ it("keeps completed sessions' findings and halts the pool when a later session h
   expect(outcome.status).toBe('needs-human');
   expect(outcome.report?.findings.length).toBeGreaterThan(0);
   expect(fake.calls()).toBe(2);
+});
+
+it.each(['lane', 'delivery'] as const)('halts after a deterministic %s refusal', async (cause) => {
+  const fake = fakeDrivers(cause === 'lane' ? { lane: 'acp' } : { skipHook: true });
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 1_000_000,
+      session: { concurrency: 1 },
+    }),
+  );
+  expect(outcome.status).toBe('needs-human');
+  if (outcome.status !== 'needs-human') throw new Error('expected needs-human');
+  expect(outcome.report?.coverage.sessions).toHaveLength(1);
+  expect(fake.calls()).toBe(cause === 'lane' ? 0 : 1);
+  expect(outcome.report?.coverage.pieces[0]?.state).not.toBe('completed');
+});
+
+it('keeps successful sibling evidence complete when aggregate spend exceeds the guard', async () => {
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let started = 0;
+  const fake = fakeDrivers({
+    onHook: async () => {
+      if (++started === 1) await firstHeld;
+      else releaseFirst();
+    },
+    result: () => result({ usage: { input: 60, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+  });
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 100,
+      session: { concurrency: 2 },
+    }),
+  );
+  expect(outcome.status).toBe('needs-human');
+  if (outcome.status !== 'needs-human') throw new Error('expected needs-human');
+  expect(outcome.reason).toContain('budget exhausted');
+  expect(outcome.report?.usage).toBe(120);
+  expect(outcome.report?.coverage.sessions.map((session) => session.status)).toEqual([
+    'complete',
+    'complete',
+  ]);
+  expect(outcome.report?.coverage.pieces[0]?.state).not.toBe('completed');
 });
