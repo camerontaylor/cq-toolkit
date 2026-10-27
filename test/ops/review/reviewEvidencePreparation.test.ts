@@ -158,7 +158,15 @@ describe('R3W evidence preparation', () => {
         quote: 'export const moved = true;',
       }),
     });
-    const secondRepair = evidence({ primary: anchor({ side: 'base' }) });
+    const secondRepair = evidence({
+      primary: anchor({
+        file: OLD_NAME,
+        side: 'base',
+        start: 1,
+        end: 1,
+        quote: 'export const moved = true;',
+      }),
+    });
     const step = invalid(
       prepareFindingEvidence({
         candidate: original,
@@ -173,10 +181,10 @@ describe('R3W evidence preparation', () => {
     ]);
     expect(step.candidates[0]?.reasons).toEqual(['out-of-range']);
     expect(step.candidates[1]?.reasons).toEqual(['unknown-base-path']);
-    expect(step.candidates[2]?.reasons).toEqual(['unknown-base-path']);
+    expect(step.candidates[2]?.reasons).toEqual(['quote-mismatch']);
     expect(step.repairs[0]?.requestedAfter).toEqual(['out-of-range']);
     expect(step.repairs[1]?.requestedAfter).toEqual(['unknown-base-path']);
-    expect(step.reasons).toEqual(['unknown-base-path']);
+    expect(step.reasons).toEqual(['quote-mismatch']);
     expect(step.repairOutcome).toBe('exhausted');
     expect(step.ignoredRepairSubmissions).toBe(0);
   });
