@@ -284,10 +284,11 @@ export interface DevCycleDeps {
   git?: GhFn;
 }
 
-/** Build the `dev.cycle` op over the injected steps. */
-export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, DevCycleReport> {
-  const run = (observe: DriverUsageObserver): Op<DevCycleCompositionInput, DevCycleCoreReport> =>
-    guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
+function makeDevCycleCore(
+  deps: DevCycleDeps,
+  observe: DriverUsageObserver,
+): Op<DevCycleCompositionInput, DevCycleCoreReport> {
+  return guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
     // ONE run budget across the legs (S7 attempt H): the run started here,
     // and every token a default leg's driver spends is metered here.
     const cycleStarted = Date.now();
@@ -650,6 +651,10 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       };
     }
   });
+}
+
+/** Build the `dev.cycle` op over the injected steps. */
+export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, DevCycleReport> {
   return async (input) => {
     const usageLedger = createKnownUsageLedger();
     let open = true;
@@ -664,7 +669,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         pending.delete(id);
       },
     };
-    const result = await run(observe)(input);
+    const result = await makeDevCycleCore(deps, observe)(input);
     open = false;
     for (const id of pending) usageLedger.record(id, {});
     const usageSummary = usageLedger.snapshot();
