@@ -124,4 +124,40 @@ describe('known usage across driver exits', () => {
     });
     expect(mixed.usage.input).toBe(4);
   });
+
+  it('normalizes usage and cost independently at the driver boundary', () => {
+    const ledger = createKnownUsageLedger();
+    ledger.record(
+      'bad-usage',
+      normalizeUsageObservation({
+        usage: { input: Number.NaN, output: 2, cacheRead: 0, cacheWrite: 0 },
+        costUSD: 0.25,
+      }),
+    );
+    ledger.record(
+      'bad-cost',
+      normalizeUsageObservation({
+        usage: { input: 3, output: 1, cacheRead: 0, cacheWrite: 0 },
+        costUSD: Number.POSITIVE_INFINITY,
+      }),
+    );
+    expect(ledger.snapshot()).toEqual({
+      usage: { input: 3, output: 1, cacheRead: 0, cacheWrite: 0 },
+      costUSD: 0.25,
+      knownCount: 1,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    'treats an invalid token reading %s as unknown',
+    (input) => {
+      expect(
+        normalizeUsageObservation({
+          usage: { input, output: 1, cacheRead: 0, cacheWrite: 0 },
+        }),
+      ).toEqual({});
+    },
+  );
 });

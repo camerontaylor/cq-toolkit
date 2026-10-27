@@ -65,6 +65,54 @@ describe('dev.cycle known usage', () => {
     expect(ledger.snapshot().costUSD).toBeCloseTo(0.02);
   });
 
+  it('preserves a thrown driver error when its partial usage is invalid', async () => {
+    const ledger = createKnownUsageLedger();
+    const original = Object.assign(new Error('driver failed'), {
+      usage: { ...usage, input: Number.NaN },
+    });
+    const driver = { run: async (): Promise<WorkerResult> => Promise.reject(original) };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    let spent = 0;
+    const resolved = meterDrivers(factory, (tokens) => (spent += tokens), {
+      start: () => {},
+      settle: (id, observation) => ledger.record(id, observation),
+    }).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+    expect(spent).toBe(0);
+    expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
+  });
+
+  it('returns the original driver result when its cost is invalid, keeping valid usage', async () => {
+    const ledger = createKnownUsageLedger();
+    const original: WorkerResult = {
+      stopReason: 'complete',
+      usage,
+      costUSD: Number.POSITIVE_INFINITY,
+      denials: [],
+    };
+    const driver = { run: async (): Promise<WorkerResult> => original };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    let spent = 0;
+    const resolved = meterDrivers(factory, (tokens) => (spent += tokens), {
+      start: () => {},
+      settle: (id, observation) => ledger.record(id, observation),
+    }).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    expect(await resolved.driver.run(invocation)).toBe(original);
+    expect(spent).toBe(6);
+    expect(ledger.snapshot()).toEqual({
+      usage,
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+  });
+
   it('attaches a typed empty summary to a pre-dispatch validation failure', async () => {
     const cycle = makeDevCycle({ effects: {} as DevEffects });
     const result = await cycle({ repoRoot: '' });
