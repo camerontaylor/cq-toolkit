@@ -328,11 +328,15 @@ Remaining: rerun when the Go key's quota window resets.
 
 ## S7 dogfood attempts D–J: dev.cycle on fix/s7-dogfood-address-469 (paused)
 
-All runs were detached on triton, from `dist` at the named head, with the same flags as
+Runs D take 3 through J ran detached on triton, from `dist` at the named head, with the same flags as
 attempt C (`--push --target=merge-queue --includeIntegration=true` plus 10 named
-`--testFiles`). Run state lives under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
-Every run exited **3** at `review.run` or `review.address`, and **none opened a PR**.
-Each found a defect, fixed in-branch:
+`--testFiles`); attempt D itself ran attached and was killed silently by the lane
+shell-tool timeout, which is why the later runs are detached. Run state lives under
+`~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
+Every run from D take 3 through J exited **3** at `review.run` or `review.address`, and
+**none opened a PR**; attempt D was killed before any CLI exit and opened no PR.
+Each found a defect: D take 3 through I were fixed in-branch, D's fix was operational
+(detaching the runs) and J's is paused pending #483:
 
 | Attempt  | Head       | Stopped at                                    | Cause                                                                                                                                                                                     | Fix                                                                                               |
 | -------- | ---------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
