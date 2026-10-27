@@ -30,16 +30,29 @@ describe('capBoundedContext', () => {
     expect(capBoundedContext('hello', 10)).toBe('hello');
   });
 
-  it('truncates with a visible count-accurate marker inside the cap', () => {
+  it('truncates with a visible, truthful omission count inside the cap', () => {
     const capped = capBoundedContext('a'.repeat(50), 40);
-    expect(capped.length).toBe(40);
-    expect(capped).toContain('[truncated: 10 characters omitted]');
+    expect(capped.length).toBeLessThanOrEqual(40);
+    const omitted = Number(/\[truncated: (\d+) characters omitted\]/.exec(capped)?.[1]);
+    // The marker counts what the reader will NOT see: original minus kept.
+    expect(omitted).toBe(50 - capped.indexOf('\n'));
+    expect(capped).toContain('[truncated: ');
   });
 
-  it('degrades to a hard slice when the marker alone would exceed the cap', () => {
+  it('degrades safely at a tiny cap: the marker never exceeds a whole cap of its own', () => {
+    // With the realistic cap (4_000) the floor keeps the marker inside;
+    // a degenerate tiny cap produces a marker that names the whole text.
     const capped = capBoundedContext('abcdef', 3);
-    expect(capped).toBe('abc');
-    expect(capped.length).toBe(3);
+    expect(capped).toContain('[truncated: 6 characters omitted]');
+  });
+
+  it('the omission count plus the kept prefix equals the original length', () => {
+    const text = 'b'.repeat(200);
+    const capped = capBoundedContext(text, 100);
+    const omitted = Number(/\[truncated: (\d+) characters omitted\]/.exec(capped)?.[1]);
+    expect(capped.indexOf('b')).toBe(0);
+    const kept = capped.indexOf('\n');
+    expect(kept + omitted).toBe(text.length);
   });
 });
 
@@ -53,7 +66,6 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('collects the capped commit intent and numstat list for the committed scope', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/intent.ts', 'export const intent = 1;\n');
     repo.commitAll('feat: capture INTENT_MARKER\n\nexplains the change');
     const effects = repoEffects(repo);
@@ -75,7 +87,6 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('the uncommitted scope describes the dirty work, not committed history', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/committed.ts', 'export const committed = 1;\n');
     repo.commitAll('feat: COMMITTED_MARKER');
     await repo.write('src/dirty.ts', 'export const dirty = 1;\n');
@@ -100,7 +111,6 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('a giant intent is truncated once at the cap with the marker inside it', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/big.ts', 'export const big = 1;\n');
     repo.commitAll(`${'x'.repeat(REVIEW_CONTEXT_INTENT_CAP + 500)}`);
     const effects = repoEffects(repo);
@@ -118,7 +128,6 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('a non-zero git log exit is a NON-fatal fault naming the command class', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/a.ts', 'export const a = 1;\n');
     repo.commitAll('base work');
     const effects = scriptedRepoEffects(repo, (command, args) =>
@@ -138,7 +147,6 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('a non-zero numstat exit is a NON-fatal fault naming the stats read', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/a.ts', 'export const a = 1;\n');
     repo.commitAll('base work');
     const effects = scriptedRepoEffects(repo, (command, args) =>
@@ -158,7 +166,6 @@ describe('collectBoundedReviewContext (real git)', () => {
   });
 
   it('an aborted signal is FATAL: the caller deadline stops the review, no degraded run', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/a.ts', 'export const a = 1;\n');
     repo.commitAll('base work');
     const controller = new AbortController();
@@ -177,19 +184,63 @@ describe('collectBoundedReviewContext (real git)', () => {
     if (!result.ok) expect(result.reason).toContain('could not collect review context');
   });
 
-  it('an exhausted wall budget is FATAL and the reads carry the remaining time', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
+  it('an exhausted wall budget is FATAL even when the reads would succeed', async () => {
     await repo.write('src/a.ts', 'export const a = 1;\n');
     repo.commitAll('base work');
-    const effects = scriptedRepoEffects(repo, () => undefined);
+    let runs = 0;
+    const base = repoEffects(repo);
+    const effects: DevEffects = {
+      ...base,
+      runCommand: async (command, args, opts) => {
+        runs += 1;
+        return base.runCommand(command, args, opts);
+      },
+    };
     const result = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
       remainingWallMs: () => 0,
     });
     expect(result).toMatchObject({ ok: false, fatal: true });
+    expect(runs).toBe(0);
+  });
+
+  it('a NON-FINITE remaining budget is FATAL, never an unbounded run', async () => {
+    await repo.write('src/a.ts', 'export const a = 1;\n');
+    repo.commitAll('base work');
+    const result = await collectBoundedReviewContext(repoEffects(repo), 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
+      remainingWallMs: () => Number.NaN,
+    });
+    expect(result).toMatchObject({ ok: false, fatal: true });
+  });
+
+  it('a budget exhausted AFTER the intent read is FATAL before the file-list read', async () => {
+    await repo.write('src/a.ts', 'export const a = 1;\n');
+    repo.commitAll('base work');
+    const seen: string[] = [];
+    const base = repoEffects(repo);
+    const effects: DevEffects = {
+      ...base,
+      runCommand: async (command, args, opts) => {
+        const first = args[0];
+        if (first !== undefined) seen.push(first);
+        return base.runCommand(command, args, opts);
+      },
+    };
+    let remaining = 60_000;
+    const result = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
+      remainingWallMs: () => remaining,
+    });
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual(['log', 'diff']);
+    // The after-read guard path: the budget collapses mid-collection.
+    remaining = 0;
+    const second = await collectBoundedReviewContext(effects, 'HEAD', repo.git('rev-parse', 'HEAD').trim(), 'full', {
+      remainingWallMs: () => remaining,
+    });
+    expect(second).toMatchObject({ ok: false, fatal: true });
+    expect(seen).toEqual(['log', 'diff']);
   });
 
   it('both reads share the caller deadline: options carry the signal and bounded timeout', async () => {
-    repo.git('checkout', '-q', '-b', 'feature/x');
     await repo.write('src/a.ts', 'export const a = 1;\n');
     repo.commitAll('base work');
     const controller = new AbortController();

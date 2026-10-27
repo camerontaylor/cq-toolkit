@@ -33,12 +33,24 @@ export const REVIEW_CONTEXT_FILE_LIST_CAP = 4_000;
 /** The git read wall-clock cap for one context read (run.ts's 60s ceiling). */
 const CONTEXT_READ_TIMEOUT_MS = 60_000;
 
-/** Truncate to `cap` with a visible, count-accurate marker inside the cap. */
+/**
+ * The guaranteed room for the truncation marker: kept = cap minus this,
+ * so `result.length <= cap` ALWAYS holds and the omission count equals
+ * the characters the reader will not see.
+ */
+const TRUNCATION_MARKER_FLOOR = 64;
+
+/**
+ * Truncate to `cap` with a visible marker inside the cap. The marker's
+ * omission count is the number of characters NOT PRESENT in the result
+ * (original length minus the kept prefix), so the marker is truthful about
+ * what the reader will not see, whatever the marker's own length.
+ */
 export function capBoundedContext(text: string, cap: number): string {
   if (text.length <= cap) return text;
-  const marker = `\n[truncated: ${String(text.length - cap)} characters omitted]`;
-  if (marker.length >= cap) return text.slice(0, cap);
-  return text.slice(0, cap - marker.length) + marker;
+  const kept = Math.max(0, cap - TRUNCATION_MARKER_FLOOR);
+  const marker = `\n[truncated: ${String(text.length - kept)} characters omitted]`;
+  return text.slice(0, kept) + marker;
 }
 
 /** Which diff the context describes. The file list must match this scope. */
@@ -89,7 +101,22 @@ export async function collectBoundedReviewContext(
     timeoutMs: Math.max(1, Math.min(CONTEXT_READ_TIMEOUT_MS, deadline.remainingWallMs())),
     ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
   });
+  // A DEADLINE GUARD, not a clamp: an exhausted (<= 0) or non-finite
+  // remaining budget is FATAL before and after every await. A successful
+  // git exit must never settle a context read the caller's budget could
+  // not cover — the wall budget, not the subprocess exit, is the gate.
+  const budgetGuard = (when: string): ReviewContextFault | null => {
+    const remaining = deadline.remainingWallMs();
+    if (!Number.isFinite(remaining) || remaining > 0) return null;
+    return {
+      ok: false,
+      fatal: true,
+      reason: `review wall budget ${when} — review context not collected (${String(remaining)}ms remaining)`,
+    };
+  };
   try {
+    const before = budgetGuard('was exhausted before the context reads');
+    if (before !== null) return before;
     deadline.signal?.throwIfAborted();
     const log = await effects.runCommand(
       'git',
@@ -104,6 +131,9 @@ export async function collectBoundedReviewContext(
       };
     }
     deadline.signal?.throwIfAborted();
+    const afterLog = budgetGuard('was exhausted after the intent read');
+    if (afterLog !== null) return afterLog;
+    deadline.signal?.throwIfAborted();
     const numstat = await effects.runCommand(
       'git',
       ['diff', '--numstat', ...HARDENED_DIFF_FLAGS, comparison],
@@ -117,6 +147,8 @@ export async function collectBoundedReviewContext(
       };
     }
     deadline.signal?.throwIfAborted();
+    const afterNumstat = budgetGuard('was exhausted after the file-list read');
+    if (afterNumstat !== null) return afterNumstat;
     return {
       ok: true,
       context: {
