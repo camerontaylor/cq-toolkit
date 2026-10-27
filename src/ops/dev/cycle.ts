@@ -49,7 +49,7 @@ import { join } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
-import type { Usage } from '../../driver/types.js';
+import type { Usage, WorkerResult } from '../../driver/types.js';
 import { composeSection, mdSafe, type PrEffects } from '../pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.js';
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
@@ -68,6 +68,11 @@ import { DEFAULT_DEV_TARGET } from './record.js';
 import { readReadinessWithGaps } from './ready.js';
 import { CLEAN_TREE, readWorkState } from './internal/workState.js';
 import { DevCycleCompositionInputSchema } from './registry.js';
+import {
+  createKnownUsageLedger,
+  type KnownUsageSummary,
+  type UsageObservation,
+} from '../shared/knownUsage.js';
 
 /**
  * Wall time held back from the review and address legs for the publication
@@ -119,6 +124,7 @@ export interface DevCycleCompositionInput {
 
 /** The dev.cycle report — the ok value (a ready, published branch). */
 export interface DevCycleReport {
+  usageSummary: KnownUsageSummary;
   branch: string;
   /** The final reviewed head the PR was opened from. */
   head: string;
@@ -131,6 +137,7 @@ export interface DevCycleReport {
   /** Non-blocking review context from the published comparison. */
   advisories?: string[];
 }
+type DevCycleCoreReport = Omit<DevCycleReport, 'usageSummary'>;
 
 /** The follow-up command dev.cycle reports after publishing a PR. */
 export function followUpCommand(prNumber: number, repoRoot: string, target?: string): string {
@@ -279,14 +286,19 @@ export interface DevCycleDeps {
 
 /** Build the `dev.cycle` op over the injected steps. */
 export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, DevCycleReport> {
-  return guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
+  const run = (observe: DriverUsageObserver): Op<DevCycleCompositionInput, DevCycleCoreReport> =>
+    guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
     // ONE run budget across the legs (S7 attempt H): the run started here,
     // and every token a default leg's driver spends is metered here.
     const cycleStarted = Date.now();
     let spentTokens = 0;
-    const drivers = meterDrivers(deps.drivers ?? createDriverFactory(), (tokens) => {
-      spentTokens += tokens;
-    });
+    const drivers = meterDrivers(
+      deps.drivers ?? createDriverFactory(),
+      (tokens) => {
+        spentTokens += tokens;
+      },
+      observe,
+    );
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const check =
       deps.check ?? ((step: DevCheckInput) => makeDevCheck(deps.effects, deps.scanSecrets)(step));
@@ -638,6 +650,36 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       };
     }
   });
+  return async (input) => {
+    const usageLedger = createKnownUsageLedger();
+    let open = true;
+    const pending = new Set<string>();
+    const observe: DriverUsageObserver = {
+      start: (id) => {
+        if (open) pending.add(id);
+      },
+      settle: (id, observation) => {
+        if (!open) return;
+        usageLedger.record(id, observation);
+        pending.delete(id);
+      },
+    };
+    const result = await run(observe)(input);
+    open = false;
+    for (const id of pending) usageLedger.record(id, {});
+    const usageSummary = usageLedger.snapshot();
+    if (result.status === 'ok')
+      return { ...result, value: { ...result.value, usageSummary } };
+    const previous = 'report' in result && typeof result.report === 'object' && result.report !== null
+      ? result.report
+      : {};
+    return { ...result, report: { ...previous, usageSummary } };
+  };
+}
+
+export interface DriverUsageObserver {
+  start(id: string): void;
+  settle(id: string, observation: UsageObservation): void;
 }
 
 /**
@@ -655,7 +697,12 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
  * still shrinks the unspent remainder instead of inflating the next leg's
  * token budget. The error itself is never swallowed or reshaped.
  */
-function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): DriverFactory {
+export function meterDrivers(
+  factory: DriverFactory,
+  spend: (tokens: number) => void,
+  observe: DriverUsageObserver,
+): DriverFactory {
+  let dispatch = 0;
   return {
     resolve: (request) => {
       const resolved = factory.resolve(request);
@@ -663,6 +710,8 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
         ...resolved,
         driver: {
           run: async (invocation, options) => {
+            const id = `cycle:${String(dispatch++)}`;
+            observe.start(id);
             const meter = (usage: Usage): void => {
               const total =
                 usage.input +
@@ -673,15 +722,21 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
               // Invalid readings must not poison the shared token remainder.
               if (Number.isFinite(total)) spend(total);
             };
+            let result: WorkerResult;
             try {
-              const result = await resolved.driver.run(invocation, options);
-              meter(result.usage);
-              return result;
+              result = await resolved.driver.run.call(resolved.driver, invocation, options);
             } catch (err) {
               const partial = usageOf(err);
               if (partial !== undefined) meter(partial);
+              observe.settle(id, partial === undefined ? {} : { usage: partial });
               throw err;
             }
+            meter(result.usage);
+            observe.settle(id, {
+              usage: result.usage,
+              ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
+            });
+            return result;
           },
         },
       };
