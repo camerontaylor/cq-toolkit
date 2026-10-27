@@ -673,11 +673,11 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     open = false;
     for (const id of pending) usageLedger.record(id, {});
     const usageSummary = usageLedger.snapshot();
-    if (result.status === 'ok')
-      return { ...result, value: { ...result.value, usageSummary } };
-    const previous = 'report' in result && typeof result.report === 'object' && result.report !== null
-      ? result.report
-      : {};
+    if (result.status === 'ok') return { ...result, value: { ...result.value, usageSummary } };
+    const previous =
+      'report' in result && typeof result.report === 'object' && result.report !== null
+        ? result.report
+        : {};
     return { ...result, report: { ...previous, usageSummary } };
   };
 }

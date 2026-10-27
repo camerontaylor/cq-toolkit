@@ -32,11 +32,24 @@ describe('dev.cycle known usage', () => {
     const factory: DriverFactory = {
       resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
     };
-    const metered = meterDrivers(factory, (tokens) => { spent += tokens; }, {
-      start: (id) => { seen.push(id); },
-      settle: (id, observation) => { ledger.record(id, observation); },
+    const metered = meterDrivers(
+      factory,
+      (tokens) => {
+        spent += tokens;
+      },
+      {
+        start: (id) => {
+          seen.push(id);
+        },
+        settle: (id, observation) => {
+          ledger.record(id, observation);
+        },
+      },
+    );
+    const resolved = metered.resolve({
+      role: 'reviewer',
+      modelSpec: { provider: 'mock', model: 'm' },
     });
-    const resolved = metered.resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
     expect((await resolved.driver.run(invocation)).stopReason).toBe('error');
     expect((await resolved.driver.run(invocation)).stopReason).toBe('complete');
     await expect(resolved.driver.run(invocation)).rejects.toThrow('partial');
