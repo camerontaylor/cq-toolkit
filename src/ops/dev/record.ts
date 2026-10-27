@@ -41,6 +41,19 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { makeGitMutex } from '../../shared/gitMutex.js';
+import {
+  DeferredVendorDebtSchema,
+  VendorFailureProvenanceSchema,
+  hasPersistedVendorOutageOrigin,
+  matchesDeferredVendorDebt,
+  type DeferredVendorDebt,
+  type VendorFailureProvenance,
+} from './internal/deferredReview.js';
+import {
+  isCoverageV2Complete,
+  ReviewCoverageV2Schema,
+  type ReviewCoverageV2,
+} from '../review/internal/reviewCoverageV2.js';
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.
@@ -107,6 +120,10 @@ export interface DevCycleRecord {
    * Optional so v2 ledgers written before this field still parse.
    */
   advisories?: string[];
+  /** Positive structured local CLI provenance; never a completed vendor review. */
+  vendorFailure?: VendorFailureProvenance;
+  /** Retained engine proof for a fresh agent cycle; legacy cycles remain readable. */
+  agentCoverage?: ReviewCoverageV2;
   /** Where the raw stream log was saved — OUTSIDE the repository (protocol §3). */
   logPath: string;
   /** Untracked non-ignored files present at cycle time (outside the review scope). */
@@ -229,7 +246,15 @@ export type DevRecord =
   | DevCycleRecord
   | DevCheckRecord
   | DevDispositionRecord
-  | DevReuseRecord;
+  | DevReuseRecord
+  | DevVendorDebtRecord;
+
+/** Additive audit snapshot, including predecessors whose obligations remain open. */
+export interface DevVendorDebtRecord {
+  kind: 'vendor-debt';
+  debt: DeferredVendorDebt;
+  at: string;
+}
 
 /** The persisted dev-record file. Version 1 — the only version parse accepts. */
 export interface DevLedgerFile {
@@ -278,6 +303,8 @@ const DevCycleRecordSchema = z
     completion: DevCompletionSchema,
     findings: z.array(DevFindingSchema),
     advisories: z.array(z.string().min(1)).exactOptional(),
+    vendorFailure: VendorFailureProvenanceSchema.exactOptional(),
+    agentCoverage: ReviewCoverageV2Schema.exactOptional(),
     logPath: z.string().min(1),
     untracked: z.array(z.string().min(1)),
     at: z.string().min(1),
@@ -361,6 +388,13 @@ const DevRecordSchema = z.discriminatedUnion('kind', [
   DevCheckRecordSchema,
   DevDispositionRecordSchema,
   DevReuseRecordSchema,
+  z
+    .object({
+      kind: z.literal('vendor-debt'),
+      debt: DeferredVendorDebtSchema,
+      at: z.string().min(1),
+    })
+    .strict(),
 ]);
 
 /**
@@ -437,10 +471,13 @@ export function findReusableCycle(
     (record): record is DevCycleRecord =>
       record.kind === 'cycle' && record.scope === 'full' && sameIdentity(record),
   );
-  const selected = [...cycles].reverse().find((cycle) => cycle.completion.kind === 'terminal');
+  const selected = [...cycles]
+    .reverse()
+    .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
   if (selected === undefined) return null;
-  const latest = cycles[cycles.length - 1];
-  if (latest === undefined) return null; // unreachable: selected came from cycles
+  const latest = cycles.at(-1);
+  if (latest === undefined) return null;
+  if (latest.vendorFailure !== undefined) return null;
   if (latest.cycleId === selected.cycleId) return { cycle: selected, basis: 'exact-terminal' };
   if (
     latest.completion.kind === 'blocked' &&
@@ -680,6 +717,8 @@ export interface DevReadinessRecord {
   cycleId: string;
   /** Which configured reviewer supplied the terminal cycle. */
   reviewer: string;
+  /** Visible unresolved vendor obligation; grants no vendor completion credit. */
+  vendorDebt?: DeferredVendorDebt;
   /**
    * The explicit Q4 reuse selection behind this record, when readiness
    * resolved an affirmative no-fresh blocked tail (#485) — the reuse
@@ -712,6 +751,8 @@ export interface AssembleReadinessInput {
   blockingSeverities?: readonly string[];
   /** Configured reviewer families (`agent` admits `agent:<role>` ledger identities). */
   configuredReviewers?: readonly string[];
+  /** Fresh authoritative queue read over the latest exact persisted debt. */
+  deferredVendorDebt?: DeferredVendorDebt;
   /** ISO-8601 timestamp for the assembled record. */
   nowIso: string;
 }
@@ -750,6 +791,38 @@ export function assembleReadiness(
   const isConfigured = (reviewer: string) =>
     configuredReviewers.has(reviewer) ||
     (reviewer.startsWith('agent:') && configuredReviewers.has('agent'));
+  const debt = input.deferredVendorDebt;
+  const cycles = ledger.records.filter(
+    (record): record is DevCycleRecord => record.kind === 'cycle',
+  );
+  const latestDebt = ledger.records.filter((record) => record.kind === 'vendor-debt').at(-1)?.debt;
+  const binding = debt?.reference.binding;
+  const debtValid =
+    debt !== undefined &&
+    binding?.kind === 'deferred-author' &&
+    latestDebt !== undefined &&
+    JSON.stringify(latestDebt.reference) === JSON.stringify(debt.reference) &&
+    JSON.stringify(latestDebt.originAttempt) === JSON.stringify(debt.originAttempt) &&
+    JSON.stringify(latestDebt.deferral) === JSON.stringify(debt.deferral) &&
+    hasPersistedVendorOutageOrigin(debt.originAttempt, cycles) &&
+    matchesDeferredVendorDebt(debt, {
+      repo: binding.repo,
+      producer: binding.producer,
+      target: input.target,
+      head: identity.head,
+      base: identity.base,
+      dirtySha256: identity.dirtySha256,
+      deferralId: debt.deferral.id,
+    }) &&
+    configuredReviewers.has('coderabbit') &&
+    configuredReviewers.has('agent') &&
+    [...configuredReviewers].every((reviewer) => reviewer === 'coderabbit' || reviewer === 'agent');
+  if (debt !== undefined && !debtValid)
+    gaps.push({
+      field: 'vendor-debt',
+      detail:
+        'deferred debt does not match the retained origin, latest enrollment and current identity',
+    });
 
   // Only a FULL-scope terminal cycle satisfies readiness: an
   // uncommitted-scope cycle never covered the committed part of the
@@ -760,6 +833,8 @@ export function assembleReadiness(
       record.kind === 'cycle' &&
       record.scope === 'full' &&
       record.completion.kind === 'terminal' &&
+      record.vendorFailure === undefined &&
+      (!debtValid || record.reviewer.startsWith('agent:')) &&
       isConfigured(record.reviewer),
   );
   const cycle = terminalCycles[terminalCycles.length - 1];
@@ -770,6 +845,19 @@ export function assembleReadiness(
         'no terminal full-scope review cycle recorded — run dev.review without --uncommitted (a blocked or uncommitted-scope cycle does not count)',
     });
   } else {
+    if (
+      debtValid &&
+      (!cycle.agentCoverage ||
+        !isCoverageV2Complete(cycle.agentCoverage) ||
+        cycle.agentCoverage.scope !== 'full' ||
+        cycle.agentCoverage.head !== identity.head ||
+        cycle.agentCoverage.base !== identity.base)
+    )
+      gaps.push({
+        field: 'agent-coverage',
+        detail:
+          'deferred vendor readiness requires fresh full v2 engine coverage at the current head and base',
+      });
     const stale: string[] = [];
     // The cycle's RECORDED TARGET must be the requested one — the same rule
     // the check record enforces: when two targets share a merge-base,
@@ -827,7 +915,7 @@ export function assembleReadiness(
     }
   }
 
-  // The LATEST review ATTEMPT overall: if it was BLOCKED, the author's most
+  // The LATEST configured review ATTEMPT overall: if it was BLOCKED, the author's most
   // recent review evidence is a failure — readiness never silently leans on
   // an older terminal cycle past a blocked attempt. The ONE Q4 resolution
   // (#485): an affirmative NO-FRESH attempt at the CURRENT request identity
@@ -841,12 +929,44 @@ export function assembleReadiness(
     (record): record is DevCycleRecord => record.kind === 'cycle' && isConfigured(record.reviewer),
   );
   const latestAttempt = allCycles[allCycles.length - 1];
+  // A later unrelated vendor blocker must survive even when a fresh agent ran after it.
+  const latestVendor = allCycles.filter((entry) => entry.reviewer === 'coderabbit').at(-1);
+  const latestAgent = allCycles.filter((entry) => entry.reviewer.startsWith('agent:')).at(-1);
+  if (debtValid && latestAgent?.cycleId !== cycle?.cycleId)
+    gaps.push({
+      field: 'latest-review-blocked',
+      detail: 'the latest agent attempt is not the current full terminal coverage anchor',
+    });
+  if (!debtValid && latestVendor?.vendorFailure !== undefined)
+    gaps.push({
+      field: 'vendor-debt',
+      detail: 'vendor outage requires verified durable current enrollment before continuation',
+    });
+  if (
+    debtValid &&
+    latestVendor?.completion.kind === 'blocked' &&
+    latestVendor.cycleId !== debt.originAttempt.cycleId
+  )
+    gaps.push({
+      field: 'latest-review-blocked',
+      detail: 'a newer vendor blocker is not covered by the persisted outage origin',
+    });
   const noFreshReuse =
-    ledger.records.find(
-      (record): record is DevReuseRecord =>
-        record.kind === 'reuse' && record.basis === 'no-fresh-tail',
-    ) ?? null;
-  if (latestAttempt !== undefined && latestAttempt.completion.kind === 'blocked') {
+    [...ledger.records]
+      .reverse()
+      .find(
+        (record): record is DevReuseRecord =>
+          record.kind === 'reuse' && record.basis === 'no-fresh-tail',
+      ) ?? null;
+  if (
+    latestAttempt !== undefined &&
+    latestAttempt.completion.kind === 'blocked' &&
+    !(
+      debtValid &&
+      latestAttempt.reviewer === 'coderabbit' &&
+      latestAttempt.cycleId === debt.originAttempt.cycleId
+    )
+  ) {
     const sameRequest =
       latestAttempt.target === input.target &&
       latestAttempt.base === identity.base &&
@@ -854,19 +974,22 @@ export function assembleReadiness(
       latestAttempt.dirtySha256 === identity.dirtySha256;
     const reuseResolves =
       sameRequest &&
+      latestAttempt.scope === 'full' &&
+      isConfigured(latestAttempt.reviewer) &&
+      latestAttempt.vendorFailure === undefined &&
       NO_FRESH_TAIL_PATTERN.test(latestAttempt.completion.reason) &&
       noFreshReuse !== null &&
       noFreshReuse.resolvesCycleId === latestAttempt.cycleId &&
+      noFreshReuse.reviewer === latestAttempt.reviewer &&
+      noFreshReuse.scope === 'full' &&
+      noFreshReuse.target === input.target &&
+      noFreshReuse.head === identity.head &&
+      noFreshReuse.base === identity.base &&
+      noFreshReuse.dirtySha256 === identity.dirtySha256 &&
+      ledger.records.indexOf(noFreshReuse) > ledger.records.indexOf(latestAttempt) &&
       cycle !== undefined &&
       noFreshReuse.cycleId === cycle.cycleId;
-    if (reuseResolves) {
-      gaps.push({
-        field: 'review-reused',
-        detail:
-          `review ${latestAttempt.cycleId} was the reviewer's affirmative no-fresh notice at the current identity; ` +
-          `readiness rests on ${noFreshReuse.cycleId} via reuse record ${noFreshReuse.reuseId} — the reuse is author evidence, not verification or independent acceptance`,
-      });
-    } else {
+    if (!reuseResolves) {
       gaps.push({
         field: 'latest-review-blocked',
         detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
@@ -925,10 +1048,15 @@ export function assembleReadiness(
     }
     return { ready: false, gaps };
   }
-  const noFreshReuseFinal = ledger.records.find(
-    (record): record is DevReuseRecord =>
-      record.kind === 'reuse' && record.basis === 'no-fresh-tail',
-  );
+  const noFreshReuseFinal = [...ledger.records]
+    .reverse()
+    .find(
+      (record): record is DevReuseRecord =>
+        record.kind === 'reuse' &&
+        record.basis === 'no-fresh-tail' &&
+        record.resolvesCycleId === latestAttempt?.cycleId &&
+        record.cycleId === cycle.cycleId,
+    );
   const readyRecord: DevReadinessRecord = {
     ready: true,
     evidenceClass: 'author',
@@ -940,9 +1068,8 @@ export function assembleReadiness(
     dirtySha256: identity.dirtySha256,
     cycleId: cycle.cycleId,
     reviewer: cycle.reviewer,
-    ...(noFreshReuseFinal === undefined
-      ? {}
-      : { reuse: noFreshReuseFinal.reuseId }),
+    ...(debtValid ? { vendorDebt: debt } : {}),
+    ...(noFreshReuseFinal === undefined ? {} : { reuse: noFreshReuseFinal.reuseId }),
     checkId: check.checkId,
     at: input.nowIso,
   };

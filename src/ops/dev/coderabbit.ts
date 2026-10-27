@@ -176,7 +176,9 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
       case 'error': {
         parsed.sawError = true;
         parsed.errorCodes.push(
-          /^(?:Review failed: )?([a-z]+_err):/.exec(stringAt(event, 'message') ?? '')?.[1] ?? '',
+          /^(?:Review failed: )?([a-z]+_err|auth|rate_limited):/.exec(
+            stringAt(event, 'message') ?? '',
+          )?.[1] ?? '',
         );
         break;
       }

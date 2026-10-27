@@ -12,10 +12,85 @@ import {
 import { dirname, join, relative } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
-import { DEV_LEDGER_VERSION, devLedgerPath } from '../../../src/ops/dev/record.js';
+import {
+  DEV_LEDGER_VERSION,
+  devLedgerPath,
+  parseDevLedger,
+  serializeDevLedger,
+} from '../../../src/ops/dev/record.js';
 import { makeTestRepo } from '../dev/repo.js';
 
 const hash = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
+
+test.each(['valid', 'bound-head', 'base', 'changed-bytes'] as const)(
+  'vendor debt bookkeeping validates exact bytes and bound ancestry: %s',
+  async (mode) => {
+    const f = await fixture();
+    try {
+      const base = f.repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim();
+      const ledger = parseDevLedger(f.ledgerText);
+      ledger.records.push({
+        kind: 'vendor-debt',
+        at: '2026-10-28T00:00:00Z',
+        debt: {
+          reference: {
+            requestId: 'intent-1',
+            binding: {
+              kind: 'deferred-author',
+              repo: 'owner/repo',
+              producer: 'author',
+              head: mode === 'bound-head' ? 'f'.repeat(40) : f.head,
+              target: 'merge-queue',
+              targetSelector: 'promoted-main',
+            },
+          },
+          deferral: {
+            id: 'intent-1',
+            base: mode === 'base' ? 'f'.repeat(40) : base,
+            dirtySha256: 'clean-tree',
+          },
+          originAttempt: {
+            cycleId: 'c001-outage',
+            head: f.head,
+            base,
+            target: 'merge-queue',
+            scope: 'full',
+            dirtySha256: 'clean-tree',
+            failure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
+          },
+          vendor: 'vendor-blocked-transient',
+          vendorCompleted: false,
+          queue: {
+            state: 'awaiting-pr',
+            pr: null,
+            mergeSha: null,
+            itemId: null,
+            receiptId: null,
+            consumed: false,
+            reviewed: false,
+            fixed: false,
+          },
+        },
+      });
+      const text = serializeDevLedger(ledger);
+      await writeFile(f.ledger, text);
+      f.original.fingerprints.set(f.ledger, hash(text));
+      await f.original.receipt.persist();
+      if (mode === 'changed-bytes') await writeFile(f.ledger, text + '\n');
+      const fresh = f.make();
+      if (mode === 'valid') {
+        await fresh.receipt.prepare(f.root);
+        expect(fresh.fingerprints.get(f.ledger)).toBe(hash(text));
+        expect(ledger.records.at(-1)).toMatchObject({ debt: { vendorCompleted: false } });
+      } else {
+        await expect(fresh.receipt.prepare(f.root)).rejects.toThrow();
+        expect(fresh.fingerprints.size).toBe(0);
+      }
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
 async function fixture() {
   const repo = await makeTestRepo();
   const root = await realpath(repo.root);

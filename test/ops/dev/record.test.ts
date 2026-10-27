@@ -26,7 +26,7 @@ import { BASE, BRANCH, checkRecord, cycleRecord, dispositionRecord, HEAD } from 
 
 /** The affirmative no-fresh blocked reason exactly as decideCompletion records it. */
 const NO_FRESH_REASON =
-  'reviewer completed \'review_completed\' with an AFFIRMATIVE no-fresh/skipped notice ' +
+  "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
   '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
 
 /** A reuse record naming the fixture cycle (fakes.ts c001-aaaaaaaa at the fixture identity). */
@@ -584,18 +584,26 @@ describe('findReusableCycle', () => {
   test('selects the exact terminal cycle at the identical identity', () => {
     const selection = findReusableCycle([cycleRecord()], REQUEST);
     expect(selection).not.toBeNull();
-    expect(selection).toMatchObject({ basis: 'exact-terminal', cycleId: 'c001-aaaaaaaa' });
+    expect(selection).toMatchObject({
+      basis: 'exact-terminal',
+      cycle: { cycleId: 'c001-aaaaaaaa' },
+    });
   });
 
   test('no terminal cycle: null (dispatch a fresh cycle)', () => {
     expect(
-      findReusableCycle([cycleRecord({ completion: { kind: 'blocked', reason: 'cli exit 1' } })], REQUEST),
+      findReusableCycle(
+        [cycleRecord({ completion: { kind: 'blocked', reason: 'cli exit 1' } })],
+        REQUEST,
+      ),
     ).toBeNull();
     expect(findReusableCycle([], REQUEST)).toBeNull();
   });
 
   test('dirty scope mismatch never reuses', () => {
-    expect(findReusableCycle([cycleRecord()], { ...REQUEST, dirtySha256: 'other-dirty' })).toBeNull();
+    expect(
+      findReusableCycle([cycleRecord()], { ...REQUEST, dirtySha256: 'other-dirty' }),
+    ).toBeNull();
   });
 
   test('changed target at the same merge-base never reuses', () => {
@@ -608,7 +616,9 @@ describe('findReusableCycle', () => {
   });
 
   test('a different reviewer or scope never reuses', () => {
-    expect(findReusableCycle([cycleRecord()], { ...REQUEST, reviewer: 'agent:reviewer' })).toBeNull();
+    expect(
+      findReusableCycle([cycleRecord()], { ...REQUEST, reviewer: 'agent:reviewer' }),
+    ).toBeNull();
     expect(findReusableCycle([cycleRecord()], { ...REQUEST, scope: 'uncommitted' })).toBeNull();
   });
 
@@ -635,7 +645,7 @@ describe('findReusableCycle', () => {
     expect(selection).not.toBeNull();
     expect(selection).toMatchObject({
       basis: 'no-fresh-tail',
-      cycleId: 'c001-aaaaaaaa',
+      cycle: { cycleId: 'c001-aaaaaaaa' },
       resolvesCycleId: 'c002-aaaaaaaa',
     });
   });
@@ -676,16 +686,22 @@ describe('findReusableCycle', () => {
     ).toBeNull();
   });
 
-  test('a terminal cycle NEWER than the selected one is never papered over', () => {
-    expect(
-      findReusableCycle(
-        [
-          cycleRecord(),
-          cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'newer-head' }),
-        ],
-        REQUEST,
-      ),
-    ).toBeNull();
+  test('a terminal cycle at a DIFFERENT head neither blocks nor supersedes this identity (adjudicated)', () => {
+    // Contract adjudication (the selector answers one question): does exact
+    // terminal evidence exist for THIS request identity, and is the latest
+    // SAME-IDENTITY attempt consistent with it? A newer terminal at another
+    // head reviewed different content: it cannot be fresher evidence for
+    // this tree, and it is not a blocker (a blocker is a BLOCKED attempt).
+    // Nothing unsafe hides behind the selection: findings from ANY cycle
+    // still block readiness through open-blocking-findings.
+    const selection = findReusableCycle(
+      [cycleRecord(), cycleRecord({ cycleId: 'c002-aaaaaaaa', head: 'newer-head' })],
+      REQUEST,
+    );
+    expect(selection).toMatchObject({
+      basis: 'exact-terminal',
+      cycle: { cycleId: 'c001-aaaaaaaa' },
+    });
   });
 
   test('an earlier no-fresh tail that a newer same-identity terminal supersedes selects exact-terminal', () => {
@@ -700,7 +716,10 @@ describe('findReusableCycle', () => {
       ],
       REQUEST,
     );
-    expect(selection).toMatchObject({ basis: 'exact-terminal', cycleId: 'c003-aaaaaaaa' });
+    expect(selection).toMatchObject({
+      basis: 'exact-terminal',
+      cycle: { cycleId: 'c003-aaaaaaaa' },
+    });
   });
 });
 
@@ -735,7 +754,11 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
   test('a resolution record that names the WRONG tail or wrong anchor never resolves', () => {
     for (const mismatched of [
       reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c009-aaaaaaaa' }),
-      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa', cycleId: 'c009-aaaaaaaa' }),
+      reuseRecord({
+        basis: 'no-fresh-tail',
+        resolvesCycleId: 'c002-aaaaaaaa',
+        cycleId: 'c009-aaaaaaaa',
+      }),
     ]) {
       const result = assemble([cycleRecord(), blockedTail(), mismatched, checkRecord()]);
       expect(result.ready).toBe(false);
@@ -776,12 +799,12 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
       expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
   });
 
-  test('a no-fresh tail from an UNCONFIGURED reviewer is not resolved', () => {
-    const agentTail = cycleRecord({
-      cycleId: 'c002-aaaaaaaa',
-      reviewer: 'agent:unreviewer',
-      completion: { kind: 'blocked', reason: NO_FRESH_REASON },
-    });
+  test('a no-fresh tail from an UNCONFIGURED reviewer is not resolved (adjudicated shape)', () => {
+    // Adjudication: the reused ANCHOR is configured (so the terminal anchor
+    // requirement is met); the unconfigured tail is NOT the latest overall
+    // attempt Q4's resolution inspects, and its findings remain subject to
+    // disposition. Readiness names the configured terminal reviewer, with
+    // no reuse resolution attributed to the unrelated unconfigured tail.
     const result = assembleReadiness({
       branch: BRANCH,
       target: 'merge-queue',
@@ -791,7 +814,11 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
         branch: BRANCH,
         records: [
           cycleRecord(),
-          agentTail,
+          cycleRecord({
+            cycleId: 'c002-aaaaaaaa',
+            reviewer: 'agent:unreviewer',
+            completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+          }),
           reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
           checkRecord(),
         ],
@@ -800,9 +827,11 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
       configuredReviewers: ['coderabbit'],
       nowIso: '2026-10-17T01:00:00.000Z',
     });
-    expect(result.ready).toBe(false);
-    if (!result.ready)
-      expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+    expect(result.ready).toBe(true);
+    if (result.ready) {
+      expect(result.record.reviewer).toBe('coderabbit');
+      expect(result.record.reuse).toBeUndefined();
+    }
   });
 
   test('blocking findings on the tail still block readiness through the resolution', () => {
@@ -820,7 +849,8 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
     if (!result.ready)
       expect(
         result.gaps.some(
-          (gap) => gap.field === 'open-blocking-findings' && gap.detail.includes('c000-aaaaaaaa#f1'),
+          (gap) =>
+            gap.field === 'open-blocking-findings' && gap.detail.includes('c000-aaaaaaaa#f1'),
         ),
       ).toBe(true);
   });

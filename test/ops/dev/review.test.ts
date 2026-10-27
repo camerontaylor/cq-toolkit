@@ -33,13 +33,7 @@ import {
 import { sshAuthorTransport, type AuthorTransport } from '../../../src/ops/dev/review-transport.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
 import { cycleRecord, makeFakeEffects, stubScanner } from './fakes.js';
-import {
-  makeTestRepo,
-  repoEffects,
-  seed,
-  type CommandHandler,
-  type TestRepo,
-} from './repo.js';
+import { makeTestRepo, repoEffects, seed, type CommandHandler, type TestRepo } from './repo.js';
 
 /** The cycle branch of the composed op. */
 const cycleReview = (
@@ -757,12 +751,64 @@ describe('dev.review cycle', () => {
 
   // --- Q4 (#485): exact-terminal reuse before vendor dispatch --------------
 
+  test.each(['con_err', 'rate_limited', 'auth'])(
+    'records positive local vendor %s provenance without completing the review',
+    async (code) => {
+      const effects = repoEffects(
+        repo,
+        reviewer(
+          ran(1, JSON.stringify({ type: 'error', message: `Review failed: ${code}: fixture` })),
+        ),
+      );
+      const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      const cycle = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle');
+      expect(cycle).toMatchObject({
+        completion: { kind: 'blocked' },
+        vendorFailure: { source: 'vendor', codes: [code] },
+      });
+    },
+  );
+  test.each([
+    [
+      { type: 'error', message: 'Review failed: con_err: fixture' },
+      { type: 'error', message: 'Review failed: scan_err: fixture' },
+    ],
+    [{ type: 'error', message: 'please login again' }],
+    [{ type: 'error', message: 'Review failed: auth: fixture' }, { type: 'action_required' }],
+    [
+      { type: 'error', message: 'Review failed: auth: fixture' },
+      { type: 'complete', status: 'review_skipped' },
+    ],
+  ])(
+    'mixed/unknown vendor stream keeps the blocker without outage authority: %j',
+    async (...events) => {
+      const effects = repoEffects(
+        repo,
+        reviewer(ran(1, events.map((event) => JSON.stringify(event)).join('\n'))),
+      );
+      expect((await cycleReview(effects, stubScanner())({ repoRoot: repo.root })).status).toBe(
+        'needs-human',
+      );
+      const cycle = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle');
+      expect(cycle?.kind === 'cycle' ? cycle.vendorFailure : undefined).toBeUndefined();
+    },
+  );
+
   const NO_FRESH_REASON =
     "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
     '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
 
   test('an unchanged rerun over an exact terminal record makes ZERO vendor calls and returns reuse evidence', async () => {
     const state = await seed(repo);
+    // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
+    const reuseId = `r001-${state.head.slice(0, 8)}`;
     let coderabbitRuns = 0;
     const effects = repoEffects(repo, (command) => {
       if (command === 'coderabbit') coderabbitRuns += 1;
@@ -773,7 +819,7 @@ describe('dev.review cycle', () => {
     expect(coderabbitRuns).toBe(0);
     if (result.status !== 'ok') return;
     expect(result.value.reuse).toMatchObject({
-      reuseId: 'r001-aaaaaaaa',
+      reuseId,
       basis: 'exact-terminal',
     });
     expect(result.value.cycleId).toBe('c001-aaaaaaaa');
@@ -788,7 +834,7 @@ describe('dev.review cycle', () => {
     const reuse = ledger.records.find((r) => r.kind === 'reuse');
     expect(reuse).toMatchObject({
       kind: 'reuse',
-      reuseId: 'r001-aaaaaaaa',
+      reuseId,
       cycleId: 'c001-aaaaaaaa',
       basis: 'exact-terminal',
       base: state.base,
@@ -809,6 +855,8 @@ describe('dev.review cycle', () => {
         dirtySha256: current.dirtySha256,
       }),
     ]);
+    // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
+    const reuseId = `r001-${state.head.slice(0, 8)}`;
     const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
@@ -818,9 +866,7 @@ describe('dev.review cycle', () => {
       resolvesCycleId: 'c002-bbbbbbbb',
     });
     const ledger = effects.openLedger('feature/x').load();
-    const tail = ledger.records.find(
-      (r) => r.kind === 'cycle' && r.cycleId === 'c002-bbbbbbbb',
-    );
+    const tail = ledger.records.find((r) => r.kind === 'cycle' && r.cycleId === 'c002-bbbbbbbb');
     // The blocked tail is NOT overwritten, deleted, or relabeled.
     expect(tail).toMatchObject({
       kind: 'cycle',
@@ -828,7 +874,7 @@ describe('dev.review cycle', () => {
     });
     const reuse = ledger.records.find((r) => r.kind === 'reuse');
     expect(reuse).toMatchObject({
-      reuseId: 'r001-bbbbbbbb',
+      reuseId,
       cycleId: 'c001-aaaaaaaa',
       basis: 'no-fresh-tail',
       resolvesCycleId: 'c002-bbbbbbbb',
@@ -945,7 +991,12 @@ describe('dev.review cycle', () => {
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
       expect(result.value.findings).toEqual([
-        { id: 'c001-aaaaaaaa#f1', severity: 'major', fileName: 'src/a.ts', excerpt: 'handle the null case' },
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: 'src/a.ts',
+          excerpt: 'handle the null case',
+        },
       ]);
     }
   });
@@ -1243,13 +1294,21 @@ test.each(['queued', 'running', 'expired'] as const)(
           return ran(0);
         }),
       );
-      if (mode === 'queued')
-        effects.withHostLock = async (_fn, signal) => {
+      if (mode === 'queued') {
+        // The Q4 reuse check acquires the host lock FIRST; a queued cancel
+        // must land in the vendor span's own guard so the pre-existing
+        // blocked-evidence persistence (#534) is what the assertions below
+        // verify. Pass the reuse acquisition through uncancelled.
+        let locks = 0;
+        effects.withHostLock = async (fn, signal) => {
+          locks += 1;
+          if (locks === 1) return fn();
           expect(signal).toBe(controller.signal);
           controller.abort(new Error('parent cancelled queued review'));
           signal!.throwIfAborted();
           throw new Error('unreachable');
         };
+      }
       const run = effects.runCommand;
       effects.runCommand = async (command, args, opts) => {
         if (command === 'coderabbit') {

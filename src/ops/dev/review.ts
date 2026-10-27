@@ -44,6 +44,10 @@ import {
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
 import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.js';
+import {
+  classifyDeferredVendorFailure,
+  type VendorFailureProvenance,
+} from './internal/deferredReview.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
@@ -494,7 +498,10 @@ function makeReviewCycle(
         };
       }, signal);
     } catch (err) {
-      return needsHuman(`the reuse check could not complete — ${faultText(err)}`);
+      // A queued cancellation still reaches the ordinary blocked-outcome recorder.
+      // It must not spend vendor quota or disappear before the durable attempt.
+      if (!signal?.aborted && (remainingWallMs?.() ?? Infinity) > 0)
+        return needsHuman(`the reuse check could not complete — ${faultText(err)}`);
     }
     if (reuseReport !== undefined) return { status: 'ok', value: reuseReport };
 
@@ -507,6 +514,8 @@ function makeReviewCycle(
       logPath: string;
       findings: Omit<DevFinding, 'id'>[];
       advisories: string[];
+      vendorFailure?: VendorFailureProvenance;
+      agentCoverage?: ReviewCoverageV2;
       /** The block came from the network/transient class (#509): a re-review may retry it. */
       transient?: boolean;
       /** A deadline/signal stopped the CLI itself, rather than a safety or provider refusal. */
@@ -582,6 +591,12 @@ function makeReviewCycle(
               excerpt: finding.text,
             })),
             advisories,
+            ...(completion.kind === 'terminal' &&
+            coverage.ok &&
+            !signal?.aborted &&
+            (remainingWallMs?.() ?? Infinity) > 0
+              ? { agentCoverage: coverage.coverage }
+              : {}),
             ...(result.status === 'needs-human' && report?.transient === true
               ? { transient: true }
               : {}),
@@ -658,11 +673,31 @@ function makeReviewCycle(
           !signal?.aborted &&
           (remainingWallMs?.() ?? Infinity) > 0 &&
           isTransientReviewerFailure(parsed, raw);
+        const vendorFailure =
+          completion.kind === 'blocked'
+            ? classifyDeferredVendorFailure({
+                origin: 'vendor-cli',
+                codes: parsed.errorCodes,
+                exitCode: raw.exitCode,
+                timedOut: raw.timedOut,
+                cancelled: signal?.aborted === true,
+                budgetStopped: (remainingWallMs?.() ?? Infinity) <= 0,
+                malformed:
+                  parsed.unparsedLines > 0 ||
+                  parsed.trailingAfterComplete > 0 ||
+                  (parsed.sawComplete && parsed.completeStatus !== 'review_completed'),
+                actionRequired: parsed.sawActionRequired,
+                // With error events, a completion can mix no-fresh and failure evidence.
+                // Refuse the mixed stream rather than classifying its prose.
+                skipped: parsed.sawComplete,
+              })
+            : undefined;
         return {
           completion,
           logPath,
           findings: parsed.findings,
           advisories: [],
+          ...(vendorFailure === undefined ? {} : { vendorFailure }),
           ...(transient ? { transient: true } : {}),
           ...(budgetStopped ? { budgetStopped: true as const } : {}),
         };
@@ -702,6 +737,8 @@ function makeReviewCycle(
             id: `${cycleId}#f${String(index + 1)}`,
           })),
           ...(span.advisories.length > 0 ? { advisories: span.advisories } : {}),
+          ...(span.vendorFailure === undefined ? {} : { vendorFailure: span.vendorFailure }),
+          ...(span.agentCoverage === undefined ? {} : { agentCoverage: span.agentCoverage }),
           logPath: span.logPath,
           untracked: state.untracked,
           at,
