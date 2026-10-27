@@ -96,7 +96,11 @@ function validateAnchor(
   if (expected !== anchor.quote) return ['quote-mismatch'];
   if (requireHunkOverlap) {
     const hunks = anchor.side === 'base' ? blob.baseHunks : blob.headHunks;
+    // Every accepted hunk is a non-empty half-open range [start, end): a
+    // zero-length hunk names a pure insertion/deletion point and changes no
+    // line, so it cannot anchor evidence to changed content.
     if (hunks.length === 0) return ['no-hunk-information'];
+    if (hunks.some((hunk) => hunk.start >= hunk.end)) return ['no-hunk-information'];
     const overlaps = hunks.some((hunk) => anchor.start < hunk.end && hunk.start <= anchor.end);
     if (!overlaps) return ['outside-changed-hunks'];
   }
