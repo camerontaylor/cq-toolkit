@@ -708,10 +708,11 @@ async function dispatchCli(
       const hasReport = Object.hasOwn(raw, 'report');
       const hasUsageSummary = Object.hasOwn(raw, 'usageSummary');
       if (hasReport || hasUsageSummary) {
-        const { report: _report, usageSummary: _usageSummary, ...rest } = raw as Record<
-          string,
-          unknown
-        >;
+        const {
+          report: _report,
+          usageSummary: _usageSummary,
+          ...rest
+        } = raw as Record<string, unknown>;
         base = rest;
       }
       if (hasUsageSummary) {

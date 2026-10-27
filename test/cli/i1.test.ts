@@ -192,23 +192,46 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
   test('typed top-level usage summaries preserve all result statuses and reject malformed envelopes', async () => {
     const tmp = await makeTmpOpsRoot('cq-i1-usage-summary-');
     await mkdir(join(tmp, 'summaries'));
-    const summary = '{knownCount:1,unknownCount:1,unpricedCount:1,usage:{input:3,output:2,cacheRead:0,cacheWrite:0},costUSD:0.25}';
+    const summary =
+      '{knownCount:1,unknownCount:1,unpricedCount:1,usage:{input:3,output:2,cacheRead:0,cacheWrite:0},costUSD:0.25}';
     const valid = [
       ['summaryok', `{status:'ok',value:{done:true},usageSummary:${summary}}`, 0],
       ['summaryfailed', `{status:'failed',error:'failed',usageSummary:${summary}}`, 1],
       ['summaryhuman', `{status:'needs-human',reason:'review',usageSummary:${summary}}`, 3],
       ['summarybudget', `{status:'budget-exhausted',usageSummary:${summary}}`, 3],
-      ['summaryindeterminate', `{status:'indeterminate',detail:'lost',usageSummary:${summary},report:{note:'retained'}}`, 1],
+      [
+        'summaryindeterminate',
+        `{status:'indeterminate',detail:'lost',usageSummary:${summary},report:{note:'retained'}}`,
+        1,
+      ],
     ] as const;
     const invalid = [
       ['summaryundefined', "{status:'failed',error:'failed',usageSummary:undefined}"],
-      ['summarynegative', "{status:'failed',error:'failed',usageSummary:{knownCount:-1,unknownCount:0,unpricedCount:0}}"],
-      ['summaryunsafe', "{status:'failed',error:'failed',usageSummary:{knownCount:Number.MAX_SAFE_INTEGER+1,unknownCount:0,unpricedCount:0}}"],
-      ['summarycost', "{status:'failed',error:'failed',usageSummary:{knownCount:0,unknownCount:0,unpricedCount:0,costUSD:Infinity}}"],
-      ['summaryunknown', "{status:'failed',error:'failed',usageSummary:{knownCount:0,unknownCount:0,unpricedCount:0,extra:1}}"],
+      [
+        'summarynegative',
+        "{status:'failed',error:'failed',usageSummary:{knownCount:-1,unknownCount:0,unpricedCount:0}}",
+      ],
+      [
+        'summaryunsafe',
+        "{status:'failed',error:'failed',usageSummary:{knownCount:Number.MAX_SAFE_INTEGER+1,unknownCount:0,unpricedCount:0}}",
+      ],
+      [
+        'summarycost',
+        "{status:'failed',error:'failed',usageSummary:{knownCount:0,unknownCount:0,unpricedCount:0,costUSD:Infinity}}",
+      ],
+      [
+        'summaryunknown',
+        "{status:'failed',error:'failed',usageSummary:{knownCount:0,unknownCount:0,unpricedCount:0,extra:1}}",
+      ],
       ['summarytoplevel', `({status:'failed',error:'failed',usageSummary:${summary},extra:1})`],
-      ['summaryhidden', "{status:'failed',error:'failed',usageSummary:Object.defineProperty({knownCount:0,unknownCount:0,unpricedCount:0},'hidden',{value:1})}"],
-      ['summaryreportnan', `{status:'failed',error:'failed',usageSummary:${summary},report:{x:NaN}}`],
+      [
+        'summaryhidden',
+        "{status:'failed',error:'failed',usageSummary:Object.defineProperty({knownCount:0,unknownCount:0,unpricedCount:0},'hidden',{value:1})}",
+      ],
+      [
+        'summaryreportnan',
+        `{status:'failed',error:'failed',usageSummary:${summary},report:{x:NaN}}`,
+      ],
       ['summarynovalue', `{status:'ok',value:undefined,usageSummary:${summary}}`],
       ['summaryvaluemap', `{status:'ok',value:new Map(),usageSummary:${summary}}`],
     ] as const;

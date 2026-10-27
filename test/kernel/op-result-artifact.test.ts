@@ -36,7 +36,12 @@ describe('typed result artifact usage summary', () => {
     { knownCount: 0.5, unknownCount: 0, unpricedCount: 0 },
     { knownCount: 0, unknownCount: 0, unpricedCount: 0, costUSD: Number.POSITIVE_INFINITY },
     { knownCount: 0, unknownCount: 0, unpricedCount: 0, costUSD: -1 },
-    { knownCount: 0, unknownCount: 0, unpricedCount: 0, usage: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    {
+      knownCount: 0,
+      unknownCount: 0,
+      unpricedCount: 0,
+      usage: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
     { knownCount: 0, unknownCount: 0, unpricedCount: 0, extra: 1 },
     undefined,
   ])('rejects malformed or undefined summary %j before publication', (summary) => {
