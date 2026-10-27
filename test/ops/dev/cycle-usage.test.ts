@@ -174,12 +174,13 @@ describe('dev.cycle known usage', () => {
 
   it('returns the original result when its usage accessor throws and keeps valid cost', async () => {
     const ledger = createKnownUsageLedger();
-    const original = {
+    const original: WorkerResult = {
       stopReason: 'error',
       error: 'original accessor result',
+      usage,
       costUSD: 0.03,
       denials: [],
-    } as WorkerResult;
+    };
     Object.defineProperty(original, 'usage', {
       get: () => {
         throw new Error('bad usage accessor');
