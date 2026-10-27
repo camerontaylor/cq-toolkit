@@ -169,21 +169,34 @@ Ordering and guarantees:
    author_observations) and `state/heartbeat.json` must be byte-identical
    across the switch; any difference refuses the deployment with the file
    names. State is never restored, migrated or rewritten by the controller.
-5. **Rollback compatibility** — recorded before and after: an unmarked queue
-   permits owner-approved automatic rollback; `author_*` state keys (or an
-   unreadable queue) disable it — fail stopped with an explicit operator
-   recovery action, never an old-snapshot restore or an incompatible binary
-   start.
+5. **Rollback compatibility** — recorded before and after: automatic
+   rollback is permitted only against an **unmarked** queue (no explicit
+   `schema_version`, no `author_*` state keys, queue readable) — the one
+   shape the recorded prior target is known to read. Any explicit schema
+   marker (e.g. `schema_version: 2`), any `author_*` state key, or an
+   unreadable queue disables automatic rollback — fail stopped with an
+   explicit operator recovery action, never an old-snapshot restore or an
+   incompatible binary start.
 6. **Health** — `health` requires `last_tick` to advance for TWO consecutive
    observations (strictly increasing UTC timestamps; one slot seen twice is
    not two slots) and samples up to ten `state/runs/*/meta.json` receipts for
    readability. Tick advancement, service health and receipt readability are
    distinct checks; advancement alone is not acceptance.
 
-A journal entry (schema 1, mode 0600, private record directory) records every
+The deploy journal (schema 1) is the only validated rollback input: it
+records `prior_head`, the prior target's own annotated approval tag
+(`prior_tag`), and the compatibility evidence at the top level. When no
+annotated tag names the prior target, `prior_tag` is recorded null and the
+rollback refuses (the owner approves and supplies the artifact); rollback
+never guesses a tag. A malformed recorded `run` on a queue item blocks the
+drain as ambiguous: only a genuinely absent/unstarted run (no `run` key or
+the runner's explicit `run: null` marker) is skipped, so no switch proceeds
+without an absence proof for every recorded run.
+
+A journal entry (mode 0600, private record directory) records every
 completed deploy or rollback. Rollback reuses the same helper fence with the
-recorded prior target and tag; a fresh-target switch to a different commit is
-a new deployment, not a rollback.
+recorded prior target and prior tag; a fresh-target switch to a different
+commit is a new deployment, not a rollback.
 
 ## Subsequent deploy and rollback
 

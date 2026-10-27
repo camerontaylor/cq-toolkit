@@ -170,13 +170,15 @@ def compatibility_record(effects: Effects, target_sha: str) -> dict:
     """Read-only rollback-compatibility evidence for the CURRENT->TARGET move.
 
     The controller cannot execute the prior target's parser, so it records
-    observable state-shape facts an owner needs: queue schema markers and the
-    state keys the current queue carries. Any key the controller cannot
-    classify as readable by the recorded prior target disables automatic
-    rollback (owner decision, never a silent restore). Receipts under
-    state/runs are append-only artifacts both versions read defensively.
+    observable state-shape facts an owner needs: the queue schema marker and
+    the state keys the current queue carries. Any observation the controller
+    cannot prove readable by the recorded prior target (an explicit schema
+    marker, an ``author_*`` state key, an unreadable queue) disables
+    automatic rollback (owner decision, never a silent restore). Receipts
+    under state/runs are append-only artifacts both versions read
+    defensively.
     """
-    record = {"checked": True, "schema_observations": []}
+    record = {"checked": True, "schema_observations": [], "queue_schema": "unmarked"}
     if effects.exists("queue.json"):
         try:
             queue = effects.read_json("queue.json")
@@ -232,8 +234,16 @@ def drain_check(effects: Effects, liveness) -> dict:
     runs = effects.state_dir() / "runs"
     blocked = []
     for item in queue.get("items", []):
+        if item.get("run") is None and "run" not in item:
+            continue  # genuinely unstarted: no recorded run to probe
         r = item.get("run")
+        if r is None:
+            continue  # the runner's own terminal/consumed marker: run is gone
         if not isinstance(r, dict):
+            # A damaged record proves nothing about the process; the drain is
+            # fail closed: block as ambiguous until the owner disposes it.
+            blocked.append({"item": item.get("id"), "state": "ambiguous",
+                            "reason": "malformed recorded run metadata"})
             continue
         run_id = r.get("run_id")
         if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f-]{8,64}", run_id):
@@ -350,13 +360,16 @@ def two_slot_health(effects: Effects, observe) -> dict:
 
 
 def rollback_compatible(record: dict) -> bool:
-    """Automatic rollback is permitted only when the preflight compatibility
-    record shows no schema-advancing marker the prior target cannot read.
-    Any observation the controller cannot classify disables automatic
-    rollback: the operator decides instead."""
-    if not record.get("checked"):
+    """Automatic rollback is permitted only against an UNMARKED queue with no
+    schema-advancing state keys: the one shape the recorded prior target is
+    known to read. Any explicit schema_version marker, any ``author_*``
+    state key, and any unreadable queue disable automatic rollback; the
+    operator decides instead. A missing/unchecked record refuses."""
+    if not isinstance(record, dict) or not record.get("checked"):
         return False
-    return not record.get("schema_observations")
+    if record.get("schema_observations"):
+        return False
+    return record.get("queue_schema", "unmarked") == "unmarked"
 
 
 # --------------------------------------------------------------------- plan
@@ -387,10 +400,73 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
         plan["rollback_compatibility_after"] = record
         plan["automatic_rollback_permitted"] = rollback_compatible(
             {**pre["rollback_compatibility"], **record})
-        effects.journal_append({"schema_version": JOURNAL_SCHEMA,
-                                "operation": "deploy", "at": now_iso(),
-                                "plan": plan})
+        journal = deploy_journal(pre["state"], target, tag, plan,
+                                 prior_tag=prior_tag_for(effects, pre["state"]["prior_head"]))
+        effects.journal_append(journal)
         return plan
+
+
+def prior_tag_for(effects: Effects, sha: str) -> str | None:
+    """The annotated crq-runner/ tag that peels to ``sha`` in this checkout,
+    or None when no such tag exists. Read-only; used to record the prior
+    target's own approval tag in the deploy journal."""
+    listing = effects.git("tag", "--list", "crq-runner/*",
+                          "--format=%(refname:short) %(objecttype)")
+    candidates = []
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[1] != "tag":
+            continue  # lightweight tags are not owner-approval artifacts
+        tag = parts[0]
+        if effects.git("rev-parse", "refs/tags/" + tag + "^{commit}") == sha:
+            candidates.append(tag)
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        raise Refused("multiple annotated runner tags name the prior target "
+                      + sha[:10] + ": " + ", ".join(sorted(candidates)))
+    return None
+
+
+def deploy_journal(prior_state: dict, target: str, tag: str, plan: dict,
+                   prior_tag: str | None = None) -> dict:
+    """The journal schema (version 1) and the ONLY validated rollback input:
+    the prior identity and compatibility evidence live at the TOP LEVEL so a
+    rollback can consume the file this controller wrote, with the full step
+    detail retained under ``plan``. ``prior_tag`` is the prior target's own
+    annotated approval tag; a rollback refuses without it rather than guess."""
+    return {"schema_version": JOURNAL_SCHEMA,
+            "operation": "deploy",
+            "at": now_iso(),
+            "prior_head": prior_state.get("prior_head"),
+            "prior_config_sha256": prior_state.get("prior_config_sha256"),
+            "prior_tag": prior_tag,
+            "target": target,
+            "tag": tag,
+            "rollback_compatibility": plan.get("rollback_compatibility_after") or {},
+            "automatic_rollback_permitted": plan.get("automatic_rollback_permitted"),
+            "plan": plan}
+
+
+def rollback_target(prior: dict) -> dict:
+    """Validate a rollback input (a controller deploy journal) and return its
+    prior identity. Refuses anything this controller did not write."""
+    if not isinstance(prior, dict) or prior.get("schema_version") != JOURNAL_SCHEMA:
+        raise Refused("prior record must be a controller journal with schema_version "
+                      + str(JOURNAL_SCHEMA))
+    if prior.get("operation") != "deploy":
+        raise Refused("prior record must be a completed deploy journal")
+    target = prior.get("prior_head")
+    if not target or not SHA_RE.match(target):
+        raise Refused("no recorded prior target SHA; refusing blind rollback")
+    tag = prior.get("prior_tag")
+    if not tag or not TAG_RE.match(tag):
+        raise Refused("prior record lacks the prior target's own annotated runner "
+                      "tag (prior_tag); owner must approve and supply it")
+    compat = prior.get("rollback_compatibility")
+    if not isinstance(compat, dict):
+        raise Refused("prior record lacks its rollback compatibility evidence")
+    return {"prior_head": target, "tag": tag, "rollback_compatibility": compat}
 
 
 def _runner_liveness(helper_module):
@@ -416,27 +492,27 @@ def _refusing_liveness(*_args, **_kwargs):
 def rollback_plan(effects: Effects, helper_module, prior: dict,
                   overlay_path: Path) -> dict:
     """Owner-approved rollback to the recorded prior target, through the SAME
-    helper fence. Refuses when the compatibility record disables automatic
-    rollback (schema-incompatible prior target)."""
+    helper fence. Consumes exactly the journal ``deploy_plan`` wrote.
+    Refuses when the compatibility record disables automatic rollback
+    (schema-incompatible prior target)."""
     with effects.controller_lock():
-        target = prior.get("prior_head")
-        if not target or not SHA_RE.match(target):
-            raise Refused("no recorded prior target SHA; refusing blind rollback")
-        record = prior.get("rollback_compatibility", {})
-        if not rollback_compatible(record):
-            raise Refused("rollback disabled: schema-advancing queue state observed; "
-                          "operator recovery required (never restore old queue "
+        record = rollback_target(prior)
+        if not rollback_compatible(record["rollback_compatibility"]):
+            raise Refused("rollback disabled: queue state the prior target cannot "
+                          "provably read (explicit schema marker or author_* state "
+                          "keys); operator recovery required (never restore old queue "
                           "snapshots or start incompatible binaries)")
         drain = drain_check(effects, _runner_liveness(helper_module))
         if not drain["drained"]:
             raise Refused("cannot roll back with live/ambiguous reviews: "
                           + json.dumps(drain["blocked"])[:400])
         overlay, raw = helper_module.load_overlay(overlay_path)
-        helper_module.switch(effects.root, overlay, raw, target, prior["tag"])
+        helper_module.switch(effects.root, overlay, raw, record["prior_head"],
+                             record["tag"])
         effects.journal_append({"schema_version": JOURNAL_SCHEMA,
                                 "operation": "rollback", "at": now_iso(),
-                                "to": target, "tag": prior["tag"]})
-        return {"rolled_back_to": target, "tag": prior["tag"]}
+                                "to": record["prior_head"], "tag": record["tag"]})
+        return {"rolled_back_to": record["prior_head"], "tag": record["tag"]}
 
 
 # --------------------------------------------------------------------- main
