@@ -172,10 +172,10 @@ describe('R3W evidence preparation', () => {
       secondRepair,
     ]);
     expect(step.candidates[0]?.reasons).toEqual(['out-of-range']);
-    expect(step.candidates[1]?.reasons).toEqual([]);
+    expect(step.candidates[1]?.reasons).toEqual(['unknown-base-path']);
     expect(step.candidates[2]?.reasons).toEqual(['unknown-base-path']);
     expect(step.repairs[0]?.requestedAfter).toEqual(['out-of-range']);
-    expect(step.repairs[1]?.requestedAfter).toEqual([]);
+    expect(step.repairs[1]?.requestedAfter).toEqual(['unknown-base-path']);
     expect(step.reasons).toEqual(['unknown-base-path']);
     expect(step.repairOutcome).toBe('exhausted');
     expect(step.ignoredRepairSubmissions).toBe(0);
