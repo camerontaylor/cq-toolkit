@@ -516,6 +516,17 @@ export function makeDevCheck(
     try {
       record = await effects.openLedger(state.branch).mutate((ledger) => {
         const checkCount = ledger.records.filter((entry) => entry.kind === 'check').length;
+        // test:narrow is a legacy-path gate only; a configured-checks run has
+        // no test selection to disclose, so both fields are omitted there
+        // (a selection that never ran would misdescribe the record).
+        const testSelection: DevCheckRecord['testSelection'] =
+          configuredChecks === null
+            ? input.testFiles !== undefined
+              ? { mode: 'named', files: [...input.testFiles] }
+              : input.range !== undefined
+                ? { mode: 'range' }
+                : { mode: 'base' }
+            : undefined;
         const entry: DevCheckRecord = {
           kind: 'check',
           checkId: `k${String(checkCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`,
@@ -524,13 +535,10 @@ export function makeDevCheck(
           head: state.head,
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
-          ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
-          testSelection:
-            input.testFiles !== undefined
-              ? { mode: 'named', files: [...input.testFiles] }
-              : input.range !== undefined
-                ? { mode: 'range' }
-                : { mode: 'base' },
+          ...(configuredChecks === null && input.includeIntegration === true
+            ? { includeIntegration: true }
+            : {}),
+          ...(testSelection !== undefined ? { testSelection } : {}),
           passed,
           gates,
           loadStamp,
