@@ -34,6 +34,13 @@ async function world(
     failer?: boolean;
   } = {},
 ) {
+  // The failer knob only has a defined thread order inside the default
+  // ordering (its T3 crasher and the human-conditional T2 tail are appended
+  // there); combined with human/sameFile/fileless it would silently drop or
+  // reorder a thread, so refuse the combination instead of testing the
+  // wrong world.
+  if (options.failer && (human || options.sameFile || options.fileless))
+    throw new Error('world(): failer cannot be combined with human, sameFile or fileless');
   const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
   const worktree = join(root, 'git', 'cq-review-worktrees', 'worker');
   await mkdir(worktree, { recursive: true });
@@ -74,9 +81,7 @@ async function world(
       ? ['T2', 'T1']
       : options.fileless === 'last'
         ? ['T1', 'T2']
-        : options.failer
-          ? ['T1', 'T3']
-          : ['T1', ...(human ? ['T2'] : [])];
+        : ['T1', ...(options.failer ? ['T3'] : []), ...(human ? ['T2'] : [])];
   const threads = order.map((id, i) => ({
     id,
     isResolved: false,
@@ -85,7 +90,9 @@ async function world(
       options.fileless && id === 'T2'
         ? null
         : id === 'T3'
-          ? `src/${i === 0 ? 'a' : 'b'}.ts`
+          ? // T3 targets src/b.ts by identity, never by its position in the
+            // order above, so a reordering cannot silently retarget its file.
+            'src/b.ts'
           : `src/${!options.sameFile && id === 'T2' ? 'b' : 'a'}.ts`,
     line: 1,
     comments: {
