@@ -160,11 +160,11 @@ describe('R3W evidence preparation', () => {
     });
     const secondRepair = evidence({
       primary: anchor({
-        file: OLD_NAME,
+        file: MODIFIED,
         side: 'base',
         start: 1,
         end: 1,
-        quote: 'export const moved = true;',
+        quote: 'export const before = 1;',
       }),
     });
     const step = invalid(
