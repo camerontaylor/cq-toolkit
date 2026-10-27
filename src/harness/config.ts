@@ -146,6 +146,8 @@ export const HarnessConfigSchema = z
     tools: HarnessToolConfigSchema,
     promptBudget: PromptBudgetConfigSchema,
     workspaceRoot: z.string().optional(),
+    /** Opt-in ai-sdk session diagnostics; undefined has the same effect as false. */
+    logToolFailures: z.boolean().optional(),
   })
   .strict();
 
@@ -175,6 +177,7 @@ export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
  */
 export const defaultHarnessConfig: HarnessConfig = deepFreeze(
   HarnessConfigSchema.parse({
+    logToolFailures: false,
     tools: {
       read: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 200_000 },
       edit: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 4_000 },

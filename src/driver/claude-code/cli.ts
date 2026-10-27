@@ -942,6 +942,7 @@ export class ClaudeCodeCliTransport implements Driver {
           }
         : {}),
       denials: observation.denials,
+      toolFailures: observation.deniedToolUseIds.size,
       stopReason: effectiveStopReason,
       ...(error !== undefined ? { error } : {}),
       ...(errorClass !== undefined ? { errorClass } : {}),

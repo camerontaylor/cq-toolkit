@@ -1835,6 +1835,7 @@ export class AcpDriver implements Driver {
       ...cost,
       sessionId,
       denials: observation.denials,
+      toolFailures: observation.deniedToolCallIds.size,
       stopReason: effectiveStopReason,
       ...(error !== undefined ? { error } : {}),
       ...(errorClass !== undefined ? { errorClass } : {}),

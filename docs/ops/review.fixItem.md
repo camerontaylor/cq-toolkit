@@ -82,6 +82,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "harness": {
       "additionalProperties": false,
       "properties": {
+        "logToolFailures": {
+          "type": "boolean"
+        },
         "promptBudget": {
           "additionalProperties": false,
           "properties": {

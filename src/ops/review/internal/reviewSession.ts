@@ -131,6 +131,7 @@ export async function runReviewSession(
     onUsage: (usage: Usage) => void;
     onAdvisories?: (advisories: readonly string[]) => void;
     searchTools: boolean;
+    logToolFailures?: boolean;
     /** Per-request step bound for the ai-sdk lane (cq.json `budgets.step.wallMs`, capped). */
     stepTimeoutMs?: number;
   },
@@ -161,6 +162,7 @@ export async function runReviewSession(
     ...(input.stepTimeoutMs === undefined ? {} : { stepTimeoutMs: input.stepTimeoutMs }),
     harness: {
       ...defaultHarnessConfig,
+      logToolFailures: input.logToolFailures ?? false,
       tools: {
         ...defaultHarnessConfig.tools,
         edit: { ...defaultHarnessConfig.tools.edit, enabled: false },
@@ -251,6 +253,8 @@ export async function runReviewSession(
     evidence.usage = sumUsage(evidence.usage, attempt.usage);
     if (attempt.steps !== undefined) evidence.steps = (evidence.steps ?? 0) + attempt.steps;
     if (attempt.sessionId !== undefined) evidence.driverSessionId = attempt.sessionId;
+    evidence.toolFailures =
+      (evidence.toolFailures ?? 0) + (attempt.toolFailures ?? attempt.denials.length);
     evidence.denials = (evidence.denials ?? 0) + attempt.denials.length;
     if (attempt.capabilities !== undefined)
       evidence.capabilities = structuredClone(attempt.capabilities);

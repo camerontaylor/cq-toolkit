@@ -111,7 +111,7 @@ describe('windowed read tool', () => {
       await writeFile(join(workspace, 'small.txt'), 'one\ntwo\nthree', 'utf8');
       const read = tool(buildTools(configWithReadPaths(['**/*'], 40), workspace), 'read');
       await expect(
-        read.execute({ file_path: 'small.txt', path: 'small.txt' }),
+        read.execute({ file_path: 'small.txt', path: 'other.txt' }),
       ).resolves.toMatchObject({
         ok: false,
       });

@@ -327,6 +327,8 @@ export interface WorkerResult {
    */
   nativeSessionPath?: string;
   denials: ToolDenial[];
+  /** Observed failed tool calls, including SDK validation and unexecuted repair calls. */
+  toolFailures?: number;
   /**
    * Tool-capability evidence for the run (rg seam): populated ONLY by a lane
    * that actually observed the probe — today the ai-sdk lane; every other

@@ -93,6 +93,15 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "force": {
       "type": "boolean"
     },
+    "harness": {
+      "additionalProperties": false,
+      "properties": {
+        "logToolFailures": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "migrate": {
       "type": "boolean"
     },

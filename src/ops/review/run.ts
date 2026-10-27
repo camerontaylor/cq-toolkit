@@ -23,6 +23,7 @@ import { startFixerDeadline } from '../sweep/internal/fixerBudget.js';
 import { CLEAN_TREE, driftSince, readWorkState } from '../dev/internal/workState.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import { runAgentReviewer } from './agentReviewer.js';
+import { ReviewCoverageV2Schema } from './internal/reviewCoverageV2.js';
 import {
   FindingsRecordSchema,
   isComplete,
@@ -452,6 +453,7 @@ export function makeReviewRun(
                     intent: context.intent,
                     fileList: context.fileList,
                     searchTools: policy.review.searchTools,
+                    logToolFailures: policy.harness.logToolFailures,
                     session: policy.review.session,
                     size: policy.review.size,
                     exclude: policy.review.exclude,
@@ -493,6 +495,7 @@ export function makeReviewRun(
                     blockedReason = `agent review returned no verifiable coverage proof — ${coverage.reason}`;
                   const agentFindings = report?.findings ?? [];
                   const advisories = report?.advisories ?? [];
+                  const failureEvidence = ReviewCoverageV2Schema.safeParse(report?.coverage);
                   let logPath: string;
                   try {
                     logPath = await effects.writeReviewLog(
@@ -505,6 +508,7 @@ export function makeReviewRun(
                         `findings: ${String(agentFindings.length)}`,
                         ...renderAgentReviewEvidence(report),
                         `usage: ${String(report?.usage ?? 0)}`,
+                        `tool failures: ${failureEvidence.success ? String(failureEvidence.data.sessions.reduce((sum, session) => sum + (session.toolFailures ?? 0), 0)) : 'unavailable'}`,
                         '',
                       ].join('\n'),
                     );

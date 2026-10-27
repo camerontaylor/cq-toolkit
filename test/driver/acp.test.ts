@@ -786,6 +786,7 @@ describe('acp driver specifics (fake ACP server)', () => {
           }),
         );
         expect(result.stopReason).toBe('complete');
+        expect(result.toolFailures).toBe(0);
         expect(result.denials).toEqual([]);
         const record = await store.load(result.sessionId as string);
         expect(await readFile(join(record?.workspace as string, 'allowed.txt'), 'utf8')).toContain(
@@ -2094,6 +2095,7 @@ describe('acp driver specifics (fake ACP server)', () => {
         ),
       );
       const result = await driver.run(invocation({ prompt: 'deny-tool run' }));
+      expect(result.toolFailures).toBe(1);
       // The tool executed (allow-answered) and FAILED vendor-side: the
       // second denial channel carries the vendor's rawOutput.
       expect(result.denials).toEqual([
