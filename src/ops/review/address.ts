@@ -272,7 +272,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       ) {
         // Only an engine-attributed budget block may observe a new stop here.
         // Safety/admission errors and arbitrary throws never gain eligibility.
-        if (reviewBudgetBlocked) cleanStop?.();
+        // Consume the late call's return like every other stop() call site: a
+        // surfaced reason is recorded in report.reasons, never silently
+        // dropped. Only the budget branch of stop() sets budgetSpent, and the
+        // gate above already cleared cancellation and tampering in this same
+        // synchronous slice, so the marker below can only ride the budget
+        // exhaustion itself.
+        if (reviewBudgetBlocked) {
+          const lateStop = cleanStop?.();
+          if (lateStop) report.reasons.push(lateStop);
+        }
         if (budgetSpent) marker = 'budget';
       }
       // The structured round-cap marker rides the report envelope — the
