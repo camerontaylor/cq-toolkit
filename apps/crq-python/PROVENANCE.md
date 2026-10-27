@@ -64,8 +64,9 @@ exclude this directory. Repair remains disabled.
 CodeRabbit CLI 0.7.7 reviewed the full committed diff at
 `d4e298c524de2c13186c637a86b62ef43a926362` against pinned base
 `7069782f5e935a7938e6b4ad5e2897a198a1f170`, clean tree. The owner authorized
-one full cycle for this import, overriding the repository's default two-cycle
-protocol. Earlier rate-limited attempts performed no analysis and do not count.
+one full cycle for this import, overriding the then-reported two-cycle
+protocol. The current owner-directed policy (2026-10-28) requires one CLI cycle
+per PR; see [README.md](README.md#review-and-repair-policy). Earlier rate-limited attempts performed no analysis and do not count.
 After the reported one-minute wait, the retry ended with exit 0,
 `complete.status=review_completed`, `outcome=completed`, two findings and no
 error/action-required event. No code changes resulted; no targeted fix review
