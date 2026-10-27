@@ -19,7 +19,9 @@ export interface KnownUsageSummary {
 }
 
 /** Fold engine summaries without treating each aggregate as one driver call. */
-export function foldKnownUsageSummaries(summaries: readonly KnownUsageSummary[]): KnownUsageSummary {
+export function foldKnownUsageSummaries(
+  summaries: readonly KnownUsageSummary[],
+): KnownUsageSummary {
   const folded: KnownUsageSummary = { knownCount: 0, unknownCount: 0, unpricedCount: 0 };
   for (const summary of summaries) {
     folded.knownCount += summary.knownCount;

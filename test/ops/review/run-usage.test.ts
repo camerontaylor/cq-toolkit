@@ -3,7 +3,11 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { makeTestRepo, repoEffects } from '../dev/repo.js';
 
-const noDriver: DriverFactory = { resolve: () => { throw new Error('unexpected driver'); } };
+const noDriver: DriverFactory = {
+  resolve: () => {
+    throw new Error('unexpected driver');
+  },
+};
 
 describe('review.run usage envelope', () => {
   it('attaches an empty summary to a pre-dispatch refusal', async () => {
@@ -24,16 +28,21 @@ describe('review.run usage envelope', () => {
     const repo = await makeTestRepo();
     try {
       await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
-      await repo.write('cq.json', JSON.stringify({
-        schemaVersion: 2,
-        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
-        roles: { reviewer: { provider: 'mock', model: 'mock' } },
-        budgets: { run: { maxTokens: 500 } },
-        review: { reviewers: ['agent'] },
-      }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
       repo.commitAll('usage fixture');
       const effects = repoEffects(repo, () => undefined, {
-        writeReviewLog: async () => { throw new Error('log unavailable'); },
+        writeReviewLog: async () => {
+          throw new Error('log unavailable');
+        },
       });
       const result = await makeReviewRun({
         drivers: noDriver,
