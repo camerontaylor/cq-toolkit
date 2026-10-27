@@ -1,4 +1,6 @@
 import type { DevEffects } from '../effects.js';
+import type { Finding } from '../../review/findings.js';
+import { restoreDurableDisposition } from '../../review/internal/durableDisposition.js';
 import { createHash } from 'node:crypto';
 import { consumeDeferredVendorReport } from './deferredSettlement.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -7,6 +9,7 @@ import { makeConfiguredQueueClient } from '../../review/queue.js';
 import type { DeferredQueueClient } from '../../review/internal/queueProtocol.js';
 import {
   DeferredVendorDebtSchema,
+  deferredReceiptFindings,
   hasPersistedVendorOutageOrigin,
   matchesDeferredVendorDebt,
   refreshDeferredVendorDebt,
@@ -181,6 +184,17 @@ export async function prepareDeferredVendorReview(
     queue,
     signal,
   );
+}
+
+/** Verified retained obligations are report findings, independent of current coverage.
+ * Never invent a current source or discard predecessor receipts after HEAD changes.
+ */
+export function retainedReceiptFindings(ledger: DevLedgerFile): Finding[] {
+  return deferredReceiptFindings(
+    ledger.records
+      .filter((entry) => entry.kind === 'vendor-debt')
+      .map((entry) => DeferredVendorDebtSchema.parse(entry.debt)),
+  ).map((finding) => restoreDurableDisposition(finding, ledger));
 }
 
 /** Latest exact enrollment only. Never fall back past a newer debt snapshot. */
