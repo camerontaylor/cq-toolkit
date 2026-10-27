@@ -761,7 +761,10 @@ export function meterDrivers(
             }
             let costUSD: number | undefined;
             try {
-              costUSD = normalizeUsageObservation({ costUSD: result.costUSD }).costUSD;
+              const reportedCost = result.costUSD;
+              costUSD = normalizeUsageObservation(
+                reportedCost === undefined ? {} : { costUSD: reportedCost },
+              ).costUSD;
             } catch {
               // Cost remains independent of malformed usage telemetry.
             }
