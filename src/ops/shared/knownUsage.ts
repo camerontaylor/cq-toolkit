@@ -18,6 +18,29 @@ export interface KnownUsageSummary {
   unpricedCount: number;
 }
 
+/** Fold engine summaries without treating each aggregate as one driver call. */
+export function foldKnownUsageSummaries(summaries: readonly KnownUsageSummary[]): KnownUsageSummary {
+  const folded: KnownUsageSummary = { knownCount: 0, unknownCount: 0, unpricedCount: 0 };
+  for (const summary of summaries) {
+    folded.knownCount += summary.knownCount;
+    folded.unknownCount += summary.unknownCount;
+    folded.unpricedCount += summary.unpricedCount;
+    if (summary.usage !== undefined) {
+      if (folded.usage === undefined) folded.usage = { ...summary.usage };
+      else {
+        folded.usage.input += summary.usage.input;
+        folded.usage.output += summary.usage.output;
+        folded.usage.cacheRead += summary.usage.cacheRead;
+        folded.usage.cacheWrite += summary.usage.cacheWrite;
+        if (summary.usage.reasoning !== undefined)
+          folded.usage.reasoning = (folded.usage.reasoning ?? 0) + summary.usage.reasoning;
+      }
+    }
+    if (summary.costUSD !== undefined) folded.costUSD = (folded.costUSD ?? 0) + summary.costUSD;
+  }
+  return folded;
+}
+
 function validUsage(usage: Usage): boolean {
   return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.reasoning].every(
     (value) => value === undefined || (Number.isSafeInteger(value) && value >= 0),
