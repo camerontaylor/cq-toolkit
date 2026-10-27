@@ -401,3 +401,20 @@ Started 2026-10-27T10:03:00Z (18:03 SGT, after the GLM blackout); exited **3** a
 - The 25 unreviewed fix commits are parked at `fix/s7-dogfood-address-469-v3-l-fixes` (`50ea6393`); v3 itself stays at the reviewed head.
 
 S7 acceptance (dev.cycle opens a PR) is still not met. This is the first run where no reviewer or transport failure occurred and the address leg ran to its budget. Fixing #532 would have published a draft with 25 fixes.
+
+## S7 dogfood attempt M: dev.cycle with #532's verified budget publication (v3 @ 2f2a1dcf)
+
+Same branch as L plus the #532 fix: structured budget attribution, `verifiedHead`, and dev.cycle publishing a budget/rereview-blocked DRAFT only for a clean tree at that head, with a pinned-SHA push. The launcher's CodeRabbit guard now uses `[c]oderabbit review`, so it can't match itself. Started 2026-10-27T14:24:55Z (22:25 SGT); exited **1** at 18:16:19Z (3 h 51 m). Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261027-m/`.
+
+- **dev.check:** green.
+- **review.run:** TERMINAL on both reviewers. CodeRabbit had 3 findings. The agent had **41 findings**, coverage v2 `partitioned` (1 890 changed lines / 24 files), **35/35 sessions, 24/24 pieces**, 384 112 tokens.
+- **review.address:** **30 verified fix commits** (one round, 19 batch runs, 106 attempts / 4 failed), 11 490 439 ms, 14 427 629 tokens (modeled $1.00). It stopped on the run budget with **`stop: 'budget'`** and `verifiedHead` = HEAD `485c0734`. The #532/D1 path engaged: final gates first.
+- **Final dev.check RED** (`k002-485c0734`), so nothing was pushed and no PR opened (the gates-first rule held):
+  - `check:static`: lint `await-thenable` at `test/ops/review/run.test.ts:1880`, from address fixes c002#f36/#f37;
+  - `test:narrow` 376/377: `check.test.ts` "automatic forms record their selection mode honestly", after address fixes to `src/ops/dev/check.ts`.
+    Root cause, filed **#535**: the address leg verifies against cq.json `checks` only, which for cq-toolkit are tsc + oxfmt-check (no lint, no tests). "Verified" fixes can therefore break gates the final dev.check runs, and the whole run is discarded together.
+- Unrelated to this exit: PR #534 (D1/D2 + #532 to merge-queue) later fixed one more edge (a CodeRabbit refusal followed by a deadline kill). M's head predates it, and M's CodeRabbit runs completed normally, so it didn't apply.
+- **#490** reproduced again (all 44 rows `open`).
+- The 30 unreviewed fix commits are parked at `fix/s7-dogfood-address-469-v3-m-fixes` (`485c0734`).
+
+S7 acceptance (a PR opens) is still not met. M is the first run where the whole pipeline reached publication: reviewers terminal, 30 fixes, a structured budget stop, and the verified head bound. Its own final gate rightly refused it. Next: #535 (make "verified" match the final gates).
