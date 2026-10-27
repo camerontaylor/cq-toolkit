@@ -16,8 +16,8 @@
 //                                `run` process group is killed); no
 //                                response is sent for a cancelled request
 //   ping                      → {}
-//   tools/list                → the served surface only, strict JSON
-//                                Schemas, no pagination
+//   tools/list                → the served canonical descriptors only, strict
+//                                JSON Schemas, no pagination
 //   tools/call                → surface.call → the CallToolResult; an
 //                                unlisted name or malformed params → -32602
 //   any other request → -32601; any other notification → ignored;

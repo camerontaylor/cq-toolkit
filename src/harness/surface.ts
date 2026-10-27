@@ -41,14 +41,18 @@ import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
-import { stripMetaSchema } from '../shared/json-schema.js';
 import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
-import { buildTools, canonicalToolName, toolAliases } from './tools.js';
+import { buildTools, canonicalToolDescriptor, canonicalToolName, toolAliases } from './tools.js';
 import { harnessRunGate } from '../sandbox/index.js';
 import type { HarnessRunGate } from '../sandbox/index.js';
-import type { ToolkitTool, ToolkitToolName, ToolkitToolResult } from './tools.js';
+import type {
+  CanonicalToolDescriptor,
+  ToolkitTool,
+  ToolkitToolName,
+  ToolkitToolResult,
+} from './tools.js';
 
 // ---------------------------------------------------------------------------
 // Naming
@@ -216,14 +220,7 @@ export interface McpCallToolResult {
 }
 
 /** One served tool: its descriptor plus the strict JSON Schema `tools/list` advertises. */
-export interface HarnessSurfaceTool {
-  name: ToolkitToolName;
-  description: string;
-  /** The harness zod input schema (strict). */
-  inputSchema: ToolkitTool['inputSchema'];
-  /** `z.toJSONSchema` of the strict input schema, meta-schema stripped (`additionalProperties: false`). */
-  inputJsonSchema: Record<string, unknown>;
-}
+export type HarnessSurfaceTool = CanonicalToolDescriptor;
 
 /** One call's outcome: the wire result and the harness outcome it was mapped from. */
 export interface HarnessCallOutcome {
@@ -237,7 +234,7 @@ export interface HarnessSurface {
   /** The served tools, in `manifest.tools` order. */
   readonly tools: readonly HarnessSurfaceTool[];
   /** True when `name` is a served tool. */
-  has(name: string): name is ToolkitToolName;
+  has(name: string): boolean;
   /**
    * Execute one served tool. Calls run one at a time, in arrival order.
    * Throws only for an unserved name (a caller bug — transports check
@@ -282,12 +279,7 @@ export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
     );
   }
   const served = requested.map((name) => byName.get(name as ToolkitToolName) as ToolkitTool);
-  const tools: HarnessSurfaceTool[] = served.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputSchema,
-    inputJsonSchema: stripMetaSchema(z.toJSONSchema(tool.inputSchema)) as Record<string, unknown>,
-  }));
+  const tools: HarnessSurfaceTool[] = served.map(canonicalToolDescriptor);
   /** Every accepted spelling (canonical + one-release aliases) → canonical. */
   const accepted = new Map<string, ToolkitToolName>();
   for (const name of requested) {
@@ -299,7 +291,7 @@ export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
   return {
     manifest,
     tools,
-    has(name: string): name is ToolkitToolName {
+    has(name: string): boolean {
       return accepted.has(name);
     },
     call(name, args, opts) {
