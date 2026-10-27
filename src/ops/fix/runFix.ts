@@ -554,7 +554,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           (row.report ?? (row.result.status === 'ok' ? row.result.value : undefined))?.tasks ?? [],
       );
       for (const row of report.units) {
-        const unit = row.input as SweepUnitDispatchInput;
+        const unit = plan.jobs.find((job) => job.id === row.jobId)
+          ?.input as SweepUnitDispatchInput;
+        if (unit === undefined) continue;
         const known = unstartedUnits.some(
           (entry) => entry.unit.package === unit.package && entry.unit.fixer === unit.fixer,
         );
