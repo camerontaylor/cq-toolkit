@@ -297,3 +297,26 @@ test('cq.json v2 metadata is not forwarded to the strict checkRunner input', asy
   expect(result.status).toBe('ok');
   expect(run.calls).toHaveLength(1);
 });
+
+test('real root cq.json analyzes repository checks without unscoped bounded tests', async () => {
+  const config = readFileSync(new URL('../../../cq.json', import.meta.url), 'utf8');
+  const dir = project({ 'cq.json': config });
+  const run = scripted([
+    { stdout: '', exitCode: 0 },
+    { stdout: 'Checking formatting...\nAll matched files use the correct format.', exitCode: 0 },
+    { stdout: JSON.stringify({ number_of_files: 1, diagnostics: [] }), exitCode: 0 },
+    { stdout: 'test:narrow result="refused" exit=2', exitCode: 2 },
+  ]);
+  const result = await makeAnalyzeRun(run)({ dir });
+  expect(result.status).toBe('ok');
+  expect(run.calls).toHaveLength(3);
+});
+
+test('analysis refuses configs with only address checks instead of reporting an empty clean run', () => {
+  const dir = project({
+    'cq.json': JSON.stringify({ schemaVersion: 2, checks: [{ ...TSC_CHECK, addressOnly: true }] }),
+  });
+  const resolved = resolveChecks(dir, {});
+  expect(resolved.ok).toBe(false);
+  if (!resolved.ok) expect(resolved.error).toContain('no repository checks');
+});

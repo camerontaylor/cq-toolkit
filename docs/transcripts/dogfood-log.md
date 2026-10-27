@@ -156,3 +156,401 @@ the open human-decision thread stays open.
 
 This is positive measured live acceptance: fixesPerRun over the S6 dogfood runs
 is 1 (A 0, B 0, C 0, D 1).
+
+## S7 dogfood attempt A — dev.cycle on fix/s7-dogfood-address-469
+
+First live `dev.cycle` run (the composition's own first run against a real
+diff; #470's evidence was fixture-only). Code work landed first as commit
+`24aba328e32d0a35eba40bba813e6c27ddb30c33` on `fix/s7-dogfood-address-469`
+(from `origin/merge-queue` @ `7cac1ec2`): #469 report truth (loop-side row +
+engine-settled `exit-published` / exit-failed / publication-off row states),
+verdict P2 #1 (a scripted push fault through the real engine's `finish()`,
+pinning the `verified publication failed` rewrite and the `report.stop`
+clearing) and P2 #2 (test:narrow's gated-file refusal names the re-run).
+Evidence: `test:narrow result="pass" exit=0 files=5 projects="pure,process"
+tests="227/227" failed=0 skipped=0 wait="0.0s" duration="21.3s" nice=5
+load="3.8" uptime="646004s" source="explicit"
+ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/plans/review-loop.test.ts,test/scripts/test-narrow.test.ts"`,
+plus `address-pr-git`/`address-local`/`addressBlockedRereview`/`addressPinBase`/
+`addressReceiptRotate`/`addressRerequestPersist`/`addressStaleClean`/`cycle`
+narrow runs green (312/312 across the day), `pnpm lint` exit 0, `pnpm
+format:check` clean.
+
+```sh
+node dist/cli.js dev.cycle --repoRoot=$PWD --push --target=merge-queue \
+  --title="fix(review.address): report exact publication state (#469) + verdict P2s"
+```
+
+Observed CLI exit: **1**, `failed` after 61 s wall — the FIRST leg
+(`dev.check`) went red, so no review/address/open legs ran and no PR was
+opened. The deterministic statics passed; the `test:narrow` gate was
+REFUSED, not failed:
+
+> test:narrow result="refused" exit=2 … source="base:7cac1ec2…" ran=-
+> reason="gated test files cover the change: test/e2e/review/live.test.ts
+> (integration), test/e2e/sweep/sweep.e2e.test.ts (integration); pass
+> --include-integration to run them (an opt-in gate, not a refusal — re-run
+> with --include-integration)"
+
+Root cause (structural, a dev.cycle defect candidate): dev.check invokes the
+wrapper as `pnpm test:narrow --base <sha>` with NO include flags (pinned at
+test/ops/dev/check.test.ts:269), and the `--base` selector's closure maps
+src/plans/review-loop.ts + src/ops/review/address.ts to the e2e files above.
+Two independent blocks follow: (a) the refusal — the exact gate this slice's
+P2 #2 clarified — cannot be satisfied from inside dev.check; and (b) even
+WITH `--include-integration` the run could never execute hermetically:
+`test/e2e/review/live.test.ts` is `describe.skipIf(!process.env.LIVE_GH)`
+opt-in, and a skipped file fails runVerdict's "no tests executed" rule. So
+no change touching the review-loop/address family can pass dev.cycle as
+shipped. The red record (`k001-24aba328`) persists in the branch dev-record;
+artifacts under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025/`.
+Per the lane protocol the failure itself is the finding: no `gh pr create`
+fallback, no gate-policy improvisation; the branch keeps commit `24aba328`
+for review through the normal path.
+
+## S7 dogfood attempt B — dev.cycle with --includeIntegration=true
+
+The chancellor's fix for attempt A landed as `4f8e494c` (dev.check gains an
+optional `includeIntegration` input appending `--include-integration` to the
+gate's `--base`/`--range` argv, recorded as `includeIntegration: true` in the
+check record; dev.cycle forwards it to both check legs; RED-first tests,
+statics, knip and regenerated op docs). Evidence: `test:narrow result="pass"
+exit=0 files=7 projects="pure,process" tests="180/180" failed=0` (the seven
+files are `dev.check`, `dev.cycle`, both registry suites, `review-loop`,
+`review.address` and `pr-open`), `pnpm lint` 0 errors,
+`format:check` clean, `knip` clean.
+
+```sh
+node dist/cli.js dev.cycle --repoRoot=$PWD --push --target=merge-queue \
+  --includeIntegration=true \
+  --title="fix(review.address): report exact publication state (#469) + verdict P2s; dev.cycle includeIntegration"
+```
+
+Observed CLI exit: **1**, `failed` after 45 s — again the first leg
+(`dev.check`), no review/address/open legs, no PR. The opt-in WORKED (record
+`k002-4f8e494c` carries `includeIntegration: true`; the integration gate
+refusal is gone), but the gate then refused on the FILE CAP:
+
+> test:narrow result="refused" exit=2 files=78 …
+> reason="78 test files selected, the cap is 10; name the files that cover
+> your change explicitly"
+
+Root cause (second structural defect, a dev.cycle defect candidate):
+dev.check selects with `--base`, and the full closure for any
+dev/registry-touching branch is far over the wrapper's owner-set 10-file
+cap. Reproduced and decomposed on triton: the vitest import-graph query
+returns **51** related test files for the branch's 8 src/scripts changes
+(`src/ops/dev/registry.ts` reaches the central registry barrel, so CLI
+conformance, smoke, driver, plans and e2e suites all import it), and the
+reviewed NON_IMPORT_MAP adds **27** more from four fan-out rows
+(`docs/ops/*` → `test/scripts/*`; `scripts/lib/test-narrow.mjs` →
+`test/scripts/*` + `test/workflows/*` + policyDiff; `src/ops/**` →
+cli/registry+conformance+served-model-sites; any `src/**/*.ts` →
+protectedPaths). 51 ∪ 27 = 78. Named-file selection (the wrapper's designed
+escape) is unavailable inside dev.check's automated `--base` call.
+
+The focused-checks contract reserves exactly this refusal as an ESCALATION
+TRIGGER (docs/focused-checks-contract.md §2 step 4: "the selection exceeds
+its file cap. That refusal is the escalation trigger … Do not launch another
+owner's gate"), so no local widening was improvised. The branch keeps both
+commits (`24aba328`, `4f8e494c`) plus this entry at `HEAD`; artifacts under
+`~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025-b/`; both red
+records (`k001-24aba328`, `k002-4f8e494c`) persist in the branch dev-record.
+Per the lane protocol: no `gh pr create` fallback; the failure is reported
+for an owner/coordinator decision on the cap-vs-closure policy.
+
+## S7 dogfood attempt C — dev.cycle with testFiles (named selection)
+
+Attempt B exposed the second blocker: the `--base` closure for any
+dev/registry-touching branch exceeds the owner's 10-file cap (decomposition:
+the vitest import-graph query returns **51** related test files for this
+branch's 8 src/scripts changes — `src/ops/dev/registry.ts` reaches the
+central registry barrel, dragging CLI conformance, smoke, driver, plans and
+e2e suites in — and the reviewed NON_IMPORT_MAP adds **27** more from four
+fan-out rows: `docs/ops/*` → `test/scripts/*`; `scripts/lib/test-narrow.mjs`
+→ `test/scripts/*` + `test/workflows/*` + policyDiff; `src/ops/**` →
+cli/registry + conformance + served-model-sites; any `src/**/*.ts` →
+protectedPaths. 51 ∪ 27 = 78). Per the chancellor's ruling the cap stays;
+the policy's own escape ("name a narrower set of files") is now exposed
+through the ops as `0b72de61`: dev.check gains `testFiles: string[]`
+(replaces the `--base`/`--range` selection, flags-first argv, dash-leading
+segments refused before any gate), the record discloses the narrowing as
+`testSelection: { mode: 'named', files }` vs `{ mode: 'base' | 'range' }`,
+and dev.cycle forwards it to every check leg. `ae669f3d` fixed the follow-on
+ledger-evolution defect attempt C-1 exposed (a REQUIRED new schema field
+made pre-existing records unloadable — all gates green, record unpersisted);
+`testSelection` is optional on read, always written. Evidence:
+`test:narrow result="pass" exit=0 files=10 projects="pure,process,integration"
+tests="231/231" failed=0` — the named selection IS the gate input, so the
+row's own numbers follow from the ten files above and reconcile with the
+record: all ten are selected (`planRun` puts a gated file in the run because
+`includeIntegration` covers its class, so the e2e file is not filtered out),
+`files` counts that run, `projects` names every project it uses
+(`integration` for test/e2e/review/review-address.e2e.test.ts), and a pass
+means every selected file executed at least one test — `runVerdict` fails a
+selected file that runs none, so nine files, an unrun file or an all-skipped
+file can never carry a green row. lint 0, format clean, knip clean.
+
+Named files for this branch (10, at the cap): test/plans/review-loop.test.ts,
+test/ops/review/address-pr.test.ts, test/ops/review/address.test.ts,
+test/e2e/review/review-address.e2e.test.ts, test/ops/dev/check.test.ts,
+test/ops/dev/cycle.test.ts, test/ops/dev/registry.test.ts,
+test/cli/registry.test.ts, test/scripts/test-narrow.test.ts,
+test/driver/process-inventory.test.ts.
+
+```sh
+node dist/cli.js dev.cycle --repoRoot=$PWD --push --target=merge-queue \
+  --includeIntegration=true --testFiles='[...the 10 files above...]' \
+  --title="fix(review.address): report exact publication state (#469) + verdict P2s; dev.cycle includeIntegration"
+```
+
+Observed CLI exit: **3**, `needs-human` after 275 s — PAST dev.check this
+time: the named-selection gate ran GREEN and persisted
+(`k003-6e3baf9f`, `testSelection.mode: 'named'`, all 10 files recorded,
+`includeIntegration: true`), then failed at leg 2 (`review.run`):
+
+> dev.cycle (review.run): review.run: not every configured reviewer
+> completed a terminal cycle; the findings record, including partial
+> findings, was persisted
+
+The ledger shows CodeRabbit TERMINAL (3 findings, coverage receipt logged)
+and the agent reviewer BLOCKED: `agent review did not complete (error)`,
+usage 0, first partition failed after 2 serialized requests — the OpenCode
+Go wire (`roles.reviewer`: `opencode-go`/`deepseek-v4.1-flash`) erroring at
+dispatch, consistent with the 5-hour quota 429 the lane was pre-warned
+about. Per protocol cq.json was NOT touched. Failure time: 2026-10-25
+~23:17:20 +1100. No push, no PR (remote head still `35de807d`; the branch
+carries `24aba328`, `4f8e494c`, `0b72de61`, `ae669f3d`, `6e3baf9f` + this
+entry). Artifacts: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261025-c/`,
+agent log `~/.jcode/scratch/cq-dev-review/fix_s7-dogfood-address-469-…-agent-…log`.
+Defect candidate from C-1 (fixed in-branch): required-field ledger evolution.
+Remaining: rerun when the Go key's quota window resets.
+
+## S7 dogfood attempts D–J: dev.cycle on fix/s7-dogfood-address-469 (paused)
+
+Attempt D ran attached and was killed by the lane shell-tool timeout; every run from its rerun
+onward (D take 3–J) was detached on triton, from `dist` at the named head, with the same flags as
+attempt C (`--push --target=merge-queue --includeIntegration=true` plus 10 named
+`--testFiles`). Run state lives under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
+Every run exited **3** at `review.run` or `review.address`, and **none opened a PR**.
+Every run except D surfaced a defect, and each of those was fixed in-branch — except J's,
+which is left unfixed while the lane is paused:
+
+| Attempt  | Head       | Stopped at                                    | Cause                                                                                                                                                                                     | Fix                                                                                               |
+| -------- | ---------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| D        | `e1b63507` | process killed silently after the secret scan | lane shell-tool timeout (runs are now detached)                                                                                                                                           | —                                                                                                 |
+| D take 3 | `e1b63507` | review.run                                    | CodeRabbit no-fresh notice on an already-reviewed head (#485); DeepSeek reviewer emits DSML tool-call markup (#483)                                                                       | `0b6c3276` reviewer → `zai`/`glm-5.3-flash` (owner)                                               |
+| E        | `0b6c3276` | review.run, partition 4                       | ai-sdk per-request step timeout hard-coded at 120 s                                                                                                                                       | `01127c00` step bound from `budgets.step.wallMs`                                                  |
+| F        | `01127c00` | review.run, partition 20/28                   | undici default headersTimeout of 300 s on the non-streaming repair call; error detail dropped (#484)                                                                                      | `15d9b8df` (#484), `56b7bdd4` (undici timeouts follow the step bound)                             |
+| G        | `56b7bdd4` | review.run, partition 11/32                   | `output-invalid`: GLM added an unknown key `rule_id_hint` to a finding                                                                                                                    | `35daf528` strip and count unknown finding keys                                                   |
+| H        | `35daf528` | review.address, budget                        | review.run TERMINAL on both reviewers (agent: 64 findings). Address made **8 verified fix commits** but nothing was published, and the legs didn't share the run wall (5 h 48 m)          | `fa9b1948` budget stop publishes a draft; one run budget across legs. #490 (rows stay `open`)     |
+| I        | `fa9b1948` | review.run, partition 9/34                    | one GLM request ran the full 20-min step bound                                                                                                                                            | `fc59ec3d` step bound 1 h (owner), `0ff7c961` one retry per partition on transient/output-invalid |
+| J        | `0ff7c961` | review.run                                    | GLM degenerate loop: 458 676 chars of hallucinated `BASH:` calls and echoed schema, until the model's output limit. `finishReason: 'length'` maps to `budget-exhausted` (`index.ts:1781`) | — (paused)                                                                                        |
+
+**Measured:** attempt H `fixesPerRun` = **8** (`c013-35daf528#f3`, `#f4`, `#f5`, `#f15`,
+`#f34`–`#f37`; ~6.9M tokens, ~4 h address wall). This is the first live review-side run with
+multiple verified fixes. The chancellor pushed them as `00fb37ba` after the run.
+
+**Paused (owner, 2026-10-26):** the agent reviewer's remaining failures share #483's root
+cause, a tool-less turn told to "use the tools", and #483's redesign replaces that reviewer.
+The S7 acceptance run (dev.cycle opens a PR with a readiness record) is rerun on top of #483.
+
+## S7 dogfood attempt K: dev.cycle on the #483 session reviewer (fix/s7-dogfood-address-469-v2)
+
+The branch was rebuilt from `origin/main` `e4732cc3`, which carries #483 A–D. Ported onto it:
+#469 + P2s, includeIntegration/testFiles, the D1/D2 budget-stop publication and shared run
+budget, cq.json (reviewer `zai`/`glm-5.3-flash`, `budgets.step.wallMs` 3 600 000), and three
+minimal deltas main still lacked: the `budgets.step.wallMs` → `stepTimeoutMs` wiring, the undici
+step-fetch transport, and the finding-item key strip. Main's own versions replaced the #484
+detail and the partition retry. Same invocation as attempts E–J, detached on triton from `dist`
+at `0663e37a`. Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261027-k/`.
+
+Started 2026-10-26T22:55:53Z (06:55 SGT); exited **3** at 2026-10-27T02:24:45Z (3 h 29 m).
+
+- **dev.check:** green.
+- **review.run:** TERMINAL on both reviewers, the first clean pass on the session reviewer.
+  CodeRabbit had 1 finding. The agent reviewer had **37 findings**, coverage v2 `partitioned`
+  (1 637 changed lines / 33 files exceed the medium tier, advisory recorded), **35/35 sessions
+  complete, 33/33 pieces completed**, no limitations, 361 324 tokens. None of attempts E–J's
+  review.run failure modes recurred: no step timeout, no undici cut, no extra-key rejection.
+  Attempt H's publish-loss failure mode is the one recurrence — as in H, the verified fixes
+  went unpublished (see the address bullets below and #509).
+- **review.address:** **7 verified fix commits** (`8fd86528`, `0699aca3`, `0e8dd36e`,
+  `0b9fad2c`, `398c2a97`, `5c09971c`, `afdb134a`; `fixesPerRun` 7) in 1 h 57 m, using 6 513 080
+  tokens (modeled cost $0.41). It stopped on its re-review: both reviewers lost the network in
+  a **host DNS outage on triton**. The agent got `getaddrinfo EAI_AGAIN api.z.ai` after 2
+  attempts; CodeRabbit got `con_err: webSocket connection failed` at 02:24:15Z. The
+  re-review sessions `ses-mvq2be0e-9b6e90d7` and `ses-mvq2bjbf-20da26da` hold only the
+  prompt. **The exit was caused by the environment, not by the product.**
+- **No push, no PR:** a blocked re-review isn't a `round-cap`/`budget` stop, so dev.cycle
+  propagated it verbatim and the 7 commits stayed local. Filed **#509**: verified fixes stay
+  unpublished when the re-review blocks (needs a decision against the earlier P1 control).
+  Also filed **#510**: `rounds[]` gets one entry per batch, each repeating the full record (20
+  entries here). #490 reproduced without a budget stop (all 38 rows `open`) and was commented.
+
+S7 acceptance (dev.cycle opens a PR with a readiness record) is still not met. Rerun once the
+host network is stable; #509 decides whether the next blocked re-review still loses the fixes.
+
+## S7 dogfood attempt L: dev.cycle on merge-queue + D1/D2 (fix/s7-dogfood-address-469-v3)
+
+The branch was built fresh from `origin/merge-queue` `3f1e61da`, which carries #504, #511 (step bound wiring, undici transport, finding-key strip), #513 (re-review retry + `rereview-blocked` draft), #515 (oxfmt-check gate) and #516 (`rounds[]` per round). On top of that: #469 + P2s, includeIntegration/testFiles, D1/D2 (with `stop` = round-cap | budget | rereview-blocked), the A–K log, and cq.json (reviewer `zai`/`glm-5.3-flash`, `budgets.step.wallMs` 3 600 000). Same invocation as E–K, detached on triton from `dist` at `07397c69`. Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261027-l/`.
+
+Started 2026-10-27T10:03:00Z (18:03 SGT, after the GLM blackout); exited **3** at 13:53:01Z (3 h 50 m). The start was 2 min late because the launcher's "wait for a running CodeRabbit review" guard matched its own launching shell (run.sh text in its command line); that shell was stopped by exact PID.
+
+- **dev.check:** green.
+- **review.run:** TERMINAL on both reviewers. CodeRabbit had 1 finding. The agent had **26 findings**, coverage v2 `partitioned` (1 329 changed lines / 20 files), **28/28 sessions complete, 20/20 pieces completed**, 290 004 tokens. No step-timeout, transport or schema failure.
+- **review.address:** **25 verified fix commits** (`fixesPerRun` 25; the address checks now include the oxfmt-check gate), one round, 14 batch runs, 88 attempts (4 failed), 12 077 247 ms, 9 966 983 tokens (modeled $0.78).
+- **Stop:** the re-review's agent reviewer ran out of the address leg's wall budget (4 h − 10-min reserve ends at 13:53). The block reached `finish()` with no structured stop. D1's `budget` marker is set only when the leg's own `stop()` observes exhaustion, and on this path nothing called it. So dev.cycle propagated the block verbatim: **no push, no PR**, reserve unused. Filed **#532** (root cause and fix direction). CodeRabbit's re-review completed (2 findings).
+- **#490** reproduced again (all 27 rows `open` despite 25 fixes).
+- The 25 unreviewed fix commits are parked at `fix/s7-dogfood-address-469-v3-l-fixes` (`50ea6393`); v3 itself stays at the reviewed head.
+
+S7 acceptance (dev.cycle opens a PR) is still not met. This is the first run where no reviewer or transport failure occurred and the address leg ran to its budget. Fixing #532 would have published a draft with 25 fixes.
+
+## S7I source integration (2026-10-28)
+
+Fresh queue base: `1eea0b5b323de8b23a9388a72da4e97f8e631450` (#534).
+Source: v3 `2f2a1dcfd7efe185d6f07b5e010a44b4f3467c35`;
+parked L: `50ea63939e4d54555e8329ffeeaee158e28bf26a`.
+This is source integration, not a new live acceptance attempt.
+
+Re-read on triton: L's start.txt names runtime head `07397c69` and
+2026-10-27T10:03:00Z; exit.txt records EXIT=3 at 13:53:01Z.
+stdout.log points to address report
+`<worktrees>/.cq-address-runs/e106122c-7d6a-4fac-88b0-349873779cd0/review-address-report.json`.
+That report has fixesPerRun=25, one round, no stop marker and 27 open rows.
+No successful publication or O2 acceptance is claimed.
+
+**Route reconciliation (DEC5):** retain queue's cq.json byte-for-byte,
+including its production reviewer route and budgets. Do not port v3's experimental
+GLM route or one-hour step override. Queue's #534 structured publication,
+verified-head checks and newer CLI stream-refusal precedence are preserved.
+The old v3 review/run.ts and agentReviewer.ts differences are omitted because
+queue has newer fatal-stop/tool-failure handling. dev/review.ts receives the
+missing DevCycleInput includeIntegration/testFiles fields plus the explicitly
+authorized M wall-attribution/sampling region described below. Q4/Q5 owns
+future dev.review behavior and context extraction.
+
+**Parked L applicability inventory:** all 25 changes remain applicable to the
+remaining v3 seam, including documentation and stronger fixture assertions.
+They are ported selectively onto current queue source, without copying parked
+branch history or changing its ref.
+
+| L commit | Finding  | Applied behavior or evidence                                         |
+| -------- | -------- | -------------------------------------------------------------------- |
+| 69fee213 | c002 f1  | Correct attached versus detached D run history                       |
+| 04ae16c8 | c001 f1  | Disclose test scope only when legacy test gate ran                   |
+| c4d8a12d | c002 f4  | Reject empty named test selection before gates (also schema-guarded) |
+| fadb67cf | c002 f2  | Correct D/J defect and fix history                                   |
+| aa19afea | c002 f3  | Limit K non-recurrence claim to review.run                           |
+| dbb5f214 | c002 f5  | Reject conflicting range and named selection                         |
+| a51f663a | c002 f6  | Document propagation to every check path                             |
+| 22de036f | c002 f10 | Reject option-shaped named files at shared input schemas             |
+| 80e7d851 | c002 f7  | Skip agentic legs when remaining run budget is exhausted             |
+| 1e7e2561 | c002 f8  | Explain shared default driver factory and metering                   |
+| b0f303e4 | c002 f12 | Settle withheld rows when no engine publication ran                  |
+| cb0b106a | c002 f13 | Preserve published witness after post-push failure                   |
+| f4d5af5a | c002 f9  | Meter structurally valid partial usage on driver rejection           |
+| 512d371f | c002 f14 | Avoid suggesting exit publication when push is disabled              |
+| 257b1326 | c002 f15 | Assert named selections emit neither base nor range flags            |
+| e31c10a3 | c002 f16 | Pin conflicting selection refusal and nonempty ledger                |
+| 6fd3eb91 | c002 f19 | Assert absent integration opt-in stays undefined                     |
+| f69c6b9e | c002 f17 | Cover bare and path-shaped dash-prefixed file rejection              |
+| 5df38a19 | c002 f21 | Bound address wall remainder on both sides                           |
+| d0949e5d | c002 f18 | Assert both base and range record modes                              |
+| f8aaa5ef | c002 f22 | Assert cycle result before wall-budget comparisons                   |
+| c9a4f6b5 | c002 f24 | Document persistent scripted push fault                              |
+| 8040ba18 | c002 f23 | Pin the exact unmarked budget-like refusal reason                    |
+| 7179405f | c002 f25 | Keep unrelated loop reasons from satisfying withhold assertions      |
+| 50ea6393 | c002 f26 | Assert opt-in guidance against ordinary refusal text                 |
+
+Already landed and not reimported: v3's shared cycle budget, reserve,
+structured budget-stop publication and associated address tests are in #534.
+The publication-truth changes here settle existing mixed-worktree reason rows;
+they do not implement #490's final disposition/delivery redesign. No further live attempt or provider evaluation is authorized.
+
+Integration fixture adaptations: L f17 now accepts the shared-schema diagnostic for bare options while requiring refusal before gates; L f22 uses a CodeRabbit-configured fixture to match its seeded readiness ledger. The initial named run failed on those two mismatches (324/326); production guards were retained.
+
+### Existing M: bounded fixture reconciliation
+
+M was discovered after it had run; S7I did not launch it. Its retained head is
+`485c0734b02114b4a5ce55c4db657bea082d5b32`, on runtime/source
+`2f2a1dcfd7efe185d6f07b5e010a44b4f3467c35`. The parked worktree and ref
+are preserved. The existing address report
+`<worktrees>/.cq-address-runs/9c002450-626f-4383-9c23-6e88fc3d63ea/review-address-report.json`
+records 30 verified fixes and stop=budget; final gates were red and nothing
+was published. Its lost temporary report cannot establish the original failed
+assertion.
+
+A named fixture reproduction on current queue source isolated M f21's faulty
+first-row lookup: the second run appends a range record, but the first row
+still says base. Reintroducing only that lookup produced
+`expected { mode: 'base' } to deeply equal { mode: 'range' }`.
+The existing L d0949e5d last-row fix was restored afterward. This is causal
+fixture evidence, not recovery of the missing original test artifact.
+
+Exact reproduction result:
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="38/39" failed=1 skipped=0 wait="0.0s" duration="8.1s" nice=5 load="1.7" uptime="841310s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/dev/check.test.ts"
+```
+
+The scoped M review/run fixture delta passed against queue source (63/63).
+Its added await on synchronous repo.git was removed to address M's recorded
+await-thenable lint failure. No M review/run.ts or agentReviewer.ts source was
+imported.
+
+**M applicability inventory (all 30 retained fixes):**
+
+| M commit | Disposition in S7I                                                                             |
+| -------- | ---------------------------------------------------------------------------------------------- |
+| a6ca4115 | Already covered by L04ae16c8 legacy-only scope disclosure                                      |
+| a049ba7d | Apply explicit attempt A log heading                                                           |
+| b8e6857c | Omit duplicate comment clarification; current legacy-only comment is accurate                  |
+| 6903f833 | Apply guarded publication work-state re-read failure diagnostics                               |
+| 1ec084b3 | Already covered by Lc4d8a12d empty selection guard                                             |
+| de0b9031 | Already covered by Lf4d5af5a rejected-driver usage metering                                    |
+| 531b1735 | Apply wall-only budget attribution under explicit narrow authorization; preserve streamRefusal |
+| 11bedcc1 | Apply finite total guard; retain L's strict structural Usage validation                        |
+| 5879e99e | Apply single completion-time wall sample for marker and completion                             |
+| b1f939b9 | Apply late budget-stop reason recording without changing cancellation guards                   |
+| 9701bdd3 | Omit expanded comment; queue verified-head guard retained                                      |
+| fb392247 | Omit reviewer-engine delta outside owned source seam; queue implementation retained            |
+| 2e7f372e | Omit reviewer-engine budget marker delta outside owned seam                                    |
+| d0a5cf5e | Already covered by Lcb0b106a published-witness preservation                                    |
+| ef6313ca | Defer reviewer-engine budget/transient classification outside owned seam                       |
+| 567e8f68 | Already covered by Lb0f303e4 publication-truth settlement                                      |
+| 46965dfa | Omit defective first-row assertion; retain Ld0949e5d last-row assertion                        |
+| a9d63cce | Defer reviewer-engine admission attribution outside owned seam                                 |
+| 787a7f7a | Already covered by L6fd3eb91 undefined integration opt-in assertion                            |
+| e2a5a241 | Apply persistent push-fault helper rename; retain L's accurate persistent-fault comment        |
+| 88ade437 | Apply incompatible fixture knob guard and identity-based T3 file                               |
+| 576557ef | Apply production reason/structured-stop pairing and distinct draft headings                    |
+| b48b3505 | Omit redundant assertion removal; current stronger assertions retained                         |
+| b99208d8 | Apply two-check-leg proof for verified-head refusal matrix                                     |
+| d966bb3b | Apply push-only transport counter and honest non-push response                                 |
+| 255d41d2 | Apply real thrown-driver fixture instead of an injected reviewer throw                         |
+| ab31ab70 | Apply unmasked structured-result assertions; remove erroneous synchronous await                |
+| 488f5268 | Omit temporary-repo hard reset; existing per-case fixture cleanup retained                     |
+| afa9651e | Apply exact propagated refusal reason, strengthening L8040ba18                                 |
+| 485c0734 | Already covered by L7179405f accurate loop-only text/title assertions                          |
+
+M f7/f8 do not remove DevCycleInput fields. The earlier removal claim was
+corrected after directly comparing v3 and M. The coordinator subsequently
+authorized only their exact budgetStopped/completion-sampling region beyond
+the fields-only change. The port samples wall remaining once, requires actual
+wall exhaustion for budgetStopped, and retains queue's streamRefusal guard and
+streamRefusal ?? completion precedence. No transient/refusal handling changes.
+
+Direct named fixtures cover terminal and killed CLI results for parent
+cancellation with positive wall remaining, wall exhaustion alone, and both
+simultaneously; existing explicit error/action/skipped/no-fresh expiry fixtures
+remain. Parent cancellation with wall remaining stays blocked without a budget
+marker. When both cancellation and wall expiry are observed, a qualifying
+terminal/killed CLI receives the wall marker absent an explicit stream refusal;
+this does not prove which event caused the stop. Parent cancellation still
+has the address engine's independent publication exclusion. No stronger
+causal cancellation guarantee is claimed.
+
+Reviewer-engine omissions remain reported to the coordinator. No
+planner/partition/session/driver source or production route configuration
+is changed.

@@ -78,7 +78,10 @@ export function staticRelatedCheckCommand(
   if (adapter === 'tsc-lines') return { ...check, args: [...check.args] };
   // The format gate scopes to the task files only through an explicit
   // {files} template; otherwise it checks the whole configured scope.
-  if (adapter === 'oxfmt-check')
+  // Non-code fixes still need real lint evidence: use the configured scope.
+  if (adapter === 'oxlint-json' && !files.some((file) => /\.[cm]?[jt]sx?$/.test(file)))
+    return { ...check, args: [...check.args] };
+  if (adapter === 'oxfmt-check' || adapter === 'oxlint-json')
     return files.length > 0 && relatedArgs?.includes('{files}') === true
       ? relatedCheckCommand(check, files, relatedArgs)
       : { ...check, args: [...check.args] };

@@ -596,13 +596,17 @@ export function makeFixRun(deps: FixRunDeps = {}) {
 
 /**
  * The cq.json checks a fix source may draw on: those of the source's kind,
- * minus the gate-only format check (`oxfmt-check`). A format failure is not
+ * minus the verification-only format, typed-lint and bounded-test checks. These are not
  * something fix.run repairs; it still gates every candidate wherever the
  * full check list runs (review.address validation, dev.check).
  */
-export function fixSourceChecks<T extends { kind?: string; adapter: string }>(
-  checks: readonly T[],
-  source: string,
-): T[] {
-  return checks.filter((check) => check.kind === source && check.adapter !== 'oxfmt-check');
+export function fixSourceChecks<
+  T extends { kind?: string; adapter: string; addressOnly?: boolean },
+>(checks: readonly T[], source: string): T[] {
+  return checks.filter(
+    (check) =>
+      check.addressOnly !== true &&
+      check.kind === source &&
+      !['oxfmt-check', 'oxlint-json', 'test-narrow'].includes(check.adapter),
+  );
 }

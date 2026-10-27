@@ -39,7 +39,14 @@ import type { RegressionGateInput } from './regressionGate.js';
  */
 export const CheckRunnerInputObject = z
   .object({
-    adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines', 'oxfmt-check']),
+    adapter: z.enum([
+      'vitest-json',
+      'eslint-json',
+      'tsc-lines',
+      'oxfmt-check',
+      'oxlint-json',
+      'test-narrow',
+    ]),
     // Strict: an unknown key inside command (a typo'd timeoutMS) must fail
     // loudly, not be silently stripped into an uncapped-looking input.
     command: z
@@ -112,6 +119,7 @@ export const FailureSetSchema: z.ZodType<FailureSet> = z
     failures: z.array(CheckFailureSchema),
     exitCode: z.number().nullable(),
     numTotalTests: z.number().int().nonnegative().exactOptional(),
+    advisories: z.array(z.string()).exactOptional(),
     numPassedTests: z.number().int().nonnegative().exactOptional(),
     numPassed: z.number().int().nonnegative().exactOptional(),
     numSkippedTests: z.number().int().nonnegative().exactOptional(),

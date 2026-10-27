@@ -25,7 +25,10 @@ export function resolveCqConfigDefaults(config: CqConfig, flags: CqConfigFlags) 
     checks: c.checks.map((check) => ({
       ...check,
       kind:
-        check.kind ?? (check.adapter === 'vitest-json' ? ('tests' as const) : ('static' as const)),
+        check.kind ??
+        (['vitest-json', 'test-narrow'].includes(check.adapter)
+          ? ('tests' as const)
+          : ('static' as const)),
     })),
     roles: { ...c.roles, ...f.roles },
     budgets: {

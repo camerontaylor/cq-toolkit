@@ -19,6 +19,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "base": {
       "additionalProperties": false,
       "properties": {
+        "advisories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "exitCode": {
           "type": [
             "number",
@@ -147,6 +153,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "final": {
       "additionalProperties": false,
       "properties": {
+        "advisories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "exitCode": {
           "type": [
             "number",
