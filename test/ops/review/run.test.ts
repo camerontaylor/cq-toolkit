@@ -103,6 +103,11 @@ describe('review.run', () => {
       true,
     ],
     ['any other CLI error is not', 'Review failed: auth_required', false],
+    [
+      'a dropped connection followed by an auth error is not',
+      'Review failed: con_err: socket closed\nAUTH',
+      false,
+    ],
   ] as const)('#509: %s', async (_label, message, transient) => {
     const repo = await makeTestRepo();
     try {
@@ -120,7 +125,14 @@ describe('review.run', () => {
         command === 'coderabbit'
           ? {
               exitCode: 1,
-              stdout: `${JSON.stringify({ type: 'error', errorType: 'review', message, recoverable: false })}\n`,
+              stdout: message
+                .split('\nAUTH')
+                .map((text, index) =>
+                  index === 0
+                    ? `${JSON.stringify({ type: 'error', errorType: 'review', message: text, recoverable: false })}\n`
+                    : `${JSON.stringify({ type: 'error', errorType: 'review', message: 'Review failed: auth_err: login required', recoverable: false })}\n`,
+                )
+                .join(''),
               stderr: 'Error: An unexpected error occurred.',
               timedOut: false,
             }

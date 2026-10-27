@@ -72,13 +72,13 @@ export interface ParsedReviewerStream {
   /** true when an `error` event arrived. */
   sawError: boolean;
   /**
-   * The vendor error code of the first `error` event, when its message
-   * carries one (`Review failed: con_err: …` → `con_err`). The CLI exposes
-   * no structured error class (`errorType` is `review` and `recoverable` is
-   * false even for a dropped connection), so the code is read with an
-   * anchored pattern, never a free-text search.
+   * The vendor error code of EVERY `error` event, in order (`Review failed:
+   * con_err: …` → `con_err`; '' when an event carries no code). The CLI
+   * exposes no structured error class (`errorType` is `review` and
+   * `recoverable` is false even for a dropped connection), so the code is
+   * read with an anchored pattern, never a free-text search.
    */
-  errorCode?: string;
+  errorCodes: string[];
   /** true when an action-required (billing-confirmation-class) event arrived. */
   sawActionRequired: boolean;
   /** The complete event's message VERBATIM, when it carried one. */
@@ -113,6 +113,7 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
     sawComplete: false,
     trailingAfterComplete: 0,
     sawError: false,
+    errorCodes: [],
     sawActionRequired: false,
     unparsedLines: 0,
   };
@@ -174,10 +175,9 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
       }
       case 'error': {
         parsed.sawError = true;
-        const code = /^(?:Review failed: )?([a-z]+_err):/.exec(
-          stringAt(event, 'message') ?? '',
-        )?.[1];
-        if (code !== undefined) parsed.errorCode ??= code;
+        parsed.errorCodes.push(
+          /^(?:Review failed: )?([a-z]+_err):/.exec(stringAt(event, 'message') ?? '')?.[1] ?? '',
+        );
         break;
       }
       case 'action_required':
@@ -270,4 +270,27 @@ export function decideCompletion(exitCode: number, parsed: ParsedReviewerStream)
     };
   }
   return { kind: 'terminal' };
+}
+
+/**
+ * #509: the blocked run is the network class ONLY when the stream is wholly
+ * that: at least one error event, every error event a dropped connection
+ * (`con_err`), no action-required event, no unparsed line, and a process
+ * that exited on its own with a failure (not killed, not timed out). Any
+ * other condition vetoes the retry/draft path.
+ */
+export function isTransientReviewerFailure(
+  parsed: ParsedReviewerStream,
+  raw: { exitCode: number | null; timedOut: boolean },
+): boolean {
+  return (
+    raw.exitCode !== null &&
+    raw.exitCode !== 0 &&
+    !raw.timedOut &&
+    parsed.sawError &&
+    parsed.errorCodes.length > 0 &&
+    parsed.errorCodes.every((code) => code === 'con_err') &&
+    !parsed.sawActionRequired &&
+    parsed.unparsedLines === 0
+  );
 }

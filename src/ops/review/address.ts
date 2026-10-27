@@ -243,6 +243,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // persisted below so the written artifact agrees with the returned
       // envelope (and the publication-failure clearing above, which erases
       // the marker, is included in both).
+      // #509: a stopped run (parent cancelled, bookkeeping tampered, budget
+      // spent) never carries the blocked-re-review publication marker.
+      if (structuredStop === 'rereview-blocked' && (parent?.aborted || cleanStop?.() !== undefined))
+        structuredStop = undefined;
       if (structuredStop !== undefined) report.stop = structuredStop;
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
@@ -531,8 +535,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               maxTokens: Math.max(1, remainingTokens()),
               wallMs: Math.max(1, remainingWallMs()),
             });
+            // A budget, cancellation or bookkeeping stop observed after the
+            // retry outranks it: never mark a draft over a stopped run.
             rereviewStillTransient =
-              second.status === 'needs-human' && second.report?.blockedTransient === true;
+              second.status === 'needs-human' &&
+              second.report?.blockedTransient === true &&
+              stop() === undefined;
             return second;
           };
           const rereviewStop = (): 'rereview-blocked' | undefined =>

@@ -49,6 +49,7 @@ import {
   CODERABBIT_REVIEWER,
   coderabbitReviewArgv,
   decideCompletion,
+  isTransientReviewerFailure,
   parseReviewerStream,
 } from './coderabbit.js';
 import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
@@ -505,7 +506,7 @@ function makeReviewCycle(
           completion.kind === 'blocked' &&
           !signal?.aborted &&
           (remainingWallMs?.() ?? Infinity) > 0 &&
-          parsed.errorCode === 'con_err';
+          isTransientReviewerFailure(parsed, raw);
         return {
           completion,
           logPath,

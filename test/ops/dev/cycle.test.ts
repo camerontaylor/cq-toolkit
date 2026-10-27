@@ -933,7 +933,11 @@ describe('dev.cycle', () => {
     expect(opens).toEqual([
       { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
     ]);
+    // The findings section names the blocked re-review, never the round cap.
     expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+    expect(bodies[0]).toContain('## Findings after a blocked re-review');
+    expect(bodies[0]).toContain('made 1 verified fix(es), then its re-review stayed blocked');
+    expect(bodies[0]).not.toContain('round cap');
   });
 
   test('#509: a red FINAL gate on the blocked-re-review path refuses verbatim — NO push, NO PR', async () => {
