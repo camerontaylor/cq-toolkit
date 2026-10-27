@@ -302,9 +302,9 @@ export async function runAgentReviewer(
                     );
                     returned = true;
                     settleUsage(() => ({
-                        usage: value.usage,
-                        ...(value.costUSD === undefined ? {} : { costUSD: value.costUSD }),
-                      }));
+                      usage: value.usage,
+                      ...(value.costUSD === undefined ? {} : { costUSD: value.costUSD }),
+                    }));
                     return value;
                   } catch (error) {
                     if (!returned) settleUsage(() => ({}));
