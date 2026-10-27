@@ -70,9 +70,11 @@ export interface DevCheckInput {
    * a too-broad automatic selection, S7 dogfood attempt B): replaces the
    * `--base`/`--range` selection entirely. The names ride argv positionals
    * after the flags, so a dash-prefixed value is refused here (option
-   * injection); the record discloses the narrowing as
-   * `testSelection: { mode: 'named', files }` — a reader must be able to
-   * tell a named gate from an automatic one.
+   * injection); an EMPTY array is refused too — a named selection must name
+   * at least one file (the gate would otherwise run test:narrow with no
+   * selector while the record claims mode:'named'). The record discloses
+   * the narrowing as `testSelection: { mode: 'named', files }` — a reader
+   * must be able to tell a named gate from an automatic one.
    */
   testFiles?: string[];
 }
@@ -317,6 +319,19 @@ export function makeDevCheck(
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
+    // A named selection must name something: an empty testFiles would spread
+    // to no selector at all in the gate argv below, leaving test:narrow's
+    // no-selection default in charge (a vacuous pass or an accidental full
+    // run) while the record still discloses mode:'named' with files:[] —
+    // indistinguishable-in-effect from automatic, which the disclosure exists
+    // to prevent. Refused BEFORE any gate runs, with the option-shaped
+    // entries checked next.
+    if (input.testFiles !== undefined && input.testFiles.length === 0)
+      return {
+        status: 'failed',
+        error:
+          'dev.check: testFiles must name at least one test file — an empty array is refused; omit testFiles entirely for the automatic --base/--range selection',
+      };
     // Named files ride argv as positionals AFTER the flags, so any
     // dash-leading segment ("-x" or "test/-evil.test.ts" — a basename
     // starting with '-' reaches getopt once the shell expands it) could be
