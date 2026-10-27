@@ -763,6 +763,8 @@ describe('dev.review cycle', () => {
 
   test('an unchanged rerun over an exact terminal record makes ZERO vendor calls and returns reuse evidence', async () => {
     const state = await seed(repo);
+    // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
+    const reuseId = `r001-${state.head.slice(0, 8)}`;
     let coderabbitRuns = 0;
     const effects = repoEffects(repo, (command) => {
       if (command === 'coderabbit') coderabbitRuns += 1;
@@ -773,7 +775,7 @@ describe('dev.review cycle', () => {
     expect(coderabbitRuns).toBe(0);
     if (result.status !== 'ok') return;
     expect(result.value.reuse).toMatchObject({
-      reuseId: 'r001-aaaaaaaa',
+      reuseId,
       basis: 'exact-terminal',
     });
     expect(result.value.cycleId).toBe('c001-aaaaaaaa');
@@ -788,7 +790,7 @@ describe('dev.review cycle', () => {
     const reuse = ledger.records.find((r) => r.kind === 'reuse');
     expect(reuse).toMatchObject({
       kind: 'reuse',
-      reuseId: 'r001-aaaaaaaa',
+      reuseId,
       cycleId: 'c001-aaaaaaaa',
       basis: 'exact-terminal',
       base: state.base,
@@ -809,6 +811,8 @@ describe('dev.review cycle', () => {
         dirtySha256: current.dirtySha256,
       }),
     ]);
+    // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
+    const reuseId = `r001-${state.head.slice(0, 8)}`;
     const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
@@ -828,7 +832,7 @@ describe('dev.review cycle', () => {
     });
     const reuse = ledger.records.find((r) => r.kind === 'reuse');
     expect(reuse).toMatchObject({
-      reuseId: 'r001-bbbbbbbb',
+      reuseId,
       cycleId: 'c001-aaaaaaaa',
       basis: 'no-fresh-tail',
       resolvesCycleId: 'c002-bbbbbbbb',
@@ -945,7 +949,12 @@ describe('dev.review cycle', () => {
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
       expect(result.value.findings).toEqual([
-        { id: 'c001-aaaaaaaa#f1', severity: 'major', fileName: 'src/a.ts', excerpt: 'handle the null case' },
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: 'src/a.ts',
+          excerpt: 'handle the null case',
+        },
       ]);
     }
   });
@@ -1243,13 +1252,21 @@ test.each(['queued', 'running', 'expired'] as const)(
           return ran(0);
         }),
       );
-      if (mode === 'queued')
-        effects.withHostLock = async (_fn, signal) => {
+      if (mode === 'queued') {
+        // The Q4 reuse check acquires the host lock FIRST; a queued cancel
+        // must land in the vendor span's own guard so the pre-existing
+        // blocked-evidence persistence (#534) is what the assertions below
+        // verify. Pass the reuse acquisition through uncancelled.
+        let locks = 0;
+        effects.withHostLock = async (fn, signal) => {
+          locks += 1;
+          if (locks === 1) return fn();
           expect(signal).toBe(controller.signal);
           controller.abort(new Error('parent cancelled queued review'));
           signal!.throwIfAborted();
           throw new Error('unreachable');
         };
+      }
       const run = effects.runCommand;
       effects.runCommand = async (command, args, opts) => {
         if (command === 'coderabbit') {
