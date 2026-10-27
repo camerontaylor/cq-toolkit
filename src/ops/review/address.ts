@@ -328,7 +328,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       //   - a failed exit publication → the row names the failure and that
       //     the commit stays local (the outcome reason carries it too);
       //   - a run with no push → "publication is off": the commit truly is
-      //     unpublished (the one state where the old text was right).
+      //     unpublished (the one state where the old text was right);
+      //   - push requested but no exit push ran and no witness was recorded
+      //     (the inner early-returned with nothing unpublished or the run
+      //     already cancelled, or finish skipped the attempt on a cancelled
+      //     parent) → the engine has exited without publishing; the stale
+      //     "may still happen at engine exit" wording must not survive.
       const settleWithholdRows = (tail: string) => {
         for (const [index, row] of report.reasons.entries()) {
           if (row.includes('publish-withheld-mixed-worktree')) {
@@ -352,6 +357,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       } else if (input.push !== true) {
         settleWithholdRows(
           '; publication is off for this run (no --push) — the verified commit stays unpublished in the worktree',
+        );
+      } else {
+        // Push was requested, yet no exit push ever left this process and no
+        // witness was recorded: publishOnExit ran but its inner early-returned
+        // (nothing left unpublished, or the run was already cancelled), or
+        // finish() skipped the attempt on a cancelled parent. The exit
+        // publication has had its only chance — the engine is exiting without
+        // publishing — so the loop's pre-publication "may still happen at
+        // engine exit" wording is stale and is settled with the truth.
+        settleWithholdRows(
+          '; engine exited without publishing — the verified commit stays unpublished in the worktree',
         );
       }
       // Jobs cancelled by the enclosing runner still retain independently
