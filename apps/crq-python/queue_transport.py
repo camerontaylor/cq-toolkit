@@ -69,11 +69,13 @@ def decode(raw):
     return request
 
 
-def _forge(verify_source, b, pr, merge_sha):
+def _forge(verify_source, b, pr, merge_sha, policy):
     """Trusted adapter fetches forge metadata; compare every authorization binding."""
     actual = verify_source(b["repo"], pr)
     if not isinstance(actual, dict) or actual.get("repo") != b["repo"] or actual.get("pr") != pr:
         raise ValueError("forge repository/PR mismatch")
+    if actual.get("target") not in policy.get("branches", []):
+        raise ValueError("forge target branch denied")
     if b["kind"] == "deferred-author" and any(actual.get(k) != b[k] for k in ("producer", "head", "target")):
         raise ValueError("forge producer/head/target mismatch")
     if merge_sha is not None and (actual.get("mergeSha") != merge_sha or actual.get("state") != "MERGED"):
@@ -95,10 +97,18 @@ def _status(q, request_id, entry):
         if item.get("reused_from"):
             state = "reused"
         # Terminal truth is read from the immutable receipt in handle, never a done label.
+    reason = entry.get("reason")
+    if reason is not None:
+        reason = ({"source": "queue", "category": "identity", "code": "forge-identity"}
+                  if reason == {"source": "queue", "category": "identity", "code": "forge-identity"}
+                  else {"source": "queue", "category": "unknown", "code": "persisted-reason"})
+        state = "blocked"
     return {"state": state, "pr": entry.get("pr"), "mergeSha": entry.get("mergeSha"),
             "itemId": item["item_id"] if item else None, "receiptId": receipt_id,
             "consumed": receipt_id is not None and entry.get("consumed") == receipt_id,
-            "reviewed": False, "fixed": False}
+            "reviewed": False, "fixed": False, "reason": reason, "enqueued": item is not None,
+            "reusedFrom": item.get("reused_from") if item else None,
+            "receiptSource": None, "receiptEquivalence": None}
 
 
 def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
@@ -120,9 +130,12 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         if entry is not None and (entry["binding"] != b or entry["principal"] != principal):
             raise ValueError("request binding or principal mismatch")
         if op == "enqueue" and entry is None:
+            limit = policy.get("max_requests", 10000)
+            if type(limit) is not int or not 1 <= limit <= 100000 or len(entries) >= limit:
+                raise ValueError("queue request capacity refused")
             entry = {"binding": b, "principal": principal, "state": "awaiting-pr", "createdAt": runner.iso()}
             if b["kind"] == "merged-current":
-                _forge(verify_source, b, b["pr"], b["mergeSha"])
+                _forge(verify_source, b, b["pr"], b["mergeSha"], policy)
                 _enroll(q, b, rid, b["pr"], b["mergeSha"], runner.iso())
                 entry.update(pr=b["pr"], mergeSha=b["mergeSha"], state="ready-current")
             entries[rid] = entry
@@ -134,7 +147,8 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             pr, merge_sha = req["pr"], req["mergeSha"]
             if entry.get("pr", pr) != pr or entry.get("mergeSha") not in (None, merge_sha):
                 raise ValueError("conflicting PR/merge binding")
-            _forge(verify_source, b, pr, merge_sha)
+            _forge(verify_source, b, pr, merge_sha, policy)
+            entry.pop("reason", None)
             entry.update(pr=pr, state="awaiting-merge")
             if merge_sha is not None:
                 _enroll(q, b, rid, pr, merge_sha, runner.iso())
@@ -146,17 +160,43 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         result = _status(q, rid, entry)
         receipt_id = result["receiptId"]
         if receipt_id:
+            item = receipts.status(q, rid)
             # Bounded status excludes capture/paths/findings. Full document goes through chunks.
             doc_manifest = receipts.read_receipt(receipt_root, receipt_id)
+            if doc_manifest["bytes"] > 64 * 1024 * 1024:
+                raise ValueError("receipt exceeds supported client capacity")
             data = bytearray()
             for i in range(doc_manifest["chunks"]):
                 data.extend(base64.b64decode(receipts.read_receipt(receipt_root, receipt_id, f"{receipt_id}:{i}")["data"]))
             document = json.loads(data)
-            outcome = document.get("outcome") or document.get("classification", {}).get("outcome")
-            counted = document.get("classification", {}).get("counted", False)
-            result["reviewed"] = counted is True and outcome in {"completed", "completed_with_findings", "clean"}
-            result["state"] = ("terminal-with-findings" if document.get("findings") else "terminal-clean") if result["reviewed"] else {
+            source = document.get("source", {})
+            if source.get("repo") != b["repo"] or source.get("target_selector") != b["targetSelector"]:
+                raise ValueError("receipt source repository/target mismatch")
+            if source.get("pr") != entry.get("pr") or source.get("merge_sha") != entry.get("mergeSha"):
+                if not item.get("reused_from") or not item.get("capture") or item["capture"].get("equivalence") != document.get("capture", {}).get("equivalence"):
+                    raise ValueError("receipt source mismatch without proven equivalent reuse")
+            result["receiptSource"] = {"kind": "merged-current", "repo": source["repo"], "pr": source["pr"],
+                                       "mergeSha": source["merge_sha"], "targetSelector": source["target_selector"]}
+            result["receiptEquivalence"] = document.get("capture", {}).get("equivalence")
+            outcome = document.get("outcome")
+            counted = document.get("counted", False)
+            result["reviewed"] = counted is True and outcome in {"terminal-clean", "terminal-with-findings", "partial-scope"}
+            result["state"] = outcome if result["reviewed"] else {
                 "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
+            if result["state"] == "blocked":
+                # Only trusted structured classifier outcomes, never last_error string matching.
+                category = {"rate_limited": "vendor-rate-limited", "auth": "vendor-needs-action"}.get(outcome)
+                result["reason"] = {"source": "vendor" if category else "queue",
+                                    "category": category or "unknown", "code": "rate_limited" if outcome == "rate_limited" else "auth" if outcome == "auth" else "unclassified"}
+        elif result["state"] == "blocked" and result["reason"] is None:
+            result["reason"] = {"source": "queue", "category": "unknown", "code": "no-receipt"}
+        if entry.get("reason") is not None:
+            persisted = _status(q, rid, entry)
+            result.update(state="blocked", reviewed=False, reason=persisted["reason"])
+            if op in {"report", "ack"}:
+                raise ValueError("source revalidation required before receipt consumption")
+        elif receipt_id and result["state"] == "blocked" and document.get("outcome") == "blocked-secret-scan":
+            result["reason"] = {"source": "queue", "category": "scan", "code": "blocked-secret-scan"}
         if op in {"report", "ack"}:
             if not receipt_id or req["receiptId"] != receipt_id:
                 raise ValueError("receipt/request mismatch")

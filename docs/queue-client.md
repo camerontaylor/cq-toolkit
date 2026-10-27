@@ -26,3 +26,65 @@ chunks carry at most 3072 raw bytes. The client verifies snapshot, order, count,
 per-chunk and whole-document digests before import and consumption acknowledgement.
 Queue evidence has its own versioned store; affected-current clean never supplies
 full-branch readiness, independent acceptance or remediation completion.
+
+## SDK and generated CLI
+
+Import `makeConfiguredQueueClient` (uses operator `CQ_QUEUE_SSH_ALIAS`) or
+`makeQueueClient(transport)` from the SDK review family. The client exposes
+`enqueue(reference)`, `bind({...reference, pr, mergeSha?})`, `cancel(reference)`,
+`status(reference)` and `report(reference, evidenceDir)`. Every call requires
+the original immutable `{requestId, binding}`; a failed read creates no ID.
+Producer is the forge PR author login; target is its base branch. Q6 owns the
+known-PR refresh and unique author/head/base publication recovery. It preserves
+server-only principal and delivery/consumption fields.
+
+```sh
+cq review.enqueue --requestId=missed-12 --binding='{"kind":"merged-current","repo":"owner/repo","pr":12,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}'
+cq review.queueStatus --requestId=missed-12 --binding='{"kind":"merged-current","repo":"owner/repo","pr":12,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}'
+cq review.report --requestId=missed-12 --binding='{"kind":"merged-current","repo":"owner/repo","pr":12,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}' --evidenceDir=.cq/queue-evidence
+```
+
+`review.enqueue --action=bind --pr=12 [--mergeSha=…]` attaches a deferred
+binding; `--action=cancel` retains unpublished debt as cancelled. No positional
+arguments or caller-selected remote paths/commands are supported. A command
+success is distinct from review verdict. Stdout contains the I1 JSON artifact;
+the generated CLI owns exit mapping and stderr narration.
+
+Reports verify the entire receipt before create-only durable import and ack.
+Interrupted readers restart at the manifest and safely replay bounded chunks;
+server delivery progress survives caller restart. Local raw receipt bytes are
+stored once as `<receipt SHA256>.json` in the chosen queue-evidence directory.
+`readQueueEvidence(directory, receiptId)` validates both whole-document and
+scope-manifest digest, returning the separate `cq-queue-evidence` v1 artifact.
+It never writes a findings-v1 record. Each supported receipt is at most 64 MiB;
+larger receipts refuse explicitly without truncation or acknowledgement.
+
+Status separates enqueued/reviewed/consumed/fixed. `reason` is typed provenance
+(`source`, `category`, `code`); only trusted structured vendor outcomes produce
+vendor availability categories. Unknown errors never become availability debt
+through message matching. Full capture paths/findings are absent from status.
+Receipt request IDs may name the original enqueue; durable alias bindings and
+verified equivalence authorize reuse, never the cursor or original ID alone.
+
+## Source capability deployment prerequisite
+
+`apps/crq-python/capability_dispatcher.py` routes exactly `author-v1` to the
+unchanged author transport and exactly `queue-v1` to the new capability. All
+other commands refuse. It is source code only: Q3 changes no installed key,
+credential, SSH configuration, signer or running service.
+
+The operator provides `CRQ_QUEUE_PRINCIPAL` and an operator-owned JSON policy
+path `CRQ_QUEUE_POLICY` through the existing trusted forced-command boundary.
+Do not accept these environment variables from SSH clients. Example policy
+keys: `enabled` (defaults false), `repo`, `read` and `write` principal lists,
+`targets` selector list, `branches` forge base-branch list, `max_requests`
+(default 10000). Read covers status/report; write covers enqueue/bind/cancel/ack.
+Requests are permanently principal/repository/source/target bound. Forge source
+metadata is fetched with fixed API argv before attachment or Q1 enrollment.
+The existing tick lock/process-group supervisor bounds each operation, and
+queue state saves before a response. No reviewer dispatch occurs here.
+
+D1C must review/activate that exact capability under existing deployment trust,
+after compatible Q1 service/state and healthy dispatch. Disabled/old runners
+return unsupported or a transport refusal with a deployment prerequisite.
+Q3 source/test success alone does not establish activation or live acceptance.

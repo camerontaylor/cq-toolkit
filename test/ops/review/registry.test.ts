@@ -46,6 +46,9 @@ interface LooseResult {
 
 /** The review producer plus six loop entries, in registry order. */
 const ENTRY_NAMES = [
+  'review.enqueue',
+  'review.queueStatus',
+  'review.report',
   'review.address',
   'review.run',
   'review.fixItem',
@@ -101,6 +104,21 @@ const snapshot = (): Record<string, unknown> => ({
 
 /** One minimal valid input per entry (kept loose — mutation tests widen it). */
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
+  'review.enqueue': () => ({
+    requestId: 'request-1',
+    binding: {
+      kind: 'merged-current',
+      repo: 'owner/repo',
+      pr: 1,
+      mergeSha: 'a'.repeat(40),
+      targetSelector: 'promoted-main',
+    },
+  }),
+  'review.queueStatus': () => minimalInputs['review.enqueue']!(),
+  'review.report': () => ({
+    ...minimalInputs['review.enqueue']!(),
+    evidenceDir: '/tmp/queue-evidence',
+  }),
   'review.address': () => ({ repoRoot: '/tmp/cq-review-fixture', source: 'local' }),
   'review.run': () => ({ repoRoot: '/tmp/cq-review-fixture' }),
   'review.fixItem': () => ({
