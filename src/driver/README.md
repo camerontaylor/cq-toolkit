@@ -196,10 +196,10 @@ interoperable with an external ledger; a shared cross-language canonical
 projection protocol does not exist and is an activation blocker for that
 bridge. With no hook the shared token allowance is enforced per-invocation
 only — a named gap, not a whole-job claim.
-The one driver-side temporal bound is the SDK call's per-request
-`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (600 s; `AiSdkDriverOptions.stepTimeoutMs`) — NOT a run deadline,
-but a bound on each step of the tool loop so a hung HTTP request cannot
-stall the loop.
+The one driver-side temporal bound is the SDK call's
+`timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (20 min; `AiSdkDriverOptions.stepTimeoutMs`) — NOT a run deadline,
+but a bound on each step of the tool loop so a hung step (model call, its retry and
+tool runs) cannot stall the loop.
 
 Transient retry (#210): the SDK call runs `maxRetries: 1` — ONE retry per
 step request (bounded; ≤ DEFAULT_MAX_STEPS per run) for the SDK's own
