@@ -27,6 +27,7 @@ import coverage
 import author_quota
 import author_lease
 import review_receipt
+import deferred_refresh
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -374,6 +375,77 @@ def findings_md(ndjson: Path, meta: Dict[str, Any], cls: Dict[str, Any]) -> str:
 def pr_info(pr: int) -> Dict[str, Any]:
     return gh_json(["pr", "view", str(pr), "--repo", REPO, "--json",
                     "number,state,isDraft,headRefName,headRefOid,baseRefName,updatedAt,mergeCommit,mergedAt"])
+
+
+def deferred_forge(args: List[str]) -> Any:
+    """Normalize a bounded forge timeout into retryable deferred debt."""
+    try:
+        return gh_json(args)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("deferred forge request timed out") from None
+
+
+def verify_deferred_source(repo: str, pr: int) -> Dict[str, Any]:
+    """Trusted forge identity for one explicitly enrolled request, no discovery."""
+    if repo != REPO or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise ValueError("deferred repository is outside configured scope")
+    if type(pr) is not int or pr <= 0:
+        raise ValueError("invalid deferred PR")
+    data = deferred_forge(["api", f"repos/{repo}/pulls/{pr}"])
+    if not isinstance(data, dict):
+        raise ValueError("missing forge PR metadata")
+    base = data.get("base") or {}
+    head = data.get("head") or {}
+    user = data.get("user") or {}
+    if (not isinstance(base, dict) or not isinstance(head, dict) or not isinstance(user, dict) or
+            not isinstance(base.get("repo"), dict) or base["repo"].get("full_name") != repo or
+            type(data.get("number")) is not int or data["number"] != pr or
+            not isinstance(user.get("login"), str) or not user["login"] or
+            not isinstance(head.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", head["sha"]) or
+            base.get("ref") != "merge-queue" or type(data.get("merged")) is not bool or
+            data.get("state") not in ("open", "closed") or (data["merged"] and data["state"] != "closed")):
+        raise ValueError("invalid forge PR identity")
+    merge = data.get("merge_commit_sha") if data["merged"] else None
+    if data["merged"] and (not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge)):
+        raise ValueError("missing immutable forge merge identity")
+    return {"repo": repo, "pr": pr, "producer": user["login"], "head": head["sha"],
+            "target": base["ref"], "state": "MERGED" if data["merged"] else data["state"].upper(),
+            "mergeSha": merge}
+
+
+def find_deferred_source(repo: str, producer: str, head: str, target: str, limit: int) -> List[Dict[str, Any]]:
+    """Recover a lost publication reply, all states, refusing incomplete search.
+
+    Search is restricted to the explicit request's repo/producer/head/base. Its
+    candidates are re-read as trusted PR metadata; search snippets are no proof.
+    Empty/index-lag results leave the intent unpublished for a later tick.
+    """
+    if (repo != REPO or not isinstance(producer, str) or
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", producer) or
+            not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head) or
+            target != "merge-queue" or type(limit) is not int or limit != 2):
+        raise ValueError("invalid deferred publication binding")
+    query = f"repo:{repo} is:pr author:{producer} base:{target} {head}"
+    result = deferred_forge(["api", "--method", "GET", "search/issues", "-f", "q=" + query,
+                             "-f", "per_page=" + str(limit), "-f", "page=1"])
+    if (not isinstance(result, dict) or result.get("incomplete_results") is not False or
+            type(result.get("total_count")) is not int or not isinstance(result.get("items"), list) or
+            not 0 <= result["total_count"] <= limit or len(result["items"]) != result["total_count"]):
+        raise RuntimeError("deferred publication search incomplete; debt retained")
+    matches = []
+    seen = set()
+    for candidate in result["items"]:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("pull_request"), dict):
+            raise ValueError("search candidate is not a forge PR")
+        number = candidate.get("number")
+        actual = verify_deferred_source(repo, number)
+        if any(actual[k] != value for k, value in (("producer", producer), ("head", head), ("target", target))):
+            raise ValueError("publication candidate identity drift")
+        if number in seen:
+            raise RuntimeError("duplicate search candidate; debt retained")
+        seen.add(number)
+        matches.append(actual)
+    return matches
 
 
 _AGENTS_CACHE: Dict[str, Any] = {}
@@ -2684,6 +2756,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
+    if not dry and only is None:
+        refreshed = deferred_refresh.refresh_deferred(q, verify_source=verify_deferred_source,
+            find_source=find_deferred_source, at=iso(), limit=20)
+        if refreshed:
+            # Caller already holds tick.lock. Persist recovered publication and
+            # merge binding BEFORE any selection/reservation/vendor dispatch.
+            save_queue(q)
+            log.append(f"deferred refresh: {len(refreshed)} explicit request(s)")
     starts_before = len(q.get("starts", []))
     for item in list(q["items"]):
         if item["kind"] == "promotion" and item["state"] in SIGNER_STATES:
