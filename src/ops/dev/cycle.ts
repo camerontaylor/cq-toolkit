@@ -790,5 +790,11 @@ function usageOf(err: unknown): Usage | undefined {
     (reasoning !== undefined && typeof reasoning !== 'number')
   )
     return undefined;
-  return { input, output, cacheRead, cacheWrite, ...(reasoning === undefined ? {} : { reasoning }) };
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    ...(reasoning === undefined ? {} : { reasoning }),
+  };
 }
