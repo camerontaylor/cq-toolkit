@@ -383,6 +383,8 @@ function makeReviewCycle(
       advisories: string[];
       /** The block came from the network/transient class (#509): a re-review may retry it. */
       transient?: boolean;
+      /** A deadline/signal stopped the CLI itself, rather than a safety or provider refusal. */
+      budgetStopped?: true;
     };
     try {
       span = await effects.withHostLock(async () => {
@@ -468,6 +470,11 @@ function makeReviewCycle(
         // A killed run is blocked, but whatever findings it emitted before
         // the kill are still recorded: they stay open until dispositioned.
         const parsed = parseReviewerStream(raw.stdout);
+        const ordinaryCompletion =
+          raw.exitCode === null ? undefined : decideCompletion(raw.exitCode, parsed);
+        const budgetStopped =
+          (signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0) &&
+          (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
         const completion: DevReviewCompletion =
           signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
             ? {
@@ -517,6 +524,7 @@ function makeReviewCycle(
           findings: parsed.findings,
           advisories: [],
           ...(transient ? { transient: true } : {}),
+          ...(budgetStopped ? { budgetStopped: true as const } : {}),
         };
       }, signal);
     } catch (err) {
@@ -584,7 +592,15 @@ function makeReviewCycle(
       );
       // The class rides the report envelope (stripped before the strict
       // OpResult parse), never the persisted cycle record.
-      return span.transient === true ? { ...blocked, report: { transient: true } } : blocked;
+      return span.transient === true || span.budgetStopped === true
+        ? {
+            ...blocked,
+            report: {
+              ...(span.transient === true ? { transient: true } : {}),
+              ...(span.budgetStopped === true ? { budgetStopped: true } : {}),
+            },
+          }
+        : blocked;
     }
     return {
       status: 'ok',

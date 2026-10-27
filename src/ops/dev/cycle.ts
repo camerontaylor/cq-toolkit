@@ -65,7 +65,7 @@ import type { DevEffects } from './effects.js';
 import { guardDevOp } from './effects.js';
 import { DEFAULT_DEV_TARGET } from './record.js';
 import { readReadinessWithGaps } from './ready.js';
-import { readWorkState } from './internal/workState.js';
+import { CLEAN_TREE, readWorkState } from './internal/workState.js';
 import { DevCycleCompositionInputSchema } from './registry.js';
 
 /**
@@ -312,6 +312,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     const publishHead = async (
       branch: string,
       head: string,
+      pinHead = false,
     ): Promise<{ ok: true } | { ok: false; reason: string }> => {
       if (!pushed) return { ok: true };
       const result = await git([
@@ -319,7 +320,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         input.repoRoot,
         'push',
         'origin',
-        `refs/heads/${branch}:refs/heads/${branch}`,
+        `${pinHead ? head : `refs/heads/${branch}`}:refs/heads/${branch}`,
       ]);
       if (result.code !== 0)
         return {
@@ -538,11 +539,21 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     > {
       // The branch/head the draft publishes: the CURRENT state, re-read —
       // the address leg's commits are the head the gaps describe.
+      const guardedStop =
+        addressReport?.stop === 'budget' || addressReport?.stop === 'rereview-blocked';
       const current = await readWorkState(deps.effects, { target });
       if (!current.ok)
-        return { status: 'needs-human', reason: `dev.cycle (readiness): ${current.reason}` };
+        return guardedStop
+          ? stepResult('review.address', addressResult)
+          : { status: 'needs-human', reason: `dev.cycle (readiness): ${current.reason}` };
       const { branch, head } = current.state;
-      const publication = await publishHead(branch, head);
+      if (
+        guardedStop &&
+        (addressReport.verifiedHead !== head || current.state.dirtySha256 !== CLEAN_TREE)
+      )
+        return stepResult('review.address', addressResult);
+      // Pin the verified object too: a later branch move cannot upload another head.
+      const publication = await publishHead(branch, head, guardedStop);
       if (!publication.ok)
         return { status: 'needs-human', reason: `dev.cycle (push): ${publication.reason}` };
       const openResult = await open({

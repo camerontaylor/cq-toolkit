@@ -95,6 +95,8 @@ export interface ReviewAddressReport {
    * would be an unrecognized key and trip the frozen taxonomy.
    */
   stop?: 'round-cap' | 'budget' | 'rereview-blocked';
+  /** Last admitted head, advanced only by verified fix commits. */
+  verifiedHead?: string;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -228,7 +230,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
-      structuredStop?: 'round-cap' | 'rereview-blocked',
+      structuredStop?: 'round-cap' | 'rereview-blocked' | 'budget',
     ): Promise<ReviewAddressResult> => {
       if (reason) report.reasons.push(reason);
       let publicationFailed = false;
@@ -259,7 +261,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // a budget stop must never masquerade as a blocked re-review.
       if (structuredStop === 'rereview-blocked' && (parent?.aborted || cleanStop?.() !== undefined))
         structuredStop = undefined;
-      let marker: ReviewAddressReport['stop'] = structuredStop;
+      const reviewBudgetBlocked = structuredStop === 'budget';
+      let marker: ReviewAddressReport['stop'] = reviewBudgetBlocked ? undefined : structuredStop;
       if (
         marker === undefined &&
         status === 'needs-human' &&
@@ -267,9 +270,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         !bookkeepingTampered &&
         !parent?.aborted
       ) {
-        // A blocked re-review can return without checking stop() after its
-        // final provider call. Observe the exit budget before deciding its marker.
-        cleanStop?.();
+        // Only an engine-attributed budget block may observe a new stop here.
+        // Safety/admission errors and arbitrary throws never gain eligibility.
+        if (reviewBudgetBlocked) cleanStop?.();
         if (budgetSpent) marker = 'budget';
       }
       // The structured round-cap marker rides the report envelope — the
@@ -613,10 +616,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               stop() === undefined;
             return second;
           };
-          const rereviewStop = (): 'rereview-blocked' | undefined =>
-            rereviewStillTransient && report.fixes.some((fix) => fix.commit !== undefined)
-              ? 'rereview-blocked'
-              : undefined;
+          const rereviewStop = (
+            result: ReviewRunResult,
+          ): 'rereview-blocked' | 'budget' | undefined =>
+            result.status === 'needs-human' && result.report?.blockedBudget === true
+              ? 'budget'
+              : rereviewStillTransient && report.fixes.some((fix) => fix.commit !== undefined)
+                ? 'rereview-blocked'
+                : undefined;
           // Blocked/failed re-reviews still write engine-owned ledger cycles.
           // reviewImplementation only runs inside review()'s bookkeeping FIFO
           // slot, so this registration must NOT re-enter that queue (it would
@@ -701,7 +708,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let workerRoot = resolve(input.repoRoot);
           const remember = (fix: AddressFix) => {
             report.fixes.push(fix);
-            if (fix.commit) unpublished.add(fix.commit);
+            if (fix.commit) {
+              unpublished.add(fix.commit);
+              report.verifiedHead = fix.commit;
+            }
           };
           const publishOnExitInner = async (): Promise<void> => {
             if (!input.push || unpublished.size === 0 || parent?.aborted) return;
@@ -873,6 +883,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             )
               throw new Error('duplicate finding identity');
             await admitRecord(root, record);
+            report.verifiedHead ??= record.head;
             publishedBase ??= await gitText(root, ['rev-parse', 'HEAD']);
             for (const batch of addressBatches(
               record.findings.filter((finding) => finding.status === 'open'),
@@ -1157,6 +1168,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       findings: [finding],
                     };
                     await admitRecord(root, record);
+                    report.verifiedHead ??= record.head;
                     dispatchedRecord ??= record;
                   };
                   try {
@@ -1420,7 +1432,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               });
               if (agent.status !== 'ok') {
                 if (agent.report) noteAdvisories(agent.report);
-                return await finish('needs-human', `PR re-review: ${issue(agent)}`, rereviewStop());
+                return await finish(
+                  'needs-human',
+                  `PR re-review: ${issue(agent)}`,
+                  rereviewStop(agent),
+                );
               }
               if (agent.value.branch !== threads.branch || agent.value.head !== threads.head)
                 return await finish('needs-human', 'PR re-review identity changed');
@@ -1490,6 +1506,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   'findings record does not match current branch/head',
                 );
               previous = record;
+              report.verifiedHead ??= record.head;
             }
             report.findings = previous.findings;
             noteAdvisories(previous);
@@ -1515,7 +1532,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             });
             if (refreshed.status !== 'ok') {
               if (refreshed.report) noteAdvisories(refreshed.report);
-              return await finish('needs-human', `re-review: ${issue(refreshed)}`, rereviewStop());
+              return await finish(
+                'needs-human',
+                `re-review: ${issue(refreshed)}`,
+                rereviewStop(refreshed),
+              );
             }
             if (
               refreshed.value.branch !== (await branchName(root)) ||

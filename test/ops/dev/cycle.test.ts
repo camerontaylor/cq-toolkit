@@ -7,6 +7,8 @@
 // network, no credentials.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { rm } from 'node:fs/promises';
+import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import {
   DEV_CYCLE_PUBLICATION_RESERVE_MS,
   DEV_FINDINGS_SECTION_MARKER,
@@ -109,6 +111,7 @@ function addressReport(
 ): ReviewAddressReport {
   return {
     source: 'local',
+    verifiedHead: state.head,
     reportPath: '/tmp/dev-cycle-fixture/review-address-report.json',
     rounds: [],
     findings: openBlocking,
@@ -619,7 +622,10 @@ describe('dev.cycle', () => {
       open: openFake(opens),
       gh,
       git: async (args) => {
-        if (args.includes('push')) pushCalls++;
+        if (args.includes('push')) {
+          pushCalls++;
+          expect(args.at(-1)).toBe(`${state.head}:refs/heads/feature/x`);
+        }
         return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
       },
     });
@@ -642,6 +648,149 @@ describe('dev.cycle', () => {
     expect(bodies[0]).not.toContain('round cap');
     expect(bodies[0]).not.toContain('blocked re-review');
   });
+
+  test.each(['budget', 'rereview-blocked'] as const)(
+    '#532: %s publication refuses a changed head, dirty tree, or missing verified head',
+    async (stop) => {
+      for (const mode of [
+        'head',
+        'staged',
+        'unstaged',
+        'untracked',
+        'missing',
+        'final-gate',
+      ] as const) {
+        const state = await seed(repo);
+        const opens: PrOpenInput[] = [];
+        let pushes = 0;
+        const reason = 'review.address: stopped after verified fixes';
+        let checks = 0;
+        const result = await makeDevCycle({
+          effects: effects(),
+          check: async (input) => {
+            const checked = await greenCheck()(input);
+            if (++checks === 2 && mode === 'final-gate')
+              repo.git('commit', '--allow-empty', '-m', 'changed during final gates');
+            return checked;
+          },
+          review: cleanReview(state),
+          address: async () => {
+            if (mode === 'head') repo.git('commit', '--allow-empty', '-m', 'concurrent head');
+            if (mode === 'staged' || mode === 'unstaged') {
+              await repo.write('src/a.ts', 'changed after addressing');
+              if (mode === 'staged') repo.git('add', 'src/a.ts');
+            }
+            if (mode === 'untracked') await repo.write('unexpected.txt', 'unverified');
+            const report = { ...addressReport(state, [capFinding], []), stop };
+            if (mode === 'missing') delete report.verifiedHead;
+            return { status: 'needs-human', reason, report };
+          },
+          open: openFake(opens),
+          git: async () => {
+            pushes++;
+            return { code: 0, stdout: '', stderr: '' };
+          },
+        })({ repoRoot: repo.root });
+        expect(result).toEqual({
+          status: 'needs-human',
+          reason: `dev.cycle (review.address): ${reason}`,
+        });
+        expect(pushes).toBe(0);
+        expect(opens).toEqual([]);
+        // Restore only fixture changes so the next named case has a clean seed.
+        if (mode === 'staged' || mode === 'unstaged') {
+          await repo.write('src/a.ts', 'export const a = 1;\n');
+          repo.git('add', 'src/a.ts');
+          repo.git('commit', '--allow-empty', '-m', 'restore fixture');
+        }
+        if (mode === 'untracked') await rm(`${repo.root}/unexpected.txt`);
+      }
+    },
+  );
+
+  test.each(['identity', 'admission', 'scan', 'thrown', 'wall'] as const)(
+    '#532: a real address %s exit at its deadline publishes only a budget-attributed block',
+    async (mode) => {
+      const state = await seed(repo);
+      const originalNow = Date.now;
+      let clock = originalNow();
+      const opens: PrOpenInput[] = [];
+      let pushes = 0;
+      try {
+        Date.now = () => clock;
+        const record: FindingsRecord = {
+          schemaVersion: 1,
+          branch: state.branch,
+          head: state.head,
+          reviewed: { base: state.base, scope: 'full' },
+          sources: [{ kind: 'agent', status: 'terminal' }],
+          findings: [capFinding],
+        };
+        const role = { provider: 'mock', model: 'mock' };
+        const address = makeReviewAddress({
+          config: {
+            schemaVersion: 2,
+            roles: { worker: role, reviewer: role },
+            budgets: { run: { maxTokens: 1000 } },
+            checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+            review: { reviewers: ['agent'] },
+          },
+          initialRecord:
+            mode === 'admission'
+              ? {
+                  ...record,
+                  get head() {
+                    clock += 1001;
+                    return 'b'.repeat(40);
+                  },
+                }
+              : record,
+          disposition: async () => ({ status: 'ok', value: {} }),
+          workerFactory: () => ({
+            escalation: createEscalationState,
+            fix: async (item) => ({
+              finding: { ...item, status: 'fixed', reason: 'verified' },
+              commit: state.head,
+              observedHead: state.head,
+              reason: 'verified',
+              validation: [],
+            }),
+          }),
+          review: async () => {
+            clock += 1001;
+            if (mode === 'thrown') throw new Error('unexpected reviewer fault');
+            if (mode === 'identity') {
+              repo.git('commit', '--allow-empty', '-m', 'concurrent head');
+              return { status: 'ok', value: record };
+            }
+            return {
+              status: 'needs-human',
+              reason: mode === 'scan' ? 'denylist scan refused' : 'agent wall budget exhausted',
+              report: { ...record, ...(mode === 'wall' ? { blockedBudget: true as const } : {}) },
+            };
+          },
+        });
+        const result = await makeDevCycle({
+          effects: effects(),
+          check: greenCheck(),
+          review: cleanReview(state),
+          address: (input) =>
+            address({ ...input, wallMs: 1000, journalDir: `${repo.root}/.cq/test-journal` }),
+          open: openFake(opens),
+          gh: ghFake().gh,
+          git: async (args) => {
+            if (args.includes('push')) pushes++;
+            return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+          },
+        })({ repoRoot: repo.root });
+        expect(result.status).toBe('needs-human');
+        expect(pushes).toBe(mode === 'wall' ? 1 : 0);
+        expect(opens).toHaveLength(mode === 'wall' ? 1 : 0);
+      } finally {
+        Date.now = originalNow;
+      }
+    },
+  );
 
   test('S7 H (D1): a red FINAL gate on the budget path refuses verbatim — NO push, NO PR', async () => {
     const state = await seed(repo);
