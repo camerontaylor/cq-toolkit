@@ -10,6 +10,10 @@ import re
 import review_receipt as receipts
 
 
+class RefreshExhausted(RuntimeError):
+    """Aggregate allowance ended; leave the current intent/cursor untouched."""
+
+
 def _verified(actual, binding, pr=None):
     if not isinstance(actual, dict):
         raise ValueError("forge metadata missing")
@@ -25,13 +29,15 @@ def _verified(actual, binding, pr=None):
     return actual
 
 
-def refresh_deferred(q, *, verify_source, find_source, at, limit=20):
+def refresh_deferred(q, *, verify_source, find_source, at, limit=20, may_continue=lambda: True):
     """Refresh at most limit intents, fairly across ticks, without Q2 discovery.
 
     verify_source(repo, pr) and find_source(repo, producer, head, target, limit)
     return forge metadata. find_source must bound its result to limit (2 here),
     including closed/merged PRs, and refuse incomplete/ambiguous searches.
     Unpublished intents remain inspectable; multiple matches fail closed.
+    may_continue gates each intent under the caller's aggregate read/deadline budget.
+    RefreshExhausted leaves that intent and cursor untouched for the next tick.
     The caller persists this result even when a remote publication reply was lost.
     """
     if type(limit) is not int or not 1 <= limit <= 50:
@@ -44,10 +50,10 @@ def refresh_deferred(q, *, verify_source, find_source, at, limit=20):
     ordered = [rid for rid in ids if rid > cursor] + [rid for rid in ids if rid <= cursor]
     refreshed = []
     for rid in ordered[:limit]:
+        if not may_continue():
+            break
         entry = entries[rid]
         b = entry["binding"]
-        q["deferred_refresh_cursor"] = rid
-        entry["refreshedAt"] = at
         try:
             if entry.get("pr") is None:
                 matches = find_source(b["repo"], b["producer"], b["head"], b["target"], 2)
@@ -55,6 +61,8 @@ def refresh_deferred(q, *, verify_source, find_source, at, limit=20):
                     raise ValueError("forge publication recovery ambiguous")
                 if not matches:
                     entry.pop("refreshError", None)
+                    q["deferred_refresh_cursor"] = rid
+                    entry["refreshedAt"] = at
                     refreshed.append(rid)
                     continue
                 actual = _verified(matches[0], b)
@@ -77,11 +85,15 @@ def refresh_deferred(q, *, verify_source, find_source, at, limit=20):
                 entry.update(state="ready-current", mergeSha=actual["mergeSha"])
             entry.pop("refreshError", None)
             entry.pop("reason", None)
+        except RefreshExhausted:
+            break
         except ValueError:
             # Identity/ambiguity is a real blocker, never vendor availability.
             entry["reason"] = {"source": "queue", "category": "identity", "code": "forge-identity"}
         except (OSError, RuntimeError):
             # Preserve debt and retry next natural tick; don't persist API payloads.
             entry["refreshError"] = "forge refresh unavailable; debt retained"
+        q["deferred_refresh_cursor"] = rid
+        entry["refreshedAt"] = at
         refreshed.append(rid)
     return refreshed
