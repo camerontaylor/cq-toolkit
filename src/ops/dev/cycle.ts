@@ -542,10 +542,22 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       const guardedStop =
         addressReport?.stop === 'budget' || addressReport?.stop === 'rereview-blocked';
       const current = await readWorkState(deps.effects, { target });
-      if (!current.ok)
-        return guardedStop
-          ? stepResult('review.address', addressResult)
-          : { status: 'needs-human', reason: `dev.cycle (readiness): ${current.reason}` };
+      if (!current.ok) {
+        if (!guardedStop)
+          return { status: 'needs-human', reason: `dev.cycle (readiness): ${current.reason}` };
+        // Fail closed on the leg's own result — but never SILENTLY: the
+        // re-read's infrastructure failure rides the surfaced text, so an
+        // unreadable work state is diagnosable instead of masquerading as
+        // the leg's budget/blocked stop with the actual error discarded.
+        const surfaced = stepResult('review.address', addressResult);
+        const cause = ` — the work-state re-read also failed: ${current.reason}`;
+        if (surfaced.status === 'failed')
+          return { status: 'failed', error: `${surfaced.error}${cause}` };
+        if (surfaced.status === 'indeterminate')
+          return { status: 'indeterminate', detail: `${surfaced.detail}${cause}` };
+        if (surfaced.status === 'budget-exhausted') return surfaced;
+        return { status: 'needs-human', reason: `${surfaced.reason}${cause}` };
+      }
       const { branch, head } = current.state;
       if (
         guardedStop &&
