@@ -17,6 +17,46 @@
       "kind": "static",
       "command": { "command": "node_modules/.bin/oxfmt", "args": ["--check", "."], "cwd": "." },
       "relatedArgs": ["--check", "{files}"]
+    },
+    {
+      "adapter": "oxlint-json",
+      "kind": "static",
+      "command": {
+        "command": "node_modules/.bin/oxlint",
+        "args": [
+          "--config",
+          ".oxlintrc.json",
+          "--disable-nested-config",
+          "--type-aware",
+          "--report-unused-disable-directives-severity",
+          "error",
+          "--format",
+          "json",
+          "src",
+          "test",
+          "lint",
+          "scripts",
+          "vitest.config.ts"
+        ],
+        "cwd": "."
+      },
+      "relatedArgs": [
+        "--config",
+        ".oxlintrc.json",
+        "--disable-nested-config",
+        "--type-aware",
+        "--report-unused-disable-directives-severity",
+        "error",
+        "--format",
+        "json",
+        "{files}"
+      ]
+    },
+    {
+      "adapter": "test-narrow",
+      "kind": "tests",
+      "command": { "command": "node", "args": ["scripts/check-related-tests.mjs"], "cwd": "." },
+      "relatedArgs": ["scripts/check-related-tests.mjs", "{files}"]
     }
   ],
   "roles": {

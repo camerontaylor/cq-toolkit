@@ -142,3 +142,19 @@ test('fix sources never offer the gate-only format check', () => {
   };
   expect(fixSourceChecks([tsc, fmt], 'static')).toEqual([tsc]);
 });
+
+test('verification-only lint and related tests are not fix sources', () => {
+  expect(fixSourceChecks([{ kind: 'static', adapter: 'oxlint-json' }], 'static')).toEqual([]);
+  expect(fixSourceChecks([{ kind: 'tests', adapter: 'test-narrow' }], 'tests')).toEqual([]);
+});
+
+test('typed lint scopes code with its full typed flags and falls back for non-code fixes', () => {
+  const command = { command: 'oxlint', args: ['--type-aware', 'src', 'test'] };
+  expect(
+    staticRelatedCheckCommand(command, 'oxlint-json', ['src/a.ts'], ['--type-aware', '{files}'])
+      .args,
+  ).toEqual(['--type-aware', 'src/a.ts']);
+  expect(
+    staticRelatedCheckCommand(command, 'oxlint-json', ['README.md'], ['--type-aware', '{files}']),
+  ).toEqual(command);
+});

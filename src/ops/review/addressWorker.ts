@@ -479,7 +479,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           remainingUnit(finding),
         ),
       };
-      if (related) {
+      // The bounded test gate needs the same explicit fix scope at baseline
+      // and candidate: a clean detached baseline has no git diff to discover.
+      if (related || check.adapter === 'test-narrow') {
         const files = relatedFilesRelativeToCheck([finding.file!], cwd, checkRoot);
         command =
           check.kind === 'static'
@@ -862,6 +864,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                     related: async () => related[index]!,
                     broader: async () => broader[index]!,
                     relatedAccepts: (set) =>
+                      // Bounded tests compare stable failure identities below,
+                      // including pre-existing failures in a touched test file.
+                      policy.checks[index]?.adapter === 'test-narrow' ||
                       set.exitCode === 0 ||
                       (set.failures.length > 0 && !set.failures.some((f) => f.file === file)),
                     stagedPaths: [file],

@@ -205,12 +205,35 @@ describe('cq.json v2', () => {
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (result.ok) {
       expect(result.config.review?.reviewers?.[0]).toBe('coderabbit');
-      // Cheap static gates only (no test suite); the format gate makes a
-      // review.address "verified" fix cover format too (S7 attempt K).
+      // Verified fixes cover typecheck, format, typed lint and bounded related tests.
       expect(result.config.checks.map(({ adapter }) => adapter)).toEqual([
         'tsc-lines',
         'oxfmt-check',
+        'oxlint-json',
+        'test-narrow',
       ]);
+      const lint = result.config.checks.find((check) => check.adapter === 'oxlint-json')!;
+      expect(lint.command.args).toEqual([
+        '--config',
+        '.oxlintrc.json',
+        '--disable-nested-config',
+        '--type-aware',
+        '--report-unused-disable-directives-severity',
+        'error',
+        '--format',
+        'json',
+        'src',
+        'test',
+        'lint',
+        'scripts',
+        'vitest.config.ts',
+      ]);
+      expect(lint.relatedArgs).toEqual([...lint.command.args.slice(0, 8), '{files}']);
+      expect(result.config.checks.find((check) => check.adapter === 'test-narrow')).toMatchObject({
+        kind: 'tests',
+        command: { command: 'node', args: ['scripts/check-related-tests.mjs'] },
+        relatedArgs: ['scripts/check-related-tests.mjs', '{files}'],
+      });
     }
   });
 });
