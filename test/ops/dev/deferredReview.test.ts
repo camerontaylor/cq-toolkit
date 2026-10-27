@@ -2,6 +2,9 @@ import { describe, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   bindDeferredPublication,
+  advanceDeferredVendorDebt,
+  type VendorOutageOrigin,
+  hasPersistedVendorOutageOrigin,
   deferVendorReview,
   matchesDeferredVendorDebt,
   hasDeferredReviewSources,
@@ -14,10 +17,12 @@ import type {
   DeferredQueueClient,
   QueueReference,
   QueueStatus,
+  DeferredAuthorBinding,
 } from '../../../src/ops/review/internal/queueProtocol.js';
 import type { FindingsRecord } from '../../../src/ops/review/findings.js';
+import type { DevCycleRecord } from '../../../src/ops/dev/record.js';
 
-const reference: QueueReference = {
+const reference: QueueReference & { binding: DeferredAuthorBinding } = {
   requestId: 'cycle-1',
   binding: {
     kind: 'deferred-author',
@@ -38,9 +43,37 @@ const status: QueueStatus = {
   reviewed: false,
   fixed: false,
 };
-const attempt = { cycleId: 'cycle-1', base: 'b'.repeat(40), dirtySha256: 'clean-tree' as const };
+const deferral = { id: 'cycle-1', base: 'b'.repeat(40), dirtySha256: 'clean-tree' as const };
+function origin(failure: VendorFailure = 'unavailable'): VendorOutageOrigin {
+  return {
+    cycleId: 'cycle-1',
+    head: 'a'.repeat(40),
+    base: deferral.base,
+    target: 'merge-queue',
+    scope: 'full',
+    dirtySha256: 'clean-tree',
+    failure: {
+      source: 'vendor',
+      category:
+        failure === 'login-required'
+          ? 'vendor-needs-action'
+          : failure === 'rate-limited'
+            ? 'vendor-rate-limited'
+            : 'vendor-unavailable',
+      codes: [
+        failure === 'login-required'
+          ? 'auth'
+          : failure === 'rate-limited'
+            ? 'rate_limited'
+            : 'con_err',
+      ],
+    },
+  };
+}
 const identity = {
-  ...attempt,
+  deferralId: deferral.id,
+  base: deferral.base,
+  dirtySha256: deferral.dirtySha256,
   repo: 'owner/repo',
   producer: 'author',
   head: 'a'.repeat(40),
@@ -76,6 +109,44 @@ function fake() {
 }
 
 describe('deferred vendor policy', () => {
+  test('origin must match one genuine retained blocked vendor cycle and structured failure', () => {
+    const proof = origin();
+    const cycle: DevCycleRecord & { vendorFailure: VendorOutageOrigin['failure'] } = {
+      kind: 'cycle',
+      cycleId: proof.cycleId,
+      reviewer: 'coderabbit',
+      scope: proof.scope,
+      target: proof.target,
+      base: proof.base,
+      head: proof.head,
+      dirtySha256: proof.dirtySha256,
+      completion: { kind: 'blocked', reason: 'operational vendor failure' },
+      vendorFailure: proof.failure,
+      findings: [{ id: 'known', severity: 'major', excerpt: 'keep this finding' }],
+      logPath: '/outside/review.log',
+      untracked: [],
+      at: '2026-10-28T00:00:00Z',
+    };
+    expect(hasPersistedVendorOutageOrigin(proof, [cycle])).toBe(true);
+    expect(hasPersistedVendorOutageOrigin(proof, [])).toBe(false);
+    expect(hasPersistedVendorOutageOrigin(proof, [cycle, cycle])).toBe(false);
+    for (const changed of [
+      { ...cycle, reviewer: 'agent:reviewer' },
+      { ...cycle, completion: { kind: 'terminal' as const } },
+      { ...cycle, head: 'd'.repeat(40) },
+      { ...cycle, base: 'd'.repeat(40) },
+      { ...cycle, target: 'main' },
+      { ...cycle, scope: 'uncommitted' as const },
+      { ...cycle, dirtySha256: 'changed' },
+      { ...cycle, vendorFailure: origin('login-required').failure },
+      { ...cycle, vendorFailure: { ...proof.failure, codes: ['scan'] } },
+    ])
+      expect(hasPersistedVendorOutageOrigin(proof, [changed])).toBe(false);
+    const { vendorFailure: omitted, ...legacy } = cycle;
+    expect(omitted).toEqual(proof.failure);
+    expect(hasPersistedVendorOutageOrigin(proof, [legacy])).toBe(false);
+    expect(cycle.findings[0]!.id).toBe('known');
+  });
   test('classifies only wholly recognized structured vendor failures', () => {
     const input = {
       origin: 'vendor-cli' as const,
@@ -122,7 +193,13 @@ describe('deferred vendor policy', () => {
 
   test('queue auth/read exceptions retain original debt without granting fresh continuation', async () => {
     const f = fake();
-    const debt = await deferVendorReview(f.client, reference, 'login-required', attempt);
+    const debt = await deferVendorReview(
+      f.client,
+      reference,
+      'login-required',
+      deferral,
+      origin('login-required'),
+    );
     const before = structuredClone(debt);
     f.client.status = async () => {
       throw new Error('queue authentication failed');
@@ -135,9 +212,9 @@ describe('deferred vendor policy', () => {
     f.client.enqueue = async () => {
       throw new Error('queue authentication failed');
     };
-    await expect(deferVendorReview(f.client, reference, 'login-required', attempt)).rejects.toThrow(
-      'queue authentication failed',
-    );
+    await expect(
+      deferVendorReview(f.client, reference, 'login-required', deferral, origin('login-required')),
+    ).rejects.toThrow('queue authentication failed');
   });
   test('typed vendor blockage after enrollment remains debt; queue and unknown failures block', async () => {
     const f = fake();
@@ -152,7 +229,13 @@ describe('deferred vendor policy', () => {
         enqueued: true,
         reason: { source: 'vendor', category, code: 'vendor-error' },
       });
-      const debt = await deferVendorReview(f.client, reference, 'unavailable', attempt);
+      const debt = await deferVendorReview(
+        f.client,
+        reference,
+        'unavailable',
+        deferral,
+        origin('unavailable'),
+      );
       expect(matchesDeferredVendorDebt(debt, identity)).toBe(true);
       for (const source of ['queue', 'vendor'] as const) {
         for (const category of ['identity', 'scan', 'unknown', 'persistence'] as const) {
@@ -167,14 +250,20 @@ describe('deferred vendor policy', () => {
       }
       f.saved.set(reference.requestId, { ...debt.queue, enqueued: false });
       await expect(
-        deferVendorReview(f.client, reference, 'unavailable', attempt),
+        deferVendorReview(f.client, reference, 'unavailable', deferral, origin('unavailable')),
       ).rejects.toThrow();
     }
   });
 
   test('substantive fixes retain coverage and findings, while final readiness remains blocked', async () => {
     const f = fake();
-    const debt = await deferVendorReview(f.client, reference, 'unavailable', attempt);
+    const debt = await deferVendorReview(
+      f.client,
+      reference,
+      'unavailable',
+      deferral,
+      origin('unavailable'),
+    );
     const record: FindingsRecord = {
       schemaVersion: 1,
       branch: 'feature',
@@ -184,7 +273,7 @@ describe('deferred vendor policy', () => {
         {
           kind: 'coderabbit',
           status: 'blocked',
-          cycleId: attempt.cycleId,
+          cycleId: origin().cycleId,
           reason: 'vendor unavailable',
         },
         {
@@ -275,14 +364,132 @@ describe('deferred vendor policy', () => {
     expect(
       hasDeferredReviewSources(record, ['agent', 'coderabbit', 'pr-threads'], debt, identity),
     ).toBe(false);
+    const nextReference: QueueReference = {
+      ...reference,
+      requestId: 'deferral-2',
+      binding: { ...reference.binding, head: 'c'.repeat(40) },
+    };
+    const nextDeferral = { ...deferral, id: nextReference.requestId };
+    const persisted: unknown[] = [];
+    const successor = await advanceDeferredVendorDebt(
+      f.client,
+      debt,
+      nextReference,
+      nextDeferral,
+      async (row) => {
+        persisted.push(structuredClone(row));
+      },
+    );
+    const nextIdentity = { ...identity, deferralId: nextDeferral.id, head: 'c'.repeat(40) };
+    expect(hasDeferredReviewSources(record, ['agent', 'coderabbit'], successor, nextIdentity)).toBe(
+      false,
+    );
+    const fresh = structuredClone(record);
+    fresh.head = nextIdentity.head;
+    fresh.sources = fresh.sources.filter((source) => source.kind === 'agent');
+    fresh.sources[0]!.coverage!.head = nextIdentity.head;
+    expect(hasDeferredReviewSources(fresh, ['agent', 'coderabbit'], successor, nextIdentity)).toBe(
+      true,
+    );
+    expect(
+      hasDeferredReviewSources(
+        fresh,
+        ['agent', 'coderabbit', 'pr-threads'],
+        successor,
+        nextIdentity,
+      ),
+    ).toBe(false);
+    fresh.findings[0]!.status = 'open';
+    expect(
+      allowsDeferredVendorComposition(fresh, ['agent', 'coderabbit'], successor, nextIdentity, [
+        'major',
+      ]),
+    ).toBe(false);
+    expect(successor.originAttempt).toEqual(debt.originAttempt);
+    expect(successor.predecessor).toEqual(reference);
+    expect(persisted).toEqual([successor]);
+    expect(successor.vendorCompleted).toBe(false);
+  });
+
+  test('successor persists before continuation and replays uncertain writes without changing bound obligations', async () => {
+    const f = fake();
+    const initial = await deferVendorReview(f.client, reference, 'unavailable', deferral, origin());
+    const previous = await bindDeferredPublication(f.client, initial, 12);
+    const before = structuredClone(previous);
+    const next: QueueReference = {
+      ...reference,
+      requestId: 'deferral-2',
+      binding: { ...reference.binding, head: 'c'.repeat(40) },
+    };
+    const pin = { ...deferral, id: next.requestId };
+    let writes = 0;
+    const fail = async () => {
+      writes++;
+      throw new Error('local debt persistence failed');
+    };
+    await expect(advanceDeferredVendorDebt(f.client, previous, next, pin, fail)).rejects.toThrow(
+      'local debt persistence failed',
+    );
+    expect(writes).toBe(1);
+    expect(previous).toEqual(before);
+    expect(f.saved.size).toBe(2);
+    let persisted: unknown;
+    const successor = await advanceDeferredVendorDebt(
+      f.client,
+      previous,
+      next,
+      pin,
+      async (row) => {
+        persisted = structuredClone(row);
+      },
+    );
+    expect(persisted).toEqual(successor);
+    expect(previous).toEqual(before);
+    expect(f.saved.get(reference.requestId)?.pr).toBe(12);
+    expect(f.saved.get(reference.requestId)?.state).toBe('awaiting-merge');
+    expect(f.saved.size).toBe(2);
+    for (const binding of [
+      { ...next.binding, repo: 'other/repo' },
+      { ...next.binding, producer: 'other' },
+      { ...next.binding, target: 'main' },
+      { ...next.binding, targetSelector: 'merge-queue' as const },
+      reference.binding,
+    ]) {
+      await expect(
+        advanceDeferredVendorDebt(f.client, previous, { ...next, binding }, pin, async () => {
+          throw new Error('must not persist invalid successor');
+        }),
+      ).rejects.toThrow('lineage');
+    }
+    expect(f.saved.size).toBe(2);
+    f.client.enqueue = async () => {
+      throw new Error('queue unavailable');
+    };
+    await expect(advanceDeferredVendorDebt(f.client, previous, next, pin, fail)).rejects.toThrow(
+      'queue unavailable',
+    );
+    expect(writes).toBe(1);
+    expect(previous).toEqual(before);
   });
   test('persists pre-PR debt and replays publication with the original immutable identity', async () => {
     const f = fake();
-    const debt = await deferVendorReview(f.client, reference, 'unavailable', attempt);
+    const debt = await deferVendorReview(
+      f.client,
+      reference,
+      'unavailable',
+      deferral,
+      origin('unavailable'),
+    );
     expect(debt.vendorCompleted).toBe(false);
     expect(debt.vendor).toBe('vendor-blocked-transient');
     expect(matchesDeferredVendorDebt(debt, identity)).toBe(true);
-    const replay = await deferVendorReview(f.client, reference, 'unavailable', attempt);
+    const replay = await deferVendorReview(
+      f.client,
+      reference,
+      'unavailable',
+      deferral,
+      origin('unavailable'),
+    );
     expect(f.saved.size).toBe(1);
     const bound = await bindDeferredPublication(f.client, replay, 12);
     expect((await bindDeferredPublication(f.client, bound, 12)).queue.pr).toBe(12);
@@ -294,7 +501,7 @@ describe('deferred vendor policy', () => {
       'head',
       'target',
       'base',
-      'cycleId',
+      'deferralId',
       'dirtySha256',
     ] as const) {
       expect(matchesDeferredVendorDebt(bound, { ...identity, [key]: 'changed' })).toBe(false);
@@ -303,9 +510,17 @@ describe('deferred vendor policy', () => {
 
   test('login is visible needs-action debt; other failure classes never enqueue', async () => {
     const f = fake();
-    expect((await deferVendorReview(f.client, reference, 'login-required', attempt)).vendor).toBe(
-      'vendor-needs-action',
-    );
+    expect(
+      (
+        await deferVendorReview(
+          f.client,
+          reference,
+          'login-required',
+          deferral,
+          origin('login-required'),
+        )
+      ).vendor,
+    ).toBe('vendor-needs-action');
     for (const failure of [
       'scan',
       'tamper',
@@ -313,9 +528,9 @@ describe('deferred vendor policy', () => {
       'substantive',
       'unknown',
     ] satisfies VendorFailure[]) {
-      await expect(deferVendorReview(f.client, reference, failure, attempt)).rejects.toThrow(
-        'remains blocking',
-      );
+      await expect(
+        deferVendorReview(f.client, reference, failure, deferral, origin(failure)),
+      ).rejects.toThrow('remains blocking');
     }
     expect(f.calls()).toBe(1);
   });
@@ -327,12 +542,20 @@ describe('deferred vendor policy', () => {
       await enqueue(ref);
       throw new Error('lost persistence reply');
     };
-    await expect(deferVendorReview(f.client, reference, 'rate-limited', attempt)).rejects.toThrow(
-      'lost persistence reply',
-    );
+    await expect(
+      deferVendorReview(f.client, reference, 'rate-limited', deferral, origin('rate-limited')),
+    ).rejects.toThrow('lost persistence reply');
     f.client.enqueue = enqueue;
     expect(
-      (await deferVendorReview(f.client, reference, 'rate-limited', attempt)).reference.requestId,
+      (
+        await deferVendorReview(
+          f.client,
+          reference,
+          'rate-limited',
+          deferral,
+          origin('rate-limited'),
+        )
+      ).reference.requestId,
     ).toBe('cycle-1');
     expect(f.saved.size).toBe(1);
     for (const state of [
@@ -342,15 +565,21 @@ describe('deferred vendor policy', () => {
       'terminal-with-findings',
     ] as const) {
       f.saved.set(reference.requestId, { ...status, state });
-      await expect(deferVendorReview(f.client, reference, 'unavailable', attempt)).rejects.toThrow(
-        'does not establish',
-      );
+      await expect(
+        deferVendorReview(f.client, reference, 'unavailable', deferral, origin('unavailable')),
+      ).rejects.toThrow('does not establish');
     }
   });
 
   test('cancelled debt cannot be used for readiness', async () => {
     const f = fake();
-    const debt = await deferVendorReview(f.client, reference, 'unavailable', attempt);
+    const debt = await deferVendorReview(
+      f.client,
+      reference,
+      'unavailable',
+      deferral,
+      origin('unavailable'),
+    );
     debt.queue = await f.client.cancel(reference);
     expect(matchesDeferredVendorDebt(debt, identity)).toBe(false);
     await expect(bindDeferredPublication(f.client, debt, 12)).rejects.toThrow('cancelled');
@@ -359,10 +588,16 @@ describe('deferred vendor policy', () => {
   test('head-only enrollment cannot authorize a dirty or uncommitted review', async () => {
     const f = fake();
     await expect(
-      deferVendorReview(f.client, reference, 'unavailable', {
-        ...attempt,
-        dirtySha256: 'changed' as 'clean-tree',
-      }),
+      deferVendorReview(
+        f.client,
+        reference,
+        'unavailable',
+        {
+          ...deferral,
+          dirtySha256: 'changed' as 'clean-tree',
+        },
+        origin(),
+      ),
     ).rejects.toThrow();
     expect(f.calls()).toBe(0);
   });

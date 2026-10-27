@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { DevCycleRecord } from '../record.js';
 import {
   isComplete,
   openBlocking,
@@ -26,13 +27,27 @@ export type VendorFailure =
   | 'substantive'
   | 'unknown';
 
+function vendorCategory(codes: readonly string[]) {
+  if (!codes.length || codes.some((code) => !['con_err', 'rate_limited', 'auth'].includes(code)))
+    return undefined;
+  return codes.includes('auth')
+    ? 'vendor-needs-action'
+    : codes.includes('rate_limited')
+      ? 'vendor-rate-limited'
+      : 'vendor-unavailable';
+}
+
 export const VendorFailureProvenanceSchema = z
   .object({
     source: z.literal('vendor'),
     category: z.enum(['vendor-unavailable', 'vendor-rate-limited', 'vendor-needs-action']),
     codes: z.array(QueueToken).min(1),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) => vendorCategory(value.codes) === value.category,
+    'vendor category must match wholly recognized structured codes',
+  );
 export type VendorFailureProvenance = z.infer<typeof VendorFailureProvenanceSchema>;
 
 /** Recognized structured codes only; mixed/unknown causes fail closed. */
@@ -59,24 +74,62 @@ export function classifyDeferredVendorFailure(input: {
     !input.codes.length
   )
     return undefined;
-  const categories = input.codes.map((code) => {
-    if (code === 'con_err') return 'vendor-unavailable';
-    if (code === 'rate_limited') return 'vendor-rate-limited';
-    if (code === 'auth') return 'vendor-needs-action';
-    return undefined;
-  });
-  if (categories.some((category) => category === undefined)) return undefined;
+  const category = vendorCategory(input.codes);
+  if (!category) return undefined;
   // A mixed vendor-only failure stays operational debt; the action-needed cause is visible.
   return VendorFailureProvenanceSchema.parse({
     source: 'vendor',
-    category: categories.includes('vendor-needs-action')
-      ? 'vendor-needs-action'
-      : categories.includes('vendor-rate-limited')
-        ? 'vendor-rate-limited'
-        : 'vendor-unavailable',
+    category,
     codes: [...input.codes],
   });
 }
+
+export const VendorOutageOriginSchema = z
+  .object({
+    cycleId: QueueToken,
+    head: QueueSha,
+    base: QueueSha,
+    target: QueueToken,
+    scope: z.literal('full'),
+    dirtySha256: z.literal('clean-tree'),
+    failure: VendorFailureProvenanceSchema,
+  })
+  .strict();
+export type VendorOutageOrigin = z.infer<typeof VendorOutageOriginSchema>;
+
+/** A caller-supplied origin is insufficient: match the genuine retained local cycle. */
+export function hasPersistedVendorOutageOrigin(
+  origin: VendorOutageOrigin,
+  cycles: readonly (DevCycleRecord & { vendorFailure?: VendorFailureProvenance })[],
+): boolean {
+  const parsed = VendorOutageOriginSchema.safeParse(origin);
+  if (!parsed.success) return false;
+  const matching = cycles.filter((cycle) => cycle.cycleId === parsed.data.cycleId);
+  if (matching.length !== 1) return false;
+  const cycle = matching[0]!;
+  const failure = VendorFailureProvenanceSchema.safeParse(cycle.vendorFailure);
+  return (
+    cycle.reviewer === 'coderabbit' &&
+    cycle.completion.kind === 'blocked' &&
+    cycle.scope === parsed.data.scope &&
+    cycle.head === parsed.data.head &&
+    cycle.base === parsed.data.base &&
+    cycle.target === parsed.data.target &&
+    cycle.dirtySha256 === parsed.data.dirtySha256 &&
+    failure.success &&
+    failure.data.category === parsed.data.failure.category &&
+    failure.data.codes.length === parsed.data.failure.codes.length &&
+    failure.data.codes.every((code, index) => code === parsed.data.failure.codes[index])
+  );
+}
+
+const DeferralIdentitySchema = z
+  .object({
+    id: QueueToken,
+    base: QueueSha,
+    dirtySha256: z.literal('clean-tree'),
+  })
+  .strict();
 
 export const DeferredVendorDebtSchema = z
   .object({
@@ -85,9 +138,11 @@ export const DeferredVendorDebtSchema = z
     vendor: z.enum(['vendor-pending', 'vendor-blocked-transient', 'vendor-needs-action']),
     /** Independent acceptance and required CI are separate evidence. */
     vendorCompleted: z.literal(false),
-    attempt: z
-      .object({ cycleId: QueueToken, base: QueueSha, dirtySha256: z.literal('clean-tree') })
-      .strict(),
+    /** Genuine retained vendor cycle; a successor never changes this evidence. */
+    originAttempt: VendorOutageOriginSchema,
+    /** Current enrollment, explicitly not a vendor run. */
+    deferral: DeferralIdentitySchema,
+    predecessor: QueueReferenceSchema.exactOptional(),
   })
   .strict();
 export type DeferredVendorDebt = z.infer<typeof DeferredVendorDebtSchema>;
@@ -116,14 +171,31 @@ export async function deferVendorReview(
   client: DeferredQueueClient,
   reference: QueueReference,
   failure: VendorFailure,
-  attempt: DeferredVendorDebt['attempt'],
+  deferral: DeferredVendorDebt['deferral'],
+  originAttempt: VendorOutageOrigin,
 ): Promise<DeferredVendorDebt> {
   if (failure !== 'unavailable' && failure !== 'rate-limited' && failure !== 'login-required') {
     throw new Error(`vendor failure remains blocking: ${failure}`);
   }
   const ref = QueueReferenceSchema.parse(reference);
   if (ref.binding.kind !== 'deferred-author') throw new Error('deferred author binding required');
-  const pin = DeferredVendorDebtSchema.shape.attempt.parse(attempt);
+  const pin = DeferralIdentitySchema.parse(deferral);
+  const origin = VendorOutageOriginSchema.parse(originAttempt);
+  const category =
+    failure === 'login-required'
+      ? 'vendor-needs-action'
+      : failure === 'rate-limited'
+        ? 'vendor-rate-limited'
+        : 'vendor-unavailable';
+  if (
+    pin.id !== ref.requestId ||
+    origin.head !== ref.binding.head ||
+    origin.base !== pin.base ||
+    origin.target !== ref.binding.target ||
+    origin.failure.category !== category
+  ) {
+    throw new Error('origin vendor attempt does not match initial deferral');
+  }
   const queue = QueueStatusSchema.parse(await client.enqueue(ref));
   if (!continuableQueue(queue)) {
     throw new Error(`queue enrollment does not establish deferred debt: ${queue.state}`);
@@ -133,8 +205,52 @@ export async function deferVendorReview(
     queue,
     vendor: failure === 'login-required' ? 'vendor-needs-action' : 'vendor-blocked-transient',
     vendorCompleted: false,
-    attempt: pin,
+    deferral: pin,
+    originAttempt: origin,
   };
+}
+
+/** Enroll and persist a linked successor before selecting it for continuation.
+ * Never cancels or mutates the predecessor, including its published obligations.
+ * On an uncertain write the caller must replay the SAME nextReference.
+ */
+export async function advanceDeferredVendorDebt(
+  client: DeferredQueueClient,
+  previous: DeferredVendorDebt,
+  nextReference: QueueReference,
+  deferral: DeferredVendorDebt['deferral'],
+  persistSuccessor: (successor: DeferredVendorDebt) => Promise<void>,
+): Promise<DeferredVendorDebt> {
+  const prior = DeferredVendorDebtSchema.parse(previous);
+  const next = QueueReferenceSchema.parse(nextReference);
+  const pin = DeferralIdentitySchema.parse(deferral);
+  const before = prior.reference.binding;
+  const after = next.binding;
+  if (
+    before.kind !== 'deferred-author' ||
+    after.kind !== 'deferred-author' ||
+    next.requestId === prior.reference.requestId ||
+    pin.id !== next.requestId ||
+    before.head === after.head ||
+    before.repo !== after.repo ||
+    before.producer !== after.producer ||
+    before.target !== after.target ||
+    before.targetSelector !== after.targetSelector ||
+    !continuableQueue(prior.queue)
+  ) {
+    throw new Error('successor must retain outage lineage with a new immutable head and request');
+  }
+  const queue = QueueStatusSchema.parse(await client.enqueue(next));
+  if (!continuableQueue(queue)) throw new Error('successor queue enrollment failed');
+  const successor: DeferredVendorDebt = {
+    ...prior,
+    reference: next,
+    queue,
+    deferral: pin,
+    predecessor: prior.reference,
+  };
+  await persistSuccessor(successor);
+  return successor;
 }
 
 /** Publication can be replayed after a crash. The server verifies forge identity. */
@@ -159,7 +275,7 @@ export function matchesDeferredVendorDebt(
     producer: string;
     head: string;
     target: string;
-    cycleId: string;
+    deferralId: string;
     base: string;
     dirtySha256: string;
   },
@@ -173,9 +289,11 @@ export function matchesDeferredVendorDebt(
     binding.producer === identity.producer &&
     binding.head === identity.head &&
     binding.target === identity.target &&
-    parsed.data.attempt.cycleId === identity.cycleId &&
-    parsed.data.attempt.base === identity.base &&
-    parsed.data.attempt.dirtySha256 === identity.dirtySha256 &&
+    parsed.data.deferral.id === identity.deferralId &&
+    parsed.data.reference.requestId === identity.deferralId &&
+    parsed.data.originAttempt.target === identity.target &&
+    parsed.data.deferral.base === identity.base &&
+    parsed.data.deferral.dirtySha256 === identity.dirtySha256 &&
     continuableQueue(parsed.data.queue) &&
     debt.vendorCompleted === false
   );
@@ -202,8 +320,7 @@ export function hasDeferredReviewSources(
   const blockedVendor = record.sources.filter(
     (source) => source.kind === 'coderabbit' && source.status === 'blocked',
   );
-  if (!blockedVendor.length || blockedVendor.some((source) => source.cycleId !== identity.cycleId))
-    return false;
+  if (blockedVendor.some((source) => source.cycleId !== debt.originAttempt.cycleId)) return false;
   const remaining = configured.filter((kind) => kind !== 'coderabbit');
   if (record.sources.some((source) => source.kind !== 'coderabbit' && source.status === 'blocked'))
     return false;

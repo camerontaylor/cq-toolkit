@@ -207,6 +207,14 @@ against unique verified forge metadata. Never mint another request to bypass
 an uncertain write. Unpublished/cancelled work remains visible and starts no
 vendor review. Changed head/author/target is an identity failure.
 
+A fix that changes the head creates a new immutable enrollment and request ID.
+Keep the genuine original outage attempt separate from this current deferral;
+the successor is not a vendor run. Persist the linked successor before using
+it, then obtain fresh full agent coverage and gates for its head/base. Retain
+the predecessor's published obligations, findings, dispositions and receipts;
+superseding the current deferral neither cancels those obligations nor completes
+vendor review. Replay the same successor after an uncertain write.
+
 The sole runner refreshes only explicitly enrolled PRs within a bounded tick
 budget, observes verified merge provenance and enrolls current-code work.
 Q2 historical interval discovery is unnecessary for this lifecycle. Q1 captures
