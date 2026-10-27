@@ -736,7 +736,11 @@ per round that has a settled batch or completed re-review. Each entry is
 round (replaced by a successful re-review), and `runs` contains every settled
 batch `RunReport` in dispatch order, including PR-thread and local-agent
 batches. A round without dispatched work has `runs: []`. A stop before
-re-review retains the dispatched record and all settled batch runs.
+re-review retains the dispatched record and all settled batch runs. PR runs
+are retained immediately when the governed run settles, before post-fix Git
+verification, publication or snapshots can throw. A refused sibling cannot
+erase earlier admitted work; an initial refusal before any admitted work
+still records zero rounds. The settled-run callback aggregates each run once.
 `rounds.length` therefore counts recorded rounds, rather than dispatch batches.
 
 This intentionally changes the persisted greenfield report format:

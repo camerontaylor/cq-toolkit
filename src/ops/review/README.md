@@ -92,7 +92,10 @@ open findings and distinct verified commit count (`fixesPerRun`). Unknown
 USD prices remain absent. `rounds[]` contains one entry per recorded round:
 `{ round, record, runs }`. The record is that round's latest reviewed findings;
 `runs` lists all settled batch runs in order (or is empty if no work dispatched).
-A stop before re-review retains the dispatched record and settled runs.
+A stop before re-review retains the dispatched record and settled runs. PR
+fix runs are recorded immediately on settlement, before post-fix Git/forge
+operations. A later sibling admission refusal or snapshot exception preserves
+admitted work's history exactly once; an initial admission refusal records no round.
 This greenfield report format replaces the former optional `rounds[].run`
 with required `rounds[].runs`; `rounds.length` counts rounds, not batches.
 `failed[]` lists retained branch/SHA pointers, finding,

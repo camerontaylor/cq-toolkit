@@ -998,6 +998,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               const meta = prMetadata;
               const fixesById = new Map<string, AddressFix>();
               const dispatchedFindings: Finding[] = [];
+              let dispatchedRecord: FindingsRecord | undefined;
               let admissionRefused = false;
               const entry: OpRegistryEntry = {
                 name: 'review.fixItem',
@@ -1025,13 +1026,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const admit = async (head: string) => {
                     if ((await branchName(root)) !== item.worktree.branch)
                       throw new Error('worker execution branch changed');
-                    await admitRecord(root, {
+                    const record: FindingsRecord = {
                       schemaVersion: 1,
                       branch: item.worktree.branch,
                       head,
                       sources: [{ kind: 'pr-threads', status: 'terminal' }],
                       findings: [finding],
-                    });
+                    };
+                    await admitRecord(root, record);
+                    dispatchedRecord ??= record;
                   };
                   try {
                     if (bound.withVerifiedHead) await bound.withVerifiedHead(admit);
@@ -1104,6 +1107,22 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 engineOwnedConcurrency: policy.review.addressConcurrency,
                 publish: input.push === true,
                 publicationTreeClean,
+                onFixRunSettled: (run) => {
+                  // Retain the settled run before later Git/forge work can throw.
+                  // An initial refusal has no admitted work to record; a refused
+                  // sibling must not erase the history of earlier admitted work.
+                  if (!dispatchedRecord || dispatchedFindings.length === 0) return;
+                  noteRound(
+                    round,
+                    {
+                      ...dispatchedRecord,
+                      findings: dispatchedFindings.map(
+                        (finding) => fixesById.get(finding.id)?.finding ?? finding,
+                      ),
+                    },
+                    run,
+                  );
+                },
                 onWorktreeStaleRefresh: async () => {
                   // The refresh removal refused on untracked files. Clear
                   // ONLY what the existing receipt strictly attests as
@@ -1150,21 +1169,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   'needs-human',
                   'PR worker admission refused; persisted/caller bytes retained',
                 );
-              if (loop.fixReport) {
-                noteRound(
-                  round,
-                  {
-                    schemaVersion: 1,
-                    branch: loop.worktree.branch,
-                    head: await gitText(root, ['rev-parse', 'HEAD']),
-                    sources: [{ kind: 'pr-threads', status: 'terminal' }],
-                    findings: dispatchedFindings.map(
-                      (finding) => fixesById.get(finding.id)?.finding ?? finding,
-                    ),
-                  },
-                  loop.fixReport,
-                );
-              }
               const fetched = await fetchReviewState(
                 { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                 undefined,

@@ -491,6 +491,12 @@ export interface ReviewLoopOpts {
    * reporting.
    */
   onSpend?: (usd: number, tokens?: number) => void;
+  /**
+   * Called once with the settled fix run, before post-dispatch Git/forge
+   * operations. Compositions can retain history even if those operations throw.
+   * Absent when the fix run never returns a report; errors propagate.
+   */
+  onFixRunSettled?: (report: RunReport) => void;
 }
 
 /** The loop's terminal report. Plain JSON; `ok` only when every stage came back clean. */
@@ -1239,6 +1245,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       }
     }
   })();
+  opts.onFixRunSettled?.(fixReport);
   const headAfter = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const headMoved =
     headBefore.code === 0 &&
