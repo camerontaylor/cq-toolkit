@@ -1497,12 +1497,17 @@ describe('mixed-worktree publication (round-3 item 11)', () => {
     expect(row!).not.toContain('not published');
   });
 
-  test('the withhold row resolves to exit-published once publication is on (engine truth amendment contract)', async () => {
+  test('with publication explicitly on, the withhold row keeps the engine-exit publication clause open, never the publication-off denial', async () => {
     // S6 attempt D's exact shape: T1's row ended budget-exhausted, T2's fix
     // committed and verified; the loop withheld, then the engine's exit
-    // publication pushed the verified range (8f78ca91). The loop-side text
-    // must never deny that outcome; the composition amendment test owns the
-    // "exit-published" resolution (address-pr push-fault suite).
+    // publication pushed the verified range (8f78ca91). The "exit-published"
+    // resolution itself is the composition's to prove (address-pr push-fault
+    // suite); this pin owns the loop-side TEXT half of that amendment: the
+    // explicit opt-in (`publish: true` — the composition's
+    // `input.push === true` shape) must keep the withhold row's engine-exit
+    // clause OPEN. The publish-off branch of this exact row appends "this
+    // run publishes nothing at engine exit (publication requires --push)"
+    // instead — that denial is what a publish-on run must never carry.
     const world = defaultWorld();
     world.threads = [
       actionableThread('T1', 'src/a.ts', 3, 101),
@@ -1524,6 +1529,11 @@ describe('mixed-worktree publication (round-3 item 11)', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]).toContain('T2');
+    // THE PUBLISH-ON OBSERVABLE: the row ends with the OPEN engine-exit
+    // clause — the one difference `opts.publish === false` vs otherwise
+    // actually makes on this text — never the publish-off denial.
+    expect(rows[0]).toContain('; publication may still happen at engine exit');
+    expect(rows[0]).not.toContain('publication requires --push');
     expect(outcome.fixReport).toBeDefined();
   });
 });
