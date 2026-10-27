@@ -383,7 +383,7 @@ function makeReviewCycle(
       advisories: string[];
       /** The block came from the network/transient class (#509): a re-review may retry it. */
       transient?: boolean;
-      /** A deadline/signal stopped the CLI itself, rather than a safety or provider refusal. */
+      /** The wall budget itself (remainingWallMs spent) stopped the CLI, rather than a safety or provider refusal; a parent cancel (sibling-leg failure, user interrupt) never sets it. */
       budgetStopped?: true;
     };
     try {
@@ -472,8 +472,14 @@ function makeReviewCycle(
         const parsed = parseReviewerStream(raw.stdout);
         const ordinaryCompletion =
           raw.exitCode === null ? undefined : decideCompletion(raw.exitCode, parsed);
+        // budgetStopped demands evidence the WALL BUDGET alone was spent: a
+        // parent cancel (sibling-leg failure, user interrupt) must never be
+        // relabeled as a budget stop, even when it races a terminally
+        // completed CLI run or the driver's own timeout. Budget spend via the
+        // composition's signal abort is still covered, because that abort
+        // implies remainingWallMs() <= 0.
         const budgetStopped =
-          (signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0) &&
+          (remainingWallMs?.() ?? Infinity) <= 0 &&
           (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
         const completion: DevReviewCompletion =
           signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
