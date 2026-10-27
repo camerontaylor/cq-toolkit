@@ -279,7 +279,7 @@ test('settlement propagates cancellation and remaining budget without mutating v
       },
     },
     queue: {
-      state: 'queued',
+      state: 'enqueued',
       pr: 12,
       mergeSha: 'b'.repeat(40),
       itemId: 'item',
