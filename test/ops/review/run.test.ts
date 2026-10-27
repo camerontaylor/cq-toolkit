@@ -1877,7 +1877,7 @@ it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
           : {
               runAgentReviewer: async () => {
                 clock += 1001;
-                if (mode === 'drift') repo.git('commit', '--allow-empty', '-m', 'drift');
+                if (mode === 'drift') await repo.git('commit', '--allow-empty', '-m', 'drift');
                 return mode === 'coverage'
                   ? { status: 'needs-human' as const, reason: 'coverage incomplete' }
                   : { status: 'budget-exhausted' as const };
