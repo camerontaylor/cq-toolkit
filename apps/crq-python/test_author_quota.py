@@ -1002,6 +1002,21 @@ class OpenCyclePolicyTest(unittest.TestCase):
                 self.assertEqual(crq.load_queue(), q)
                 self.assertTrue(all("boost" not in i for i in q["items"]))
 
+    def test_migration_preserves_incomplete_items_for_admission_validation(self):
+        q = dict(items=[
+            {"id": "author-snapshot-1"},
+            {"id": "no-state", "kind": "open", "cycles": [{}]},
+            {"id": "no-cycles", "kind": "open", "state": "pending"},
+            {"id": "no-kind", "state": "pending", "cycles": [{}]},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "queue.json"
+            before = json.dumps(q).encode()
+            path.write_bytes(before)
+            with mock.patch.object(crq, "QUEUE", path):
+                self.assertEqual(crq.load_queue(), q)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_optional_cycle_lowest_rank_and_never_a_dependency_blocker(self):
         optional = self.item(cycles=[{}], optional_cycle=True)
         for kind in ("open", "delta", "merged", "promotion", "coverage", crq.review_receipt.KIND,
