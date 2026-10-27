@@ -127,7 +127,11 @@ export async function runAgentReviewer(
   };
   try {
     const work = async (): Promise<AgentReviewResult> => {
-      ensureActive();
+      // Degenerate budgets answer with the structured status, never a throw:
+      // `ensureActive` below would turn wallMs <= 0 into a pre-report
+      // wall-budget abort — a budget-like needs-human reason without the
+      // `budgetExhausted` marker, which the caller contract treats as an
+      // unexpected-error refusal.
       if (
         !Number.isFinite(input.maxTokens) ||
         input.maxTokens <= 0 ||
@@ -165,6 +169,12 @@ export async function runAgentReviewer(
         advisories: plan.advisories,
         limitations: plan.limitations,
       };
+      // The first wall-budget gate runs only after `report` exists: an abort
+      // landing before any session evidence is recorded must still exit
+      // through the catch with a partial snapshot, so the structured
+      // `budgetExhausted`/`cancelled` markers attach (a marker-less
+      // budget-like reason propagates verbatim as an unexpected error).
+      ensureActive();
       // Excluded bytes are retained in local coverage but are never uploaded.
       await scanReviewUpload(
         input.scanSecrets,
