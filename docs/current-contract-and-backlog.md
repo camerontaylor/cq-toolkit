@@ -18,7 +18,7 @@
 9. **Remediation is approval-gated; nothing is auto-applied.** _Realised_ 2026-10-20 as an attended authority bound to the preview digest and a clean tree.
 10. **Workers may not commit tests, runner config or snapshots** (W1.8). Enforced in sweep, not in `analyze.fix`.
 11. **Baselines only tighten; a missing summary is non-passing; the monotonic guard is mandatory.**
-12. **Review = one CodeRabbit CLI cycle plus one independent head-bound review; P2s go to issues** (2026-10-16). Supersedes the 0.2 plan's two cycles.
+12. **Review = one CodeRabbit CLI cycle, or visible durable vendor debt under approved DEC1, plus one independent head-bound review; P2s go to issues** (2026-10-16; DEC1, 2026-10-27). During vendor availability/rate-limit/login outages, development and merge may continue before vendor recovery after authorized durable enrollment. Vendor completion remains false; queue authorization/persistence, scan/tamper, stale identity, unknown failures, substantive blocking findings, CI, independence and privileged trust still block. Supersedes the 0.2 plan's two cycles. Lifecycle: [CodeRabbit protocol](coderabbit-review.md#6-completion-semantics-and-blockers).
 13. **Acceptance = independent PASS on the exact head, not draft, right base; unresolved threads are reported, not blocking** (2026-10-20).
 14. **Author evidence is a claim; verification uses only facts an owner credential cannot write** (2026-10-16).
 15. **The PR is not development state; every checkable rule is a command** (2026-10-16).

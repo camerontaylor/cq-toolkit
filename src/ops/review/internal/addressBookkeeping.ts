@@ -144,6 +144,12 @@ export function makeAddressBookkeepingReceipt(deps: {
           if (ledger.branch !== current.branch)
             throw new Error('bookkeeping ledger branch mismatch');
           for (const record of ledger.records) {
+            if (record.kind === 'vendor-debt') {
+              if (record.debt.reference.binding.kind !== 'deferred-author')
+                throw new Error('bookkeeping debt requires a deferred author binding');
+              heads.push(record.debt.reference.binding.head, record.debt.deferral.base);
+              continue;
+            }
             heads.push(record.head);
             if (record.kind !== 'disposition') heads.push(record.base);
           }

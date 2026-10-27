@@ -103,8 +103,9 @@ use a non-GLM provider or wait.
 ## Code review — mandatory before every PR
 
 ONE completed CodeRabbit CLI review-and-address cycle over the full
-intended PR diff before creating a PR, then one independent head-bound
-review of the PR (owner ruling D-J, development posture 2026-10-20). Full
+intended PR diff, or the approved durable vendor-debt path during a vendor
+outage (DEC1, 2026-10-27), then one independent head-bound review of the PR
+(owner ruling D-J, development posture 2026-10-20). Full
 protocol: [docs/coderabbit-review.md](docs/coderabbit-review.md).
 
 - Pin ONE immutable base per task: the merge-base against the task's
@@ -117,14 +118,22 @@ protocol: [docs/coderabbit-review.md](docs/coderabbit-review.md).
   with a terminal non-skipped completion, and no error/action_required
   occurred — a `complete` event alone is insufficient. Failed, skipped,
   interrupted, auth-failed, or rate-limited runs do not count: report the
-  blocker — a blocker prevents opening the PR. Never replace a required
-  review with another reviewer, never waive the rule, never fabricate
-  results. One exception, for `cq dev.cycle` only (owner, 2026-10-27,
+  true reason; they never count as completed. Under DEC1, proven vendor
+  availability, rate-limit or login/operational failure becomes visible
+  deferred debt after authorized durable enrollment. Ready PRs and merge
+  may proceed, including before vendor recovery, with deterministic gates
+  and independent exact-head acceptance. Agent review, leases, queue
+  assignment and consumption acknowledgements never mean vendor completion.
+  Queue authorization/persistence failures, unsupported deployment, unknown
+  failures, scan/tamper, stale identity, substantive blocking findings, red
+  CI, missing independence and privileged trust remain blockers. No inline
+  paid retry or extra scheduler. The older exception for `cq dev.cycle` (2026-10-27,
   #509): when its address leg's re-review is blocked on a network/transient
   class, it is retried once; if it is still blocked and at least one
   verified fix exists, the final deterministic gates run and a DRAFT PR
   naming the blocked re-review is published (red gates still publish
-  nothing). The draft is not a counted cycle and is never marked ready.
+  nothing). Without DEC1's durable enrollment this remains draft-only and
+  is not a counted cycle. See the protocol's deferred-debt lifecycle.
 - Run the deterministic gates before the cycle and after addressing it.
   Those gates are the cheap deterministic ones plus the affected tests — the
   full suite is CI's, and Knip runs per the contract's condition (see
