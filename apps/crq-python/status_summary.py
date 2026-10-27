@@ -57,7 +57,9 @@ def merged_current(queue, receipt_root=None):
             if state == "done" and review_receipt.reusable_current(document, capture):
                 category = "partial_scope" if outcome == "partial-scope" else "proven_terminal"
             elif (state == "no-current-code" and outcome == "no-current-code" and
-                  all(p.get("disposition") in ("deleted", "empty") for p in capture["paths"])):
+                  all(p.get("disposition") == "deleted" or
+                      p.get("disposition") == "excluded-with-reason" and p.get("reason") == "empty current file"
+                      for p in capture["paths"])):
                 category = "no_current_code"
             elif state == "unsupported" and outcome == "unsupported":
                 category = "unsupported"
@@ -74,7 +76,9 @@ def merged_current(queue, receipt_root=None):
     discovery = queue.get("merged_reconcile") or {}
     allowed = ("after", "before", "complete", "complete_through", "next_cursor", "represented",
                "intents", "unsupported", "duplicates_seen", "records_read", "inventory_digest")
-    return {"discovery": {key: discovery[key] for key in allowed if key in discovery},
+    natural = queue.get("merged_discovery") or {}
+    return {"natural_discovery": {key: natural[key] for key in ("after", "before", "complete", "error") if key in natural},
+            "discovery": {key: discovery[key] for key in allowed if key in discovery},
             "watermark": queue.get("merged_watermark"), "receipts": counts,
             "path_exclusions": exclusions, "captured_targets": sorted(targets)[:32],
             "additional_captured_targets": max(0, len(targets) - 32),

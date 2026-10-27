@@ -394,8 +394,8 @@ def _query(repo, body):
 
 def freeze_source(forge, *, repo, base):
     """Pin a finite all-state universe, never a merged/search result offset."""
-    body = ("issues(last:1, orderBy:{field:CREATED_AT,direction:ASC}) { totalCount nodes { number } } "
-            "pullRequests(last:1, orderBy:{field:CREATED_AT,direction:ASC}) { totalCount nodes { number } }")
+    body = ("issues(last:1, states:[OPEN,CLOSED], orderBy:{field:CREATED_AT,direction:ASC}) { totalCount nodes { number } } "
+            "pullRequests(last:1, states:[OPEN,CLOSED,MERGED], orderBy:{field:CREATED_AT,direction:ASC}) { totalCount nodes { number } }")
     repository = _repository(forge(_query(repo, body)), repo)
     numbers = []
     total = 0

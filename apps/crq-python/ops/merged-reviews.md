@@ -133,7 +133,8 @@ python3 apps/crq-python/crq.py reconcile-merged --after=2026-10-01T00:00:00Z --b
 ```
 
 Remove `--dry-run` to persist and enroll; repeat the same flags to resume.
-Bounds mean `(after, before]`. The command prints one JSON discovery summary,
+Bounds mean `(after, before]`; `before` must precede scan startup. Natural
+discovery freezes its upper bound one second behind the tick clock. The command prints one JSON discovery summary,
 holds the existing tick lock, and never dispatches a provider or repair. An
 incomplete result retains its cursor and enrolls nothing. A completed inventory
 enrolls supported sources through the Q1 API, deduplicating exact source bindings

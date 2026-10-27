@@ -887,6 +887,8 @@ def enqueue_merged(pr: int, merge_sha: str, request_id: str, target_selector: st
 def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     """Caller owns tick.lock; persist source/page before reads and Q1 before watermark."""
     interval = merged_reconcile.normalize_interval(after, before)
+    if before >= iso():
+        raise merged_reconcile.ReconcileRefused("upper bound must precede scan startup")
     merged_reconcile.normalize_page_budget(page_budget)
     key = review_receipt.digest({"repo": REPO, "base": "merge-queue", **interval})
     path = STATE / "reconcile" / (key + ".json")
@@ -958,7 +960,7 @@ def discover_merged(q, budget):
     else:
         watermark = q.get("merged_watermark") or q["created_at"]
         after = iso(parse_iso(watermark) - dt.timedelta(minutes=5))
-        before = iso()
+        before = iso(now() - dt.timedelta(seconds=1))
     if after >= before:
         return []
     # Record the frozen bounds in queue too: a crash after source pinning but
@@ -1136,8 +1138,8 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # authorizes the agent fallback, instead of failing every tick.
         raise author_quota.AuthorRefused("author head cannot be checked out") from exc
     cli_cmd = ["coderabbit", "review", "--agent"]
-    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND):
-        # Author/current cycles review the COMMITTED base..head (the original manual cycle 1
+    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) or plan.get("range_policy"):
+        # Author/current/full-range cycles review the COMMITTED base..head (the original manual cycle 1
         # form) on a clean worktree, never uncommitted working-tree edits. The
         # natural argv is deliberately unchanged.
         cli_cmd.append("--committed")

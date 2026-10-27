@@ -737,3 +737,48 @@ class CurrentTest(unittest.TestCase):
         self.assertTrue(json.loads(out.getvalue())["complete"])
         self.assertEqual(crq.load_queue()["items"], [])
         launch.assert_not_called()
+
+
+    def test_real_tick_recovery_budget_shared_and_exhausted_debt_untouched(self):
+        self.q["created_at"] = "2026-10-01T00:00:00Z"
+        entry = self.deferred_entry()
+        self.q["queue_client_requests"] = {f"request-{n:02}": copy.deepcopy(entry) for n in range(3)}
+        crq.save_queue(self.q)
+        original_run = crq.run
+        actual_forge = self.forge_inventory()
+        calls = []
+        budget = crq.ForgeBudget(requests=5, seconds=30)
+        def fake_run(argv, **kwargs):
+            if argv[0] != "gh":
+                return original_run(argv, **kwargs)
+            calls.append(argv)
+            self.assertLessEqual(kwargs["timeout"], 10)
+            value = actual_forge(argv[1:]) if argv[2] == "graphql" else self.forge_data()
+            return SimpleNamespace(stdout=json.dumps(value), returncode=0)
+        with mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+            self.tick(discovery=True)
+        q = crq.load_queue()
+        self.assertEqual(len(calls), 5)  # ceiling + 3 numeric pages + 1 deferred read
+        self.assertEqual(q["merged_reconcile"]["represented"], 125)
+        self.assertEqual(q["deferred_refresh_cursor"], "request-00")
+        self.assertEqual(q["queue_client_requests"]["request-01"], entry)
+        self.assertEqual(q["queue_client_requests"]["request-02"], entry)
+
+    def test_future_bound_refuses_before_forge_and_full_range_dispatch_is_committed(self):
+        with mock.patch.object(crq, "gh_json") as forge:
+            with self.assertRaises(crq.merged_reconcile.ReconcileRefused):
+                crq.reconcile_merged(self.q, after="2026-10-01T00:00:00Z",
+                                     before="2099-01-01T00:00:00Z", page_budget=1)
+            forge.assert_not_called()
+        self.g("update-ref", "refs/remotes/origin/merge-queue", self.pre)
+        item = {"id": "open-range", "kind": "open", "pr": 42, "state": "pending", "cycles": [],
+                "attempts": [], "failures": 0}
+        self.q["items"].append(item)
+        info = {"state": "OPEN", "isDraft": False, "headRefOid": self.merge,
+                "baseRefName": "merge-queue", "headRefName": "fixture"}
+        plan = crq.plan_open(item, info, False)
+        with mock.patch.object(crq, "secret_scan", return_value=(True, {})),              mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")),              mock.patch.object(crq.subprocess, "Popen", return_value=SimpleNamespace(pid=919191)):
+            crq.launch(self.q, item, plan)
+        meta = json.loads((crq.RUNS / item["run"]["run_id"] / "meta.json").read_text())
+        self.assertIn("--committed", meta["cmd"])
+        self.assertEqual(meta["range_policy"], "full-range-once-v1")
