@@ -386,3 +386,18 @@ Started 2026-10-26T22:55:53Z (06:55 SGT); exited **3** at 2026-10-27T02:24:45Z (
 
 S7 acceptance (dev.cycle opens a PR with a readiness record) is still not met. Rerun once the
 host network is stable; #509 decides whether the next blocked re-review still loses the fixes.
+
+## S7 dogfood attempt L: dev.cycle on merge-queue + D1/D2 (fix/s7-dogfood-address-469-v3)
+
+The branch was built fresh from `origin/merge-queue` `3f1e61da`, which carries #504, #511 (step bound wiring, undici transport, finding-key strip), #513 (re-review retry + `rereview-blocked` draft), #515 (oxfmt-check gate) and #516 (`rounds[]` per round). On top of that: #469 + P2s, includeIntegration/testFiles, D1/D2 (with `stop` = round-cap | budget | rereview-blocked), the A–K log, and cq.json (reviewer `zai`/`glm-5.3-flash`, `budgets.step.wallMs` 3 600 000). Same invocation as E–K, detached on triton from `dist` at `07397c69`. Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261027-l/`.
+
+Started 2026-10-27T10:03:00Z (18:03 SGT, after the GLM blackout); exited **3** at 13:53:01Z (3 h 50 m). The start was 2 min late because the launcher's "wait for a running CodeRabbit review" guard matched its own launching shell (run.sh text in its command line); that shell was stopped by exact PID.
+
+- **dev.check:** green.
+- **review.run:** TERMINAL on both reviewers. CodeRabbit had 1 finding. The agent had **26 findings**, coverage v2 `partitioned` (1 329 changed lines / 20 files), **28/28 sessions complete, 20/20 pieces completed**, 290 004 tokens. No step-timeout, transport or schema failure.
+- **review.address:** **25 verified fix commits** (`fixesPerRun` 25; the address checks now include the oxfmt-check gate), one round, 14 batch runs, 88 attempts (4 failed), 12 077 247 ms, 9 966 983 tokens (modeled $0.78).
+- **Stop:** the re-review's agent reviewer ran out of the address leg's wall budget (4 h − 10-min reserve ends at 13:53). The block reached `finish()` with no structured stop. D1's `budget` marker is set only when the leg's own `stop()` observes exhaustion, and on this path nothing called it. So dev.cycle propagated the block verbatim: **no push, no PR**, reserve unused. Filed **#532** (root cause and fix direction). CodeRabbit's re-review completed (2 findings).
+- **#490** reproduced again (all 27 rows `open` despite 25 fixes).
+- The 25 unreviewed fix commits are parked at `fix/s7-dogfood-address-469-v3-l-fixes` (`50ea6393`); v3 itself stays at the reviewed head.
+
+S7 acceptance (dev.cycle opens a PR) is still not met. This is the first run where no reviewer or transport failure occurred and the address leg ran to its budget. Fixing #532 would have published a draft with 25 fixes.
