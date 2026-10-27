@@ -333,6 +333,9 @@ describe('dev.check', () => {
     // may be emitted for the combined selection.
     expect(pnpmArgs(effects)).toEqual(argvBefore);
     const records = effects.openLedger('feature/x').load().records;
+    // .every on an empty array is vacuously true, so a silently failed ledger
+    // save would slip through: pin the records as non-empty first.
+    expect(records.length).toBeGreaterThanOrEqual(1);
     expect(records.every((r) => r.kind === 'check' && r.testSelection?.mode === 'named')).toBe(
       true,
     );
