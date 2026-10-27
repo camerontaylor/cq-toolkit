@@ -199,6 +199,103 @@ describe('planReviewAreas contract harvesting', () => {
     );
     expect(contractDescriptor('src/a.ts', 'const local = 1;')).toBe('');
   });
+
+  it('bounds each area contract payload at maxCharsPerContractArea and records truncation', () => {
+    const cap = REVIEW_AREA_DEFAULTS.maxCharsPerContractArea;
+    // Wide unique export lines keep descending past the cap; one file is a
+    // single area, so the aggregate payload is the thing under test. Each
+    // descriptor is about 30 chars, so 2000 descriptors overflow the 20k cap.
+    const line = (index: number) => `export const value${String(index)} = ${String(index)};`;
+    const components = [
+      tracked(
+        'src/wide.ts',
+        Array.from({ length: 2_000 }, (_, index) => line(index)),
+      ),
+    ];
+    const result = plan({ components });
+    const area = result.areas[0]!;
+    expect(area.contracts.length).toBeGreaterThan(0);
+    expect(area.contracts.length).toBeLessThan(2_000);
+    const payload = area.contracts.join('\n').length;
+    expect(payload).toBeLessThanOrEqual(cap);
+    const firstCut = line(area.contracts.length);
+    expect(area.contracts).not.toContain(`src/wide.ts:${firstCut}`);
+    expect(area.contractsTruncated).toBe(true);
+    expect(result.crossAreaPass.reason).toContain('truncated');
+  });
+
+  it('keeps the full contract list when it fits and never sets the flag', () => {
+    const cap = REVIEW_AREA_DEFAULTS.maxCharsPerContractArea;
+    const budget = Math.floor(cap / 40);
+    const components = [
+      tracked(
+        'src/fit.ts',
+        Array.from(
+          { length: budget },
+          (_, index) => `export const v${String(index)} = ${String(index)};`,
+        ),
+      ),
+    ];
+    const result = plan({ components });
+    const area = result.areas[0]!;
+    expect(area.contracts).toHaveLength(budget);
+    expect(area.contracts.join('\n').length).toBeLessThanOrEqual(cap);
+    expect(area.contractsTruncated).toBe(false);
+    expect(result.crossAreaPass.reason).not.toContain('truncated');
+  });
+
+  it('cuts at a boundary: an oversized descriptor itself is dropped, prior fits are kept', () => {
+    const cap = REVIEW_AREA_DEFAULTS.maxCharsPerContractArea;
+    // A single descriptor is bounded at path + 64 snippet chars, so overflow
+    // needs many unique lines; 600 small descriptors force the cut with a
+    // deterministic prefix kept.
+    const fits = Array.from(
+      { length: 600 },
+      (_, index) => `export const v${String(index)} = ${String(index)};`,
+    );
+    const result = plan({ components: [tracked('src/boundary.ts', fits)] });
+    const area = result.areas[0]!;
+    expect(area.contracts.length).toBeGreaterThan(0);
+    expect(area.contracts.length).toBeLessThan(600);
+    expect(area.contractsTruncated).toBe(true);
+    expect(area.contracts.join('\n').length).toBeLessThanOrEqual(cap);
+    // The cut is prefix-stable: keeping the first K sorted descriptors.
+    expect(area.contracts[0]).toContain('src/boundary.ts:');
+  });
+
+  it('reports truncation on a single component whose descriptor payload overflows the cap', () => {
+    // A single descriptor is bounded at path + 64 snippet chars, so one huge
+    // line alone cannot overflow 20k. Overflow needs many unique lines, which
+    // the 2000-line case above covers; here the payload is exactly at the
+    // boundary: nothing truncated.
+    const cap = REVIEW_AREA_DEFAULTS.maxCharsPerContractArea;
+    const fits = Array.from(
+      { length: 100 },
+      (_, index) => `export const v${String(index)} = ${String(index)};`,
+    );
+    const result = plan({ components: [tracked('src/monolith.ts', fits)] });
+    const area = result.areas[0]!;
+    expect(area.contracts).toHaveLength(100);
+    expect(area.contracts.join('\n').length).toBeLessThanOrEqual(cap);
+    expect(area.contractsTruncated).toBe(false);
+  });
+
+  it('stays deterministic and frozen when contracts are truncated', () => {
+    const cap = REVIEW_AREA_DEFAULTS.maxCharsPerContractArea;
+    const line = (index: number) => `export const value${String(index)} = ${String(index)};`;
+    const components = [
+      tracked(
+        'src/wide.ts',
+        Array.from({ length: 2_000 }, (_, index) => line(index)),
+      ),
+    ];
+    const first = plan({ components });
+    const second = plan({ components });
+    expect(first).toEqual(second);
+    expect(Object.isFrozen(first.areas[0]!.contracts)).toBe(true);
+    expect(typeof first.areas[0]!.contractsTruncated).toBe('boolean');
+    expect(first.areas[0]!.contracts.join('\n').length).toBeLessThanOrEqual(cap);
+  });
 });
 
 describe('planReviewAreas splitting and bounds', () => {
@@ -364,18 +461,92 @@ describe('primary-coverage exclusion', () => {
       tracked('docs/b.md', ['documented b']),
     ],
   });
+  const srcPath = 'src/a.ts';
+  const docsPath = 'docs/b.md';
+  const bothComplete = new Map<string, boolean>([
+    ['area-1', true],
+    ['area-2', true],
+  ]);
 
   it('spans two areas so a failure case has a surviving sibling', () => {
     expect(seeded.areas).toHaveLength(2);
+    expect(seeded.areas.map((area) => area.id)).toEqual(['area-1', 'area-2']);
   });
 
-  it('excludes only cross-area-covered manifest paths from primary coverage', () => {
-    const covered = new Set<string>(['src/a.ts']);
+  it('excludes a covered manifest path only when every area completed', () => {
+    const covered = new Set<string>([srcPath]);
     const reserved = reserveCrossAreaPass(seeded, 50, []);
-    expect(reserved.plan.changedFiles.map((file) => file.path)).toEqual(['src/a.ts', 'docs/b.md']);
-    expect(isExcludedFromPrimaryCoverage(reserved, covered, 'src/a.ts')).toBe(true);
-    expect(isExcludedFromPrimaryCoverage(reserved, covered, 'docs/b.md')).toBe(false);
-    expect(isExcludedFromPrimaryCoverage(reserved, covered, 'src/never-planned.ts')).toBe(false);
+    expect(reserved.plan.changedFiles.map((file) => file.path)).toEqual([srcPath, docsPath]);
+    expect(isExcludedFromPrimaryCoverage(reserved, bothComplete, covered, srcPath)).toBe(true);
+    expect(isExcludedFromPrimaryCoverage(reserved, bothComplete, covered, docsPath)).toBe(false);
+    expect(
+      isExcludedFromPrimaryCoverage(reserved, bothComplete, covered, 'src/never-planned.ts'),
+    ).toBe(false);
+  });
+
+  it('keeps the FAILED primary area path primary-covered even when the covered set names it', () => {
+    // The reviewer's exact repro: two areas, src area failed, cross-area set
+    // claims the src path. The replayed coverage must not mask the failure.
+    const covered = new Set<string>([srcPath]);
+    const reserved = reserveCrossAreaPass(seeded, 50, []);
+    const srcFailed = new Map<string, boolean>([
+      ['area-1', false],
+      ['area-2', true],
+    ]);
+    expect(isExcludedFromPrimaryCoverage(reserved, srcFailed, covered, srcPath)).toBe(false);
+    // Same for an aborted/unsettled sibling: only settled completion counts.
+    const siblingUnsettled = new Map<string, boolean>([['area-1', true]]);
+    expect(isExcludedFromPrimaryCoverage(reserved, siblingUnsettled, covered, srcPath)).toBe(false);
+    const siblingAborted = new Map<string, boolean>([
+      ['area-1', true],
+      ['area-2', false],
+    ]);
+    expect(isExcludedFromPrimaryCoverage(reserved, siblingAborted, covered, srcPath)).toBe(false);
+  });
+
+  it('discharges nothing when the completed set holds unknown ids or the covered set unknown paths', () => {
+    const covered = new Set<string>([srcPath]);
+    const reserved = reserveCrossAreaPass(seeded, 50, []);
+    const unknownIds = new Map<string, boolean>([
+      ['area-9', true],
+      ['area-1', true],
+      ['area-2', true],
+    ]);
+    expect(isExcludedFromPrimaryCoverage(reserved, unknownIds, covered, srcPath)).toBe(true);
+    const unknownPaths = new Set<string>(['src/unknown.ts']);
+    expect(isExcludedFromPrimaryCoverage(reserved, bothComplete, unknownPaths, srcPath)).toBe(
+      false,
+    );
+    expect(
+      isExcludedFromPrimaryCoverage(reserved, bothComplete, unknownPaths, 'src/unknown.ts'),
+    ).toBe(false);
+  });
+
+  it('excludes nothing when the cross-area pass is not required', () => {
+    const single = plan({ components: [tracked('src/plain.ts', ['const v = 1;'])] });
+    expect(single.crossAreaPass.required).toBe(false);
+    const reserved = reserveCrossAreaPass(single, 0, []);
+    const everything = new Set([single.changedFiles[0]!.path]);
+    expect(
+      isExcludedFromPrimaryCoverage(
+        reserved,
+        new Map([['area-1', true]]),
+        everything,
+        single.changedFiles[0]!.path,
+      ),
+    ).toBe(false);
+  });
+
+  it('requires settled completion across the whole plan before any exclusion', () => {
+    const covered = new Set<string>([srcPath, docsPath]);
+    const reserved = reserveCrossAreaPass(seeded, 50, []);
+    expect(isExcludedFromPrimaryCoverage(reserved, new Map(), covered, srcPath)).toBe(false);
+    expect(isExcludedFromPrimaryCoverage(reserved, new Map(), covered, docsPath)).toBe(false);
+    const onlySrc = new Map<string, boolean>([['area-1', true]]);
+    expect(isExcludedFromPrimaryCoverage(reserved, onlySrc, covered, srcPath)).toBe(false);
+    expect(isExcludedFromPrimaryCoverage(reserved, onlySrc, covered, docsPath)).toBe(false);
+    expect(isExcludedFromPrimaryCoverage(reserved, bothComplete, covered, srcPath)).toBe(true);
+    expect(isExcludedFromPrimaryCoverage(reserved, bothComplete, covered, docsPath)).toBe(true);
   });
 
   it('treats a held reserve as non-discharging: no path is excluded without cross-area coverage', () => {
@@ -383,7 +554,7 @@ describe('primary-coverage exclusion', () => {
     const reserved = reserveCrossAreaPass(seeded, bounded, []);
     const covered = new Set<string>();
     for (const file of reserved.plan.changedFiles)
-      expect(isExcludedFromPrimaryCoverage(reserved, covered, file.path)).toBe(false);
+      expect(isExcludedFromPrimaryCoverage(reserved, bothComplete, covered, file.path)).toBe(false);
   });
 
   it('keeps failed required areas non-excluded: incomplete stays incomplete', () => {
@@ -391,18 +562,15 @@ describe('primary-coverage exclusion', () => {
     const failedArea = seeded.areas[0]!;
     // The failed area's own bytes stay primary coverage even when a sibling
     // area (or the cross-area pass) covered something else.
-    const covered = new Set<string>(
-      seeded.changedFiles
-        .map((file) => file.path)
-        .filter(
-          (path) =>
-            !failedArea.files.some((index) => seeded.changedFiles[index - 1]!.path === path),
-        ),
-    );
+    const covered = new Set<string>([docsPath]);
+    const siblingComplete = new Map<string, boolean>([
+      ['area-1', false],
+      ['area-2', true],
+    ]);
     for (const file of failedArea.files) {
       const path = seeded.changedFiles[file - 1]!.path;
       expect(covered.has(path)).toBe(false);
-      expect(isExcludedFromPrimaryCoverage(reserved, covered, path)).toBe(false);
+      expect(isExcludedFromPrimaryCoverage(reserved, siblingComplete, covered, path)).toBe(false);
     }
   });
 });

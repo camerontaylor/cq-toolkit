@@ -21,6 +21,8 @@ export const REVIEW_AREA_DEFAULTS = {
   maxAreas: 12,
   /** The common intent is bounded to this many UTF-16 chars per area. */
   maxIntentChars: 2_000,
+  /** Maximum summed contract-descriptor chars for one area. */
+  maxCharsPerContractArea: 20_000,
   /** Planning reserve for the cross-area pass prompt (not a spend). */
   crossAreaPromptReserveChars: 8_000,
 } as const;
@@ -70,8 +72,14 @@ export interface ReviewArea {
   readonly id: string;
   /** Ascending 1-based `changedFiles[].index` references owned by this area. */
   readonly files: readonly number[];
-  /** Sorted unique contract descriptors for the area's files. */
+  /**
+   * Sorted unique contract descriptors for the area's files, bounded to
+   * `maxCharsPerContractArea` summed chars; `contractTruncated` records an
+   * exceeded bound instead of silently dropping evidence.
+   */
   readonly contracts: readonly string[];
+  /** True when contracts overflowed `maxCharsPerContractArea` and were cut. */
+  readonly contractsTruncated: boolean;
   /** The common change intent, bounded to `maxIntentChars`. */
   readonly intent: string;
 }
@@ -119,6 +127,13 @@ export interface ReservedReviewAreaPlan {
   readonly reserveChars: number;
   readonly primaryMaxChars: number;
 }
+
+/**
+ * Settled outcomes per area id, from the caller's session evidence: `true`
+ * only for an area whose session ran to a complete verdict. An id absent
+ * from the map has not settled; `false` records a failed or aborted area.
+ */
+export type AreaCompletion = ReadonlyMap<string, boolean>;
 
 /**
  * Paths the cross-area contract pass actually covered, recorded by its
@@ -227,6 +242,28 @@ function splitBucket(
 const compareCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
+ * Bound one area's contract descriptors to `maxCharsPerContractArea` summed
+ * chars: keep whole descriptors while they fit (each including its single
+ * separating newline), drop the rest, and return whether anything was cut so
+ * the plan records the loss explicitly instead of degrading silently.
+ * Deterministic: descriptors are sorted first, so the kept set is stable.
+ */
+function boundContracts(
+  descriptors: readonly string[],
+  maxCharsPerContractArea: number,
+): { contracts: readonly string[]; truncated: boolean } {
+  let used = 0;
+  const kept: string[] = [];
+  for (const descriptor of descriptors) {
+    const cost = descriptor.length + 1;
+    if (used + cost > maxCharsPerContractArea) return { contracts: kept, truncated: true };
+    kept.push(descriptor);
+    used += cost;
+  }
+  return { contracts: kept, truncated: false };
+}
+
+/**
  * Deterministically group the reviewed components of one change into areas.
  *
  * - Group by directory affinity, split oversized buckets by char/file bounds,
@@ -292,6 +329,7 @@ export function planReviewAreas(input: {
     );
 
   const intent = boundedIntent(input.intent ?? '', REVIEW_AREA_DEFAULTS.maxIntentChars);
+  const maxCharsPerContractArea = REVIEW_AREA_DEFAULTS.maxCharsPerContractArea;
   // Insertion-ordered buckets keep each group's components in reviewed order,
   // so group membership maps onto ascending manifest indexes without a lookup.
   const indexByComponent = new Map(reviewed.map((component, index) => [component, index + 1]));
@@ -302,11 +340,14 @@ export function planReviewAreas(input: {
     const descriptors = new Set<string>();
     for (const component of group)
       for (const descriptor of contractsFor(component)) descriptors.add(descriptor);
+    const sorted = [...descriptors].sort(compareCodeUnits);
+    const bounded = boundContracts(sorted, maxCharsPerContractArea);
     areas.push(
       Object.freeze({
         id: `area-${String(areaIndex)}`,
         files: Object.freeze(group.map((component) => indexByComponent.get(component)!)),
-        contracts: Object.freeze([...descriptors].sort(compareCodeUnits)),
+        contracts: Object.freeze(bounded.contracts),
+        contractsTruncated: bounded.truncated,
         intent,
       }),
     );
@@ -314,6 +355,7 @@ export function planReviewAreas(input: {
   const frozenAreas = Object.freeze(areas);
 
   const required = frozenAreas.length > 1 || frozenAreas.some((area) => area.contracts.length > 0);
+  const truncated = frozenAreas.some((area) => area.contractsTruncated);
   return Object.freeze({
     kind: 'areas',
     areas: frozenAreas,
@@ -322,7 +364,9 @@ export function planReviewAreas(input: {
     crossAreaPass: Object.freeze({
       required,
       reason: required
-        ? 'review areas share one change intent; a cross-area contract pass is required'
+        ? truncated
+          ? 'review areas share one change intent; a cross-area contract pass is required (some areas truncated their contract list at maxCharsPerContractArea)'
+          : 'review areas share one change intent; a cross-area contract pass is required'
         : 'single area without contracts: no cross-area contract pass required',
       promptReserveChars: REVIEW_AREA_DEFAULTS.crossAreaPromptReserveChars,
     }),
@@ -361,16 +405,35 @@ export function reserveCrossAreaPass(
 
 /**
  * Whether `path` is excluded from primary-coverage accounting because the
- * cross-area contract pass covered it. A held reserve excludes nothing by
- * itself: only a manifest path recorded as covered qualifies, so a failed,
- * aborted or omitted pass (an empty covered set) leaves every path primary
- * coverage and the review incomplete — never a false clean. Paths outside
- * the manifest were never primary coverage to begin with.
+ * cross-area contract pass covered it AND primary coverage is actually
+ * settled complete. Primary completion stays independently mandatory:
+ *
+ * - the path's own area must be completed, so a failed, aborted or unsettled
+ *   required area keeps its paths primary-covered even when the covered set
+ *   names them (context replay is not primary evidence);
+ * - every OTHER area in the plan must also be completed, so one covered path
+ *   cannot mask a failed sibling area's incomplete coverage;
+ * - a cross-area pass recorded required=false discharges nothing at all;
+ * - paths outside the manifest were never primary coverage to begin with.
  */
 export function isExcludedFromPrimaryCoverage(
   reserved: ReservedReviewAreaPlan,
+  completedAreas: AreaCompletion,
   covered: CrossAreaCoveredPaths,
   path: string,
 ): boolean {
-  return covered.has(path) && reserved.plan.changedFiles.some((file) => file.path === path);
+  const { plan } = reserved;
+  if (!plan.crossAreaPass.required) return false;
+  const ownerOf = (candidate: string): ReviewArea | undefined =>
+    plan.areas.find((area) =>
+      area.files.some((index) => plan.changedFiles[index - 1]?.path === candidate),
+    );
+  const owner = ownerOf(path);
+  if (owner === undefined) return false;
+  if (completedAreas.get(owner.id) !== true) return false;
+  for (const area of plan.areas) {
+    if (area.id === owner.id) continue;
+    if (completedAreas.get(area.id) !== true) return false;
+  }
+  return covered.has(path);
 }

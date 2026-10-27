@@ -37,8 +37,9 @@ All of it lives in `src/ops/review/internal/reviewAreas.ts`. Types:
 ```ts
 export interface ReviewArea {
   readonly id: string; // `area-1`, `area-2`, … in output order
-  readonly paths: readonly string[]; // 1-based `changedFiles[].index` references, ascending
+  readonly files: readonly number[]; // ascending 1-based `changedFiles[].index` references
   readonly contracts: readonly string[]; // sorted unique matched contract descriptors
+  readonly contractsTruncated: boolean; // true when the list overflowed maxCharsPerContractArea
   readonly intent: string; // the shared change intent, bounded
 }
 
@@ -86,7 +87,7 @@ export const REVIEW_AREA_DEFAULTS: {
 };
 
 export const REVIEW_AREA_CONTRACT_LINE: RegExp;
-// (?:^\s*export\s|\b(?:schemaVersion|z\.object|z\.enum|z\.union|z\.literal|
+// (?:\bexport\s|\b(?:schemaVersion|z\.object|z\.enum|z\.union|z\.literal|
 //    z\.array|z\.record|z\.tuple|migrations?|persisted)\b|\b[A-Za-z0-9_]+Schema\b)
 
 export function contractDescriptor(path: string, line: string): string;
@@ -101,10 +102,10 @@ export function planReviewAreas(input: {
 
 Determinism: same input, same output, `toEqual`-deep, always. Components are
 partitioned (never reordered or copied textually), area ids and manifest rows
-are 1-based in first-touch order, contract lists sort with `Intl.Collator`,
-manifest rows freeze and never carry component text. Empty intent is valid; an
-empty reviewed component list is `unsafe` (`review areas: no reviewed
-components to group`).
+are 1-based in first-touch order, contract lists sort by UTF-16 code-unit
+order, and manifest rows freeze and never carry component text. Empty intent
+is valid; an empty reviewed component list is `unsafe` (`review areas: no
+reviewed components`).
 
 ### Fallback states (fail closed, never manufacture a grouped plan)
 
@@ -121,12 +122,16 @@ oversized grouping" therefore always has an explicit, inspectable answer.
 
 ## Contract-line harvesting
 
-The regex matches changed diff lines (`+`/`-`, inside the bounds
-`resolveBounds` already uses) and whole lines of untracked components.
-Descriptors are harvested as path + line-slice pairs, deduplicated, sorted,
-and attached to the area that owns the file. `contractDescriptor` exports the
-exact `<path>:<snippet>` format, and `REVIEW_AREA_CONTRACT_LINE` exports the
-regex, so tests and future consumers pin both.
+The regex matches changed diff lines (`+`/`-`) with their markers stripped
+first, and whole lines of untracked components. Each descriptor is bounded:
+`<path>:<trimmed 64-char snippet>`. An area's aggregate descriptor payload is
+bounded to `maxCharsPerContractArea` (20 000 chars): whole descriptors are
+kept in sorted order while they fit, the rest are cut, and the area records
+`contractsTruncated: true` (the plan's cross-area `reason` names the
+truncation too) instead of silently dropping evidence or emitting an
+unbounded payload. `contractDescriptor` exports the exact
+`<path>:<snippet>` format, and `REVIEW_AREA_CONTRACT_LINE` exports the regex,
+so tests and future consumers pin both.
 
 ## Directory affinity grouping (the algorithm)
 
@@ -161,8 +166,8 @@ pass required'` when one area covers everything with no contracts.
 at runtime, and a failed area session never releases its primary bytes to a
 reserve, which cannot exceed `totalChars`.
 
-`reserveCrossAreaPass(plan, reserveChars)` returns a bounded reserved-plan
-view:
+`reserveCrossAreaPass(plan, reserveChars, completedAreaIds)` returns a bounded
+reserved-plan view (the hold is refused once any area has completed):
 
 ```ts
 export interface ReservedReviewAreaPlan {
@@ -178,11 +183,15 @@ It **holds** only before any primary area session has run (an empty
 unavailable: the change is spent on primary coverage, and the cross-area pass
 would reduce primary completeness. `reserveChars` outside `0..totalChars`
 throws. **A held reserve does not discharge primary coverage**:
-`isExcludedFromPrimaryCoverage(reserved, path)` names only manifest paths the
-cross-area session actually covered — a failed or omitted cross-area session
-leaves the path primary-covered, and failed required areas or an exhausted
-final-pass reserve leave the review incomplete (truthful incomplete, never a
-false clean).
+`isExcludedFromPrimaryCoverage(reserved, completedAreas, covered, path)`
+excludes a manifest path only when (a) the cross-area session actually
+covered it, (b) the path's OWN area is recorded completed, AND (c) every
+other area in the plan is also completed. A failed, aborted or unsettled
+required area keeps its paths primary-covered even when the covered set names
+them — context replay is not primary evidence — and a `required: false` plan
+discharges nothing. Failed required areas or an exhausted final-pass reserve
+therefore leave the review incomplete (truthful incomplete, never a false
+clean).
 
 ## Coverage-piece accounting and the common intent
 
