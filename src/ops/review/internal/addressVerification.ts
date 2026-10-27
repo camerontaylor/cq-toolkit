@@ -271,36 +271,39 @@ export function verifyClosureEvidence(
     } catch (error) {
       problems.push(`dependencies unavailable: ${detailOf(error)}`);
     }
-    if (problems.length === 0 && !Array.isArray(supplied))
-      problems.push('dependencies is not an array');
-    if (problems.length === 0)
-      for (const element of supplied) {
-        if (typeof element !== 'object' || element === null) {
-          problems.push('dependency is not an object');
-          continue;
+    if (problems.length === 0) {
+      // The array check lexically encloses the iteration so the compiler
+      // narrows supplied here; problems.length never encodes a type fact.
+      if (!Array.isArray(supplied)) problems.push('dependencies is not an array');
+      else
+        for (const element of supplied) {
+          if (typeof element !== 'object' || element === null) {
+            problems.push('dependency is not an object');
+            continue;
+          }
+          const record = element as Record<string, unknown>;
+          // Capture each field value exactly once: element getters are read a
+          // single time and the snapshot stores these same captured values, so
+          // a field getter returning a trigger during validation and clean
+          // text afterwards cannot split a verdict.
+          const path: unknown = record.path;
+          const role: unknown = record.role;
+          const text: unknown = record.text;
+          if (typeof path !== 'string' || path === '') {
+            problems.push('dependency path missing');
+            continue;
+          }
+          if (typeof role !== 'string' || (role !== 'consumer' && role !== 'dependency')) {
+            problems.push(`dependency ${path} has unknown role`);
+            continue;
+          }
+          if (typeof text !== 'string' || text === '') {
+            problems.push(`dependency ${path} text missing`);
+            continue;
+          }
+          dependencies.push({ path, role, text });
         }
-        const record = element as Record<string, unknown>;
-        // Capture each field value exactly once: element getters are read a
-        // single time and the snapshot stores these same captured values, so
-        // a field getter returning a trigger during validation and clean
-        // text afterwards cannot split a verdict.
-        const path: unknown = record.path;
-        const role: unknown = record.role;
-        const text: unknown = record.text;
-        if (typeof path !== 'string' || path === '') {
-          problems.push('dependency path missing');
-          continue;
-        }
-        if (typeof role !== 'string' || (role !== 'consumer' && role !== 'dependency')) {
-          problems.push(`dependency ${path} has unknown role`);
-          continue;
-        }
-        if (typeof text !== 'string' || text === '') {
-          problems.push(`dependency ${path} text missing`);
-          continue;
-        }
-        dependencies.push({ path, role, text });
-      }
+    }
     if (revision === undefined) problems.push('metadata.revision missing');
     if (problems.length > 0)
       return {
