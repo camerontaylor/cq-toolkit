@@ -179,10 +179,14 @@ async function installTarball(prefix, tarball, timeoutMs) {
 
 async function sdkSmoke(prefix, timeoutMs) {
   const probe = [
+    // The bare specifier is the point: only the public exports mapping can
+    // resolve it. The package identity is read as a plain FILE (the real
+    // package's exports map does not expose ./package.json).
     `import { SEAM_VERSION, defaultHarnessConfig } from '@camerontaylor/cq-toolkit';`,
+    `import { readFileSync } from 'node:fs';`,
     `import { createRequire } from 'node:module';`,
-    `const require = createRequire(import.meta.url);`,
-    `const pkg = require('@camerontaylor/cq-toolkit/package.json');`,
+    `const pkgRoot = createRequire(import.meta.url).resolve('@camerontaylor/cq-toolkit');`,
+    `const pkg = JSON.parse(readFileSync(pkgRoot.replace(/dist\\/index\\.js$/, 'package.json'), 'utf8'));`,
     `console.log(JSON.stringify({`,
     `  seamVersion: SEAM_VERSION,`,
     `  harnessConfigTools: Object.keys(defaultHarnessConfig.tools),`,
