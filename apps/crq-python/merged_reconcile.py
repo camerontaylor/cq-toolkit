@@ -1,73 +1,74 @@
-"""Resumable bounded outage-interval reconciliation (Q2, version 1).
+"""Bounded merged-interval inventory; no queue mutation or review dispatch.
 
-Pure inventory over a frozen interval: page the merged-PR list between
-``after`` and a frozen ``before`` upper bound, dedupe by Q1 subject identity,
-checkpoint after every page, and report honest totals. This module never
-reviews, dispatches, retries vendor work, or mutates the queue: it PROPOSES
-merged-current intents (the exact ``review_receipt.enroll`` binding shape)
-and the operator/sole-tick applies them.
+The caller binds an authorized repository/base and frozen (after, before] to its
+page fetcher. It must supply complete forge pages, never search-capped results:
+``{records: [...], has_next_page: bool, next_cursor: str | None}``. Cursors are
+opaque, stable within that frozen query, and independent of record ordering.
 
-Invariants:
+``checkpoint_save`` atomically persists a JSON snapshot before the next fetch;
+errors propagate so a failed save cannot advance persisted progress. A page read
+failure returns incomplete and retries that same cursor on resume. Dry runs fetch
+and inventory normally but never call the persistence callback. The unused first
+argument preserves the retained checkpoint's call shape; no effects are invoked.
 
-  * the upper bound (``before``) is frozen at reconcile start; PRs merged
-    after it belong to the NEXT interval, never this one's watermark;
-  * a page budget is a budget, not a completeness assertion: stopping with
-    pages remaining reports ``complete: false`` plus a ``next_cursor``;
-  * page boundaries are resumable: the checkpoint (cursor + accumulated
-    inventory digest) restarts exactly where the previous run stopped, and
-    an overlapping replay window re-reads already-seen PRs without double
-    counting (dedupe by source PR number + merge SHA);
-  * PRs merged while paging are visible in a later page only if their
-    ``mergedAt`` is <= the frozen ``before``; otherwise they are outside
-    this interval entirely;
-  * transient page failures are retried without advancing the completeness
-    watermark; a page that stays unreadable leaves the interval explicitly
-    ``incomplete``;
-  * every PR is REPRESENTED: ``intent`` (a proposed merged-current subject),
-    ``already-covered`` (an equivalent Q1 request exists), or an explicit
-    ``unsupported`` reason (empty/missing merge identity, source head gone,
-    malformed record) — never silent loss;
-  * no historical replay, no vendor calls, no scheduler, no repair.
-
-The page source is injected: production passes a callable that shells to
-``gh pr list --state merged``; tests pass fake pages. The callable returns
-one page of PR records (dicts with at least number/mergedAt/mergeCommit)
-and raises ``PageFailed`` for a transient failure.
+``enrollment_plan`` only proposes Q1 enroll arguments. It refuses incomplete
+inventories and conflicting identities, grants no review credit, and never
+modifies a queue. Integration, repository/forge verification and the sole tick
+remain caller responsibilities. Legacy synthetic/skipped/done state is not proof
+of current coverage. Schema 1 checkpoints are refused: they cannot prove complete
+page metadata or accurate deduplication counts.
 """
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
 from typing import Any, Callable, Dict, List, Optional
 
 VERSION = 1
-CHECKPOINT_SCHEMA = 1
-
-# A reconcile checkpoint file records exactly where a bounded run stopped.
+CHECKPOINT_SCHEMA = 2
 CHECKPOINT_NAME = "reconcile-checkpoint.json"
-
-TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-
+TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_PAGE_BUDGET = 200
+MAX_PAGE_RECORDS = 100
+MAX_CURSOR_BYTES = 4096
 
 
 class ReconcileRefused(Exception):
-    """A refused reconcile run: nothing recorded, the reason is terminal."""
+    """Invalid input; no successful complete-inventory claim is possible."""
 
 
 class PageFailed(Exception):
-    """A transient page read failure; the watermark must not advance."""
+    """Retryable page read failure; resume without advancing its cursor."""
 
 
-# ------------------------------------------------------------- validation
+def _copy(value):
+    return json.loads(json.dumps(value, allow_nan=False))
+
+
+def checkpoint_digest(checkpoint: Dict[str, Any]) -> str:
+    """Digest of a JSON snapshot, excluding its own digest field.
+
+    Detects accidental corruption, not authorization or authenticity. Checkpoint
+    files must remain in the caller's trusted state directory.
+    """
+    payload = {k: v for k, v in checkpoint.items() if k != "digest"}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+
+
+def _seal(checkpoint):
+    result = _copy(checkpoint)
+    result["summary"] = summarize(result)
+    result["digest"] = checkpoint_digest(result)
+    return result
 
 
 def _timestamp(name: str, value: Any) -> str:
-    if not isinstance(value, str) or not TS_RE.match(value):
-        raise ReconcileRefused(f"{name} must be an exact UTC timestamp "
-                               "YYYY-MM-DDTHH:MM:SSZ")
+    if not isinstance(value, str) or not TS_RE.fullmatch(value):
+        raise ReconcileRefused(f"{name} must be an exact UTC timestamp YYYY-MM-DDTHH:MM:SSZ")
     try:
         dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
@@ -76,8 +77,6 @@ def _timestamp(name: str, value: Any) -> str:
 
 
 def normalize_interval(after: Any, before: Any) -> Dict[str, str]:
-    """Validate and FREEZE the interval. ``before`` is the upper bound for
-    the whole run; PRs merged after it are a different interval."""
     after = _timestamp("after", after)
     before = _timestamp("before", before)
     if after >= before:
@@ -86,101 +85,108 @@ def normalize_interval(after: Any, before: Any) -> Dict[str, str]:
 
 
 def normalize_page_budget(budget: Any) -> int:
-    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
-        raise ReconcileRefused("page budget must be a positive integer")
-    if budget > MAX_PAGE_BUDGET:
-        raise ReconcileRefused(f"page budget is capped at {MAX_PAGE_BUDGET}")
+    if type(budget) is not int or not 1 <= budget <= MAX_PAGE_BUDGET:
+        raise ReconcileRefused(f"page budget must be a positive integer capped at {MAX_PAGE_BUDGET}")
     return budget
 
 
-# ------------------------------------------------------- record inspection
+def _cursor(value):
+    return value is None or (isinstance(value, str) and 0 < len(value.encode()) <= MAX_CURSOR_BYTES)
 
 
 def record_identity(page_record: Any) -> Dict[str, Any]:
-    """Classify one forge page record into an inventory entry.
-
-    Every record gets exactly one disposition:
-      ``intent``      — a well-formed merged PR: proposed merged-current subject
-                        (the review_receipt.enroll binding shape, minus request
-                        id, which the operator assigns);
-      ``unsupported`` — a record that cannot name a source intent (missing/
-                        empty merge identity, missing head, malformed number);
-    Both are represented in the inventory; nothing is dropped.
-    """
     if not isinstance(page_record, dict):
         return {"disposition": "unsupported", "reason": "page record is not an object"}
     pr = page_record.get("number")
-    merged_at = page_record.get("mergedAt")
-    merge = page_record.get("mergeCommit")
-    head = page_record.get("headRefOid")
     if type(pr) is not int or pr <= 0:
         return {"disposition": "unsupported", "reason": "malformed PR number"}
-    if not isinstance(merged_at, str) or not TS_RE.match(merged_at):
+    merged_at = page_record.get("mergedAt")
+    try:
+        _timestamp("mergedAt", merged_at)
+    except ReconcileRefused:
         return {"disposition": "unsupported", "pr": pr,
                 "reason": "missing or malformed mergedAt"}
-    if not isinstance(merge, dict) or not SHA_RE.match(merge.get("oid") or ""):
-        return {"disposition": "unsupported", "pr": pr,
+    merge = page_record.get("mergeCommit")
+    oid = merge.get("oid") if isinstance(merge, dict) else None
+    if not isinstance(oid, str) or not SHA_RE.fullmatch(oid):
+        return {"disposition": "unsupported", "pr": pr, "merged_at": merged_at,
                 "reason": "missing or malformed merge commit identity"}
-    if not isinstance(head, str) or not SHA_RE.match(head):
-        return {"disposition": "unsupported", "pr": pr,
+    head = page_record.get("headRefOid")
+    if not isinstance(head, str) or not SHA_RE.fullmatch(head):
+        return {"disposition": "unsupported", "pr": pr, "merged_at": merged_at,
                 "reason": "source head gone or malformed"}
     return {"disposition": "intent", "pr": pr, "merged_at": merged_at,
-            "merge_sha": merge["oid"], "head": head,
-            "subject": {"repo": None, "pr": pr, "merge_sha": merge["oid"],
+            "merge_sha": oid, "head": head,
+            "subject": {"repo": None, "pr": pr, "merge_sha": oid,
                         "target_selector": "promoted-main",
                         "policy": "affected-current-additions-v1"}}
 
 
-# -------------------------------------------------------------- checkpoint
+def new_checkpoint(interval: Dict[str, str], page_budget: int, *, repo: str, base: str) -> Dict[str, Any]:
+    return {"schema_version": CHECKPOINT_SCHEMA, **normalize_interval(**interval),
+            "page_budget": normalize_page_budget(page_budget), "repo": repo, "base": base,
+            "cursor": None, "pages_read": 0, "seen": {}, "inventory": [],
+            "record_keys": [], "cursor_history": [], "duplicates_seen": 0,
+            "outside_window": 0, "records_read": 0, "transient_failures": 0,
+            "complete": False, "steps": [], "dry_run": False}
 
 
-def new_checkpoint(interval: Dict[str, str], page_budget: int) -> Dict[str, Any]:
-    return {"schema_version": CHECKPOINT_SCHEMA,
-            "after": interval["after"], "before": interval["before"],
-            "page_budget": page_budget,
-            "cursor": None, "pages_read": 0,
-            "seen": {},           # pr number -> {"merge_sha","merged_at"} dedupe registry
-            "inventory": [],      # represented entries in stable order
-            "transient_failures": 0,
-            "complete": False}
-
-
-def checkpoint_digest(checkpoint: Dict[str, Any]) -> str:
-    import hashlib
-
-    payload = json.dumps(checkpoint, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=True).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def load_checkpoint(raw: Any, interval: Dict[str, str], page_budget: int) -> Dict[str, Any]:
-    """Validate a resumed checkpoint against the CURRENT run's frozen
-    interval. A checkpoint from a different interval or budget is refused
-    (start a fresh reconcile instead of silently mixing windows)."""
-    if not isinstance(raw, dict) or raw.get("schema_version") != CHECKPOINT_SCHEMA:
-        raise ReconcileRefused("checkpoint is not a version "
-                               + str(CHECKPOINT_SCHEMA) + " reconcile checkpoint")
+def load_checkpoint(raw: Any, interval: Dict[str, str], page_budget: int,
+                    *, repo: str, base: str, allow_complete=False) -> Dict[str, Any]:
+    if not isinstance(raw, dict) or type(raw.get("schema_version")) is not int or raw["schema_version"] != CHECKPOINT_SCHEMA:
+        raise ReconcileRefused("checkpoint schema unsupported; restart inventory")
     if raw.get("after") != interval["after"] or raw.get("before") != interval["before"]:
         raise ReconcileRefused("checkpoint belongs to a different frozen interval")
-    if raw.get("page_budget") != page_budget:
+    if type(raw.get("page_budget")) is not int or raw["page_budget"] != page_budget:
         raise ReconcileRefused("checkpoint was taken with a different page budget")
-    for field in ("cursor", "pages_read", "seen", "inventory", "transient_failures",
-                  "complete"):
-        if field not in raw:
-            raise ReconcileRefused("checkpoint missing field: " + field)
-    if not isinstance(raw["seen"], dict) or not isinstance(raw["inventory"], list):
-        raise ReconcileRefused("checkpoint registry/inventory malformed")
-    if raw["complete"]:
+    if raw.get("repo") != repo or raw.get("base") != base:
+        raise ReconcileRefused("checkpoint belongs to a different repository/base query")
+    required = new_checkpoint(interval, page_budget, repo=repo, base=base)
+    if any(k not in raw for k in required):
+        raise ReconcileRefused("checkpoint missing required fields")
+    try:
+        if raw.get("digest") != checkpoint_digest(raw):
+            raise ReconcileRefused("checkpoint digest mismatch")
+        checkpoint = _copy(raw)
+    except (TypeError, ValueError):
+        raise ReconcileRefused("checkpoint is not canonical JSON") from None
+    for field in ("pages_read", "duplicates_seen", "outside_window", "records_read", "transient_failures"):
+        if type(raw[field]) is not int or raw[field] < 0:
+            raise ReconcileRefused("checkpoint counter malformed: " + field)
+    if (type(raw["complete"]) is not bool or type(raw["dry_run"]) is not bool or
+            not _cursor(raw["cursor"]) or not isinstance(raw["seen"], dict) or
+            any(not isinstance(raw[k], list) for k in ("inventory", "record_keys", "cursor_history", "steps"))):
+        raise ReconcileRefused("checkpoint state malformed")
+    keys, history = raw["record_keys"], raw["cursor_history"]
+    if (any(not isinstance(k, str) or not re.fullmatch(r"[0-9a-f]{64}", k) for k in keys) or
+            len(set(keys)) != len(keys) or len(keys) != len(raw["inventory"]) or
+            any(c is None or not _cursor(c) for c in history) or
+            len(set(history)) != len(history) or len(history) != raw["pages_read"] - int(raw["complete"]) or
+            (raw["cursor"] != (history[-1] if history else None)) and not raw["complete"] or
+            raw["complete"] and (raw["cursor"] is not None or raw["pages_read"] == 0) or
+            raw["records_read"] != len(keys) + raw["duplicates_seen"] + raw["outside_window"]):
+        raise ReconcileRefused("checkpoint progress inconsistent")
+    expected_seen = {}
+    for entry in raw["inventory"]:
+        if not isinstance(entry, dict) or entry.get("disposition") not in ("intent", "unsupported"):
+            raise ReconcileRefused("checkpoint inventory malformed")
+        if entry["disposition"] == "intent":
+            reconstructed = record_identity({"number": entry.get("pr"), "mergedAt": entry.get("merged_at"),
+                                             "mergeCommit": {"oid": entry.get("merge_sha")},
+                                             "headRefOid": entry.get("head")})
+            if entry != reconstructed or not interval["after"] < entry["merged_at"] <= interval["before"]:
+                raise ReconcileRefused("checkpoint intent malformed")
+            expected_seen[str(entry["pr"])] = {"merge_sha": entry["merge_sha"], "merged_at": entry["merged_at"]}
+        elif not isinstance(entry.get("reason"), str) or not entry["reason"]:
+            raise ReconcileRefused("checkpoint unsupported reason missing")
+    if raw["seen"] != expected_seen or raw.get("summary") != summarize(raw):
+        raise ReconcileRefused("checkpoint registry/summary inconsistent")
+    if raw["complete"] and not allow_complete:
         raise ReconcileRefused("checkpoint is already complete; nothing to resume")
-    return raw
+    return checkpoint
 
 
-# ----------------------------------------------------------------- paging
-
-
-def _stable_page_sort(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Stable order inside one page: mergedAt, then PR number as tie-break
-    (same-time merges get a deterministic order)."""
+def _stable_page_sort(records):
     def key(record):
         merged = record.get("mergedAt") if isinstance(record, dict) else None
         pr = record.get("number") if isinstance(record, dict) else None
@@ -188,144 +194,160 @@ def _stable_page_sort(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(records, key=key)
 
 
-def _in_window(merged_at: str, interval: Dict[str, str]) -> bool:
-    """The frozen upper bound decides membership: a PR merged after
-    ``before`` is outside THIS interval even if a page happened to return it
-    (clock skew, concurrent merge during paging)."""
-    return interval["after"] < merged_at <= interval["before"]
-
-
 def reconcile_page(checkpoint: Dict[str, Any], page_records: Any) -> Dict[str, Any]:
-    """Fold one fetched page into the checkpoint. Pure: returns a NEW
-    checkpoint (input is never mutated, so a crashed fold leaves the
-    on-disk checkpoint intact for resume).
-
-    Records already in the ``seen`` registry (an overlapping replay window)
-    are counted as duplicates, not new intents. Records outside the frozen
-    window are ignored for the inventory but do not fail the page.
-    """
-    if not isinstance(page_records, list):
-        raise ReconcileRefused("a page must be a list of PR records")
-    updated = json.loads(json.dumps(checkpoint))  # deep copy via canonical shape
+    """Pure page fold. Cursor validation/persistence belongs to reconcile."""
+    if not isinstance(page_records, list) or len(page_records) > MAX_PAGE_RECORDS:
+        raise ReconcileRefused("a page must be a bounded list of PR records")
+    updated = _copy(checkpoint)
+    keys = set(updated["record_keys"])
     for record in _stable_page_sort(page_records):
+        updated["records_read"] += 1
+        # Filter even unsupported source identities when their timestamp is known.
+        at = record.get("mergedAt") if isinstance(record, dict) else None
+        try:
+            _timestamp("mergedAt", at)
+        except ReconcileRefused:
+            at = None
+        if at is not None and not updated["after"] < at <= updated["before"]:
+            updated["outside_window"] += 1
+            continue
         identity = record_identity(record)
-        pr = identity.get("pr")
-        # Registry keys are STRINGS: the checkpoint round-trips through JSON,
-        # which stringifies int keys. Looking up with a raw int would silently
-        # miss every previously seen PR after a resume (a real double-count).
-        registry_key = None if pr is None else str(pr)
-        if identity["disposition"] == "unsupported":
-            if registry_key is not None and registry_key in updated["seen"]:
-                continue  # duplicate of an already-represented record
-            updated["inventory"].append(identity)
-            if registry_key is not None:
-                updated["seen"][registry_key] = {"unsupported": identity["reason"]}
+        # Valid source identity ignores incidental page fields/head churn. Invalid
+        # records dedupe by their canonical payload so distinct failures survive.
+        source = ({"pr": identity["pr"], "merge_sha": identity["merge_sha"]}
+                  if identity["disposition"] == "intent" else {"unsupported_record": record})
+        try:
+            key = checkpoint_digest(source)
+        except (TypeError, ValueError):
+            raise ReconcileRefused("page record is not canonical JSON") from None
+        if key in keys:
+            updated["duplicates_seen"] += 1
             continue
-        merged_at = identity["merged_at"]
-        if not _in_window(merged_at, updated):
-            continue  # outside the frozen interval: never this watermark
-        seen = updated["seen"].get(registry_key)
-        if seen is not None:
-            if seen.get("merge_sha") == identity["merge_sha"]:
-                continue  # exact duplicate across pages/replay: one intent
-            # Same PR, different recorded merge: represent the conflict, never
-            # silently prefer one identity.
-            updated["inventory"].append({"disposition": "unsupported", "pr": pr,
-                                         "reason": "conflicting merge identity for one PR",
-                                         "prior": seen, "observed": {"merge_sha": identity["merge_sha"],
-                                                                     "merged_at": merged_at}})
-            continue
-        updated["seen"][registry_key] = {"merge_sha": identity["merge_sha"], "merged_at": merged_at}
+        keys.add(key)
+        updated["record_keys"].append(key)
+        if identity["disposition"] == "intent":
+            prior = updated["seen"].get(str(identity["pr"]))
+            if prior and prior["merge_sha"] != identity["merge_sha"]:
+                identity = {"disposition": "unsupported", "pr": identity["pr"],
+                            "reason": "conflicting merge identity for one PR",
+                            "prior": prior, "observed": {"merge_sha": identity["merge_sha"], "merged_at": at}}
+            else:
+                updated["seen"][str(identity["pr"])] = {"merge_sha": identity["merge_sha"], "merged_at": at}
         updated["inventory"].append(identity)
+    updated["inventory"].sort(key=lambda e: (e.get("merged_at", ""), e.get("pr", 0), e.get("reason", "")))
     updated["pages_read"] += 1
     return updated
 
 
-def reconcile(effects, page_fetch: Callable[[Optional[str]], List[Dict[str, Any]]],
-             *, after: str, before: str, page_budget: int,
-             checkpoint_raw: Any = None) -> Dict[str, Any]:
-    """Resumable bounded reconcile of one frozen interval.
+def _page(value, cursor, history):
+    if (not isinstance(value, dict) or not isinstance(value.get("records"), list) or
+            type(value.get("has_next_page")) is not bool or "next_cursor" not in value or
+            not _cursor(value["next_cursor"])):
+        raise ReconcileRefused("page requires records, has_next_page and next_cursor")
+    next_cursor = value["next_cursor"]
+    if value["has_next_page"] != (next_cursor is not None):
+        raise ReconcileRefused("inconsistent page completeness metadata")
+    if next_cursor is not None and (next_cursor == cursor or next_cursor in history):
+        raise ReconcileRefused("page cursor did not advance or cycled")
+    return value["records"], next_cursor
 
-    ``page_fetch(cursor)`` returns the next page of merged-PR records
-    (``cursor`` None = first page) and raises ``PageFailed`` on a transient
-    read failure. The caller owns persistence: save the returned checkpoint
-    after each fold (it is returned after every page via ``steps``).
 
-    The completeness watermark advances ONLY on a successfully read page.
-    A budget that runs out with pages remaining, or a page that stays
-    unreadable, reports ``complete: false`` plus ``next_cursor`` — an honest
-    incomplete inventory. Total reconciliation across restarts is proven by
-    the final ``complete: true`` with no next cursor.
+def reconcile(effects, page_fetch: Callable[[Optional[str]], Dict[str, Any]],
+              *, repo: str, after: str, before: str, page_budget: int, base="merge-queue", checkpoint_raw: Any = None,
+              checkpoint_save=None, dry_run=False) -> Dict[str, Any]:
+    """Inventory up to page_budget reads per invocation over immutable bounds.
+
+    Save snapshots include their digest and summary and are independent copies.
+    A callback failure aborts before any further page reads. Save the initial
+    snapshot as well: a crash during page one retains the original upper bound.
+    The caller must reuse the SAME repository/base query on resume, never a new
+    live 'now'. This module does not call the unused effects argument.
     """
+    if (not isinstance(repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or
+            not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9_. /-]+", base) or
+            not base or base.strip() != base or " " in base):
+        raise ReconcileRefused("invalid repository/base query")
     interval = normalize_interval(after, before)
     budget = normalize_page_budget(page_budget)
-    if checkpoint_raw is not None:
-        checkpoint = load_checkpoint(checkpoint_raw, interval, budget)
-    else:
-        checkpoint = new_checkpoint(interval, budget)
+    if type(dry_run) is not bool or checkpoint_save is not None and not callable(checkpoint_save):
+        raise ReconcileRefused("invalid dry-run or checkpoint callback")
+    checkpoint = (load_checkpoint(checkpoint_raw, interval, budget, repo=repo, base=base) if checkpoint_raw is not None
+                  else new_checkpoint(interval, budget, repo=repo, base=base))
+    checkpoint["dry_run"] = dry_run
+    checkpoint["steps"] = []
 
-    steps = []
-    cursor = checkpoint["cursor"]
+    def persist():
+        snapshot = _seal(checkpoint)
+        if checkpoint_save is not None and not dry_run:
+            checkpoint_save(_copy(snapshot))
+        return snapshot
+
+    persist()
     for _ in range(budget):
-        if cursor is None and checkpoint["pages_read"] > 0:
-            break  # previous run finished the interval; nothing to resume
+        cursor = checkpoint["cursor"]
         try:
             page = page_fetch(cursor)
         except PageFailed as exc:
             checkpoint["transient_failures"] += 1
-            steps.append({"page": checkpoint["pages_read"] + 1,
-                          "outcome": "transient-failure", "reason": str(exc)[:200],
-                          "watermark_advanced": False})
-            break  # stop WITHOUT advancing completeness; resume retried the page
-        checkpoint = reconcile_page(checkpoint, page)
-        cursor = _next_cursor(page)
-        checkpoint["cursor"] = cursor
-        advanced = {"page": checkpoint["pages_read"],
-                    "records": len(page), "outcome": "read",
-                    "watermark_advanced": True,
-                    "inventory_total": len(checkpoint["inventory"])}
-        steps.append(advanced)
-        if cursor is None:
-            checkpoint["complete"] = True
+            checkpoint["steps"].append({"page": checkpoint["pages_read"] + 1,
+                                         "outcome": "transient-failure", "reason": str(exc)[:200],
+                                         "watermark_advanced": False})
+            persist()
             break
-    checkpoint["steps"] = steps
-    checkpoint["complete"] = checkpoint.get("complete", False) and cursor is None
-    checkpoint["summary"] = summarize(checkpoint)
-    return checkpoint
-
-
-def _next_cursor(page: List[Dict[str, Any]]) -> Optional[str]:
-    """The forge cursor for the next page, derived from the LAST record by
-    the injected fetcher's own convention; None means no more pages. The
-    pure module treats the fetcher's cursor contract as opaque: pages carry
-    an optional trailing ``__next_cursor`` marker the fetcher may set."""
-    if isinstance(page, dict):
-        return page.get("__next_cursor")
-    for record in reversed(page):
-        if isinstance(record, dict) and "__next_cursor" in record:
-            return record["__next_cursor"]
-    return None
-
-
-# ---------------------------------------------------------------- summary
+        records, next_cursor = _page(page, cursor, checkpoint["cursor_history"])
+        checkpoint = reconcile_page(checkpoint, records)
+        checkpoint["cursor"] = next_cursor
+        checkpoint["complete"] = next_cursor is None
+        if next_cursor is not None:
+            checkpoint["cursor_history"].append(next_cursor)
+        checkpoint["steps"].append({"page": checkpoint["pages_read"], "records": len(records),
+                                     "outcome": "read", "watermark_advanced": False})
+        persist()
+        if checkpoint["complete"]:
+            break
+    return _seal(checkpoint)
 
 
 def summarize(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
-    """Honest totals that reconcile against the inventory list: pending
-    intents, explicit unsupported entries, and duplicates are counted
-    separately. Nothing here asserts review completion — pending is pending."""
-    inventory = checkpoint.get("inventory", [])
-    intents = [e for e in inventory if e.get("disposition") == "intent"]
-    unsupported = [e for e in inventory if e.get("disposition") == "unsupported"]
-    return {"version": VERSION,
-            "after": checkpoint["after"], "before": checkpoint["before"],
-            "pages_read": checkpoint["pages_read"],
-            "transient_failures": checkpoint.get("transient_failures", 0),
-            "complete": checkpoint.get("complete", False),
-            "next_cursor": checkpoint.get("cursor"),
-            "represented": len(inventory),
-            "intents": len(intents),
-            "unsupported": len(unsupported),
-            "duplicates_seen": len(checkpoint.get("seen", {})) - len(intents),
-            # review counts are NOT discovery counts: pending is never reviewed
-            "reviewed": 0, "pending_review": len(intents)}
+    inventory = checkpoint["inventory"]
+    intents = sum(e.get("disposition") == "intent" for e in inventory)
+    return {"version": VERSION, "after": checkpoint["after"], "before": checkpoint["before"],
+            "pages_read": checkpoint["pages_read"], "transient_failures": checkpoint["transient_failures"],
+            "complete": checkpoint["complete"], "next_cursor": checkpoint["cursor"],
+            # Only complete discovery permits advancing the interval watermark.
+            "complete_through": checkpoint["before"] if checkpoint["complete"] else None,
+            "represented": len(inventory), "intents": intents, "unsupported": len(inventory) - intents,
+            "duplicates_seen": checkpoint["duplicates_seen"], "outside_window": checkpoint["outside_window"],
+            "records_read": checkpoint["records_read"], "reviewed": 0, "pending_review": intents}
+
+
+def enrollment_plan(result, *, repo, existing_requests=(), dry_run=True):
+    """Return deterministic Q1 enroll bindings, never invoke or mutate Q1.
+
+    Existing requests are verified Q1 binding dictionaries (not old PR states or
+    receipts). Equal bindings are already-enrolled, never counted as reviewed.
+    Caller adds `at` and persists Q1 enrolls under the existing lock; repeat after
+    a crash is idempotent by request ID and binding. No Q3 transport dependency.
+    """
+    if not isinstance(result, dict):
+        raise ReconcileRefused("invalid inventory")
+    result = load_checkpoint(result, normalize_interval(result.get("after"), result.get("before")),
+                             normalize_page_budget(result.get("page_budget")), repo=repo, base=result.get("base"), allow_complete=True)
+    if not result["complete"]:
+        raise ReconcileRefused("incomplete inventory cannot authorize enrollment or watermark advancement")
+    if type(dry_run) is not bool or not isinstance(repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise ReconcileRefused("invalid repository or dry-run")
+    if any(e.get("reason") == "conflicting merge identity for one PR" for e in result["inventory"]):
+        raise ReconcileRefused("conflicting source identity prevents enrollment")
+    entries = []
+    for entry in result["inventory"]:
+        if entry["disposition"] != "intent":
+            entries.append(_copy(entry))
+            continue
+        binding = {**entry["subject"], "repo": repo}
+        # Q1 uses this canonical JSON identity for equivalent pending subjects.
+        request_id = "reconcile-" + checkpoint_digest(binding)[:64]
+        disposition = "already-enrolled" if binding in existing_requests else "intent"
+        entries.append({"disposition": disposition, "binding": binding, "request_id": request_id})
+    return {"version": VERSION, "dry_run": dry_run, "after": result["after"], "before": result["before"],
+            "inventory_digest": result["digest"], "entries": entries, "reviewed": 0}
