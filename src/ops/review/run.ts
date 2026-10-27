@@ -73,10 +73,12 @@ export interface ReviewRunDeps {
 /**
  * The blocked result's report may carry `blockedTransient` (#509): every
  * blocked source stopped on the network/transient class, so a caller may
- * retry the review once. It rides the report envelope and is never persisted.
+ * retry the review once. `blockedBudget` requires every blocked source to
+ * have stopped on the engine's budget and no repository drift or parent cancel.
+ * Both ride the report envelope and are never persisted.
  */
 export type ReviewRunResult = OpResult<FindingsRecord> & {
-  report?: FindingsRecord & { blockedTransient?: true };
+  report?: FindingsRecord & { blockedTransient?: true; blockedBudget?: true };
 };
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
@@ -189,10 +191,8 @@ export function makeReviewRun(
       ...(input.reviewers === undefined ? {} : { review: { reviewers: input.reviewers } }),
     });
     const wallMs = Math.min(policy.budgets.run.wallMs, input.wallMs ?? Infinity);
-    const deadline = startFixerDeadline(
-      deps.parentSignal ?? currentJobContext()?.signal,
-      Math.max(0, wallMs - (Date.now() - started)),
-    );
+    const parent = deps.parentSignal ?? currentJobContext()?.signal;
+    const deadline = startFixerDeadline(parent, Math.max(0, wallMs - (Date.now() - started)));
     const remainingWallMs = () => wallMs - (Date.now() - started);
     try {
       const target = input.target ?? 'merge-queue';
@@ -215,6 +215,9 @@ export function makeReviewRun(
       const records: FindingsRecord[] = [];
       // #509: the sources whose block was the network/transient class.
       const transientBlocks = new Set<ReviewSource['kind']>();
+      const budgetBlocks = new Set<ReviewSource['kind']>();
+      const budgetStopped = () =>
+        !parent?.aborted && (deadline.expired() || remainingWallMs() <= 0);
       if (coderabbitConfigured) {
         const result = await makeDevReview({
           effects,
@@ -261,6 +264,11 @@ export function makeReviewRun(
                   : `CodeRabbit cycle did not produce a terminal record (${result.status})`;
           if ((result as { report?: { transient?: boolean } }).report?.transient === true)
             transientBlocks.add('coderabbit');
+          if (
+            (result as { report?: { budgetStopped?: boolean } }).report?.budgetStopped === true &&
+            budgetStopped()
+          )
+            budgetBlocks.add('coderabbit');
           const cycleId = /review cycle (c\d+-[a-f0-9]+)/.exec(reason)?.[1];
           let cycle: DevCycleRecord | undefined;
           if (cycleId !== undefined) {
@@ -316,6 +324,7 @@ export function makeReviewRun(
       }
       if (agentConfigured && (deadline.signal?.aborted || remainingWallMs() <= 0)) {
         records.push(blocked('agent', 'review cancelled or wall budget exhausted'));
+        if (budgetStopped()) budgetBlocks.add('agent');
       } else if (agentConfigured) {
         const budgetStop = requireAgenticTokenBudget(policy);
         if (budgetStop !== undefined) records.push(blocked('agent', budgetStop.reason));
@@ -482,8 +491,16 @@ export function makeReviewRun(
                           : `agent review did not complete (${agent.status})`;
                   if ((await driftSince(effects, state)).length > 0)
                     blockedReason = 'repository state changed during agent review';
-                  else if (agent.status === 'needs-human' && agent.report?.transient === true)
-                    transientBlocks.add('agent');
+                  else {
+                    if (agent.status === 'needs-human' && agent.report?.transient === true)
+                      transientBlocks.add('agent');
+                    if (
+                      agent.status === 'budget-exhausted' ||
+                      agent.report?.budgetExhausted === true ||
+                      (agent.report?.cancelled === true && budgetStopped())
+                    )
+                      budgetBlocks.add('agent');
+                  }
                   const at = effects.nowIso();
                   const report = agent.status === 'ok' ? agent.value : agent.report;
                   const coverage = verifyAgentReviewCoverage(report?.coverage, {
@@ -611,11 +628,16 @@ export function makeReviewRun(
       const stopped = () => deadline.signal?.aborted || remainingWallMs() <= 0;
       if (stopped()) {
         for (const item of records)
-          item.sources = item.sources.map((source) => ({
-            ...source,
-            status: 'blocked',
-            reason: 'review cancelled or wall budget exhausted',
-          }));
+          item.sources = item.sources.map((source) => {
+            // Do not erase a prior auth/coverage/scan/etc refusal with the clock.
+            if (source.status !== 'terminal') return source;
+            if (budgetStopped()) budgetBlocks.add(source.kind);
+            return {
+              ...source,
+              status: 'blocked',
+              reason: 'review cancelled or wall budget exhausted',
+            };
+          });
       }
       // A full review can see uncommitted repairs. Restoring those bytes later
       // must not turn that review into clean proof about the unchanged HEAD.
@@ -678,11 +700,20 @@ export function makeReviewRun(
           !stopped() &&
           blockedSources.length > 0 &&
           blockedSources.every((source) => transientBlocks.has(source.kind));
+        const blockedBudget =
+          !parent?.aborted &&
+          blockedSources.length > 0 &&
+          blockedSources.every((source) => budgetBlocks.has(source.kind)) &&
+          (await driftSince(effects, state)).length === 0;
         return {
           status: 'needs-human',
           reason:
             'review.run: not every configured reviewer completed a terminal cycle; the findings record, including partial findings, was persisted',
-          report: blockedTransient ? { ...record, blockedTransient: true } : record,
+          report: {
+            ...record,
+            ...(blockedTransient ? { blockedTransient: true as const } : {}),
+            ...(blockedBudget ? { blockedBudget: true as const } : {}),
+          },
         };
       }
       return { status: 'ok', value: record };

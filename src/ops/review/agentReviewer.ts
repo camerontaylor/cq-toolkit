@@ -55,6 +55,10 @@ export interface AgentReviewReport {
    * may retry. Absent otherwise.
    */
   transient?: boolean;
+  /** The engine stopped on its own token or wall budget, with no other session failure. */
+  budgetExhausted?: true;
+  /** An upstream signal interrupted this engine; the caller owns its attribution. */
+  cancelled?: true;
 }
 export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
 
@@ -106,9 +110,12 @@ export async function runAgentReviewer(
   const relay = () => controller.abort(parent.reason);
   parent.addEventListener('abort', relay, { once: true });
   const deadline = Date.now() + input.wallMs;
+  const wallBudgetError = new Error('agent review wall budget exhausted');
+  const cancellationError = new Error('agent review cancelled or wall budget exhausted');
+  let nonBudgetFailure = false;
   const ensureActive = () => {
     controller.signal.throwIfAborted();
-    if (Date.now() >= deadline) throw new Error('agent review wall budget exhausted');
+    if (Date.now() >= deadline) throw wallBudgetError;
   };
   let report: AgentReviewReport | undefined;
   const active = new Set<ReviewCoverageV2['sessions'][number]>();
@@ -280,6 +287,7 @@ export async function runAgentReviewer(
           inFlight -= 1;
           reserved -= allowance;
         }
+        if (result.status !== 'ok' && result.status !== 'budget-exhausted') nonBudgetFailure = true;
         ensureActive();
         updatePieces(report!.coverage);
         active.delete(evidence);
@@ -323,6 +331,12 @@ export async function runAgentReviewer(
           } catch (error) {
             // A hard error (scanner fault, abort) must not let sibling workers
             // keep uploading and spending.
+            if (
+              error !== wallBudgetError &&
+              error !== cancellationError &&
+              !(parent.aborted && error === parent.reason)
+            )
+              nonBudgetFailure = true;
             halted = true;
             throw error;
           }
@@ -335,12 +349,13 @@ export async function runAgentReviewer(
       if (rejected !== undefined) throw (rejected as PromiseRejectedResult).reason;
       rebuildFindings();
       updatePieces(report.coverage);
-      if (budgetStop === 'before') return { status: 'budget-exhausted', report: snapshot()! };
-      if (budgetStop === 'during')
+      if (budgetStop === 'before' && firstFailure === undefined)
+        return { status: 'budget-exhausted', report: snapshot()! };
+      if (budgetStop === 'during' && firstFailure === undefined)
         return {
           status: 'needs-human',
           reason: `agent review budget exhausted; ${incompleteReason(report.coverage)}`,
-          report: snapshot()!,
+          report: { ...snapshot()!, budgetExhausted: true },
         };
       ReviewCoverageV2Schema.parse(report.coverage);
       if (firstFailure !== undefined)
@@ -358,22 +373,39 @@ export async function runAgentReviewer(
       return { status: 'ok', value: snapshot()! };
     };
     const stopped = new Promise<never>((_resolve, reject) => {
-      cancelled = () => reject(new Error('agent review cancelled or wall budget exhausted'));
+      cancelled = () => reject(cancellationError);
       controller.signal.addEventListener('abort', cancelled, { once: true });
-      timer = setTimeout(
-        () => controller.abort(new Error('agent review wall budget exhausted')),
-        Math.max(0, input.wallMs),
-      );
+      timer = setTimeout(() => controller.abort(wallBudgetError), Math.max(0, input.wallMs));
     });
     return await Promise.race([work(), stopped]);
   } catch (error) {
     for (const evidence of active)
       evidence.status = controller.signal.aborted ? 'aborted' : 'error';
     const partial = snapshot();
+    // A coincident deadline cannot reclassify a scanner/provider exception.
+    const interrupted =
+      error === cancellationError ||
+      error === wallBudgetError ||
+      (parent.aborted && error === parent.reason);
+    const budgetExhausted =
+      !parent.aborted &&
+      !nonBudgetFailure &&
+      interrupted &&
+      (error === wallBudgetError || controller.signal.reason === wallBudgetError);
     return {
       status: 'needs-human',
       reason: `agent review did not run: ${boundedErrorText(error instanceof Error ? error.message : String(error))}${partial ? `; ${incompleteReason(partial.coverage)}` : ''}`,
-      ...(partial === undefined ? {} : { report: partial }),
+      ...(partial === undefined
+        ? {}
+        : {
+            report: {
+              ...partial,
+              ...(budgetExhausted ? { budgetExhausted: true as const } : {}),
+              ...(parent.aborted && interrupted && !nonBudgetFailure
+                ? { cancelled: true as const }
+                : {}),
+            },
+          }),
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
