@@ -38,7 +38,7 @@ touched file at the pinned revision, cited dependencies with their full
 content, and the assembler's `relevantDependenciesComplete` attestation. The
 revision identity (head, parent) lives in `metadata.revision`.
 
-Two deliberate plainness decisions:
+Three deliberate plainness decisions:
 
 1. **Plain finding/task/patch text, not structured finding references.** The
    R3 evidence schema is reusable but not required (card); a legacy finding's
@@ -49,6 +49,17 @@ Two deliberate plainness decisions:
    closure. So completeness is a boolean the assembler must set, and every
    path that lacks the attestation ends uncertain. Missing relevant
    consumer/dependency evidence can never resolve.
+3. **The dependency list is stable data, not live views.** The
+   `dependencies` property is read exactly once, every array entry reference
+   is captured before any record field is read, and each field value is read
+   exactly once from its own data descriptor. A slot or record field backed
+   by an accessor (getter/setter), or a record missing an own data field, is
+   rejected as unavailable evidence: closure must never rest on values a
+   host can swap between reads, so getter-backed evidence is not trusted
+   evidence and need not resolve. A throw escaping any read is recorded as
+   unavailable by the enclosing step. No proxies, no traps, no generic
+   object-integrity machinery: descriptor checks and the existing step catch
+   are the whole mechanism.
 
 ## Check sequence
 

@@ -257,14 +257,17 @@ export function verifyClosureEvidence(
     if (typeof packet.patch !== 'string' || packet.patch === '') problems.push('patch missing');
     if (typeof packet.before !== 'string' || packet.before === '') problems.push('before missing');
     if (typeof packet.after !== 'string' || packet.after === '') problems.push('after missing');
-    // The dependencies value is read exactly once: the property access is
-    // captured to a local, checked against the declared array contract, then
-    // each element is narrowed and its path/role/text values are captured to
-    // locals exactly once and validated, with the snapshot recording those
-    // same captured values. Element field getters are therefore read once:
-    // text that reads differently between validation and the later sweep
-    // cannot split a verdict. Only a real array of well-formed records
-    // satisfies the contract; anything else is unavailable.
+    // The dependencies DTO must be stable data. The packet property is read
+    // exactly once, then every array entry reference is captured before any
+    // record field is read, and each field of each record is read exactly
+    // once from the captured reference. Nothing is read twice, so no read
+    // order can make validation and the later checks see different content.
+    // The contract is data-only: a slot or field backed by an accessor
+    // (getter on the record itself, or an index accessor on the array) is
+    // rejected as unavailable evidence rather than trusted, because closure
+    // must never rest on values a host can swap between reads. Missing own
+    // data fields reject the same way. A throw escaping any read is caught
+    // by the step and recorded as unavailable.
     let supplied: unknown;
     try {
       supplied = packet.dependencies;
@@ -275,34 +278,69 @@ export function verifyClosureEvidence(
       // The array check lexically encloses the iteration so the compiler
       // narrows supplied here; problems.length never encodes a type fact.
       if (!Array.isArray(supplied)) problems.push('dependencies is not an array');
-      else
-        for (const element of supplied) {
-          if (typeof element !== 'object' || element === null) {
-            problems.push('dependency is not an object');
+      else {
+        const entries: unknown[] = [];
+        let rejectedAccessor = false;
+        for (let index = 0; index < supplied.length; index++) {
+          const descriptor = Object.getOwnPropertyDescriptor(supplied, index);
+          if (descriptor === undefined || 'get' in descriptor || 'set' in descriptor) {
+            problems.push(`dependency slot ${index} is accessor-backed`);
+            rejectedAccessor = true;
             continue;
           }
-          const record = element as Record<string, unknown>;
-          // Capture each field value exactly once: element getters are read a
-          // single time and the snapshot stores these same captured values, so
-          // a field getter returning a trigger during validation and clean
-          // text afterwards cannot split a verdict.
-          const path: unknown = record.path;
-          const role: unknown = record.role;
-          const text: unknown = record.text;
-          if (typeof path !== 'string' || path === '') {
-            problems.push('dependency path missing');
-            continue;
-          }
-          if (typeof role !== 'string' || (role !== 'consumer' && role !== 'dependency')) {
-            problems.push(`dependency ${path} has unknown role`);
-            continue;
-          }
-          if (typeof text !== 'string' || text === '') {
-            problems.push(`dependency ${path} text missing`);
-            continue;
-          }
-          dependencies.push({ path, role, text });
+          entries.push(supplied[index]);
         }
+        if (!rejectedAccessor)
+          for (const element of entries) {
+            if (typeof element !== 'object' || element === null) {
+              problems.push('dependency is not an object');
+              continue;
+            }
+            if (
+              !Object.prototype.hasOwnProperty.call(element, 'path') ||
+              !Object.prototype.hasOwnProperty.call(element, 'role') ||
+              !Object.prototype.hasOwnProperty.call(element, 'text')
+            ) {
+              problems.push('dependency record misses an own data field');
+              continue;
+            }
+            const record = element as Record<string, unknown>;
+            const pathDescriptor = Object.getOwnPropertyDescriptor(record, 'path');
+            const roleDescriptor = Object.getOwnPropertyDescriptor(record, 'role');
+            const textDescriptor = Object.getOwnPropertyDescriptor(record, 'text');
+            if (
+              pathDescriptor === undefined ||
+              'get' in pathDescriptor ||
+              'set' in pathDescriptor ||
+              roleDescriptor === undefined ||
+              'get' in roleDescriptor ||
+              'set' in roleDescriptor ||
+              textDescriptor === undefined ||
+              'get' in textDescriptor ||
+              'set' in textDescriptor
+            ) {
+              problems.push('dependency record field is accessor-backed');
+              continue;
+            }
+            // Data descriptors only: each field value is read exactly once.
+            const path: unknown = pathDescriptor.value;
+            const role: unknown = roleDescriptor.value;
+            const text: unknown = textDescriptor.value;
+            if (typeof path !== 'string' || path === '') {
+              problems.push('dependency path missing');
+              continue;
+            }
+            if (typeof role !== 'string' || (role !== 'consumer' && role !== 'dependency')) {
+              problems.push(`dependency ${path} has unknown role`);
+              continue;
+            }
+            if (typeof text !== 'string' || text === '') {
+              problems.push(`dependency ${path} text missing`);
+              continue;
+            }
+            dependencies.push({ path, role, text });
+          }
+      }
     }
     if (revision === undefined) problems.push('metadata.revision missing');
     if (problems.length > 0)

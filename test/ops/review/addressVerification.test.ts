@@ -232,19 +232,15 @@ describe('review.address closure evidence verifier', () => {
   });
 
   test('an element text getter read during validation then clean must stay unresolved', () => {
-    // Validation captures the text exactly once: the trigger-bearing value
-    // seen at validation is the value every later check sweeps, so the
-    // getter switching to clean content afterwards cannot split the
-    // verdict, and the read counter stays at one.
+    // Contract update: getter-backed evidence is not trusted evidence. The
+    // element's text field is an accessor, so the record is rejected as
+    // unavailable rather than resolved on either read. Closure never rests
+    // on values a host can swap between reads.
     const split = makePacket();
     let reads = 0;
     const element = {
-      get path() {
-        return 'src/legacy.ts';
-      },
-      get role() {
-        return 'consumer';
-      },
+      path: 'src/legacy.ts',
+      role: 'consumer',
       get text() {
         reads++;
         return reads === 1 ? "if (mode === 'PARTIAL_MODE') load(raw);\n" : "load('{}');\n";
@@ -252,21 +248,17 @@ describe('review.address closure evidence verifier', () => {
     };
     (split as { dependencies: unknown }).dependencies = [element];
     const result = verifyClosureEvidence(split);
-    expect(result.verdict).toBe('unresolved');
-    expect(result.reason).toBe('deleted-trigger-survives');
-    expect(result.checks[3]?.detail).toContain('PARTIAL_MODE');
-    expect(reads).toBe(1);
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expect(namesOf(result)).toEqual(['packet-complete']);
+    expect(result.checks[0]?.detail).toContain('accessor-backed');
   });
 
   test('an element field getter that throws during capture yields uncertain', () => {
     const throwing = makePacket();
     const element = {
-      get path() {
-        return 'src/x.ts';
-      },
-      get role() {
-        return 'consumer';
-      },
+      path: 'src/x.ts',
+      role: 'consumer',
       get text() {
         throw new Error('text storage failed');
       },
@@ -276,7 +268,50 @@ describe('review.address closure evidence verifier', () => {
     expect(result.verdict).toBe('uncertain');
     expect(result.reason).toBe('unavailable-evidence');
     expect(namesOf(result)).toEqual(['packet-complete']);
-    expect(result.checks[0]?.detail).toContain('text storage failed');
+    expect(result.checks[0]?.detail).toContain('accessor-backed');
+  });
+
+  test('a later-slot mutation during validation cannot re-enter the snapshot', () => {
+    // The relay repro: every array entry reference is captured before any
+    // record field is read, so a host swapping a later slot while an earlier
+    // record validates cannot change which content the later checks scan.
+    const mutated = makePacket();
+    const clean = { path: 'src/clean.ts', role: 'consumer', text: "load('{}');\n" };
+    const surviving = {
+      path: 'src/legacy.ts',
+      role: 'consumer',
+      text: "if (mode === 'PARTIAL_MODE') load(raw);\n",
+    };
+    mutated.dependencies = [clean, surviving];
+    const originalText = surviving.text;
+    Object.defineProperty(surviving, 'text', {
+      get() {
+        // Swap the second slot the first time an earlier record's field read
+        // reaches this record's text.
+        mutated.dependencies[1] = clean;
+        return originalText;
+      },
+    });
+    const result = verifyClosureEvidence(mutated);
+    expect(result.verdict).toBe('unresolved');
+    expect(result.reason).toBe('deleted-trigger-survives');
+    expect(result.checks[3]?.detail).toContain('src/legacy.ts');
+  });
+
+  test('an accessor-backed array slot is rejected as unavailable', () => {
+    const packet = makePacket();
+    const slots: unknown[] = [];
+    Object.defineProperty(slots, 0, {
+      get() {
+        return { path: 'src/clean.ts', role: 'consumer', text: "load('{}');\n" };
+      },
+    });
+    (packet as { dependencies: unknown }).dependencies = slots;
+    const result = verifyClosureEvidence(packet);
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expect(namesOf(result)).toEqual(['packet-complete']);
+    expect(result.checks[0]?.detail).toContain('slot 0 is accessor-backed');
   });
 
   test('non-object dependency elements are unavailable, not crashes', () => {
