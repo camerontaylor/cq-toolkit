@@ -1840,7 +1840,15 @@ it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
       await configureAgentRepo(repo);
       Date.now = () => clock;
       const result = await makeReviewRun({
-        drivers: scriptedDrivers(),
+        // 'thrown' faults the driver under the real reviewer seam (never a raw
+        // throw past the engine): a coincident deadline must not reclassify an
+        // unexpected fault as a budget stop.
+        drivers: scriptedDrivers(() => {
+          if (mode === 'thrown') {
+            clock += 1001;
+            throw new Error('unexpected reviewer fault');
+          }
+        }),
         effectsFactory: () =>
           repoEffects(repo, (command) => {
             if (command !== 'coderabbit') return undefined;
@@ -1859,19 +1867,27 @@ it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
           }
           return components.map((component) => ({ component: component.component, hits: [] }));
         },
-        runAgentReviewer: async () => {
-          clock += 1001;
-          if (mode === 'thrown') throw new Error('unexpected reviewer fault');
-          if (mode === 'drift') repo.git('commit', '--allow-empty', '-m', 'drift');
-          return mode === 'coverage'
-            ? { status: 'needs-human', reason: 'coverage incomplete' }
-            : { status: 'budget-exhausted' };
-        },
+        // No injected reviewer for 'thrown', so the real seam runs. No .catch
+        // fallback either: the engine must refuse with a structured result,
+        // and a thrown engine error fails the test instead of being laundered
+        // into a report-less needs-human object that satisfies both
+        // assertions vacuously.
+        ...(mode === 'thrown'
+          ? {}
+          : {
+              runAgentReviewer: async () => {
+                clock += 1001;
+                if (mode === 'drift') repo.git('commit', '--allow-empty', '-m', 'drift');
+                return mode === 'coverage'
+                  ? { status: 'needs-human' as const, reason: 'coverage incomplete' }
+                  : { status: 'budget-exhausted' as const };
+              },
+            }),
       })({
         repoRoot: repo.root,
         wallMs: 1000,
         reviewers: mode === 'auth' || mode === 'mixed' ? ['coderabbit', 'agent'] : ['agent'],
-      }).catch((error: unknown) => ({ status: 'needs-human', reason: String(error) }));
+      });
       expect(result.status).toBe('needs-human');
       expect(result).not.toMatchObject({ report: { blockedBudget: true } });
     } finally {
