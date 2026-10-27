@@ -25,24 +25,43 @@ export type FixTaskOutcome =
   | 'exhausted';
 
 /**
- * One failed-attempt or outstanding-work row per task: the retained
- * failed-attempt evidence when an attempt produced any, else the honest
- * no-artifact row (branchless) for work the run never got evidence for. A
- * task that was eventually fixed keeps its failed-attempt rows as history;
- * the task row's `fixed` outcome separates them from work still outstanding.
+ * A branch-bearing failure row: an attempt retained its failed-attempt commit.
+ * The gate that refused the attempt is preserved verbatim.
  */
-export interface FixTaskFailure {
+export interface FixTaskAttemptFailure {
   /** The unit that planned the task: `<kind>/<slug>`, as in the failed refs. */
   unit: string;
   task: string;
   outcome: FixTaskOutcome;
   gate: FailedAttemptGate;
   reason: string;
-  /** The retained failed-attempt branch; absent when no attempt left evidence. */
-  branch?: string;
-  /** The retained failed-attempt commit; absent when no attempt left evidence. */
-  sha?: string;
+  branch: string;
+  sha: string;
 }
+
+/**
+ * A branchless failure row: work the run could not conclude and an attempt
+ * never retained an artifact for. The gate is honestly `none` — no gate
+ * refused a retained commit because there is no retained commit; `reason`
+ * carries the stop cause. No branch or sha is invented.
+ */
+export interface FixTaskNoArtifactFailure {
+  /** The unit that planned the task: `<kind>/<slug>`, as in the failed refs. */
+  unit: string;
+  task: string;
+  outcome: FixTaskOutcome;
+  gate: 'none';
+  reason: string;
+}
+
+/**
+ * One failed-attempt or outstanding-work row per task: branch-bearing rows
+ * carry the retained failed-attempt evidence; branchless rows are work the
+ * run never got evidence for. A task that was eventually fixed keeps its
+ * failed-attempt rows as history; the task row's `fixed` outcome separates
+ * them from work still outstanding.
+ */
+export type FixTaskFailure = FixTaskAttemptFailure | FixTaskNoArtifactFailure;
 
 /**
  * One accounting row per planned unit of work: every task the run's units
@@ -216,8 +235,9 @@ export function fixRunCounters(rows: readonly PlannedTaskRow[]): FixRunCounters 
     fixed,
     skipped: rows.filter((row) => row.outcome === 'fixed' && row.commits.length === 0).length,
     unresolved: rows.length - fixed,
-    rescueAttempts: rows.flatMap((row) => row.rounds ?? []).filter((round) => round.tier === 'rescue')
-      .length,
+    rescueAttempts: rows
+      .flatMap((row) => row.rounds ?? [])
+      .filter((round) => round.tier === 'rescue').length,
     rescueFixes: rows.filter(
       (row) => row.outcome === 'fixed' && row.attempts.some((attempt) => attempt.tier === 'rescue'),
     ).length,

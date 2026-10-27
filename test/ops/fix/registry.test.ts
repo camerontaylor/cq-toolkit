@@ -117,7 +117,7 @@ describe('fix-run report accounting', () => {
       gate: 'none',
       reason: 'failure has no attributed file',
     });
-    expect(withoutBranch.failures[0].branch).toBeUndefined();
+    expect('branch' in withoutBranch.failures[0]).toBe(false);
   });
 
   test('never-dispatched, cancelled and budget-stopped siblings refine their outcomes', () => {
@@ -173,7 +173,13 @@ describe('fix-run report accounting', () => {
     );
     expect(row.outcome).toBe('not-started');
     expect(row.branch).toBe('cq/run/tests-1/other-repo');
-    expect(row.failures[0]?.branch).toBeUndefined();
+    expect(row.failures[0]).toEqual({
+      unit: 'tests-1/other-repo',
+      task: 'other-repo',
+      outcome: 'not-started',
+      gate: 'none',
+      reason: 'unit halted on a budget bound',
+    });
     expect(fixRunCounters([row])).toMatchObject({
       planned: 1,
       attempted: 0,

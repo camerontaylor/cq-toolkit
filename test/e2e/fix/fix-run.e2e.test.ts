@@ -526,8 +526,8 @@ test('one failing task has a failed-attempt commit while a passing sibling remai
     );
     expect(
       reportOf(result)
-        .failed.filter((attempt) => attempt.branch !== undefined)
-        .map((attempt) => attempt.branch!.split('/').at(-1)),
+        .failed.filter((attempt) => 'branch' in attempt)
+        .map((attempt) => attempt.branch.split('/').at(-1)),
     ).toEqual(['a1', 'a2']);
   } finally {
     await rm(f.root, { recursive: true, force: true });
@@ -1016,7 +1016,10 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
     // A third failing task the run never reaches: the budget stop lands after
     // the second task's first worker call, so tasks one (fixed), two (failed
     // with a retained branch) and the never-started remainder are all visible.
-    await writeFile(join(f.repo, 'cases', 'c.test.cjs'), 'module.exports = { actual: 1, expected: 2 };\n');
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
     await git(f.repo, 'add', '-A');
     await git(f.repo, 'commit', '-m', 'seed third failing task');
     // Worker contract: fix a.test.cjs, fail b.test.cjs with a retained patch,
@@ -1095,14 +1098,17 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
     // row's failures carry branch and sha while every branchless row omits
     // both (no invented artifact).
     const failedWithBranch = report.planned.find(
-      (row) => row.outcome === 'unfixed' && row.failures.some((failure) => failure.sha !== undefined),
+      (row) => row.outcome === 'unfixed' && row.failures.some((failure) => 'branch' in failure),
     );
-    expect(failedWithBranch?.failures[0]?.branch).toMatch(/^cq\/fixture\/failed\//);
-    expect(failedWithBranch?.failures[0]?.sha).toMatch(/^[0-9a-f]{40}$/);
+    const retained = failedWithBranch?.failures.find((failure) => 'branch' in failure);
+    expect(retained && 'branch' in retained ? retained.branch : undefined).toMatch(
+      /^cq\/fixture\/failed\//,
+    );
+    expect(retained && 'sha' in retained ? retained.sha : undefined).toMatch(/^[0-9a-f]{40}$/);
     for (const row of outstanding)
       for (const failure of row.failures)
-        if (failure.sha === undefined) {
-          expect(failure.branch).toBeUndefined();
+        if (!('branch' in failure)) {
+          expect(failure.gate).toBe('none');
           expect(failure.reason).toBeTruthy();
         }
     // Explicit denominators: planned = fixed + unresolved.
@@ -1111,7 +1117,7 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
     expect(report.counters.unresolved).toBe(report.counters.planned - 1);
     expect(report.counters.attempted).toBeGreaterThanOrEqual(1);
     // The legacy failed evidence still carries the retained branch row.
-    expect(report.failed.some((row) => 'sha' in row && row.sha !== undefined)).toBe(true);
+    expect(report.failed.some((row) => 'branch' in row)).toBe(true);
     // fixesPerRun keeps its meaning: verified fixes only.
     expect(report.fixesPerRun).toBe(1);
     // The persisted artifact matches the returned report exactly.
@@ -1379,9 +1385,7 @@ test.each([
           ?.flatMap((round) => round.failedAttempt?.branch.split('/').at(-1) ?? [])
           .toSorted(),
       ).toEqual(['a1', 'a2']);
-      expect(
-        report.failed.filter((row) => 'sha' in row && row.sha !== undefined),
-      ).toHaveLength(2);
+      expect(report.failed.filter((row) => 'branch' in row)).toHaveLength(2);
     } else if (mode === 'regression-rescue') {
       expect(report.tasks[0]?.attempts.map((a) => [a.tier, a.attempt])).toEqual([
         ['worker', 1],

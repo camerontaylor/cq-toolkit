@@ -222,17 +222,19 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       // branchless rows join the legacy `failed` evidence so the local JSON
       // and the PR summary name every outstanding unit (no commit URL is
       // invented where no attempt left a branch).
-      report.planned = report.tasks.map(plannedTaskRowOf).concat(
-        unstartedUnits.map((entry) =>
-          neverStartedRow(entry.segments, entry.unit.package, entry.reason),
-        ),
-      );
+      report.planned = report.tasks
+        .map(plannedTaskRowOf)
+        .concat(
+          unstartedUnits.map((entry) =>
+            neverStartedRow(entry.segments, entry.unit.package, entry.reason),
+          ),
+        );
       report.counters = fixRunCounters(report.planned);
       for (const row of report.planned)
-        if (row.outcome !== 'fixed' && row.failures.some((failure) => failure.sha === undefined))
+        if (row.outcome !== 'fixed' && row.failures.some((failure) => !('branch' in failure)))
           report.failed.push(
             ...row.failures
-              .filter((failure) => failure.sha === undefined)
+              .filter((failure) => !('branch' in failure))
               .map((failure) => ({
                 unit: failure.unit,
                 task: failure.task,
@@ -554,8 +556,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           (row.report ?? (row.result.status === 'ok' ? row.result.value : undefined))?.tasks ?? [],
       );
       for (const row of report.units) {
-        const unit = plan.jobs.find((job) => job.id === row.jobId)
-          ?.input as SweepUnitDispatchInput;
+        const unit = plan.jobs.find((job) => job.id === row.jobId)?.input as SweepUnitDispatchInput;
         if (unit === undefined) continue;
         const known = unstartedUnits.some(
           (entry) => entry.unit.package === unit.package && entry.unit.fixer === unit.fixer,
@@ -629,7 +630,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             const branchless = report.planned.filter(
               (row) =>
                 row.outcome !== 'fixed' &&
-                row.failures.every((failure) => failure.sha === undefined) &&
+                row.failures.every((failure) => !('branch' in failure)) &&
                 !report.tasks.some(
                   (task) =>
                     task.task.id === row.task.id &&

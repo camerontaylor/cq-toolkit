@@ -10,7 +10,9 @@ export {
 } from './report.js';
 export type {
   FixRunCounters,
+  FixTaskAttemptFailure,
   FixTaskFailure,
+  FixTaskNoArtifactFailure,
   FixTaskOutcome,
   PlannedTaskRow,
 } from './report.js';
