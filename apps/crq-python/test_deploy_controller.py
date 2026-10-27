@@ -652,8 +652,11 @@ class CliTests(ControllerFixture):
         merged = dict(os.environ)
         if env:
             merged.update(env)
+        # The copied helper is imported from the fixture checkout. Prevent
+        # that import from creating untracked bytecode beside reviewed source;
+        # the production "only rendered config modified" fence stays strict.
         return subprocess.run(
-            ["python3", str(OPS / "deploy-controller.py"),
+            ["python3", "-B", str(OPS / "deploy-controller.py"),
              "--root", str(self.root), "--overlay", str(self.overlay_path),
              "--record-dir", str(self.record_dir), *args],
             capture_output=True, text=True, env=merged)
@@ -691,9 +694,20 @@ class CliTests(ControllerFixture):
             'echo inactive\n'
             'exit 0\n')
         (shim / "systemctl").chmod(0o755)
+        # Do not let host-global excludes hide generated fixture files.
+        self.command("config", "core.excludesFile", os.devnull)
+        expected_status = [" M " + host.CONFIG]
+        before_cli = self.command("status", "--porcelain", "--untracked-files=all").splitlines()
+        self.assertEqual(before_cli, expected_status, before_cli[:10])
         result = self.run_cli("switch", "--sha", pinned, "--tag", "crq-runner/20261028-2",
-                              env={"PATH": str(shim) + ":" + os.environ["PATH"]})
-        self.assertEqual(result.returncode, 0, result.stderr)
+                              env={"PATH": str(shim) + ":" + os.environ["PATH"],
+                                   # Exercise -B even when inherited env does
+                                   # not suppress bytecode (as in CI discovery).
+                                   "PYTHONDONTWRITEBYTECODE": ""})
+        after_cli = self.command("status", "--porcelain", "--untracked-files=all").splitlines()
+        self.assertEqual(result.returncode, 0,
+                         result.stderr[-1000:] + "\nfixture status: " + repr(after_cli[:10]))
+        self.assertEqual(after_cli, expected_status, after_cli[:10])
         artifact = json.loads(result.stdout)
         self.assertEqual(artifact["operation"], "switch")
         self.assertEqual(artifact["target"], pinned)
