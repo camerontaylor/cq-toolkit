@@ -132,6 +132,8 @@ describe('review.address composition', () => {
       })({ ...f.input, maxTokens: 10, concurrency: 1 });
       expect(result.status).toBe('needs-human');
       expect(attempted).toEqual(['a']);
+      expect(reportOf(result).rounds).toHaveLength(1);
+      expect(reportOf(result).rounds[0]?.runs).toHaveLength(1);
       expect(f.calls).not.toContain('review');
       expect(reportOf(result).usage).toEqual({
         input: 5,
@@ -145,6 +147,24 @@ describe('review.address composition', () => {
       expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
         reportOf(result),
       );
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('one round retains both batch runs and only its final findings record', async () => {
+    const f = await fixture([finding('a'), finding('b')]);
+    try {
+      const result = await makeReviewAddress(f.deps)({ ...f.input, concurrency: 1, rounds: 1 });
+      const report = reportOf(result);
+      expect(f.calls.filter((call) => call.startsWith('fix:'))).toEqual(['fix:a', 'fix:b']);
+      expect(report.rounds).toHaveLength(1);
+      expect(report.rounds[0]).toMatchObject({ round: 1, record: { findings: report.findings } });
+      expect(report.rounds[0]).toHaveProperty('runs', [
+        expect.objectContaining({ jobs: [expect.objectContaining({ jobId: 'finding-0' })] }),
+        expect.objectContaining({ jobs: [expect.objectContaining({ jobId: 'finding-0' })] }),
+      ]);
+      expect(report.rounds[0]).not.toHaveProperty('run');
+      expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
     } finally {
       await f.cleanup();
     }
@@ -211,6 +231,7 @@ describe('review.address composition', () => {
       // key on — inside the report envelope (the kernel-sanctioned extension),
       // never a top-level field (the strict OpResultSchema would reject it).
       expect(reportOf(result).stop).toBe('round-cap');
+      expect(reportOf(result).rounds.map((entry) => entry.round)).toEqual([1, 2]);
     } finally {
       await f.cleanup();
     }

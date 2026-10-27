@@ -68,7 +68,8 @@ export interface ReviewAddressInput {
 export interface ReviewAddressReport {
   source: string;
   reportPath: string;
-  rounds: Array<{ round: number; record: FindingsRecord; run?: RunReport }>;
+  /** One entry per round; the latest reviewed record and all settled batch runs. */
+  rounds: Array<{ round: number; record: FindingsRecord; runs: RunReport[] }>;
   findings: Finding[];
   /** Report context only: review advisories never enter `findings` or dispatch. */
   advisories?: string[];
@@ -734,6 +735,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return false;
             }
           };
+          const noteRound = (round: number, record: FindingsRecord, run?: RunReport) => {
+            let entry = report.rounds.find((entry) => entry.round === round);
+            if (!entry) {
+              entry = { round, record, runs: [] };
+              report.rounds.push(entry);
+            }
+            if (run) entry.runs.push(run);
+            return entry;
+          };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
@@ -798,7 +808,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 const fix = row.result.value as AddressFix;
                 if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
               }
-              report.rounds.push({ round, record, run });
+              noteRound(round, record, run);
             }
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
@@ -987,6 +997,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (prMetadata) {
               const meta = prMetadata;
               const fixesById = new Map<string, AddressFix>();
+              const dispatchedFindings: Finding[] = [];
               let admissionRefused = false;
               const entry: OpRegistryEntry = {
                 name: 'review.fixItem',
@@ -1032,6 +1043,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     admissionRefused = true;
                     throw error;
                   }
+                  dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
@@ -1138,6 +1150,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   'needs-human',
                   'PR worker admission refused; persisted/caller bytes retained',
                 );
+              if (loop.fixReport) {
+                noteRound(
+                  round,
+                  {
+                    schemaVersion: 1,
+                    branch: loop.worktree.branch,
+                    head: await gitText(root, ['rev-parse', 'HEAD']),
+                    sources: [{ kind: 'pr-threads', status: 'terminal' }],
+                    findings: dispatchedFindings.map(
+                      (finding) => fixesById.get(finding.id)?.finding ?? finding,
+                    ),
+                  },
+                  loop.fixReport,
+                );
+              }
               const fetched = await fetchReviewState(
                 { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                 undefined,
@@ -1272,11 +1299,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 return await finish('needs-human', 'PR re-review identity changed');
               previous = retainDeferred(merge([threads, agent.value]));
               noteAdvisories(previous);
-              report.rounds.push({
-                round,
-                record: previous,
-                ...(loop.fixReport ? { run: loop.fixReport } : {}),
-              });
+              noteRound(round, previous).record = previous;
               report.findings = previous.findings;
               report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
               if (
@@ -1376,7 +1399,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-            report.rounds.push({ round, record: previous });
+            noteRound(round, previous).record = previous;
             if (
               isComplete(previous, policy.review.reviewers) &&
               !report.openBlocking.length &&

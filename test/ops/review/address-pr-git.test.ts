@@ -657,8 +657,14 @@ test.each([
       ).toBe(
         'Review fixture <review-fixture@example.invalid>|Review fixture <review-fixture@example.invalid>',
       );
-      expect(report.rounds).toHaveLength(tampered ? 0 : 1);
-      if (!tampered) expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
+      // A settled run survives a later disposition refusal; admission refusals
+      // still stop before any round record is created.
+      const recordedRound = !tampered || earlyTamper;
+      expect(report.rounds).toHaveLength(recordedRound ? 1 : 0);
+      if (recordedRound) {
+        expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
+        expect(report.rounds[0]?.runs).toHaveLength(1);
+      }
       if (!earlyTamper)
         expect(report.reasons.join('\n')).not.toMatch(
           /identity changed|admission|branch changed|unknown finding|disposition persistence|could not be persisted/,
