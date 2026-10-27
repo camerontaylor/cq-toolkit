@@ -128,8 +128,8 @@ def load_queue() -> Dict[str, Any]:
     # requeues survive reload; running reviews still have to be harvested.
     for item in q["items"]:
         item.pop("boost", None)
-        if (item["kind"] == "open" and completed_open_cycles(item) >= 1
-                and item["state"] in ("pending", "blocked") and not item.get("optional_cycle")):
+        if (item.get("kind") == "open" and completed_open_cycles(item) >= 1
+                and item.get("state") in ("pending", "blocked") and not item.get("optional_cycle")):
             item.update(state="done", not_before=None, last_error=None)
     return q
 
