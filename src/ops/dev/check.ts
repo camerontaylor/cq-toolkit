@@ -61,8 +61,10 @@ export interface DevCheckInput {
    * (`--include-integration`), for both the --base and --range forms. The
    * selector's closure can name e2e files for plain src changes, and the
    * gate refusal can never be satisfied from inside dev.check — the caller
-   * must opt in (S7 dogfood attempt A). Default off; the record carries the
-   * choice (includeIntegration: true) so readers can see the opt-in.
+   * must opt in (S7 dogfood attempt A). Default off; the legacy-path record
+   * carries the choice (includeIntegration: true) so readers can see the
+   * opt-in (a configured-checks run has no test:narrow gate to widen, so its
+   * record carries neither this flag nor a testSelection).
    */
   includeIntegration?: boolean;
   /**
@@ -524,13 +526,22 @@ export function makeDevCheck(
           head: state.head,
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
-          ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
-          testSelection:
-            input.testFiles !== undefined
-              ? { mode: 'named', files: [...input.testFiles] }
-              : input.range !== undefined
-                ? { mode: 'range' }
-                : { mode: 'base' },
+          // Both fields describe the legacy test:narrow gate only: a
+          // configured-checks run has no test gate, so the record must not
+          // claim an integration opt-in or a selection never executed.
+          ...(configuredChecks === null && input.includeIntegration === true
+            ? { includeIntegration: true }
+            : {}),
+          ...(configuredChecks === null
+            ? {
+                testSelection:
+                  input.testFiles !== undefined
+                    ? { mode: 'named', files: [...input.testFiles] }
+                    : input.range !== undefined
+                      ? { mode: 'range' }
+                      : { mode: 'base' },
+              }
+            : {}),
           passed,
           gates,
           loadStamp,
