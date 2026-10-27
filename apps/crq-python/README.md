@@ -48,8 +48,23 @@ a file lock cannot provide that guarantee across hosts.
 Review each unreviewed range once. Critical and major findings get deterministic
 `crq-<run>-F<n>` inbox jobs; minors remain recorded. Clean reviews finish without
 an unconditional second cycle. New head commits enroll a delta. All-owned repair
-ranges are suppressed to terminate the loop. Fix PRs into merge-queue carry one
-prior cycle by default (`repair.fix_pr_cycles=1`, configurable D8).
+ranges are suppressed to terminate the loop. Every open PR, including fix PRs,
+requires one completed CLI cycle. On load, legacy pending/blocked open items
+with at least one recorded completed cycle become done; zero-cycle items remain
+pending. Historical `prior_cycles` credits are retained as metadata but cannot
+satisfy a review on the PR head.
+
+`crq.py requeue <done-open-item> [reason]` requests an additional optional cycle.
+It is never owed or a dependency blocker, ranks below coverage, and runs only
+when no item at rank 0–3 is pending. A prior `boost` is ignored and removed on
+load. Merged-current catch-up ranks alongside newly merged follow-ups (rank 2).
+
+`crq.py prioritize <pending-item> [reason]` gives any pending item operator
+priority after promotion and before normal rank; `deprioritize` clears it.
+Both append admin events and preserve natural-tick admission, backoff and quota
+gates. Optional cycles still wait for rank 0–3 work even when prioritized.
+Selective starts for author and merged-current items remain refused. Explicit
+author cycle-2 requests also rank last and wait for rank 0–3 demand to clear.
 
 Every job records FIXED, NOT-FIXED or FAILED, a reason, attempts and judge evidence.
 A0 uses the window's fixer. A mechanical failure retries the same model at A1,

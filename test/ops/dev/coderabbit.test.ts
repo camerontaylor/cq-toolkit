@@ -10,6 +10,7 @@ import {
   decideCompletion,
   isTransientReviewerFailure,
   parseReviewerStream,
+  parseReviewerWaitTime,
 } from '../../../src/ops/dev/coderabbit.js';
 
 describe('coderabbitReviewArgv', () => {
@@ -399,5 +400,60 @@ describe('CodeRabbit transient classification (#509)', () => {
     ['a clean exit', { exitCode: 0, timedOut: false }],
   ])('%s vetoes the transient class', (_label, raw) => {
     expect(isTransientReviewerFailure(parseReviewerStream(conErr), raw)).toBe(false);
+  });
+});
+
+describe('recoverable rate-limit waits (#551)', () => {
+  test.each([
+    ['10 minutes', 600_000],
+    ['1 minutes and 47 seconds', 107_000],
+    ['2 seconds', 2000],
+    ['1 minute and 1 second', 61_000],
+    ['garbage', undefined],
+    ['10 minutes later', undefined],
+    ['-1 seconds', undefined],
+    ['0 seconds', 0],
+    ['999999999999999999999 minutes', undefined],
+  ])('parses %s', (text, expected) => {
+    expect(parseReviewerWaitTime(text)).toBe(expected);
+  });
+
+  test.each([
+    [{}, true],
+    [{ recoverable: false }, false],
+    [{ errorType: 'auth' }, false],
+    [{ metadata: { waitTime: 'garbage' } }, false],
+    [{ metadata: {} }, false],
+  ])('retries only structured recoverable waits: %j', (overrides, retryable) => {
+    const parsed = parseReviewerStream(
+      JSON.stringify({
+        type: 'error',
+        errorType: 'rate_limit',
+        recoverable: true,
+        metadata: { waitTime: '2 seconds' },
+        ...overrides,
+      }),
+    );
+    expect(parsed.rateLimitWait?.ms).toBe(retryable ? 2000 : undefined);
+  });
+
+  test.each([
+    { type: 'error', errorType: 'auth' },
+    { type: 'action_required' },
+    { type: 'complete', status: 'review_skipped' },
+    { type: 'unknown' },
+  ])('mixed refusals never retry: %j', (event) => {
+    const parsed = parseReviewerStream(
+      [
+        JSON.stringify({
+          type: 'error',
+          errorType: 'rate_limit',
+          recoverable: true,
+          metadata: { waitTime: '2 seconds' },
+        }),
+        JSON.stringify(event),
+      ].join('\n'),
+    );
+    expect(parsed.rateLimitWait).toBeUndefined();
   });
 });
