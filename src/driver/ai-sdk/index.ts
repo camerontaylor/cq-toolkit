@@ -698,9 +698,16 @@ export class AiSdkDriver implements Driver {
       if (this.beforeRequest !== undefined) {
         const serialized = JSON.stringify(input) ?? 'undefined';
         try {
+          const contents = [{ text: toolName }, { text: reason }];
+          const collect = (value: unknown): void => {
+            if (typeof value === 'string') contents.push({ text: value });
+            else if (value !== null && typeof value === 'object')
+              for (const child of Object.values(value)) collect(child);
+          };
+          collect(input);
           await this.beforeRequest(
             JSON.stringify({ tool: toolName, reason, input: serialized }),
-            undefined,
+            contents,
             {
               kind: 'tool-output',
             },

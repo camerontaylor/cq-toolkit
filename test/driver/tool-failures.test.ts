@@ -42,8 +42,13 @@ async function run(
   const store = new SessionStore(sessions);
   const record = await store.create(root);
   const guard = vi.fn(
-    (text: string, _contents?: readonly unknown[], context?: { kind: string }) => {
-      if (context?.kind === 'tool-output' && text.includes('PRIVATE_SENTINEL'))
+    (text: string, contents?: readonly { text: string }[], context?: { kind: string }) => {
+      if (
+        context?.kind === 'tool-output' &&
+        [text, ...(contents ?? []).map((content) => content.text)].some((value) =>
+          /\bPRIVATE_SENTINEL\b/.test(value),
+        )
+      )
         throw new Error('secret');
     },
   );
@@ -221,6 +226,16 @@ describe('tool failure evidence', () => {
     expect(noScan.result.stopReason).toBe('complete');
     expect(noScan.raw).not.toContain('PRIVATE_SENTINEL');
     expect(noScan.failures[0]?.inputSummary).toContain('omitted');
+  });
+
+  test('diagnostic scans include decoded nested strings before JSON escaping', async () => {
+    const scanned = await run(
+      [call('not_a_tool', { nested: ['\nPRIVATE_SENTINEL'] }), reply('done')],
+      true,
+    );
+    expect(scanned.result.stopReason).toBe('complete');
+    expect(scanned.failures[0]?.inputSummary).toBe('[redacted: diagnostic scan refused]');
+    expect(scanned.raw).not.toContain('PRIVATE_SENTINEL');
   });
 
   test('failure line survives store append/load and old session schemas still parse', async () => {
