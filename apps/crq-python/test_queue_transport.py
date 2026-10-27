@@ -130,13 +130,30 @@ class QueueTransportTests(unittest.TestCase):
 
     def test_structured_vendor_reason_and_unknown_fail_closed(self):
         rid, doc = self.receipt()
-        for outcome, category in [("rate_limited", "vendor-rate-limited"), ("auth", "vendor-needs-action"), ("error", "unknown"), ("blocked-secret-scan", "scan")]:
+        for outcome, category in [("rate_limited", "vendor-rate-limited"), ("auth", "vendor-needs-action"), ("action_required", "vendor-needs-action"), ("error", "unknown"), ("blocked-secret-scan", "scan")]:
             doc.update(outcome=outcome, counted=False)
             self.q["items"][0]["receipt_id"] = receipts.write_receipt(self.tmp.name, doc)
             result = self.call("status")
             self.assertEqual(result["state"], "blocked")
             self.assertEqual(result["reason"]["category"], category)
             self.assertFalse(result["reviewed"])
+
+    def test_cross_source_reuse_requires_q1_exact_current_identity(self):
+        rid, doc = self.receipt()
+        paths = [{"source_path": "src/a.ts", "path": "src/a.ts",
+                  "resolution": "same-path-current", "disposition": "included"}]
+        capture = {"target": "c" * 40, "tree": "d" * 40, "paths": paths,
+                   "scope_digest": receipts.digest(paths), "policy": receipts.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1", "reviewer_version": "fixture"}
+        capture["equivalence"] = receipts.current_equivalence(capture)
+        doc["capture"] = capture
+        doc["source"] = {**doc["source"], "pr": 99, "merge_sha": "f" * 40}
+        self.q["items"][0].update(receipt_id=receipts.write_receipt(self.tmp.name, doc),
+                                   capture=copy.deepcopy(capture), reused_from="original-item")
+        self.assertEqual(self.call("status")["state"], "reused")
+        self.q["items"][0]["capture"]["tree"] = "e" * 40
+        with self.assertRaisesRegex(ValueError, "equivalent"): self.call("status")
 
     def test_persisted_identity_block_survives_reads_and_exact_revalidation_clears(self):
         self.call("enqueue")

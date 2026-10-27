@@ -21,7 +21,7 @@ export const QueueReceiptSchema = z.looseObject({
     equivalence: QueueDigest,
     policy: z.literal('affected-current-additions-v1'),
     projection: z.literal('current-affected-files/full-file-addition-projection'),
-    reviewer: z.string().min(1),
+    reviewer: z.literal('coderabbit-review-agent-committed-v1'),
     reviewer_version: z.string().min(1),
     captured_at: z.string().datetime(),
     paths: z.array(
@@ -46,6 +46,8 @@ export const QueueReceiptSchema = z.looseObject({
   counted: z.boolean(),
   classification: z.record(z.string(), z.unknown()).nullable(),
   findings: z.array(z.record(z.string(), z.unknown())),
+  run_id: z.string().nullable(),
+  started_at: z.string().datetime().nullable(),
   artifacts: z.record(z.string(), QueueDigest),
   remediation: z.literal('disabled/deferred'),
   independent_acceptance: z.literal(false),

@@ -1,7 +1,8 @@
 # Queue client protocol (Q3)
 
 Stack parent/base: `queue/q1-merged-current` at
-`f3944022a8cebc622742c397cd7a756d818943cf`. Queue baseline:
+`063b9f1d4c41f87a470180e352f977ba867ca670` (preserving the frozen
+`f3944022a8cebc622742c397cd7a756d818943cf` helper API). Queue baseline:
 `1eea0b5b323de8b23a9388a72da4e97f8e631450`.
 
 `queue-v1` is a separate forced-command capability. Deployment must explicitly
@@ -62,7 +63,8 @@ larger receipts refuse explicitly without truncation or acknowledgement.
 Status separates enqueued/reviewed/consumed/fixed. `reason` is typed provenance
 (`source`, `category`, `code`); only trusted structured vendor outcomes produce
 vendor availability categories. Unknown errors never become availability debt
-through message matching. Full capture paths/findings are absent from status.
+through message matching. Persistent Q6 `forge-identity` reasons project blocked
+and prohibit receipt consumption until exact successful forge revalidation clears them. Full capture paths/findings are absent from status.
 Receipt request IDs may name the original enqueue; durable alias bindings and
 verified equivalence authorize reuse, never the cursor or original ID alone.
 
