@@ -861,28 +861,53 @@ describe('dev.review cycle', () => {
 
   // --- Q4 (#485): exact-terminal reuse before vendor dispatch --------------
 
-  test.each(['con_err', 'rate_limited', 'auth'])(
-    'records positive local vendor %s provenance without completing the review',
-    async (code) => {
-      const effects = repoEffects(
-        repo,
-        reviewer(
-          ran(1, JSON.stringify({ type: 'error', message: `Review failed: ${code}: fixture` })),
+  test('records only literal recoverable rate-limit provenance without completion', async () => {
+    const effects = repoEffects(
+      repo,
+      reviewer(
+        ran(
+          1,
+          JSON.stringify({
+            type: 'error',
+            errorType: 'rate_limit',
+            recoverable: true,
+          }),
         ),
-      );
-      const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
-      expect(result.status).toBe('needs-human');
-      const cycle = effects
+      ),
+    );
+    expect((await cycleReview(effects, stubScanner())({ repoRoot: repo.root })).status).toBe(
+      'needs-human',
+    );
+    expect(
+      effects
         .openLedger('feature/x')
         .load()
-        .records.find((entry) => entry.kind === 'cycle');
-      expect(cycle).toMatchObject({
-        completion: { kind: 'blocked' },
-        vendorFailure: { source: 'vendor', codes: [code] },
-      });
-    },
-  );
+        .records.find((entry) => entry.kind === 'cycle'),
+    ).toMatchObject({
+      completion: { kind: 'blocked' },
+      vendorFailure: {
+        source: 'vendor',
+        category: 'vendor-rate-limited',
+        codes: ['rate_limited'],
+      },
+    });
+  });
+  const literalVendor = { type: 'error', errorType: 'rate_limit', recoverable: true };
+  const scanWithVendorProse = {
+    type: 'error',
+    errorType: 'scan',
+    message: 'Review failed: con_err: fixture',
+  };
   test.each([
+    [scanWithVendorProse],
+    [literalVendor, scanWithVendorProse],
+    [scanWithVendorProse, literalVendor],
+    [{ type: 'error', errorType: 'unknown', message: 'Review failed: rate_limited: fixture' }],
+    [{ type: 'error', errorType: 'rate_limit', recoverable: false }],
+    [literalVendor, { type: 'status', status: 'budget_exhausted' }],
+    [literalVendor, { type: 'status', status: 'cancelled' }],
+    [literalVendor, { type: 'finding', severity: 'major', comment: 'defect' }],
+
     [
       { type: 'error', message: 'Review failed: con_err: fixture' },
       { type: 'error', message: 'Review failed: scan_err: fixture' },

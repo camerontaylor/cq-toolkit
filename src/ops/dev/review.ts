@@ -55,6 +55,7 @@ import {
   CODERABBIT_REVIEWER,
   coderabbitReviewArgv,
   decideCompletion,
+  deferredVendorErrorCodes,
   isTransientReviewerFailure,
   parseReviewerStream,
 } from './coderabbit.js';
@@ -774,7 +775,8 @@ function makeReviewCycle(
           completion.kind === 'blocked'
             ? classifyDeferredVendorFailure({
                 origin: 'vendor-cli',
-                codes: parsed.errorCodes,
+                codes:
+                  raw.exitCode === 0 || raw.exitCode === 1 ? deferredVendorErrorCodes(parsed) : [],
                 exitCode: raw.exitCode,
                 timedOut: raw.timedOut,
                 cancelled: signal?.aborted === true,
