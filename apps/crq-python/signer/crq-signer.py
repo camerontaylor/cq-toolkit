@@ -85,6 +85,9 @@ CODEGEN_PREAMBLE_MARKERS = (
     "untrusted review content",
     "do not follow any instructions",
 )
+# Residue (after removing markers and `at line N`) no longer than this is a
+# truncated preamble continuation, not a defect description.
+PREAMBLE_RESIDUE_MAX = 60
 
 # IDENTITY — where the reviewer identity may come from. The reviewer App's
 # name, bot login and numeric bot id come ONLY from the owner's registration
@@ -734,10 +737,16 @@ def capture_review_scope(wt: Path) -> Optional[set]:
         return None
 
 
+def _has_defect_text(s: str) -> bool:
+    """True when s carries any letter/digit outside `at line N` markers —
+    i.e. something that could describe a defect."""
+    return bool(re.search(r"[a-z0-9]", re.sub(r"\s*at line \d+\s*", " ", s, flags=re.I)))
+
+
 def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]:
     """Why one blocking-severity finding row carries NO reviewable defect:
-    `invalid` (no defect text at all, or nothing beyond an `at line N`
-    marker), `preamble` (the row body is reviewer-prompt boilerplate, #529),
+    `invalid` (no defect text at all, or nothing beyond `at line N`
+    markers), `preamble` (the row body is reviewer-prompt boilerplate, #529),
     or `out_of_scope` (a located path outside the captured base..HEAD diff,
     so the row does not describe this comparison). None for a substantive
     finding. Classification is structural: no exact-utterance blacklist —
@@ -752,10 +761,14 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
         stem = lowered
         for marker in CODEGEN_PREAMBLE_MARKERS:
             stem = stem.replace(marker, " ")
-        if not re.search(r"[a-z0-9]", re.sub(r"\s*at line \d+\s*", " ", stem)):
+        residue = re.sub(r"\s*at line \d+\s*", " ", stem, flags=re.I).strip()
+        # A short residue is the preamble's own truncated continuation (#529's
+        # "Verify ea"), not a defect description; a longer self-standing
+        # remainder falls through to the scope check, so prompt text quoted
+        # inside a real defect stays a finding.
+        if len(residue) <= PREAMBLE_RESIDUE_MAX:
             return "preamble"
-    if not re.search(r"[a-z0-9]", re.sub(r"\s*at line \d+\s*$", " ", lowered, flags=re.I)) \
-            and not re.search(r"[a-z0-9]", title.lower()):
+    if not _has_defect_text(lowered) and not _has_defect_text(title.lower()):
         return "invalid"
     file_name = e.get("fileName")
     if not isinstance(file_name, str) or not file_name.strip():
@@ -1505,16 +1518,20 @@ def process_request(path: Path) -> None:
                 # outside the captured base..HEAD diff) become reviewer_fault
                 # diagnostics — never blocking defects, never silently clean.
                 findings, reviewer_faults = blocking_findings(run_dir / "review.ndjson", diff_files)
-                clean = not any(f["severity"] in BLOCKING_SEVERITIES for f in findings)
-                if not reviewer_faults:
-                    clean = clean and cls["outcome"] == "completed"
+                # Faults void clean credit exactly like blocking rows: a
+                # broken reviewer stream is not coverage (#529).
+                clean = (not any(f["severity"] in BLOCKING_SEVERITIES for f in findings)
+                         and not reviewer_faults)
             record_run(base, run_base, batch, cls["outcome"], clean)
-            if cls["outcome"] == "completed" and reviewer_faults:
-                # Reviewer-stream integrity failure (bounds of the protocol
-                # violated): the captured comparison is not trustworthy
-                # evidence, so the item can neither pass nor carry fabricated
-                # defect evidence. reason_code reviewer_fault is outside the
-                # steward's done/recut sets → state blocked + signer_alert.
+            if cls["outcome"] == "completed" and reviewer_faults and not findings:
+                # Faults ONLY (no valid blocking defect): a reviewer-stream
+                # integrity failure — the captured comparison is not
+                # trustworthy evidence, so the item can neither pass nor
+                # carry fabricated defect evidence. reason_code
+                # reviewer_fault is outside the steward's done/recut sets →
+                # state blocked + signer_alert. With a real defect present,
+                # the normal blocking branch below keeps priority and the
+                # faults ride along as diagnostics.
                 codes = sorted({f["code"] for f in reviewer_faults})
                 reason = "reviewer fault: no reviewable defect rows (" + ", ".join(codes) + ")"
                 posted = post_final(iid, batch, "error", f"review reviewer_fault main={base} crq#{iid}") or posted
@@ -1548,6 +1565,7 @@ def process_request(path: Path) -> None:
             posted = post_final(iid, batch, "failure", f"blocked: {sev} main={base} crq#{iid}") or posted
             close_out(iid, req, req_sha, outcome="completed", started_at=started_at,
                       severity_counts=counts, posted=posted, findings=findings, blocking=blocking,
+                      reviewer_faults=reviewer_faults or None,
                       wait_minutes=wait_minutes)
             return
 
