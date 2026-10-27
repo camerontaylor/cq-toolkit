@@ -80,10 +80,12 @@ the canonical order with at most one non-pass entry, last:
    the after content or in any cited dependency's content; symbols declared
    on removed lines must not be re-declared in the after content or in any
    cited dependency. Survival is concrete counter-evidence: verdict
-   `unresolved`. A packet with no citable trigger (no quoted span, no removed
-   declaration) is uncertain: the helper refuses to guess what the finding
-   was about, and uncertainty keeps the finding open without demanding a
-   code edit.
+   `unresolved`. Removed declarations supply counter-evidence only: their
+   removal alone cannot establish a relationship to the finding. Without a
+   quoted finding trigger, a packet with no survival counter-evidence is
+   uncertain (`no-citable-trigger`), even when an unrelated declaration was
+   removed. The helper refuses to guess what the finding was about, and
+   uncertainty keeps the finding open without demanding a code edit.
 5. `dependencies-covered`: a deletion-only patch can never resolve (a
    deleted line alone never establishes closure), and the completeness
    attestation must be present. Otherwise pass.

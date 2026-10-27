@@ -513,6 +513,35 @@ describe('review.address closure evidence verifier', () => {
     expectLastCheck(result, { check: 'trigger-removed', outcome: 'unavailable' });
   });
 
+  test('an unrelated removed declaration cannot close an unquoted dangerous finding', () => {
+    const finding = {
+      id: 'unvalidated-dangerous-call',
+      text: 'dangerous receives unvalidated input and must validate it before execution',
+      file: 'src/config.ts',
+      line: 2,
+    };
+    const before = 'const obsolete = 1;\ndangerous(input);\n';
+    const after = '// obsolete declaration removed\ndangerous(input);\n';
+    const patch = [
+      'diff --git a/src/config.ts b/src/config.ts',
+      '--- a/src/config.ts',
+      '+++ b/src/config.ts',
+      '@@ -1,2 +1,2 @@',
+      '-const obsolete = 1;',
+      '+// obsolete declaration removed',
+      ' dangerous(input);',
+    ].join('\n');
+    const result = verifyClosureEvidence(makePacket({ finding, before, after, patch }));
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('no-citable-trigger');
+    expect(namesOf(result)).toEqual(CHECK_ORDER.slice(0, 4));
+    expect(result.checks.slice(0, 3).every((check) => check.outcome === 'pass')).toBe(true);
+    expectLastCheck(result, { check: 'trigger-removed', outcome: 'unavailable' });
+    expect(result.checks[3]?.detail).toContain(
+      'removed declarations alone do not establish finding-linked trigger evidence',
+    );
+  });
+
   test('unpinned revision identity yields uncertain', () => {
     const shortHead = makePacket();
     (shortHead.metadata as { revision: { head: string } }).revision.head = 'deadbeef';

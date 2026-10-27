@@ -438,13 +438,6 @@ export function verifyClosureEvidence(
     const spans = quotedSpans(packet.finding.text);
     const shape = parsePatchShape(packet.patch);
     const symbols = typeof shape === 'string' ? [] : removedDeclarations(shape.removedLines);
-    if (spans.length === 0 && symbols.length === 0)
-      return {
-        check: 'trigger-removed',
-        outcome: 'unavailable',
-        detail: 'packet carries no quoted trigger span or removed declaration to check',
-        reason: 'no-citable-trigger',
-      };
     for (const span of spans) {
       if (packet.after.includes(span))
         return {
@@ -486,6 +479,16 @@ export function verifyClosureEvidence(
           };
       }
     }
+    // Removed declarations can supply counter-evidence, but their removal
+    // alone does not link the patch to the finding's actual trigger.
+    if (spans.length === 0)
+      return {
+        check: 'trigger-removed',
+        outcome: 'unavailable',
+        detail:
+          'finding carries no quoted trigger span; removed declarations alone do not establish finding-linked trigger evidence',
+        reason: 'no-citable-trigger',
+      };
     return {
       check: 'trigger-removed',
       outcome: 'pass',
