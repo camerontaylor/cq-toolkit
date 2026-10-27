@@ -617,13 +617,22 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
           run: async (invocation, options) => {
             const result = await resolved.driver.run(invocation, options);
             const { usage } = result;
-            spend(
-              usage.input +
-                usage.output +
-                usage.cacheRead +
-                usage.cacheWrite +
-                (usage.reasoning ?? 0),
-            );
+            // Every component is null-guarded (like `reasoning`): a lane
+            // that omits a field — or a hand-scripted test driver — must
+            // not poison the sum with undefined. The finite check is the
+            // second half of the guard: a NaN/Infinity sum that reached
+            // `spend` would make `spentTokens` NaN, and `Math.max(1, NaN)`
+            // in legBudget() returns NaN — silently disabling the shared
+            // run token budget. A non-finite reading is dropped rather
+            // than spent (this op has no narration channel; --json keeps
+            // stderr empty).
+            const total =
+              (usage.input ?? 0) +
+              (usage.output ?? 0) +
+              (usage.cacheRead ?? 0) +
+              (usage.cacheWrite ?? 0) +
+              (usage.reasoning ?? 0);
+            if (Number.isFinite(total)) spend(total);
             return result;
           },
         },
