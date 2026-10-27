@@ -333,7 +333,8 @@ onward (D take 3–J) was detached on triton, from `dist` at the named head, wit
 attempt C (`--push --target=merge-queue --includeIntegration=true` plus 10 named
 `--testFiles`). Run state lives under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
 Every run exited **3** at `review.run` or `review.address`, and **none opened a PR**.
-Each found a defect, fixed in-branch:
+Every run except D surfaced a defect, and each of those was fixed in-branch — except J's,
+which is left unfixed while the lane is paused:
 
 | Attempt  | Head       | Stopped at                                    | Cause                                                                                                                                                                                     | Fix                                                                                               |
 | -------- | ---------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
