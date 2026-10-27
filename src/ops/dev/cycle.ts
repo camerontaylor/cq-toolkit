@@ -73,7 +73,7 @@ import {
   normalizeUsageObservation,
   type KnownUsageSummary,
   type UsageObservation,
-} from '../shared/knownUsage.js';
+} from '../../shared/knownUsage.js';
 
 /**
  * Wall time held back from the review and address legs for the publication

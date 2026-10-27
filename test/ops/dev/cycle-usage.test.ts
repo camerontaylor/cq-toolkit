@@ -3,7 +3,7 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { OpInvocation, Usage, WorkerResult } from '../../../src/driver/types.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import { makeDevCycle, meterDrivers } from '../../../src/ops/dev/cycle.js';
-import { createKnownUsageLedger } from '../../../src/ops/shared/knownUsage.js';
+import { createKnownUsageLedger } from '../../../src/shared/knownUsage.js';
 
 const usage: Usage = { input: 3, output: 2, cacheRead: 1, cacheWrite: 0 };
 const invocation = {} as OpInvocation;

@@ -44,7 +44,7 @@ import {
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { collectBoundedReviewContext } from './internal/reviewContext.js';
-import { foldKnownUsageSummaries, type KnownUsageSummary } from '../shared/knownUsage.js';
+import { foldKnownUsageSummaries, type KnownUsageSummary } from '../../shared/knownUsage.js';
 
 export interface ReviewRunInput {
   repoRoot: string;

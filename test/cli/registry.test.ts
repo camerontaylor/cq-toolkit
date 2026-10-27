@@ -22,9 +22,10 @@
 //      violation only if it appears in NEITHER place (entries nor skipped).
 //   3. Every registry entry has a subcommand: subcommandNames(list()) covers
 //      all entry names plus 'run-plan'; the empty registry still yields
-//      ['run-plan']. T4.2 closed the planned family convention (ratchet's
-//      interim metric-adapter registry moved to metricRegistry.ts). The
-//      helper-only shared directory is surfaced in skippedFamilies.
+//      ['run-plan']. T4.2 closed the family convention (ratchet's interim
+//      metric-adapter registry moved to metricRegistry.ts), so the default
+//      root now reports an EMPTY skippedFamilies — the tolerance stays
+//      surfaced for future families.
 //   4. Fixture-root DI: the pure-op fixture family under
 //      test/fixtures/cli-ops/ resolves exactly its six names through the
 //      same list()/get() seam, and get('echo').importer() yields an async fn.
@@ -256,11 +257,12 @@ describe('registry ⇄ CLI subcommand surface', () => {
     // Plan names ride the caller-supplied list (sorted, deduped, run-plan
     // appended) — the signature stays backward compatible for op-only callers.
     expect(subcommandNames([], ['sweep'])).toEqual(['sweep', 'run-plan']);
-    // Every planned op family exports a `registry` array. The one helper-only
-    // directory has no registry and remains visible in diagnostics; any new
-    // skipped directory changes this exact assertion.
+    // Convention closure (phase-4 T4.2): every planned family now exports a
+    // `registry` array, so NO family is skipped — the diagnostics' skip list
+    // is empty. ratchet's interim metric-adapter registry moved to
+    // metricRegistry.ts and the family's registry.ts is the op registry.
     const { entries: diagEntries, skippedFamilies } = await listWithDiagnostics();
-    expect(skippedFamilies).toEqual(['shared']);
+    expect(skippedFamilies).toEqual([]);
     // list() is exactly the diagnostics' entry half (same cached scan).
     expect(diagEntries).toEqual(entries);
   });

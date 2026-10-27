@@ -18,7 +18,7 @@ import {
   normalizeUsageObservation,
   type KnownUsageSummary,
   type UsageObservation,
-} from '../shared/knownUsage.js';
+} from '../../shared/knownUsage.js';
 
 export interface AgentReviewerInput {
   repoRoot: string;

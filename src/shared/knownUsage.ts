@@ -1,4 +1,4 @@
-import type { Usage } from '../../driver/types.js';
+import type { Usage } from '../driver/types.js';
 
 /** One driver invocation, including a failed or cancelled invocation that returned usage. */
 export interface UsageObservation {

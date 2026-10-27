@@ -3,7 +3,7 @@ import {
   createKnownUsageLedger,
   foldKnownUsageSummaries,
   normalizeUsageObservation,
-} from '../../../src/ops/shared/knownUsage.js';
+} from '../../src/shared/knownUsage.js';
 
 describe('known usage across driver exits', () => {
   it('keeps success, failure, cancellation, budget and repair measurements after a later throw', () => {
