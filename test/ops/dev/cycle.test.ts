@@ -730,6 +730,16 @@ describe('dev.cycle', () => {
         });
         expect(pushes).toBe(0);
         expect(opens).toEqual([]);
+        // The refusal came from the verified-head gate INSIDE the publication
+        // path — not from a vacuous verbatim propagation of an unrecognized
+        // stop: BOTH check legs ran, because the cycle only runs the final
+        // gates (the second check) after the discriminator accepts a
+        // structured stop for publication. A stop that never took the
+        // publication path would refuse verbatim after the FIRST check alone,
+        // so this count is what proves the 'budget' and 'rereview-blocked'
+        // iterations of this matrix actually reach the gate (cycle.ts keeps
+        // the gate two-legged: capCheck, then finishNotReady's re-read).
+        expect(checks).toBe(2);
         // Restore only fixture changes so the next named case has a clean seed.
         if (mode === 'staged' || mode === 'unstaged') {
           await repo.write('src/a.ts', 'export const a = 1;\n');
