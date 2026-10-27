@@ -1027,6 +1027,63 @@ test.each([
   },
 );
 
+test.each([
+  ['parent cancellation', 'terminal', true, 1000, false],
+  ['parent cancellation', 'killed', true, 1000, false],
+  ['wall expiry', 'terminal', false, 0, true],
+  ['wall expiry', 'killed', false, 0, true],
+  ['cancellation and wall expiry', 'terminal', true, 0, true],
+  ['cancellation and wall expiry', 'killed', true, 0, true],
+] as const)(
+  '#532: %s with a %s CLI uses one wall sample for budget attribution',
+  async (_mode, cli, cancel, wall, marked) => {
+    const controller = new AbortController();
+    let dispatched = false;
+    let completionSamples = 0;
+    let completionRecorded = false;
+    const effects = repoEffects(
+      repo,
+      reviewer(() => {
+        dispatched = true;
+        if (cancel) controller.abort(new Error('parent cancelled reviewer'));
+        return cli === 'terminal'
+          ? ran(0)
+          : ran(null, JSON.stringify({ type: 'heartbeat', status: 'reviewing' }), {
+              timedOut: true,
+            });
+      }),
+    );
+    const writeReviewLog = effects.writeReviewLog;
+    effects.writeReviewLog = async (...args) => {
+      completionRecorded = true;
+      return writeReviewLog(...args);
+    };
+    const result = await makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      signal: controller.signal,
+      remainingWallMs: () => {
+        if (!dispatched) return 1000;
+        // Transient classification after the log keeps its independent wall read.
+        if (completionRecorded) return wall;
+        completionSamples++;
+        // A later sample would disagree: attribution and completion must share one.
+        return completionSamples === 1 ? wall : wall === 0 ? 1000 : 0;
+      },
+    })({ repoRoot: repo.root });
+    expect(completionSamples).toBe(1);
+    expect(result.status).toBe('needs-human');
+    if (marked) expect(result).toMatchObject({ report: { budgetStopped: true } });
+    else expect(result).not.toMatchObject({ report: { budgetStopped: true } });
+    const cycles = effects
+      .openLedger('feature/x')
+      .load()
+      .records.filter((entry) => entry.kind === 'cycle');
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+  },
+);
+
 test.each(['queued', 'running', 'expired'] as const)(
   'bounded review persists blocked evidence when %s without a completed review',
   async (mode) => {

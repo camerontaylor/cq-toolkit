@@ -18,7 +18,7 @@ import {
 } from '../../../src/ops/dev/cycle.js';
 import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
 import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
-import type { DevCheckReport } from '../../../src/ops/dev/check.js';
+import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -42,7 +42,7 @@ afterEach(async () => {
 
 const effects: () => DevEffects = () => repoEffects(repo);
 
-type CheckLeg = (input: { repoRoot: string; target?: string }) => Promise<OpResult<DevCheckReport>>;
+type CheckLeg = (input: DevCheckInput) => Promise<OpResult<DevCheckReport>>;
 type ReviewLeg = (input: ReviewRunInput) => Promise<OpResult<FindingsRecord>>;
 type AddressLeg = (
   input: ReviewAddressInput,
@@ -72,6 +72,12 @@ function greenCheck(calls: string[] = []): CheckLeg {
         target: input.target ?? 'merge-queue',
         ...at,
         passed: true,
+        testSelection:
+          input.testFiles !== undefined
+            ? { mode: 'named' as const, files: [...input.testFiles] }
+            : input.range !== undefined
+              ? ({ mode: 'range' } as const)
+              : ({ mode: 'base' } as const),
         gates: [
           { name: 'check:static', status: 'pass', exitCode: 0, durationMs: 5, evidence: 'ok' },
         ],
@@ -271,6 +277,72 @@ describe('dev.cycle', () => {
     expect(checkCalls).toEqual(['check:merge-queue', 'check:merge-queue']);
     // The PR opened ready (no draft flags), at the intended target.
     expect(opens).toEqual([{ repoRoot: repo.root, target: 'merge-queue' }]);
+  });
+
+  test('includeIntegration=true reaches BOTH check legs', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: boolean[] = [];
+    const opens: PrOpenInput[] = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.includeIntegration === true);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake(opens),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root, includeIntegration: true });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(seen).toEqual([true, true]);
+  });
+
+  test('testFiles reaches BOTH check legs; absent keeps them automatic', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: Array<string[] | undefined> = [];
+    const files = ['test/ops/dev/cycle.test.ts', 'test/ops/dev/check.test.ts'];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.testFiles);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const named = await op({ repoRoot: repo.root, testFiles: files });
+    expect(named.status, JSON.stringify(named)).toBe('ok');
+    expect(seen).toEqual([files, files]);
+    seen.length = 0;
+    const bare = await op({ repoRoot: repo.root });
+    expect(bare.status, JSON.stringify(bare)).toBe('ok');
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  test('includeIntegration absent keeps the check legs bare', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: Array<boolean | undefined> = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.includeIntegration);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(seen).toEqual([undefined, undefined]);
   });
 
   test('push:false skips the verified push (the branch stays local; pr.open still runs)', async () => {
@@ -517,65 +589,98 @@ describe('dev.cycle', () => {
 
   // ---- BEFORE controls (P1 thread 7kNb + 7lxL): report presence is NOT
   // a publication trigger. Blocked re-reviews and admission failures carry a
-  // report too; only the STRUCTURED stops — 'round-cap' and (S7 attempt H,
-  // the spec's never-unpublished invariant) 'budget' — publish a draft.
+  // report too; only the STRUCTURED stops — 'round-cap', 'budget' (S7
+  // attempt H, the spec's never-unpublished invariant) and #532's
+  // 'rereview-blocked' — publish a draft.
 
-  /** An address leg that stopped on the BUDGET: the production finish() shape, structured marker inside. */
-  function budgetStopAddress(
+  /**
+   * An address leg that stopped on a STRUCTURED stop: the production
+   * finish() shape — the needs-human reason carries the '; report: <path>'
+   * suffix and the structured marker rides INSIDE the report envelope.
+   * Production pairs each stop value with its own reason (address.ts
+   * finish()): a run-budget stop marks stop:'budget' behind 'token or wall
+   * budget exhausted', and a re-review still blocked after verified fixes
+   * (#532) marks stop:'rereview-blocked' behind 're-review: …' — one
+   * reason/stop pairing each, never a budget marker under a re-review
+   * reason.
+   */
+  function structuredStopAddress(
     state: WorkState,
-    reason = 'review.address: token or wall budget exhausted; report: /tmp/r.json',
+    stop: Exclude<ReviewAddressReport['stop'], undefined>,
+    reason: string,
   ): AddressLeg {
     return async () => ({
       status: 'needs-human',
       reason,
-      report: { ...addressReport(state, [capFinding], []), stop: 'budget' as const },
+      report: { ...addressReport(state, [capFinding], []), stop },
     });
   }
 
   test.each([
-    'review.address: token or wall budget exhausted; report: /tmp/r.json',
-    'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
-  ])('an address budget stop publishes a DRAFT with the original reason: %s', async (reason) => {
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    const opens: PrOpenInput[] = [];
-    const checks: string[] = [];
-    let pushCalls = 0;
-    const { gh, bodies } = ghFake();
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(checks),
-      review: cleanReview(state),
-      address: budgetStopAddress(state, reason),
-      open: openFake(opens),
-      gh,
-      git: async (args) => {
-        if (args.includes('push')) {
-          pushCalls++;
-          expect(args.at(-1)).toBe(`${state.head}:refs/heads/feature/x`);
-        }
-        return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
-      },
-    });
-    const result = await op({ repoRoot: repo.root });
-    expect(result.status).toBe('needs-human');
-    if (result.status !== 'needs-human') return;
-    expect(result.reason).toContain('NOT READY');
-    expect(result.reason).toContain(reason);
-    expect(result.reason).toContain('draft PR #42');
-    // The final gates ran before the publication (first check + final check).
-    expect(checks).toHaveLength(2);
-    expect(pushCalls).toBe(1);
-    expect(opens).toEqual([
-      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
-    ]);
-    // The open findings ride the draft like the round cap's.
-    expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
-    expect(bodies[0]).toContain('c001-aaaaaaaa#f1');
-    expect(bodies[0]).toContain('stopped on the run budget');
-    expect(bodies[0]).not.toContain('round cap');
-    expect(bodies[0]).not.toContain('blocked re-review');
-  });
+    ['budget', 'review.address: token or wall budget exhausted; report: /tmp/r.json'],
+    [
+      'rereview-blocked',
+      'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
+    ],
+  ] as const)(
+    'an address %s stop publishes a DRAFT with the original reason: %s',
+    async (stop, reason) => {
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      const opens: PrOpenInput[] = [];
+      const checks: string[] = [];
+      let pushCalls = 0;
+      const { gh, bodies } = ghFake();
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(checks),
+        review: cleanReview(state),
+        address: structuredStopAddress(state, stop, reason),
+        open: openFake(opens),
+        gh,
+        git: async (args) => {
+          if (args.includes('push')) {
+            pushCalls++;
+            expect(args.at(-1)).toBe(`${state.head}:refs/heads/feature/x`);
+          }
+          return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
+        },
+      });
+      const result = await op({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('NOT READY');
+      expect(result.reason).toContain(reason);
+      expect(result.reason).toContain('draft PR #42');
+      // The composition frames the stop exactly as production finish() named
+      // it — the run-budget framing for 'budget', the blocked-re-review
+      // framing for 'rereview-blocked'.
+      expect(result.reason).toContain(
+        stop === 'budget'
+          ? 'review.address stopped on the run budget'
+          : 'the re-review was blocked after verified fixes',
+      );
+      // The final gates ran before the publication (first check + final check).
+      expect(checks).toHaveLength(2);
+      expect(pushCalls).toBe(1);
+      expect(opens).toEqual([
+        { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+      ]);
+      // The open findings ride the draft like the round cap's, and the
+      // section names ITS OWN structured stop — a blocked re-review must not
+      // masquerade under the run-budget heading (or vice versa).
+      expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
+      expect(bodies[0]).toContain('c001-aaaaaaaa#f1');
+      expect(bodies[0]).not.toContain('round cap');
+      if (stop === 'budget') {
+        expect(bodies[0]).toContain('stopped on the run budget');
+        expect(bodies[0]).not.toContain('blocked re-review');
+      } else {
+        expect(bodies[0]).toContain('blocked re-review');
+        expect(bodies[0]).not.toContain('stopped on the run budget');
+      }
+    },
+  );
 
   test.each(['budget', 'rereview-blocked'] as const)(
     '#532: %s publication refuses a changed head, dirty tree, or missing verified head',
@@ -614,9 +719,21 @@ describe('dev.cycle', () => {
             return { status: 'needs-human', reason, report };
           },
           open: openFake(opens),
-          git: async () => {
-            pushes++;
-            return { code: 0, stdout: '', stderr: '' };
+          git: async (args) => {
+            // Count ONLY pushes (the adjacent publication test's
+            // args.includes('push') filter): publishHead drives BOTH the push
+            // and its ls-remote verification through this one transport, so
+            // an unfiltered counter would let any non-push git call inflate
+            // `pushes` and fail expect(pushes).toBe(0) spuriously — and a
+            // blanket empty-success answer could itself masquerade as the
+            // gate's refusal instead of the verified-head/dirty-tree one.
+            // Non-push calls get the same honest ls-remote answer the
+            // adjacent test's fake returns.
+            if (args.includes('push')) {
+              pushes++;
+              return { code: 0, stdout: '', stderr: '' };
+            }
+            return { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' };
           },
         })({ repoRoot: repo.root });
         expect(result).toEqual({
@@ -625,6 +742,16 @@ describe('dev.cycle', () => {
         });
         expect(pushes).toBe(0);
         expect(opens).toEqual([]);
+        // The refusal came from the verified-head gate INSIDE the publication
+        // path — not from a vacuous verbatim propagation of an unrecognized
+        // stop: BOTH check legs ran, because the cycle only runs the final
+        // gates (the second check) after the discriminator accepts a
+        // structured stop for publication. A stop that never took the
+        // publication path would refuse verbatim after the FIRST check alone,
+        // so this count is what proves the 'budget' and 'rereview-blocked'
+        // iterations of this matrix actually reach the gate (cycle.ts keeps
+        // the gate two-legged: capCheck, then finishNotReady's re-read).
+        expect(checks).toBe(2);
         // Restore only fixture changes so the next named case has a clean seed.
         if (mode === 'staged' || mode === 'unstaged') {
           await repo.write('src/a.ts', 'export const a = 1;\n');
@@ -734,7 +861,11 @@ describe('dev.cycle', () => {
         return { status: 'failed', error: 'dev.check: the addressed head broke format:check' };
       },
       review: cleanReview(state),
-      address: budgetStopAddress(state),
+      address: structuredStopAddress(
+        state,
+        'budget',
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      ),
       open: openFake(opens),
       git: async (args) => {
         if (args.includes('push')) pushCalls++;
@@ -773,7 +904,12 @@ describe('dev.cycle', () => {
     });
     const result = await op({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).not.toContain('NOT READY');
+    if (result.status === 'needs-human') {
+      expect(result.reason).not.toContain('NOT READY');
+      expect(result.reason).toBe(
+        'dev.cycle (review.address): review.address: token or wall budget exhausted; report: /tmp/r.json',
+      );
+    }
     expect(pushCalls).toBe(0);
     expect(opens).toEqual([]);
   });
@@ -786,7 +922,7 @@ describe('dev.cycle', () => {
         checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
         roles: { reviewer: { provider: 'mock', model: 'mock' } },
         budgets: { run: { maxTokens: 1000, wallMs: 3_600_000 } },
-        review: { reviewers: ['agent'] },
+        review: { reviewers: ['coderabbit'] },
       }),
     );
     repo.commitAll('budgeted cq.json');
@@ -811,13 +947,23 @@ describe('dev.cycle', () => {
       open: openFake([]),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
-    await op({ repoRoot: repo.root });
+    const result = await op({ repoRoot: repo.root });
+    // Pin the cycle outcome before the budget assertions: if a leg refuses
+    // (failed gate, review failure), fail on the actual status/reason —
+    // serialized into the message — instead of undefined comparisons
+    // against leg inputs that were never recorded.
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    if (result.status === 'ok') expect(result.value.pushed).toBe(true);
     const budget = 3_600_000 - DEV_CYCLE_PUBLICATION_RESERVE_MS;
     expect(reviewInputs[0]?.wallMs).toBeLessThanOrEqual(budget);
     expect(reviewInputs[0]?.wallMs).toBeGreaterThan(budget - 10_000);
     expect(reviewInputs[0]?.maxTokens).toBe(1000);
     // The address leg gets what the review leg left, not a fresh run budget.
     expect(addressInputs[0]?.wallMs).toBeLessThanOrEqual((reviewInputs[0]?.wallMs ?? 0) - 50);
+    // ...and the remaining wall must not be shrunk further (e.g. by subtracting
+    // the publication reserve a second time): pin a lower bound with slack for
+    // scheduling/timing slop between the legs.
+    expect(addressInputs[0]?.wallMs).toBeGreaterThan((reviewInputs[0]?.wallMs ?? 0) - 50 - 10_000);
     expect(addressInputs[0]?.maxTokens).toBe(1000);
   });
 
