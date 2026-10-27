@@ -12,6 +12,15 @@ import {
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import type { DevEffects } from '../dev/effects.js';
 import type { DiffSecretScanner } from '../dev/denylist.js';
+import {
+  prepareDeferredVendorReview,
+  loadCurrentDeferredVendorDebt,
+} from '../dev/internal/deferredLedger.js';
+import {
+  hasDeferredReviewSources,
+  type DeferredVendorDebt,
+} from '../dev/internal/deferredReview.js';
+import type { DeferredQueueClient } from './internal/queueProtocol.js';
 import { DEV_LEDGER_VERSION, type DevCycleRecord } from '../dev/record.js';
 import {
   makeGitleaksDefaultsScanner,
@@ -51,6 +60,7 @@ export interface ReviewRunInput {
 }
 export interface ReviewRunDeps {
   drivers: DriverFactory;
+  queueClient?: DeferredQueueClient;
   /** Injection seam for the engine; production binds {@link runAgentReviewer}. */
   runAgentReviewer?: typeof runAgentReviewer;
   parentSignal?: AbortSignal;
@@ -78,7 +88,11 @@ export interface ReviewRunDeps {
  * Both ride the report envelope and are never persisted.
  */
 export type ReviewRunResult = OpResult<FindingsRecord> & {
-  report?: FindingsRecord & { blockedTransient?: true; blockedBudget?: true };
+  report?: FindingsRecord & {
+    blockedTransient?: true;
+    blockedBudget?: true;
+    deferredVendorDebt?: DeferredVendorDebt;
+  };
 };
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
@@ -218,7 +232,79 @@ export function makeReviewRun(
       const budgetBlocks = new Set<ReviewSource['kind']>();
       const budgetStopped = () =>
         !parent?.aborted && (deadline.expired() || remainingWallMs() <= 0);
-      if (coderabbitConfigured) {
+      let deferredVendorDebt: DeferredVendorDebt | undefined;
+      const prepareDebt = async () => {
+        const debt = await prepareDeferredVendorReview(
+          effects,
+          target,
+          state,
+          deps.queueClient,
+          deadline.signal,
+        );
+        if (debt) {
+          if (
+            input.uncommitted ||
+            !agentConfigured ||
+            policy.review.reviewers.some((source) => source !== 'agent' && source !== 'coderabbit')
+          )
+            throw new Error(
+              'deferred vendor review requires full coverage of every configured nonvendor source',
+            );
+          await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+        }
+        return debt;
+      };
+      if (coderabbitConfigured && agentConfigured) {
+        try {
+          deferredVendorDebt = await prepareDebt();
+        } catch (error) {
+          return {
+            status: 'indeterminate',
+            detail: `review.run: deferred vendor trust/enrollment failed — ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      if (deferredVendorDebt) {
+        const ledger = effects.openLedger(state.branch).load();
+        const dispositions = new Map(
+          ledger.records
+            .filter((entry) => entry.kind === 'disposition')
+            .map((entry) => [entry.findingId, entry]),
+        );
+        records.push({
+          schemaVersion: 1,
+          branch: state.branch,
+          head: state.head,
+          sources: [
+            {
+              kind: 'coderabbit',
+              status: 'blocked',
+              cycleId: deferredVendorDebt.originAttempt.cycleId,
+              reason: 'vendor review remains outstanding under durable deferred debt',
+            },
+          ],
+          findings: ledger.records
+            .filter(
+              (entry): entry is DevCycleRecord =>
+                entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
+            )
+            .flatMap((entry) =>
+              entry.findings.map((finding) => {
+                const disposition = dispositions.get(finding.id);
+                return {
+                  id: finding.id,
+                  source: 'coderabbit',
+                  severity: finding.severity,
+                  text: finding.excerpt ?? '',
+                  ...(finding.fileName ? { file: finding.fileName } : {}),
+                  status: disposition?.action ?? 'open',
+                  ...(disposition ? { reason: disposition.why } : {}),
+                };
+              }),
+            ),
+        });
+      }
+      if (coderabbitConfigured && !deferredVendorDebt) {
         const result = await makeDevReview({
           effects,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
@@ -320,6 +406,16 @@ export function makeReviewRun(
                   }))
                 : [],
           });
+          if (cycle?.vendorFailure && agentConfigured) {
+            try {
+              deferredVendorDebt = await prepareDebt();
+            } catch (error) {
+              return {
+                status: 'needs-human',
+                reason: `review.run: vendor failure retained but durable queue enrollment failed — ${error instanceof Error ? error.message : String(error)}`,
+              };
+            }
+          }
         }
       }
       if (agentConfigured && (deadline.signal?.aborted || remainingWallMs() <= 0)) {
@@ -510,6 +606,11 @@ export function makeReviewRun(
                   });
                   if (blockedReason === undefined && !coverage.ok)
                     blockedReason = `agent review returned no verifiable coverage proof — ${coverage.reason}`;
+                  if (
+                    blockedReason === undefined &&
+                    (deadline.signal?.aborted || remainingWallMs() <= 0)
+                  )
+                    blockedReason = 'review cancelled or wall budget exhausted';
                   const agentFindings = report?.findings ?? [];
                   const advisories = report?.advisories ?? [];
                   const failureEvidence = ReviewCoverageV2Schema.safeParse(report?.coverage);
@@ -553,6 +654,9 @@ export function makeReviewRun(
                           blockedReason === undefined
                             ? { kind: 'terminal' }
                             : { kind: 'blocked', reason: blockedReason },
+                        ...(blockedReason === undefined && coverage.ok
+                          ? { agentCoverage: coverage.coverage }
+                          : {}),
                         findings: agentFindings.map((finding, index) => ({
                           id: `${id}#f${String(index + 1)}`,
                           severity: finding.severity,
@@ -694,7 +798,40 @@ export function makeReviewRun(
           detail: `review.run: findings record write outcome is uncertain at '${path}' — ${error instanceof Error ? error.message : String(error)}`,
         };
       }
-      if (stopped() || !isComplete(record, policy.review.reviewers)) {
+      let deferredComplete = false;
+      if (deferredVendorDebt && !stopped()) {
+        try {
+          deferredVendorDebt = await loadCurrentDeferredVendorDebt(
+            effects,
+            target,
+            state,
+            effects.openLedger(state.branch).load(),
+            deps.queueClient,
+            deadline.signal,
+          );
+          deferredComplete =
+            deferredVendorDebt !== undefined &&
+            hasDeferredReviewSources(record, policy.review.reviewers, deferredVendorDebt, {
+              repo: deferredVendorDebt.reference.binding.repo,
+              producer:
+                deferredVendorDebt.reference.binding.kind === 'deferred-author'
+                  ? deferredVendorDebt.reference.binding.producer
+                  : '',
+              target,
+              head: state.head,
+              base: state.base,
+              dirtySha256: state.dirtySha256,
+              deferralId: deferredVendorDebt.deferral.id,
+            });
+        } catch (error) {
+          return {
+            status: 'needs-human',
+            reason: `review.run: current queue trust could not be verified — ${error instanceof Error ? error.message : String(error)}`,
+            report: record,
+          };
+        }
+      }
+      if (stopped() || (!deferredComplete && !isComplete(record, policy.review.reviewers))) {
         const blockedSources = record.sources.filter((source) => source.status !== 'terminal');
         const blockedTransient =
           !stopped() &&
@@ -716,7 +853,13 @@ export function makeReviewRun(
           },
         };
       }
-      return { status: 'ok', value: record };
+      return {
+        status: 'ok',
+        value: record,
+        ...(deferredComplete && deferredVendorDebt
+          ? { report: { ...record, deferredVendorDebt } }
+          : {}),
+      };
     } finally {
       deadline.dispose();
     }
