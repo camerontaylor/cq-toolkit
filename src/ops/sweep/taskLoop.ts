@@ -82,6 +82,8 @@ export interface FailedAttemptInput {
   kind: string;
   slug: string;
   task: string;
+  /** Full logical identity for compact task IDs (for example static clusters). */
+  taskIdentity?: string;
   parent: string;
   firstAttempt: number;
   tier: 'worker' | 'rescue';
@@ -265,17 +267,15 @@ async function runTaskLoopInner(
         reason: string,
       ): Promise<FailedAttempt> => {
         if (parent === undefined) throw new Error('failed attempt has no pre-attempt HEAD');
-        const segment = (raw: string) => raw.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-        const kind = bindings.segments?.kind ?? segment(unit.fixer);
-        const slug = bindings.segments?.slug ?? segment(unit.package);
-        if (!kind || !slug || !segment(task.id))
-          throw new Error('failed attempt identity has an empty branch segment');
+        const kind = bindings.segments?.kind ?? unit.fixer;
+        const slug = bindings.segments?.slug ?? unit.package;
         await git(['add', '-A', '--', '.']);
         const failedAttempt = await commitFailedAttempt(git, {
           runPrefix: bindings.runPrefix,
           kind,
           slug,
           task: task.id,
+          taskIdentity: task.signature ?? task.id,
           parent,
           firstAttempt: Math.max(1, (row.rounds?.length ?? 0) + 1),
           tier,
@@ -883,25 +883,51 @@ export async function commitFailedAttempt(
   git: (args: string[]) => Promise<string>,
   input: FailedAttemptInput,
 ): Promise<FailedAttempt> {
-  const component = (raw: string): string => {
-    const normalized = raw.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-    if (!normalized) throw new Error('failed attempt identity has an empty branch segment');
-    if (normalized.length <= 80) return normalized;
-    const suffix = createHash('sha256').update(raw).digest('hex').slice(0, 12);
-    return `${normalized.slice(0, 67)}-${suffix}`;
+  const identity = Buffer.from(
+    JSON.stringify([input.kind, input.slug, input.taskIdentity ?? input.task]),
+  ).toString('base64url');
+  const component = (display: string, raw: string, digits: number): string => {
+    const readable = display.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'id';
+    const digest = createHash('sha256').update(raw).digest('hex').slice(0, digits);
+    return `${readable.slice(0, 79 - digits)}-${digest}`;
   };
-  const kind = component(input.kind);
-  const slug = component(input.slug);
-  const taskSlug = component(input.task);
   const tree = await git(['write-tree']);
   if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new Error('could not write failed-attempt tree');
-  let attempt = Math.max(1, input.firstAttempt);
+  if (!Number.isSafeInteger(input.firstAttempt) || input.firstAttempt < 1)
+    throw new Error('failed attempt number must be a positive safe integer');
+  let digits = 16;
+  let attempt = input.firstAttempt;
   for (;;) {
-    const branch = `${input.runPrefix}/failed/${kind}/${slug}/${taskSlug}/a${String(attempt)}`;
+    const base = `${input.runPrefix}/failed/${component(input.kind, input.kind, digits)}/${component(input.slug, input.slug, digits)}/${component(input.task, input.taskIdentity ?? input.task, digits)}`;
+    const existing = await git(['for-each-ref', '--format=%(refname)', `refs/heads/${base}/`]);
+    let conflict = false;
+    const occupied = new Set<number>();
+    for (const ref of existing.split('\n').filter(Boolean)) {
+      const suffix = ref.slice(`refs/heads/${base}/`.length);
+      if (!ref.startsWith(`refs/heads/${base}/`) || !/^a[1-9][0-9]*$/.test(suffix)) {
+        conflict = true;
+        break;
+      }
+      const message = await git(['show', '-s', '--format=%B', ref]);
+      if (!message.split('\n').includes(`Cq-Ref-Identity: ${identity}`)) {
+        conflict = true;
+        break;
+      }
+      occupied.add(Number(suffix.slice(1)));
+    }
+    if (conflict) {
+      if (digits === 64) throw new Error('failed attempt ref identity conflicts at full digest');
+      digits = Math.min(64, digits + 8);
+      attempt = input.firstAttempt;
+      continue;
+    }
+    while (occupied.has(attempt)) attempt++;
+    if (!Number.isSafeInteger(attempt)) throw new Error('failed attempt number exhausted');
+    const branch = `${base}/a${String(attempt)}`;
     const reasonLine = input.reason.replace(/[\r\n]+/g, ' ').trim() || 'task attempt refused';
     const taskLine = input.task.replace(/[\r\n]+/g, ' ');
     const subject = `cq-failed(${input.outcome}): ${taskLine}${input.pushFailed ? ' [skip ci]' : ''}`;
-    const message = `${subject}\n\n${reasonLine}\n\nCq-Run: ${input.runPrefix}\nCq-Unit: ${input.kind}/${input.slug}\nCq-Task: ${taskLine}\nCq-Attempt: ${String(attempt)}\nCq-Tier: ${input.tier}\nCq-Model: ${input.model.provider}/${input.model.model}\nCq-Gate: ${input.gate}\nCq-Outcome: ${input.outcome}`;
+    const message = `${subject}\n\n${reasonLine}\n\nCq-Run: ${input.runPrefix}\nCq-Unit: ${input.kind}/${input.slug}\nCq-Task: ${taskLine}\nCq-Ref-Identity: ${identity}\nCq-Attempt: ${String(attempt)}\nCq-Tier: ${input.tier}\nCq-Model: ${input.model.provider}/${input.model.model}\nCq-Gate: ${input.gate}\nCq-Outcome: ${input.outcome}`;
     const sha = await git([
       '-c',
       'user.name=CQ fix engine',
@@ -921,7 +947,8 @@ export async function commitFailedAttempt(
     } catch (error) {
       try {
         await git(['rev-parse', '--verify', `refs/heads/${branch}`]);
-        attempt++;
+        // A concurrent writer won this exact ref. Recheck its recorded identity.
+        // Only a matching identity may consume the next attempt number.
       } catch {
         throw error;
       }
