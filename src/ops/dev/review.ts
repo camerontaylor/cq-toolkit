@@ -466,13 +466,27 @@ function makeReviewCycle(
         // A killed run is blocked, but whatever findings it emitted before
         // the kill are still recorded: they stay open until dispositioned.
         const parsed = parseReviewerStream(raw.stdout);
+        // Explicit refusals survive a later deadline kill. Use the stream
+        // verdict independently of the exit code so a killed process cannot
+        // erase an error, required action, or skipped/no-fresh completion.
+        const streamCompletion = decideCompletion(0, parsed);
+        const streamRefusal =
+          (parsed.sawError ||
+            parsed.sawActionRequired ||
+            parsed.sawComplete ||
+            parsed.unparsedLines > 0) &&
+          streamCompletion.kind === 'blocked'
+            ? streamCompletion
+            : undefined;
         const ordinaryCompletion =
           raw.exitCode === null ? undefined : decideCompletion(raw.exitCode, parsed);
         const budgetStopped =
+          streamRefusal === undefined &&
           (signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0) &&
           (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
         const completion: DevReviewCompletion =
-          signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
+          streamRefusal ??
+          (signal?.aborted || (remainingWallMs?.() ?? Infinity) <= 0
             ? {
                 kind: 'blocked',
                 reason: `review cancelled or wall budget exhausted — ${faultText(signal?.reason ?? 'deadline elapsed')}`,
@@ -484,7 +498,7 @@ function makeReviewCycle(
                     ? `the reviewer CLI timed out after ${String(timeoutMs)}ms and was stopped — no review completed`
                     : `the reviewer CLI did not run — ${raw.stderr.trim().slice(0, 300)}`,
                 }
-              : decideCompletion(raw.exitCode, parsed);
+              : decideCompletion(raw.exitCode, parsed));
         const logPath = await effects.writeReviewLog(
           state.branch,
           `${Date.now()}`,

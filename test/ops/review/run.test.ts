@@ -7,6 +7,8 @@ import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runCli } from '../../../src/cli/main.js';
 import type { CliIo } from '../../../src/cli/output.js';
 import { assembleReadiness, DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
+import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { cycleRecord, dispositionRecord } from '../dev/fakes.js';
 import { repoEffects, makeTestRepo, seed } from '../dev/repo.js';
@@ -1860,6 +1862,101 @@ it('forwards cq.json failure logging and sums driver failures into the review lo
     await repo.cleanup();
   }
 });
+
+it.each([
+  ['error', { type: 'error', message: 'auth_required' }, 'error event'],
+  ['action', { type: 'action_required', status: 'awaiting_confirmation' }, 'requested action'],
+  ['skipped', { type: 'complete', status: 'review_skipped' }, 'review_skipped'],
+  [
+    'no-fresh',
+    {
+      type: 'complete',
+      status: 'review_completed',
+      message: 'No fresh detailed file review was performed in this run.',
+    },
+    'no-fresh/skipped notice',
+  ],
+  ['clean', { type: 'heartbeat', status: 'reviewing' }, 'wall budget exhausted'],
+] as const)(
+  '#532: killed %s CLI at deadline preserves refusal through review.run and address',
+  async (mode, event, reason) => {
+    const repo = await makeTestRepo();
+    const originalNow = Date.now;
+    let clock = originalNow();
+    try {
+      await configureAgentRepo(repo);
+      Date.now = () => clock;
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () =>
+          repoEffects(repo, (command) => {
+            if (command !== 'coderabbit') return undefined;
+            clock += 1001;
+            return { exitCode: null, stdout: JSON.stringify(event), stderr: '', timedOut: true };
+          }),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, wallMs: 1000, reviewers: ['coderabbit'] });
+      expect(result.status).toBe('needs-human');
+      if (mode === 'clean') expect(result).toMatchObject({ report: { blockedBudget: true } });
+      else expect(result).not.toMatchObject({ report: { blockedBudget: true } });
+      expect(result.report?.sources[0]).toMatchObject({
+        status: 'blocked',
+        reason: expect.stringContaining(reason) as unknown,
+      });
+      const head = repo.git('rev-parse', 'HEAD').trim();
+      const role = { provider: 'mock', model: 'mock' };
+      const addressed = await makeReviewAddress({
+        config: {
+          schemaVersion: 2,
+          roles: { worker: role, reviewer: role },
+          budgets: { run: { maxTokens: 1000 } },
+          checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+          review: { reviewers: ['agent'] },
+        },
+        initialRecord: {
+          schemaVersion: 1,
+          branch: 'feature/x',
+          head,
+          reviewed: {
+            base: repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+            scope: 'full',
+          },
+          sources: [{ kind: 'agent', status: 'terminal' }],
+          findings: [
+            { id: 'f1', source: 'agent', severity: 'major', text: 'fix this', status: 'open' },
+          ],
+        },
+        disposition: async () => ({ status: 'ok', value: {} }),
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (item) => ({
+            finding: { ...item, status: 'fixed', reason: 'verified' },
+            commit: head,
+            observedHead: head,
+            reason: 'verified',
+            validation: [],
+          }),
+        }),
+        review: async () => {
+          clock += 1001;
+          return result;
+        },
+      })({
+        repoRoot: repo.root,
+        source: 'local',
+        wallMs: 1000,
+        journalDir: `${repo.root}/.cq/test-journal`,
+      });
+      expect(addressed.status).toBe('needs-human');
+      expect(addressed.report?.fixesPerRun).toBe(1);
+      expect(addressed.report?.stop).toBe(mode === 'clean' ? 'budget' : undefined);
+    } finally {
+      Date.now = originalNow;
+      await repo.cleanup();
+    }
+  },
+);
 
 it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
   '#532: coincident deadline never attributes %s failure to the budget',

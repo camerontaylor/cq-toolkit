@@ -981,6 +981,52 @@ describe('dev.review — one op discriminated on action', () => {
 // and the post-run drift refusal.
 // ---------------------------------------------------------------------------
 
+test.each([
+  ['error', { type: 'error', message: 'auth_required' }, 'error event'],
+  ['action', { type: 'action_required', status: 'awaiting_confirmation' }, 'requested action'],
+  ['skipped', { type: 'complete', status: 'review_skipped' }, 'review_skipped'],
+  [
+    'no-fresh',
+    {
+      type: 'complete',
+      status: 'review_completed',
+      message: 'No fresh detailed file review was performed in this run.',
+    },
+    'no-fresh/skipped notice',
+  ],
+  ['clean', { type: 'heartbeat', status: 'reviewing' }, 'wall budget exhausted'],
+] as const)(
+  '#532: killed deadline reviewer preserves %s stream refusal before budget attribution',
+  async (mode, event, reason) => {
+    let remaining = 1000;
+    const effects = repoEffects(
+      repo,
+      reviewer(() => {
+        remaining = 0;
+        return ran(null, JSON.stringify(event), { timedOut: true });
+      }),
+    );
+    const result = await makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      remainingWallMs: () => remaining,
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    expect(result).toMatchObject({ reason: expect.stringContaining(reason) as unknown });
+    if (mode === 'clean') expect(result).toMatchObject({ report: { budgetStopped: true } });
+    else expect(result).not.toMatchObject({ report: { budgetStopped: true } });
+    const cycles = effects
+      .openLedger('feature/x')
+      .load()
+      .records.filter((entry) => entry.kind === 'cycle');
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.completion).toMatchObject({
+      kind: 'blocked',
+      reason: expect.stringContaining(reason) as unknown,
+    });
+  },
+);
+
 test.each(['queued', 'running', 'expired'] as const)(
   'bounded review persists blocked evidence when %s without a completed review',
   async (mode) => {
