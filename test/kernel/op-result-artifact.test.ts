@@ -18,11 +18,11 @@ const usageSummary = {
 
 describe('typed result artifact usage summary', () => {
   it.each([
-    [{ status: 'ok', value: { done: true } }, 0],
-    [{ status: 'failed', error: 'failed' }, 1],
-    [{ status: 'needs-human', reason: 'review' }, 3],
-    [{ status: 'budget-exhausted' }, 3],
-    [{ status: 'indeterminate', detail: 'lost' }, 1],
+    { status: 'ok', value: { done: true } },
+    { status: 'failed', error: 'failed' },
+    { status: 'needs-human', reason: 'review' },
+    { status: 'budget-exhausted' },
+    { status: 'indeterminate', detail: 'lost' },
   ] as const)('keeps the frozen %j result and typed metadata separate', (base) => {
     const raw = { ...base, usageSummary, report: { note: 'retained' } };
     expect(OpResultSchema.safeParse(raw).success).toBe(false);
