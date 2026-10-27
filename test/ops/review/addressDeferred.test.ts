@@ -298,6 +298,92 @@ test('known substantive finding reaches fixing; changed head requires durable su
   }
 });
 
+test('cached clean record cannot erase findings from original outage or an unconfigured reviewer', async () => {
+  const f = await fixture();
+  try {
+    await f.effects.openLedger(f.state.branch).mutate((ledger) => ({
+      ledger: {
+        ...ledger,
+        records: [
+          ...ledger.records.map((entry) =>
+            entry.kind === 'cycle'
+              ? {
+                  ...entry,
+                  findings: [
+                    { id: 'original-known', severity: 'major', excerpt: 'retained outage finding' },
+                  ],
+                }
+              : entry,
+          ),
+          cycleRecord({
+            head: f.state.head,
+            base: f.state.base,
+            dirtySha256: 'clean-tree',
+            cycleId: 'unconfigured',
+            reviewer: 'retired-reviewer',
+            findings: [
+              { id: 'retired-known', severity: 'major', excerpt: 'still needs disposition' },
+            ],
+          }),
+        ],
+      },
+      value: undefined,
+    }));
+    const context = await f.resolver({
+      repoRoot: f.repo.root,
+      target: 'merge-queue',
+      base: f.state.base,
+      record: f.record(),
+    });
+    expect(context?.findings.map((finding) => finding.id)).toEqual([
+      'original-known',
+      'retired-known',
+    ]);
+    const cached = f.record();
+    cached.findings = [
+      {
+        id: 'original-known',
+        source: 'coderabbit',
+        severity: 'major',
+        text: 'retained outage finding',
+        status: 'fixed',
+      },
+    ];
+    const result = await makeReviewAddress({
+      config,
+      initialRecord: cached,
+      resolveDeferredVendorContext: f.resolver,
+      disposition: async (root, finding) =>
+        makeDevDisposition(f.effects)({
+          repoRoot: root,
+          findingId: finding.id,
+          action: 'deferred',
+          why: 'requires owner',
+        }),
+      workerFactory: () => ({
+        escalation: createEscalationState,
+        fix: async (finding) => {
+          expect(finding.status).toBe('open');
+          return {
+            finding: { ...finding, status: 'deferred', reason: 'requires owner' },
+            observedHead: f.record().head,
+            reason: 'requires owner',
+            validation: [],
+          };
+        },
+      }),
+      review: async () => ({ status: 'ok', value: f.record() }),
+    })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir, rounds: 1 });
+    expect(result.status).toBe('needs-human');
+    expect(result.report?.openBlocking.map((finding) => finding.id)).toEqual([
+      'original-known',
+      'retired-known',
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('post-await wall stop outranks otherwise valid debt and prevents dispatch', async () => {
   const f = await fixture();
   const originalNow = Date.now;

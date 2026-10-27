@@ -57,6 +57,42 @@ export async function resolveDeferredVendorContext(
       .filter((entry) => entry.kind === 'disposition')
       .map((entry) => [entry.findingId, entry]),
   );
+  // Configuration selects coverage, never which retained findings exist.
+  // Address import cycles may repeat an ID; conflicting contents fail closed.
+  const findings = new Map<string, Finding>();
+  const retained = [
+    ...ledger.records
+      .filter((entry) => entry.kind === 'cycle')
+      .flatMap((entry) =>
+        entry.findings.map((finding): Finding => ({
+          id: finding.id,
+          source: entry.reviewer,
+          severity: finding.severity,
+          text: finding.excerpt ?? '',
+          status: 'open',
+          ...(finding.fileName ? { file: finding.fileName } : {}),
+        })),
+      ),
+    ...deferredReceiptFindings(
+      ledger.records.filter((entry) => entry.kind === 'vendor-debt').map((entry) => entry.debt),
+    ),
+  ];
+  for (const finding of retained) {
+    const previous = findings.get(finding.id);
+    if (
+      previous &&
+      (previous.text !== finding.text ||
+        previous.file !== finding.file ||
+        previous.severity !== finding.severity)
+    )
+      throw new Error('conflicting retained finding identity');
+    const disposition = dispositions.get(finding.id);
+    findings.set(finding.id, {
+      ...finding,
+      status: disposition?.action ?? finding.status,
+      ...(disposition ? { reason: disposition.why } : {}),
+    });
+  }
   return {
     debt,
     identity: {
@@ -68,15 +104,6 @@ export async function resolveDeferredVendorContext(
       dirtySha256: state.dirtySha256,
       deferralId: debt.deferral.id,
     },
-    findings: deferredReceiptFindings(
-      ledger.records.filter((entry) => entry.kind === 'vendor-debt').map((entry) => entry.debt),
-    ).map((finding) => {
-      const disposition = dispositions.get(finding.id);
-      return {
-        ...finding,
-        status: disposition?.action ?? finding.status,
-        ...(disposition ? { reason: disposition.why } : {}),
-      };
-    }),
+    findings: [...findings.values()],
   };
 }

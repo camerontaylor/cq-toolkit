@@ -848,9 +848,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               )
                 return false;
               // New receipt findings enter the normal dispatcher. Existing
-              // dispositions remain bound to their retained finding IDs.
+              // dispositions come from the ledger, never a cached record's
+              // status. A newer record cannot silently adjudicate an old ID.
+              const retained = new Map(context.findings.map((finding) => [finding.id, finding]));
               record.findings = [
-                ...record.findings,
+                ...record.findings.map((finding) => {
+                  const current = retained.get(finding.id);
+                  return current ? { ...finding, ...current, reason: current.reason } : finding;
+                }),
                 ...context.findings.filter(
                   (finding) => !record.findings.some((item) => item.id === finding.id),
                 ),
