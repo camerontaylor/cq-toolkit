@@ -1040,6 +1040,7 @@ test.each([
     const controller = new AbortController();
     let dispatched = false;
     let completionSamples = 0;
+    let completionRecorded = false;
     const effects = repoEffects(
       repo,
       reviewer(() => {
@@ -1052,12 +1053,19 @@ test.each([
             });
       }),
     );
+    const writeReviewLog = effects.writeReviewLog;
+    effects.writeReviewLog = async (...args) => {
+      completionRecorded = true;
+      return writeReviewLog(...args);
+    };
     const result = await makeDevReview({
       effects,
       scanSecrets: stubScanner(),
       signal: controller.signal,
       remainingWallMs: () => {
         if (!dispatched) return 1000;
+        // Transient classification after the log keeps its independent wall read.
+        if (completionRecorded) return wall;
         completionSamples++;
         // A later sample would disagree: attribution and completion must share one.
         return completionSamples === 1 ? wall : wall === 0 ? 1000 : 0;
