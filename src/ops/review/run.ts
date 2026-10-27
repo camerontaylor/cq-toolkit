@@ -74,7 +74,11 @@ export interface ReviewRunDeps {
  * blocked source stopped on the network/transient class, so a caller may
  * retry the review once. `blockedBudget` requires every blocked source to
  * have stopped on the engine's budget and no repository drift or parent cancel.
- * Both ride the report envelope and are never persisted.
+ * Both ride the report envelope and are never persisted. A source can stop
+ * transiently and on budget in the same attempt, so the two classifications
+ * are not exclusive; precedence is defined here: when `blockedBudget` holds,
+ * `blockedTransient` is omitted, so a transient retry never runs against a
+ * spent budget.
  */
 export type ReviewRunResult = OpResult<FindingsRecord> & {
   report?: FindingsRecord & { blockedTransient?: true; blockedBudget?: true };
@@ -696,15 +700,21 @@ export function makeReviewRun(
       }
       if (stopped() || !isComplete(record, policy.review.reviewers)) {
         const blockedSources = record.sources.filter((source) => source.status !== 'terminal');
-        const blockedTransient =
-          !stopped() &&
-          blockedSources.length > 0 &&
-          blockedSources.every((source) => transientBlocks.has(source.kind));
         const blockedBudget =
           !parent?.aborted &&
           blockedSources.length > 0 &&
           blockedSources.every((source) => budgetBlocks.has(source.kind)) &&
           (await driftSince(effects, state)).length === 0;
+        // Precedence: a spent budget wins over the transient class. A source
+        // can land in both sets (needs-human with transient === true and
+        // budgetExhausted === true), and a caller retrying on
+        // `blockedTransient` must never burn tokens against that budget, so
+        // the transient flag is suppressed whenever `blockedBudget` holds.
+        const blockedTransient =
+          !blockedBudget &&
+          !stopped() &&
+          blockedSources.length > 0 &&
+          blockedSources.every((source) => transientBlocks.has(source.kind));
         return {
           status: 'needs-human',
           reason:
