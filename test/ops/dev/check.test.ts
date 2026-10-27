@@ -289,6 +289,12 @@ describe('dev.check', () => {
     const result = await makeDevCheck(effects)({ repoRoot: repo.root, testFiles: files });
     expect(result.status, JSON.stringify(result)).toBe('ok');
     expect(pnpmArgs(effects)).toContainEqual(['test:narrow', ...files]);
+    // The named files REPLACE the automatic selection: toContainEqual alone
+    // would pass even if a '--base' argv were ALSO emitted, so no pnpm argv
+    // may carry '--base' or '--range' alongside the named files.
+    expect(
+      pnpmArgs(effects).every((args) => !args.includes('--base') && !args.includes('--range')),
+    ).toBe(true);
     // The record must DISCLOSE the narrowed selection, never let a reader
     // mistake it for the automatic diff selection.
     const [record] = effects.openLedger('feature/x').load().records;
@@ -298,7 +304,7 @@ describe('dev.check', () => {
     });
   });
 
-  test('testFiles composes with includeIntegration and beats --base/--range', async () => {
+  test('testFiles composes with includeIntegration; a range alongside is refused', async () => {
     const effects = effectsFor();
     const files = ['test/ops/dev/check.test.ts'];
     const result = await makeDevCheck(effects)({
@@ -308,14 +314,24 @@ describe('dev.check', () => {
     });
     expect(result.status, JSON.stringify(result)).toBe('ok');
     expect(pnpmArgs(effects)).toContainEqual(['test:narrow', '--include-integration', ...files]);
-    // A named selection replaces the range form too.
+    // Same negative contract: the composed named run must not emit a
+    // '--base'/'--range' argv in addition to the named files.
+    expect(
+      pnpmArgs(effects).every((args) => !args.includes('--base') && !args.includes('--range')),
+    ).toBe(true);
+    // A named selection replaces the range form ENTIRELY — supplying both is
+    // a conflicting selection, refused before any gate runs.
+    const argvBefore = pnpmArgs(effects);
     const ranged = await makeDevCheck(effects)({
       repoRoot: repo.root,
       range: 'HEAD~1..HEAD',
       testFiles: files,
     });
-    expect(ranged.status, JSON.stringify(ranged)).toBe('ok');
-    expect(pnpmArgs(effects)).toContainEqual(['test:narrow', ...files]);
+    expect(ranged.status, JSON.stringify(ranged)).toBe('failed');
+    if (ranged.status === 'failed') expect(ranged.error).toContain('conflicting selections');
+    // The refusal precedes every gate: no test:narrow argv — range or named —
+    // may be emitted for the combined selection.
+    expect(pnpmArgs(effects)).toEqual(argvBefore);
     const records = effects.openLedger('feature/x').load().records;
     expect(records.every((r) => r.kind === 'check' && r.testSelection?.mode === 'named')).toBe(
       true,
