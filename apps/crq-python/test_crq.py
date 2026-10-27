@@ -699,8 +699,11 @@ class CurrentTest(unittest.TestCase):
         initial = copy.deepcopy(self.q)
         vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
         hard = {"type": "error", "errorType": "scan"}
+        launch_at = crq.now()
         for n, events in enumerate(([vendor], [vendor, hard], [hard, vendor])):
-            with self.subTest(events=events):
+            with self.subTest(events=events), \
+                 mock.patch.object(crq, "RUNS", self.state / f"runs-{n}"), \
+                 mock.patch.object(crq, "now", return_value=launch_at):
                 self.q = copy.deepcopy(initial)
                 crq.save_queue(self.q)
                 request = f"boundary-{n}"
