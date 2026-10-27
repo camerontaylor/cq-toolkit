@@ -95,7 +95,18 @@ export interface ReviewAddressReport {
    * would be an unrecognized key and trip the frozen taxonomy.
    */
   stop?: 'round-cap' | 'budget' | 'rereview-blocked';
-  /** Last admitted head, advanced only by verified fix commits. */
+  /**
+   * Last admitted head, advanced only by verified fix commits. Rides the
+   * report envelope exactly like `stop` above: the ENVELOPE (the whole
+   * `report` key) is the kernel-sanctioned extension, and both strict-parse
+   * sites strip it wholesale before the strict OpResultSchema base parse —
+   * the kernel mirror (src/kernel/schema.ts OpResultArtifactSchema) and the
+   * CLI's direct-dispatch gate (src/cli/main.ts) — so the base taxonomy
+   * never sees this member. The envelope's only contract is JSON
+   * losslessness (undefined-member + lossless-walk probes), which this
+   * plain string field satisfies; no per-field strip or result-schema
+   * extension is needed for it.
+   */
   verifiedHead?: string;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
