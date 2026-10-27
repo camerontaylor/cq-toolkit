@@ -139,6 +139,7 @@ describe('fix-run report accounting', () => {
     );
     expect(withoutBranch.outcome).toBe('escalated-to-human');
     const branchlessRow = withoutBranch.failures[0];
+    if (branchlessRow === undefined) throw new Error('no branchless failure row recorded');
     expect('branch' in branchlessRow).toBe(false);
     expect(branchlessRow).toEqual({
       unit: 'tests-1/scratch-repo',
