@@ -328,7 +328,8 @@ Remaining: rerun when the Go key's quota window resets.
 
 ## S7 dogfood attempts D–J: dev.cycle on fix/s7-dogfood-address-469 (paused)
 
-All runs were detached on triton, from `dist` at the named head, with the same flags as
+Attempt D ran attached and was killed by the lane shell-tool timeout; every run from its rerun
+onward (D take 3–J) was detached on triton, from `dist` at the named head, with the same flags as
 attempt C (`--push --target=merge-queue --includeIntegration=true` plus 10 named
 `--testFiles`). Run state lives under `~/.local/state/cq-toolkit/dogfood/s7-devcycle-2026102{5,6}-{d..j}/`.
 Every run exited **3** at `review.run` or `review.address`, and **none opened a PR**.
