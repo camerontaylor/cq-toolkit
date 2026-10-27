@@ -88,7 +88,7 @@
 export { installProcessSignalCleanup } from '../kernel/governor.js';
 import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
-import { OpResultSchema } from '../kernel/schema.js';
+import { KnownUsageSummarySchema, OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
@@ -705,12 +705,34 @@ async function dispatchCli(
     // exit-code derivation (the plan path gets the same two probes via
     // runPlan's executeOp; this is their direct-path counterpart).
     const raw: unknown = await op(check.data);
-    // I1 permits an optional run-report envelope on every status. Keep the
-    // frozen result mirror strict: no other extension key is accepted.
+    // I1 permits optional report and typed usage envelopes on every status.
+    // Keep the frozen result mirror strict: no other extension key is accepted.
     let base = raw;
-    if (typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'report')) {
-      const { report: _report, ...rest } = raw as Record<string, unknown>;
-      base = rest;
+    if (typeof raw === 'object' && raw !== null) {
+      const hasReport = Object.hasOwn(raw, 'report');
+      const hasUsageSummary = Object.hasOwn(raw, 'usageSummary');
+      if (hasReport || hasUsageSummary) {
+        const { report: _report, usageSummary: _usageSummary, ...rest } = raw as Record<
+          string,
+          unknown
+        >;
+        base = rest;
+      }
+      if (hasUsageSummary) {
+        const summary = KnownUsageSummarySchema.safeParse(
+          (raw as Record<string, unknown>).usageSummary,
+        );
+        if (!summary.success) {
+          return reportError(
+            io,
+            mode,
+            'invalid-result',
+            sub,
+            `${sub} returned an invalid result: usageSummary: ${issueMessage(summary.error)}`,
+            EXIT_CODES.thrown,
+          );
+        }
+      }
     }
     const checked = OpResultSchema.safeParse(base);
     if (!checked.success) {
