@@ -54,7 +54,7 @@ async function fixture(budget: number | undefined = 1000, configuredDenylist = t
     `
 const fs = require('node:fs');
 const files = process.argv.slice(2).filter(x => x !== '--');
-const names = files.length ? files : ['cases/a.test.cjs', 'cases/b.test.cjs'];
+const names = files.length ? files : fs.readdirSync('cases').filter(n => n.endsWith('.test.cjs')).sort().map(n => 'cases/' + n);
 let failed = false;
 const testResults = names.map(name => {
  const { actual, expected } = require(require('node:path').resolve(name));

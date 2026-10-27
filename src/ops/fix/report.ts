@@ -169,19 +169,23 @@ export function failureRowsOf(task: FixTaskReport, unit: string): FixTaskFailure
 
 /**
  * The accounting row of one task report, with the outcome refinement of
- * {@link FixTaskOutcome}: a `not-started`/`cancelled`/`exhausted` label for
- * never-dispatched or cancelled work, keeping `escalated-to-human` for
- * terminal human review and leaving attempted, concluded tasks untouched.
+ * {@link FixTaskOutcome}: `not-started`/`cancelled`/`exhausted` label only
+ * work the run never dispatched (or whose dispatch was cancelled) —
+ * recognizable because the loop records undispatched siblings with no
+ * attempts and one of its stop reasons ('enclosing job cancelled', 'token or
+ * wall budget exhausted') while later siblings carry 'unit stopped for human
+ * review'. A terminal conclusion with its own evidence — a failure with no
+ * attributed file, or an attempt that was refused — keeps its loop outcome
+ * and is never rewritten. Attempted, concluded tasks are untouched.
  */
 export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
   const unit = unitLabelOf(task.branch);
   let outcome: FixTaskOutcome = task.outcome;
-  if (task.outcome === 'escalated-to-human') {
+  if (task.outcome !== 'fixed' && task.attempts.length === 0) {
     const reason = task.reason ?? '';
-    const cancelled = reason.includes('cancelled');
-    if (cancelled) outcome = 'cancelled';
-    else if (task.attempts.length === 0)
-      outcome = reason.includes('budget') ? 'exhausted' : 'not-started';
+    if (reason === 'enclosing job cancelled') outcome = 'cancelled';
+    else if (reason === 'token or wall budget exhausted') outcome = 'exhausted';
+    else if (reason === 'unit stopped for human review') outcome = 'not-started';
   }
   return {
     unit,

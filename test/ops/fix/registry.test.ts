@@ -159,10 +159,23 @@ describe('fix-run report accounting', () => {
       task({ outcome: 'escalated-to-human', reason: 'enclosing job cancelled' }),
     );
     expect(cancelled.outcome).toBe('cancelled');
+    // The loop leaves undispatched budget-stopped siblings at their initial
+    // 'unfixed' label with no attempts; the refinement relabels them.
     const exhausted = plannedTaskRowOf(
-      task({ outcome: 'escalated-to-human', reason: 'token or wall budget exhausted' }),
+      task({ outcome: 'unfixed', reason: 'token or wall budget exhausted' }),
     );
     expect(exhausted.outcome).toBe('exhausted');
+    const exhaustedEscalated = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'token or wall budget exhausted' }),
+    );
+    expect(exhaustedEscalated.outcome).toBe('exhausted');
+    // A terminal no-attempt conclusion with its own evidence keeps its
+    // outcome: a failure the loop escalated (no attributed file) is work
+    // done, not work never started.
+    const terminal = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
+    );
+    expect(terminal.outcome).toBe('escalated-to-human');
     // An attempted task keeps its terminal outcome even when the reason names
     // a budget: the loop concluded the attempt honestly.
     const attempted = plannedTaskRowOf(
