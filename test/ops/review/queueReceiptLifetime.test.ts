@@ -11,6 +11,7 @@ import {
 import { consumeDeferredVendorReport } from '../../../src/ops/dev/internal/deferredSettlement.js';
 import type { DeferredVendorDebt } from '../../../src/ops/dev/internal/deferredReview.js';
 import { makeFakeEffects, okResult } from '../dev/fakes.js';
+import type { RunCommand } from '../../../src/ops/dev/effects.js';
 import { sha256 } from '../../../src/ops/review/internal/queueEvidence.js';
 import type {
   QueueReference,
@@ -303,7 +304,7 @@ test('settlement propagates cancellation and remaining budget without mutating v
   };
   const retained = structuredClone(debt);
   const effects = makeFakeEffects();
-  effects.runCommand = vi.fn(async (_command, _args, options) => {
+  effects.runCommand = vi.fn<RunCommand>(async (_command, _args, options) => {
     expect(options.signal).toBeDefined();
     expect(options.timeoutMs).toBeLessThanOrEqual(1000);
     return okResult('/offline');
