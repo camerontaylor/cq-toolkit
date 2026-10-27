@@ -399,7 +399,7 @@ describe('runAgentReviewer v3 session engine', () => {
       knownCount: 2,
       unknownCount: 0,
     });
-    expect(result.value.usageSummary.costUSD).toBeCloseTo(0.03);
+    expect(result.value.usageSummary?.costUSD).toBeCloseTo(0.03);
   });
 
   it('refuses a non-ai-sdk lane because it cannot attest pre-upload scanning', async () => {
