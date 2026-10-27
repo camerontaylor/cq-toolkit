@@ -1,3 +1,4 @@
+import type { WorkerResult } from '../../../src/driver/types.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -534,4 +535,63 @@ test('re-review keeps the original full comparison when a mutable target ref mov
   } finally {
     await f.cleanup();
   }
+});
+
+describe('blocked re-review marker (#509)', () => {
+  const blockedTransient = (record: FindingsRecord) => ({
+    status: 'needs-human' as const,
+    reason: 'review.run: not every configured reviewer completed a terminal cycle',
+    report: { ...record, blockedTransient: true as const },
+  });
+  /** One verified fix, then a re-review blocked on the transient class twice. */
+  const run = async (spendOnRetry: number) => {
+    const f = await fixture();
+    try {
+      let account: ((result: WorkerResult) => void) | undefined;
+      let reviews = 0;
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: (deps) => {
+          account = deps.account;
+          return {
+            escalation: createEscalationState,
+            fix: async (finding) => ({
+              finding: { ...finding, status: 'fixed', reason: 'verified' },
+              commit: 'a'.repeat(40),
+              observedHead: f.record().head,
+              reason: 'verified',
+              validation: [],
+            }),
+          };
+        },
+        review: async () => {
+          reviews += 1;
+          if (reviews === 2 && spendOnRetry > 0)
+            account?.({
+              stopReason: 'error',
+              usage: { input: spendOnRetry, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            });
+          return blockedTransient(f.record());
+        },
+      })({ ...f.input, maxTokens: 100, rounds: 1 });
+      return { result, reviews };
+    } finally {
+      await f.cleanup();
+    }
+  };
+
+  test('still blocked after the retry with a verified fix: marked rereview-blocked', async () => {
+    const { result, reviews } = await run(0);
+    expect(reviews).toBe(2);
+    expect(result.status).toBe('needs-human');
+    expect(reportOf(result).stop).toBe('rereview-blocked');
+  });
+
+  test('a retry that exhausts the token budget never carries the marker', async () => {
+    const { result, reviews } = await run(100);
+    expect(reviews).toBe(2);
+    expect(result.status).toBe('needs-human');
+    expect(reportOf(result).stop).toBeUndefined();
+  });
 });

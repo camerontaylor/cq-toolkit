@@ -28,7 +28,17 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   await rm(scanner.root, { recursive: true, force: true });
 });
-async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 10000) {
+async function fixture(
+  mode: 'fix' | 'defer' | 'rescue' = 'fix',
+  maxTokens = 10000,
+  /** #509: the first N reviewer driver runs fail with this class (default none). */
+  reviewerFailures: { count: number; errorClass: 'transient' | 'auth' } = {
+    count: 0,
+    errorClass: 'transient',
+  },
+) {
+  let reviewerFailuresLeft = reviewerFailures.count;
+  const reviewRequests = { count: 0 };
   const repo = await makeTestRepo();
   repo.git('config', 'user.name', 'Test');
   repo.git('config', 'user.email', 'test@example.invalid');
@@ -80,6 +90,17 @@ async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 100
           models.push(input.modelSpec.model);
           let structuredOutput: unknown;
           const content = await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8');
+          if (input.outputSchema?.name === 'review.agent/v3') reviewRequests.count += 1;
+          if (input.outputSchema?.name === 'review.agent/v3' && reviewerFailuresLeft > 0) {
+            reviewerFailuresLeft -= 1;
+            return {
+              stopReason: 'error',
+              errorClass: reviewerFailures.errorClass,
+              error: 'Cannot connect to API: getaddrinfo EAI_AGAIN api.example.invalid',
+              usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          }
           if (input.outputSchema?.name === 'review.agent/v3') {
             const serialized = JSON.stringify({
               prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
@@ -132,6 +153,7 @@ async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 100
     journalDir,
     record,
     models,
+    reviewRequests,
     drivers,
     op: makeReviewAddress({ drivers, initialRecord: record }),
     cleanup: async () => {
@@ -606,4 +628,81 @@ test('cancelled edit reports an ordinary local branch and finding pointer withou
   } finally {
     await f.cleanup();
   }
+});
+
+describe('review.address blocked re-review (#509)', () => {
+  test('a re-review blocked on the transient class is retried once and the run completes', async () => {
+    // The session retries a transient driver failure once itself, so two
+    // failures block one review.run; the address retry then succeeds.
+    const f = await fixture('fix', 10000, { count: 2, errorClass: 'transient' });
+    try {
+      const result = await f.op({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.value.fixesPerRun).toBe(1);
+      expect(result.value.reasons).toContain(
+        're-review blocked on a network/transient class; retrying once',
+      );
+      expect(f.reviewRequests.count).toBe(3);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test('still blocked after the retry with a verified fix: stop marks rereview-blocked', async () => {
+    const f = await fixture('fix', 10000, { count: 4, errorClass: 'transient' });
+    try {
+      const result = await f.op({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status).toBe('needs-human');
+      const report = (result as { report?: { stop?: string; fixesPerRun: number } }).report;
+      expect(report?.fixesPerRun).toBe(1);
+      expect(report?.stop).toBe('rereview-blocked');
+      expect(f.reviewRequests.count).toBe(4);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test('still blocked after the retry with NO verified fix: no publication marker', async () => {
+    const f = await fixture('defer', 10000, { count: 4, errorClass: 'transient' });
+    try {
+      const result = await f.op({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status).toBe('needs-human');
+      const report = (result as { report?: { stop?: string; fixesPerRun: number } }).report;
+      expect(report?.fixesPerRun).toBe(0);
+      expect(report?.stop).toBeUndefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test('a re-review blocked on a non-transient class is neither retried nor marked', async () => {
+    const f = await fixture('fix', 10000, { count: 4, errorClass: 'auth' });
+    try {
+      const result = await f.op({
+        repoRoot: f.repo.root,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status).toBe('needs-human');
+      const report = (result as { report?: { stop?: string; reasons: string[] } }).report;
+      expect(report?.stop).toBeUndefined();
+      expect(report?.reasons.join(' ')).not.toContain('retrying once');
+      expect(f.reviewRequests.count).toBe(1);
+    } finally {
+      await f.cleanup();
+    }
+  });
 });

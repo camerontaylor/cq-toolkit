@@ -69,7 +69,14 @@ export interface ReviewRunDeps {
 }
 
 /** A blocked run still exposes the persisted record so consumers can surface advisories. */
-export type ReviewRunResult = OpResult<FindingsRecord> & { report?: FindingsRecord };
+/**
+ * The blocked result's report may carry `blockedTransient` (#509): every
+ * blocked source stopped on the network/transient class, so a caller may
+ * retry the review once. It rides the report envelope and is never persisted.
+ */
+export type ReviewRunResult = OpResult<FindingsRecord> & {
+  report?: FindingsRecord & { blockedTransient?: true };
+};
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
   return {
@@ -205,6 +212,8 @@ export function makeReviewRun(
       const coderabbitConfigured = policy.review.reviewers.includes('coderabbit');
       const agentConfigured = policy.review.reviewers.includes('agent');
       const records: FindingsRecord[] = [];
+      // #509: the sources whose block was the network/transient class.
+      const transientBlocks = new Set<ReviewSource['kind']>();
       if (coderabbitConfigured) {
         const result = await makeDevReview({
           effects,
@@ -249,6 +258,8 @@ export function makeReviewRun(
                 : result.status === 'indeterminate'
                   ? result.detail
                   : `CodeRabbit cycle did not produce a terminal record (${result.status})`;
+          if ((result as { report?: { transient?: boolean } }).report?.transient === true)
+            transientBlocks.add('coderabbit');
           const cycleId = /review cycle (c\d+-[a-f0-9]+)/.exec(reason)?.[1];
           let cycle: DevCycleRecord | undefined;
           if (cycleId !== undefined) {
@@ -465,6 +476,8 @@ export function makeReviewRun(
                           : `agent review did not complete (${agent.status})`;
                   if ((await driftSince(effects, state)).length > 0)
                     blockedReason = 'repository state changed during agent review';
+                  else if (agent.status === 'needs-human' && agent.report?.transient === true)
+                    transientBlocks.add('agent');
                   const at = effects.nowIso();
                   const report = agent.status === 'ok' ? agent.value : agent.report;
                   const coverage = verifyAgentReviewCoverage(report?.coverage, {
@@ -652,11 +665,16 @@ export function makeReviewRun(
         };
       }
       if (stopped() || !isComplete(record, policy.review.reviewers)) {
+        const blockedSources = record.sources.filter((source) => source.status !== 'terminal');
+        const blockedTransient =
+          !stopped() &&
+          blockedSources.length > 0 &&
+          blockedSources.every((source) => transientBlocks.has(source.kind));
         return {
           status: 'needs-human',
           reason:
             'review.run: not every configured reviewer completed a terminal cycle; the findings record, including partial findings, was persisted',
-          report: record,
+          report: blockedTransient ? { ...record, blockedTransient: true } : record,
         };
       }
       return { status: 'ok', value: record };
