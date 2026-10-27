@@ -34,7 +34,7 @@ describe('cq.json effective policy', () => {
       addressConcurrency: 2,
       searchTools: true,
       bulk: { concurrency: 3 },
-      session: { maxInputChars: 60_000, maxSteps: 15 },
+      session: { maxInputChars: 60_000, maxSteps: 15, concurrency: 4 },
       size: {
         small: { maxChangedLines: 200, maxFiles: 5 },
         medium: { maxChangedLines: 800, maxFiles: 20 },
@@ -100,7 +100,7 @@ describe('cq.json effective policy', () => {
       searchTools: false,
       denylistPatternsFile: 'patterns.yml',
       bulk: { query: 'is:open', concurrency: 8 },
-      session: { maxInputChars: 90_000, maxSteps: 30 },
+      session: { maxInputChars: 90_000, maxSteps: 30, concurrency: 4 },
       size: {
         small: { maxChangedLines: 50, maxFiles: 7 },
         medium: { maxChangedLines: 900, maxFiles: 40 },
