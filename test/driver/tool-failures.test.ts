@@ -228,15 +228,15 @@ describe('tool failure evidence', () => {
     expect(noScan.failures[0]?.inputSummary).toContain('omitted');
   });
 
-  test('diagnostic scans include decoded nested strings before JSON escaping', async () => {
-    const scanned = await run(
-      [call('not_a_tool', { nested: ['\nPRIVATE_SENTINEL'] }), reply('done')],
-      true,
-    );
-    expect(scanned.result.stopReason).toBe('complete');
-    expect(scanned.failures[0]?.inputSummary).toBe('[redacted: diagnostic scan refused]');
-    expect(scanned.raw).not.toContain('PRIVATE_SENTINEL');
-  });
+  test.each([{ nested: ['\nPRIVATE_SENTINEL'] }, { nested: { ['\nPRIVATE_SENTINEL']: 'value' } }])(
+    'diagnostic scans include decoded nested strings and keys: %j',
+    async (input) => {
+      const scanned = await run([call('not_a_tool', input), reply('done')], true);
+      expect(scanned.result.stopReason).toBe('complete');
+      expect(scanned.failures[0]?.inputSummary).toBe('[redacted: diagnostic scan refused]');
+      expect(scanned.raw).not.toContain('PRIVATE_SENTINEL');
+    },
+  );
 
   test('failure line survives store append/load and old session schemas still parse', async () => {
     const { failures, loaded } = await run(

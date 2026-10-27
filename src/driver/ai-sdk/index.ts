@@ -702,7 +702,10 @@ export class AiSdkDriver implements Driver {
           const collect = (value: unknown): void => {
             if (typeof value === 'string') contents.push({ text: value });
             else if (value !== null && typeof value === 'object')
-              for (const child of Object.values(value)) collect(child);
+              for (const [key, child] of Object.entries(value)) {
+                contents.push({ text: key });
+                collect(child);
+              }
           };
           collect(input);
           await this.beforeRequest(
