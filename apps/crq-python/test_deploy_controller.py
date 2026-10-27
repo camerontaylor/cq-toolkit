@@ -1,0 +1,543 @@
+"""Q7 deployment controller characterization: offline fixtures only.
+
+No live systemd, no network, no real deployment. The accepted helper is
+exercised against temporary detached git clones exactly as
+``test_host_config.py`` does; process liveness is faked; units are never
+started; the controller never signals a process.
+"""
+import fcntl
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent
+OPS = ROOT / "ops"
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+dc = _load("crq_deploy_controller", OPS / "deploy-controller.py")
+host = _load("crq_prepare_host", OPS / "prepare-host.py")
+
+
+class ControllerFixture(unittest.TestCase):
+    """A temporary deployment clone with a real helper, fake systemctl."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-q7-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.root = self.base / "deploy"
+        self.runner = self.root / "apps/crq-python"
+        self.runner.mkdir(parents=True)
+        shutil.copy(ROOT / "config.json", self.runner / "config.json")
+        shutil.copytree(OPS / "systemd", self.runner / "ops/systemd")
+        shutil.copy(OPS / "prepare-host.py", self.runner / "ops/prepare-host.py")
+        shutil.copy(OPS / "deploy-controller.py", self.runner / "ops/deploy-controller.py")
+        (self.root / ".gitignore").write_text("apps/crq-python/state/\n")
+        self.command("init", "-q")
+        self.command("config", "user.email", "fixture@example.invalid")
+        self.command("config", "user.name", "Fixture")
+        self.command("add", ".")
+        self.command("commit", "-qm", "baseline")
+        self.before = self.command("rev-parse", "HEAD").strip()
+        config = json.loads((self.runner / "config.json").read_text())
+        config["promotion"]["hours_trigger"] = 9
+        (self.runner / "config.json").write_bytes(host.encode(config))
+        self.command("commit", "-qam", "next policy")
+        self.target = self.command("rev-parse", "HEAD").strip()
+        self.command("update-ref", "refs/remotes/origin/main", self.target)
+        self.tag = "crq-runner/20261028-1"
+        self.command("tag", "-a", self.tag, "-m", "owner fixture approval")
+        self.command("checkout", "-q", "--detach", self.before)
+        self.overlay = {
+            "schema_version": 1, "deploy_root": str(self.root),
+            "record_dir": str(self.base / "records"),
+            "fleet_reader": {"ssh_host": "queue.example.invalid",
+                             "source": "/srv/state/crq/summary.json"},
+            "config": {
+                "clone": str(self.base / "runtime"),
+                "worktree_root": str(self.base / "worktrees"),
+                "timeout_bin": "/usr/bin/timeout",
+                "paseo_hosts": ["worker.example.invalid:6767", "127.0.0.1:6767"],
+                "promotion": {"record_url_template":
+                              "http://queue.example.invalid:6778/promotion/{item}",
+                              "alert_agent_host": "worker.example.invalid:6767",
+                              "signer": {"spool": {
+                                  "ssh_alias": "operator@127.0.0.1",
+                                  "ssh_key": "/srv/keys/crq-spool"}}},
+                "repair": {"enabled": False,
+                           "cq_bin": str(self.base / "runtime/dist/cli.js"),
+                           "paseo_host": "127.0.0.1:6767"},
+            },
+        }
+        self.raw = host.encode(self.overlay)
+        self.overlay_path = self.base / "host.json"
+        self.overlay_path.write_bytes(self.raw)
+        self.overlay_path.chmod(0o600)
+        self.record_dir = self.base / "controller-records"
+        self.floor = mock.patch.object(host, "POLICY_FLOOR", self.before)
+        self.floor.start()
+        self.addCleanup(self.floor.stop)
+        self.effects = dc.Effects(self.root, self.record_dir)
+
+    def command(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args], check=True,
+                              capture_output=True, text=True).stdout
+
+    def stopped(self, argv):
+        """Fake systemctl: every CRQ unit reports inactive; git really runs."""
+        if argv[0] == "systemctl":
+            if argv[2] in {"list-unit-files", "list-units"}:
+                return ""
+            return "inactive\n"
+        return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+
+    def write_state(self, rel, payload):
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / rel).write_text(json.dumps(payload) + "\n")
+
+    def rendered(self):
+        data = host.render(self.root, self.overlay)
+        (self.runner / "config.json").write_bytes(data)
+        return data
+
+
+class PreflightTests(ControllerFixture):
+    def test_valid_target_and_tag_pass_and_capture_state(self):
+        self.write_state("queue.json", {"items": [], "last_tick": "2026-10-28T00:00:00Z"})
+        pre = dc.preflight(self.effects, self.target, self.tag)
+        self.assertEqual(pre["target"], self.target)
+        self.assertEqual(pre["state"]["prior_head"], self.before)
+        self.assertIsNotNone(pre["state"]["prior_config_sha256"])
+        self.assertEqual(pre["state"]["preserved/queue.json"],
+                         dc._sha256(self.runner / "state/queue.json"))
+        self.assertIsNone(pre["state"]["preserved/heartbeat.json"])
+
+    def test_sha_tag_shape_and_annotated_binding_refused_before_any_mutation(self):
+        before_status = self.command("status", "--porcelain", "--untracked-files=all")
+        for target, tag in [("short", self.tag), ("A" * 40, self.tag),
+                            (self.before, "20261028-1"),
+                            (self.before, "crq-runner/not-a-date"),
+                            (self.before, "refs/tags/" + self.tag)]:
+            with self.subTest(target=target, tag=tag):
+                with self.assertRaises(dc.Refused):
+                    dc.preflight(self.effects, target, tag)
+        # lightweight tag refused: annotation is the owner-approval artifact
+        self.command("tag", "crq-runner/20261028-2", self.before)
+        with self.assertRaisesRegex(dc.Refused, "annotated"):
+            dc.preflight(self.effects, self.before, "crq-runner/20261028-2")
+        # annotated tag naming a different commit refused
+        self.command("tag", "-a", "crq-runner/20261028-3", self.target, "-m", "x")
+        with self.assertRaisesRegex(dc.Refused, "peels to"):
+            dc.preflight(self.effects, self.before, "crq-runner/20261028-3")
+        self.assertEqual(self.command("status", "--porcelain", "--untracked-files=all"),
+                         before_status)
+
+
+class DrainTests(ControllerFixture):
+    def test_no_active_runs_reports_drained(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "kind": "merged", "state": "pending"},
+            {"id": "pr2", "kind": "delta", "state": "done"},
+        ]})
+        result = dc.drain_check(self.effects, lambda *a: "harvest")
+        self.assertTrue(result["drained"])
+        self.assertEqual(result["blocked"], [])
+
+    def test_alive_and_ambiguous_block_with_exact_item_identity(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "a" * 32, "pid": 4242}},
+            {"id": "pr2", "run": {"run_id": "b" * 32}},
+            {"id": "pr3", "run": "not-a-dict"},
+            {"id": "pr4", "run": {"run_id": "bad id!"}},
+        ]})
+        calls = []
+
+        def liveness(rdir, item, r, has_exit):
+            calls.append((item["id"], r["run_id"], has_exit))
+            return {"a" * 32: "alive", "b" * 32: "ambiguous"}[r["run_id"]]
+
+        result = dc.drain_check(self.effects, liveness)
+        self.assertFalse(result["drained"])
+        blocked = {entry["item"]: entry["state"] for entry in result["blocked"]}
+        self.assertEqual(blocked, {"pr1": "alive", "pr2": "ambiguous",
+                                   "pr4": "ambiguous"})
+        self.assertEqual(calls, [("pr1", "a" * 32, False), ("pr2", "b" * 32, False)])
+
+    def test_receipt_exit_artifact_is_observed_not_created(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "c" * 32}}]})
+        runs = self.runner / "state/runs"
+        runs.mkdir(parents=True)
+        (runs / ("c" * 32)).mkdir()
+        (runs / ("c" * 32) / "exit.json").write_text('{"exit":0}\n')
+        seen = {}
+        dc.drain_check(self.effects,
+                       lambda rdir, item, r, has_exit: seen.setdefault("has_exit", has_exit))
+        self.assertTrue(seen["has_exit"])
+
+    def test_liveness_probe_failure_is_ambiguous_never_absence(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "d" * 32}}]})
+
+        def broken(*_a):
+            raise RuntimeError("ps exploded")
+
+        result = dc.drain_check(self.effects, broken)
+        self.assertFalse(result["drained"])
+        self.assertEqual(result["blocked"][0]["state"], "ambiguous")
+        self.assertIn("ps exploded", result["blocked"][0]["reason"])
+
+    def test_unreadable_queue_refuses_instead_of_claiming_drained(self):
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / "queue.json").write_text("{not json")
+        with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+            dc.drain_check(self.effects, lambda *a: "harvest")
+
+    def test_missing_queue_entirely_refuses(self):
+        with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+            dc.drain_check(self.effects, lambda *a: "harvest")
+
+
+class PreservationTests(ControllerFixture):
+    def test_identical_bytes_pass(self):
+        self.write_state("queue.json", {"items": []})
+        before = {"preserved/queue.json": dc._sha256(self.runner / "state/queue.json"),
+                  "preserved/heartbeat.json": None}
+        self.assertEqual(dc.preservation_check(self.effects, before)["preserved"], True)
+
+    def test_changed_or_vanished_surface_refuses_with_names(self):
+        self.write_state("queue.json", {"items": []})
+        before = {"preserved/queue.json": "0" * 64,
+                  "preserved/heartbeat.json": "2" * 64}
+        with self.assertRaisesRegex(dc.Refused, "queue.json, heartbeat.json"):
+            dc.preservation_check(self.effects, before)
+
+
+class HealthTests(ControllerFixture):
+    def observe_fixtures(self):
+        runs = self.runner / "state/runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / "run-a").mkdir(exist_ok=True)
+        (runs / "run-a/meta.json").write_text('{"head": "%s"}\n' % self.before)
+        (runs / "run-b").mkdir(exist_ok=True)
+        (runs / "run-b/meta.json").write_bytes(b"{broken")
+
+    def test_two_advancing_observations_are_healthy_with_receipt_sample(self):
+        self.observe_fixtures()
+        ticks = iter(["2026-10-28T00:00:00Z", "2026-10-28T00:05:00Z",
+                      "2026-10-28T00:10:00Z"])
+        self.write_state("queue.json", {})
+        effects = self.effects
+
+        def read_json(rel):
+            return {"last_tick": next(ticks)}
+
+        effects.read_json = read_json
+        result = dc.two_slot_health(effects, lambda prior:
+                                    dc.health_observation(effects, prior))
+        self.assertTrue(result["healthy"])
+        first, second = result["observations"]
+        self.assertEqual(first["observed_tick"], "2026-10-28T00:05:00Z")
+        self.assertEqual(second["observed_tick"], "2026-10-28T00:10:00Z")
+        self.assertEqual(first["receipts"], {"sampled": 2, "readable": 1})
+
+    def test_same_tick_twice_is_one_slot_not_two(self):
+        fixed = "2026-10-28T00:00:00Z"
+        self.write_state("queue.json", {"last_tick": fixed})
+        result = dc.two_slot_health(self.effects, lambda prior:
+                                    dc.health_observation(self.effects, prior))
+        self.assertFalse(result["healthy"])
+        self.assertIn("first observation", result["reason"])
+
+    def test_second_observation_stalled_is_unhealthy(self):
+        ticks = iter(["2026-10-28T00:00:00Z", "2026-10-28T00:05:00Z",
+                      "2026-10-28T00:05:00Z"])
+        self.write_state("queue.json", {})
+        effects = self.effects
+
+        def read_json(rel):
+            return {"last_tick": next(ticks)}
+
+        effects.read_json = read_json
+        result = dc.two_slot_health(effects, lambda prior:
+                                    dc.health_observation(effects, prior))
+        self.assertFalse(result["healthy"])
+        self.assertIn("second observation", result["reason"])
+
+    def test_no_tick_source_refuses(self):
+        with self.assertRaisesRegex(dc.Refused, "no last_tick"):
+            dc._tick_value(self.effects)
+
+    def test_heartbeat_fallback_when_queue_has_no_tick(self):
+        self.write_state("heartbeat.json", {"last_tick": "2026-10-28T00:00:00Z"})
+        self.assertEqual(dc._tick_value(self.effects), "2026-10-28T00:00:00Z")
+
+    def test_malformed_timestamp_is_not_health_evidence(self):
+        self.write_state("queue.json", {"last_tick": "yesterday-ish"})
+        with self.assertRaises(ValueError):
+            dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+
+
+class RollbackDecisionTests(unittest.TestCase):
+    def test_schema_observations_disable_automatic_rollback(self):
+        self.assertTrue(dc.rollback_compatible(
+            {"checked": True, "schema_observations": []}))
+        for record in [{"checked": True, "schema_observations": ["author_requests"]},
+                       {"checked": True, "schema_observations": ["author_observations"]},
+                       {"checked": False, "schema_observations": []},
+                       {}]:
+            with self.subTest(record=record):
+                self.assertFalse(dc.rollback_compatible(record))
+
+
+class CompatibilityRecordTests(ControllerFixture):
+    def test_untagged_shape_records_unmarked_and_permits_rollback(self):
+        self.write_state("queue.json", {"items": [], "starts": []})
+        record = dc.compatibility_record(self.effects, self.target)
+        self.assertEqual(record["queue_schema"], "unmarked")
+        self.assertEqual(record["schema_observations"], [])
+        self.assertTrue(dc.rollback_compatible(record))
+
+    def test_author_state_keys_are_observed_and_disable_rollback(self):
+        self.write_state("queue.json",
+                         {"items": [], "author_requests": {"r1": {}},
+                          "author_observations": []})
+        record = dc.compatibility_record(self.effects, self.target)
+        self.assertEqual(sorted(record["schema_observations"]),
+                         ["author_observations", "author_requests"])
+        self.assertFalse(dc.rollback_compatible(record))
+
+    def test_explicit_schema_marker_is_recorded(self):
+        self.write_state("queue.json", {"items": [], "schema_version": 2})
+        record = dc.compatibility_record(self.effects, self.target)
+        self.assertEqual(record["queue_schema"], 2)
+
+    def test_unreadable_queue_is_recorded_not_crashed(self):
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        (state / "queue.json").write_text("[[[")
+        record = dc.compatibility_record(self.effects, self.target)
+        self.assertIn("unreadable", record["queue_schema"])
+
+
+class DeployPlanTests(ControllerFixture):
+    def setUp(self):
+        super().setUp()
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "kind": "merged", "state": "done"}], "starts": []})
+        self.rendered()
+
+    def fake_switch(self):
+        """The helper's switch, with systemctl faked inactive (no live units)."""
+        def run(argv):
+            if argv[0] == "systemctl":
+                return self.stopped(argv)
+            return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+        return mock.patch.object(host, "run", side_effect=run)
+
+    def test_successful_switch_records_journal_and_preserves_state(self):
+        with self.fake_switch():
+            plan = dc.deploy_plan(self.effects, host, self.target, self.tag,
+                                  self.overlay_path)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
+        steps = {step["step"]: step for step in plan["steps"]}
+        self.assertTrue(steps["drain"]["drained"])
+        self.assertTrue(steps["preservation"]["preserved"])
+        journals = list(self.record_dir.glob("controller-*.json"))
+        self.assertEqual(len(journals), 1)
+        entry = json.loads(journals[0].read_text())
+        self.assertEqual(entry["operation"], "deploy")
+        self.assertEqual(entry["schema_version"], dc.JOURNAL_SCHEMA)
+        self.assertTrue(plan["automatic_rollback_permitted"])
+        self.assertEqual(journals[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.record_dir.stat().st_mode & 0o777, 0o700)
+        # state was never copied, restored or rewritten
+        self.assertEqual(json.loads((self.runner / "state/queue.json").read_text()),
+                         {"items": [{"id": "pr1", "kind": "merged", "state": "done"}],
+                          "starts": []})
+
+    def test_alive_review_refuses_before_helper_runs(self):
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "a" * 32}}]})
+        with mock.patch.object(host, "switch") as helper_switch:
+            with self.assertRaisesRegex(dc.Refused, "alive/ambiguous"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag,
+                               self.overlay_path)
+            helper_switch.assert_not_called()
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_target_sha_mismatch_refuses_before_drain_or_helper(self):
+        with mock.patch.object(host, "switch") as helper_switch:
+            with self.assertRaisesRegex(dc.Refused, "peels to"):
+                dc.deploy_plan(self.effects, host, self.before, self.tag,
+                               self.overlay_path)
+            helper_switch.assert_not_called()
+
+    def test_lock_collision_refuses_second_controller(self):
+        state = self.runner / "state"
+        state.mkdir(exist_ok=True)
+        with (state / dc.LOCK_NAME).open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(dc.Refused, "controller lock busy"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag,
+                               self.overlay_path)
+
+    def test_controller_restart_after_completed_switch_is_safe(self):
+        with self.fake_switch():
+            dc.deploy_plan(self.effects, host, self.target, self.tag,
+                           self.overlay_path)
+        # A restarted controller observes the checkout already at target and the
+        # preserved surfaces unchanged: a fresh preflight passes, drain is quiet.
+        pre = dc.preflight(self.effects, self.target, self.tag)
+        self.assertEqual(pre["state"]["prior_head"], self.target)
+        drain = dc.drain_check(self.effects, dc._refusing_liveness)
+        self.assertTrue(drain["drained"])
+
+
+class RollbackPlanTests(ControllerFixture):
+    def setUp(self):
+        super().setUp()
+        self.write_state("queue.json", {"items": [], "starts": []})
+        self.rendered()
+        self.prior = {"prior_head": self.before, "tag": "crq-runner/20261027-9",
+                      "rollback_compatibility": {"checked": True,
+                                                 "schema_observations": []}}
+        self.command("tag", "-a", "crq-runner/20261027-9", self.before,
+                     "-m", "prior fixture approval")
+
+    def fake_switch(self):
+        def run(argv):
+            if argv[0] == "systemctl":
+                return self.stopped(argv)
+            return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+        return mock.patch.object(host, "run", side_effect=run)
+
+    def at_target(self):
+        with self.fake_switch():
+            host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+
+    def test_compatible_rollback_returns_to_recorded_prior_target(self):
+        self.at_target()
+        with self.fake_switch():
+            result = dc.rollback_plan(self.effects, host, self.prior,
+                                      self.overlay_path)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+        self.assertEqual(result["rolled_back_to"], self.before)
+        journals = [json.loads(p.read_text())
+                    for p in self.record_dir.glob("controller-*.json")]
+        self.assertEqual([j["operation"] for j in journals], ["rollback"])
+
+    def test_schema_incompatible_prior_target_disables_automatic_rollback(self):
+        self.at_target()
+        incompatible = {**self.prior,
+                        "rollback_compatibility": {"checked": True,
+                                                   "schema_observations":
+                                                   ["author_requests"]}}
+        with mock.patch.object(host, "switch") as helper_switch:
+            with self.assertRaisesRegex(dc.Refused, "rollback disabled"):
+                dc.rollback_plan(self.effects, host, incompatible,
+                                 self.overlay_path)
+            helper_switch.assert_not_called()
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
+
+    def test_missing_prior_sha_refuses_blind_rollback(self):
+        self.at_target()
+        with self.assertRaisesRegex(dc.Refused, "no recorded prior target"):
+            dc.rollback_plan(self.effects, host, {"tag": self.tag},
+                             self.overlay_path)
+
+    def test_rollback_refuses_with_live_reviews(self):
+        self.at_target()
+        self.write_state("queue.json", {"items": [
+            {"id": "pr1", "run": {"run_id": "e" * 32}}]})
+        with self.assertRaisesRegex(dc.Refused, "live/ambiguous"):
+            dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
+
+
+class CliTests(ControllerFixture):
+    """End-to-end CLI invocations with faked systemctl; JSON on stdout."""
+
+    def run_cli(self, *args, env=None):
+        merged = dict(os.environ)
+        if env:
+            merged.update(env)
+        return subprocess.run(
+            ["python3", str(OPS / "deploy-controller.py"),
+             "--root", str(self.root), "--overlay", str(self.overlay_path),
+             "--record-dir", str(self.record_dir), *args],
+            capture_output=True, text=True, env=merged)
+
+    def test_switch_cli_succeeds_with_fake_systemctl_and_emits_json(self):
+        self.write_state("queue.json", {"items": [], "starts": []})
+        # The subprocess cannot inherit this module's POLICY_FLOOR mock, so the
+        # fixture copy of the helper pins the fixture baseline directly. The
+        # pin commit must contain UNRENDERED committed config, so the helper's
+        # post-switch "only rendered config modified" contract still holds.
+        self.command("restore", "--", host.CONFIG)
+        helper = self.runner / "ops/prepare-host.py"
+        original = helper.read_text()
+        helper.write_text(original.replace(
+            "POLICY_FLOOR = 'f748fd43e75505f4e89098a4ffe28fa2a179a50c'",
+            "POLICY_FLOOR = '" + self.before + "'"))
+        # The edited helper bytes must not look like checkout drift: commit the
+        # pinned copy into the fixture clone (same content, new commit).
+        self.command("commit", "-qam", "fixture floor pin")
+        pinned = self.command("rev-parse", "HEAD").strip()
+        self.command("update-ref", "refs/remotes/origin/main", pinned)
+        self.command("tag", "-a", "crq-runner/20261028-2", pinned, "-m", "cli fixture")
+        # Render AFTER the pin commit: the rendered config must differ from the
+        # committed one for the helper's post-switch status contract to hold.
+        self.rendered()
+        # No systemd on the test host either: fake systemctl for the subprocess
+        # through a PATH shim that reports every CRQ unit inactive.
+        shim = self.base / "bin"
+        shim.mkdir(exist_ok=True)
+        (shim / "systemctl").write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "--user" ] && { [ "$2" = "list-unit-files" ] || [ "$2" = "list-units" ]; }; then\n'
+            '  exit 0\n'
+            'fi\n'
+            'echo inactive\n'
+            'exit 0\n')
+        (shim / "systemctl").chmod(0o755)
+        result = self.run_cli("switch", "--sha", pinned, "--tag", "crq-runner/20261028-2",
+                              env={"PATH": str(shim) + ":" + os.environ["PATH"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        artifact = json.loads(result.stdout)
+        self.assertEqual(artifact["operation"], "switch")
+        self.assertEqual(artifact["target"], pinned)
+        self.assertTrue(artifact["automatic_rollback_permitted"])
+
+    def test_health_cli_reports_stale_without_advancement(self):
+        self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
+        result = self.run_cli("health")
+        self.assertEqual(result.returncode, 1)
+        artifact = json.loads(result.stdout)
+        self.assertFalse(artifact["healthy"])
+
+    def test_refusal_exits_2_with_stderr_reason_and_no_stdout_artifact(self):
+        result = self.run_cli("switch", "--sha", "nothex", "--tag", self.tag)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("refused:", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
+if __name__ == "__main__":
+    unittest.main()

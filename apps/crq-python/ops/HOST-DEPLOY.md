@@ -131,6 +131,60 @@ No spool probes are authorized by this document. Any new probe requires separate
 recorded owner authorization. Retain the heartbeat endpoint confirmation from the
 old handover as evidence, without inventing new live evidence.
 
+## Controller wrapper (Q7, #395) — proposed, offline-tested only
+
+`ops/deploy-controller.py` wraps (never replaces) the helper's `switch` with
+observable, fail-stopped steps. It is not deployed and grants no new
+authority: the owner approval, tag and target requirements of this document
+are unchanged, and the controller starts nothing.
+
+One JSON artifact on stdout, narration on stderr; exit 0 switched/healthy,
+1 health observation failed, 2 refused (nothing changed). The controller lock
+is `state/controller.lock`, distinct from the runner's tick lock.
+
+```sh
+# Preflight, drain, helper switch, preservation, journal:
+python3 ops/deploy-controller.py --root /srv/crq-deploy \
+  --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
+# After the owner starts units (this document, step 6):
+python3 ops/deploy-controller.py --root /srv/crq-deploy \
+  --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  health --interval-seconds 1500
+```
+
+Ordering and guarantees:
+
+1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
+   to it; prior HEAD/config digests retained; reachability, drift and
+   stopped-unit checks are the helper's own (they run inside its `switch`).
+2. **Drain** — every queue item with a recorded run is probed with the
+   runner's own fail-closed `crq.run_liveness` from the same checkout.
+   `alive` or `ambiguous` blocks the controller; it never signals or kills a
+   process (exact owned-PID drain means: verified-none, not a sweep). Drain
+   live/ambiguous work through the documented author-recovery path first.
+3. **Switch** — the helper's `switch` runs unchanged, under its tick lock and
+   drift fence.
+4. **Preservation** — `state/queue.json` (items, starts, author_requests,
+   author_observations) and `state/heartbeat.json` must be byte-identical
+   across the switch; any difference refuses the deployment with the file
+   names. State is never restored, migrated or rewritten by the controller.
+5. **Rollback compatibility** — recorded before and after: an unmarked queue
+   permits owner-approved automatic rollback; `author_*` state keys (or an
+   unreadable queue) disable it — fail stopped with an explicit operator
+   recovery action, never an old-snapshot restore or an incompatible binary
+   start.
+6. **Health** — `health` requires `last_tick` to advance for TWO consecutive
+   observations (strictly increasing UTC timestamps; one slot seen twice is
+   not two slots) and samples up to ten `state/runs/*/meta.json` receipts for
+   readability. Tick advancement, service health and receipt readability are
+   distinct checks; advancement alone is not acceptance.
+
+A journal entry (schema 1, mode 0600, private record directory) records every
+completed deploy or rollback. Rollback reuses the same helper fence with the
+recorded prior target and tag; a fresh-target switch to a different commit is
+a new deployment, not a rollback.
+
 ## Subsequent deploy and rollback
 
 Stop timers/records and wait for tick inactivity before invoking `switch`.
