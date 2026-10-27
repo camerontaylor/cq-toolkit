@@ -271,10 +271,13 @@ describe('review.address closure evidence verifier', () => {
     expect(result.checks[0]?.detail).toContain('accessor-backed');
   });
 
-  test('a later-slot mutation during validation cannot re-enter the snapshot', () => {
-    // The relay repro: every array entry reference is captured before any
-    // record field is read, so a host swapping a later slot while an earlier
-    // record validates cannot change which content the later checks scan.
+  test('a later-slot mutation attempt is rejected uncertain, snapshot unaffected', () => {
+    // Original relay repro, under the stable-data contract: the FIRST
+    // record's path getter attempts to replace the later trigger slot while
+    // it is being read. Accessor-backed records are rejected without ever
+    // invoking their getters, so the getter must never run, the later slot
+    // must remain unchanged, and the packet is uncertain at packet-complete
+    // (accessor-backed evidence is not trusted evidence).
     const mutated = makePacket();
     const clean = { path: 'src/clean.ts', role: 'consumer', text: "load('{}');\n" };
     const surviving = {
@@ -283,19 +286,24 @@ describe('review.address closure evidence verifier', () => {
       text: "if (mode === 'PARTIAL_MODE') load(raw);\n",
     };
     mutated.dependencies = [clean, surviving];
-    const originalText = surviving.text;
-    Object.defineProperty(surviving, 'text', {
-      get() {
-        // Swap the second slot the first time an earlier record's field read
-        // reaches this record's text.
+    let getterInvoked = false;
+    const first = {
+      get path() {
+        getterInvoked = true;
         mutated.dependencies[1] = clean;
-        return originalText;
+        return 'src/clean.ts';
       },
-    });
+      role: 'consumer',
+      text: "load('{}');\n",
+    };
+    mutated.dependencies[0] = first;
     const result = verifyClosureEvidence(mutated);
-    expect(result.verdict).toBe('unresolved');
-    expect(result.reason).toBe('deleted-trigger-survives');
-    expect(result.checks[3]?.detail).toContain('src/legacy.ts');
+    expect(result.verdict).toBe('uncertain');
+    expect(result.reason).toBe('unavailable-evidence');
+    expect(namesOf(result)).toEqual(['packet-complete']);
+    expect(result.checks[0]?.detail).toContain('accessor-backed');
+    expect(getterInvoked).toBe(false);
+    expect(mutated.dependencies[1]).toBe(surviving);
   });
 
   test('an accessor-backed array slot is rejected as unavailable', () => {
