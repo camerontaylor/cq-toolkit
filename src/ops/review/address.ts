@@ -857,7 +857,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const current = retained.get(finding.id);
                   if (current && !sameFindingContent(finding, current))
                     throw new Error(`conflicting retained finding identity: ${finding.id}`);
-                  return current ? { ...finding, ...current, reason: current.reason } : finding;
+                  return current
+                    ? { ...finding, ...current, source: finding.source, reason: current.reason }
+                    : finding;
                 }),
                 ...context.findings.filter(
                   (finding) => !record.findings.some((item) => item.id === finding.id),

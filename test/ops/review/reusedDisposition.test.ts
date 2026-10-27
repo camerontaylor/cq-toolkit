@@ -39,7 +39,10 @@ const original = () => cycleRecord({ cycleId: 'c001-original', findings: [raw] }
 const config: CqConfig = {
   schemaVersion: 2,
   checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
-  roles: { worker: { provider: 'mock', model: 'mock' } },
+  roles: {
+    worker: { provider: 'mock', model: 'mock' },
+    reviewer: { provider: 'mock', model: 'mock' },
+  },
   budgets: { run: { maxTokens: 1000 } },
   review: { reviewers: ['coderabbit'] },
 };
@@ -153,6 +156,18 @@ test.each([
   const ledger = ledgerWith([original(), dispositionRecord({ findingId: finding.id })]);
   expect(sameFindingContent(incoming, finding)).toBe(false);
   expect(restoreDurableDisposition(incoming, ledger)).toEqual(incoming);
+});
+
+test('the exact engine reviewer source normalizes without admitting other source identities', () => {
+  const incoming = { ...finding, source: 'agent' };
+  const cycle = { ...original(), reviewer: 'agent:reviewer' };
+  const ledger = ledgerWith([cycle, dispositionRecord({ findingId: finding.id })]);
+  expect(restoreDurableDisposition(incoming, ledger)).toEqual({
+    ...incoming,
+    status: 'fixed',
+    reason: 'addressed in the diff',
+  });
+  expect(sameFindingContent(incoming, { ...incoming, source: 'agent:other' })).toBe(false);
 });
 
 test('later same-ID raw content collision invalidates earlier disposition', () => {
