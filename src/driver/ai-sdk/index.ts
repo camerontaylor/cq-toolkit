@@ -282,18 +282,23 @@ export type ProviderFactory = (modelId: string, sessionId?: string) => LanguageM
 export const DEFAULT_MAX_STEPS = 40;
 
 /**
- * Per-request wall-clock bound for EACH step of the SDK tool loop
- * (`timeout.stepMs`, ai@7.0.99). This is NOT a run deadline — the governor's
- * escalation ladder owns WHEN to abort the run (I8; Budget.wallClockMs is
- * ignored here). It bounds a single provider HTTP request so a hung
- * connection cannot stall the loop indefinitely; the SDK aborts that step
- * and surfaces the cause, which the classifier maps to [endpoint-timeout].
- * The default is generous because a non-streaming step legitimately waits for
- * its whole output (a 48k-token review answer exceeded the old 120 s); ai@7's
- * `chunkMs` applies to streaming only, so it cannot serve this path.
- * Override per driver with `AiSdkDriverOptions.stepTimeoutMs`.
+ * Wall-clock bound for EACH step of the SDK tool loop (`timeout.stepMs`,
+ * ai@7.0.99). ai's generateText arms ONE timer per loop iteration
+ * (`setAbortTimeout`, dist/index.js ~5810) and clears it only after the step's
+ * tool execution (~6286), so it covers the model call INCLUDING its SDK retry
+ * and the step's tool runs — not a single HTTP request, and not the whole turn
+ * (`timeout.totalMs`, unset here). It is NOT a run deadline — the governor
+ * and the review wall budget own that (I8; Budget.wallClockMs is ignored
+ * here). It catches a hung step; the SDK aborts it and surfaces the cause,
+ * which the classifier maps to [endpoint-timeout]. The default is generous
+ * because a non-streaming step legitimately waits for its whole output (a
+ * 48k-token review answer exceeded 120 s, a slow-but-steady GLM piece
+ * exceeded 600 s): limits stop runaways, not slow working runs. ai@7's
+ * `chunkMs`/`firstChunkMs` apply to streamText only (generateText warns
+ * "only supported by streaming functions"). Override per driver with
+ * `AiSdkDriverOptions.stepTimeoutMs`.
  */
-export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
+export const DEFAULT_STEP_TIMEOUT_MS = 1_200_000;
 
 /**
  * The minimum ripgrep the search tools need at runtime: 11.0.0 (the CI

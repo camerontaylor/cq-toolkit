@@ -1588,7 +1588,7 @@ describe('ai-sdk driver failure classes (#210)', () => {
       expect(args.maxRetries).toBe(1);
       // Per-request bound for EACH step of the tool loop.
       expect(args.timeout).toEqual({ stepMs: DEFAULT_STEP_TIMEOUT_MS });
-      expect(DEFAULT_STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(600_000);
+      expect(DEFAULT_STEP_TIMEOUT_MS).toBe(1_200_000);
       // The bound is configurable per driver and validated.
       const tuned = new AiSdkDriver({
         providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
