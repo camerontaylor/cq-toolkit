@@ -66,12 +66,13 @@ the canonical order with at most one non-pass entry, last:
    before/after content. Renames are refused as unverified. Incoherent
    packets are `unavailable`: the evidence contradicts itself.
 4. `trigger-removed`: quoted spans from the finding text must not survive in
-   the after content; symbols declared on removed lines must not be
-   re-declared in the after content or in any cited dependency. Survival is
-   concrete counter-evidence: verdict `unresolved`. A packet with no citable
-   trigger (no quoted span, no removed declaration) is uncertain: the helper
-   refuses to guess what the finding was about, and uncertainty keeps the
-   finding open without demanding a code edit.
+   the after content or in any cited dependency's content; symbols declared
+   on removed lines must not be re-declared in the after content or in any
+   cited dependency. Survival is concrete counter-evidence: verdict
+   `unresolved`. A packet with no citable trigger (no quoted span, no removed
+   declaration) is uncertain: the helper refuses to guess what the finding
+   was about, and uncertainty keeps the finding open without demanding a
+   code edit.
 5. `dependencies-covered`: a deletion-only patch can never resolve (a
    deleted line alone never establishes closure), and the completeness
    attestation must be present. Otherwise pass.
@@ -123,13 +124,13 @@ evaluation; the packet is pure data and every check is local computation.
 
 `test/ops/review/addressVerification.test.ts` covers the mandated fixtures:
 omitted consumer/dependency attestation, deleted trigger surviving in after
-content and in a cited consumer, a valid fix resolving, deletion-only never
-closing, missing citable trigger, unpinned and missing revision identity,
-malformed packets, rename refusal, before/after coherence mismatches,
-cancellation, budget exhaustion, a non-Error gate refusal, a check-side
-storage failure and the cross-scenario verdict invariants (resolved has five
-passes; uncertain never carries a fail; check names are always a canonical
-prefix).
+content, in a cited consumer and in a cited dependency, a valid fix
+resolving, deletion-only never closing, missing citable trigger, unpinned
+and missing revision identity, malformed packets, rename refusal,
+before/after coherence mismatches, cancellation, budget exhaustion, a
+non-Error gate refusal, a check-side storage failure and the cross-scenario
+verdict invariants (resolved has five passes; uncertain never carries a
+fail; check names are always a canonical prefix).
 
 Evidence boundary: no test invokes a provider, spawns a process or touches
 the network; the suite is pure computation on literals.

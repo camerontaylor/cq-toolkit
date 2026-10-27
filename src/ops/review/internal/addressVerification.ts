@@ -253,16 +253,16 @@ export function verifyClosureEvidence(
     if (typeof packet.patch !== 'string' || packet.patch === '') problems.push('patch missing');
     if (typeof packet.before !== 'string' || packet.before === '') problems.push('before missing');
     if (typeof packet.after !== 'string' || packet.after === '') problems.push('after missing');
-    if (!Array.isArray(packet.dependencies)) problems.push('dependencies missing');
-    else
-      for (const dependency of packet.dependencies) {
-        if (typeof dependency?.path !== 'string' || dependency.path === '')
-          problems.push('dependency path missing');
-        else if (dependency.role !== 'consumer' && dependency.role !== 'dependency')
-          problems.push(`dependency ${dependency.path} has unknown role`);
-        else if (typeof dependency.text !== 'string' || dependency.text === '')
-          problems.push(`dependency ${dependency.path} text missing`);
-      }
+    // Field access is validated per element; a non-iterable or hostile
+    // dependencies value throws here and the step records it as unavailable.
+    for (const dependency of packet.dependencies) {
+      if (typeof dependency?.path !== 'string' || dependency.path === '')
+        problems.push('dependency path missing');
+      else if (dependency.role !== 'consumer' && dependency.role !== 'dependency')
+        problems.push(`dependency ${dependency.path} has unknown role`);
+      else if (typeof dependency.text !== 'string' || dependency.text === '')
+        problems.push(`dependency ${dependency.path} text missing`);
+    }
     if (revision === undefined) problems.push('metadata.revision missing');
     if (problems.length > 0)
       return {
@@ -369,6 +369,17 @@ export function verifyClosureEvidence(
           detail: `quoted trigger survives in after content: ${oneLine(span)}`,
           reason: 'deleted-trigger-survives',
         };
+      for (const dependency of packet.dependencies) {
+        if (dependency.text.includes(span))
+          return {
+            check: 'trigger-removed',
+            outcome: 'fail',
+            detail:
+              `quoted trigger survives in cited ${dependency.role} ` +
+              `${dependency.path}: ${oneLine(span)}`,
+            reason: 'deleted-trigger-survives',
+          };
+      }
     }
     for (const symbol of symbols) {
       const redeclared = DECLARATION_SURVIVAL(symbol);
