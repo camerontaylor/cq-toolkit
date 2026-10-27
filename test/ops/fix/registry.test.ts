@@ -176,6 +176,37 @@ describe('fix-run report accounting', () => {
       task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
     );
     expect(terminal.outcome).toBe('escalated-to-human');
+    // Issue 615 (4): the refined outcome reaches the branchless failure row
+    // (and the failed evidence built from it), while retained attempt rows
+    // keep their recorded history.
+    const refined = plannedTaskRowOf(
+      task({ outcome: 'unfixed', reason: 'token or wall budget exhausted' }),
+    );
+    expect(refined.failures[0]?.outcome).toBe('exhausted');
+    const terminalRow = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
+    );
+    expect(terminalRow.failures[0]?.outcome).toBe('escalated-to-human');
+    const history = plannedTaskRowOf(
+      task({
+        outcome: 'fixed',
+        commits: ['1'.repeat(40)],
+        rounds: [
+          {
+            tier: 'worker',
+            attempt: 1,
+            reason: 'first refusal',
+            outcome: 'unfixed',
+            gate: 'related',
+            failedAttempt: { branch: 'cq/run/failed/k/s/t/a1', sha: '2'.repeat(40) },
+          },
+        ],
+      }),
+    );
+    expect(history.failures[0]).toMatchObject({
+      outcome: 'unfixed',
+      branch: 'cq/run/failed/k/s/t/a1',
+    });
     // An attempted task keeps its terminal outcome even when the reason names
     // a budget: the loop concluded the attempt honestly.
     const attempted = plannedTaskRowOf(

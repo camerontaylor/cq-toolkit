@@ -1010,6 +1010,44 @@ test.each(['denylist hit', 'scanner fault'] as const)(
   },
 );
 
+test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)', async () => {
+  const f = await fixture();
+  let packageBody = '';
+  try {
+    // The failure that strands the unit leaves the run's planned rows empty
+    // until the pre-assembly refresh; the uploaded Unfixed section must still
+    // name the retained-branch row from the final accounting.
+    const result = await makeFixRun({
+      drivers: scripted('fail-b-safe-change'),
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (raw as { packages: Array<{ body?: string }> }).packages;
+                packageBody = packages[0]?.body ?? '';
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true, pushFailed: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(packageBody).toContain('## Unfixed (1)');
+    expect(packageBody).toContain('`cases/b.test.cjs`');
+    // The planned accounting behind the body matches the persisted report.
+    const report = reportOf(result);
+    expect(report.planned.length).toBeGreaterThan(0);
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless failure and never-started', async () => {
   const f = await fixture(1000);
   try {
@@ -1090,6 +1128,11 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
     expect(outcomes).toContainEqual(['cases/b.test.cjs', 'unfixed']);
     const outstanding = report.planned.filter((row) => row.outcome !== 'fixed');
     expect(outstanding.length).toBeGreaterThanOrEqual(2);
+    // Issue 615 (2): no placeholder row duplicates an attempted unit —
+    // every not-started/exhausted/cancelled row names a task no other row
+    // carries.
+    const plannedIds = report.planned.map((row) => row.task.id);
+    expect(new Set(plannedIds).size).toBe(plannedIds.length);
     // The fixed row keeps its verified evidence and the legacy metric.
     const fixed = report.planned.find((row) => row.outcome === 'fixed');
     expect(fixed?.commits).toHaveLength(1);
