@@ -119,8 +119,7 @@ export function prepareFindingEvidence(input: {
     const turnReasons = verdictOf(evidence);
     repairs.push({ requestedAfter: reasons, evidence, reasons: turnReasons });
     candidates.push({ evidence, reasons: turnReasons });
-    if (turnReasons.length === 0)
-      return { status: 'valid', evidence, candidates, repairs };
+    if (turnReasons.length === 0) return { status: 'valid', evidence, candidates, repairs };
     // The next repair request (if any) must cite the candidate just evaluated.
     reasons = turnReasons;
   }
