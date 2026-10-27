@@ -91,8 +91,14 @@ function installFakeNpm(
     fail: 'process.exitCode = 3;',
     populate: `populate(prefix, ${stubs});`,
     'populate-strip-patterns': `populate(prefix, ${stubs}); require('node:fs').rmSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/policy/denylist/patterns.yml'));`,
-    'populate-broken-cli': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/cli.js'), "console.log('hello from a broken cli'); process.exit(0);\\n");`,
-    'populate-refusing-mcp': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/harness/mcp/bin.js'), "process.stderr.write('cq-harness-mcp: refusing to start — fixture\\\\n'); process.exit(78);\\n");`,
+    // Both broken-bin fixtures overwrite stub dist files THROUGH the .bin
+    // mapping, so the replacement content must stay executable on every CI
+    // host: a shebang line (macOS spawns the mapping directly and returns
+    // spawnENOEXEC for shebang-less files) plus mode 0755 (writeFileSync
+    // truncates but does not reset permissions; the mode keeps the fixture
+    // intent explicit).
+    'populate-broken-cli': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/cli.js'), "#!/usr/bin/env node\\nconsole.log('hello from a broken cli'); process.exit(0);\\n"); require('node:fs').chmodSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/cli.js'), 0o755);`,
+    'populate-refusing-mcp': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/harness/mcp/bin.js'), "#!/usr/bin/env node\\nprocess.stderr.write('cq-harness-mcp: refusing to start — fixture\\\\n'); process.exit(78);\\n"); require('node:fs').chmodSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/harness/mcp/bin.js'), 0o755);`,
     // P2 regression coverage: the MCP bin RESPONDS to initialize + tools/list
     // but never exits after stdin EOF — the leg deadline must kill it and
     // fail the run instead of waiting forever. (hungMcpSource is inlined
