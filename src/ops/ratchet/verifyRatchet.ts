@@ -27,7 +27,9 @@
 //     predicate the promotion gate's policy pass uses) that authorizes
 //     every hit. Records stay dormant until the D-H.3 C3 attestation
 //     (D-G.4), and the CLI carrier binds none, so today every hit is
-//     needs-human. Authorized, the subject is judged on its evidence —
+//     needs-human. Trusted advisory posture treats ordinary definition changes
+//     as advice; privileged changes retain authorization. Authorized, the subject
+//     is judged on its evidence —
 //     produced under its new definitions — with the trust ref's lists and
 //     the stricter baseline unchanged.
 //   - MONOTONIC GUARD over the same range's `baselines/` diff, with the
@@ -48,6 +50,8 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
+import type { ProtectedPathsConfig } from '../gates/policyConfig.js';
+import { parsePolicyList, privilegedPathPredicate, POLICY_LIST_PATH } from '../gates/policyDiff.js';
 import { messageOf } from '../../shared/messageOf.js';
 import {
   authorizePaths,
@@ -341,87 +345,125 @@ async function judgeRatchet(
   return { ...base, baseline: baselineCmp, value, verdict: 'pass' };
 }
 
-/** The verifier op. See the module header for what is trusted and why. */
-export const verifyRatchet: Op<VerifyRatchetInput, VerifyRatchetOutcome> = async (input) => {
-  // The carrier resolves the PR base or merge-queue push before invoking this
-  // op. Bind that classification to the branch whose merge-base starts the
-  // judged range, so a mislabeled push cannot silently use the PR range.
-  const baseBranch = /^(?:refs\/remotes\/origin\/)?(main|merge-queue)$/.exec(input.base)?.[1];
-  if (baseBranch === undefined || (input.subjectKind === 'push' && baseBranch !== 'main')) {
-    return {
-      status: 'failed',
-      error: `ratchet verify: ${input.subjectKind} subject has invalid base '${input.base}'`,
-    };
-  }
-  let trust: string;
-  let subject: string;
-  let rangeBase: string;
-  try {
-    trust = await gitRevParse(input.repo, input.trustRef);
-    subject = await gitRevParse(input.repo, input.subject);
-    rangeBase = await gitMergeBase(input.repo, subject, input.base);
-  } catch (err) {
-    return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
-  }
+/** Bind posture from trusted caller configuration, never from subject input. */
+export const createVerifyRatchet =
+  (config: ProtectedPathsConfig): Op<VerifyRatchetInput, VerifyRatchetOutcome> =>
+  async (input) => {
+    // The carrier resolves the PR base or merge-queue push before invoking this
+    // op. Bind that classification to the branch whose merge-base starts the
+    // judged range, so a mislabeled push cannot silently use the PR range.
+    const baseBranch = /^(?:refs\/remotes\/origin\/)?(main|merge-queue)$/.exec(input.base)?.[1];
+    if (baseBranch === undefined || (input.subjectKind === 'push' && baseBranch !== 'main')) {
+      return {
+        status: 'failed',
+        error: `ratchet verify: ${input.subjectKind} subject has invalid base '${input.base}'`,
+      };
+    }
+    let trust: string;
+    let subject: string;
+    let rangeBase: string;
+    try {
+      trust = await gitRevParse(input.repo, input.trustRef);
+      subject = await gitRevParse(input.repo, input.subject);
+      rangeBase = await gitMergeBase(input.repo, subject, input.base);
+    } catch (err) {
+      return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
+    }
 
-  let manifest;
-  let graph: string[];
-  let changed: string[];
-  let diff: string;
-  try {
-    manifest = await loadTrustedManifest(input.repo, trust);
-    graph = await tsconfigGraphPaths(input.repo, trust);
-    changed = await gitChangedPaths(input.repo, rangeBase, subject);
-    diff = await gitDiffText(input.repo, rangeBase, subject, ['baselines/']);
-  } catch (err) {
-    return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
-  }
+    let manifest;
+    let graph: string[];
+    let changed: string[];
+    let diff: string;
+    try {
+      manifest = await loadTrustedManifest(input.repo, trust);
+      graph = await tsconfigGraphPaths(input.repo, trust);
+      changed = await gitChangedPaths(input.repo, rangeBase, subject);
+      diff = await gitDiffText(input.repo, rangeBase, subject, ['baselines/']);
+    } catch (err) {
+      return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
+    }
 
-  const graphSet = new Set(graph);
-  const definitionChanges = changed.filter(
-    (path) => isDefinitionPath(manifest, path) || graphSet.has(path),
-  );
-  const guard = checkDiffMonotonicity(normalizeBaselineDiffValues(diff, COVERAGE_BASELINE_PATH));
-  const measured = await readMeasurement(input.measurementPath);
-  const results: RatchetResult[] = [];
-  for (const def of manifest.ratchets) {
-    results.push(await judgeRatchet(def, input, trust, measured));
-  }
-
-  const reasons: string[] = [];
-  const d11 =
-    definitionChanges.length > 0 && input.authorization !== undefined
-      ? authorizePaths(input.authorization, definitionChanges)
-      : undefined;
-  const unauthorized = definitionChanges.length > 0 && d11?.authorized !== true;
-  if (unauthorized) {
-    reasons.push(
-      `needs-human (D11): the subject changes ratchet definitions — ${definitionChanges.join(', ')}`,
+    // Match the promotion gate's privileged-path decision using only the trust ref.
+    let ordinaryAdvisory = false;
+    if (config.posture === 'advisory') {
+      try {
+        const text = await gitReadBlob(input.repo, trust, POLICY_LIST_PATH);
+        if (text === null) throw new Error(`missing trusted ${POLICY_LIST_PATH}`);
+        const policy = parsePolicyList(text);
+        ordinaryAdvisory = !changed.some(privilegedPathPredicate(policy));
+      } catch (err) {
+        return { status: 'failed', error: `ratchet verify: ${messageOf(err)}` };
+      }
+    }
+    const dependencyChange = changed.some((path) =>
+      /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock)$/.test(path),
     );
-  }
-  if (d11 !== undefined) reasons.push(...d11.lines);
-  if (guard.ok === false) reasons.push(...formatViolations(guard.violations));
-  for (const r of results) {
-    if (r.verdict === 'fail') reasons.push(`${r.target}/${r.metric}: ${r.reason ?? 'failed'}`);
-  }
-  const failing = guard.ok === false || results.some((r) => r.verdict === 'fail');
-  const verdict = unauthorized ? 'needs-human' : failing ? 'fail' : 'pass';
-  if (verdict === 'pass') {
-    for (const r of results)
-      reasons.push(`${r.target}/${r.metric}: ${r.value} vs baseline ${r.baseline}`);
-  }
-  return {
-    status: 'ok',
-    value: {
-      verdict,
-      trustRef: trust,
-      subject,
-      rangeBase,
-      definitionChanges,
-      ...(d11 === undefined ? {} : { d11 }),
-      guard,
-      results,
-      reasons,
-    },
+    const graphSet = new Set(graph);
+    const definitionChanges = changed.filter(
+      (path) => isDefinitionPath(manifest, path) || graphSet.has(path),
+    );
+    const guard = checkDiffMonotonicity(normalizeBaselineDiffValues(diff, COVERAGE_BASELINE_PATH));
+    const measured = await readMeasurement(input.measurementPath);
+    const results: RatchetResult[] = [];
+    for (const def of manifest.ratchets) {
+      results.push(await judgeRatchet(def, input, trust, measured));
+    }
+
+    const reasons: string[] = [];
+    const d11 =
+      definitionChanges.length > 0 && input.authorization !== undefined
+        ? authorizePaths(input.authorization, definitionChanges)
+        : undefined;
+    const unauthorized =
+      !ordinaryAdvisory && definitionChanges.length > 0 && d11?.authorized !== true;
+    if (ordinaryAdvisory && definitionChanges.length > 0) {
+      reasons.push(`advisory (D11): definition changes — ${definitionChanges.join(', ')}`);
+    }
+    // A trusted old dependency tree cannot judge a candidate's new imports.
+    // The promotion gate still requires successful static CI on the exact candidate.
+    // Only numeric regressions are advisory: missing/malformed evidence still fails.
+    const advisoryRecompute = (r: RatchetResult): boolean =>
+      ordinaryAdvisory &&
+      dependencyChange &&
+      r.metric === 'typecheck-count' &&
+      r.evidence === 'recompute' &&
+      r.baseline !== null &&
+      r.value !== null;
+    if (unauthorized) {
+      reasons.push(
+        `needs-human (D11): the subject changes ratchet definitions — ${definitionChanges.join(', ')}`,
+      );
+    }
+    if (d11 !== undefined) reasons.push(...d11.lines);
+    if (guard.ok === false) reasons.push(...formatViolations(guard.violations));
+    for (const r of results) {
+      if (r.verdict === 'fail')
+        reasons.push(
+          `${advisoryRecompute(r) ? 'advisory (dependency universe): ' : ''}${r.target}/${r.metric}: ${r.reason ?? 'failed'}`,
+        );
+    }
+    const failing =
+      guard.ok === false || results.some((r) => r.verdict === 'fail' && !advisoryRecompute(r));
+    const verdict = unauthorized ? 'needs-human' : failing ? 'fail' : 'pass';
+    if (verdict === 'pass') {
+      for (const r of results)
+        reasons.push(`${r.target}/${r.metric}: ${r.value} vs baseline ${r.baseline}`);
+    }
+    return {
+      status: 'ok',
+      value: {
+        verdict,
+        trustRef: trust,
+        subject,
+        rangeBase,
+        definitionChanges,
+        ...(d11 === undefined ? {} : { d11 }),
+        guard,
+        results,
+        reasons,
+      },
+    };
   };
-};
+
+/** SDK callers remain strict unless a trusted caller explicitly binds a posture. */
+export const verifyRatchet = createVerifyRatchet({ posture: 'human', layer: 'default' });
