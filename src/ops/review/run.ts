@@ -97,7 +97,7 @@ type ReviewRunCoreResult = OpResult<FindingsRecord> & {
 };
 export type ReviewRunResult = ReviewRunCoreResult & {
   /** Known driver spend for this invocation, independent of persisted findings. */
-  usageSummary: KnownUsageSummary;
+  usageSummary?: KnownUsageSummary;
 };
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
