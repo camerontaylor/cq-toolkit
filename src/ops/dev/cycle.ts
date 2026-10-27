@@ -293,7 +293,17 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // The default address leg is CONSTRUCTED with the cycle's (metered)
     // driver factory: the whole cycle honours one wiring — test transports
     // injected here must not be replaced by real provider factories inside
-    // the address leg's own default construction.
+    // the address leg's own default construction. The UN-INJECTED path
+    // shares it deliberately too (it also feeds the default review.run leg
+    // above): an address leg that self-built createDriverFactory() would
+    // spend tokens no meter sees, and the ONE run budget's maxTokens
+    // (legBudget below) is computed from spentTokens. Sharing is safe
+    // because the factory carries no per-instance state: every resolve()
+    // constructs a FRESH lane instance and wrappers from immutable config
+    // (env knobs are read at resolve time, never cached), and meterDrivers
+    // forwards the whole one-method seam — DriverFactory is `resolve`
+    // alone, Driver is `run` alone, lane/modelSpec ride the spread — so
+    // the legs share the wiring, never driver state.
     const address =
       deps.address ?? ((step: ReviewAddressInput) => makeReviewAddress({ drivers })(step));
     // The forge effects for the findings-section compose: the DEFAULT
