@@ -23,6 +23,7 @@ import { mkdtempSync } from 'node:fs';
 import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { MockLanguageModelV4 } from 'ai/test';
+import { createAnthropic } from '@ai-sdk/anthropic';
 import { makeGitleaksFixture } from '../helpers/gitleaks-fixture.js';
 import { bindingsFromDispatch } from '../../src/ops/sweep/unit.js';
 import { APICallError } from '@ai-sdk/provider';
@@ -826,55 +827,131 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('the session request is fixed: the final step and the repair keep tools, toolChoice and system (#502)', async () => {
-    const requests: { tools: number; choice: string | undefined; system: string; tail: string }[] =
-      [];
-    const mock = new MockLanguageModelV4({
-      modelId: 'mock-1',
-      doGenerate: async (options) => {
-        const system = options.prompt.find((message) => message.role === 'system');
-        const last = options.prompt.at(-1);
-        requests.push({
-          tools: options.tools?.length ?? 0,
-          choice: options.toolChoice?.type,
-          system: typeof system?.content === 'string' ? system.content : '',
-          tail: last?.role === 'user' ? JSON.stringify(last.content) : String(last?.role),
+  test.each(['opencode-go', 'zai', 'ai-sdk'])(
+    'the complete prepared definitions stay fixed through final and repair: %s (#502)',
+    async (provider) => {
+      const requests: {
+        definitions: string;
+        choice: string;
+        system: string;
+        tail: string;
+        schemaBytes: number;
+        syntheticBytes: number;
+      }[] = [];
+      const mock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async (options) => {
+          const system = options.prompt.find((message) => message.role === 'system');
+          const last = options.prompt.at(-1);
+          const prepared = {
+            tools: options.tools,
+            toolChoice: options.toolChoice,
+            system: typeof system?.content === 'string' ? system.content : '',
+          };
+          requests.push({
+            definitions: JSON.stringify(options.tools),
+            choice: JSON.stringify(options.toolChoice),
+            system: prepared.system,
+            tail: last?.role === 'user' ? JSON.stringify(last.content) : String(last?.role),
+            schemaBytes:
+              options.tools?.reduce(
+                (total, entry) =>
+                  total +
+                  ('inputSchema' in entry
+                    ? Buffer.byteLength(JSON.stringify(entry.inputSchema), 'utf8')
+                    : 0),
+                0,
+              ) ?? 0,
+            // Serialized request shape only: these are NOT provider tokens or billed bytes.
+            syntheticBytes: Buffer.byteLength(JSON.stringify(prepared), 'utf8'),
+          });
+          if (offeredToolCount(options) > 0) return toolCallResult('read', { path: 'absent.txt' });
+          // The final step's text misses the schema, so the repair call runs too.
+          return requests.length === 3
+            ? textResult('not a JSON object')
+            : textResult('{"fixed":true,"notes":"ok"}');
+        },
+      });
+      const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-fixed-'));
+      try {
+        const driver = new AiSdkDriver({
+          providers: { [provider]: () => mock },
+          sessionsDir: join(scratchDir, 'sessions'),
         });
-        if (offeredToolCount(options) > 0) return toolCallResult('read', { path: 'absent.txt' });
-        // The final step's text misses the schema, so the repair call runs too.
-        return requests.length === 3
-          ? textResult('not a JSON object')
-          : textResult('{"fixed":true,"notes":"ok"}');
-      },
-    });
-    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-final-fixed-'));
+        const result = await driver.run(
+          invocation({
+            modelSpec: { provider, model: 'mock-1' },
+            budget: { maxSteps: 3 },
+            toolPolicy: { allow: ['read'], mode: 'allowlist' },
+            outputSchema: toOutputSchema(
+              'test/final-fixed/v1',
+              z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+            ),
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(requests).toHaveLength(4);
+        // Compare whole prepared definitions, not just names or tool counts.
+        expect(JSON.parse(requests[0]!.definitions)).toMatchObject([{ name: 'read' }]);
+        expect(requests[0]!.schemaBytes).toBe(410);
+        expect(requests[0]!.syntheticBytes).toBeGreaterThan(0);
+        for (const request of requests) {
+          expect(request.definitions).toBe(requests[0]?.definitions);
+          expect(request.choice).toBe(requests[0]?.choice);
+          expect(request.system).toBe(requests[0]?.system);
+          expect(request.schemaBytes).toBe(requests[0]?.schemaBytes);
+          expect(request.syntheticBytes).toBe(requests[0]?.syntheticBytes);
+        }
+        expect(requests[0]?.choice).toBe('{"type":"auto"}');
+        expect(requests.reduce((total, request) => total + request.syntheticBytes, 0)).toBe(
+          4 * requests[0]!.syntheticBytes,
+        );
+        expect(requests.reduce((total, request) => total + request.schemaBytes, 0)).toBe(1640);
+        expect(requests[0]?.system).toContain('use the available tools');
+        // Only the trailing instruction turn differs.
+        expect(requests[2]?.tail).toContain('This is your final step');
+        expect(requests[3]?.tail).toContain('did not satisfy the required JSON contract');
+      } finally {
+        await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('legacy Anthropic JSON-tool fallback is present on the offline wire (#505)', async () => {
+    const requests: Record<string, unknown>[] = [];
+    const offlineFetch: typeof fetch = async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: 'offline fixture stop' },
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-anthropic-offline-'));
     try {
+      const anthropic = createAnthropic({ apiKey: 'offline-fixture', fetch: offlineFetch });
       const driver = new AiSdkDriver({
-        providers: { mock: () => mock },
+        providers: { anthropic: () => anthropic.languageModel('claude-sonnet-4-20250514') },
         sessionsDir: join(scratchDir, 'sessions'),
       });
       const result = await driver.run(
         invocation({
-          budget: { maxSteps: 3 },
-          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          modelSpec: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+          toolPolicy: { mode: 'allowlist', allow: ['read'] },
           outputSchema: toOutputSchema(
-            'test/final-fixed/v1',
-            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+            'test/anthropic-legacy/v1',
+            z.object({ answer: z.string() }).strict(),
           ),
         }),
       );
-      expect(result.stopReason).toBe('complete');
-      expect(requests).toHaveLength(4);
-      // Every request, final step and repair included, has the same shape.
-      for (const request of requests) {
-        expect(request.tools).toBe(1);
-        expect(request.choice).toBe('auto');
-        expect(request.system).toBe(requests[0]?.system);
-      }
-      expect(requests[0]?.system).toContain('use the available tools');
-      // Only the trailing instruction turn differs.
-      expect(requests[2]?.tail).toContain('This is your final step');
-      expect(requests[3]?.tail).toContain('did not satisfy the required JSON contract');
+      expect(result.stopReason).toBe('error');
+      expect(requests).toHaveLength(1);
+      const tools = requests[0]?.tools;
+      expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'json' })]));
+      expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'read' })]));
+      expect(requests[0]).not.toHaveProperty('output_config');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -970,10 +1047,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('the repair sends the same tool names as the main loop, aliases included (#502)', async () => {
     const toolNames: string[][] = [];
+    const preparedDefinitions: string[] = [];
     const mock = new MockLanguageModelV4({
       modelId: 'mock-1',
       doGenerate: async (options) => {
         toolNames.push((options.tools ?? []).map((t) => ('name' in t ? t.name : '')).sort());
+        preparedDefinitions.push(JSON.stringify(options.tools));
         return toolNames.length === 1
           ? textResult('not a JSON object')
           : textResult('{"fixed":true,"notes":"ok"}');
@@ -999,6 +1078,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(toolNames).toHaveLength(2);
       expect(toolNames[0]).toContain('run');
       expect(toolNames[1]).toEqual(toolNames[0]);
+      expect(preparedDefinitions[1]).toBe(preparedDefinitions[0]);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
