@@ -2476,7 +2476,7 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
       expect(result.error).toBeUndefined();
       expect(result.denials).toHaveLength(1);
       expect(result.denials[0]?.tool).toBe('read');
-      expect(result.denials[0]?.reason.startsWith('path escape:')).toBe(true);
+      expect(result.denials[0]?.reason.startsWith('PATH_ESCAPE: path escape:')).toBe(true);
       // The session record speaks harness names, never the qualified spelling.
       const record = await store.load(result.sessionId as string);
       const toolMessages = record?.messages.filter(
@@ -2550,9 +2550,11 @@ describe('claude-code CLI transport: the closed harness tool surface (W1.4)', ()
     handleStdoutLine(harnessDenied, toolUseLine('t3', read));
     handleStdoutLine(
       harnessDenied,
-      toolResultLine('t3', [{ type: 'text', text: "file not found: 'x'" }]),
+      toolResultLine('t3', [{ type: 'text', text: "FS_NOT_FOUND: file not found: 'x'" }]),
     );
-    expect(harnessDenied.denials).toEqual([{ tool: 'read', reason: "file not found: 'x'" }]);
+    expect(harnessDenied.denials).toEqual([
+      { tool: 'read', reason: "FS_NOT_FOUND: file not found: 'x'" },
+    ]);
     expect(harnessDenied.harnessFailure).toBeUndefined();
 
     // (d) Anything else on a harness tool → transport failure, never a denial.

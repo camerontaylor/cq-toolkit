@@ -200,7 +200,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
       if (!result?.ok) {
         expect(result?.denial.tool).toBe('bash');
         expect(result?.denial.reason).toBe(
-          'command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring',
+          'CMD_DENIED: command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring',
         );
       }
     });
@@ -255,7 +255,7 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
       expect(result?.ok).toBe(false);
       if (!result?.ok) {
         expect(result?.denial.reason).toBe(
-          'command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring',
+          'CMD_DENIED: command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring',
         );
       }
     });
@@ -332,7 +332,7 @@ describe('symlink hardening (fix 5)', () => {
       expect(viaLink?.ok).toBe(false);
       if (!viaLink?.ok) {
         expect(viaLink?.denial.reason).toBe(
-          "path not allowed by harness config allowlist: 'src/link'",
+          "PATH_DENIED: path not allowed by harness config allowlist: 'src/link'",
         );
       }
 
@@ -471,7 +471,7 @@ describe('run: process-group cancellation (W1.4)', () => {
         controller.abort();
         const result = await pending;
         expect(result).toMatchObject({ ok: true, exitCode: null, killed: true });
-        if (result?.ok) expect(result.output).toContain('killed by signal (exit null)');
+        if (result?.ok) expect(result.output).toMatch(/^CANCELLED: killed by signal/);
         await expectDead(pid);
       });
     },
@@ -493,6 +493,7 @@ describe('run: process-group cancellation (W1.4)', () => {
           );
           const result = await run?.execute({ command: GRANDCHILD });
           expect(result).toMatchObject({ ok: true, exitCode: null, killed: true });
+          if (result?.ok) expect(result.output).toMatch(/^TIMEOUT: /);
           const text = await readFile(join(scratchDir, 'pid.txt'), 'utf8').catch(() => '');
           if (text.endsWith('\n')) pid = Number(text.trim());
         });
@@ -589,7 +590,7 @@ describe('run: results, output retention and spawn failure (W1.4)', () => {
       expect(result?.ok).toBe(false);
       if (!result?.ok) {
         expect(result?.denial.tool).toBe('bash');
-        expect(result?.denial.reason.startsWith('bash failed: ')).toBe(true);
+        expect(result?.denial.reason.startsWith('EXECUTION_ERROR: bash failed: ')).toBe(true);
       }
     });
   });
@@ -644,7 +645,9 @@ describe('toolkit invariant: read/edit never touch .git (W1.4 composition review
         expect(result?.ok, input.path).toBe(false);
         if (result?.ok !== false) continue;
         expect(result.denial.tool).toBe('edit');
-        expect(result.denial.reason, input.path).toMatch(/^path not allowed: .*\.git directory/);
+        expect(result.denial.reason, input.path).toMatch(
+          /^PATH_DENIED: path not allowed: .*\.git directory/,
+        );
         expect(isHarnessDenial(result.denial.reason)).toBe(true);
       }
       const readGit = await read?.execute({ path: '.git/HEAD' });

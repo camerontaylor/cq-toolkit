@@ -235,7 +235,7 @@ describe('tools/list + tools/call', () => {
     expect(reply['error']).toBeUndefined();
     expect(reply['result']).toMatchObject({ isError: true });
     const text = (reply['result'] as { content: Array<{ text: string }> }).content[0]?.text;
-    expect(text?.startsWith('path escape: ')).toBe(true);
+    expect(text?.startsWith('PATH_ESCAPE: path escape: ')).toBe(true);
   });
 
   test('omitted arguments are passed as {} (a schema denial, not a crash)', async () => {
@@ -244,7 +244,7 @@ describe('tools/list + tools/call', () => {
     const reply = await io.next();
     expect(reply['result']).toMatchObject({ isError: true });
     const text = (reply['result'] as { content: Array<{ text: string }> }).content[0]?.text;
-    expect(text?.startsWith('invalid input: ')).toBe(true);
+    expect(text?.startsWith('INPUT_INVALID: invalid input: ')).toBe(true);
   });
 
   test.each([

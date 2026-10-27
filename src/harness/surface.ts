@@ -42,6 +42,7 @@ import { resolve } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
 import { stripMetaSchema } from '../shared/json-schema.js';
+import { TOOL_FAILURE_KINDS } from './failures.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 import { buildTools, canonicalToolName, toolAliases } from './tools.js';
@@ -316,7 +317,7 @@ export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
                 ok: false,
                 denial: {
                   tool: tool.name,
-                  reason: 'cancelled: the call was cancelled before it ran',
+                  reason: 'CANCELLED: cancelled: the call was cancelled before it ran',
                 },
               }
             : await tool.execute(args, opts);
@@ -338,6 +339,7 @@ export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
  * (tools.ts header; the conformance suite asserts on them). Frozen.
  */
 export const HARNESS_DENIAL_PREFIXES: readonly string[] = Object.freeze([
+  ...TOOL_FAILURE_KINDS.map((kind) => `${kind}: `),
   'sandbox: ',
   'invalid input: ',
   'path escape: ',

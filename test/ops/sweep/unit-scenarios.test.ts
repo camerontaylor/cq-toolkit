@@ -208,6 +208,27 @@ async function runUnit(
 }
 
 describe('sweep unit in-process scenarios', () => {
+  test('default unit worker can read before editing an existing file', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const seen: unknown[] = [];
+    try {
+      await runUnit(world, {
+        driver: {
+          run: async (invocation) => {
+            seen.push(invocation.toolPolicy);
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+            };
+          },
+        },
+      });
+      expect(seen).toEqual([{ allow: ['read', 'edit'], mode: 'allowlist' }]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
   test('failed publication pushes the scanned SHA even if its branch moves during scanning', async () => {
     const world = await makeWorld([{ failing: true }, { failing: true }]);
     const underlying = world.gitFactory();

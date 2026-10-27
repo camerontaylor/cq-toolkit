@@ -48,6 +48,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, truncate } from 'node:fs/prom
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { TOOL_FAILURE_KINDS } from './failures.js';
 
 // ---------------------------------------------------------------------------
 // Shapes — plain data, our vocabulary
@@ -130,6 +131,7 @@ const ToolFailureLineSchema = z
   .object({
     type: z.literal('tool-failure'),
     kind: z.enum([
+      ...TOOL_FAILURE_KINDS,
       'invalid-input',
       'unknown-tool',
       'denial',

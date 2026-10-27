@@ -337,7 +337,7 @@ describe('createHarnessSurface', () => {
     });
     const denied = await surface.call('read', { path: '../x' });
     expect(denied.result.isError).toBe(true);
-    expect(denied.result.content[0]?.text.startsWith('path escape: ')).toBe(true);
+    expect(denied.result.content[0]?.text.startsWith('PATH_ESCAPE: path escape: ')).toBe(true);
     expect(denied.outcome.ok).toBe(false);
   });
 
@@ -377,7 +377,10 @@ describe('createHarnessSurface', () => {
     );
     expect(outcome).toEqual({
       ok: false,
-      denial: { tool: 'bash', reason: 'cancelled: the call was cancelled before it ran' },
+      denial: {
+        tool: 'bash',
+        reason: 'CANCELLED: cancelled: the call was cancelled before it ran',
+      },
     });
   });
 });
@@ -487,15 +490,15 @@ describe('isHarnessDenial against real denials', () => {
       const result = reasons[key];
       return result !== undefined && !result.ok ? result.denial.reason : '';
     };
-    expect(reasonOf('sandboxEdit')).toBe('sandbox: read-only');
-    expect(reasonOf('sandboxBash')).toBe('sandbox: read-only');
-    expect(reasonOf('sandboxWrite')).toBe('sandbox: read-only');
-    expect(reasonOf('symlinkEscape')).toMatch(/^path escape: .*symlink/);
-    expect(reasonOf('metacharacters')).toMatch(/^command allowlist: /);
-    expect(reasonOf('readFailed')).toMatch(/^read failed: /);
-    expect(reasonOf('runFailed')).toMatch(/^bash failed: /);
+    expect(reasonOf('sandboxEdit')).toBe('PATH_DENIED: sandbox: read-only');
+    expect(reasonOf('sandboxBash')).toBe('PATH_DENIED: sandbox: read-only');
+    expect(reasonOf('sandboxWrite')).toBe('PATH_DENIED: sandbox: read-only');
+    expect(reasonOf('symlinkEscape')).toMatch(/^PATH_ESCAPE: path escape: .*symlink/);
+    expect(reasonOf('metacharacters')).toMatch(/^CMD_DENIED: command allowlist: /);
+    expect(reasonOf('readFailed')).toMatch(/^EXECUTION_ERROR: read failed: /);
+    expect(reasonOf('runFailed')).toMatch(/^EXECUTION_ERROR: bash failed: /);
     if (reasons['editFailed'] !== undefined)
-      expect(reasonOf('editFailed')).toMatch(/^edit failed: /);
+      expect(reasonOf('editFailed')).toMatch(/^EXECUTION_ERROR: edit failed: /);
   });
 });
 
@@ -634,10 +637,15 @@ describe('queued cancellation (improvement pass)', () => {
     const { result, outcome } = await queued;
     expect(outcome).toEqual({
       ok: false,
-      denial: { tool: 'edit', reason: 'cancelled: the call was cancelled before it ran' },
+      denial: {
+        tool: 'edit',
+        reason: 'CANCELLED: cancelled: the call was cancelled before it ran',
+      },
     });
     expect(result.isError).toBe(true);
-    expect(isHarnessDenial('cancelled: the call was cancelled before it ran')).toBe(true);
+    expect(isHarnessDenial('CANCELLED: cancelled: the call was cancelled before it ran')).toBe(
+      true,
+    );
     expect(readFileSync(join(workspace, 'note.txt'), 'utf8')).toBe('before\n');
   }, 20_000);
 });

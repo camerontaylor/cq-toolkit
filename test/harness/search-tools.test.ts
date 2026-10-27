@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
+import * as runner from '../../src/harness/run.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import { buildTools } from '../../src/harness/tools.js';
@@ -35,6 +36,39 @@ function configWithReadPaths(pathPatterns: string[], maxOutputChars?: number): H
     },
   };
 }
+
+test.each([
+  ['enumeration', false],
+  ['enumeration', true],
+  ['grep', false],
+  ['grep', true],
+] as const)('search %s distinguishes deadline from caller abort (%s)', async (phase, aborted) => {
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'a.txt'), 'needle');
+    const controller = new AbortController();
+    const original = runner.runArgvCommand;
+    const spy = vi
+      .spyOn(runner, 'runArgvCommand')
+      .mockImplementation(async (file, args, options) => {
+        if ((phase === 'grep') === args.includes('--json')) {
+          if (aborted) controller.abort();
+          return { kind: 'killed', stdout: '', stderr: '', overflowed: false };
+        }
+        return original(file, args, options);
+      });
+    try {
+      const result = await tool(
+        buildTools(defaultHarnessConfig, workspace, 'read-only'),
+        'grep',
+      ).execute({ pattern: 'needle' }, { signal: controller.signal });
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.denial.reason).toMatch(new RegExp(`^${aborted ? 'CANCELLED' : 'TIMEOUT'}: `));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
 
 describe('windowed read tool', () => {
   test('uses 1-based windows, line numbers, the path alias, and a continuation hint', async () => {
@@ -175,12 +209,17 @@ describe('contained grep and glob tools', () => {
     });
   });
 
-  test('honors .gitignore while still enumerating hidden workspace files', async () => {
+  test('glob includes ignored and hidden files while grep respects .gitignore', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, '.git'), { recursive: true });
       await mkdir(join(workspace, 'ignored'), { recursive: true });
       await writeFile(join(workspace, '.gitignore'), 'ignored/\n', 'utf8');
       await writeFile(join(workspace, 'ignored', 'secret.ts'), 'ignored-needle\n', 'utf8');
+      await writeFile(join(workspace, '.hidden.ts'), 'visible-needle\n', 'utf8');
+      for (const vcs of ['.git', '.hg', '.svn']) {
+        await mkdir(join(workspace, vcs), { recursive: true });
+        await writeFile(join(workspace, vcs, 'internal.ts'), 'vcs-needle\n', 'utf8');
+      }
       const tools = buildTools(defaultHarnessConfig, workspace, 'read-only');
       await expect(
         tool(tools, 'grep').execute({ pattern: 'ignored-needle' }),
@@ -190,7 +229,17 @@ describe('contained grep and glob tools', () => {
       });
       const listed = await tool(tools, 'glob').execute({ pattern: '**/*.ts' });
       expect(listed.ok).toBe(true);
-      if (listed.ok) expect(listed.output).not.toContain('ignored/secret.ts');
+      if (listed.ok) {
+        expect(listed.output).toContain('ignored/secret.ts');
+        expect(listed.output).toContain('.hidden.ts');
+        expect(listed.output).not.toContain('internal.ts');
+      }
+      await expect(
+        tool(tools, 'grep').execute({ pattern: 'visible-needle' }),
+      ).resolves.toMatchObject({
+        ok: true,
+        output: expect.stringContaining('.hidden.ts') as unknown,
+      });
     });
   });
 
@@ -252,6 +301,12 @@ describe('contained grep and glob tools', () => {
       const gitFile = await grep.execute({ pattern: 'gitdir', path: 'nested/.git' });
       expect(gitFile.ok).toBe(false);
       if (!gitFile.ok) expect(gitFile.denial.reason).toContain('.git');
+      const glob = tool(tools, 'glob');
+      for (const path of ['outside-link', 'git-link', 'nested/.git']) {
+        const denied = await glob.execute({ pattern: '**/*', path });
+        expect(denied.ok).toBe(false);
+        if (!denied.ok) expect(denied.denial.reason).toMatch(/^(PATH_ESCAPE|PATH_DENIED): /);
+      }
       const broadSearch = await grep.execute({ pattern: 'external-secret' });
       expect(broadSearch).toMatchObject({ ok: true, output: 'No matches' });
     });

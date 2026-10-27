@@ -1,4 +1,4 @@
-Toolkit-owned minimal tool surface (read/edit/write/bash), per-op allowlists.
+Toolkit-owned minimal tool surface (read/edit/write/grep/glob/bash), per-op allowlists.
 The pre-F1 `run` tool name and `path`/`oldText`/`newText` edit arguments are
 accepted as one-release aliases.
 Land: phase 1 (WS-B).
@@ -22,12 +22,13 @@ File tools accept `filePath` or `path` for `file_path`. Edit also accepts
 `oldString`/`oldText`, `newString`/`newText`, and `replaceAll`. Equal alias
 values may be supplied together; conflicting values fail validation. Schemas
 remain strict: unrecognised options are rejected. The ai-sdk request advertises
-only canonical fields with short field help; compatibility aliases are checked
-and normalized by the schema validator before execution. Denial and command
-failure results carry typed `tool-failure` hints.
+only canonical fields; compatibility aliases are checked
+and normalized by the schema validator before execution. Model-visible failures start with a stable code followed by prose; see the vocabulary below.
 
 Grep accepts `ignore_case` (`-i` or `ignoreCase`), `output_mode` (`content`,
 `files_with_matches`, `count`), and `head_limit` (0 uses the safety cap).
+Glob includes hidden and ignored files, excluding `.git`, `.hg` and `.svn` directories.
+Grep respects `.gitignore`; both retain workspace containment and path allowlists.
 Counts are matching lines within the existing search limits; truncation
 markers identify partial results; capped count rows use `+` for lower bounds. Bash accepts `timeoutMs` for `timeout`,
 `workdir`/`cwd` within the workspace (lexical and symlink containment), and
@@ -51,6 +52,38 @@ unexecuted final/repair calls. Ordinary nonzero shell exits remain results. Revi
 Claude Code CLI and ACP also expose their existing observed failure counts;
 they retain their native transcript formats. Claude Code SDK transport and
 native-lane structured diagnostic logging remain separate work.
+
+## Failure codes
+
+New ai-sdk session failure lines use the same `kind` as the leading code in
+model-visible failure text (`CODE: explanation`). SDK validation and unknown-tool
+errors are normalized before the next model request. The schema still accepts
+legacy lowercase failure kinds when reading old sessions.
+
+| Code                     | Meaning                                                     |
+| ------------------------ | ----------------------------------------------------------- |
+| `FS_NOT_FOUND`           | Target file or search root does not exist                   |
+| `FS_NOT_READ`            | Read the file before editing or overwriting                 |
+| `FS_STALE`               | File changed since the recorded read                        |
+| `FS_UNSUPPORTED`         | Unsupported file representation or target type              |
+| `EDIT_NO_MATCH`          | Exact old text was not found                                |
+| `EDIT_AMBIGUOUS`         | Multiple matches; add context or use `replace_all`          |
+| `PATH_ESCAPE`            | Lexical or resolved path escapes the workspace              |
+| `PATH_DENIED`            | Sandbox, `.git` invariant or path allowlist refusal         |
+| `INPUT_INVALID`          | Tool input failed strict validation                         |
+| `SEARCH_INVALID_PATTERN` | Ripgrep rejected the regular expression                     |
+| `SEARCH_LIMIT`           | Search could not proceed within its safety limit            |
+| `CMD_DENIED`             | Command policy refused execution                            |
+| `TIMEOUT`                | Command or search exceeded its execution deadline           |
+| `CANCELLED`              | Execution was cancelled                                     |
+| `UNSUPPORTED`            | Explicitly unsupported option, such as background execution |
+| `UNKNOWN_TOOL`           | Tool name is absent from the selected surface               |
+| `EXECUTION_ERROR`        | Other filesystem, process or tool execution error           |
+| `FINAL_STEP`             | Tool call denied by the final-step backstop                 |
+| `REPAIR_STEP`            | Tool call refused during structured-output repair           |
+
+A nonzero shell exit is an ordinary result, with its exit code preserved.
+Native lanes keep their existing failure-count and transcript conventions.
 
 ## Closed-form git commands
 

@@ -200,6 +200,7 @@ import {
   generateText,
   jsonSchema,
   NoObjectGeneratedError,
+  InvalidToolInputError,
   Output,
   stepCountIs,
   wrapLanguageModel,
@@ -236,8 +237,9 @@ import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool, ToolExecuteOptions } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
-import type { SessionMessage, SessionRecord, ToolFailureLine } from '../../harness/session.js';
-import { messageOf } from '../../shared/messageOf.js';
+import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import { invalidToolInput, toolFailureKind } from '../../harness/failures.js';
+import type { ToolFailureKind } from '../../harness/failures.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
@@ -676,12 +678,13 @@ export class AiSdkDriver implements Driver {
     // no-policy behavior; an expressed environment is resolved by the gate.
     const denials: ToolDenial[] = [];
     const failedCalls = new Set<string>();
+    const sdkErrorKinds = new Map<string, ToolFailureKind>();
     let toolStep = 0;
     const recordFailure = async (
       id: string,
       toolName: string,
       input: unknown,
-      kind: ToolFailureLine['kind'],
+      fallbackKind: ToolFailureKind,
       reason: string,
       step = toolStep,
     ): Promise<void> => {
@@ -690,6 +693,7 @@ export class AiSdkDriver implements Driver {
       failedCalls.add(key);
       failures.count += 1;
       if (this.harnessConfig.logToolFailures !== true) return;
+      const kind = toolFailureKind(reason, fallbackKind);
       // Scan complete diagnostics before bounding them. Without a configured
       // scanner retain only a shape summary; values and vendor errors may contain secrets.
       let tool = boundedErrorText(toolName).slice(0, 128);
@@ -762,19 +766,27 @@ export class AiSdkDriver implements Driver {
         if (!repair && part.type !== 'tool-error' && part.invalid !== true) continue;
         const name = part.toolName ?? 'unknown';
         const kind = repair
-          ? 'repair-step'
+          ? 'REPAIR_STEP'
           : !Object.hasOwn(toolSet, name)
-            ? 'unknown-tool'
-            : part.invalid === true || part.type === 'tool-call'
-              ? 'invalid-input'
-              : 'execution';
+            ? 'UNKNOWN_TOOL'
+            : part.invalid === true ||
+                InvalidToolInputError.isInstance(part.error) ||
+                part.type === 'tool-call'
+              ? 'INPUT_INVALID'
+              : 'EXECUTION_ERROR';
+        if (part.toolCallId !== undefined && part.error instanceof Error) {
+          sdkErrorKinds.set(
+            JSON.stringify([part.toolCallId, String(part.error)]),
+            toolFailureKind(describeError(part.error), kind),
+          );
+        }
         await recordFailure(
           part.toolCallId ?? `${stepNumber}:${name}`,
           name,
           part.input,
           kind,
           repair
-            ? 'tool calls are disabled during structured-output repair'
+            ? 'REPAIR_STEP: tool calls are disabled during structured-output repair'
             : describeError(part.error ?? 'invalid tool input'),
           stepNumber,
         );
@@ -865,7 +877,7 @@ export class AiSdkDriver implements Driver {
             } catch (error) {
               return {
                 success: false,
-                error: new Error(`[tool-failure:invalid-input] ${messageOf(error)}`),
+                error: new Error(invalidToolInput(error)),
               };
             }
           },
@@ -881,14 +893,15 @@ export class AiSdkDriver implements Driver {
           if (finalStepStarted) {
             const denial = {
               tool: harnessTool.name,
-              reason: 'tool calls are disabled on the final step; reply with the answer',
+              reason:
+                'FINAL_STEP: tool calls are disabled on the final step; reply with the answer',
             };
             denials.push(denial);
             await recordFailure(
               options.toolCallId,
               harnessTool.name,
               input,
-              'final-step',
+              'FINAL_STEP',
               denial.reason,
             );
             await store.appendMessage(record.sessionId, {
@@ -897,7 +910,7 @@ export class AiSdkDriver implements Driver {
               content: JSON.stringify({ ok: false, denial }),
               at: nowIso(),
             });
-            return `[tool-failure:final-step] ${denial.reason}`;
+            return denial.reason;
           }
           return runTool(
             harnessTool,
@@ -962,6 +975,32 @@ export class AiSdkDriver implements Driver {
     // dishonest evidence). The fold never feeds a cost figure on this path.
     // ai@7 response.messages covers one step; retain every completed step
     // for repair, including when native output parsing throws after the loop.
+    const normalizeToolErrors = (messages: readonly ModelMessage[]): ModelMessage[] =>
+      messages.map((message): ModelMessage => {
+        if (message.role !== 'tool') return message;
+        return {
+          ...message,
+          content: message.content.map((part) => {
+            if (part.type !== 'tool-result' || part.output.type !== 'error-text') return part;
+            const text = part.output.value;
+            const kind =
+              sdkErrorKinds.get(JSON.stringify([part.toolCallId, text])) ??
+              toolFailureKind(
+                text,
+                Object.hasOwn(toolSet, part.toolName) ? 'EXECUTION_ERROR' : 'UNKNOWN_TOOL',
+              );
+            const start = text.indexOf(`${kind}: `);
+            return {
+              ...part,
+              output: {
+                type: 'error-text',
+                value: start < 0 ? `${kind}: ${text}` : text.slice(start),
+              },
+            };
+          }),
+        };
+      });
+
     const responseMessages: ModelMessage[] = [];
     let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     let completedSteps = 0;
@@ -1011,28 +1050,30 @@ export class AiSdkDriver implements Driver {
           // pseudo-tool-call text (Step 4 eval, eb8f80ac and 49c3715c). A call
           // the model makes anyway is denied by the executor backstop above.
           // Pure step-number function — no scheduling primitive (I8).
-          ...(outputSchema !== undefined && selected.length > 0
-            ? {
-                prepareStep: ({ stepNumber, messages }) => {
-                  toolStep = stepNumber;
-                  if (stepNumber < effectiveStepCap - 1) return undefined;
-                  finalStepStarted = true;
-                  return {
-                    messages: [
-                      ...messages,
-                      { role: 'user' as const, content: finalStepContract(outputSchema, prompted) },
-                    ],
-                  };
-                },
-              }
-            : {}),
+          prepareStep: ({ stepNumber, messages }) => {
+            toolStep = stepNumber;
+            const typedMessages = normalizeToolErrors(messages);
+            if (
+              outputSchema === undefined ||
+              selected.length === 0 ||
+              stepNumber < effectiveStepCap - 1
+            )
+              return { messages: typedMessages };
+            finalStepStarted = true;
+            return {
+              messages: [
+                ...typedMessages,
+                { role: 'user' as const, content: finalStepContract(outputSchema, prompted) },
+              ],
+            };
+          },
           stopWhen,
           onStepFinish: async (step) => {
             await observeToolStep(step, false, completedSteps);
             completedSteps += 1;
             toolStep = completedSteps;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
-            responseMessages.push(...step.response.messages);
+            responseMessages.push(...normalizeToolErrors(step.response.messages));
             lastStep = {
               usage: step.usage,
               toolCalls: step.toolCalls as readonly unknown[] | undefined,
@@ -2051,12 +2092,19 @@ async function runTool(
   denials: ToolDenial[],
   guard?: AiSdkDriverOptions['beforeRequest'],
   options?: ToolExecuteOptions,
-  onFailure?: (reason: string, kind: ToolFailureLine['kind']) => Promise<void>,
+  onFailure?: (reason: string, kind: ToolFailureKind) => Promise<void>,
   scanDiagnostic?: AiSdkDriverOptions['beforeRequest'],
 ): Promise<string> {
   const result = await harnessTool.execute(input, options);
-  if (!result.ok) await onFailure?.(result.denial.reason, 'denial');
-  else if (result.killed) await onFailure?.('tool execution timed out or was killed', 'execution');
+  if (!result.ok)
+    await onFailure?.(
+      result.denial.reason,
+      toolFailureKind(result.denial.reason, 'EXECUTION_ERROR'),
+    );
+  else if (result.killed) {
+    const kind = toolFailureKind(result.output, 'TIMEOUT');
+    await onFailure?.(`${kind}: tool execution was killed`, kind);
+  }
   if (guard !== undefined && result.ok) {
     const contents: { text: string; path?: string }[] = [{ text: result.output }];
     if (
@@ -2106,10 +2154,10 @@ async function runTool(
     at: nowIso(),
   });
   if (result.ok) {
-    return result.killed ? `[tool-failure:execution] ${result.output}` : result.output;
+    return result.output;
   }
   denials.push(result.denial);
-  return `[tool-failure:denial] ${result.denial.reason}`;
+  return result.denial.reason;
 }
 
 /** Our session transcript → SDK messages (plain text replay; tool turns folded into user turns). */
