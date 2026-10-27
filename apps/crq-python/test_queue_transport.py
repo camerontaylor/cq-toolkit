@@ -182,6 +182,60 @@ class QueueTransportTests(unittest.TestCase):
         Path(self.tmp.name, rid + ".json").write_text("tampered")
         with self.assertRaisesRegex(ValueError, "digest"): self.call("status")
 
+    def test_receipt_request_reads_once_bounded_and_matches_q1_pages(self):
+        rid, doc = self.receipt()
+        path = Path(self.tmp.name, rid + ".json")
+        data = path.read_bytes()
+        manifest = receipts.read_receipt(self.tmp.name, rid)
+        first = receipts.read_receipt(self.tmp.name, rid, rid + ":0")
+        self.assertGreater(manifest["chunks"], 10)
+        # Each request gets a fresh verified snapshot, not one full read per page.
+        for op, extra, expected in [("status", {}, None),
+                ("report", {"receiptId": rid, "cursor": None}, manifest),
+                ("report", {"receiptId": rid, "cursor": rid + ":0"}, first)]:
+            stream = mock.MagicMock(wraps=io.BytesIO(data))
+            stream.__enter__.return_value = stream
+            with mock.patch.object(Path, "open", return_value=stream) as opened, \
+                    mock.patch.object(receipts, "read_receipt", side_effect=AssertionError("per-page reread")):
+                result = self.call(op, **extra)
+            opened.assert_called_once_with("rb")
+            stream.read.assert_called_once_with(transport.MAX_RECEIPT_BYTES + 1)
+            if expected is not None:
+                self.assertEqual(result["page"], expected)
+
+    def test_snapshot_pages_stay_bound_and_next_request_rejects_tampering(self):
+        rid, doc = self.receipt()
+        expected = receipts.read_receipt(self.tmp.name, rid, rid + ":0")
+        self.call("report", receiptId=rid, cursor=None)
+        original = transport._ReceiptSnapshot.page
+        def replace_after_verification(snapshot, cursor=None):
+            Path(self.tmp.name, rid + ".json").write_bytes(b"tampered")
+            return original(snapshot, cursor)
+        with mock.patch.object(transport._ReceiptSnapshot, "page", replace_after_verification):
+            self.assertEqual(self.call("report", receiptId=rid, cursor=rid + ":0")["page"], expected)
+        with self.assertRaisesRegex(ValueError, "digest"):
+            self.call("status")
+
+    def test_snapshot_capacity_and_authorization_fail_before_consumption(self):
+        rid, doc = self.receipt()
+        before = copy.deepcopy(self.q)
+        with mock.patch.object(transport, "MAX_RECEIPT_BYTES", 32):
+            with self.assertRaisesRegex(ValueError, "capacity"):
+                self.call("report", receiptId=rid, cursor=None)
+        self.assertEqual(self.q, before)
+        self.policy["read"] = []
+        with mock.patch.object(transport, "_ReceiptSnapshot") as snapshot:
+            with self.assertRaisesRegex(ValueError, "denied"):
+                self.call("report", receiptId=rid, cursor=None)
+            snapshot.assert_not_called()
+        self.policy["read"] = ["developer"]
+        self.b["head"] = "f" * 40
+        with mock.patch.object(transport, "_ReceiptSnapshot") as snapshot:
+            with self.assertRaisesRegex(ValueError, "binding"):
+                self.call("status")
+            snapshot.assert_not_called()
+        self.assertEqual(self.q, before)
+
     def test_strict_decode_wire_and_author_protocol_separation(self):
         for raw in [b'{"v":1,"v":1}', b"x" * 8193, b'{"v":2}', b'{"v":1,"op":"fallback"}']:
             with self.assertRaises(ValueError): transport.decode(raw)
