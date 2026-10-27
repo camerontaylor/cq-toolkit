@@ -372,7 +372,9 @@ Started 2026-10-26T22:55:53Z (06:55 SGT); exited **3** at 2026-10-27T02:24:45Z (
   CodeRabbit had 1 finding. The agent reviewer had **37 findings**, coverage v2 `partitioned`
   (1 637 changed lines / 33 files exceed the medium tier, advisory recorded), **35/35 sessions
   complete, 33/33 pieces completed**, no limitations, 361 324 tokens. None of attempts E–J's
-  failure modes recurred: no step timeout, no undici cut, no extra-key rejection.
+  review.run failure modes recurred: no step timeout, no undici cut, no extra-key rejection.
+  Attempt H's publish-loss failure mode is the one recurrence — as in H, the verified fixes
+  went unpublished (see the address bullets below and #509).
 - **review.address:** **7 verified fix commits** (`8fd86528`, `0699aca3`, `0e8dd36e`,
   `0b9fad2c`, `398c2a97`, `5c09971c`, `afdb134a`; `fixesPerRun` 7) in 1 h 57 m, using 6 513 080
   tokens (modeled cost $0.41). It stopped on its re-review: both reviewers lost the network in
