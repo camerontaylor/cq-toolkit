@@ -399,6 +399,18 @@ export async function refreshDeferredVendorDebt(
   return { ...parsed, queue: QueueStatusSchema.parse(await client.status(parsed.reference)) };
 }
 
+/** Q1 retains raw finding events. Match its renderer's text precedence while
+ * retaining the entire original event in the immutable receipt, without truncation.
+ */
+function receiptFindingText(finding: Record<string, unknown>): string | undefined {
+  for (const key of ['codegenInstructions', 'comment', 'excerpt', 'text']) {
+    const value = finding[key];
+    if (value === undefined || value === null || value === '') continue;
+    return typeof value === 'string' ? value : undefined;
+  }
+  return undefined;
+}
+
 /** Strict terminal receipt checks supplement Q3's authenticated byte/source verification.
  * Completion covers only the captured current affected content, never this branch's full diff.
  */
@@ -450,8 +462,8 @@ export function verifiedCompletedDebt(debt: DeferredVendorDebt): boolean {
     document.findings.every(
       (finding) =>
         typeof finding['severity'] === 'string' &&
-        ['critical', 'major', 'minor', 'info'].includes(finding['severity']) &&
-        (typeof finding['excerpt'] === 'string' || typeof finding['text'] === 'string'),
+        ['critical', 'major', 'minor', 'trivial', 'info', 'none'].includes(finding['severity']) &&
+        receiptFindingText(finding) !== undefined,
     )
   );
 }
@@ -468,7 +480,7 @@ export function deferredReceiptFindings(debts: readonly DeferredVendorDebt[]): F
           id: `receipt-${debt.completion.receiptId}#f${String(index + 1)}`,
           source: 'coderabbit',
           severity: String(finding['severity']),
-          text: String(finding['excerpt'] ?? finding['text']),
+          text: receiptFindingText(finding)!,
           status: 'open' as const,
           ...(typeof finding['fileName'] === 'string' ? { file: finding['fileName'] } : {}),
           evidence: debt.completion.receiptId,

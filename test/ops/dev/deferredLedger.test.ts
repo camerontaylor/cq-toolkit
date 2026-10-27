@@ -780,10 +780,20 @@ test('missing report or post-report queue identity refusal retains pending debt'
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
 });
 
-test('settlement consumes the real Q3 paged report protocol before importing substantive findings', async () => {
+test('raw Q1 finding events survive Q3 paged delivery, settlement, findings and explicit disposition', async () => {
   const f = await fixture();
   const terminal = terminalReport(f, [
-    { severity: 'major', excerpt: 'bounded receipt finding '.repeat(300) },
+    {
+      type: 'finding',
+      severity: 'major',
+      fileName: 'src/a.ts',
+      comment: 'original raw comment is retained',
+      codegenInstructions: 'genuine untruncated CodeRabbit instructions '.repeat(300),
+      lineNumber: 7,
+      metadata: { original: true },
+    },
+    { type: 'finding', severity: 'trivial', comment: 'original trivial comment' },
+    { type: 'finding', severity: 'none', codegenInstructions: 'original informational event' },
   ]);
   const bytes = Buffer.from(JSON.stringify(terminal.document));
   const receiptId = createHash('sha256').update(bytes).digest('hex');
@@ -844,5 +854,64 @@ test('settlement consumes the real Q3 paged report protocol before importing sub
   expect(chunks).toBeGreaterThan(1);
   if (!completed?.vendorCompleted) throw new Error('missing completion');
   expect(completed.completion.document.findings).toEqual(terminal.document.findings);
+  const imported = deferredReceiptFindings([completed]);
+  expect(imported.map((finding) => finding.severity)).toEqual(['major', 'trivial', 'none']);
+  expect(imported[0]!.text).toBe(terminal.document.findings[0]!['codegenInstructions']);
+  expect(imported[0]!.text.length).toBeGreaterThan(4000);
+  expect(imported[1]!.text).toBe('original trivial comment');
+  expect(imported[2]!.text).toBe('original informational event');
   expect(f.assemble(f.effects.openLedger(f.state.branch).load(), completed).ready).toBe(false);
+  const disposition = await makeDevDisposition(f.effects)({
+    repoRoot: f.repo.root,
+    findingId: imported[0]!.id,
+    action: 'fixed',
+    why: 'explicit concrete fix for original raw vendor finding',
+  });
+  expect(disposition.status).toBe('ok');
+  expect(f.assemble(f.effects.openLedger(f.state.branch).load(), completed).ready).toBe(true);
+  expect(completed.completion.document.findings).toEqual(terminal.document.findings);
+});
+
+// Real Q1 current_document() preserves events verbatim, including aliases; unknown
+// severity and malformed text cannot become a clean or silently dropped finding.
+test.each([
+  { severity: 'major', comment: 'actual raw comment' },
+  { severity: 'minor', codegenInstructions: 'actual raw instructions' },
+  { severity: 'trivial', comment: 'low severity raw finding' },
+  { severity: 'info', codegenInstructions: '', comment: 'fallback raw comment' },
+  { severity: 'none', comment: 'supported none severity' },
+])(
+  'settles supported raw finding without changing severity or original fields: %j',
+  async (raw) => {
+    const f = await fixture();
+    const terminal = terminalReport(f, [{ type: 'finding', ...raw }]);
+    const completed = await loadCurrentDeferredVendorDebt(
+      f.effects,
+      'merge-queue',
+      f.state,
+      f.ledger,
+      terminal.client,
+    );
+    if (!completed?.vendorCompleted) throw new Error('missing raw event completion');
+    expect(completed.completion.document.findings).toEqual([{ type: 'finding', ...raw }]);
+    expect(deferredReceiptFindings([completed])[0]!.severity).toBe(raw.severity);
+  },
+);
+
+test.each([
+  { severity: 'unknown', comment: 'unknown severity must block' },
+  { severity: 'major', comment: { malformed: true } },
+  {
+    severity: 'major',
+    codegenInstructions: { malformed: true },
+    comment: 'cannot hide malformed primary text',
+  },
+  { severity: 'major', comment: '' },
+])('refuses unknown or malformed raw finding and retains pending debt: %j', async (raw) => {
+  const f = await fixture();
+  const terminal = terminalReport(f, [{ type: 'finding', ...raw }]);
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, terminal.client),
+  ).rejects.toThrow('genuine complete');
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
 });
