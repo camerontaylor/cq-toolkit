@@ -518,15 +518,21 @@ describe('dev.cycle', () => {
   // the spec's never-unpublished invariant) 'budget' — publish a draft.
 
   /** An address leg that stopped on the BUDGET: the production finish() shape, structured marker inside. */
-  function budgetStopAddress(state: WorkState): AddressLeg {
+  function budgetStopAddress(
+    state: WorkState,
+    reason = 'review.address: token or wall budget exhausted; report: /tmp/r.json',
+  ): AddressLeg {
     return async () => ({
       status: 'needs-human',
-      reason: 'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      reason,
       report: { ...addressReport(state, [capFinding], []), stop: 'budget' as const },
     });
   }
 
-  test('S7 H (D1): an address BUDGET stop runs the final gates, pushes and publishes a DRAFT, keeping the budget reason', async () => {
+  test.each([
+    'review.address: token or wall budget exhausted; report: /tmp/r.json',
+    'review.address: re-review: review.run: not every configured reviewer completed a terminal cycle; report: /tmp/r.json',
+  ])('an address budget stop publishes a DRAFT with the original reason: %s', async (reason) => {
     const state = await seed(repo);
     await seedReadyLedger(state);
     const opens: PrOpenInput[] = [];
@@ -537,7 +543,7 @@ describe('dev.cycle', () => {
       effects: effects(),
       check: greenCheck(checks),
       review: cleanReview(state),
-      address: budgetStopAddress(state),
+      address: budgetStopAddress(state, reason),
       open: openFake(opens),
       gh,
       git: async (args) => {
@@ -549,7 +555,7 @@ describe('dev.cycle', () => {
     expect(result.status).toBe('needs-human');
     if (result.status !== 'needs-human') return;
     expect(result.reason).toContain('NOT READY');
-    expect(result.reason).toContain('token or wall budget exhausted');
+    expect(result.reason).toContain(reason);
     expect(result.reason).toContain('draft PR #42');
     // The final gates ran before the publication (first check + final check).
     expect(checks).toHaveLength(2);
