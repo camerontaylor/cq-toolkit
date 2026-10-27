@@ -18,7 +18,7 @@ import {
 } from '../../../src/ops/dev/cycle.js';
 import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
 import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
-import type { DevCheckReport } from '../../../src/ops/dev/check.js';
+import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -42,7 +42,7 @@ afterEach(async () => {
 
 const effects: () => DevEffects = () => repoEffects(repo);
 
-type CheckLeg = (input: { repoRoot: string; target?: string }) => Promise<OpResult<DevCheckReport>>;
+type CheckLeg = (input: DevCheckInput) => Promise<OpResult<DevCheckReport>>;
 type ReviewLeg = (input: ReviewRunInput) => Promise<OpResult<FindingsRecord>>;
 type AddressLeg = (
   input: ReviewAddressInput,
@@ -72,6 +72,12 @@ function greenCheck(calls: string[] = []): CheckLeg {
         target: input.target ?? 'merge-queue',
         ...at,
         passed: true,
+        testSelection:
+          input.testFiles !== undefined
+            ? { mode: 'named' as const, files: [...input.testFiles] }
+            : input.range !== undefined
+              ? ({ mode: 'range' } as const)
+              : ({ mode: 'base' } as const),
         gates: [
           { name: 'check:static', status: 'pass', exitCode: 0, durationMs: 5, evidence: 'ok' },
         ],
@@ -271,6 +277,72 @@ describe('dev.cycle', () => {
     expect(checkCalls).toEqual(['check:merge-queue', 'check:merge-queue']);
     // The PR opened ready (no draft flags), at the intended target.
     expect(opens).toEqual([{ repoRoot: repo.root, target: 'merge-queue' }]);
+  });
+
+  test('includeIntegration=true reaches BOTH check legs', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: boolean[] = [];
+    const opens: PrOpenInput[] = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.includeIntegration === true);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake(opens),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root, includeIntegration: true });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(seen).toEqual([true, true]);
+  });
+
+  test('testFiles reaches BOTH check legs; absent keeps them automatic', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: Array<string[] | undefined> = [];
+    const files = ['test/ops/dev/cycle.test.ts', 'test/ops/dev/check.test.ts'];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.testFiles);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const named = await op({ repoRoot: repo.root, testFiles: files });
+    expect(named.status, JSON.stringify(named)).toBe('ok');
+    expect(seen).toEqual([files, files]);
+    seen.length = 0;
+    const bare = await op({ repoRoot: repo.root });
+    expect(bare.status, JSON.stringify(bare)).toBe('ok');
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  test('includeIntegration absent keeps the check legs bare', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const seen: Array<boolean | undefined> = [];
+    const op = makeDevCycle({
+      effects: effects(),
+      check: async (input) => {
+        seen.push(input.includeIntegration);
+        return greenCheck([])(input);
+      },
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake([]),
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(seen).toEqual([undefined, undefined]);
   });
 
   test('push:false skips the verified push (the branch stays local; pr.open still runs)', async () => {
@@ -773,7 +845,12 @@ describe('dev.cycle', () => {
     });
     const result = await op({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).not.toContain('NOT READY');
+    if (result.status === 'needs-human') {
+      expect(result.reason).not.toContain('NOT READY');
+      expect(result.reason).toContain(
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      );
+    }
     expect(pushCalls).toBe(0);
     expect(opens).toEqual([]);
   });
@@ -786,7 +863,7 @@ describe('dev.cycle', () => {
         checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
         roles: { reviewer: { provider: 'mock', model: 'mock' } },
         budgets: { run: { maxTokens: 1000, wallMs: 3_600_000 } },
-        review: { reviewers: ['agent'] },
+        review: { reviewers: ['coderabbit'] },
       }),
     );
     repo.commitAll('budgeted cq.json');
@@ -811,13 +888,23 @@ describe('dev.cycle', () => {
       open: openFake([]),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
-    await op({ repoRoot: repo.root });
+    const result = await op({ repoRoot: repo.root });
+    // Pin the cycle outcome before the budget assertions: if a leg refuses
+    // (failed gate, review failure), fail on the actual status/reason —
+    // serialized into the message — instead of undefined comparisons
+    // against leg inputs that were never recorded.
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    if (result.status === 'ok') expect(result.value.pushed).toBe(true);
     const budget = 3_600_000 - DEV_CYCLE_PUBLICATION_RESERVE_MS;
     expect(reviewInputs[0]?.wallMs).toBeLessThanOrEqual(budget);
     expect(reviewInputs[0]?.wallMs).toBeGreaterThan(budget - 10_000);
     expect(reviewInputs[0]?.maxTokens).toBe(1000);
     // The address leg gets what the review leg left, not a fresh run budget.
     expect(addressInputs[0]?.wallMs).toBeLessThanOrEqual((reviewInputs[0]?.wallMs ?? 0) - 50);
+    // ...and the remaining wall must not be shrunk further (e.g. by subtracting
+    // the publication reserve a second time): pin a lower bound with slack for
+    // scheduling/timing slop between the legs.
+    expect(addressInputs[0]?.wallMs).toBeGreaterThan((reviewInputs[0]?.wallMs ?? 0) - 50 - 10_000);
     expect(addressInputs[0]?.maxTokens).toBe(1000);
   });
 

@@ -49,6 +49,7 @@ import { join } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
+import type { Usage } from '../../driver/types.js';
 import { composeSection, mdSafe, type PrEffects } from '../pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.js';
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
@@ -93,6 +94,27 @@ export interface DevCycleCompositionInput {
   push?: boolean;
   /** PR title; default is the head commit's subject (pr.open's rule). */
   title?: string;
+  /**
+   * Opt EVERY dev.check invocation the cycle makes into the integration
+   * suite (`--include-integration`) — the opening check, the stopped-run
+   * re-check and the final check at the addressed head share one step
+   * input, so the choice reaches all three and is recorded in each check
+   * record. The `--base`/`--range` selector's closure can name gated e2e
+   * files for plain src changes, and the wrapper's refusal cannot be
+   * satisfied from inside dev.check — the caller opts in explicitly (S7
+   * dogfood attempt A). Default off.
+   */
+  includeIntegration?: boolean;
+  /**
+   * Name the EXACT test files EVERY dev.check invocation the cycle makes
+   * run — the opening check, the stopped-run re-check and the final check
+   * at the addressed head share this step input (the wrapper's own escape
+   * for a too-broad automatic selection): replaces the `--base`/`--range`
+   * selection entirely, matching dev.check's own contract (a `range`
+   * supplied alongside is refused); every check record discloses the
+   * narrowing via `testSelection: { mode: 'named', files }`.
+   */
+  testFiles?: string[];
 }
 
 /** The dev.cycle report — the ok value (a ready, published branch). */
@@ -272,7 +294,17 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // The default address leg is CONSTRUCTED with the cycle's (metered)
     // driver factory: the whole cycle honours one wiring — test transports
     // injected here must not be replaced by real provider factories inside
-    // the address leg's own default construction.
+    // the address leg's own default construction. The UN-INJECTED path
+    // shares it deliberately too (it also feeds the default review.run leg
+    // above): an address leg that self-built createDriverFactory() would
+    // spend tokens no meter sees, and the ONE run budget's maxTokens
+    // (legBudget below) is computed from spentTokens. Sharing is safe
+    // because the factory carries no per-instance state: every resolve()
+    // constructs a FRESH lane instance and wrappers from immutable config
+    // (env knobs are read at resolve time, never cached), and meterDrivers
+    // forwards the whole one-method seam — DriverFactory is `resolve`
+    // alone, Driver is `run` alone, lane/modelSpec ride the spread — so
+    // the legs share the wiring, never driver state.
     const address =
       deps.address ?? ((step: ReviewAddressInput) => makeReviewAddress({ drivers })(step));
     // The forge effects for the findings-section compose: the DEFAULT
@@ -376,26 +408,41 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     }
 
     // --------------------------- 1. dev.check ----------------------------
-    const firstCheck = await check({ repoRoot: input.repoRoot, target });
+    const checkStep: DevCheckInput = {
+      repoRoot: input.repoRoot,
+      target,
+      ...(input.includeIntegration === true ? { includeIntegration: true } : {}),
+      ...(input.testFiles !== undefined ? { testFiles: input.testFiles } : {}),
+    };
+    const firstCheck = await check(checkStep);
     if (firstCheck.status !== 'ok') return stepResult('dev.check', firstCheck);
 
     // What is left of the ONE run budget for an agentic leg: the wall to the
     // run deadline minus the publication reserve (so a budget stop can still
     // run the final gates and publish), and the tokens the metered drivers
     // have not spent. Without a cq.json the legs keep their own defaults.
-    const legBudget = (): { wallMs?: number; maxTokens?: number } => {
+    // An EXHAUSTED remainder (≤ 0) yields undefined: the caller then SKIPS
+    // the leg — an immediate budget stop that launches no driver — rather
+    // than handing it a clamped 1 ms/1 token it can only overshoot by one
+    // full driver call before its own stop() fires.
+    const legBudget = (): { wallMs?: number; maxTokens?: number } | undefined => {
       if (policy === undefined) return {};
       const reserve = Math.min(DEV_CYCLE_PUBLICATION_RESERVE_MS, Math.floor(policy.runWallMs / 4));
+      const wallMs = policy.runWallMs - reserve - (Date.now() - cycleStarted);
+      if (wallMs <= 0) return undefined;
+      const maxTokens =
+        policy.runMaxTokens === undefined ? undefined : policy.runMaxTokens - spentTokens;
+      if (maxTokens !== undefined && maxTokens <= 0) return undefined;
       return {
-        wallMs: Math.max(1, policy.runWallMs - reserve - (Date.now() - cycleStarted)),
-        ...(policy.runMaxTokens === undefined
-          ? {}
-          : { maxTokens: Math.max(1, policy.runMaxTokens - spentTokens) }),
+        wallMs,
+        ...(maxTokens === undefined ? {} : { maxTokens }),
       };
     };
 
     // --------------------------- 2. review.run ---------------------------
-    const run = await review({ repoRoot: input.repoRoot, target, ...legBudget() });
+    const runBudget = legBudget();
+    if (runBudget === undefined) return { status: 'budget-exhausted' };
+    const run = await review({ repoRoot: input.repoRoot, target, ...runBudget });
     if (run.status !== 'ok') return stepResult('review.run', run);
 
     // ------------------ 3. review.address (until clean) ------------------
@@ -404,12 +451,14 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // address leg owns the rounds and its own stop reasons. Its `push`
     // option stays OFF: the composition publishes once, at the end, after
     // the final check — never mid-loop.
+    const addressBudget = legBudget();
+    if (addressBudget === undefined) return { status: 'budget-exhausted' };
     const addressResult = await address({
       repoRoot: input.repoRoot,
       source: 'local',
       target,
       ...(run.value.reviewed === undefined ? {} : { base: run.value.reviewed.base }),
-      ...legBudget(),
+      ...addressBudget,
     });
     if (addressResult.status !== 'ok') {
       // STRUCTURED PUBLICATION STOPS: the address leg marks its designed stop with the
@@ -445,7 +494,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // (the same gates the clean path re-runs at the addressed head): a fix
       // that broke format/knip must not publish, even as a draft. A red gate
       // propagates verbatim — no push, no PR.
-      const capCheck = await check({ repoRoot: input.repoRoot, target });
+      const capCheck = await check(checkStep);
       if (capCheck.status !== 'ok') return stepResult('dev.check (final)', capCheck);
       return await finishNotReady(
         stop === 'rereview-blocked'
@@ -461,7 +510,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
     // The address leg's commits moved HEAD: re-run the deterministic gates
     // so the readiness record rests on a green check at the head the PR is
     // opened from. A red gate is surfaced verbatim (never a draft).
-    const finalCheck = await check({ repoRoot: input.repoRoot, target });
+    const finalCheck = await check(checkStep);
     if (finalCheck.status !== 'ok') return stepResult('dev.check (final)', finalCheck);
 
     // ------------------------- 5. readiness ------------------------------
@@ -584,6 +633,15 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
  * tokens (input + output + cache + reasoning) to `spend`, so the cycle can
  * hand each agentic leg what is left of the one run token budget. The Driver
  * seam is `run()` only, so the wrapper is the whole driver.
+ *
+ * A FAILED run is metered too. A driver run can consume tokens before it
+ * fails — and failure is a normal, not exceptional, occurrence here (the
+ * transient class the legs retry once, a cancel on the wall budget). The
+ * meter wraps the run in try/catch: the resolved result's usage on the
+ * success path, and whatever usage the rejection carries on the error path
+ * ({@link usageOf}) — spent BEFORE the error propagates, so a failed attempt
+ * still shrinks the unspent remainder instead of inflating the next leg's
+ * token budget. The error itself is never swallowed or reshaped.
  */
 function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): DriverFactory {
   return {
@@ -593,19 +651,53 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
         ...resolved,
         driver: {
           run: async (invocation, options) => {
-            const result = await resolved.driver.run(invocation, options);
-            const { usage } = result;
-            spend(
-              usage.input +
-                usage.output +
-                usage.cacheRead +
-                usage.cacheWrite +
-                (usage.reasoning ?? 0),
-            );
-            return result;
+            const meter = (usage: Usage): void => {
+              spend(
+                usage.input +
+                  usage.output +
+                  usage.cacheRead +
+                  usage.cacheWrite +
+                  (usage.reasoning ?? 0),
+              );
+            };
+            try {
+              const result = await resolved.driver.run(invocation, options);
+              meter(result.usage);
+              return result;
+            } catch (err) {
+              const partial = usageOf(err);
+              if (partial !== undefined) meter(partial);
+              throw err;
+            }
           },
         },
       };
     },
   };
+}
+
+/**
+ * The Usage a rejecting driver run attached, if any. The seam's lanes are
+ * taught to settle a mid-run failure as a result (stopReason 'error' with the
+ * completed steps' usage folded), so a reject is the exceptional path — but a
+ * lane that does reject WITH the partial usage it completed must still reach
+ * the meter. Structurally checked against the frozen Usage shape (numeric
+ * input/output/cacheRead/cacheWrite, optional numeric reasoning); anything
+ * else — including a `usage` field of a different shape — contributes zero,
+ * never a guess.
+ */
+function usageOf(err: unknown): Usage | undefined {
+  if (typeof err !== 'object' || err === null || !('usage' in err)) return undefined;
+  const usage: unknown = (err as { usage?: unknown }).usage;
+  if (typeof usage !== 'object' || usage === null) return undefined;
+  const fields = usage as Record<string, unknown>;
+  if (
+    typeof fields.input !== 'number' ||
+    typeof fields.output !== 'number' ||
+    typeof fields.cacheRead !== 'number' ||
+    typeof fields.cacheWrite !== 'number' ||
+    (fields.reasoning !== undefined && typeof fields.reasoning !== 'number')
+  )
+    return undefined;
+  return usage as Usage;
 }

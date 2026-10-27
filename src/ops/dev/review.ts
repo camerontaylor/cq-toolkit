@@ -204,6 +204,10 @@ export interface DevCycleInput {
   reviewer?: string;
   /** Review only staged+unstaged work (the protocol's --uncommitted scope). */
   uncommitted?: boolean;
+  /** Opt the cycle's dev.check legs into the integration suite. */
+  includeIntegration?: boolean;
+  /** Name the exact test files the cycle's dev.check legs run. */
+  testFiles?: string[];
 }
 
 /**

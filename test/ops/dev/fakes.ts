@@ -131,6 +131,7 @@ export function checkRecord(overrides: Partial<DevCheckRecord> = {}): DevCheckRe
     head: HEAD,
     dirtySha256: 'dirty',
     passed: true,
+    testSelection: { mode: 'base' },
     gates: [{ name: 'check:static', status: 'pass', exitCode: 0, durationMs: 10, evidence: 'ok' }],
     loadStamp: { uptimeSeconds: 1, load1: 1, at: '2026-10-17T00:00:00.000Z' },
     at: '2026-10-17T00:00:00.000Z',
