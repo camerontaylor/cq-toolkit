@@ -39,7 +39,14 @@ export function headLineAnchors(
     );
     removed = undefined;
   };
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n');
+  for (const [index, line] of lines.entries()) {
+    if (line.startsWith('diff --git ')) {
+      flush();
+      oldLine = undefined;
+      newLine = undefined;
+      continue;
+    }
     const marker = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
     if (marker) {
       flush();
@@ -57,6 +64,11 @@ export function headLineAnchors(
       rows.push(`L${newLine} + ${excerpt(line.slice(1))}`);
       newLine++;
     } else if (line.startsWith(' ')) {
+      flush();
+      oldLine++;
+      newLine++;
+    } else if (line === '' && index < lines.length - 1) {
+      // A blank context line whose leading space was stripped.
       flush();
       oldLine++;
       newLine++;

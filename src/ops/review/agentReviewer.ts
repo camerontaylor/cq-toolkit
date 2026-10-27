@@ -162,8 +162,8 @@ export async function runAgentReviewer(
       ensureActive();
       // Partition sessions are independent, so up to `concurrency` run at once.
       // Results are merged by plan index (deterministic coverage and finding
-      // order). The token allowance is split across the concurrent slots so
-      // in-flight sessions cannot jointly overspend the remainder.
+      // order). The token allowance is split across the concurrent slots (a
+      // guard against runaway spend, not an exact joint bound).
       const sessions = plan.sessions;
       const concurrency = Math.max(
         1,
@@ -178,6 +178,26 @@ export async function runAgentReviewer(
       let nextIndex = 0;
       let halted = false;
       let budgetStop: 'before' | 'during' | undefined;
+      let finished = 0;
+      // Findings are rebuilt from the per-session outcomes in plan order every
+      // time a session lands, so a later throw or abort still reports them.
+      const rebuildFindings = (): void => {
+        const merged: Finding[] = [];
+        for (const finding of outcomes.flatMap((found) => found ?? [])) {
+          if (
+            !merged.some(
+              (other) =>
+                other.file === finding.file &&
+                other.line === finding.line &&
+                other.rule === finding.rule &&
+                other.text === finding.text &&
+                other.severity === finding.severity,
+            )
+          )
+            merged.push(finding);
+        }
+        report!.findings = merged;
+      };
       const runOne = async (index: number): Promise<void> => {
         const session = sessions[index]!;
         ensureActive();
@@ -203,7 +223,12 @@ export async function runAgentReviewer(
           repoRoot: input.repoRoot,
           role: input.role,
           severityMap: input.severityMap,
-          maxTokens: Math.max(1, Math.floor((input.maxTokens - report!.usage) / concurrency)),
+          maxTokens: Math.max(
+            1,
+            Math.floor(
+              (input.maxTokens - report!.usage) / Math.min(concurrency, sessions.length - finished),
+            ),
+          ),
           maxSteps: input.session?.maxSteps ?? REVIEW_SESSION_DEFAULTS.maxSteps,
           maxPromptChars: Math.max(
             20_000,
@@ -223,6 +248,7 @@ export async function runAgentReviewer(
           searchTools: input.searchTools ?? true,
         });
         ensureActive();
+        finished += 1;
         if (report!.usage > input.maxTokens) evidence.status = 'budget';
         updatePieces(report!.coverage);
         active.delete(evidence);
@@ -249,6 +275,7 @@ export async function runAgentReviewer(
         }
         consecutiveFailures = 0;
         outcomes[index] = result.value;
+        rebuildFindings();
         if (report!.usage > input.maxTokens) {
           budgetStop ??= 'during';
           halted = true;
@@ -258,7 +285,14 @@ export async function runAgentReviewer(
         while (!halted) {
           const index = nextIndex++;
           if (index >= sessions.length) return;
-          await runOne(index);
+          try {
+            await runOne(index);
+          } catch (error) {
+            // A hard error (scanner fault, abort) must not let sibling workers
+            // keep uploading and spending.
+            halted = true;
+            throw error;
+          }
         }
       };
       // Settle every worker before reading state: an abort rejects them all,
@@ -266,19 +300,7 @@ export async function runAgentReviewer(
       const settled = await Promise.allSettled(Array.from({ length: concurrency }, worker));
       const rejected = settled.find((entry) => entry.status === 'rejected');
       if (rejected !== undefined) throw (rejected as PromiseRejectedResult).reason;
-      for (const finding of outcomes.flatMap((found) => found ?? [])) {
-        if (
-          !report.findings.some(
-            (other) =>
-              other.file === finding.file &&
-              other.line === finding.line &&
-              other.rule === finding.rule &&
-              other.text === finding.text &&
-              other.severity === finding.severity,
-          )
-        )
-          report.findings.push(finding);
-      }
+      rebuildFindings();
       updatePieces(report.coverage);
       if (budgetStop === 'before') return { status: 'budget-exhausted', report: snapshot()! };
       if (budgetStop === 'during')

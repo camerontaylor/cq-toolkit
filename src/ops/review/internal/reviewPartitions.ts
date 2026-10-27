@@ -205,7 +205,9 @@ export function partitionReview(input: {
         const text = source.text.slice(start, end);
         const receipt = hash(`${identity}:${component}:${start}:${end}:${hash(text)}`);
         const receiptLine = requireReceipt ? `receipt: ${receipt}\n` : '';
-        const anchors = untracked ? '' : headLineAnchors(text, { oldLine, newLine });
+        // A partition that starts inside an over-long line has no reliable counters.
+        const midLine = start > 0 && source.text.charAt(start - 1) !== '\n';
+        const anchors = untracked || midLine ? '' : headLineAnchors(text, { oldLine, newLine });
         const anchorSection = anchors === '' ? '' : `head line anchors:\n${anchors}`;
         return {
           receipt,

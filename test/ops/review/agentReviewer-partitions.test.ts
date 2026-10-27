@@ -691,3 +691,26 @@ it('retries a transient session failure once, counting both attempts, but not ot
   await runAgentReviewer(deterministic.drivers, baseInput());
   expect(deterministic.calls()).toBe(1);
 });
+
+it("keeps completed sessions' findings and halts the pool when a later session hits a hard error", async () => {
+  let calls = 0;
+  const scanner: DiffSecretScanner = async (components) => {
+    if (components.some(({ component }) => component === 'review-prompt') && ++calls === 3)
+      throw new Error('scanner unavailable');
+    return clean(components);
+  };
+  const fake = fakeDrivers();
+  const outcome = await runAgentReviewer(
+    fake.drivers,
+    baseInput({
+      diff: large,
+      components: [{ ...small, text: large }],
+      maxTokens: 1_000_000,
+      scanSecrets: scanner,
+      session: { concurrency: 1 },
+    }),
+  );
+  expect(outcome.status).toBe('needs-human');
+  expect(outcome.report?.findings.length).toBeGreaterThan(0);
+  expect(fake.calls()).toBe(2);
+});

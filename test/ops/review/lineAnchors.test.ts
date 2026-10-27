@@ -34,6 +34,11 @@ describe('headLineAnchors', () => {
     expect(headLineAnchors('+resumed\n', { oldLine: 5, newLine: 40 })).toBe('L40 + resumed\n');
   });
 
+  it('counts stripped blank context lines and resets at a new file diff', () => {
+    const text = '@@ -1,3 +1,3 @@\n\n+added\ndiff --git a/y b/y\n+ignored outside a hunk\n';
+    expect(headLineAnchors(text)).toBe('L2 + added\n');
+  });
+
   it('truncates long excerpts and caps the section', () => {
     const long = `@@ -1 +1,400 @@\n${'+x'.repeat(100)}\n`.repeat(1) + '+y\n'.repeat(1_500);
     const out = headLineAnchors(long);
