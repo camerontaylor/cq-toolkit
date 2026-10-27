@@ -11,7 +11,9 @@ Since the development posture of 2026-10-20 (owner ruling D-J) the protocol
 is ONE completed CLI review-and-address cycle, then one independent
 head-bound review of the opened PR. P2 findings left after that go to
 follow-up issues rather than further loops, and reviewers are given the
-owner rulings as context. The mechanics below are unchanged.
+owner rulings as context. DEC1 (2026-10-27) additionally approves the durable
+vendor-debt path in §6, including continued ready/merge progress before
+vendor recovery. This does not change what counts as vendor completion.
 Non-author means an independent reviewer agent or human. Reviewer and author
 agents may use the same GitHub account; the enabled same-account path records
 distinct agent identities and a review attestation bound to the exact PR head.
@@ -190,12 +192,50 @@ missing evidence is non-passing.
 Response to a blocked cycle: one bounded remediation attempt (install from
 the official source, `auth login` handoff — start the supported flow and
 report what is needed; do not read tokens, do not hang waiting), then one
-more attempt. Still blocked: **stop — the blocker prevents opening the
-PR.** Keep the work and report the blocker plainly. A human or fresh-agent
-review may be independently valuable as I2-style evidence, but it is NOT a
-fallback for the required CodeRabbit cycle and must not be presented as
-one; never substitute another reviewer, never waive the rule silently,
-never invent output or completion values.
+more attempt. Vendor availability, rate-limit and login/operational failures
+may instead follow **approved DEC1: queue review and continue**, including
+after merge. Do not require login repair or vendor recovery as a prerequisite
+to this path. Other failures remain blockers with their actual evidence.
+
+Before proceeding, persist an authorized deferred-author intent with a stable
+request/cycle ID and immutable repository, server-verified forge author
+`user.login`, source head, base branch and target selector. A queue failure
+(authorization, persistence, unsupported deployment, or an unknown reason)
+does not establish debt. After publication, bind the verified PR idempotently;
+if publication or binding loses its response, reconcile that same intent
+against unique verified forge metadata. Never mint another request to bypass
+an uncertain write. Unpublished/cancelled work remains visible and starts no
+vendor review. Changed head/author/target is an identity failure.
+
+The sole runner refreshes only explicitly enrolled PRs within a bounded tick
+budget, observes verified merge provenance and enrolls current-code work.
+Q2 historical interval discovery is unnecessary for this lifecycle. Q1 captures
+the promoted-main target commit/tree at dispatch, resolves affected paths and
+dispositions, and persists an immutable report. Prior author completion keeps
+its source and findings; it is never upgraded to current-code coverage. Only
+proven equivalent target/tree/scope/policy/projection/reviewer evidence can
+avoid another vendor start. Import the complete digest-verified report through
+Q3; acknowledgement means consumed, never findings fixed or independent PASS.
+
+Expose `vendor-pending`, `vendor-blocked-transient`, `vendor-needs-action`,
+and genuine `vendor-completed` separately. A queue status blocked solely by
+typed, proven vendor availability/rate-limit/login provenance remains debt;
+do not reintroduce a vendor gate through a status rename. A generic blocked
+state or prose mentioning an outage is insufficient. A thrown queue status RPC retains debt
+but blocks fresh continuation as queue read/trust uncertainty; it is never
+classified as vendor login or availability failure. Agent fallback uses the
+configured reviewer role and budgets. It supplies agent evidence, never a
+completed vendor cycle. Deterministic gates and independent exact-head
+acceptance remain required. Known substantive blocking findings, scan/tamper,
+stale identity, red CI and privileged trust remain blocking.
+
+Retain visible debt on the readiness/publication record until genuine review
+or explicit current-scope disposition. Backfill completion is no universal
+merge check. Installed compatible Q1/Q3 service and healthy durable enrollment
+are deployment prerequisites; a live vendor completion is separate feature
+acceptance. Source fixtures or merge alone establish neither deployment nor
+that live completion. No new scheduler, inline paid vendor call, grant renewal,
+repair activation or deployment authority follows from DEC1.
 
 Submitting a review needs no extra user approval — the task's authorized
 scope stands; diffs must merely be secret-scanned first (§1).
