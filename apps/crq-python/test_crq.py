@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import review_receipt
+import queue_transport
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("crq_current_test", ROOT / "crq.py")
@@ -692,3 +693,42 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual(document["classification"]["failure_provenance"]["causes"], [
             {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"},
             {"source": "queue", "category": "unknown", "code": "scan"}])
+
+
+    def test_persisted_producer_proof_controls_transport_vendor_authority(self):
+        initial = copy.deepcopy(self.q)
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        hard = {"type": "error", "errorType": "scan"}
+        for n, events in enumerate(([vendor], [vendor, hard], [hard, vendor])):
+            with self.subTest(events=events):
+                self.q = copy.deepcopy(initial)
+                crq.save_queue(self.q)
+                request = f"boundary-{n}"
+                item = self.enroll(request)
+                self.launch_item(item)
+                self.terminal_artifacts(item, events)
+                self.harvest(item)
+                document = self.document(item)
+                self.assertEqual(len(document["classification"]["failure_provenance"]["causes"]), len(events))
+                binding = {"kind": "merged-current", "repo": crq.REPO, "pr": 42,
+                           "mergeSha": self.merge, "targetSelector": "promoted-main"}
+                policy = {"enabled": True, "repo": crq.REPO, "targets": ["promoted-main"],
+                          "branches": ["merge-queue"], "read": ["developer"], "write": ["developer"]}
+                forge = {"repo": crq.REPO, "pr": 42, "target": "merge-queue",
+                         "state": "MERGED", "mergeSha": self.merge}
+                def call(op):
+                    raw = queue_transport.handle(review_receipt.canonical({"v": 1, "op": op,
+                        "requestId": request, "binding": binding}), crq, principal="developer",
+                        policy=policy, verify_source=lambda repo, pr: forge,
+                        receipt_root=self.state / "receipts")
+                    return json.loads(raw)["result"]
+                call("enqueue")
+                status = call("status")
+                self.assertEqual(status["receiptId"], item["receipt_id"])
+                self.assertTrue(status["enqueued"])
+                self.assertEqual(status["state"], "blocked")
+                self.assertFalse(status["reviewed"])
+                self.assertFalse(status["fixed"])
+                self.assertEqual(status["reason"],
+                    {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+                    if n == 0 else {"source": "queue", "category": "unknown", "code": "unclassified"})
