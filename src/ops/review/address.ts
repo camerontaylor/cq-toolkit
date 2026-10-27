@@ -223,6 +223,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
      * 'published' once a push left this process, 'failed' with its error
      * otherwise. #469's report-truth rule consumes it — the engine, not a
      * loop-side guess, is the only witness of what was actually pushed.
+     * Irreversible in one direction: once 'published', a later (post-push)
+     * failure never downgrades it — the commit is out regardless of what the
+     * post-push bookkeeping threw.
      */
     let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
     const finish = async (
@@ -237,7 +240,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           await publishOnExit();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          exitPublication = { state: 'failed', error: message };
+          // A post-push failure (the inner throws after the witness is set)
+          // must not rewrite the truth: 'published' stays published, so the
+          // withhold rows below never claim a pushed commit stays local.
+          if (exitPublication?.state !== 'published')
+            exitPublication = { state: 'failed', error: message };
           status = 'needs-human';
           reason = `verified publication failed: ${message}`;
           report.reasons.push(reason);
@@ -744,16 +751,20 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           };
           // The engine witnesses its own exit publication so the report can
           // state the truth about what was pushed (#469): the inner sets
-          // 'published' only after a real push; a failure is recorded and
-          // rethrown for finish()'s outcome rewrite.
+          // 'published' only after a real push; a failure before the push is
+          // recorded and rethrown for finish()'s outcome rewrite. A failure
+          // AFTER the push (e.g. the post-push rev-parse) never downgrades
+          // the already-set 'published' witness — the commit is out, so the
+          // settled withhold rows must not claim it stays local.
           publishOnExit = async () => {
             try {
               await publishOnExitInner();
             } catch (error) {
-              exitPublication = {
-                state: 'failed',
-                error: error instanceof Error ? error.message : String(error),
-              };
+              if (exitPublication?.state !== 'published')
+                exitPublication = {
+                  state: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                };
               throw error;
             }
           };
