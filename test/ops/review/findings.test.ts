@@ -474,11 +474,14 @@ describe('R3S additive evidence payload', () => {
         evidenceV1: other,
       },
     ]);
-    const withoutPayload = record('pr-threads', 'terminal', [
+    const withoutPayload = record('agent', 'terminal', [
       { id: 'shared', source: 'pr-threads', severity: 'minor', text: 'three', status: 'open' },
     ]);
     const [merged] = merge([withPayload, alsoPayload, withoutPayload]).findings;
     expect(merged?.evidenceV1).toEqual(evidenceV1);
+    // The finding-level `source` string is free-form provenance (a CodeRabbit
+    // thread imported under a pr-threads label); the record-level source KIND
+    // is the typed taxonomy this helper's parameter constrains.
     expect(merged?.source).toBe('agent,coderabbit,pr-threads');
   });
 
