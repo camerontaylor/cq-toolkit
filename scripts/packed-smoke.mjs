@@ -10,20 +10,23 @@
 //      source checkout anywhere on the resolution path (npm is the release
 //      runbook's own install tool for the audited bytes; every spawned
 //      child runs with cwd INSIDE the prefix).
-//   2. SDK smoke — a Node child imports the installed root export and
-//      asserts load-bearing identity values (the barrel's SEAM_VERSION and
-//      the default harness config) resolve from the package's dist.
-//   3. `cq` bin smoke — empty argv is a usage error BY CONTRACT
-//      (src/cli/main.ts: exit 2 + exactly one JSON artifact with
-//      error.kind 'usage' on stdout). The smoke asserts that exact
-//      contract, which proves the bin executes, resolves its imports and
-//      honors the CLI error surface from the tarball alone.
-//   4. `cq-harness-mcp` bin smoke — spawns the MCP bin with a minimal
-//      harness manifest over a temp workspace, performs ONE bounded
-//      initialize → tools/list round trip over stdio, then closes stdin and
-//      asserts a clean EOF exit 0 (the bin's documented EOF contract). All
-//      I/O is deadline-bounded: a hung server is SIGKILLed and the leg
-//      fails.
+//   2. SDK smoke — a Node child with cwd INSIDE the consumer prefix imports
+//      the PUBLIC ROOT EXPORT by bare package specifier
+//      (`import ... from '@camerontaylor/cq-toolkit'`) so npm's export
+//      mapping is on the path: a broken exports field fails the leg even
+//      when the dist files themselves are present.
+//   3. `cq` bin smoke — the INSTALLED node_modules/.bin/cq MAPPING is
+//      invoked (not dist/cli.js directly): empty argv is a usage error BY
+//      CONTRACT (src/cli/main.ts: exit 2 + exactly one JSON artifact with
+//      error.kind 'usage' on stdout). Asserting via the mapping proves the
+//      package's bin registration works, not merely that a file exists.
+//   4. `cq-harness-mcp` bin smoke — spawns the INSTALLED
+//      node_modules/.bin/cq-harness-mcp mapping with a minimal harness
+//      manifest over a temp workspace, performs ONE bounded initialize →
+//      tools/list round trip over stdio, then closes stdin and asserts a
+//      clean EOF exit 0 (the bin's documented EOF contract). The leg
+//      deadline stays armed until the process CLOSES: a server that
+//      responds but never exits is killed and fails the leg.
 //   5. IDENTITY — the tarball's path, size and SHA-256, plus the installed
 //      package's name/version/integrity and a required-artifact scan (the
 //      exports main, both bin targets and the denylist patterns), recorded
@@ -175,11 +178,11 @@ async function installTarball(prefix, tarball, timeoutMs) {
 // ---------------------------------------------------------------------------
 
 async function sdkSmoke(prefix, timeoutMs) {
-  const pkgRoot = join(prefix, PKG_DIR);
   const probe = [
-    `import { SEAM_VERSION, defaultHarnessConfig } from '${pkgRoot}/dist/index.js';`,
-    `import { readFileSync } from 'node:fs';`,
-    `const pkg = JSON.parse(readFileSync('${pkgRoot}/package.json', 'utf8'));`,
+    `import { SEAM_VERSION, defaultHarnessConfig } from '@camerontaylor/cq-toolkit';`,
+    `import { createRequire } from 'node:module';`,
+    `const require = createRequire(import.meta.url);`,
+    `const pkg = require('@camerontaylor/cq-toolkit/package.json');`,
     `console.log(JSON.stringify({`,
     `  seamVersion: SEAM_VERSION,`,
     `  harnessConfigTools: Object.keys(defaultHarnessConfig.tools),`,
@@ -190,8 +193,9 @@ async function sdkSmoke(prefix, timeoutMs) {
     `}));`,
   ].join('\n');
   return leg('sdk-import', async () => {
-    // The child's cwd is the PREFIX: the absolute import specifier resolves
-    // only through the installed package. No source checkout, no NODE_PATH.
+    // The child's cwd is the consumer PREFIX and the import is a bare
+    // package specifier: the PUBLIC exports mapping resolves the entry, so
+    // a broken exports field fails here even when dist/index.js exists.
     const result = await runChild(process.execPath, ['--input-type=module', '-e', probe], {
       cwd: prefix,
       timeoutMs,
@@ -219,9 +223,14 @@ async function sdkSmoke(prefix, timeoutMs) {
 
 async function cliSmoke(prefix, timeoutMs) {
   return leg('cli-bin', async () => {
-    const bin = join(prefix, PKG_DIR, 'dist', 'cli.js');
-    if (!existsSync(bin)) return { ok: false, reason: `cq bin missing from the tarball: ${bin}` };
-    const result = await runChild(process.execPath, [bin, '--json'], { cwd: prefix, timeoutMs });
+    // The INSTALLED .bin mapping is the public interface npm registers; a
+    // broken package.json bin field must fail here even when dist/cli.js
+    // exists. The mapping is a symlink to a shebang'd JS file — execute it
+    // directly so the shebang resolution is exercised too.
+    const bin = join(prefix, 'node_modules', '.bin', 'cq');
+    if (!existsSync(bin))
+      return { ok: false, reason: `cq bin mapping missing from the install: ${bin}` };
+    const result = await runChild(bin, ['--json'], { cwd: prefix, timeoutMs });
     if (result.code !== 2) {
       return {
         ok: false,
@@ -285,12 +294,14 @@ function smokeManifest(workspace) {
 }
 
 async function mcpSmoke(prefix, timeoutMs) {
-  const bin = join(prefix, PKG_DIR, 'dist', 'harness', 'mcp', 'bin.js');
+  // The INSTALLED .bin mapping again: a broken package.json bin field for
+  // cq-harness-mcp must fail this leg even when the dist file exists.
+  const bin = join(prefix, 'node_modules', '.bin', 'cq-harness-mcp');
   const workspace = mkdtempSync(join(realpathSync(tmpdir()), 'cq-packed-smoke-ws-'));
   try {
     return await leg('mcp-bin', async () => {
       if (!existsSync(bin))
-        return { ok: false, reason: `MCP bin missing from the tarball: ${bin}` };
+        return { ok: false, reason: `cq-harness-mcp bin mapping missing from the install: ${bin}` };
       return mcpRoundTrip(bin, smokeManifest(workspace), timeoutMs);
     });
   } finally {
@@ -299,62 +310,59 @@ async function mcpSmoke(prefix, timeoutMs) {
 }
 
 /**
- * Drive the stdio JSON-RPC round trip with a whole-leg deadline. Resolves
- * `{ok, ...}` exactly once; every terminal path SIGKILLs the child.
+ * Drive the stdio JSON-RPC round trip with a whole-leg deadline that stays
+ * armed until the process CLOSES — including the post-response EOF wait, so
+ * a server that replies but never exits is SIGKILLed and fails the leg
+ * instead of hanging forever. Resolves `{ok, ...}` exactly once.
  */
 function mcpRoundTrip(bin, manifest, timeoutMs) {
   return new Promise((resolveLeg) => {
-    const child = spawn(process.execPath, [bin, JSON.stringify(manifest)], {
+    const child = spawn(bin, [JSON.stringify(manifest)], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stderr = '';
     let buffer = '';
     /** @type {string[]} */
     const lines = [];
-    let settled = false;
+    // State machine: collecting → validating (still armed) → done. The
+    // deadline is cleared ONLY in done; every other terminal path — early
+    // exit, bad surface, or the deadline itself firing — kills the child.
+    let phase = 'collecting';
     const childErr = () => stderr.slice(-2_000);
-    const deadline = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    const fail = (reason) => {
-      if (settled) return;
-      settled = true;
+    const timedOut = () => {
+      child.kill('SIGKILL');
+    };
+    const deadline = setTimeout(timedOut, timeoutMs);
+    const finish = (result) => {
+      if (phase === 'done') return;
+      phase = 'done';
       clearTimeout(deadline);
       child.kill('SIGKILL');
-      resolveLeg({ ok: false, reason, stdout: '', stderr: childErr() });
+      resolveLeg(result);
     };
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
-    child.on('error', (err) => fail(`MCP bin spawn failed: ${err}`));
+    child.on('error', (err) =>
+      finish({ ok: false, reason: `MCP bin spawn failed: ${err}`, stdout: '', stderr: childErr() }),
+    );
     child.on('close', (code, signal) => {
-      if (!settled)
-        fail(
-          `MCP bin exited early (code ${code}, signal ${signal}) before the round trip completed`,
-        );
-    });
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      if (settled) return;
-      buffer += chunk;
-      let idx;
-      while ((idx = buffer.indexOf('\n')) !== -1) {
-        lines.push(buffer.slice(0, idx));
-        buffer = buffer.slice(idx + 1);
-      }
-      if (lines.length >= 2) settle();
-    });
-    child.stdin.on('error', () => {}); // EPIPE after an early exit
-
-    function finishWith(value) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      // Clean shutdown path: EOF on stdin must exit 0 (the bin's documented
-      // EXIT contract).
-      child.on('close', (code) => {
-        if (!settled) return;
-        if (code === 0) {
-          resolveLeg({ ok: true, value });
+      if (phase === 'validating') {
+        // The EOF-exit check: a clean exit 0 on stdin EOF is the bin's
+        // documented contract; anything else — including the deadline's
+        // SIGKILL of a server that never exited — fails the leg.
+        phase = 'done';
+        clearTimeout(deadline);
+        if (signal === 'SIGKILL') {
+          resolveLeg({
+            ok: false,
+            reason: `MCP bin did not exit within the ${timeoutMs}ms leg deadline after responding (hung past EOF)`,
+            stdout: '',
+            stderr: childErr(),
+          });
+        } else if (code === 0) {
+          resolveLeg({ ok: true, value: validated });
         } else {
           resolveLeg({
             ok: false,
@@ -363,53 +371,73 @@ function mcpRoundTrip(bin, manifest, timeoutMs) {
             stderr: childErr(),
           });
         }
-      });
-      child.stdin.end();
-    }
+        return;
+      }
+      if (phase === 'collecting') {
+        finish({
+          ok: false,
+          reason: `MCP bin exited early (code ${code}, signal ${signal}) before the round trip completed`,
+          stdout: '',
+          stderr: childErr(),
+        });
+      }
+    });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (phase !== 'collecting') return;
+      buffer += chunk;
+      let idx;
+      while ((idx = buffer.indexOf('\n')) !== -1) {
+        lines.push(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+      }
+      if (lines.length >= 2) validate();
+    });
+    child.stdin.on('error', () => {}); // EPIPE after an early exit
 
-    function settle() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
+    let validated;
+
+    function validate() {
+      // Deadline stays ARMED through validation and the EOF wait.
+      phase = 'validating';
       let init;
       let list;
       try {
         init = JSON.parse(lines[0]);
         list = JSON.parse(lines[1]);
       } catch {
-        resolveLeg({
+        finish({
           ok: false,
           reason: 'MCP bin emitted a non-JSON line',
           stdout: lines.join('\n'),
           stderr: childErr(),
         });
-        child.kill('SIGKILL');
         return;
       }
       const serverName = init?.result?.serverInfo?.name;
       const toolNames = (list?.result?.tools ?? []).map((tool) => tool.name);
       if (serverName !== 'cq-harness') {
-        resolveLeg({
+        finish({
           ok: false,
           reason: `serverInfo.name is '${serverName}', expected 'cq-harness'`,
           stdout: lines.join('\n'),
           stderr: childErr(),
         });
-        child.kill('SIGKILL');
         return;
       }
       if (toolNames.length === 0) {
-        resolveLeg({
+        finish({
           ok: false,
           reason: 'tools/list returned an empty tool set',
           stdout: lines.join('\n'),
           stderr: childErr(),
         });
-        child.kill('SIGKILL');
         return;
       }
-      settled = false; // hand control back for the EOF-exit check
-      finishWith({ serverName, tools: toolNames });
+      validated = { serverName, tools: toolNames };
+      // Responses are valid: close stdin and wait for the process to exit
+      // under the still-armed deadline.
+      child.stdin.end();
     }
 
     child.stdin.write(

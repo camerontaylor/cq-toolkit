@@ -78,7 +78,9 @@ function installFakeNpm(
     | 'populate'
     | 'populate-strip-patterns'
     | 'populate-broken-cli'
-    | 'populate-refusing-mcp',
+    | 'populate-refusing-mcp'
+    | 'populate-hung-mcp'
+    | 'populate-broken-exports',
 ): string {
   mkdirSync(binDir, { recursive: true });
   const helper = join(binDir, 'fake-npm-behavior.cjs');
@@ -89,6 +91,15 @@ function installFakeNpm(
     'populate-strip-patterns': `populate(prefix, ${stubs}); require('node:fs').rmSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/policy/denylist/patterns.yml'));`,
     'populate-broken-cli': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/cli.js'), "console.log('hello from a broken cli'); process.exit(0);\\n");`,
     'populate-refusing-mcp': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/harness/mcp/bin.js'), "process.stderr.write('cq-harness-mcp: refusing to start — fixture\\\\n'); process.exit(78);\\n");`,
+    // P2 regression coverage: the MCP bin RESPONDS to initialize + tools/list
+    // but never exits after stdin EOF — the leg deadline must kill it and
+    // fail the run instead of waiting forever. (hungMcpSource is inlined
+    // below; lint cannot see the template-string reference.)
+    'populate-hung-mcp': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/dist/harness/mcp/bin.js'), ${hungMcpSourceAsJson()});`,
+    // P1 regression coverage: dist/index.js exists but the package.json
+    // exports field does not map the root — the bare-specifier SDK import
+    // must fail the leg even though the dist file is present.
+    'populate-broken-exports': `populate(prefix, ${stubs}); const p = require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/package.json'); const pkg = JSON.parse(require('node:fs').readFileSync(p, 'utf8')); delete pkg.main; pkg.exports = './dist/wrong.js'; require('node:fs').writeFileSync(p, JSON.stringify(pkg));`,
   };
   writeFileSync(
     helper,
@@ -101,14 +112,27 @@ function installFakeNpm(
       `  const pkg = path.join(prefix, 'node_modules/@camerontaylor/cq-toolkit');`,
       `  fs.mkdirSync(path.join(pkg, 'dist/harness/mcp'), { recursive: true });`,
       `  fs.mkdirSync(path.join(pkg, 'policy/denylist'), { recursive: true });`,
+      // The public surface the smoke exercises: root export mapping and both
+      // bin registrations. The smoke asserts THROUGH these (bare-specifier
+      // import, .bin mappings), so a fake install without them is broken.
       `  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({`,
       `    name: '@camerontaylor/cq-toolkit', version: '9.9.9-fixture',`,
-      `    main: './dist/index.js', _integrity: 'sha512-fixture' }));`,
+      `    main: './dist/index.js', exports: { '.': './dist/index.js' },`,
+      `    bin: { cq: './dist/cli.js', 'cq-harness-mcp': './dist/harness/mcp/bin.js' },`,
+      `    _integrity: 'sha512-fixture' }));`,
       `  for (const [rel, source] of Object.entries(stubs)) {`,
       `    fs.mkdirSync(path.dirname(path.join(pkg, rel)), { recursive: true });`,
       `    fs.writeFileSync(path.join(pkg, rel), source);`,
       `  }`,
       `  fs.writeFileSync(path.join(pkg, 'policy/denylist/patterns.yml'), 'patterns: []\\n');`,
+      // npm creates node_modules/.bin mappings for the declared bins.
+      `  const binDir = path.join(prefix, 'node_modules/.bin');`,
+      `  fs.mkdirSync(binDir, { recursive: true });`,
+      `  for (const name of ['cq', 'cq-harness-mcp']) {`,
+      `    const target = path.join(pkg, name === 'cq' ? 'dist/cli.js' : 'dist/harness/mcp/bin.js');`,
+      `    fs.chmodSync(target, 0o755);`,
+      `    fs.symlinkSync(target, path.join(binDir, name));`,
+      `  }`,
       `}`,
       behaviors[behavior],
     ].join('\n'),
@@ -147,7 +171,7 @@ function stubDistSources(): string {
     `export const defaultHarnessConfig = { tools: { read: {}, edit: {} }, promptBudget: { maxTools: 6 } };`,
     ``,
   ].join('\n');
-  const cliStub = `if (process.argv.slice(2).includes('--json')) { console.log(JSON.stringify({ error: { kind: 'usage' } })); } process.exit(2);\n`;
+  const cliStub = `#!/usr/bin/env node\nif (process.argv.slice(2).includes('--json')) { console.log(JSON.stringify({ error: { kind: 'usage' } })); } process.exit(2);\n`;
   const mcpLines = [
     `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cq-harness","version":"9.9.9-fixture"}}}`,
     `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read"},{"name":"edit"},{"name":"bash"}]}}`,
@@ -155,6 +179,7 @@ function stubDistSources(): string {
   // The stub MCP bin reads its requests, then serves the two canned replies
   // in order, then exits 0 on EOF — enough surface for the round trip.
   const mcpStub = [
+    `#!/usr/bin/env node`,
     `const lines = require('node:fs').readFileSync(0, 'utf8').split('\\n').filter(Boolean);`,
     `for (const line of lines) JSON.parse(line);`,
     `for (const line of ${JSON.stringify(mcpLines)}) process.stdout.write(line + '\\n');`,
@@ -166,6 +191,32 @@ function stubDistSources(): string {
     'dist/cli.js': cliStub,
     'dist/harness/mcp/bin.js': mcpStub,
   });
+}
+
+/**
+ * The hung MCP bin (P2 regression coverage): it serves the same two canned
+ * replies but then NEVER exits, even after stdin EOF. The smoke's leg
+ * deadline must stay armed through the EOF wait, SIGKILL this process, and
+ * fail the run. JSON-encoded so it can be embedded in the CJS helper the
+ * fake npm evaluates.
+ */
+function hungMcpSourceAsJson(): string {
+  const mcpLines = [
+    `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"cq-harness","version":"9.9.9-fixture"}}}`,
+    `{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read"},{"name":"edit"},{"name":"bash"}]}}`,
+  ];
+  const source = [
+    `#!/usr/bin/env node`,
+    `const lines = require('node:fs').readFileSync(0, 'utf8').split('\\n').filter(Boolean);`,
+    `for (const line of lines) JSON.parse(line);`,
+    `for (const line of ${JSON.stringify(mcpLines)}) process.stdout.write(line + '\\n');`,
+    // Drain stdin (respecting EOF) but never exit: the exact hang class the
+    // armed deadline exists to bound.
+    `require('node:fs').readFileSync(0);`,
+    `setInterval(() => {}, 60_000);`,
+    ``,
+  ].join('\n');
+  return JSON.stringify(source);
 }
 
 /** A fixture tarball (a real gzipped tar with a package/ root). */
@@ -253,6 +304,30 @@ describe('packed-smoke failure paths', () => {
     const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], { fakeBinDir: fake });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("leg 'cli-bin' failed");
+    expectNoLeftoverPrefixes();
+  });
+
+  it('fails the sdk leg when the exports field does not map the root even though dist/index.js exists (P1)', () => {
+    const dir = scratch();
+    const tarball = makeTarball(dir);
+    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-broken-exports');
+    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=20000'], { fakeBinDir: fake });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("leg 'sdk-import' failed");
+    expectNoLeftoverPrefixes();
+  });
+
+  it('bounded-fails the mcp leg when the bin responds but never exits past EOF (P2)', () => {
+    const dir = scratch();
+    const tarball = makeTarball(dir);
+    const fake = installFakeNpm(join(dir, 'fake-bin'), 'populate-hung-mcp');
+    const result = runSmoke([`--tarball=${tarball}`, '--timeout-ms=3000'], {
+      fakeBinDir: fake,
+      timeoutMs: 60_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("leg 'mcp-bin' failed");
+    expect(result.stderr).toContain('leg deadline');
     expectNoLeftoverPrefixes();
   });
 });
