@@ -63,6 +63,11 @@ export interface FixTaskNoArtifactFailure {
  */
 export type FixTaskFailure = FixTaskAttemptFailure | FixTaskNoArtifactFailure;
 
+/** Type predicate: the row is branchless work with no retained artifact. */
+export function isNoArtifactFailure(failure: FixTaskFailure): failure is FixTaskNoArtifactFailure {
+  return !('branch' in failure);
+}
+
 /**
  * One accounting row per planned unit of work: every task the run's units
  * planned (attempted or not), plus one row per planned unit that never ran

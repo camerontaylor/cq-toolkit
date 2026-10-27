@@ -4,6 +4,7 @@ export type { FixRunInput, FixRunReport, FixRunResult, FixRunDeps } from './runF
 export {
   failureRowsOf,
   fixRunCounters,
+  isNoArtifactFailure,
   neverStartedRow,
   plannedTaskRowOf,
   unitLabelOf,

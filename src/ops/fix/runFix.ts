@@ -43,6 +43,7 @@ import type { FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
 import type { FixRunInputSchema } from './registry.js';
 import {
   fixRunCounters,
+  isNoArtifactFailure,
   neverStartedRow,
   plannedTaskRowOf,
   unitLabelOf,
@@ -230,19 +231,19 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           ),
         );
       report.counters = fixRunCounters(report.planned);
-      for (const row of report.planned)
-        if (row.outcome !== 'fixed' && row.failures.some((failure) => !('branch' in failure)))
+      for (const row of report.planned) {
+        const branchless = row.failures.filter(isNoArtifactFailure);
+        if (row.outcome !== 'fixed' && branchless.length > 0)
           report.failed.push(
-            ...row.failures
-              .filter((failure) => !('branch' in failure))
-              .map((failure) => ({
-                unit: failure.unit,
-                task: failure.task,
-                outcome: failure.outcome,
-                gate: failure.gate,
-                reason: failure.reason,
-              })),
+            ...branchless.map((failure) => ({
+              unit: failure.unit,
+              task: failure.task,
+              outcome: failure.outcome,
+              gate: failure.gate,
+              reason: failure.reason,
+            })),
           );
+      }
       report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -630,7 +631,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             const branchless = report.planned.filter(
               (row) =>
                 row.outcome !== 'fixed' &&
-                row.failures.every((failure) => !('branch' in failure)) &&
+                row.failures.every(isNoArtifactFailure) &&
                 !report.tasks.some(
                   (task) =>
                     task.task.id === row.task.id &&
