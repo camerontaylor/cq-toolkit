@@ -485,7 +485,9 @@ test('failing post-enrollment status read owns the durable append; replay stays 
   expect(third.status, JSON.stringify(third)).toBe('indeterminate');
   if (third.status !== 'indeterminate') throw Error(JSON.stringify(third));
   expect(third.detail).toContain('deferred ledger changed; replay the same successor');
-  expect(note).toHaveBeenCalledTimes(2);
+  // The external bytes are not the engine-requested mutation, so even though
+  // the ledger changed, no ownership notification may bless them.
+  expect(note).toHaveBeenCalledTimes(1);
   ledger = f.effects.openLedger(f.state.branch).load();
   expect(ledger.records.filter((r) => r.kind === 'vendor-debt')).toHaveLength(1);
 });

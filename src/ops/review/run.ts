@@ -179,24 +179,62 @@ export function makeReviewRun(
         !parent?.aborted && (deadline.expired() || remainingWallMs() <= 0);
       let deferredVendorDebt: DeferredVendorDebt | undefined;
       const prepareDebt = async () => {
-        const before = effects.openLedger(state.branch).load();
+        const before = structuredClone(effects.openLedger(state.branch).load());
+        // Correlate durable bytes with the mutation this invocation requested,
+        // including an enrollment whose status read later fails; never bless
+        // bytes the engine did not request — external appends stay unowned and
+        // fail closed at the address bookkeeping fingerprint check.
+        let requestedLedger: DevLedgerFile | undefined;
+        let provisionalLedger: DevLedgerFile | undefined;
         let debt: DeferredVendorDebt | undefined;
+        let failure: { thrown: boolean; error: unknown } | undefined;
         try {
           debt = await prepareDeferredVendorReview(
-            effects,
+            {
+              ...effects,
+              openLedger: (branch) => {
+                const store = effects.openLedger(branch);
+                return {
+                  ...store,
+                  mutate: (update) =>
+                    store
+                      .mutate((latest) => {
+                        const change = update(latest);
+                        provisionalLedger = structuredClone(change.ledger);
+                        return change;
+                      })
+                      .then((result) => {
+                        // Promote only once the store durably accepted the
+                        // requested state; a capture that never successfully
+                        // persisted must never own the notification.
+                        requestedLedger = provisionalLedger;
+                        return result;
+                      }),
+                };
+              },
+            },
             target,
             state,
             deps.queueClient,
             deadline.signal,
             { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
           );
-        } finally {
-          // Settlement can durably write a predecessor then return no current debt.
-          // Register those bytes even when preparation subsequently refuses progress.
-          const after = effects.openLedger(state.branch).load();
-          if (JSON.stringify(after) !== JSON.stringify(before))
-            await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+        } catch (error) {
+          failure = { thrown: true, error };
         }
+        // Ownership settlement for both outcomes: durable bytes are owned only
+        // when they exactly equal the engine-requested, successfully persisted
+        // mutation. Unowned changed bytes never reach the ownership callback;
+        // on a preparation failure the original error propagates and the
+        // enclosing address bookkeeping fingerprint check fails closed.
+        const after = effects.openLedger(state.branch).load();
+        if (!isDeepStrictEqual(before, after)) {
+          if (requestedLedger !== undefined && isDeepStrictEqual(requestedLedger, after))
+            await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+          else if (!failure)
+            throw new Error('deferred preparation changed unrecognized ledger bytes');
+        }
+        if (failure) throw failure.error;
         if (debt) {
           if (
             input.uncommitted ||
