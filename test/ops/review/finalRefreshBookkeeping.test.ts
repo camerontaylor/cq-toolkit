@@ -492,18 +492,21 @@ test('an unowned predecessor append outside the refresh still fails closed', asy
 
 test('a seam-owned authorized predecessor settlement is accepted and notified', async () => {
   const f = await fixture('authorized-predecessor-settle');
+  const beforeRecords = f.store
+    .load()
+    .records.filter((record) => record.kind === 'vendor-debt').length;
   const result = await f.run();
   // The seam appends the verified predecessor completion through its own requested mutation; the
   // ownership validation recognizes the authorized append instead of rejecting it.
   expect(result.status, JSON.stringify(result)).toBe('ok');
   expect(f.events).toContain('ledger-observed');
-  const settled = f.store
-    .load()
-    .records.filter((record) => record.kind === 'vendor-debt')
-    .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined));
-  expect(
-    settled
-      .filter((debt) => debt?.vendorCompleted === true)
-      .map((debt) => debt!.reference.requestId),
-  ).toContain('ancestor-1');
+  // Explicit >=2 authorized-appended proof: this refresh appends the current enrollment AND the
+  // authorized predecessor, which the previous single-append predicate could not accept together.
+  const debtRecords = f.store.load().records.filter((record) => record.kind === 'vendor-debt');
+  expect(debtRecords.length - beforeRecords).toBeGreaterThanOrEqual(2);
+  const completed = debtRecords
+    .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined))
+    .filter((debt) => debt?.vendorCompleted === true)
+    .map((debt) => debt!.reference.requestId);
+  expect(completed).toEqual(expect.arrayContaining(['ancestor-1', f.debt.reference.requestId]));
 });
