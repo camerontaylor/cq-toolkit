@@ -15,6 +15,15 @@
 #      and runs it FROM the unpacked root — the scan then consumes the
 #      TARBALL'S OWN policy/denylist/patterns.yml (its absence or corruption
 #      fails the audit too) and gitleaks-scans the shipped bytes.
+#   3. PACKED-CONSUMER SMOKE (#394, P4): the same tarball is installed into
+#      a fresh temporary consumer prefix (npm, from the exact file — no
+#      registry), the installed SDK root export is imported, and both bins
+#      are smoked over their documented contracts — the `cq` usage artifact
+#      (exit 2 + one JSON error object) and a bounded `cq-harness-mcp`
+#      initialize → tools/list → EOF-0 round trip. scripts/packed-smoke.mjs
+#      owns the bounded orchestration, failure reporting, artifact scan and
+#      cleanup; test/scripts/packed-smoke.test.ts mocks/fixture-tests it
+#      locally (the real install smoke runs HERE, never on a dev host).
 #
 # Trigger note (development posture, 2026-10-20): this workflow is not a
 # required check, so invariant I4 does not bind it; it is path-filtered to
@@ -118,6 +127,23 @@ jobs:
             || { echo 'policy/denylist/patterns.yml is missing from the tarball'; exit 1; }
           rm -f "${listing}"
           echo 'tarball paths: only dist/, policy/, LICENSE, README.md, package.json'
+      - name: Packed-consumer smoke (install from THIS tarball, SDK + bins) # P4, #394
+        run: |
+          set -euo pipefail
+          # The smoke installs the EXACT audited tarball into a fresh temp
+          # prefix (no registry, no source checkout on the resolution path),
+          # imports the installed SDK root export, drives both bins over
+          # their documented contracts (the cq usage artifact; one bounded
+          # initialize → tools/list → EOF-0 MCP round trip), scans the
+          # installed tree for the required artifacts, and records the
+          # tarball identity. Bounded orchestration + guaranteed cleanup
+          # live in the script; the summary lands in RUNNER_TEMP, never in
+          # the checkout.
+          node scripts/packed-smoke.mjs \
+            --tarball="${TARBALL}" \
+            --out="${RUNNER_TEMP}/packed-smoke-summary.json"
+          echo '--- packed smoke summary ---'
+          cat "${RUNNER_TEMP}/packed-smoke-summary.json"
       - name: Install pinned gitleaks v8.30.1 (digest-pinned)
         run: |
           set -euo pipefail
