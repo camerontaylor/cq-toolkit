@@ -37,14 +37,16 @@ hint exits before runner imports, locking or network calls. A due entry takes
 the tick lock non-blocking, collects only terminal detached reviews through the
 existing ownership-aware harvest path, applies published signer cooldown, then
 refreshes usage and fills eligible free slots. Live or unverifiable runs retain
-capacity. If a dated next slot is less than 60 seconds away it sleeps once and
+capacity. Uncaptured merged-current items wait for the fetching maintenance
+tick; minute admission can reuse an existing capture. Unknown signer delivery
+retains its journaled admission and cannot fall through to another launch.
+If a dated next slot is less than 60 seconds away it sleeps once and
 rechecks; undated one-minute retries never sleep under the lock. In-flight runs
 cap the timestamp hint at the next minute boundary, including while admission
 is paused or cooling down, so completed results are collected within a minute.
 Without in-flight runs, idle admission backs off twelve minutes. The twelve-minute
 full tick retains enrollment, harvest, status and audits, refreshes the hint, and
-waits up to 90
-seconds for the lock so a sleeping admission cannot skip maintenance. Harvest
+waits up to 90 seconds for the lock so a sleeping admission cannot skip maintenance. Harvest
 clears the hint; detached completion also requests a full harvest tick. Both
 entries serialize queue writes; detached runs own individual worktrees and run
 artifacts. No transient wake units are created.

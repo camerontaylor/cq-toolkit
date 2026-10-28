@@ -2911,14 +2911,18 @@ def coverage_fallback(q, log, dry, only):
     return None, available
 
 
-def start_one(q, log, dry, only, ignore_quiet):
+def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     """Select in policy order; launch reserves identity and quota before spawn."""
     started = None
     has_coverage = False
+    reservations_before = len(q.get("starts", []))
     for item in sorted(q["items"], key=sort_key):
         if only and item["id"] != only:
             continue
         if item["state"] != "pending":
+            continue
+        if item["kind"] == review_receipt.KIND and not capture_current and not item.get("capture"):
+            item["wait_reason"] = "first current capture waits for fetching maintenance tick"
             continue
         if item["kind"] == "coverage":
             if item.get("operator_priority"):
@@ -2997,6 +3001,8 @@ def start_one(q, log, dry, only, ignore_quiet):
                 plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry)
         except NotReady as exc:
             item["wait_reason"] = str(exc)
+            if len(q.get("starts", [])) > reservations_before:
+                break  # unknown delivery still owns its journaled admission
             continue
         except NothingToReview as exc:
             if not dry:
@@ -3008,6 +3014,8 @@ def start_one(q, log, dry, only, ignore_quiet):
         except Exception as exc:
             item["wait_reason"] = f"planning error: {exc}"[:300]
             log.append(f"{item['id']}: planning error {exc}"[:300])
+            if len(q.get("starts", [])) > reservations_before:
+                break
             continue
         for n in plan["notes"]:
             log.append(f"{item['id']}: {n}")
@@ -3091,7 +3099,7 @@ def collect_finished(q, log):
             log.append(msg)
 
 
-def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, reserved=()):
+def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, reserved=(), capture_current=True):
     before_all = len(q.get("starts", []))
     has_coverage = False
     global_gate = None
@@ -3120,9 +3128,12 @@ def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, res
         global_gate = "inflight"
         log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG.get('max_inflight', 10)})")
     else:
-        for _ in range(admissions):
+        while (len(q.get("starts", [])) - before_all < admissions and
+               len(inflight(q)) < CONFIG.get("max_inflight", 10)):
+            # Recount actual journaled reservations, including unknown delivery,
+            # rather than assuming one start_one call spends exactly one slot.
             before = len(q.get("starts", []))
-            _, candidate = start_one(q, log, dry, only, ignore_quiet)
+            _, candidate = start_one(q, log, dry, only, ignore_quiet, capture_current=capture_current)
             has_coverage = has_coverage or candidate
             # A dry run, refusal or no eligible candidate cannot reserve more.
             if dry or only or len(q.get("starts", [])) == before:
@@ -3147,7 +3158,7 @@ def slot():
         if PROMO.get("enabled") and promotion_mode() == "signer":
             apply_signer_backoff(q, log)
         usage, reserved = read_slot_usage(q)
-        _, gate, remaining = admit_available(q, usage, log, reserved=reserved)
+        _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
         save_queue(q)
         at = now()
         deadline = refresh_slot_deadline(q, usage, remaining, gate, at=at)

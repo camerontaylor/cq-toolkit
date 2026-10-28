@@ -111,6 +111,48 @@ class ConcurrencyTest(unittest.TestCase):
                 crq.tick()
                 self.assertEqual(len(self.started), expected)
 
+    def test_unknown_signer_delivery_consumes_one_admission(self):
+        for remaining, limit, expected_launches in [(1, 10, 0), (10, 1, 0), (2, 2, 1)]:
+            with self.subTest(remaining=remaining, max_inflight=limit):
+                self.items()
+                self.started.clear()
+                self.q['starts'] = []
+                promotion = next(i for i in self.q['items'] if i['kind'] == 'promotion')
+                promotion['id'] = 'promo-' + fixtures.HEAD[:10]
+                crq.CONFIG['max_inflight'] = limit
+                with mock.patch.object(crq, 'promotion_mode', return_value='signer'), \
+                     mock.patch.object(crq, 'main_sha', return_value=fixtures.BASE), \
+                     mock.patch.object(crq.SPOOL, 'write_request', side_effect=crq.SpoolUnreachable('unknown')) as write, \
+                     mock.patch.object(crq, 'spool_unreachable', return_value='unknown delivery'):
+                    _, _, remaining_after = crq.admit_available(self.q, {'remaining': remaining}, [])
+                write.assert_called_once()
+                self.assertEqual(promotion['state'], 'requested')
+                self.assertTrue(promotion['request']['dispatch_pending'])
+                self.assertEqual(len(self.started), expected_launches)
+                self.assertEqual(len(self.q['starts']), 1 + expected_launches)
+                self.assertLessEqual(len(crq.inflight(self.q)), limit)
+                self.assertEqual(remaining_after, remaining - 1 - expected_launches)
+
+    def test_minute_leaves_first_current_capture_to_fetching_tick(self):
+        for minute, captured, expected in [(True, False, 0), (True, True, 1), (False, False, 1)]:
+            with self.subTest(minute=minute, captured=captured):
+                self.started.clear()
+                self.q['starts'] = []
+                item = dict(id='current', kind=crq.review_receipt.KIND, state='pending', order=1)
+                if captured:
+                    item['capture'] = {'target': fixtures.HEAD}
+                self.q['items'] = [item]
+                with mock.patch.object(crq, 'prepare_current', return_value=self.plan) as prepare, \
+                     mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
+                     mock.patch.object(crq, 'fetch') as fetch:
+                    (crq.slot if minute else crq.tick)()
+                self.assertEqual(prepare.call_count, expected)
+                self.assertEqual(len(self.started), expected)
+                if minute:
+                    fetch.assert_not_called()
+                else:
+                    fetch.assert_called_once()
+
     def test_harvests_each_run_before_refilling_capacity(self):
         self.items()
         for item in self.q['items'][:2]:
