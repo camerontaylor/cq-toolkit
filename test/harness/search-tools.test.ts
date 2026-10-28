@@ -648,6 +648,68 @@ describe('contained grep and glob tools', () => {
     });
   });
 
+  test('escaped brace delimiters and commas follow rg glob expansion (#604)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      for (const name of [
+        '{a,b}.ts',
+        'a.ts',
+        'b.ts',
+        'a,b.ts',
+        'c.ts',
+        'a}.ts',
+        '{b.ts',
+        '\\a.ts',
+        '\\b.ts',
+      ]) {
+        await writeFile(join(workspace, name), 'needle\n', 'utf8');
+      }
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // Verified against rg --files --hidden --no-ignore --glob on this fixture:
+      // one slash escapes a brace/comma; two slashes escape each other.
+      const cases = [
+        {
+          include: '\\{a,b\\}.ts',
+          expected: ['{a,b}.ts'],
+          excluded: ['a.ts', 'b.ts'],
+        },
+        {
+          include: '{a\\,b,c}.ts',
+          expected: ['a,b.ts', 'c.ts'],
+          excluded: ['{a,b}.ts'],
+        },
+        {
+          include: '\\\\{a,b}.ts',
+          expected: ['\\a.ts', '\\b.ts'],
+          excluded: ['a.ts', 'b.ts'],
+        },
+        {
+          include: '{a\\},b}.ts',
+          expected: ['a}.ts', 'b.ts'],
+          excluded: ['a.ts'],
+        },
+        {
+          include: '{a,\\{b}.ts',
+          expected: ['a.ts', '{b.ts'],
+          excluded: ['b.ts'],
+        },
+        {
+          include: '{a}.ts',
+          expected: ['a.ts'],
+          excluded: ['{a,b}.ts'],
+        },
+      ];
+      for (const { include, expected, excluded } of cases) {
+        const result = await grep.execute({ pattern: 'needle', include });
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          for (const name of expected) expect(result.output).toContain(`--- ${name} ---`);
+          for (const name of excluded) expect(result.output).not.toContain(`--- ${name} ---`);
+        }
+      }
+    });
+  });
+
   test('streaming include enumeration fails closed at the scanned-bytes work cap', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, '.git'), { recursive: true });
@@ -835,6 +897,158 @@ describe('contained grep and glob tools', () => {
         expect(spawnState.current?.kill).toHaveBeenCalled();
         expect(signalCleanupState.registered - registeredBefore).toBe(1);
         expect(signalCleanupState.unregistered - unregisteredBefore).toBe(1);
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+    });
+  });
+
+  test('ripgrep bracket classes and negation work in grep include (#604)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'file1.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'file2.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'fileX.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'a.test.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'keep.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // rg fixture: file[12].ts selects exactly file1/file2 (bracket class).
+      const bracket = await grep.execute({ pattern: 'needle', include: 'file[12].ts' });
+      expect(bracket.ok).toBe(true);
+      if (bracket.ok) {
+        expect(bracket.output).toContain('--- file1.ts ---');
+        expect(bracket.output).toContain('--- file2.ts ---');
+        expect(bracket.output).not.toContain('fileX.ts');
+      }
+      // rg fixture: a PATTERN-level leading '!' is ONE exclusion — no
+      // positives remain, so nothing matches ('!*.test.ts' matches nothing;
+      // 'keep.ts' is not a .test.ts file, but with no positives the include
+      // is still empty).
+      const exclusion = await grep.execute({ pattern: 'needle', include: '!*.test.ts' });
+      expect(exclusion.ok).toBe(true);
+      if (exclusion.ok) {
+        expect(exclusion.output).toBe('No matches'); // all-exclusion: no positives
+      }
+      // rg fixture (P1 #604): an arm starting with '!' inside braces is a
+      // LITERAL-'!' component, not an exclusion — '{!*.test.ts,*.test.ts}'
+      // lists .test.ts files. Negation is pattern-level, BEFORE expansion.
+      await writeFile(join(workspace, '.test.ts'), 'needle\n', 'utf8');
+      const braceArm = await grep.execute({
+        pattern: 'needle',
+        include: '{!*.test.ts,*.test.ts}',
+      });
+      expect(braceArm.ok).toBe(true);
+      if (braceArm.ok) {
+        expect(braceArm.output).toContain('--- .test.ts ---');
+        expect(braceArm.output).toContain('--- a.test.ts ---');
+        expect(braceArm.output).not.toContain('--- keep.ts ---');
+      }
+      const ranged = await grep.execute({ pattern: 'needle', include: 'file[1-x].ts' });
+      expect(ranged.ok).toBe(true);
+      if (ranged.ok) {
+        expect(ranged.output).toContain('--- file1.ts ---');
+        expect(ranged.output).not.toContain('--- keep.ts ---');
+      }
+    });
+  });
+
+  test('repeated brace alternatives fail closed on visited-branch work cap (#605)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'x.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // One unique alternative, but 2^30 visited branches without the cap.
+      const pattern = '{a,a}'.repeat(30) + '.ts';
+      const result = await grep.execute({ pattern: 'needle', include: pattern });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.denial.reason).toBe(
+          'SEARCH_LIMIT: search denied: include expansion exceeds 256 visited branches',
+        );
+      }
+    });
+  });
+
+  test('retention and output ordering agree past the candidate cap (#613)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      // 1,005 lowercase candidates do NOT match; ONLY Z.ts contains the
+      // needle. This isolates the #613 scenario: with the old mixed
+      // ordering, the single matching candidate could be dropped by the
+      // native-code-unit top-1000 retention while a locale-sorted output
+      // would have kept it — candidate-cap selection and result ordering
+      // must agree. (The result cap is separate: only one file matches, so
+      // SEARCH_MATCH_LIMIT is not reached.)
+      await Promise.all(
+        Array.from({ length: 1_005 }, (_, index) =>
+          writeFile(
+            join(workspace, `a${String(index).padStart(4, '0')}.ts`),
+            'no match here\n',
+            'utf8',
+          ),
+        ),
+      );
+      await writeFile(join(workspace, 'Z.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({
+        pattern: 'needle',
+        include: '*.ts',
+        output_mode: 'files_with_matches',
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('Z.ts');
+        expect(result.output).not.toContain('a0000.ts');
+        // All 1,006 paths match include *.ts, so the 1,000-candidate cap
+        // excludes five paths before content matching; the honest cap
+        // marker is part of the response.
+        expect(result.truncated).toBe(true);
+        expect(result.output).toContain('[truncated: candidate files cap 1000]');
+      }
+    });
+  });
+
+  test('a pathological include pattern returns promptly with bounded work (#614)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'aaaats'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // Overlapping backtracking shape under the old regex matcher: with the
+      // bounded matcher this either matches or fails within bounded state.
+      const result = await grep.execute({ pattern: 'needle', include: `${'*a'.repeat(25)}b.ts` });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.output).toBe('No matches');
+      const oversized = await grep.execute({
+        pattern: 'needle',
+        include: `*${'a'.repeat(300)}`, // over the 256-char pattern bound
+      });
+      expect(oversized.ok).toBe(false);
+      if (!oversized.ok) {
+        expect(oversized.denial.reason).toBe(
+          'SEARCH_LIMIT: search denied: include pattern exceeds 256 characters',
+        );
+      }
+      // #614: 64 distinct alternatives share work on one 203-character candidate.
+      // Their 4,096-state budget must deny rather than silently drop it.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from(`${'a'.repeat(200)}.ts\0`)],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4247,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const deep = await grep.execute({
+          pattern: 'needle',
+          include: `{${Array.from({ length: 64 }, (_, index) => `${'*a'.repeat(10)}z${index}.ts`).join(',')}}`,
+        });
+        expect(deep.ok).toBe(false);
+        if (!deep.ok) {
+          expect(deep.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
       } finally {
         spawnState.fake = null;
         spawnState.current = null;

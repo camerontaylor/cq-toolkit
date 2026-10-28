@@ -1078,20 +1078,59 @@ export function buildTools(
    * class the CR rejects; the denial names the cap with bounded evidence.
    */
   const SEARCH_INCLUDE_EXPANSION_LIMIT = 64;
-  type IncludeExpansion = { overflow: true } | { overflow: false; alternatives: string[] };
+  // #605: the RESULT cap alone is not a work bound — '{a,a}'.repeat(30)+'.ts'
+  // retains one unique alternative while visiting 2^30 branches. Every
+  // recursive expand() call is charged to this visited-branch counter; the
+  // expansion fails closed as soon as it is exceeded, before any unbounded
+  // synchronous work.
+  const SEARCH_INCLUDE_EXPANSION_VISITS = 256;
+  type IncludeExpansion =
+    | { overflow: true; reason: 'alternatives' | 'visits' }
+    | { overflow: false; alternatives: string[] };
   const expandIncludeAlternatives = (pattern: string): IncludeExpansion => {
-    const overflow: IncludeExpansion = { overflow: true };
-    const expand = (rest: string, acc: string[]): string[] | undefined => {
-      const open = rest.indexOf('{');
+    const overflow = (reason: 'alternatives' | 'visits'): IncludeExpansion => ({
+      overflow: true,
+      reason,
+    });
+    let visited = 0;
+    const expand = (rest: string, acc: string[]): 'alternatives' | 'visits' | undefined => {
+      visited += 1;
+      if (visited > SEARCH_INCLUDE_EXPANSION_VISITS) return 'visits';
+      // An escaped brace is data for tokenizeComponent, not an expansion
+      // delimiter. A pair of backslashes escapes itself, leaving the brace
+      // syntactic (the same parity rule applies to closing braces and commas).
+      let escaped = false;
+      let open = -1;
+      for (let i = 0; i < rest.length; i += 1) {
+        const ch = rest[i];
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '{') {
+          open = i;
+          break;
+        }
+      }
       if (open === -1) {
         if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
       }
       let depth = 0;
       let close = -1;
+      escaped = false;
       for (let i = open; i < rest.length; i += 1) {
-        if (rest[i] === '{') depth += 1;
-        else if (rest[i] === '}') {
+        const ch = rest[i];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (ch === '{') depth += 1;
+        else if (ch === '}') {
           depth -= 1;
           if (depth === 0) {
             close = i;
@@ -1102,13 +1141,24 @@ export function buildTools(
       if (close === -1) {
         // Unbalanced braces stay literal (rg glob-consistent, no expansion).
         if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
       }
       const inner = rest.slice(open + 1, close);
       const parts: string[] = [];
       let partDepth = 0;
       let current = '';
+      escaped = false;
       for (const ch of inner) {
+        if (escaped) {
+          current += ch;
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          current += ch;
+          escaped = true;
+          continue;
+        }
         if (ch === '{') partDepth += 1;
         else if (ch === '}') partDepth -= 1;
         if (ch === ',' && partDepth === 0) {
@@ -1117,22 +1167,303 @@ export function buildTools(
         } else current += ch;
       }
       parts.push(current);
-      if (parts.length === 1) {
-        if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
-      }
       const prefix = rest.slice(0, open);
       const suffix = rest.slice(close + 1);
       for (const part of parts) {
-        const next = expand(prefix + part + suffix, acc);
-        if (next === undefined) return undefined;
+        const reason = expand(prefix + part + suffix, acc);
+        if (reason !== undefined) return reason;
       }
-      return acc;
+      return undefined;
     };
-    const out = expand(pattern, []);
-    if (out === undefined) return overflow;
-    return { overflow: false, alternatives: out };
+    const alternatives: string[] = [];
+    const reason = expand(pattern, alternatives);
+    if (reason !== undefined) return overflow(reason);
+    return { overflow: false, alternatives };
   };
+
+  // ---------------------------------------------------------------------------
+  // #604/#614: a file-local ripgrep-glob matcher for grep includes.
+  //
+  // compilePathPatterns is the shared path-ALLOWLIST compiler (src/index.ts,
+  // review planning) and deliberately escapes brackets and leading '!'; the
+  // include boundary must instead preserve the established ripgrep glob
+  // syntax, verified against deterministic local rg fixtures:
+  //   - '*' matches any run of non-'/' within one segment; '?' one non-'/'
+  //     char; '**' spans segments ('a**' matches 'a.test.ts' AND 'a.ts').
+  //   - '[abc]', '[a-c]' character classes; ']' as the FIRST member is a
+  //     literal ('[]a].ts' matches 'a.ts'); '[!...]' negates ('[!a-c]*.ts').
+  //   - a '/' anywhere makes the glob ROOT-anchored ('dir/n.ts' matches only
+  //     that path); otherwise the glob may match at any depth ('a*' also
+  //     matches 'deep/a.txt'; '**/n.ts' matches 'deep/dir/n.ts').
+  //   - a leading '!' marks an EXCLUSION group; one rg call with globs
+  //     ['*.ts','!*.test.ts'] returns positives MINUS exclusions. Matching
+  //     a set of alternatives is therefore: any positive matches AND no
+  //     exclusion matches ('keep.ts' survives '!*.test.ts keep.ts').
+  //   - '{a,b}' alternation is expanded before this matcher runs.
+  //
+  // #614: matching is synchronous inside enumeration, so it must be bounded
+  // independent of timeouts/abort: NO regex and NO backtracking. Each
+  // alternative is compiled into a token list and matched with iterative
+  // two-pointer wildcard matching (greedy '*' with one rollback position,
+  // no re-examination of consumed path text), total state bounded by
+  // pattern length x path length. Whole-pattern length is capped per
+  // alternative and fails closed before enumeration; an uncapped matcher
+  // would be a synchronous event-loop hazard (issue #614).
+  // ---------------------------------------------------------------------------
+  const SEARCH_INCLUDE_PATTERN_MAX = 256;
+  type GlobToken =
+    | { kind: 'literal'; chars: string }
+    | { kind: 'any-run' } // '*' — greedy within one path component
+    | { kind: 'any-one' } // '?'
+    | { kind: 'class'; members: string[]; ranges: [string, string][]; negate: boolean };
+  type CompiledGlob = { runs: GlobToken[][]; anchored: boolean };
+
+  /**
+   * Tokenize ONE '/'-free path component. rg glob rules (fixture-pinned):
+   * '*' is a greedy within-component wildcard (repeated stars fold), '?'
+   * one component char, '[abc]'/'[a-c]' classes with ']' first-member
+   * literal and '[!...]' negation; '\x' escapes; an unterminated '[' is a
+   * literal bracket. 'a**' behaves as 'a*' (rg: '**' is special ONLY as a
+   * whole path component).
+   */
+  const tokenizeComponent = (part: string): GlobToken[] => {
+    const tokens: GlobToken[] = [];
+    let literal = '';
+    const flush = (): void => {
+      if (literal !== '') {
+        tokens.push({ kind: 'literal', chars: literal });
+        literal = '';
+      }
+    };
+    let index = 0;
+    while (index < part.length) {
+      const ch = part[index]!;
+      if (ch === '*') {
+        flush();
+        while (part[index] === '*') index += 1;
+        tokens.push({ kind: 'any-run' });
+      } else if (ch === '?') {
+        flush();
+        tokens.push({ kind: 'any-one' });
+        index += 1;
+      } else if (ch === '[') {
+        let cursor = index + 1;
+        let negate = false;
+        if (part[cursor] === '!' || part[cursor] === '^') {
+          negate = true;
+          cursor += 1;
+        }
+        const members: string[] = [];
+        const ranges: [string, string][] = [];
+        let first = true;
+        let closed = false;
+        while (cursor < part.length) {
+          const member = part[cursor]!;
+          if (member === ']' && !first) {
+            closed = true;
+            cursor += 1;
+            break;
+          }
+          first = false;
+          if (
+            member !== ']' &&
+            part[cursor + 1] === '-' &&
+            part[cursor + 2] !== undefined &&
+            part[cursor + 2] !== ']'
+          ) {
+            ranges.push([member, part[cursor + 2]!]);
+            cursor += 3;
+            continue;
+          }
+          members.push(member);
+          cursor += 1;
+        }
+        flush();
+        if (closed) {
+          tokens.push({ kind: 'class', members, ranges, negate });
+          index = cursor;
+        } else {
+          literal += ch; // unterminated '[' is a literal bracket (rg)
+          index += 1;
+        }
+      } else if (ch === '\\') {
+        const next = part[index + 1];
+        if (next !== undefined) {
+          literal += next;
+          index += 2;
+        } else {
+          literal += ch;
+          index += 1;
+        }
+      } else {
+        literal += ch;
+        index += 1;
+      }
+    }
+    flush();
+    return tokens;
+  };
+
+  /**
+   * Compile one expanded alternative. The pattern-level leading '!' has
+   * already been stripped by the caller (#604: negation precedes brace
+   * expansion), so an inner '!' here is an ORDINARY component character
+   * (rg fixture: '{!*.test.ts,*.test.ts}' lists .test.ts files). '/'-free
+   * components become token runs; a whole '**' component is the globstar
+   * marker run; a glob with '/' is root-anchored.
+   */
+  const compileRgGlob = (glob: string): CompiledGlob => {
+    const parts = glob.split('/');
+    return {
+      runs: parts.map((part) =>
+        part === '**' ? [{ kind: 'any-run' }, { kind: 'any-run' }] : tokenizeComponent(part),
+      ),
+      anchored: parts.length > 1,
+    };
+  };
+
+  const classMatches = (token: Extract<GlobToken, { kind: 'class' }>, ch: string): boolean => {
+    let hit = token.members.includes(ch);
+    if (!hit) {
+      for (const [low, high] of token.ranges) {
+        if (ch >= low && ch <= high) {
+          hit = true;
+          break;
+        }
+      }
+    }
+    return token.negate ? !hit : hit;
+  };
+
+  /**
+   * Match one component run against one '/'-free path component: iterative
+   * greedy wildcard matching with a single rollback point per '*' — total
+   * work bounded by the component length; no regex, no recursion. Every
+   * state step charges the SHARED per-candidate budget; exhaustion returns
+   * `false` with `budget.exhausted = true` so the caller can fail closed.
+   */
+  const matchRun = (tokens: GlobToken[], text: string, budget: { left: number }): boolean => {
+    let t = 0;
+    let p = 0;
+    let star = -1;
+    let starPath = -1;
+    while (p < text.length) {
+      budget.left -= 1;
+      if (budget.left < 0) return false;
+      const token = tokens[t];
+      if (token === undefined) {
+        if (star === -1) return false;
+        t = star + 1;
+        starPath += 1;
+        p = starPath;
+        continue;
+      }
+      if (token.kind === 'any-run') {
+        star = t;
+        starPath = p;
+        t += 1;
+        continue;
+      }
+      let hit = false;
+      if (token.kind === 'literal') {
+        hit = text.startsWith(token.chars, p);
+        if (hit) p += token.chars.length;
+      } else if (token.kind === 'any-one') {
+        hit = true;
+        p += 1;
+      } else {
+        hit = classMatches(token, text[p]!);
+        if (hit) p += 1;
+      }
+      if (hit) {
+        t += 1;
+        continue;
+      }
+      if (star === -1) return false;
+      t = star + 1;
+      starPath += 1;
+      p = starPath;
+    }
+    while (t < tokens.length && tokens[t]!.kind === 'any-run') t += 1;
+    return t === tokens.length;
+  };
+
+  const isGlobstarRun = (run: GlobToken[] | undefined): boolean =>
+    run !== undefined &&
+    run.length === 2 &&
+    run[0]!.kind === 'any-run' &&
+    run[1]!.kind === 'any-run';
+
+  /**
+   * Match the component runs against a path's components with iterative NFA
+   * state (a set of run positions, advanced one component at a time with a
+   * doublestar fixpoint) — total state bounded by pattern length; no
+   * recursion, no backtracking across components. A doublestar COMPONENT
+   * consumes zero or more components (rg fixtures: doublestar + '/n.ts'
+   * hits 'deep/dir/n.ts'; 'deep' + doublestar + '/n.ts' ditto; a trailing
+   * doublestar matches all deeper components).
+   */
+  const matchRuns = (
+    runs: GlobToken[][],
+    segments: string[],
+    budget: { left: number },
+  ): boolean => {
+    let states = new Set<number>([0]);
+    for (const segment of segments) {
+      const expanded = new Set<number>(states);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const t of [...expanded]) {
+          if (isGlobstarRun(runs[t]) && !expanded.has(t + 1)) {
+            expanded.add(t + 1);
+            grew = true;
+          }
+        }
+      }
+      const next = new Set<number>();
+      for (const t of expanded) {
+        budget.left -= 1;
+        if (budget.left < 0) return false;
+        const run = runs[t];
+        if (run === undefined) continue;
+        if (isGlobstarRun(run)) {
+          next.add(t); // '**' also consumes this component
+          continue;
+        }
+        if (matchRun(run, segment, budget)) next.add(t + 1);
+      }
+      if (next.size === 0) return false;
+      states = next;
+    }
+    for (const t of states) {
+      let c = t;
+      while (isGlobstarRun(runs[c])) c += 1;
+      if (c === runs.length) return true;
+    }
+    return false;
+  };
+
+  type IncludeMatcher = {
+    /** Total compiled token size across alternatives — the work bound. */
+    stateBudget: number;
+    /**
+     * Match one candidate against the include set. Returns a verdict, not a
+     * boolean: `matched` is the ordinary answer; `exhausted` reports that a
+     * per-candidate match-state budget ran out BEFORE a verdict — an honest
+     * fail-closed signal the caller must deny on, never silently dropping a
+     * candidate that might have matched (#614).
+     */
+    matches: (rel: string) => { matched: boolean } | { exhausted: true };
+  };
+  // Per-CANDIDATE aggregate match-state budget (#614): one budget spans ALL
+  // alternatives (positive + exclusion), every unanchored suffix start, and
+  // every NFA state step inside matchRuns. A candidate whose evaluation
+  // exhausts it yields an honest SEARCH_LIMIT denial; an ordinary non-match
+  // stays a plain non-match. The budget is per candidate because the
+  // matcher is synchronous INSIDE enumeration — the wall clock cannot
+  // interrupt it, so the bound must be countable, not timely.
+  const SEARCH_INCLUDE_MATCH_STATE_BUDGET = 4_096;
 
   /**
    * Streaming candidate enumeration for the grep include path (CR @5ef68b24).
@@ -1360,31 +1691,91 @@ export function buildTools(
       scopeArg,
     ];
     const enumerationEnv = buildChildEnv(process.env);
-    // BRACE EXPANSION (CR @5ef68b24): a grep include is expanded into bounded
-    // full-match pattern alternatives before filtering; >64 alternatives is a
-    // fail-closed SEARCH_LIMIT denial, never a literal fallback.
-    type GrepIncludeMatcher = {
-      patterns: RegExp[];
-      matches: (rel: string) => boolean;
-    };
-    let grepInclude: GrepIncludeMatcher | undefined;
+    // INCLUDE MATCHER (#604/#605/#614, replaces the compilePathPatterns use
+    // here): ripgrep glob syntax preserved — [abc]/[a-c]/[!...] classes,
+    // ']' first-member literal, leading-'!' exclusion groups (positives MINUS
+    // exclusions, rg multi-glob semantics), '/' anchoring, '**' spanning —
+    // matched with a bounded no-regex matcher. Every bound fails visibly
+    // closed: >64 expanded alternatives, >256 visited expansion branches,
+    // or a >256-char alternative all deny with SEARCH_LIMIT before any
+    // enumeration starts; matcher state is additionally capped during
+    // matching (never silently drops a candidate).
+    let grepInclude: IncludeMatcher | undefined;
     if (tool === 'grep' && fileGlob !== undefined) {
-      const expansion = expandIncludeAlternatives(fileGlob);
+      // #604: a leading '!' negates the WHOLE include pattern (rg glob
+      // semantics), so it must be stripped BEFORE brace expansion — otherwise
+      // an arm like '{!*.test.ts,*.test.ts}' would be read as an exclusion
+      // arm instead of a literal-'!' component. rg fixture:
+      // --glob '{!*.test.ts,*.test.ts}' LISTS .test.ts files (the '!' arm
+      // matches names starting with a literal '!'); only a PATTERN-level
+      // '!' excludes.
+      let includeBody = fileGlob;
+      let patternExcluded = false;
+      if (includeBody.startsWith('!')) {
+        patternExcluded = true;
+        includeBody = includeBody.slice(1);
+      }
+      const expansion = expandIncludeAlternatives(includeBody);
       if (expansion.overflow) {
+        const reason =
+          expansion.reason === 'alternatives'
+            ? `include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_LIMIT} alternatives`
+            : `include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_VISITS} visited branches`;
+        return {
+          ok: false,
+          denial: deny(tool, `SEARCH_LIMIT: search denied: ${reason}`),
+        };
+      }
+      if (
+        expansion.alternatives.some((candidate) => candidate.length > SEARCH_INCLUDE_PATTERN_MAX)
+      ) {
         return {
           ok: false,
           denial: deny(
             tool,
-            `SEARCH_LIMIT: search denied: include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_LIMIT} alternatives`,
+            `SEARCH_LIMIT: search denied: include pattern exceeds ${SEARCH_INCLUDE_PATTERN_MAX} characters`,
           ),
         };
       }
-      const toPatterns = (candidates: readonly string[]): RegExp[] =>
-        compilePathPatterns(
-          candidates.map((candidate) => (candidate.includes('/') ? candidate : `**/${candidate}`)),
-        );
-      const patterns = toPatterns(expansion.alternatives);
-      grepInclude = { patterns, matches: (rel) => patterns.some((re) => re.test(rel)) };
+      const compiled = expansion.alternatives.map((candidate) => compileRgGlob(candidate));
+      // One positive alternative is enough to accept; exclusions veto. The
+      // whole include is ONE exclusion when the pattern itself was negated.
+      const positives = patternExcluded ? [] : compiled;
+      const exclusions = patternExcluded ? compiled : [];
+      // Unanchored globs (no '/') match at ANY depth (rg: 'a*' hits
+      // 'deep2/a.txt'), so try every suffix start; anchored globs match only
+      // from the root. ONE aggregate per-candidate budget (#614) spans all
+      // alternatives, all suffix starts and all NFA steps: exhaustion is an
+      // honest fail-closed verdict, never a silent non-match.
+      const matchOne = (glob: CompiledGlob, rel: string, budget: { left: number }): boolean => {
+        const segments = rel.split('/');
+        if (glob.anchored) {
+          return matchRuns(glob.runs, segments, budget);
+        }
+        for (let start = 0; start < segments.length; start += 1) {
+          if (matchRuns(glob.runs, segments.slice(start), budget)) return true;
+        }
+        return false;
+      };
+      grepInclude = {
+        stateBudget: compiled.reduce((total, glob) => {
+          return total + glob.runs.reduce((sum, run) => sum + run.length, 0);
+        }, 0),
+        matches: (rel) => {
+          const budget = { left: SEARCH_INCLUDE_MATCH_STATE_BUDGET };
+          if (positives.length === 0 && exclusions.length === 0) return { matched: false };
+          for (const glob of exclusions) {
+            if (matchOne(glob, rel, budget)) return { matched: false };
+            if (budget.left < 0) return { exhausted: true };
+          }
+          if (positives.length === 0) return { matched: false }; // all-exclusion
+          for (const glob of positives) {
+            if (matchOne(glob, rel, budget)) return { matched: true };
+            if (budget.left < 0) return { exhausted: true };
+          }
+          return { matched: false };
+        },
+      };
     }
 
     if (isAborted(signal)) return cancelled();
@@ -1414,6 +1805,7 @@ export function buildTools(
         slots.splice(largest, 1);
       };
       const include = grepInclude;
+      let includeExhausted = false;
       const outcome = await streamRgEnumeration(enumerateArgs, {
         cwd: workspaceAbs,
         env: enumerationEnv,
@@ -1425,11 +1817,25 @@ export function buildTools(
           const lexicalPath = resolveInside(candidate);
           if (lexicalPath === undefined) return true;
           const rel = relOf(lexicalPath);
-          if (!include.matches(rel)) return true;
+          const verdict = include.matches(rel);
+          if ('exhausted' in verdict) {
+            // Honest fail-closed (#614): the bounded matcher ran out of
+            // state before a verdict — deny the whole search rather than
+            // silently dropping a candidate that might have matched.
+            includeExhausted = true;
+            return false;
+          }
+          if (!verdict.matched) return true;
           pushMatch(rel, candidate);
           return slots.length <= SEARCH_CANDIDATE_LIMIT + 1;
         },
       });
+      if (includeExhausted) {
+        return {
+          ok: false,
+          denial: deny(tool, `SEARCH_LIMIT: search denied: include match state budget exhausted`),
+        };
+      }
       if (outcome.kind === 'killed') {
         return isAborted(signal)
           ? cancelled()
@@ -1462,7 +1868,11 @@ export function buildTools(
         };
       }
       if (isAborted(signal)) return cancelled();
-      slots.sort((left, right) => left.rel.localeCompare(right.rel));
+      // #613: ONE comparator everywhere — native code-unit order. The
+      // drop-largest selection above uses native >, so the final sort must
+      // agree (localeCompare could REORDER past the cap and silently
+      // displace a matching candidate).
+      slots.sort((left, right) => (left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0));
       rawPaths = slots.map((slot) => slot.raw);
       sawExtraCandidates = slots.length > SEARCH_CANDIDATE_LIMIT;
     } else {
