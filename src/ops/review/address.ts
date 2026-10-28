@@ -41,6 +41,7 @@ import {
 } from './addressWorker.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
 import { parseQueueReceipt } from './internal/queueEvidence.js';
+import type { DeferredQueueClient } from './internal/queueProtocol.js';
 import {
   resolveDeferredVendorContext,
   type DeferredVendorContextRequest,
@@ -120,6 +121,11 @@ export interface ReviewAddressDeps {
   worktreeRegistry?: WorktreeRegistry;
   config?: CqConfig;
   initialRecord?: FindingsRecord;
+  /**
+   * Narrow queue capability for the DEFAULT runner only: it is forwarded verbatim
+   * into `makeReviewRun`, never into `deps.review`, and changes no other wiring.
+   */
+  queueClient?: DeferredQueueClient;
   review?: (input: ReviewRunInput) => Promise<ReviewRunResult>;
   workerFactory?: (deps: Parameters<typeof makeAddressWorker>[0]) => AddressWorker;
   disposition?: (root: string, finding: Finding) => Promise<OpResult<unknown>>;
@@ -528,6 +534,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         deps.review ??
         makeReviewRun({
           drivers: reviewDrivers,
+          ...(deps.queueClient ? { queueClient: deps.queueClient } : {}),
           ...(parent ? { parentSignal: parent } : {}),
           writeFindingsRecord: async (path, content) => {
             await writeFile(path, content, { flag: 'wx', mode: 0o600 });
@@ -1125,6 +1132,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   journalDir: resolve(journalDir, `round-${round}`),
                 },
                 {
+                  // SAFETY: the runner's registry view is generic over op I/O; this
+                  // entry is the concrete single-job 'review.fixItem' op built immediately
+                  // above, and the plan resolves it by that exact name only, so the erased
+                  // I/O type parameters cannot be observed through this view.
                   get: (name) =>
                     name === entry.name
                       ? (entry as unknown as OpRegistryEntry<never, never>)

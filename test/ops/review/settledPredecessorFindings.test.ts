@@ -491,3 +491,87 @@ test('failing post-enrollment status read owns the durable append; replay stays 
   ledger = f.effects.openLedger(f.state.branch).load();
   expect(ledger.records.filter((r) => r.kind === 'vendor-debt')).toHaveLength(1);
 });
+
+test('unrelated durable bytes appended during a failing status throw never own the attempt', async () => {
+  const f = await fixture();
+  // Fresh enrollment shape: keep the retained blocked origin cycle, drop the seeded debt.
+  const seeded = f.effects.openLedger(f.state.branch).load();
+  f.effects.openLedger(f.state.branch).save({
+    ...seeded,
+    records: seeded.records.filter((entry) => entry.kind !== 'vendor-debt'),
+  });
+  const note = vi.fn(async () => {});
+  const client: DeferredQueueClient = {
+    ...f.client,
+    status: async () => {
+      const latest = f.effects.openLedger(f.state.branch).load();
+      f.effects.openLedger(f.state.branch).save({
+        ...latest,
+        records: [
+          ...latest.records,
+          cycleRecord({ head: f.state.head, base: f.state.base, cycleId: 'c913-external-append' }),
+        ],
+      });
+      throw new Error('status read failed after external append');
+    },
+  };
+  const result = await makeReviewRun({
+    drivers: cleanDrivers(),
+    queueClient: client,
+    effectsFactory: () => f.effects,
+    noteLedgerWrite: note,
+    scannerFactory: () => async (components) =>
+      components.map((component) => ({ component: component.component, hits: [] })),
+  })({ repoRoot: f.repo.root });
+  expect(result.status, JSON.stringify(result)).toBe('indeterminate');
+  if (result.status !== 'indeterminate') throw Error(JSON.stringify(result));
+  // The original status error survives, and the ownership callback is never
+  // invoked for bytes the engine did not request, even though its own durable
+  // enrollment resolved first.
+  expect(result.detail).toContain('status read failed after external append');
+  expect(note).not.toHaveBeenCalled();
+  const ledger = f.effects.openLedger(f.state.branch).load();
+  expect(ledger.records.filter((entry) => entry.kind === 'vendor-debt')).toHaveLength(1);
+  expect(
+    ledger.records.some(
+      (entry) => entry.kind === 'cycle' && entry.cycleId === 'c913-external-append',
+    ),
+  ).toBe(true);
+});
+
+test('a rejected durable ledger write never owns the attempt', async () => {
+  const f = await fixture();
+  const seeded = f.effects.openLedger(f.state.branch).load();
+  f.effects.openLedger(f.state.branch).save({
+    ...seeded,
+    records: seeded.records.filter((entry) => entry.kind !== 'vendor-debt'),
+  });
+  const before = f.effects.openLedger(f.state.branch).load();
+  const note = vi.fn(async () => {});
+  // The store rejects the engine's own requested mutation: nothing durable was
+  // accepted, so no ownership notification may follow.
+  const failing = {
+    ...f.effects,
+    openLedger: (branch: string): ReturnType<typeof f.effects.openLedger> => {
+      const store = f.effects.openLedger(branch);
+      return {
+        load: () => store.load(),
+        save: (file) => store.save(file),
+        mutate: <T>() => Promise.reject<T>(new Error('durable ledger write failed')),
+      };
+    },
+  };
+  const result = await makeReviewRun({
+    drivers: cleanDrivers(),
+    queueClient: f.client,
+    effectsFactory: () => failing,
+    noteLedgerWrite: note,
+    scannerFactory: () => async (components) =>
+      components.map((component) => ({ component: component.component, hits: [] })),
+  })({ repoRoot: f.repo.root });
+  expect(result.status, JSON.stringify(result)).toBe('indeterminate');
+  if (result.status !== 'indeterminate') throw Error(JSON.stringify(result));
+  expect(result.detail).toContain('durable ledger write failed');
+  expect(note).not.toHaveBeenCalled();
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
