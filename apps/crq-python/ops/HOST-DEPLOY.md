@@ -34,6 +34,7 @@ Example only; replace every host value privately:
     "promotion": {
       "record_url_template": "http://queue.example.invalid:6778/promotion/{item}",
       "alert_agent_host": "worker.example.invalid:6767",
+      "alert_agent_id": "00000000-0000-4000-8000-000000000004",
       "signer": {
         "spool": {
           "ssh_alias": "operator@127.0.0.1",
@@ -50,8 +51,9 @@ Example only; replace every host value privately:
 }
 ```
 
-`promotion.signer.spool.dir` is an optional host path; all other config leaves
-above are required. The spool key may retain its accepted `~/` spelling; other
+`promotion.signer.spool.dir` is an optional host path, and
+`promotion.alert_agent_id` optionally overrides the committed alert recipient with
+a lowercase Paseo agent UUID; all other config leaves above are required. The spool key may retain its accepted `~/` spelling; other
 paths are absolute. The runtime clone and worktree root must be separate from the
 deployment clone.
 The overlay also supplies the fleet-reader's source host and absolute source path;
