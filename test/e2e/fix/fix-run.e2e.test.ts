@@ -1716,10 +1716,22 @@ test('pre-task unit failure fallback keeps collision-resolved plan segments (iss
     // The failed second unit's fallback row carries the SHIPPED segments:
     // branch and unit label end in the resolved slug, not the collided fold.
     const fallback = report.planned.find((row) => row.unit === 'tests-1/scratch-repo-2');
-    expect(fallback).toBeDefined();
-    expect(fallback?.branch).toBe('cq/fixture/tests-1/scratch-repo-2');
-    expect(fallback?.outcome).toBe('not-started');
-    expect(fallback?.failures[0]?.branch).toBeUndefined();
+    if (fallback === undefined) throw new Error('no fallback row for the failed unit');
+    // The fallback is never-started work: its row names the planned branch,
+    // and its failure evidence is branchless (no artifact was retained).
+    expect(fallback.branch).toBe('cq/fixture/tests-1/scratch-repo-2');
+    expect(fallback.outcome).toBe('not-started');
+    const fallbackFailure = fallback.failures[0];
+    if (fallbackFailure === undefined) throw new Error('fallback row carries no failure');
+    expect('branch' in fallbackFailure).toBe(false);
+    expect(fallbackFailure).toEqual({
+      unit: 'tests-1/scratch-repo-2',
+      task: 'scratch.repo',
+      outcome: 'not-started',
+      gate: 'none',
+      reason: 'unit failed before deriving tasks: [PROBE]',
+    });
+    expect(fallbackFailure.reason).toContain('[PROBE]');
     // Distinct identities: the fallback never shares unit1's identity.
     const identities = report.planned.map((row) => `${row.unit}\n${row.task.id}`);
     expect(new Set(identities).size).toBe(identities.length);
