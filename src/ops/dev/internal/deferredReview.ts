@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
 import type { DevCycleRecord } from '../record.js';
 import {
   isComplete,
@@ -12,6 +13,7 @@ import {
   QueueSha,
   QueueToken,
   QueueReferenceSchema,
+  QueueRequestAliasSchema,
   QueueStatusSchema,
   type DeferredQueueClient,
   type QueueReference,
@@ -419,6 +421,29 @@ export function verifiedCompletedDebt(debt: DeferredVendorDebt): boolean {
   const { document, receiptId } = debt.completion;
   const { queue, reference } = debt;
   const binding = reference.binding;
+  const parsedAlias = QueueRequestAliasSchema.safeParse(queue.requestAlias);
+  const alias = parsedAlias.success ? parsedAlias.data : undefined;
+  // This relation comes from the authenticated report/status path. It changes
+  // request identity only, never the completion or affected-content requirements.
+  const sameItemAlias = Boolean(
+    alias &&
+    !queue.reusedFrom &&
+    isDeepStrictEqual(alias.reference, reference) &&
+    alias.originalRequestId !== reference.requestId &&
+    alias.originalRequestId === document.request_id &&
+    alias.itemId === queue.itemId &&
+    alias.itemId === document.item_id &&
+    alias.policy === document.source.policy &&
+    alias.receiptId === receiptId &&
+    alias.receiptId === queue.receiptId &&
+    alias.receiptEquivalence === document.capture.equivalence &&
+    alias.receiptEquivalence === queue.receiptEquivalence &&
+    isDeepStrictEqual(alias.source, queue.receiptSource) &&
+    alias.source.repo === document.source.repo &&
+    alias.source.pr === document.source.pr &&
+    alias.source.mergeSha === document.source.merge_sha &&
+    alias.source.targetSelector === document.source.target_selector,
+  );
   const reused = Boolean(
     queue.reusedFrom &&
     queue.receiptSource &&
@@ -445,7 +470,7 @@ export function verifiedCompletedDebt(debt: DeferredVendorDebt): boolean {
       (document.item_id === queue.itemId &&
         document.source.pr === queue.pr &&
         document.source.merge_sha === queue.mergeSha &&
-        document.request_id === reference.requestId)) &&
+        (document.request_id === reference.requestId || sameItemAlias))) &&
     document.capture.paths.length > 0 &&
     document.capture.paths.every(
       (path) =>

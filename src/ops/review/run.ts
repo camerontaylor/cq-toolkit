@@ -15,6 +15,7 @@ import type { DevEffects } from '../dev/effects.js';
 import type { DiffSecretScanner } from '../dev/denylist.js';
 import {
   prepareDeferredVendorReview,
+  retainedReceiptFindings,
   loadCurrentDeferredVendorDebt,
 } from '../dev/internal/deferredLedger.js';
 import {
@@ -178,14 +179,24 @@ export function makeReviewRun(
         !parent?.aborted && (deadline.expired() || remainingWallMs() <= 0);
       let deferredVendorDebt: DeferredVendorDebt | undefined;
       const prepareDebt = async () => {
-        const debt = await prepareDeferredVendorReview(
-          effects,
-          target,
-          state,
-          deps.queueClient,
-          deadline.signal,
-          { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
-        );
+        const before = effects.openLedger(state.branch).load();
+        let debt: DeferredVendorDebt | undefined;
+        try {
+          debt = await prepareDeferredVendorReview(
+            effects,
+            target,
+            state,
+            deps.queueClient,
+            deadline.signal,
+            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+          );
+        } finally {
+          // Settlement can durably write a predecessor then return no current debt.
+          // Register those bytes even when preparation subsequently refuses progress.
+          const after = effects.openLedger(state.branch).load();
+          if (JSON.stringify(after) !== JSON.stringify(before))
+            await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+        }
         if (debt) {
           if (
             input.uncommitted ||
@@ -195,7 +206,6 @@ export function makeReviewRun(
             throw new Error(
               'deferred vendor review requires full coverage of every configured nonvendor source',
             );
-          await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
         }
         return debt;
       };
@@ -209,8 +219,20 @@ export function makeReviewRun(
           };
         }
       }
+      // Retained receipt findings are obligations, not a current review source.
+      // Include them even when settling an old head requires a fresh vendor run.
+      const retainedLedger = effects.openLedger(state.branch).load();
+      const retainedFindings = retainedReceiptFindings(retainedLedger);
+      if (retainedFindings.length > 0)
+        records.push({
+          schemaVersion: 1,
+          branch: state.branch,
+          head: state.head,
+          sources: [],
+          findings: retainedFindings,
+        });
       if (deferredVendorDebt) {
-        const ledger = effects.openLedger(state.branch).load();
+        const ledger = retainedLedger;
         const dispositions = new Map(
           ledger.records
             .filter((entry) => entry.kind === 'disposition')
@@ -231,18 +253,6 @@ export function makeReviewRun(
             },
           ],
           findings: [
-            ...deferredReceiptFindings(
-              ledger.records
-                .filter((entry) => entry.kind === 'vendor-debt')
-                .map((entry) => entry.debt),
-            ).map((finding) => {
-              const disposition = dispositions.get(finding.id);
-              return {
-                ...finding,
-                status: disposition?.action ?? finding.status,
-                ...(disposition ? { reason: disposition.why } : {}),
-              };
-            }),
             ...ledger.records
               .filter(
                 (entry): entry is DevCycleRecord =>
