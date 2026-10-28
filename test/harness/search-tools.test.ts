@@ -921,14 +921,13 @@ describe('contained grep and glob tools', () => {
         expect(bracket.output).toContain('--- file2.ts ---');
         expect(bracket.output).not.toContain('fileX.ts');
       }
-      // rg fixture: a PATTERN-level leading '!' is ONE exclusion — no
-      // positives remain, so nothing matches ('!*.test.ts' matches nothing;
-      // 'keep.ts' is not a .test.ts file, but with no positives the include
-      // is still empty).
+      // rg --glob '!*.test.ts' retains non-excluded paths when there are
+      // no positive globs. The exclusion still vetoes a.test.ts.
       const exclusion = await grep.execute({ pattern: 'needle', include: '!*.test.ts' });
       expect(exclusion.ok).toBe(true);
       if (exclusion.ok) {
-        expect(exclusion.output).toBe('No matches'); // all-exclusion: no positives
+        expect(exclusion.output).toContain('--- keep.ts ---');
+        expect(exclusion.output).not.toContain('--- a.test.ts ---');
       }
       // rg fixture (P1 #604): an arm starting with '!' inside braces is a
       // LITERAL-'!' component, not an exclusion — '{!*.test.ts,*.test.ts}'
@@ -1046,6 +1045,53 @@ describe('contained grep and glob tools', () => {
         expect(deep.ok).toBe(false);
         if (!deep.ok) {
           expect(deep.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+      // Each unanchored suffix copies the remaining path components. The
+      // copied work alone exceeds 4,096 on this 100-component candidate;
+      // a silent No matches verdict would hide exhausted matching.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from(`${'a/'.repeat(100)}x.ts\0`)],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4248,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const suffixes = await grep.execute({ pattern: 'needle', include: 'z' });
+        expect(suffixes.ok).toBe(false);
+        if (!suffixes.ok) {
+          expect(suffixes.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+      // Repeated globstars make epsilon closure process more than 4,096
+      // states across alternatives, even for a one-component candidate.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from('a\0')],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4249,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const globstars = '**/'.repeat(70);
+        const closure = await grep.execute({
+          pattern: 'needle',
+          include: `{${globstars}z,${globstars}q}`,
+        });
+        expect(closure.ok).toBe(false);
+        if (!closure.ok) {
+          expect(closure.denial.reason).toBe(
             'SEARCH_LIMIT: search denied: include match state budget exhausted',
           );
         }
