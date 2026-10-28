@@ -507,6 +507,12 @@ describe('R3S additive evidence payload', () => {
       status: 'invalid',
       reasons: ['quote-mismatch', 'quote-mismatch', 'supporting-evidence'],
     });
+    const persisted = FindingsRecordSchema.parse(survivor);
+    expect(persisted.findings[0]?.evidenceV1?.validation).toEqual({
+      status: 'invalid',
+      reasons: ['quote-mismatch', 'quote-mismatch', 'supporting-evidence'],
+    });
+    expect(openBlocking(persisted)).toHaveLength(1);
     expect(openBlocking(survivor)).toHaveLength(1);
     // Coverage is a source-level property: a finding payload never makes a
     // source complete or incomplete by itself.
