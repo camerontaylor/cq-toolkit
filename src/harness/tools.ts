@@ -1085,7 +1085,11 @@ export function buildTools(
       return acc;
     };
     const out = expand(pattern, []);
-    if (out === undefined) return overflow;
+    if (out === undefined) {
+      // The visited-branch cap tripped inside recursion; distinguish it from
+      // the alternatives-count overflow so the denial names the true bound.
+      return overflow('visits');
+    }
     return { overflow: false, alternatives: out };
   };
 
