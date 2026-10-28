@@ -535,6 +535,8 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     ['pnpm-workspace.yaml', 'pnpmfile: "tools/pnpm hook.cjs"\n', 'tools/pnpm hook.cjs'],
     ['pnpm-workspace.yaml', 'pnpmfile: ./tools/../tools/pnpm-hook.cjs\n', 'tools/pnpm-hook.cjs'],
     ['pnpm-workspace.yaml', "pnpmfile: 'tools/pnpm hook.cjs' # hook\n", 'tools/pnpm hook.cjs'],
+    ['pnpm-workspace.yaml', '"pnpmfile": tools/pnpm-hook.cjs\n', 'tools/pnpm-hook.cjs'],
+    ['pnpm-workspace.yaml', 'pnpmfile: >-\n  tools/pnpm-hook.cjs\n', 'tools/pnpm-hook.cjs'],
   ] as const)(
     'a content-only change to a custom pnpmfile (%s: %j) reinstalls',
     async (configFile, setting, hook) => {

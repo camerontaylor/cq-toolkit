@@ -49,7 +49,7 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
@@ -951,32 +951,17 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
           };
         }
         let installedAt = candidates[0]!;
-        // The repo-relative pnpm hook paths a commit configures (`pnpmfile`
-        // in its root .npmrc or pnpm-workspace.yaml), read from the commit.
-        const configuredPnpmfiles = async (commit: string): Promise<string[]> => {
-          const values: string[] = [];
-          const npmrc = await gitAt(['show', `${commit}:.npmrc`]);
-          if (npmrc.exitCode === 0)
-            for (const line of npmrc.stdout.split('\n')) {
-              // INI `key = value`; a quoted value keeps its spaces.
-              const raw = /^\s*pnpmfile\s*=(.*)$/.exec(line)?.[1];
-              const value = raw === undefined ? undefined : settingScalar(raw, false);
-              if (value !== undefined) values.push(value);
-            }
-          const workspace = await gitAt(['show', `${commit}:pnpm-workspace.yaml`]);
-          if (workspace.exitCode === 0)
-            for (const line of workspace.stdout.split('\n')) {
-              // A top-level YAML `pnpmfile:` scalar (column 0, not nested).
-              const raw = /^pnpmfile\s*:(.*)$/.exec(line)?.[1];
-              const value = raw === undefined ? undefined : settingScalar(raw, true);
-              if (value !== undefined) values.push(value);
-            }
-          // Canonical repo-relative paths only (git reports them that way);
-          // a hook outside the repository is the same for every candidate.
-          return values.flatMap((value) => {
-            const path = posix.normalize(value.replaceAll('\\', '/'));
-            return path.startsWith('/') || path === '..' || path.startsWith('../') ? [] : [path];
-          });
+        // Whether a commit configures a custom pnpm hook at all (the
+        // `pnpmfile` setting in its root .npmrc or pnpm-workspace.yaml). Its
+        // path is NOT parsed: any configuration form we cannot fully read
+        // must fail closed, so a configured hook makes every change between
+        // candidates count as a dependency change.
+        const configuresPnpmfile = async (commit: string): Promise<boolean> => {
+          for (const file of ['.npmrc', 'pnpm-workspace.yaml']) {
+            const shown = await gitAt(['show', `${commit}:${file}`]);
+            if (shown.exitCode === 0 && shown.stdout.includes('pnpmfile')) return true;
+          }
+          return false;
         };
         const tmpEffects = (deps.effectsFor ?? makeSubprocessDevEffects)(tmp);
         // Named test files under the author's checkout are re-rooted into the
@@ -1034,18 +1019,11 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
                   verdict: 'fault',
                   detail: `dependency-input comparison failed: ${changed.stderr.trim().slice(0, 300)}`,
                 };
-              // A custom-named pnpm hook (the `pnpmfile` setting) is an input
-              // too, at whichever path either commit configures.
-              const hooks = new Set([
-                ...(await configuredPnpmfiles(installedAt)),
-                ...(await configuredPnpmfiles(commit)),
-              ]);
-              const differs = changed.stdout
-                .split('\0')
-                .some(
-                  (path) =>
-                    GREEN_PREFIX_DEPENDENCY_INPUTS.includes(basename(path)) || hooks.has(path),
-                );
+              const paths = changed.stdout.split('\0').filter((path) => path !== '');
+              const differs =
+                paths.some((path) => GREEN_PREFIX_DEPENDENCY_INPUTS.includes(basename(path))) ||
+                (paths.length > 0 &&
+                  ((await configuresPnpmfile(installedAt)) || (await configuresPnpmfile(commit))));
               if (differs) {
                 const reinstallMs = Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost);
                 if (reinstallMs <= 0)
@@ -1299,32 +1277,6 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       };
     }
   });
-}
-
-/**
- * One setting's scalar value: double-quoted (JSON-style escapes), single-
- * quoted ('' escapes a quote) or plain (trimmed; in YAML a ` #` starts a
- * comment). Undefined for an empty or unterminated value — the caller then
- * has no path to compare, never a guessed one.
- */
-function settingScalar(raw: string, yaml: boolean): string | undefined {
-  const text = raw.trim();
-  if (text.startsWith('"')) {
-    const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(text)?.[0];
-    if (quoted === undefined) return undefined;
-    try {
-      const value: unknown = JSON.parse(quoted);
-      return typeof value === 'string' && value !== '' ? value : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  if (text.startsWith("'")) {
-    const quoted = /^'((?:[^']|'')*)'/.exec(text)?.[1];
-    return quoted === undefined || quoted === '' ? undefined : quoted.replaceAll("''", "'");
-  }
-  const plain = (yaml ? text.replace(/\s+#.*$/, '') : text).trim();
-  return plain === '' ? undefined : plain;
 }
 
 /**
