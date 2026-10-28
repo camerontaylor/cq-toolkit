@@ -33,18 +33,25 @@ export interface GreenPrefixScan {
 }
 
 /**
- * The verified-fix chain behind the addressed head: the admitted head A (the
- * first round's record head) and the fix commits in the order review.address
- * recorded them. A fix's commit order is its commit order: remember() appends
+ * The verified-fix chain behind the addressed head: the fix commits in the
+ * order review.address recorded them, starting from the admitted head A. A
+ * is the CALLER's immutable evidence (the review record this run admitted),
+ * never a round record: review.address replaces a round's record with its
+ * re-review, so `rounds[0].record.head` is not the admitted head after one.
+ * The first fix must have been dispatched at A. A fix's commit order is its commit order: remember() appends
  * each verified fix and advances verifiedHead to its commit in one step. The
  * caller must still compare this list with git's own first-parent history —
  * commit presence alone is never provenance.
  */
 export function recordedFixChain(
   report: ReviewAddressReport,
-): { admitted: string; commits: string[] } | { fault: string } {
-  const admitted = report.rounds[0]?.record.head;
-  if (admitted === undefined) return { fault: 'the address report records no admitted head' };
+  admitted: string,
+): { commits: string[] } | { fault: string } {
+  const first = report.fixes.find((fix) => fix.commit !== undefined);
+  if (first !== undefined && first.observedHead !== admitted)
+    return {
+      fault: `the first verified fix was dispatched at ${first.observedHead}, not the admitted head ${admitted}`,
+    };
   const commits: string[] = [];
   for (const fix of report.fixes) {
     if (fix.commit === undefined) continue;
@@ -54,7 +61,7 @@ export function recordedFixChain(
     commits.push(fix.commit);
   }
   if (commits.length === 0) return { fault: 'the address report records no verified fix commit' };
-  return { admitted, commits };
+  return { commits };
 }
 
 /**

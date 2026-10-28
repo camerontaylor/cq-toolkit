@@ -49,7 +49,7 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
@@ -98,6 +98,20 @@ export const DEV_CYCLE_PUBLICATION_RESERVE_MS = 10 * 60 * 1000;
  * check (at the measured duration, plus a quarter) AND this margin.
  */
 export const GREEN_PREFIX_PUBLICATION_MARGIN_MS = 2 * 60 * 1000;
+/**
+ * #536: file names (at any depth) whose change between two candidates means
+ * their dependency graphs may differ, so the probe worktree is reinstalled
+ * before the probe. Matched on the changed paths' basenames: the hardened git
+ * runner takes literal pathspecs only (no glob magic).
+ */
+export const GREEN_PREFIX_DEPENDENCY_INPUTS: readonly string[] = [
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'package-lock.json',
+  'yarn.lock',
+  '.npmrc',
+];
 /** #536: the dependency-install bound in the probe worktree (also capped by the reserve). */
 export const GREEN_PREFIX_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -697,12 +711,13 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         report === undefined ||
         deps.installDeps === undefined ||
         !pushed ||
-        firstCheck.status !== 'ok'
+        firstCheck.status !== 'ok' ||
+        run.status !== 'ok'
       )
         return verbatim;
       let outcome: Awaited<ReturnType<typeof publishGreenPrefix>>;
       try {
-        outcome = await publishGreenPrefix(report, redMs, firstCheck.value.head);
+        outcome = await publishGreenPrefix(report, redMs, firstCheck.value.head, run.value.head);
       } catch (err) {
         // A fault before any probe resource existed (the owned phase has its
         // own release): the red result stands, with the fault named.
@@ -720,6 +735,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       report: ReviewAddressReport,
       redMs: number,
       firstCheckedHead: string,
+      admittedHead: string,
     ): Promise<
       | { kind: 'skip' }
       | { kind: 'none'; attribution: string }
@@ -747,16 +763,19 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         .filter((gate) => gate.status === 'fail')
         .map((gate) => gate.name);
       // The chain: the report's fix commits must BE git's linear history A..T.
-      const recorded = recordedFixChain(report);
-      if ('fault' in recorded) return { kind: 'skip' };
-      const A = recorded.admitted;
-      // The admitted head must be this run's green opening check: an admitted
-      // head that was red (or never checked here) publishes nothing.
+      // A is the head this run's review.run reviewed and review.address
+      // admitted (its record is the cycle's own, immutable evidence). It must
+      // be this run's green opening check: a red or unchecked admitted head
+      // publishes nothing.
+      const A = admittedHead;
       if (A !== firstCheckedHead)
         return {
           kind: 'none',
           attribution: `no green-prefix publication: the admitted head ${A} is not this run's green opening check (${firstCheckedHead})`,
         };
+      const recorded = recordedFixChain(report, A);
+      if ('fault' in recorded)
+        return { kind: 'none', attribution: `no green-prefix publication: ${recorded.fault}` };
       const gitAt = async (args: readonly string[]) =>
         deps.effects.runCommand('git', ['-C', input.repoRoot, ...args], { timeoutMs: 60_000 });
       const firstParent = await gitAt(['rev-list', '--first-parent', '--reverse', `${A}..${T}`]);
@@ -928,7 +947,23 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
             attribution: `no green-prefix publication: the probe worktree's dependency install failed — ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
           };
         }
+        let installedAt = candidates[0]!;
         const tmpEffects = (deps.effectsFor ?? makeSubprocessDevEffects)(tmp);
+        // Named test files under the author's checkout are re-rooted into the
+        // probe checkout (the wrapper refuses paths outside its repository).
+        const probeStep: DevCheckInput = {
+          ...checkStep,
+          repoRoot: tmp,
+          ...(checkStep.testFiles === undefined
+            ? {}
+            : {
+                testFiles: checkStep.testFiles.map((file) => {
+                  if (!isAbsolute(file)) return file;
+                  const inside = relative(input.repoRoot, file);
+                  return inside.startsWith('..') || isAbsolute(inside) ? file : join(tmp, inside);
+                }),
+              }),
+        };
         const scan = await scanNewestFirst(
           candidates,
           async (commit): Promise<GreenPrefixProbe> => {
@@ -946,6 +981,41 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
                 };
               ownedAt = commit;
             }
+            // Dependencies follow the candidate: when its dependency inputs
+            // differ from the installed commit's, reinstall within the reserve
+            // (or fault) — never probe against another commit's graph.
+            if (commit !== installedAt) {
+              const changed = await gitAt([
+                'diff',
+                '--name-only',
+                '--no-ext-diff',
+                '--no-textconv',
+                '--no-renames',
+                '-z',
+                installedAt,
+                commit,
+              ]);
+              if (changed.exitCode !== 0)
+                return {
+                  commit,
+                  verdict: 'fault',
+                  detail: `dependency-input comparison failed: ${changed.stderr.trim().slice(0, 300)}`,
+                };
+              const differs = changed.stdout
+                .split('\0')
+                .some((path) => GREEN_PREFIX_DEPENDENCY_INPUTS.includes(basename(path)));
+              if (differs) {
+                const reinstallMs = Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost);
+                if (reinstallMs <= 0)
+                  return {
+                    commit,
+                    verdict: 'fault',
+                    detail: 'its dependency inputs differ and the reserve cannot cover a reinstall',
+                  };
+                await installDeps(tmp, AbortSignal.timeout(reinstallMs));
+                installedAt = commit;
+              }
+            }
             // A FRESH check leg per candidate: its secret scanner is built from
             // the candidate's own checkout, never the author's cached rules.
             const probeCheck = await probeCheckFor(tmpEffects, tmp);
@@ -955,7 +1025,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
                 verdict: 'fault',
                 detail: 'no secret scanner could be bound to the probe worktree',
               };
-            const probed = await probeCheck({ ...checkStep, repoRoot: tmp });
+            const probed = await probeCheck(probeStep);
             const recordAt = tmpEffects
               .openLedger(pub)
               .load()

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { makeDevCycle, renderFindingsSection } from '../../../src/ops/dev/cycle.js';
-import type { DevCheckReport } from '../../../src/ops/dev/check.js';
+import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -103,6 +103,12 @@ interface Scenario {
   remoteMismatch?: boolean;
   /** The probe check throws. */
   probeThrows?: string;
+  /** review.run reports this head instead of the reviewed one. */
+  reviewHead?: string;
+  /** Named test files passed to dev.cycle (absolute paths are re-rooted). */
+  testFiles?: (root: string) => string[];
+  /** Change a dependency input (package.json) in the fix at this chain index. */
+  dependencyChangeAt?: number;
   /** Called at the start of each probe check. */
   onProbe?: () => void;
   /** Scripted author-side git commands (a race injected before real git runs). */
@@ -118,6 +124,7 @@ async function run(scenario: Scenario) {
   const opens: { input: PrOpenInput; root: string }[] = [];
   const installs: string[] = [];
   const probeRoots: string[] = [];
+  const probeSteps: DevCheckInput[] = [];
   let pushedSha: string | undefined;
   let authorChecks = 0;
   const bodies: string[] = [];
@@ -152,7 +159,7 @@ async function run(scenario: Scenario) {
         value: {
           schemaVersion: 1,
           branch: BRANCH,
-          head: read.state.head,
+          head: scenario.reviewHead ?? read.state.head,
           reviewed: { base: read.state.base, scope: 'full' },
           sources: [{ kind: 'agent', status: 'terminal' }],
           findings: [],
@@ -164,8 +171,14 @@ async function run(scenario: Scenario) {
       let observed = admitted;
       for (const [index, green] of scenario.greens.entries()) {
         await repo.write('src/a.ts', `export const a = ${String(index + 2)};\n`);
-        // Commit the fix file only: `.cq/` holds the ledger and stays untracked.
-        repo.git('add', 'src/a.ts');
+        if (scenario.dependencyChangeAt === index)
+          await repo.write('package.json', `{"name":"fixture","version":"1.0.${String(index)}"}\n`);
+        // Commit the fix files only: `.cq/` holds the ledger and stays untracked.
+        repo.git(
+          'add',
+          'src/a.ts',
+          ...(scenario.dependencyChangeAt === index ? ['package.json'] : []),
+        );
         repo.git('commit', '-q', '-m', `fix f${String(index + 1)}`);
         const commit = repo.git('rev-parse', 'HEAD').trim();
         commits.push(commit);
@@ -260,7 +273,8 @@ async function run(scenario: Scenario) {
     ...(scenario.defaultProbeCheck !== undefined
       ? {}
       : {
-          checkIn: (effects: DevEffects, root: string) => async () => {
+          checkIn: (effects: DevEffects, root: string) => async (step: DevCheckInput) => {
+            probeSteps.push(step);
             probeRoots.push(root);
             scenario.onProbe?.();
             if (scenario.probeThrows !== undefined) throw new Error(scenario.probeThrows);
@@ -299,6 +313,7 @@ async function run(scenario: Scenario) {
   const result = await op({
     repoRoot: repo.root,
     ...(scenario.push === undefined ? {} : { push: scenario.push }),
+    ...(scenario.testFiles === undefined ? {} : { testFiles: scenario.testFiles(repo.root) }),
   });
   const T = commits.at(-1)!;
   const probeParent = join(dirname(repo.root), '.cq-dev-cycle-probes');
@@ -314,6 +329,7 @@ async function run(scenario: Scenario) {
     opens,
     installs,
     probeRoots,
+    probeSteps,
     bodies,
     probeDir,
     probeParent,
@@ -427,15 +443,69 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     const r = await run({
       greens: [true, false],
       stop: 'budget',
-      tamper: (report) => {
-        report.rounds[0]!.record.head = report.fixes[0]!.commit!;
-      },
+      reviewHead: 'b'.repeat(40),
     });
     expect(r.result.status).toBe('failed');
     if (r.result.status === 'failed')
       expect(r.result.error).toContain("is not this run's green opening check");
     expect(r.probeRoots).toEqual([]);
     expect(r.opens).toEqual([]);
+  });
+
+  test('a first round re-reviewed at the fixed head (rounds[0].record replaced) still publishes', async () => {
+    const r = await run({
+      greens: [true, false],
+      tamper: (report) => {
+        // review.address replaces a round's record with its re-review.
+        report.rounds[0]!.record.head = report.verifiedHead!;
+      },
+    });
+    expect(r.result.status).toBe('needs-human');
+    if (r.result.status === 'needs-human')
+      expect(r.result.reason).toContain(`at ${r.commits[0]!}, the newest verified-fix commit`);
+  });
+
+  test('a first fix not dispatched at the admitted head publishes nothing', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      tamper: (report) => {
+        report.fixes[0]!.observedHead = 'c'.repeat(40);
+      },
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('the first verified fix was dispatched at');
+    expect(r.probeRoots).toEqual([]);
+  });
+
+  test('absolute named test files under the author checkout are re-rooted into the probe checkout', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      testFiles: (root) => [join(root, 'test/a.test.ts'), 'test/b.test.ts', '/elsewhere/c.test.ts'],
+    });
+    expect(r.result.status).toBe('needs-human');
+    expect(r.probeSteps.map((step) => step.testFiles)).toEqual([
+      [join(r.probeDir, 'test/a.test.ts'), 'test/b.test.ts', '/elsewhere/c.test.ts'],
+    ]);
+    expect(r.probeSteps[0]!.repoRoot).toBe(r.probeDir);
+  });
+
+  test('a candidate whose dependency inputs differ is reinstalled before its probe', async () => {
+    // c0 green, c1 changes package.json (red), T red: probing c1 then c0
+    // crosses the dependency change, so c0 gets its own install.
+    const r = await run({ greens: [true, false, false], stop: 'budget', dependencyChangeAt: 1 });
+    expect(r.result.status).toBe('needs-human');
+    expect(r.installs).toEqual([r.probeDir, r.probeDir]);
+    expect(r.probeRoots).toHaveLength(2);
+  });
+
+  test('candidates with identical dependency inputs share one install', async () => {
+    const r = await run({ greens: [true, false, false], stop: 'budget' });
+    expect(r.result.status).toBe('needs-human');
+    expect(r.installs).toEqual([r.probeDir]);
+    expect(r.probeRoots).toHaveLength(2);
   });
 
   test('recorded fix commits that are not the linear history publish nothing (no commit-presence shortcut)', async () => {
