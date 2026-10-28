@@ -1384,7 +1384,7 @@ test.each(['active', 'entry', 'after-first'] as const)(
   },
 );
 
-test('cancellation keeps completed unit evidence and one cancelled sibling placeholder (issue 615 #2)', async () => {
+test('cancellation keeps completed unit evidence and truthful sibling rows (issue 615 #2)', async () => {
   const f = await fixture();
   const controller = new AbortController();
   let parentSignal: AbortSignal | undefined;
@@ -1465,14 +1465,21 @@ test('cancellation keeps completed unit evidence and one cancelled sibling place
       expect(row.commits).toHaveLength(1);
       expect(row.unit).toBe('tests-1/scratch-repo');
     }
-    // The cancelled unit keeps its real planned rows (a, b) refined to
-    // cancelled — no false never-started placeholder beside them.
+    // Unit tests-2's first dispatch aborts mid-flight: task a carries its
+    // recorded aborted attempt and escalates; task b, never dispatched,
+    // refines to cancelled. Both keep unit tests-2's identity.
+    const escalated = report.planned.find(
+      (row) => row.outcome === 'escalated-to-human' && row.unit === 'tests-2/scratch-repo',
+    );
+    if (escalated === undefined) throw new Error('no escalated row for unit tests-2');
+    expect(escalated.task.id).toBe('cases/a.test.cjs');
+    expect(escalated.attempts).toHaveLength(1);
+    expect(escalated.attempts[0]?.stopReason).toBe('aborted');
     const cancelledRows = report.planned.filter((row) => row.outcome === 'cancelled');
-    expect(cancelledRows.map((row) => row.task.id).toSorted()).toEqual([
-      'cases/a.test.cjs',
-      'cases/b.test.cjs',
-    ]);
+    expect(cancelledRows.map((row) => row.task.id)).toEqual(['cases/b.test.cjs']);
     for (const row of cancelledRows) expect(row.unit).toBe('tests-2/scratch-repo');
+    // No false never-started placeholder beside the real rows (the finding-2
+    // dedup: the cancelled unit was dispatched, so its rows are its own).
     const neverStarted = report.planned.filter((row) => row.outcome === 'not-started');
     expect(neverStarted).toEqual([]);
     // Distinct identities: every (unit, task) pair appears once.
@@ -1727,14 +1734,18 @@ test('pre-task unit failure fallback keeps collision-resolved plan segments (iss
     const fallbackFailure = fallback.failures[0];
     if (fallbackFailure === undefined) throw new Error('fallback row carries no failure');
     expect('branch' in fallbackFailure).toBe(false);
+    // Truthful stable classification: the unit label, the package-name task,
+    // not-started, no gate (no artifact was retained), and the reason naming
+    // the derivation boundary and the [PROBE] baseline fault class.
     expect(fallbackFailure).toEqual({
       unit: 'tests-1/scratch-repo-2',
       task: 'scratch.repo',
       outcome: 'not-started',
       gate: 'none',
-      reason: 'unit failed before deriving tasks: [PROBE]',
+      reason:
+        'unit failed before deriving tasks: [PROBE] sweep.unit scratch.repo: ' +
+        'the baseline probe returned indeterminate — vitest-json: output is not valid JSON',
     });
-    expect(fallbackFailure.reason).toContain('[PROBE]');
     // Distinct identities: the fallback never shares unit1's identity.
     const identities = report.planned.map((row) => `${row.unit}\n${row.task.id}`);
     expect(new Set(identities).size).toBe(identities.length);
