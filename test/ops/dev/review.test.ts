@@ -307,7 +307,8 @@ describe('dev.review cycle', () => {
       const op = makeDevReview({ effects, scanSecrets: scanner, runAgentReviewer: runner });
       const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
       expect(result.status).toBe(outcome === 'terminal' ? 'ok' : 'needs-human');
-      expect(lock).toHaveBeenCalledOnce();
+      // Reuse admission and fresh dispatch acquire the same host lock separately.
+      expect(lock).toHaveBeenCalledTimes(2);
       expect(resolve).toHaveBeenCalledOnce();
       expect(dispatch).toHaveBeenCalledOnce();
       expect(reviewerCalls(effects)).toEqual([]);
