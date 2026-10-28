@@ -34,12 +34,23 @@ import {
   bindingsFromDispatch,
   makeSweepUnitOp,
   readCommittedMarkers,
+  sweepUnitSegments,
   type SweepUnitDispatchInput,
   type SweepUnitReport,
 } from '../sweep/unit.js';
 import type { AssemblePrsInput } from '../pr/assemblePrs.js';
 import type { FixTaskReport, TaskAttempt } from '../sweep/taskLoop.js';
 import type { FixRunInputSchema } from './registry.js';
+import {
+  fixRunCounters,
+  isNoArtifactFailure,
+  neverStartedRow,
+  plannedTaskRowOf,
+  unitLabelOf,
+  type FixRunCounters,
+  type FixTaskOutcome,
+  type PlannedTaskRow,
+} from './report.js';
 import { makePortableReviewScanner, type DiffSecretScanner } from '../dev/denylist.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 
@@ -51,15 +62,22 @@ export interface FixRunReport {
   verdict: 'pass' | 'fail' | 'needs-human';
   units: Array<{ jobId: string; result: OpResult<SweepUnitReport>; report?: SweepUnitReport }>;
   tasks: FixTaskReport[];
-  failed: Array<{
-    unit: string;
-    task: string;
-    outcome: 'unfixed' | 'escalated-to-human';
-    gate: import('../sweep/taskLoop.js').FailedAttemptGate;
-    reason: string;
-    branch: string;
-    sha: string;
-  }>;
+  failed: Array<
+    | {
+        unit: string;
+        task: string;
+        outcome: 'unfixed' | 'escalated-to-human';
+        gate: import('../sweep/taskLoop.js').FailedAttemptGate;
+        reason: string;
+        branch: string;
+        sha: string;
+      }
+    | { unit: string; task: string; outcome: FixTaskOutcome; gate: 'none'; reason: string }
+  >;
+  /** Every planned unit of work with its outcome, evidence and counters. */
+  planned: PlannedTaskRow[];
+  /** Explicit denominators over `planned` (see {@link FixRunCounters}). */
+  counters: FixRunCounters;
   fixesPerRun: number;
   usage: Usage;
   wallMs: number;
@@ -145,12 +163,27 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       units: [],
       tasks: [],
       failed: [],
+      planned: [],
+      counters: {
+        planned: 0,
+        attempted: 0,
+        fixed: 0,
+        skipped: 0,
+        unresolved: 0,
+        rescueAttempts: 0,
+        rescueFixes: 0,
+      },
       fixesPerRun: 0,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       wallMs: 0,
     };
     let escalation = createEscalationState();
     let escalationPolicy: Parameters<typeof rescueAllocation>[1] | undefined;
+    const unstartedUnits: Array<{
+      unit: SweepUnitDispatchInput;
+      segments: { kind: string; slug: string; branch: string };
+      reason: string;
+    }> = [];
     const collected = new Map<string, SweepUnitReport>();
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
@@ -163,7 +196,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         const attempts = (task.rounds ?? []).filter((round) => round.failedAttempt !== undefined);
         if (attempts.length > 0)
           return attempts.map((round) => ({
-            unit: `${task.branch.split('/').at(-2) ?? ''}/${task.branch.split('/').at(-1) ?? ''}`,
+            unit: unitLabelOf(task.branch),
             task: task.task.id,
             outcome: round.outcome ?? (task.outcome === 'fixed' ? 'unfixed' : task.outcome),
             gate: round.gate ?? 'none',
@@ -175,7 +208,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           ? []
           : [
               {
-                unit: `${task.branch.split('/').at(-2) ?? ''}/${task.branch.split('/').at(-1) ?? ''}`,
+                unit: unitLabelOf(task.branch),
                 task: task.task.id,
                 outcome: task.outcome === 'fixed' ? 'unfixed' : task.outcome,
                 gate: 'none' as const,
@@ -185,6 +218,32 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               },
             ];
       });
+      // Every planned unit of work is accounted for: tasks the units planned,
+      // plus one branchless row per planned unit that never ran. Unfixed
+      // branchless rows join the legacy `failed` evidence so the local JSON
+      // and the PR summary name every outstanding unit (no commit URL is
+      // invented where no attempt left a branch).
+      report.planned = report.tasks
+        .map(plannedTaskRowOf)
+        .concat(
+          unstartedUnits.map((entry) =>
+            neverStartedRow(entry.segments, entry.unit.package, entry.reason),
+          ),
+        );
+      report.counters = fixRunCounters(report.planned);
+      for (const row of report.planned) {
+        const branchless = row.failures.filter(isNoArtifactFailure);
+        if (row.outcome !== 'fixed' && branchless.length > 0)
+          report.failed.push(
+            ...branchless.map((failure) => ({
+              unit: failure.unit,
+              task: failure.task,
+              outcome: failure.outcome,
+              gate: failure.gate,
+              reason: failure.reason,
+            })),
+          );
+      }
       report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -425,6 +484,24 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             const result = await makeSweepUnitOp(bindings)(unit);
             if (result.status === 'ok')
               collected.set(`${unit.package}\0${unit.fixer}`, result.value);
+            else if (
+              parentSignal?.aborted ||
+              result.status === 'indeterminate' ||
+              result.status === 'needs-human' ||
+              result.status === 'budget-exhausted'
+            )
+              unstartedUnits.push({
+                unit,
+                segments: bindings.segments ?? sweepUnitSegments(bindings.runPrefix, unit),
+                reason:
+                  result.status === 'indeterminate'
+                    ? `unit did not produce a verdict: ${result.detail}`
+                    : result.status === 'needs-human'
+                      ? `unit stopped for human review: ${result.reason}`
+                      : result.status === 'budget-exhausted'
+                        ? 'unit halted on a budget bound'
+                        : 'enclosing job cancelled before unit dispatch',
+              });
             return result;
           } catch (error) {
             return { status: 'needs-human', reason: String(error) };
@@ -456,6 +533,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       } finally {
         clearTimeout(timer);
       }
+      // Jobs the run cancelled (an enclosing cancel races dispatch): a job
+      // with no journal row is one the runner never dispatched. The blocked
+      // set feeds the cancelled path's unstarted rows below.
+      const dispatchedJobIds = new Set(report.run.jobs.map((row) => row.jobId));
+      const blockedJobIds = new Set(
+        plan.jobs.map((job) => job.id).filter((id) => !dispatchedJobIds.has(id)),
+      );
       report.units = report.run.jobs
         .filter((row) => row.op === 'sweep.unit')
         .map((row) => {
@@ -472,6 +556,27 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         (row) =>
           (row.report ?? (row.result.status === 'ok' ? row.result.value : undefined))?.tasks ?? [],
       );
+      for (const row of report.units) {
+        const unit = plan.jobs.find((job) => job.id === row.jobId)?.input as SweepUnitDispatchInput;
+        if (unit === undefined) continue;
+        const known = unstartedUnits.some(
+          (entry) => entry.unit.package === unit.package && entry.unit.fixer === unit.fixer,
+        );
+        if (row.result.status !== 'ok' && !known) {
+          unstartedUnits.push({
+            unit,
+            segments: sweepUnitSegments(runPrefix, unit),
+            reason:
+              row.result.status === 'failed'
+                ? `unit failed before deriving tasks: ${row.result.error}`
+                : row.result.status === 'indeterminate'
+                  ? `unit did not produce a verdict: ${row.result.detail}`
+                  : row.result.status === 'needs-human'
+                    ? `unit stopped for human review: ${row.result.reason}`
+                    : 'unit halted on a budget bound',
+          });
+        }
+      }
       report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
       report.usage = report.run.usage ?? report.usage;
       const human =
@@ -521,10 +626,28 @@ export function makeFixRun(deps: FixRunDeps = {}) {
                   : `local branch \`${branch}\``;
               return `- \`${task.task.id}\` — ${task.outcome}; ${failed?.gate ?? 'none'}: diagnostic retained in local report; ${branchRef}`;
             });
+            // Work the run never reached is named without a fabricated
+            // branch or link: branchless rows show their stop reason only.
+            const branchless = report.planned.filter(
+              (row) =>
+                row.outcome !== 'fixed' &&
+                row.failures.every(isNoArtifactFailure) &&
+                !report.tasks.some(
+                  (task) =>
+                    task.task.id === row.task.id &&
+                    task.outcome !== 'fixed' &&
+                    task.failedAttempt !== undefined,
+                ),
+            );
+            const outstanding = branchless.map((row) => {
+              const detail = row.failures[0]?.reason ?? row.reason ?? 'not started';
+              return `- \`${row.task.id}\` — ${row.outcome}; ${detail}`;
+            });
+            const unfixedCount = unfixed.length + outstanding.length;
             const section =
-              unfixed.length === 0
+              unfixedCount === 0
                 ? ''
-                : `## Unfixed (${String(unfixed.length)})\n\n${lines.join('\n')}`;
+                : `## Unfixed (${String(unfixedCount)})\n\n${[...lines, ...outstanding].join('\n')}`;
             const body = [pkg.body?.trim(), section].filter(Boolean).join('\n\n');
             const outgoing = {
               ...pkg,
@@ -573,13 +696,38 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             );
         }
       }
-      if (human || parentSignal?.aborted)
+      if (human || parentSignal?.aborted) {
+        if (parentSignal?.aborted) {
+          // Distinguish already-accounted non-ok units from jobs the runner
+          // never dispatched before the cancel: only the latter get a
+          // cancelled row here (the unit seam recorded the former).
+          const cancelledIds = new Set(
+            plan.jobs
+              .filter((job) => job.op === 'sweep.unit')
+              .filter((job) => !job.dependsOn?.some((id) => blockedJobIds.has(id)))
+              .map((job) => job.id),
+          );
+          for (const row of report.units)
+            if (row.result.status !== 'ok') cancelledIds.delete(row.jobId);
+          for (const entry of plan.jobs) {
+            if (entry.op !== 'sweep.unit' || !cancelledIds.has(entry.id)) continue;
+            const unit = entry.input as SweepUnitDispatchInput;
+            const check = checks[config.fixers.indexOf(unit.fixer)];
+            if (!check) continue;
+            unstartedUnits.push({
+              unit,
+              segments: sweepUnitSegments(runPrefix, unit),
+              reason: 'enclosing job cancelled before unit dispatch',
+            });
+          }
+        }
         return await finish(
           'needs-human',
           parentSignal?.aborted
             ? 'enclosing job cancelled; verified commits retained without publishing'
             : 'run stopped for budget or human review',
         );
+      }
       if (
         report.run.jobs.some((row) => row.result.status !== 'ok') ||
         report.units.some((row) => row.report?.indeterminate) ||
