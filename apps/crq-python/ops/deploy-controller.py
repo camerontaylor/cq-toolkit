@@ -145,9 +145,8 @@ class Effects:
         try:
             if self.record_dir.is_symlink():
                 raise Refused("controller record directory must not be a symlink")
-            self.record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             if not self.record_dir.is_dir():
-                raise Refused("controller record path must be a directory")
+                raise Refused("controller record directory must already exist as a directory")
             if self.record_dir.stat().st_mode & 0o777 != 0o700:
                 raise Refused("controller record directory must have mode 0700")
         except OSError as exc:

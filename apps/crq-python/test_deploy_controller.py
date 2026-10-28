@@ -87,6 +87,7 @@ class ControllerFixture(unittest.TestCase):
         self.overlay_path.write_bytes(self.raw)
         self.overlay_path.chmod(0o600)
         self.record_dir = self.base / "controller-records"
+        self.record_dir.mkdir(mode=0o700)
         self.floor = mock.patch.object(host, "POLICY_FLOOR", self.before)
         self.floor.start()
         self.addCleanup(self.floor.stop)
@@ -426,8 +427,20 @@ class DeployPlanTests(ControllerFixture):
             dc.rollback_target(record)
         return recovery, record
 
+    def test_missing_record_ancestors_refuse_before_intent_or_helper_without_creation(self):
+        self.effects.record_dir = self.base / "not-provisioned" / "private" / "records"
+        before = dc.captured_state(self.effects)
+        with mock.patch.object(self.effects, "journal_append") as append:
+            with mock.patch.object(host, "switch") as switch:
+                with self.assertRaisesRegex(dc.Refused, "must already exist as a directory"):
+                    dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+                append.assert_not_called()
+                switch.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+        self.assertFalse((self.base / "not-provisioned").exists())
+
     def test_record_directory_mode_refuses_before_helper_without_deploy_changes(self):
-        self.record_dir.mkdir(mode=0o755)
+        self.record_dir.chmod(0o755)
         before = dc.captured_state(self.effects)
         with mock.patch.object(host, "switch") as switch:
             with self.assertRaisesRegex(dc.Refused, "mode 0700"):
@@ -437,10 +450,11 @@ class DeployPlanTests(ControllerFixture):
         self.assertEqual(list(self.record_dir.iterdir()), [])
 
     def test_record_directory_file_refuses_before_helper_without_deploy_changes(self):
+        self.record_dir.rmdir()
         self.record_dir.write_text("not a directory")
         before = dc.captured_state(self.effects)
         with mock.patch.object(host, "switch") as switch:
-            with self.assertRaisesRegex(dc.Refused, "record directory unavailable"):
+            with self.assertRaisesRegex(dc.Refused, "must already exist as a directory"):
                 dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
             switch.assert_not_called()
         self.assertEqual(dc.captured_state(self.effects), before)
@@ -462,11 +476,12 @@ class DeployPlanTests(ControllerFixture):
         syncs = []
 
         def fsync(fd):
+            kind = "directory" if dc.os.fstat(fd).st_mode & 0o170000 == 0o040000 else "file"
             actual_fsync(fd)
-            syncs.append(fd)
+            syncs.append(kind)
 
         def switch(*args):
-            self.assertGreaterEqual(len(syncs), 2)  # data and directory before helper
+            self.assertEqual(syncs, ["file", "directory"])  # both completed before helper
             path = next(self.record_dir.glob("controller-*.json"))
             pending = json.loads(path.read_text())
             self.assertEqual(pending["operation"], "deploy_pending")
@@ -732,7 +747,7 @@ class RollbackPlanTests(ControllerFixture):
 
     def test_rollback_bad_record_mode_refuses_before_helper(self):
         self.at_target()
-        self.record_dir.mkdir(mode=0o755)
+        self.record_dir.chmod(0o755)
         before = dc.captured_state(self.effects)
         with mock.patch.object(host, "switch") as switch:
             with self.assertRaisesRegex(dc.Refused, "mode 0700"):

@@ -161,9 +161,11 @@ Ordering and guarantees:
 1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
    to it; prior HEAD/config digests retained; reachability, drift and
    stopped-unit checks are the helper's own (they run inside its `switch`).
-   Record-directory type/private mode 0700 and ambiguous prior annotated tags
-   are checked before helper entry. A private mode-0600 recovery intent is
-   atomically written and its file and directory synced before any helper call.
+   The owner must provision a durable, private mode-0700 record directory before
+   invoking the controller. The controller never creates it or missing ancestors;
+   absence, wrong type/mode and ambiguous prior annotated tags refuse before
+   helper entry. A private mode-0600 recovery intent is atomically written and its
+   file and existing record directory synced before any helper call.
 2. **Drain** — every queue item with a recorded run is probed with the
    runner's own fail-closed `crq.run_liveness` from the same checkout.
    `alive` or `ambiguous` blocks the controller; it never signals or kills a
