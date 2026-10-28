@@ -682,6 +682,40 @@ describe('dev.cycle', () => {
     },
   );
 
+  test('a stopped-run draft whose findings section cannot be composed says the draft is open without it', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const { gh } = ghFake();
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: structuredStopAddress(
+        state,
+        'budget',
+        'review.address: token or wall budget exhausted; report: /tmp/r.json',
+      ),
+      open: openFake(opens),
+      gh: {
+        ...gh,
+        editPrBody: async () => {
+          throw new Error('body write refused');
+        },
+      },
+      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+    });
+    const result = await op({ repoRoot: repo.root });
+    // The draft exists (pr.open ran once); the refusal names it and the
+    // compose fault instead of claiming a complete publication.
+    expect(opens).toHaveLength(1);
+    expect(result).toMatchObject({
+      status: 'needs-human',
+      reason:
+        'dev.cycle (pr body): draft PR #42 is open but the findings section could not be composed — body write refused',
+    });
+  });
+
   test.each(['budget', 'rereview-blocked'] as const)(
     '#532: %s publication refuses a changed head, dirty tree, or missing verified head',
     async (stop) => {
