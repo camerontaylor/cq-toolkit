@@ -366,7 +366,9 @@ describe('authenticated alias completion consumer', () => {
     expect(verifiedCompletedDebt(reuse)).toBe(true);
     // With no explicit equivalent reuse, a same-item alias cannot bridge item drift.
     delete reuse.queue.reusedFrom;
-    reuse.queue.requestAlias = settled.queue.requestAlias;
+    const alias = settled.queue.requestAlias;
+    if (!alias) throw new Error('missing settled alias proof');
+    reuse.queue.requestAlias = alias;
     expect(verifiedCompletedDebt(reuse)).toBe(false);
   });
 });
