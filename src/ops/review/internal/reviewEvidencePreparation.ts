@@ -60,6 +60,8 @@ export type EvidencePreparationStep =
       candidates: readonly EvidenceCandidateRecord[];
       /** Granted repair turns; empty when the original validated. */
       repairs: readonly EvidenceRepairTurn[];
+      /** Submitted repair payloads left unevaluated after the winner. */
+      ignoredRepairSubmissions: number;
     }
   | {
       status: 'invalid';
@@ -70,10 +72,11 @@ export type EvidencePreparationStep =
       /** Full granted-repair history, original's trigger first. */
       repairs: readonly EvidenceRepairTurn[];
       /**
-       * 'exhausted': the repair cap bounded this outcome.
-       * 'unused': no repair capacity was offered (no submissions or cap 0).
+       * 'exhausted': all repair capacity was used and the outcome stayed invalid.
+       * 'partial': at least one, but fewer than the allowed repairs were used.
+       * 'unused': no repair was evaluated.
        */
-      repairOutcome: 'exhausted' | 'unused';
+      repairOutcome: 'exhausted' | 'partial' | 'unused';
       /** Submitted repair payloads beyond the cap: counted, never evaluated. */
       ignoredRepairSubmissions: number;
     };
@@ -104,6 +107,8 @@ export function prepareFindingEvidence(input: {
     );
   const candidates: EvidenceCandidateRecord[] = [];
   const repairs: EvidenceRepairTurn[] = [];
+  const offered = input.repairs ?? [];
+  const evaluated = offered.slice(0, maxRepairs);
   const verdictOf = (evidence: FindingEvidenceV1): readonly AnchorInvalidReason[] => {
     const verdict = validateFindingEvidence(evidence, input.context);
     return verdict.status === 'valid' ? [] : verdict.reasons;
@@ -111,15 +116,25 @@ export function prepareFindingEvidence(input: {
   let reasons = verdictOf(input.candidate);
   candidates.push({ evidence: input.candidate, reasons });
   if (reasons.length === 0)
-    return { status: 'valid', evidence: input.candidate, candidates, repairs };
-  const offered = input.repairs ?? [];
-  const evaluated = offered.slice(0, maxRepairs);
-  const ignoredRepairSubmissions = offered.length - evaluated.length;
+    return {
+      status: 'valid',
+      evidence: input.candidate,
+      candidates,
+      repairs,
+      ignoredRepairSubmissions: offered.length,
+    };
   for (const evidence of evaluated) {
     const turnReasons = verdictOf(evidence);
     repairs.push({ requestedAfter: reasons, evidence, reasons: turnReasons });
     candidates.push({ evidence, reasons: turnReasons });
-    if (turnReasons.length === 0) return { status: 'valid', evidence, candidates, repairs };
+    if (turnReasons.length === 0)
+      return {
+        status: 'valid',
+        evidence,
+        candidates,
+        repairs,
+        ignoredRepairSubmissions: offered.length - repairs.length,
+      };
     // The next repair request (if any) must cite the candidate just evaluated.
     reasons = turnReasons;
   }
@@ -128,8 +143,9 @@ export function prepareFindingEvidence(input: {
     reasons,
     candidates,
     repairs,
-    repairOutcome: evaluated.length > 0 ? 'exhausted' : 'unused',
-    ignoredRepairSubmissions,
+    repairOutcome:
+      evaluated.length === 0 ? 'unused' : evaluated.length === maxRepairs ? 'exhausted' : 'partial',
+    ignoredRepairSubmissions: offered.length - evaluated.length,
   };
 }
 

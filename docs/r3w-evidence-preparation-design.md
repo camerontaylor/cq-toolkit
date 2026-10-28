@@ -51,7 +51,11 @@ interface EvidenceRepairTurn {
 }
 
 type EvidencePreparationStep =
-  | { status: 'valid'; evidence: FindingEvidenceV1 }
+  | {
+      status: 'valid';
+      evidence: FindingEvidenceV1;
+      ignoredRepairSubmissions: number;
+    }
   | {
       status: 'invalid';
       /** The best (final) candidate's verdict reasons, in validator order. */
@@ -60,8 +64,10 @@ type EvidencePreparationStep =
       candidates: { evidence: FindingEvidenceV1; reasons: AnchorInvalidReason[] }[];
       /** Full repair history: every bounded turn the engine granted. */
       repairs: EvidenceRepairTurn[];
-      /** 'exhausted' = the cap bound this outcome; 'unused' = no repair was offered. */
-      repairOutcome: 'exhausted' | 'unused';
+      /** Exhausted = all allowed turns used; partial = some used; unused = none evaluated. */
+      repairOutcome: 'exhausted' | 'partial' | 'unused';
+      /** Submitted repairs left unevaluated after a winner or the cap. */
+      ignoredRepairSubmissions: number;
     };
 
 function prepareFindingEvidence(input: {
@@ -89,9 +95,10 @@ function prepareFindingEvidence(input: {
    original candidate is never mutated; a repaired payload is stored exactly as
    submitted.
 3. **Repairs are bounded.** At most `maxRepairs` (default 2, hard maximum 2) repair
-   candidates are evaluated, in order, after the original. Extra submissions beyond the
-   cap are ignored (and reported, see 6). Repair requests carry the typed reasons that
-   triggered them, so a producer replay can target the defect class instead of guessing.
+   candidates are evaluated, in order, after the original. Unevaluated submissions are
+   counted on valid and invalid outcomes without evaluating their payloads. Repair
+   requests carry the typed reasons that triggered them, so a producer replay can target
+   the defect class instead of guessing.
 4. **No silent relocation.** Repeated quotes, renamed paths and near-miss lines are never
    "fixed" by searching for a better location: the literal-path, literal-line,
    literal-quote validation of R3S is inherited untouched. A repair that re-anchors
@@ -100,10 +107,13 @@ function prepareFindingEvidence(input: {
    candidate with its own reasons (first submission first), the final verdict reasons at
    top level for direct mapping into R3S's `validation: { status: 'invalid', reasons }`,
    and the full repair history with per-turn trigger reasons.
-6. **Budget truthfulness.** `repairOutcome: 'exhausted'` means the cap bound the
-   outcome; `'unused'` means no repair capacity was offered or needed. Attempts beyond
-   the cap are visible: they are counted, not evaluated, and the excess count is
-   reported on the step (`ignoredRepairSubmissions`).
+6. **Budget truthfulness.** On invalid outcomes, `repairOutcome: 'exhausted'` means
+   every allowed repair was evaluated and the result stayed invalid; `'partial'` means
+   at least one but fewer than the allowed repairs were evaluated; `'unused'` means
+   none were evaluated. Unevaluated submissions are counted on both valid and invalid
+   steps as `ignoredRepairSubmissions`: all repairs when the original wins, repairs
+   after the first valid repair, and submissions beyond the cap. They are never
+   validated.
 7. **No false clean.** The helper returns data, never a completion claim. Whether an
    invalid survivor blocks its source is a coverage/readiness decision for the callers
    (per the card: unresolved required candidates keep the source blocked; filtering bad

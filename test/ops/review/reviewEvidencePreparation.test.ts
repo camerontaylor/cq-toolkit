@@ -121,6 +121,17 @@ describe('R3W evidence preparation', () => {
     expect(step.candidates[0]?.evidence).toBe(candidate);
     expect(step.candidates[0]?.reasons).toEqual([]);
     expect(step.repairs).toEqual([]);
+    expect(step.ignoredRepairSubmissions).toBe(0);
+  });
+
+  it('counts every repair left unevaluated when the original is already valid', () => {
+    const candidate = evidence();
+    const repairs = [evidence(), evidence(), evidence()];
+    const step = valid(prepareFindingEvidence({ candidate, context, repairs }));
+    expect(step.evidence).toBe(candidate);
+    expect(step.candidates.map((row) => row.evidence)).toEqual([candidate]);
+    expect(step.repairs).toEqual([]);
+    expect(step.ignoredRepairSubmissions).toBe(3);
   });
 
   it('stops at the first valid repair and stores it verbatim with its trigger', () => {
@@ -132,6 +143,7 @@ describe('R3W evidence preparation', () => {
     expect(step.repairs).toEqual([
       { requestedAfter: ['quote-mismatch'], evidence: repair, reasons: [] },
     ]);
+    expect(step.ignoredRepairSubmissions).toBe(0);
   });
 
   it('prefers an earlier valid repair over a later one and evaluates nothing after it', () => {
@@ -143,6 +155,21 @@ describe('R3W evidence preparation', () => {
     );
     expect(step.evidence).toBe(first);
     expect(step.candidates).toHaveLength(2);
+    expect(step.ignoredRepairSubmissions).toBe(1);
+  });
+
+  it('counts later submissions after a valid repair without evaluating them', () => {
+    const original = evidence({ primary: anchor({ quote: 'wrong bytes' }) });
+    const winner = evidence({ failureScenario: 'first repair, valid' });
+    const later = evidence({ failureScenario: 'later repair, never evaluated' });
+    const beyondCap = evidence({ failureScenario: 'beyond the hard cap' });
+    const step = valid(
+      prepareFindingEvidence({ candidate: original, context, repairs: [winner, later, beyondCap] }),
+    );
+    expect(step.evidence).toBe(winner);
+    expect(step.candidates.map((row) => row.evidence)).toEqual([original, winner]);
+    expect(step.repairs).toHaveLength(1);
+    expect(step.ignoredRepairSubmissions).toBe(2);
   });
 
   it('retains every raw candidate and full history when repairs stay invalid', () => {
@@ -220,6 +247,28 @@ describe('R3W evidence preparation', () => {
     expect(capped.repairOutcome).toBe('unused');
     expect(capped.ignoredRepairSubmissions).toBe(1);
     expect(capped.candidates).toHaveLength(1);
+  });
+
+  it('reports partial use until the allowed repair capacity is actually exhausted', () => {
+    const broken = evidence({ primary: anchor({ quote: 'nope' }) });
+    const invalidRepair = evidence({ primary: anchor({ start: 99, end: 99 }) });
+    const partial = invalid(
+      prepareFindingEvidence({ candidate: broken, context, repairs: [invalidRepair] }),
+    );
+    expect(partial.repairs).toHaveLength(1);
+    expect(partial.repairOutcome).toBe('partial');
+    expect(partial.ignoredRepairSubmissions).toBe(0);
+
+    const exhausted = invalid(
+      prepareFindingEvidence({
+        candidate: broken,
+        context,
+        repairs: [invalidRepair],
+        maxRepairs: 1,
+      }),
+    );
+    expect(exhausted.repairs).toHaveLength(1);
+    expect(exhausted.repairOutcome).toBe('exhausted');
   });
 
   it('refuses a repair allowance above the card maximum', () => {
