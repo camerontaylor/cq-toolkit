@@ -1048,6 +1048,105 @@ test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)
   }
 });
 
+test('PR summary keeps an exhausted task when another unit retained the same task ID (#631)', async () => {
+  const f = await fixture();
+  const bodies = new Map<string, string>();
+  try {
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      checks: unknown[];
+    };
+    config.checks.push({ ...(config.checks[0] as object) });
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'seed two units with matching task paths');
+
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (request, options) => {
+            if (!request.workspace) throw new Error('fixture requires a workspace');
+            const line = request.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            const unit2 = request.prompt.includes(join('tests-2', 'scratch-repo'));
+            const failingFile = task.files.find(
+              (file) => file.includes('b.test') || file.includes('c.test'),
+            );
+            if (failingFile && (!unit2 || failingFile.includes('b.test'))) {
+              await writeFile(
+                join(request.workspace.path, failingFile),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+              return {
+                stopReason: unit2 ? 'budget' : 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'broken-test',
+                  summary: 'wrong fix',
+                  confidence: 0.8,
+                },
+              } as const;
+            }
+            return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
+          },
+        },
+      }),
+    };
+    const result = await makeFixRun({
+      drivers,
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (
+                  raw as {
+                    packages: Array<{ branch: string; body?: string }>;
+                  }
+                ).packages;
+                for (const pkg of packages) bodies.set(pkg.branch, pkg.body ?? '');
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const report = reportOf(result);
+    const unit1 = 'cq/fixture/tests-1/scratch-repo';
+    const unit2 = 'cq/fixture/tests-2/scratch-repo';
+    const retained = report.planned.find(
+      (row) => row.branch === unit1 && row.task.id === 'cases/c.test.cjs',
+    );
+    const exhausted = report.planned.find(
+      (row) => row.branch === unit2 && row.task.id === 'cases/c.test.cjs',
+    );
+    expect(retained?.failures.some((failure) => 'branch' in failure)).toBe(true);
+    expect(exhausted?.outcome).toBe('exhausted');
+    expect(exhausted?.attempts).toHaveLength(0);
+    expect(exhausted?.failures.every((failure) => !('branch' in failure))).toBe(true);
+    expect(bodies.size).toBe(2);
+    expect(bodies.get(unit1)).toContain('cases/c.test.cjs');
+    expect(bodies.get(unit1)).toContain('local branch');
+    expect(bodies.get(unit2)).toContain('cases/c.test.cjs');
+    expect(bodies.get(unit2)).toContain('exhausted;');
+    expect(bodies.get(unit2)).not.toContain('failed/tests-1/');
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless failure and never-started', async () => {
   const f = await fixture(1000);
   try {
