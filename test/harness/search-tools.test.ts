@@ -891,12 +891,16 @@ describe('contained grep and glob tools', () => {
   test('retention and output ordering agree past the candidate cap (#613)', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, '.git'), { recursive: true });
-      // 1,005 lowercase candidates plus an uppercase match: with the old
-      // mixed ordering the Z file could be dropped from the retained set
-      // while the output sorted differently.
+      // 1,005 lowercase candidates do NOT match; ONLY Z.ts contains the
+      // needle. This isolates the #613 scenario: with the old mixed
+      // ordering, the single matching candidate could be dropped by the
+      // native-code-unit top-1000 retention while a locale-sorted output
+      // would have kept it — candidate-cap selection and result ordering
+      // must agree. (The result cap is separate: only one file matches, so
+      // SEARCH_MATCH_LIMIT is not reached.)
       await Promise.all(
         Array.from({ length: 1_005 }, (_, index) =>
-          writeFile(join(workspace, `a${String(index).padStart(4, '0')}.ts`), 'needle\n', 'utf8'),
+          writeFile(join(workspace, `a${String(index).padStart(4, '0')}.ts`), 'no match here\n', 'utf8'),
         ),
       );
       await writeFile(join(workspace, 'Z.ts'), 'needle\n', 'utf8');
@@ -909,7 +913,8 @@ describe('contained grep and glob tools', () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.output).toContain('Z.ts');
-        expect(result.truncated).toBe(true);
+        expect(result.output).not.toContain('a0000.ts');
+        expect(result.truncated).toBe(false);
       }
     });
   });
