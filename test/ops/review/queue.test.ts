@@ -449,10 +449,11 @@ describe('public queue local input classification', () => {
     const enqueue = await registry.find((entry) => entry.name === 'review.enqueue')!.importer();
     expect(await enqueue({ ...ref, action: 'bind' })).toMatchObject({ status: 'failed' });
   });
-  test('valid commands still dispatch the intended wire operation', async () => {
-    const sent: string[] = [];
+  test('valid commands still dispatch the intended wire payload', async () => {
+    type WireRequest = { op: string; pr?: number; mergeSha?: string };
+    const sent: WireRequest[] = [];
     const transport: QueueTransport = async (wire) => {
-      sent.push((JSON.parse(wire) as { op: string }).op);
+      sent.push(JSON.parse(wire) as WireRequest);
       return JSON.stringify({
         v: 1,
         requestId: ref.requestId,
@@ -466,7 +467,9 @@ describe('public queue local input classification', () => {
     expect(
       await ops.enqueue({ ...ref, action: 'bind', pr: 12, mergeSha: 'a'.repeat(40) }),
     ).toMatchObject({ status: 'ok' });
-    expect(sent).toEqual(['enqueue', 'cancel', 'bind']);
+    expect(sent.map(({ op }) => op)).toEqual(['enqueue', 'cancel', 'bind']);
+    // The optional mergeSha and the positive pr are only proven by the payload.
+    expect(sent[2]).toMatchObject({ op: 'bind', pr: 12, mergeSha: 'a'.repeat(40) });
   });
   test.each([
     '{}',
