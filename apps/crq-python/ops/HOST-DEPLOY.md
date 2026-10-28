@@ -139,7 +139,10 @@ authority: the owner approval, tag and target requirements of this document
 are unchanged, and the controller starts nothing.
 
 One JSON artifact on stdout, narration on stderr; exit 0 switched/healthy,
-1 health observation failed, 2 refused (nothing changed). The controller lock
+1 health observation failed, 2 refused before helper entry (deployment surfaces
+unchanged), 3 `recovery_required` (mutation occurred or cannot be excluded).
+Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
+never claims the switch was undone. The controller lock
 is `state/controller.lock`, distinct from the runner's tick lock.
 
 ```sh
@@ -158,6 +161,9 @@ Ordering and guarantees:
 1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
    to it; prior HEAD/config digests retained; reachability, drift and
    stopped-unit checks are the helper's own (they run inside its `switch`).
+   Record-directory type/private mode 0700 and ambiguous prior annotated tags
+   are checked before helper entry. A private mode-0600 recovery intent is
+   atomically written and its file and directory synced before any helper call.
 2. **Drain** — every queue item with a recorded run is probed with the
    runner's own fail-closed `crq.run_liveness` from the same checkout.
    `alive` or `ambiguous` blocks the controller; it never signals or kills a
@@ -167,8 +173,9 @@ Ordering and guarantees:
    drift fence.
 4. **Preservation** — `state/queue.json` (items, starts, author_requests,
    author_observations) and `state/heartbeat.json` must be byte-identical
-   across the switch; any difference refuses the deployment with the file
-   names. State is never restored, migrated or rewritten by the controller.
+   across the switch; any difference after helper entry requires owner recovery
+   with the affected file names. State is never restored, migrated or rewritten
+   by the controller.
 5. **Rollback compatibility** — recorded before and after: automatic
    rollback is permitted only when the queue carries **no explicit
    `schema_version` marker at all** (presence is recorded as the boolean
@@ -196,8 +203,24 @@ drain as ambiguous: only a genuinely absent/unstarted run (no `run` key or
 the runner's explicit `run: null` marker) is skipped, so no switch proceeds
 without an absence proof for every recorded run.
 
-A journal entry (mode 0600, private record directory) records every
-completed deploy or rollback. Rollback reuses the same helper fence with the
+Schema-1 records add `transaction_id` and `outcome` without changing legacy
+completed journal inputs. Before entering the helper, a `deploy_pending` or
+`rollback_pending` intent retains the prior HEAD/config/preserved-state digests,
+prior approval tag and intended target/tag. Once the helper is entered, even a
+config-only partial failure with unchanged HEAD requires owner recovery. Any
+helper, preservation, compatibility or completion-write exception produces
+`recovery_required`/exit 3 with that identity. The controller attempts to replace
+the intent with a recovery record; `record_persisted: false` plus
+`record_write_error` explicitly reports a failed final update, retaining the
+original intent when atomic replacement fails. Keep the stdout receipt privately
+if record storage is unavailable. Do not rerun blindly, restore queue snapshots,
+or infer automatic rollback permission from a pending/recovery receipt.
+
+A completed journal is written only after the checks and durable completion
+write succeed. Pending/recovery/unknown outcomes are not rollback inputs;
+verified legacy schema-1 completed deploy journals remain accepted. A journal
+entry (mode 0600, private record directory) records every completed deploy or
+rollback. Rollback reuses the same helper fence with the
 recorded prior target and prior tag; a fresh-target switch to a different
 commit is a new deployment, not a rollback.
 

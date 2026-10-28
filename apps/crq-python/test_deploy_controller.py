@@ -411,6 +411,192 @@ class DeployPlanTests(ControllerFixture):
             return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
         return mock.patch.object(host, "run", side_effect=run)
 
+    def assert_recovery(self, failure, phase):
+        recovery = failure.recovery
+        self.assertEqual(recovery["outcome"], "recovery_required")
+        self.assertEqual(recovery["failed_phase"], phase)
+        self.assertEqual(recovery["prior_head"], self.before)
+        self.assertEqual(recovery["target"], self.target)
+        self.assertFalse(recovery["automatic_rollback_permitted"])
+        self.assertEqual(recovery["rollback_compatibility"], {})
+        self.assertIn("preserved/queue.json", recovery["prior_state"])
+        self.assertIsNotNone(recovery["prior_config_sha256"])
+        record = json.loads(Path(recovery["record_path"]).read_text())
+        with self.assertRaises(dc.Refused):
+            dc.rollback_target(record)
+        return recovery, record
+
+    def test_record_directory_mode_refuses_before_helper_without_deploy_changes(self):
+        self.record_dir.mkdir(mode=0o755)
+        before = dc.captured_state(self.effects)
+        with mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "mode 0700"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+            switch.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+        self.assertEqual(list(self.record_dir.iterdir()), [])
+
+    def test_record_directory_file_refuses_before_helper_without_deploy_changes(self):
+        self.record_dir.write_text("not a directory")
+        before = dc.captured_state(self.effects)
+        with mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "record directory unavailable"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+            switch.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+
+    def test_ambiguous_prior_tag_refuses_before_helper_without_deploy_changes(self):
+        for tag in ["crq-runner/20261027-8", "crq-runner/20261027-9"]:
+            self.command("tag", "-a", tag, self.before, "-m", "ambiguous approval")
+        before = dc.captured_state(self.effects)
+        with mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "multiple annotated runner tags"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+            switch.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+        self.assertEqual(list(self.record_dir.glob("controller-*.json")), [])
+
+    def test_private_intent_is_durable_before_helper_and_not_a_rollback_input(self):
+        actual_switch = host.switch
+        actual_fsync = dc.os.fsync
+        syncs = []
+
+        def fsync(fd):
+            actual_fsync(fd)
+            syncs.append(fd)
+
+        def switch(*args):
+            self.assertGreaterEqual(len(syncs), 2)  # data and directory before helper
+            path = next(self.record_dir.glob("controller-*.json"))
+            pending = json.loads(path.read_text())
+            self.assertEqual(pending["operation"], "deploy_pending")
+            self.assertEqual(pending["outcome"], "pending")
+            self.assertEqual(pending["prior_head"], self.before)
+            self.assertEqual(pending["target"], self.target)
+            self.assertFalse(pending["automatic_rollback_permitted"])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.record_dir.stat().st_mode & 0o777, 0o700)
+            with self.assertRaises(dc.Refused):
+                dc.rollback_target(pending)
+            return actual_switch(*args)
+
+        with self.fake_switch(), mock.patch.object(dc.os, "fsync", side_effect=fsync):
+            with mock.patch.object(host, "switch", side_effect=switch):
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        completed = json.loads(next(self.record_dir.glob("controller-*.json")).read_text())
+        self.assertEqual(completed["outcome"], "completed")
+        self.assertEqual(len(completed["transaction_id"]), 32)
+
+    def test_preservation_failure_after_real_switch_requires_recovery(self):
+        actual_switch = host.switch
+
+        def switch(*args):
+            actual_switch(*args)
+            self.write_state("queue.json", {"items": [], "changed": True})
+
+        with self.fake_switch(), mock.patch.object(host, "switch", side_effect=switch):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        recovery, record = self.assert_recovery(raised.exception, "preservation")
+        self.assertEqual(recovery["observed_head"], self.target)
+        self.assertTrue(recovery["record_persisted"])
+        self.assertEqual(record["outcome"], "recovery_required")
+        self.assertTrue(json.loads((self.runner / "state/queue.json").read_text())["changed"])
+
+    def test_post_switch_compatibility_exception_requires_recovery(self):
+        real_compatibility = dc.compatibility_record
+        calls = []
+
+        def compatibility(*args):
+            calls.append(args)
+            if len(calls) == 2:
+                raise TypeError("post-switch compatibility unavailable")
+            return real_compatibility(*args)
+
+        with self.fake_switch(), mock.patch.object(dc, "compatibility_record", side_effect=compatibility):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        recovery, _ = self.assert_recovery(raised.exception, "compatibility")
+        self.assertEqual(recovery["observed_head"], self.target)
+        self.assertIn("TypeError", recovery["reason"])
+
+    def test_failed_completion_and_recovery_replace_keep_original_intent(self):
+        replace = dc.os.replace
+
+        def fail_final(source, target):
+            entry = json.loads(Path(source).read_text())
+            if entry.get("outcome") in {"completed", "recovery_required"}:
+                raise OSError("record volume became unavailable")
+            return replace(source, target)
+
+        with self.fake_switch(), mock.patch.object(dc.os, "replace", side_effect=fail_final):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        recovery, pending = self.assert_recovery(raised.exception, "journal")
+        self.assertEqual(recovery["observed_head"], self.target)
+        self.assertFalse(recovery["record_persisted"])
+        self.assertIn("record volume", recovery["record_write_error"])
+        self.assertEqual(pending["outcome"], "pending")
+        self.assertEqual(pending["transaction_id"], recovery["transaction_id"])
+        self.assertEqual(len(list(self.record_dir.iterdir())), 1)
+
+    def test_partial_helper_checkout_then_refusal_requires_recovery(self):
+        def partial(*_args):
+            self.command("restore", "--", host.CONFIG)
+            self.command("checkout", "-q", "--detach", self.target)
+            raise dc.Refused("helper failed after checkout")
+
+        with mock.patch.object(host, "switch", side_effect=partial):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        recovery, _ = self.assert_recovery(raised.exception, "helper")
+        self.assertEqual(recovery["observed_head"], self.target)
+        self.assertIn("Refused", recovery["reason"])
+
+    def test_failed_head_observation_preserves_original_mutation_failure(self):
+        def partial(*_args):
+            self.effects.config_path.write_bytes(b"partial config\n")
+            raise OSError("original helper failure")
+
+        actual_git = self.effects.git
+
+        def git(*args):
+            if args == ("rev-parse", "HEAD") and self.effects.config_path.read_bytes() == b"partial config\n":
+                raise TypeError("HEAD observation unavailable")
+            return actual_git(*args)
+
+        with mock.patch.object(host, "switch", side_effect=partial):
+            with mock.patch.object(self.effects, "git", side_effect=git):
+                with self.assertRaises(dc.RecoveryRequired) as raised:
+                    dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        recovery, record = self.assert_recovery(raised.exception, "helper")
+        self.assertIn("original helper failure", recovery["reason"])
+        self.assertIn("TypeError: HEAD observation unavailable", recovery["head_observation_error"])
+        self.assertNotIn("observed_head", recovery)
+        self.assertTrue(recovery["record_persisted"])
+        self.assertEqual(record["head_observation_error"], recovery["head_observation_error"])
+
+    def test_config_only_partial_helper_failure_cli_reports_recovery_exit_three(self):
+        def partial(*_args):
+            self.effects.config_path.write_bytes(b"partial config\n")
+            raise ValueError("helper failed before checkout")
+
+        with mock.patch.object(host, "switch", side_effect=partial):
+            with mock.patch.object(dc, "_load_helper", return_value=host):
+                with mock.patch.object(dc, "Effects", return_value=self.effects):
+                    with mock.patch("builtins.print") as printed:
+                        code = dc.main(["--root", str(self.root), "--overlay", str(self.overlay_path),
+                                        "--record-dir", str(self.record_dir), "switch",
+                                        "--sha", self.target, "--tag", self.tag])
+        self.assertEqual(code, 3)
+        result = json.loads(next(c.args[0] for c in printed.call_args_list
+                                 if not c.kwargs.get("file")))
+        self.assertEqual(result["outcome"], "recovery_required")
+        self.assertEqual(result["observed_head"], self.before)  # unchanged HEAD is not absence proof
+        self.assertTrue(result["record_persisted"])
+        self.assertEqual(self.effects.config_path.read_bytes(), b"partial config\n")
+        self.assertTrue(any("recovery required:" in c.args[0] for c in printed.call_args_list))
+
     def test_successful_switch_records_journal_and_preserves_state(self):
         # The prior target must carry its own annotated tag for the journal to
         # name it; the fixture provides one alongside the target tag.
@@ -543,6 +729,66 @@ class RollbackPlanTests(ControllerFixture):
     def at_target(self):
         with self.fake_switch():
             host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+
+    def test_rollback_bad_record_mode_refuses_before_helper(self):
+        self.at_target()
+        self.record_dir.mkdir(mode=0o755)
+        before = dc.captured_state(self.effects)
+        with mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "mode 0700"):
+                dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+            switch.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+
+    def test_rollback_final_write_failure_retains_intent_and_requires_recovery(self):
+        self.at_target()
+        replace = dc.os.replace
+
+        def fail_final(source, target):
+            entry = json.loads(Path(source).read_text())
+            if entry.get("outcome") in {"completed", "recovery_required"}:
+                raise OSError("rollback record write failed")
+            return replace(source, target)
+
+        with self.fake_switch(), mock.patch.object(dc.os, "replace", side_effect=fail_final):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+        recovery = raised.exception.recovery
+        self.assertEqual(recovery["intended_operation"], "rollback")
+        self.assertEqual(recovery["prior_head"], self.target)
+        self.assertEqual(recovery["observed_head"], self.before)
+        self.assertEqual(recovery["target"], self.before)
+        self.assertFalse(recovery["automatic_rollback_permitted"])
+        self.assertFalse(recovery["record_persisted"])
+        pending = json.loads(Path(recovery["record_path"]).read_text())
+        self.assertEqual(pending["operation"], "rollback_pending")
+        with self.assertRaises(dc.Refused):
+            dc.rollback_target(pending)
+
+    def test_rollback_partial_config_failure_never_claims_no_change(self):
+        self.at_target()
+
+        def partial(*_args):
+            self.effects.config_path.write_bytes(b"partial rollback config\n")
+            raise OSError("rollback helper failed before checkout")
+
+        with mock.patch.object(host, "switch", side_effect=partial):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+        recovery = raised.exception.recovery
+        self.assertEqual(recovery["outcome"], "recovery_required")
+        self.assertEqual(recovery["failed_phase"], "helper")
+        self.assertEqual(recovery["observed_head"], self.target)
+        self.assertEqual(recovery["prior_head"], self.target)
+        self.assertEqual(recovery["target"], self.before)
+        self.assertTrue(recovery["record_persisted"])
+        self.assertEqual(self.effects.config_path.read_bytes(), b"partial rollback config\n")
+
+    def test_pending_recovery_and_unknown_outcomes_are_not_rollback_inputs(self):
+        for outcome in ["pending", "recovery_required", "unknown", None, False]:
+            with self.subTest(outcome=outcome):
+                with self.assertRaisesRegex(dc.Refused, "completed deploy journal"):
+                    dc.rollback_target({**self.prior, "outcome": outcome})
 
     def test_compatible_rollback_returns_to_recorded_prior_target(self):
         self.at_target()

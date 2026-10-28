@@ -82,6 +82,18 @@ class Refused(Exception):
     """A controller refusal: nothing was changed; the reason is terminal."""
 
 
+class RecoveryRequired(Exception):
+    """The helper was entered: mutation occurred or cannot be excluded.
+
+    recovery always retains the pre-helper identity, even if updating the
+    durable intent failed. This is never a no-change refusal or rollback grant.
+    """
+
+    def __init__(self, recovery: dict):
+        super().__init__(recovery["reason"])
+        self.recovery = recovery
+
+
 class Effects:
     """Host effects seam. Tests substitute fakes; production uses real paths.
 
@@ -128,19 +140,42 @@ class Effects:
             yield
 
     # -- journal ----------------------------------------------------------
-    def journal_append(self, entry: dict) -> None:
-        self.record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.record_dir.stat().st_mode & 0o077:
-            raise Refused("controller record directory must have mode 0700")
-        name = "controller-" + uuid.uuid4().hex + ".json"
+    def record_preflight(self) -> None:
+        """Check deterministic storage failures before entering the helper."""
+        try:
+            if self.record_dir.is_symlink():
+                raise Refused("controller record directory must not be a symlink")
+            self.record_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if not self.record_dir.is_dir():
+                raise Refused("controller record path must be a directory")
+            if self.record_dir.stat().st_mode & 0o777 != 0o700:
+                raise Refused("controller record directory must have mode 0700")
+        except OSError as exc:
+            raise Refused("controller record directory unavailable: " + str(exc)) from exc
+
+    def journal_append(self, entry: dict) -> Path:
+        path = self.record_dir / ("controller-" + uuid.uuid4().hex + ".json")
+        self.journal_replace(path, entry)
+        return path
+
+    def journal_replace(self, path: Path, entry: dict) -> None:
+        """Atomically advance one transaction's private, retained record."""
+        self.record_preflight()
+        if path.parent != self.record_dir or path.is_symlink():
+            raise Refused("invalid controller transaction record path")
         data = (json.dumps(entry, indent=2, sort_keys=True) + "\n").encode()
-        fd, tmp = tempfile.mkstemp(prefix="." + name, dir=self.record_dir)
+        fd, tmp = tempfile.mkstemp(prefix="." + path.name, dir=self.record_dir)
         try:
             with os.fdopen(fd, "wb") as out:
                 out.write(data)
                 out.flush()
                 os.fsync(out.fileno())
-            os.replace(tmp, self.record_dir / name)
+            os.replace(tmp, path)
+            directory = os.open(self.record_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             Path(tmp).unlink(missing_ok=True)
 
@@ -391,16 +426,64 @@ def rollback_compatible(record: dict) -> bool:
 # --------------------------------------------------------------------- plan
 
 
+@contextlib.contextmanager
+def mutation_record(effects: Effects, operation: str, state: dict, target: str,
+                    tag: str, prior_tag: str | None):
+    """Persist recovery identity BEFORE calling the mutating helper.
+
+    Exception translation is confined to this mutation boundary: every failure
+    after entry, including an unexpected exception or interruption, is surfaced
+    with recovery evidence rather than a false no-change refusal. Updating that
+    evidence may also fail; retain the prewritten intent and report both errors.
+    """
+    identity = {"schema_version": JOURNAL_SCHEMA, "at": now_iso(),
+                "transaction_id": uuid.uuid4().hex,
+                "intended_operation": operation, "prior_state": state,
+                "prior_head": state["prior_head"],
+                "prior_config_sha256": state["prior_config_sha256"],
+                "prior_tag": prior_tag, "target": target, "tag": tag,
+                "automatic_rollback_permitted": False,
+                "rollback_compatibility": {}}
+    intent = {**identity, "operation": operation + "_pending", "outcome": "pending"}
+    try:
+        path = effects.journal_append(intent)
+    except (Refused, OSError, ValueError) as exc:
+        raise Refused("cannot persist pre-switch recovery intent: " + str(exc)) from exc
+    transaction = {"path": path, "id": identity["transaction_id"], "phase": "helper"}
+    try:
+        yield transaction
+    except (Exception, KeyboardInterrupt) as exc:
+        recovery = {**identity, "operation": "recovery_required",
+                    "outcome": "recovery_required", "failed_phase": transaction["phase"],
+                    "reason": type(exc).__name__ + ": " + str(exc)[:400],
+                    "record_path": str(path), "record_persisted": False}
+        try:
+            recovery["observed_head"] = effects.git("rev-parse", "HEAD")
+        except (Exception, KeyboardInterrupt) as observation_error:
+            recovery["head_observation_error"] = (type(observation_error).__name__ + ": "
+                                                  + str(observation_error)[:400])
+        try:
+            effects.journal_replace(path, {**recovery, "record_persisted": True})
+            recovery["record_persisted"] = True
+        except (Exception, KeyboardInterrupt) as record_error:
+            # Not suppressed: the CLI includes this second failure and the
+            # durable intent path so an owner can recover without a journal lie.
+            recovery["record_write_error"] = (type(record_error).__name__ + ": "
+                                               + str(record_error)[:400])
+        raise RecoveryRequired(recovery) from exc
+
+
 def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                 overlay_path: Path) -> dict:
-    """The full sequence, executed or refused as a whole (fail stopped).
+    """Preflight -> drain -> durable intent -> helper -> proofs -> completion.
 
-    Order: lock -> preflight -> drain -> helper switch -> preservation ->
-    compatibility record -> journal. Units are started by the owner per
-    HOST-DEPLOY.md; the controller never starts or enables anything.
+    Failures after helper entry require owner recovery; they never claim the
+    deployment was unchanged. Units are started only by the owner.
     """
     with effects.controller_lock():
         pre = preflight(effects, target, tag)
+        effects.record_preflight()
+        prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
         plan = {"preflight": pre, "steps": []}
         drain = drain_check(effects, _runner_liveness(helper_module))
         plan["steps"].append({"step": "drain", **drain})
@@ -409,16 +492,20 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
         overlay, raw = helper_module.load_overlay(overlay_path)
-        helper_module.switch(effects.root, overlay, raw, target, tag)
-        post = preservation_check(effects, pre["state"])
-        plan["steps"].append({"step": "preservation", **post})
-        record = compatibility_record(effects, target)
-        plan["rollback_compatibility_after"] = record
-        plan["automatic_rollback_permitted"] = rollback_compatible(
-            {**pre["rollback_compatibility"], **record})
-        journal = deploy_journal(pre["state"], target, tag, plan,
-                                 prior_tag=prior_tag_for(effects, pre["state"]["prior_head"]))
-        effects.journal_append(journal)
+        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag) as tx:
+            helper_module.switch(effects.root, overlay, raw, target, tag)
+            tx["phase"] = "preservation"
+            post = preservation_check(effects, pre["state"])
+            plan["steps"].append({"step": "preservation", **post})
+            tx["phase"] = "compatibility"
+            record = compatibility_record(effects, target)
+            plan["rollback_compatibility_after"] = record
+            plan["automatic_rollback_permitted"] = rollback_compatible(
+                {**pre["rollback_compatibility"], **record})
+            journal = deploy_journal(pre["state"], target, tag, plan, prior_tag=prior_tag)
+            journal.update(outcome="completed", transaction_id=tx["id"])
+            tx["phase"] = "journal"
+            effects.journal_replace(tx["path"], journal)
         return plan
 
 
@@ -471,6 +558,8 @@ def rollback_target(prior: dict) -> dict:
         raise Refused("prior record must be a controller journal with schema_version "
                       + str(JOURNAL_SCHEMA))
     if prior.get("operation") != "deploy":
+        raise Refused("prior record must be a completed deploy journal")
+    if prior.get("outcome", "completed") != "completed":
         raise Refused("prior record must be a completed deploy journal")
     target = prior.get("prior_head")
     if not target or not SHA_RE.match(target):
@@ -530,12 +619,21 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         if not drain["drained"]:
             raise Refused("cannot roll back with live/ambiguous reviews: "
                           + json.dumps(drain["blocked"])[:400])
+        effects.record_preflight()
+        state = captured_state(effects)
+        prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
-        helper_module.switch(effects.root, overlay, raw, record["prior_head"],
-                             record["tag"])
-        effects.journal_append({"schema_version": JOURNAL_SCHEMA,
-                                "operation": "rollback", "at": now_iso(),
-                                "to": record["prior_head"], "tag": record["tag"]})
+        with mutation_record(effects, "rollback", state, record["prior_head"],
+                             record["tag"], prior_tag) as tx:
+            helper_module.switch(effects.root, overlay, raw, record["prior_head"],
+                                 record["tag"])
+            tx["phase"] = "preservation"
+            preservation_check(effects, state)
+            tx["phase"] = "journal"
+            effects.journal_replace(tx["path"], {
+                "schema_version": JOURNAL_SCHEMA, "operation": "rollback",
+                "outcome": "completed", "transaction_id": tx["id"], "at": now_iso(),
+                "to": record["prior_head"], "tag": record["tag"]})
         return {"rolled_back_to": record["prior_head"], "tag": record["tag"]}
 
 
@@ -594,6 +692,10 @@ def main(argv=None) -> int:
                              sort_keys=True))
             if not result["healthy"]:
                 return 1
+    except RecoveryRequired as exc:
+        print(json.dumps(exc.recovery, indent=2, sort_keys=True))
+        print("recovery required: " + str(exc), file=sys.stderr)
+        return 3
     except Refused as exc:
         print("refused: " + str(exc), file=sys.stderr)
         return 2
