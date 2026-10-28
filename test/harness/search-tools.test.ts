@@ -1074,8 +1074,8 @@ describe('contained grep and glob tools', () => {
         spawnState.fake = null;
         spawnState.current = null;
       }
-      // Repeated globstars make epsilon closure process more than 4,096
-      // states across alternatives, even for a one-component candidate.
+      // The first 70-globstar alternative alone exhausts the budget
+      // through epsilon and final-closure work on one candidate component.
       spawnState.fake = {
         stdoutChunks: [Buffer.from('a\0')],
         stderrChunks: [],
