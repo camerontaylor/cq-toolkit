@@ -33,7 +33,9 @@ const config: CqConfig = {
 
 async function fixture(ignoreState = true) {
   const repo = await makeTestRepo();
-  if (ignoreState) await repo.write('.gitignore', '/.cq/\n');
+  // The injected resolver does not register pre-existing ledger writes.
+  // Isolate receipt ownership while leaving queue evidence/unknown state unignored.
+  await repo.write('.gitignore', ignoreState ? '/.cq/\n' : '/.cq/dev/\n');
   await repo.write('cq.json', JSON.stringify(config));
   repo.commitAll('configure offline review');
   const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-debt-'));
