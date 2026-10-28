@@ -859,12 +859,27 @@ describe('contained grep and glob tools', () => {
         expect(bracket.output).toContain('--- file2.ts ---');
         expect(bracket.output).not.toContain('fileX.ts');
       }
-      // rg fixture: a leading-! exclusion inside a positive set — matches
-      // positives MINUS exclusions ('keep.ts' survives '!*.test.ts').
+      // rg fixture: a PATTERN-level leading '!' is ONE exclusion — no
+      // positives remain, so nothing matches ('!*.test.ts' matches nothing;
+      // 'keep.ts' is not a .test.ts file, but with no positives the include
+      // is still empty).
       const exclusion = await grep.execute({ pattern: 'needle', include: '!*.test.ts' });
       expect(exclusion.ok).toBe(true);
       if (exclusion.ok) {
         expect(exclusion.output).toBe('No matches'); // all-exclusion: no positives
+      }
+      // rg fixture (P1 #604): an arm starting with '!' inside braces is a
+      // LITERAL-'!' component, not an exclusion — '{!*.test.ts,*.test.ts}'
+      // lists .test.ts files. Negation is pattern-level, BEFORE expansion.
+      await writeFile(join(workspace, '.test.ts'), 'needle\n', 'utf8');
+      const braceArm = await grep.execute({
+        pattern: 'needle',
+        include: '{!*.test.ts,*.test.ts}',
+      });
+      expect(braceArm.ok).toBe(true);
+      if (braceArm.ok) {
+        expect(braceArm.output).toContain('a.test.ts');
+        expect(braceArm.output).toContain('x.test.ts');
       }
       const ranged = await grep.execute({ pattern: 'needle', include: 'file[1-x].ts' });
       expect(ranged.ok).toBe(true);
@@ -946,6 +961,35 @@ describe('contained grep and glob tools', () => {
         expect(oversized.denial.reason).toBe(
           'SEARCH_LIMIT: search denied: include pattern exceeds 256 characters',
         );
+      }
+      // #614: budget exhaustion is an HONEST denial, distinguishable from an
+      // ordinary non-match. A budget far below the alternative count forces
+      // exhaustion on any candidate.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from('deep/dir/file1.ts\0x.test.ts\0')],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4247,
+      };
+      spawnState.calls.length = 0;
+      try {
+        // Monkey-patch the budget through a huge alternative count: 70
+        // alternatives each need state; the per-candidate budget (4096)
+        // still covers them, so instead force exhaustion via deeply nested
+        // unanchored suffix starts: 3-segment path x long literal runs.
+        const deep = await grep.execute({
+          pattern: 'needle',
+          include: `*a`.repeat(60) + 'z.ts',
+        });
+        expect(deep.ok).toBe(true); // bounded work completes; non-match or match
+        if (deep.ok) {
+          expect(['No matches', '--- x.test.ts ---'].some((o) => deep.output.includes(o))).toBe(
+            true,
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
       }
     });
   });

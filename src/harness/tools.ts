@@ -1025,9 +1025,14 @@ export function buildTools(
   // expansion fails closed as soon as it is exceeded, before any unbounded
   // synchronous work.
   const SEARCH_INCLUDE_EXPANSION_VISITS = 256;
-  type IncludeExpansion = { overflow: true } | { overflow: false; alternatives: string[] };
+  type IncludeExpansion =
+    | { overflow: true; reason: 'alternatives' | 'visits' }
+    | { overflow: false; alternatives: string[] };
   const expandIncludeAlternatives = (pattern: string): IncludeExpansion => {
-    const overflow: IncludeExpansion = { overflow: true };
+    const overflow = (reason: 'alternatives' | 'visits'): IncludeExpansion => ({
+      overflow: true,
+      reason,
+    });
     let visited = 0;
     const expand = (rest: string, acc: string[]): string[] | undefined => {
       visited += 1;
@@ -1119,7 +1124,7 @@ export function buildTools(
     | { kind: 'any-run' } // '*' — greedy within one path component
     | { kind: 'any-one' } // '?'
     | { kind: 'class'; members: string[]; ranges: [string, string][]; negate: boolean };
-  type CompiledGlob = { runs: GlobToken[][]; anchored: boolean; exclude: boolean };
+  type CompiledGlob = { runs: GlobToken[][]; anchored: boolean };
 
   /**
    * Tokenize ONE '/'-free path component. rg glob rules (fixture-pinned):
@@ -1207,20 +1212,21 @@ export function buildTools(
     return tokens;
   };
 
+  /**
+   * Compile one expanded alternative. The pattern-level leading '!' has
+   * already been stripped by the caller (#604: negation precedes brace
+   * expansion), so an inner '!' here is an ORDINARY component character
+   * (rg fixture: '{!*.test.ts,*.test.ts}' lists .test.ts files). '/'-free
+   * components become token runs; a whole '**' component is the globstar
+   * marker run; a glob with '/' is root-anchored.
+   */
   const compileRgGlob = (glob: string): CompiledGlob => {
-    let body = glob;
-    let exclude = false;
-    if (body.startsWith('!')) {
-      exclude = true;
-      body = body.slice(1);
-    }
-    const parts = body.split('/');
+    const parts = glob.split('/');
     return {
       runs: parts.map((part) =>
         part === '**' ? [{ kind: 'any-run' }, { kind: 'any-run' }] : tokenizeComponent(part),
       ),
       anchored: parts.length > 1,
-      exclude,
     };
   };
 
@@ -1240,14 +1246,18 @@ export function buildTools(
   /**
    * Match one component run against one '/'-free path component: iterative
    * greedy wildcard matching with a single rollback point per '*' — total
-   * work bounded by the component length; no regex, no recursion.
+   * work bounded by the component length; no regex, no recursion. Every
+   * state step charges the SHARED per-candidate budget; exhaustion returns
+   * `false` with `budget.exhausted = true` so the caller can fail closed.
    */
-  const matchRun = (tokens: GlobToken[], text: string): boolean => {
+  const matchRun = (tokens: GlobToken[], text: string, budget: { left: number }): boolean => {
     let t = 0;
     let p = 0;
     let star = -1;
     let starPath = -1;
     while (p < text.length) {
+      budget.left -= 1;
+      if (budget.left < 0) return false;
       const token = tokens[t];
       if (token === undefined) {
         if (star === -1) return false;
@@ -1301,9 +1311,12 @@ export function buildTools(
    * hits 'deep/dir/n.ts'; 'deep' + doublestar + '/n.ts' ditto; a trailing
    * doublestar matches all deeper components).
    */
-  const matchRuns = (runs: GlobToken[][], segments: string[], budget: number): boolean => {
+  const matchRuns = (
+    runs: GlobToken[][],
+    segments: string[],
+    budget: { left: number },
+  ): boolean => {
     let states = new Set<number>([0]);
-    let work = 0;
     for (const segment of segments) {
       const expanded = new Set<number>(states);
       let grew = true;
@@ -1318,15 +1331,15 @@ export function buildTools(
       }
       const next = new Set<number>();
       for (const t of expanded) {
-        work += 1;
-        if (work > budget) return false; // bounded matcher state (#614)
+        budget.left -= 1;
+        if (budget.left < 0) return false;
         const run = runs[t];
         if (run === undefined) continue;
         if (isGlobstarRun(run)) {
           next.add(t); // '**' also consumes this component
           continue;
         }
-        if (matchRun(run, segment)) next.add(t + 1);
+        if (matchRun(run, segment, budget)) next.add(t + 1);
       }
       if (next.size === 0) return false;
       states = next;
@@ -1342,8 +1355,22 @@ export function buildTools(
   type IncludeMatcher = {
     /** Total compiled token size across alternatives — the work bound. */
     stateBudget: number;
-    matches: (rel: string) => boolean;
+    /**
+     * Match one candidate against the include set. Returns a verdict, not a
+     * boolean: `matched` is the ordinary answer; `exhausted` reports that a
+     * per-candidate match-state budget ran out BEFORE a verdict — an honest
+     * fail-closed signal the caller must deny on, never silently dropping a
+     * candidate that might have matched (#614).
+     */
+    matches: (rel: string) => { matched: boolean } | { exhausted: true };
   };
+  // Per-CANDIDATE aggregate match-state budget (#614): one budget spans ALL
+  // alternatives (positive + exclusion), every unanchored suffix start, and
+  // every NFA state step inside matchRuns. A candidate whose evaluation
+  // exhausts it yields an honest SEARCH_LIMIT denial; an ordinary non-match
+  // stays a plain non-match. The budget is per candidate because the
+  // matcher is synchronous INSIDE enumeration — the wall clock cannot
+  // interrupt it, so the bound must be countable, not timely.
   const SEARCH_INCLUDE_MATCH_STATE_BUDGET = 4_096;
 
   /**
@@ -1583,14 +1610,28 @@ export function buildTools(
     // matching (never silently drops a candidate).
     let grepInclude: IncludeMatcher | undefined;
     if (tool === 'grep' && fileGlob !== undefined) {
-      const expansion = expandIncludeAlternatives(fileGlob);
+      // #604: a leading '!' negates the WHOLE include pattern (rg glob
+      // semantics), so it must be stripped BEFORE brace expansion — otherwise
+      // an arm like '{!*.test.ts,*.test.ts}' would be read as an exclusion
+      // arm instead of a literal-'!' component. rg fixture:
+      // --glob '{!*.test.ts,*.test.ts}' LISTS .test.ts files (the '!' arm
+      // matches names starting with a literal '!'); only a PATTERN-level
+      // '!' excludes.
+      let includeBody = fileGlob;
+      let patternExcluded = false;
+      if (includeBody.startsWith('!')) {
+        patternExcluded = true;
+        includeBody = includeBody.slice(1);
+      }
+      const expansion = expandIncludeAlternatives(includeBody);
       if (expansion.overflow) {
+        const reason =
+          expansion.reason === 'alternatives'
+            ? `include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_LIMIT} alternatives`
+            : `include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_VISITS} visited branches`;
         return {
           ok: false,
-          denial: deny(
-            tool,
-            `SEARCH_LIMIT: search denied: include expansion exceeds ${SEARCH_INCLUDE_EXPANSION_LIMIT} alternatives`,
-          ),
+          denial: deny(tool, `SEARCH_LIMIT: search denied: ${reason}`),
         };
       }
       if (
@@ -1605,20 +1646,22 @@ export function buildTools(
         };
       }
       const compiled = expansion.alternatives.map((candidate) => compileRgGlob(candidate));
-      const positives = compiled.filter((glob) => !glob.exclude);
-      const exclusions = compiled.filter((glob) => glob.exclude);
+      // One positive alternative is enough to accept; exclusions veto. The
+      // whole include is ONE exclusion when the pattern itself was negated.
+      const positives = patternExcluded ? [] : compiled;
+      const exclusions = patternExcluded ? compiled : [];
       // Unanchored globs (no '/') match at ANY depth (rg: 'a*' hits
       // 'deep2/a.txt'), so try every suffix start; anchored globs match only
-      // from the root.
-      const matchOne = (glob: CompiledGlob, rel: string): boolean => {
+      // from the root. ONE aggregate per-candidate budget (#614) spans all
+      // alternatives, all suffix starts and all NFA steps: exhaustion is an
+      // honest fail-closed verdict, never a silent non-match.
+      const matchOne = (glob: CompiledGlob, rel: string, budget: { left: number }): boolean => {
         const segments = rel.split('/');
         if (glob.anchored) {
-          return matchRuns(glob.runs, segments, SEARCH_INCLUDE_MATCH_STATE_BUDGET);
+          return matchRuns(glob.runs, segments, budget);
         }
         for (let start = 0; start < segments.length; start += 1) {
-          if (matchRuns(glob.runs, segments.slice(start), SEARCH_INCLUDE_MATCH_STATE_BUDGET)) {
-            return true;
-          }
+          if (matchRuns(glob.runs, segments.slice(start), budget)) return true;
         }
         return false;
       };
@@ -1627,9 +1670,18 @@ export function buildTools(
           return total + glob.runs.reduce((sum, run) => sum + run.length, 0);
         }, 0),
         matches: (rel) => {
-          if (positives.length === 0) return false; // all-exclusion include matches nothing
-          if (exclusions.some((glob) => matchOne(glob, rel))) return false;
-          return positives.some((glob) => matchOne(glob, rel));
+          const budget = { left: SEARCH_INCLUDE_MATCH_STATE_BUDGET };
+          if (positives.length === 0 && exclusions.length === 0) return { matched: false };
+          for (const glob of exclusions) {
+            if (matchOne(glob, rel, budget)) return { matched: false };
+            if (budget.left < 0) return { exhausted: true };
+          }
+          if (positives.length === 0) return { matched: false }; // all-exclusion
+          for (const glob of positives) {
+            if (matchOne(glob, rel, budget)) return { matched: true };
+            if (budget.left < 0) return { exhausted: true };
+          }
+          return { matched: false };
         },
       };
     }
@@ -1661,6 +1713,7 @@ export function buildTools(
         slots.splice(largest, 1);
       };
       const include = grepInclude;
+      let includeExhausted = false;
       const outcome = await streamRgEnumeration(enumerateArgs, {
         cwd: workspaceAbs,
         env: enumerationEnv,
@@ -1672,11 +1725,25 @@ export function buildTools(
           const lexicalPath = resolveInside(candidate);
           if (lexicalPath === undefined) return true;
           const rel = relOf(lexicalPath);
-          if (!include.matches(rel)) return true;
+          const verdict = include.matches(rel);
+          if ('exhausted' in verdict) {
+            // Honest fail-closed (#614): the bounded matcher ran out of
+            // state before a verdict — deny the whole search rather than
+            // silently dropping a candidate that might have matched.
+            includeExhausted = true;
+            return false;
+          }
+          if (!verdict.matched) return true;
           pushMatch(rel, candidate);
           return slots.length <= SEARCH_CANDIDATE_LIMIT + 1;
         },
       });
+      if (includeExhausted) {
+        return {
+          ok: false,
+          denial: deny(tool, `SEARCH_LIMIT: search denied: include match state budget exhausted`),
+        };
+      }
       if (outcome.kind === 'killed') {
         return isAborted(signal)
           ? cancelled()
