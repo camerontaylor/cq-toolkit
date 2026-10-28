@@ -494,7 +494,17 @@ async function prepareWithLifetime(
   const pin = { id, base: state.base, dirtySha256: 'clean-tree' as const };
   const persist = async (debt: DeferredVendorDebt) => {
     signalCheck(lifetime);
-    const current = await readWorkState(effects, { target, base: state.base });
+    const refusal: BoundedRefusal = {};
+    const current = await readWorkState(boundedEffects(effects, lifetime, refusal), {
+      target,
+      base: state.base,
+    });
+    if (refusal.error !== undefined) {
+      // `readWorkState` folds thrown faults into `ok:false`; rethrow the bounded view's own outcome
+      // so the caller's exact reason survives and an exhausted budget truncates nonfatally.
+      if (refusal.error instanceof LineageDeadlineExhausted) return;
+      throw refusal.error;
+    }
     if (
       !current.ok ||
       current.state.branch !== state.branch ||
@@ -630,6 +640,39 @@ function ancestryBoundary(lifetime: InvocationLifetime): 'continue' | 'stop' {
   if (lifetime.remainingMs() <= 0) return 'stop';
   if (lifetime.signal.aborted) lifetime.signal.throwIfAborted();
   return 'continue';
+}
+
+/** Set by the bounded view when it refuses a command, so the caller can rethrow the EXACT reason
+ * after `readWorkState` (which folds thrown faults into a generic `ok:false`).
+ */
+interface BoundedRefusal {
+  error?: unknown;
+}
+
+/** The post-report identity read runs under the SAME invocation lifetime: every command carries the
+ * combined signal and a timeout clamped to the remaining budget, and a command is refused before
+ * dispatch once the caller aborted or the budget is gone. A late check can therefore never follow an
+ * unbounded wait. This is a view over the caller's effects — no client, protocol or workState change.
+ */
+function boundedEffects(
+  effects: DevEffects,
+  lifetime: InvocationLifetime,
+  refusal: BoundedRefusal,
+): DevEffects {
+  const refuse = (error: unknown): Promise<never> => {
+    refusal.error = error;
+    return Promise.reject(error);
+  };
+  return {
+    ...effects,
+    runCommand: (command, args, opts) => {
+      if (lifetime.signal.aborted) return refuse(lifetime.signal.reason);
+      const remaining = lifetime.remainingMs();
+      if (remaining <= 0) return refuse(new LineageDeadlineExhausted());
+      const timeoutMs = Math.max(1, Math.min(opts.timeoutMs, Math.floor(remaining)));
+      return effects.runCommand(command, args, { ...opts, timeoutMs, signal: lifetime.signal });
+    },
+  };
 }
 
 /** Nonterminal ancestor statuses are only continuable when they are VENDOR-shaped. A queue/scan/

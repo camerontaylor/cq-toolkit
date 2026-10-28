@@ -1620,3 +1620,113 @@ test('a caller abort after the final ancestor settlement still propagates from l
     ),
   ).rejects.toThrow(reason);
 });
+
+test('the post-report identity read is clamped to the remaining budget and carries the signal', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+    report: terminal.client.report,
+  };
+  let imported = false;
+  const calls: { command: string; timeoutMs: number; signal: boolean }[] = [];
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported) calls.push({ command: call[0], timeoutMs: call[2].timeoutMs, signal: call[2].signal !== undefined });
+      const result = await f.effects.runCommand(...call);
+      return result;
+    },
+  };
+  const wrapped = {
+    ...effects,
+    // Arm the recorder only once the receipt has been imported, i.e. the identity read under test.
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported) calls.push({ command: call[0], timeoutMs: call[2].timeoutMs, signal: call[2].signal !== undefined });
+      const result = await f.effects.runCommand(...call);
+      return result;
+    },
+  };
+  const recordingClient = {
+    ...client,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    wrapped,
+    'merge-queue',
+    read.state,
+    before,
+    recordingClient,
+    undefined,
+    { remainingMs: () => 5_000 },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  const gitCalls = calls.filter((call) => call.command === 'git');
+  expect(gitCalls.length).toBeGreaterThan(0);
+  for (const call of gitCalls) {
+    expect(call.timeoutMs).toBeLessThanOrEqual(5_000);
+    expect(call.signal).toBe(true);
+  }
+});
+
+test('cancellation during the post-report identity read keeps the caller reason', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled during the bounded identity read');
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported) controller.abort(reason);
+      return f.effects.runCommand(...call);
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+  ).rejects.toThrow(reason);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('budget exhaustion during the post-report identity read truncates nonfatally', async () => {
+  const { f, predecessor, terminal, successorStatus, successor, read } = await successorWithPendingAncestor();
+  let exhausted = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      exhausted = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs: () => (exhausted ? 0 : 5_000) },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
