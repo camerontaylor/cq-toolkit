@@ -7,6 +7,7 @@ import { makeConfiguredQueueClient } from '../../review/queue.js';
 import type { DeferredQueueClient } from '../../review/internal/queueProtocol.js';
 import {
   DeferredVendorDebtSchema,
+  VendorFailureProvenanceSchema,
   hasPersistedVendorOutageOrigin,
   matchesDeferredVendorDebt,
   refreshDeferredVendorDebt,
@@ -42,7 +43,8 @@ export async function prepareDeferredVendorReview(
   signal?: AbortSignal,
 ): Promise<DeferredVendorDebt | undefined> {
   const ledger = effects.openLedger(state.branch).load();
-  let previous = ledger.records.filter((entry) => entry.kind === 'vendor-debt').at(-1)?.debt;
+  const retainedDebt = ledger.records.filter((entry) => entry.kind === 'vendor-debt').at(-1);
+  let previous = retainedDebt?.debt;
   const vendor = ledger.records
     .filter(
       (entry): entry is DevCycleRecord => entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
@@ -56,6 +58,27 @@ export async function prepareDeferredVendorReview(
   )
     previous = undefined;
   if (!previous && !vendor?.vendorFailure) return undefined;
+  if (!retainedDebt && vendor?.vendorFailure) {
+    signal?.throwIfAborted();
+    // An unusable historical attempt is not debt. Admit a genuine fresh review,
+    // without treating malformed provenance or ambiguous ledger identity as stale.
+    VendorFailureProvenanceSchema.parse(vendor.vendorFailure);
+    if (
+      ledger.records.filter((entry) => entry.kind === 'cycle' && entry.cycleId === vendor.cycleId)
+        .length !== 1
+    )
+      throw new Error('deferred vendor origin has ambiguous retained cycle identity');
+    if (
+      state.dirtySha256 !== 'clean-tree' ||
+      vendor.scope !== 'full' ||
+      vendor.dirtySha256 !== 'clean-tree' ||
+      vendor.completion.kind !== 'blocked' ||
+      vendor.head !== state.head ||
+      vendor.base !== state.base ||
+      vendor.target !== target
+    )
+      return undefined;
+  }
   // A recovered vendor requires a fresh invocation on a new head; old current-code
   // completion never authorizes a successor outage or inherited coverage.
   if (
