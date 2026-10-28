@@ -1234,7 +1234,14 @@ test('a caller abort before the next wrapped call never dispatches it', async ()
     },
   };
   await expect(
-    loadCurrentDeferredVendorDebt(effects, 'merge-queue', f.state, before, client, controller.signal),
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      f.state,
+      before,
+      client,
+      controller.signal,
+    ),
   ).rejects.toThrow(reason);
   // The wrapper refuses BEFORE dispatch: no status, no report, no ack, no import, no append.
   expect(statused).toBe(0);
@@ -1291,9 +1298,17 @@ test('a caller abort at the ancestry boundary outranks a zero budget and keeps i
     }),
   };
   await expect(
-    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal, {
-      remainingMs,
-    }),
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+      {
+        remainingMs,
+      },
+    ),
   ).rejects.toThrow(reason);
   // The caller's cancellation is the reason, never a silent nonfatal truncation.
   expect(refreshedAncestors).toEqual([]);
