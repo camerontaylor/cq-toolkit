@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
 import { makeQueueClient } from '../../../src/ops/review/queue.js';
-import { writeFile } from 'node:fs/promises';
+import { readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
 import {
@@ -1200,4 +1200,95 @@ test('unrelated roots gain no authority and same-identity duplicates become gaps
   expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
     'ambiguous current enrollment',
   );
+});
+
+test('a caller abort between the capture-root read and report dispatch never dispatches it', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled at the report boundary');
+  let reported = 0;
+  const client = {
+    ...terminal.client,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      reported += 1;
+      return terminal.client.report(ref, root);
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const evidenceDir = join(f.repo.root, '.cq', 'queue-evidence');
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      const result = await f.effects.runCommand(...call);
+      const [command, args] = call;
+      // consumeDeferredVendorReport verifies the local capture root immediately before report.
+      if (command === 'git' && args.includes('--show-toplevel')) controller.abort(reason);
+      return result;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', f.state, before, client, controller.signal),
+  ).rejects.toThrow(/caller cancelled at the report boundary/);
+  // The wrapped operation was refused BEFORE dispatch: no report, no ack, no import, no append.
+  expect(reported).toBe(0);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+  await expect(readdir(evidenceDir)).rejects.toThrow();
+});
+
+test('a caller abort at the ancestry boundary outranks a zero budget and keeps its reason', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled at the ancestry boundary');
+  let exhausted = false;
+  const remainingMs = () => (exhausted ? 0 : 5_000);
+  const store = f.effects.openLedger(f.state.branch);
+  const before = store.load();
+  const refreshedAncestors: string[] = [];
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId === predecessor.reference.requestId) refreshedAncestors.push(ref.requestId);
+      return successorStatus;
+    },
+  };
+  let loads = 0;
+  const effects = {
+    ...f.effects,
+    openLedger: () => ({
+      ...store,
+      // The final ledger read is the last local step before the ancestry boundary.
+      load: () => {
+        const ledger = store.load();
+        loads += 1;
+        if (loads === 1) {
+          exhausted = true;
+          controller.abort(reason);
+        }
+        return ledger;
+      },
+    }),
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal, {
+      remainingMs,
+    }),
+  ).rejects.toThrow(reason);
+  // The caller's cancellation is the reason, never a silent nonfatal truncation.
+  expect(refreshedAncestors).toEqual([]);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });

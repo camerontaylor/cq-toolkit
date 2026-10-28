@@ -57,6 +57,8 @@ interface InvocationLifetime {
   remainingMs(): number;
   /** True only when the deadline fired and the caller did not cancel. */
   expired(): boolean;
+  /** True when the caller cancelled; a cancellation always outranks a deadline stop. */
+  callerAborted(): boolean;
   dispose(): void;
 }
 
@@ -102,6 +104,7 @@ function startInvocationLifetime(
     signal: caller ? AbortSignal.any([caller, controller.signal]) : controller.signal,
     remainingMs,
     expired: () => fired && caller?.aborted !== true,
+    callerAborted: () => caller?.aborted === true,
     dispose: () => {
       clearTimeout(timer);
       caller?.removeEventListener('abort', onCallerAbort);
@@ -119,8 +122,17 @@ function boundQueueClient(
   lifetime: InvocationLifetime,
 ): DeferredQueueClient {
   let dead = lifetime.remainingMs() <= 0;
+  /** Refusal before dispatch. An already-cancelled or exhausted lifetime must never invoke the
+   * wrapped operation at all — a rejected race still evaluates `run()`. The caller's cancellation
+   * is the reason the caller observes; an internal deadline keeps its own reason.
+   */
+  const refuse = (label: string): never => {
+    dead = true;
+    lifetime.signal.throwIfAborted();
+    throw new Error(`queue lifetime exhausted before ${label}`);
+  };
   const settle = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
-    if (dead) throw new Error(`queue lifetime exhausted before ${label}`);
+    if (dead || lifetime.signal.aborted || lifetime.remainingMs() <= 0) return refuse(label);
     let detach: () => void = () => undefined;
     const expired = new Promise<never>((_resolve, reject) => {
       const fail = () =>
@@ -592,12 +604,17 @@ function signalCheck(lifetime: InvocationLifetime): void {
   lifetime.signal.throwIfAborted();
 }
 
-/** Authorized-ancestry boundary: a deadline or the count backstop stops the pass WITHOUT throwing;
- * a caller abort still propagates identically.
+/** Authorized-ancestry boundary. A caller abort propagates with the caller's exact reason BEFORE any
+ * nonfatal deadline/count classification — even when the caller's remaining budget is also zero.
+ * Only the invocation's own deadline (or the count backstop, checked after this) stops the pass
+ * without throwing.
  */
-function ancestryStopped(lifetime: InvocationLifetime): boolean {
-  if (lifetime.expired()) return true;
-  return lifetime.remainingMs() <= 0;
+function ancestryBoundary(lifetime: InvocationLifetime): 'continue' | 'stop' {
+  if (lifetime.callerAborted()) lifetime.signal.throwIfAborted();
+  if (lifetime.expired()) return 'stop';
+  if (lifetime.remainingMs() <= 0) return 'stop';
+  if (lifetime.signal.aborted) lifetime.signal.throwIfAborted();
+  return 'continue';
 }
 
 /** Refreshes the current enrollment's authorized predecessors, sequentially and in FIFO/lineage
@@ -622,9 +639,9 @@ async function refreshAuthorizedAncestry(
     const lineageOrder = [...read.enrollment.pendingAncestry].reverse();
     const next = lineageOrder.find((ancestor) => !attempted.has(ancestor.reference.requestId));
     if (next === undefined) return;
+    // The caller's cancellation outranks the nonfatal count/deadline stops.
+    if (ancestryBoundary(lifetime) === 'stop') return;
     if (refreshed >= MAX_PREDECESSOR_REFRESHES) return;
-    if (ancestryStopped(lifetime)) return;
-    signalCheck(lifetime);
     attempted.add(next.reference.requestId);
     refreshed += 1;
     const fresh = await refreshDeferredVendorDebt(queue, next);
