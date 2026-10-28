@@ -21,6 +21,8 @@ import { messageOf } from '../../shared/messageOf.js';
 import { eslintJsonAdapter } from './adapters/eslint.js';
 import { tscLinesAdapter } from './adapters/tsc.js';
 import { oxfmtCheckAdapter } from './adapters/oxfmt.js';
+import { oxlintJsonAdapter } from './adapters/oxlint.js';
+import { testNarrowAdapter } from './adapters/testNarrow.js';
 import { vitestJsonAdapter } from './adapters/vitest.js';
 
 /** The command a check op asks its injected runner to execute. */
@@ -83,6 +85,8 @@ export interface FailureSet {
   exitCode: number | null;
   /** Total tests reported by the test runner, when its wire format exposes it. */
   numTotalTests?: number;
+  /** Non-failing evidence limitations, retained in address validation records. */
+  advisories?: string[];
   /** Passing tests reported by the test runner, when its wire format exposes it. */
   numPassedTests?: number;
   /** Short alias used by some runner reporters. */
@@ -112,7 +116,13 @@ export type CheckParseResult =
  * Adapter names shipped as JSON-describable config. Each names a wire
  * format the toolkit parses; the wire knowledge itself lives in ./adapters.
  */
-export type AdapterName = 'vitest-json' | 'eslint-json' | 'tsc-lines' | 'oxfmt-check';
+export type AdapterName =
+  | 'vitest-json'
+  | 'eslint-json'
+  | 'tsc-lines'
+  | 'oxfmt-check'
+  | 'oxlint-json'
+  | 'test-narrow';
 
 /**
  * Output-shape adapter: the ONLY home of tool-specific wire knowledge.
@@ -140,6 +150,10 @@ export function adapterByName(name: AdapterName): CheckAdapter {
       return eslintJsonAdapter;
     case 'tsc-lines':
       return tscLinesAdapter;
+    case 'oxlint-json':
+      return oxlintJsonAdapter;
+    case 'test-narrow':
+      return testNarrowAdapter;
     case 'oxfmt-check':
       return oxfmtCheckAdapter;
   }

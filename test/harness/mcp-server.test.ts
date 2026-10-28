@@ -213,6 +213,8 @@ describe('tools/list + tools/call', () => {
       expect(schema['type']).toBe('object');
       expect(schema['additionalProperties']).toBe(false);
       expect('$schema' in schema).toBe(false);
+      expect(schema['required']).toEqual(tool['name'] === 'read' ? ['file_path'] : ['command']);
+      expect(Object.keys(schema['properties'] as object)).not.toContain('timeoutMs');
     }
   });
 

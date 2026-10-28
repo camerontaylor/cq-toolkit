@@ -40,6 +40,18 @@ const REVIEWER_PATTERN = new RegExp(
   `^(${CODERABBIT_REVIEWER}|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$`,
 );
 
+/**
+ * One testFiles entry. The dev protocol's invariant — a dash-leading segment
+ * is an option-shaped token (`-x`, `--flag`, the literal `--`) and is refused
+ * BEFORE any gate runs — is encoded here so the shared boundary schemas
+ * (dev.check, the dev.review cycle branch, dev.cycle composition) reject it
+ * at the entry point, instead of failing per-leg after a run has started.
+ */
+const TEST_FILE_SEGMENT_SCHEMA = z
+  .string()
+  .min(1)
+  .regex(/^[^-]/, 'testFiles entries are file paths and must not begin with "-"');
+
 // Defaults are applied by the OPS (`target ?? DEFAULT_DEV_TARGET`), not the
 // schemas — the drift pins mirror the hand-written optional input types, so
 // every optional field is `.exactOptional()` (exactOptionalPropertyTypes).
@@ -51,6 +63,8 @@ export const DevCheckInputSchema: z.ZodType<DevCheckInput> = z
       .string()
       .regex(/^[^-\s.][^\s]*\.\.[^-\s.][^\s]*$/, "range must be '<ref>..<ref>'")
       .exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(TEST_FILE_SEGMENT_SCHEMA).min(1).exactOptional(),
   })
   .strict();
 
@@ -65,6 +79,8 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
       .exactOptional(),
     reviewer: z.string().regex(REVIEWER_PATTERN).exactOptional(),
     uncommitted: z.boolean().exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(TEST_FILE_SEGMENT_SCHEMA).min(1).exactOptional(),
   })
   .strict();
 
@@ -139,6 +155,8 @@ export const DevCycleCompositionInputSchema: z.ZodType<DevCycleCompositionInput>
     target: z.string().min(1).exactOptional(),
     push: z.boolean().exactOptional(),
     title: z.string().min(1).exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(TEST_FILE_SEGMENT_SCHEMA).min(1).exactOptional(),
   })
   .strict();
 

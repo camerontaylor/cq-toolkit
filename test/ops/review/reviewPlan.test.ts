@@ -5,6 +5,7 @@ import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type { ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import {
+  REVIEW_PARTITION_STEPS,
   REVIEW_TIER_STEPS,
   createReviewPlan,
   type CreateReviewPlanInput,
@@ -373,7 +374,12 @@ describe('createReviewPlan partitioned fallback', () => {
       components.map((_, index) => `partition-${String(index + 1)}`),
     );
     expect(new Set(plan.sessions.map((session) => session.id)).size).toBe(21);
-    expect(plan.sessions.every((session) => !session.tools)).toBe(true);
+    // The fallback ships the fixed read-only reference set with a bounded
+    // total step allowance by default (#508).
+    expect(plan.sessions.every((session) => session.tools)).toBe(true);
+    expect(plan.sessions.every((session) => session.maxSteps === REVIEW_PARTITION_STEPS)).toBe(
+      true,
+    );
     expect(plan.advisories).toHaveLength(1);
     expect(plan.advisories[0]).toContain('large change: 21 changed lines across 21 files');
     expect(plan.advisories[0]).toContain('partitioned fallback');
@@ -388,6 +394,8 @@ describe('createReviewPlan partitioned fallback', () => {
       expect(session.prompt).toContain('check that the fixes hold and look for regressions');
       expect(session.prompt).toContain('check every contract other code depends on');
       expect(session.prompt).not.toContain('check every documented value');
+      expect(session.prompt).toContain('bounded read-only reference tools');
+      expect(session.prompt).toContain('denied on your final step');
       expect(session.prompt).toContain('partition data');
       expectExactPlacements(session, textByComponent);
       expect(() => ReviewCoverageV2Schema.parse(plan.coverage)).not.toThrow();
@@ -514,6 +522,69 @@ describe('createReviewPlan partitioned fallback', () => {
     expect(toolFree.partitions[0]!.prompt).toContain('evidence-based text');
     expect(toolFree.partitions[0]!.receipt).toBe(legacy.partitions[0]!.receipt);
   });
+
+  it('gives every fallback partition the fixed read-only tool set and bounded steps', () => {
+    const components = Array.from({ length: 21 }, (_, index) =>
+      tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
+    );
+    const plan = createReviewPlan(planInput(components));
+    expect(plan.coverage.mode).toBe('partitioned');
+    expect(plan.limitations).toEqual([]);
+    for (const session of plan.sessions) {
+      expect(session.tools).toBe(true);
+      expect(session.maxSteps).toBe(REVIEW_PARTITION_STEPS);
+      expect(session.prompt).toContain('bounded read-only reference tools (read');
+      expect(session.prompt).toContain('verify cited code and one direct dependency');
+      expect(session.prompt).toContain('denied on your final step');
+      expect(session.prompt).not.toContain('This session has no tools');
+    }
+  });
+
+  it('clamps partition steps under a lower configured session.maxSteps ceiling', () => {
+    const components = Array.from({ length: 21 }, (_, index) =>
+      tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
+    );
+    const plan = createReviewPlan(
+      planInput(components, { session: { maxSteps: 2 }, partitionTools: { steps: 9 } }),
+    );
+    expect(plan.sessions.every((session) => session.tools)).toBe(true);
+    expect(plan.sessions.every((session) => session.maxSteps === 2)).toBe(true);
+  });
+
+  it('keeps the read-only file-only set when searchTools is false', () => {
+    const components = Array.from({ length: 21 }, (_, index) =>
+      tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
+    );
+    const plan = createReviewPlan(planInput(components, { searchTools: false }));
+    expect(plan.sessions.every((session) => session.tools)).toBe(true);
+    expect(plan.sessions.every((session) => session.maxSteps === REVIEW_PARTITION_STEPS)).toBe(
+      true,
+    );
+    for (const session of plan.sessions)
+      expect(session.prompt).toContain('bounded read-only file tool');
+  });
+
+  it('keeps an explicit tool-less fallback opt-out with its stated limitation', () => {
+    const components = Array.from({ length: 21 }, (_, index) =>
+      tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
+    );
+    const plan = createReviewPlan(planInput(components, { partitionTools: false }));
+    expect(plan.sessions.every((session) => !session.tools)).toBe(true);
+    expect(plan.sessions.every((session) => session.maxSteps === undefined)).toBe(true);
+    for (const session of plan.sessions) {
+      expect(session.prompt).toContain('This session has no tools');
+      expect(session.prompt).not.toContain('bounded read-only');
+    }
+    expect(plan.limitations).toEqual([
+      'partitioned fallback ran without tools: partition findings could not be verified against referenced code',
+    ]);
+  });
+
+  it('is deterministic with partition tooling configured', () => {
+    const components = [tracked('src/a.ts', ['a']), tracked('src/b.ts', ['b'])];
+    const input = planInput(components, { partitionTools: { steps: 5 } });
+    expect(createReviewPlan(input)).toEqual(createReviewPlan(input));
+  });
 });
 
 describe('createReviewPlan exclusions', () => {
@@ -609,6 +680,18 @@ describe('createReviewPlan boundary validation', () => {
     expect(() =>
       createReviewPlan(planInput([component], { session: { maxInputChars: Number.NaN } })),
     ).toThrow(/session\.maxInputChars/);
+  });
+
+  it('rejects invalid partition tool budgets', () => {
+    expect(() =>
+      createReviewPlan(planInput([component], { partitionTools: { steps: 0 } })),
+    ).toThrow(/partitionTools\.steps/);
+    expect(() =>
+      createReviewPlan(planInput([component], { partitionTools: { steps: 1.5 } })),
+    ).toThrow(/partitionTools\.steps/);
+    expect(() =>
+      createReviewPlan(planInput([component], { partitionTools: { steps: Number.NaN } })),
+    ).toThrow(/partitionTools\.steps/);
   });
 
   it('rejects empty, duplicate or unnamable components', () => {

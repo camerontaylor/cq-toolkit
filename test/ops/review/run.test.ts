@@ -1968,7 +1968,15 @@ it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
       await configureAgentRepo(repo);
       Date.now = () => clock;
       const result = await makeReviewRun({
-        drivers: scriptedDrivers(),
+        // 'thrown' faults the driver under the real reviewer seam (never a raw
+        // throw past the engine): a coincident deadline must not reclassify an
+        // unexpected fault as a budget stop.
+        drivers: scriptedDrivers(() => {
+          if (mode === 'thrown') {
+            clock += 1001;
+            throw new Error('unexpected reviewer fault');
+          }
+        }),
         effectsFactory: () =>
           repoEffects(repo, (command) => {
             if (command !== 'coderabbit') return undefined;
@@ -1987,19 +1995,27 @@ it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
           }
           return components.map((component) => ({ component: component.component, hits: [] }));
         },
-        runAgentReviewer: async () => {
-          clock += 1001;
-          if (mode === 'thrown') throw new Error('unexpected reviewer fault');
-          if (mode === 'drift') repo.git('commit', '--allow-empty', '-m', 'drift');
-          return mode === 'coverage'
-            ? { status: 'needs-human', reason: 'coverage incomplete' }
-            : { status: 'budget-exhausted' };
-        },
+        // No injected reviewer for 'thrown', so the real seam runs. No .catch
+        // fallback either: the engine must refuse with a structured result,
+        // and a thrown engine error fails the test instead of being laundered
+        // into a report-less needs-human object that satisfies both
+        // assertions vacuously.
+        ...(mode === 'thrown'
+          ? {}
+          : {
+              runAgentReviewer: async () => {
+                clock += 1001;
+                if (mode === 'drift') repo.git('commit', '--allow-empty', '-m', 'drift');
+                return mode === 'coverage'
+                  ? { status: 'needs-human' as const, reason: 'coverage incomplete' }
+                  : { status: 'budget-exhausted' as const };
+              },
+            }),
       })({
         repoRoot: repo.root,
         wallMs: 1000,
         reviewers: mode === 'auth' || mode === 'mixed' ? ['coderabbit', 'agent'] : ['agent'],
-      }).catch((error: unknown) => ({ status: 'needs-human', reason: String(error) }));
+      });
       expect(result.status).toBe('needs-human');
       expect(result).not.toMatchObject({ report: { blockedBudget: true } });
     } finally {
@@ -2028,6 +2044,55 @@ it('#532: an agent wall stop is attributed through the real review engine', asyn
     expect(result).toMatchObject({ report: { blockedBudget: true } });
   } finally {
     Date.now = originalNow;
+    await repo.cleanup();
+  }
+});
+
+it('#551: review.run completes after the scripted CodeRabbit rate limit', async () => {
+  const repo = await makeTestRepo();
+  try {
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        review: { reviewers: ['coderabbit'] },
+      }),
+    );
+    repo.commitAll('configure review');
+    let calls = 0;
+    const effects = repoEffects(repo, (command) =>
+      command !== 'coderabbit'
+        ? undefined
+        : {
+            exitCode: ++calls === 1 ? 1 : 0,
+            stdout: JSON.stringify(
+              calls === 1
+                ? {
+                    type: 'error',
+                    errorType: 'rate_limit',
+                    recoverable: true,
+                    metadata: { waitTime: '1 second' },
+                  }
+                : { type: 'complete', status: 'review_completed' },
+            ),
+            stderr: '',
+            timedOut: false,
+          },
+    );
+    const sleep = vi.fn(async () => undefined);
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(),
+      effectsFactory: () => effects,
+      sleep,
+      scannerFactory: () => async (components) =>
+        components.map((c) => ({ component: c.component, hits: [] })),
+    })({ repoRoot: repo.root, wallMs: 60_000 });
+    expect(result.status).toBe('ok');
+    expect(calls).toBe(2);
+    expect(sleep).toHaveBeenCalledExactlyOnceWith(16_000, expect.any(AbortSignal));
+    if (result.status === 'ok') expect(result.value.sources[0]?.status).toBe('terminal');
+  } finally {
     await repo.cleanup();
   }
 });

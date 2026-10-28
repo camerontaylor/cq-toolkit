@@ -522,7 +522,7 @@ test('one failing task has a failed-attempt commit while a passing sibling remai
     ]);
     expect(reportOf(result).fixesPerRun).toBe(1);
     expect(reportOf(result).tasks[1]?.failedAttempt?.branch).toMatch(
-      /^cq\/fixture\/failed\/tests-1\/scratch-repo\/.*\/a\d+$/,
+      /^cq\/fixture\/failed\/tests-1-[0-9a-f]{16}\/scratch-repo-[0-9a-f]{16}\/cases-b-test-cjs-[0-9a-f]{16}\/a[1-9][0-9]*$/,
     );
     expect(
       reportOf(result)

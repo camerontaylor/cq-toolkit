@@ -97,6 +97,30 @@ describe('naming', () => {
   });
 });
 
+test('served descriptors advertise only required canonical fields', () => {
+  const surface = createHarnessSurface(
+    manifest(scratch(), { tools: ['read', 'edit', 'write', 'bash'] }),
+  );
+  const required = {
+    read: ['file_path'],
+    edit: ['file_path', 'old_string', 'new_string'],
+    write: ['file_path', 'content'],
+    bash: ['command'],
+  };
+  expect(surface.tools.map((tool) => tool.name)).toEqual(Object.keys(required));
+  for (const tool of surface.tools) {
+    const schema = tool.inputJsonSchema;
+    expect(schema['required']).toEqual(required[tool.name as keyof typeof required]);
+    expect(schema['additionalProperties']).toBe(false);
+    expect(Object.keys(schema['properties'] as object)).toEqual(
+      Object.keys(tool.inputSchema.shape),
+    );
+    expect(tool.description.length).toBeGreaterThan(25);
+  }
+  expect(surface.has('run')).toBe(true);
+  expect(surface.has('unknown')).toBe(false);
+});
+
 describe('selection', () => {
   const names = ['read', 'edit', 'write', 'bash'] as const;
 
@@ -313,8 +337,8 @@ describe('createHarnessSurface', () => {
     }
     const read = surface.tools.find((tool) => tool.name === 'read');
     expect(read?.inputJsonSchema).toHaveProperty('properties.file_path');
-    expect(read?.inputJsonSchema).toHaveProperty('properties.path');
-    expect(read?.inputJsonSchema['required']).toBeUndefined();
+    expect(read?.inputJsonSchema).not.toHaveProperty('properties.path');
+    expect(read?.inputJsonSchema['required']).toEqual(['file_path']);
   });
 
   test('call on an unserved name rejects (even one the config provides)', async () => {

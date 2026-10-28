@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 2,
+  "harness": { "logToolFailures": true },
+  "checks": [
+    {
+      "adapter": "tsc-lines",
+      "kind": "static",
+      "command": {
+        "command": "node_modules/.bin/tsc",
+        "args": ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"],
+        "cwd": "."
+      },
+      "relatedArgs": ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"]
+    },
+    {
+      "adapter": "oxfmt-check",
+      "kind": "static",
+      "command": { "command": "node_modules/.bin/oxfmt", "args": ["--check", "."], "cwd": "." },
+      "relatedArgs": ["--check", "{files}"]
+    },
+    {
+      "adapter": "oxlint-json",
+      "kind": "static",
+      "command": {
+        "command": "node_modules/.bin/oxlint",
+        "args": [
+          "--config",
+          ".oxlintrc.json",
+          "--disable-nested-config",
+          "--type-aware",
+          "--report-unused-disable-directives-severity",
+          "error",
+          "--format",
+          "json",
+          "src",
+          "test",
+          "lint",
+          "scripts",
+          "vitest.config.ts"
+        ],
+        "cwd": "."
+      },
+      "relatedArgs": [
+        "--config",
+        ".oxlintrc.json",
+        "--disable-nested-config",
+        "--type-aware",
+        "--report-unused-disable-directives-severity",
+        "error",
+        "--format",
+        "json",
+        "{files}"
+      ]
+    },
+    {
+      "adapter": "test-narrow",
+      "kind": "tests",
+      "addressOnly": true,
+      "command": { "command": "node", "args": ["scripts/check-related-tests.mjs"], "cwd": "." },
+      "relatedArgs": ["scripts/check-related-tests.mjs", "{files}"]
+    }
+  ],
+  "roles": {
+    "worker": {
+      "provider": "zai",
+      "model": "glm-5.3-flash"
+    },
+    "rescue": {
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash"
+    },
+    "reviewer": {
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash"
+    }
+  },
+  "budgets": {
+    "run": { "maxTokens": 25000000, "wallMs": 14400000 },
+    "unit": { "wallMs": 3600000 },
+    "step": { "wallMs": 1200000 }
+  },
+  "review": {
+    "reviewers": ["coderabbit", "agent"],
+    "denylistPatternsFile": "policy/denylist/patterns.yml"
+  }
+}
