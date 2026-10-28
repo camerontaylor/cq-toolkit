@@ -19,6 +19,7 @@ import {
   type KnownUsageSummary,
   type UsageObservation,
 } from '../../shared/knownUsage.js';
+import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 export interface AgentReviewerInput {
   repoRoot: string;
@@ -301,8 +302,12 @@ export async function runAgentReviewer(
                       options,
                     );
                     returned = true;
+                    // Seam v3: only an explicit provider measurement reaches the
+                    // summary; absence/unmeasured contributes unknown usage, and an
+                    // independently reported cost still rides along.
+                    const usageMeasured = usageProvenanceOf(value) === 'measured';
                     settleUsage(() => ({
-                      usage: value.usage,
+                      ...(usageMeasured ? { usage: value.usage } : {}),
                       ...(value.costUSD === undefined ? {} : { costUSD: value.costUSD }),
                     }));
                     return value;

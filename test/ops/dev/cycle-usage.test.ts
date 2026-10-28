@@ -24,6 +24,7 @@ describe('dev.cycle known usage', () => {
         return {
           stopReason: attempt === 1 ? 'error' : 'complete',
           usage,
+          usageProvenance: 'measured',
           costUSD: 0.01,
           denials: [],
         };
@@ -90,6 +91,7 @@ describe('dev.cycle known usage', () => {
     const original: WorkerResult = {
       stopReason: 'complete',
       usage,
+      usageProvenance: 'measured',
       costUSD: Number.POSITIVE_INFINITY,
       denials: [],
     };
@@ -119,6 +121,7 @@ describe('dev.cycle known usage', () => {
       stopReason: 'error',
       error: 'original partial result',
       usage: { ...usage, input: -1 },
+      usageProvenance: 'measured',
       costUSD: 0.02,
       denials: [],
     };
@@ -178,6 +181,7 @@ describe('dev.cycle known usage', () => {
       stopReason: 'error',
       error: 'original accessor result',
       usage,
+      usageProvenance: 'measured',
       costUSD: 0.03,
       denials: [],
     };
@@ -215,6 +219,52 @@ describe('dev.cycle known usage', () => {
     expect(result).toMatchObject({
       status: 'failed',
       report: { usageSummary: { knownCount: 0, unknownCount: 0, unpricedCount: 0 } },
+    });
+  });
+  it('counts only explicitly measured usage (seam v3): unmeasured and absent are unknown, cost stays independent', async () => {
+    const ledger = createKnownUsageLedger();
+    let spent = 0;
+    let attempt = 0;
+    const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const results: WorkerResult[] = [
+      // A provider-reported all-zero measurement: KNOWN, aggregate stays zero.
+      { stopReason: 'complete', usage: zero, usageProvenance: 'measured', denials: [] },
+      // A placeholder zero: the driver declares it UNMEASURED.
+      { stopReason: 'aborted', usage: zero, usageProvenance: 'unmeasured', denials: [] },
+      // A legacy/custom result with no declaration at all: UNKNOWN, never assumed.
+      { stopReason: 'error', error: 'legacy result', usage: zero, denials: [] },
+      // A measured partial fold on failure, with an independently valid cost.
+      { stopReason: 'error', usage, usageProvenance: 'measured', costUSD: 0.02, denials: [] },
+    ];
+    const driver = {
+      run: async (): Promise<WorkerResult> => results[attempt++]!,
+    };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    const resolved = meterDrivers(
+      factory,
+      (tokens) => {
+        spent += tokens;
+      },
+      {
+        start: () => {},
+        settle: (id, observation) => ledger.record(id, observation),
+      },
+    ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+    const returned: WorkerResult[] = [];
+    for (let index = 0; index < results.length; index += 1)
+      returned.push(await resolved.driver.run(invocation));
+    // Original result identity is preserved for every dispatch.
+    returned.forEach((value, index) => expect(value).toBe(results[index]));
+    // The numeric debit is unchanged: the measured partial fold still spends.
+    expect(spent).toBe(6);
+    expect(ledger.snapshot()).toEqual({
+      usage: { ...usage },
+      costUSD: 0.02,
+      knownCount: 2,
+      unknownCount: 2,
+      unpricedCount: 3,
     });
   });
 });

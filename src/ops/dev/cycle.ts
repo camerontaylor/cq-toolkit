@@ -86,6 +86,7 @@ import {
   type KnownUsageSummary,
   type UsageObservation,
 } from '../../shared/knownUsage.js';
+import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 /**
  * Wall time held back from the review and address legs for the publication
@@ -1428,8 +1429,12 @@ export function meterDrivers(
               // Cost remains independent of malformed usage telemetry.
             }
             if (measured !== undefined) meter(measured);
+            // Seam v3: only an explicit provider measurement reaches the summary.
+            // The numeric debit above is unchanged; cost stays independent, and an
+            // absent/`unmeasured` declaration contributes unknown usage, not zeros.
+            const usageMeasured = usageProvenanceOf(result) === 'measured';
             settle({
-              ...(measured === undefined ? {} : { usage: measured }),
+              ...(usageMeasured && measured !== undefined ? { usage: measured } : {}),
               ...(costUSD === undefined ? {} : { costUSD }),
             });
             return result;

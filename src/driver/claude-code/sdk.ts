@@ -318,7 +318,12 @@ export class ClaudeCodeSdkTransport implements Driver {
     // Cancellation outranks the strict refusal.
     const signal = options?.signal;
     if (signalAborted(signal)) {
-      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
     assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-code');
 
@@ -358,7 +363,12 @@ export class ClaudeCodeSdkTransport implements Driver {
     // dispatches and never creates a session record. The strict refusal
     // already ran at entry (no duplicate here).
     if (signalAborted(signal)) {
-      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
 
     // --- Structured-output preflight (PR #238 review round 2): the schema
@@ -737,6 +747,8 @@ export class ClaudeCodeSdkTransport implements Driver {
   ): WorkerResult {
     const measuredFrame = measureResultUsage(observation.result);
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
+    // Seam v3: presence from the two raw sources, never the normalized zero.
+    const usageMeasured = measured !== undefined || observation.assistantUsage !== undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted,
@@ -798,14 +810,13 @@ export class ClaudeCodeSdkTransport implements Driver {
       observation.servedModel !== undefined
         ? { ...modelSpec, model: observation.servedModel }
         : modelSpec;
-    const cost =
-      measured === undefined && observation.assistantUsage === undefined
-        ? {}
-        : costField(
-            (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
-            pricedModel,
-            usage,
-          );
+    const cost = !usageMeasured
+      ? {}
+      : costField(
+          (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
+          pricedModel,
+          usage,
+        );
     return {
       // The observed served model: what the agent reported it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
@@ -817,6 +828,7 @@ export class ClaudeCodeSdkTransport implements Driver {
         ? { structuredOutput: structured }
         : {}),
       usage,
+      usageProvenance: usageMeasured ? 'measured' : 'unmeasured',
       ...cost,
       sessionId,
       denials: observation.denials,

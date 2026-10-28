@@ -43,6 +43,9 @@ function workerResult(overrides: Partial<WorkerResult> = {}): WorkerResult {
       findings: [{ file: 'src/a.ts', line: 2, rule: 'bug', severity: 'high', text: 'Evidence' }],
     },
     usage: { ...usage },
+    // Seam v3: the shared fixture models a provider MEASUREMENT; the provenance
+    // tests override it to declare the placeholder/absent cases explicitly.
+    usageProvenance: 'measured',
     steps: 1,
     denials: [],
     ...overrides,
@@ -329,6 +332,35 @@ describe('runAgentReviewer v3 session engine', () => {
     if (result.status !== 'ok') throw new Error(JSON.stringify(result));
     expect(result.value.usageSummary).toEqual({
       usage,
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+  });
+
+  it('counts an unmeasured placeholder as unknown, and a measured zero as known (seam v3)', async () => {
+    const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const unmeasured = fakeDrivers({
+      result: workerResult({ usage: zero, usageProvenance: 'unmeasured' }),
+    });
+    const unmeasuredResult = await runAgentReviewer(unmeasured.drivers, reviewerInput());
+    expect(unmeasuredResult.status).toBe('ok');
+    if (unmeasuredResult.status !== 'ok') throw new Error(JSON.stringify(unmeasuredResult));
+    expect(unmeasuredResult.value.usageSummary).toEqual({
+      knownCount: 0,
+      unknownCount: 1,
+      unpricedCount: 1,
+    });
+
+    const measuredZero = fakeDrivers({
+      result: workerResult({ usage: zero, usageProvenance: 'measured' }),
+    });
+    const measuredResult = await runAgentReviewer(measuredZero.drivers, reviewerInput());
+    expect(measuredResult.status).toBe('ok');
+    if (measuredResult.status !== 'ok') throw new Error(JSON.stringify(measuredResult));
+    // A genuine all-zero measurement is KNOWN and aggregates as a present zero.
+    expect(measuredResult.value.usageSummary).toEqual({
+      usage: zero,
       knownCount: 1,
       unknownCount: 0,
       unpricedCount: 1,

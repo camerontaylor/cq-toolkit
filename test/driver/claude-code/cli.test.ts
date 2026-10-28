@@ -1231,6 +1231,8 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
       const result = await driver.run(invocation({ prompt: 'boom run' }));
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      // Seam v3: a spawn failure measured nothing — declared unmeasured.
+      expect(result.usageProvenance).toBe('unmeasured');
       expect(result.costUSD).toBeUndefined(); // nothing was measured — no cost claim
       // #208: the spawn cause reaches WorkerResult.error too, not just narration.
       expect(result.error).toContain('spawn failed');

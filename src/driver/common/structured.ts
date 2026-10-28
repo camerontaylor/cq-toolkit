@@ -227,6 +227,8 @@ export function compileOutputSchema(
 export function uncompilableSchemaVerdict(lane: string, fault: string): WorkerResult {
   return {
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    // Seam v3: the document never shipped, so nothing was measured.
+    usageProvenance: 'unmeasured',
     denials: [],
     stopReason: 'error',
     error: boundedErrorText(`${lane} driver: structured output invalid — ${fault}`),

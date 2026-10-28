@@ -122,13 +122,29 @@ describe('the fold channels — measureResultUsage over the recorded frames', ()
   });
 
   test('absent/lying numerics fold to the honest zero, and an unshaped usage is NO measurement', () => {
-    expect(usageFromWire({ input_tokens: -5, output_tokens: 1.5 })).toEqual({
-      input: 0,
+    // Seam v3 refinement: a record whose ONLY numeric fields are lying reports
+    // no measurement at all — it must not read as a measured zero. (A mixed
+    // record still folds: the valid fields count and the lying ones are 0.)
+    expect(usageFromWire({ input_tokens: -5, output_tokens: 1.5 })).toBeUndefined();
+    expect(usageFromWire({ input_tokens: 7, output_tokens: 1.5 })).toEqual({
+      input: 7,
       output: 0,
       cacheRead: 0,
       cacheWrite: 0,
     });
     expect(usageFromWire('not a usage')).toBeUndefined();
+    // Seam v3: an object that carries NO valid numeric field reports nothing —
+    // it must not normalize to zeros that a measured zero would be confused with.
+    expect(usageFromWire({})).toBeUndefined();
+    // ...while an explicit numeric zero IS a measurement.
+    expect(
+      usageFromWire({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      }),
+    ).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     expect(measureResultUsage(undefined)).toBeUndefined();
     expect(zeroUsage()).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
