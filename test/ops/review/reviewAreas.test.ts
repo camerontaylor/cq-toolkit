@@ -218,8 +218,13 @@ describe('planReviewAreas contract harvesting', () => {
     expect(area.contracts.length).toBeLessThan(2_000);
     const payload = area.contracts.join('\n').length;
     expect(payload).toBeLessThanOrEqual(cap);
-    const firstCut = line(area.contracts.length);
-    expect(area.contracts).not.toContain(`src/wide.ts:${firstCut}`);
+    const sortedDescriptors = Array.from(
+      { length: 2_000 },
+      (_, index) => `src/wide.ts:${line(index)}`,
+    ).sort();
+    const keptCount = area.contracts.length;
+    expect(area.contracts).toEqual(sortedDescriptors.slice(0, keptCount));
+    expect(sortedDescriptors.slice(0, keptCount + 1).join('\n').length + 1).toBeGreaterThan(cap);
     expect(area.contractsTruncated).toBe(true);
     expect(result.crossAreaPass.reason).toContain('truncated');
   });

@@ -137,9 +137,9 @@ so tests and future consumers pin both.
 
 Bounded and deterministic:
 
-1. Group reviewed components by top-level directory (`a/b/c.ts` → `a/b`,
-   `root.ts` → `(root)`). This is the affinity signal: changed code usually
-   groups with its directory.
+1. Group reviewed components by their full parent directory (the path prefix
+   before the final slash: `a/b/c.ts` → `a/b`; `root.ts` → `(root)`). This is
+   the affinity signal: changed code usually groups with its directory.
 2. Split any directory whose summed `chars` exceeds `maxCharsPerArea` into
    byte-driven areas, each ≤ that cap and each ≤ `maxFilesPerArea` files.
 3. Split any directory whose file count exceeds `maxFilesPerArea` into
@@ -159,7 +159,7 @@ area is fine — the cap is on the area, not the file.
 cross-area contract pass is required'` when there are ≥ 2 areas or ≥ 1
   matched contract;
 - `required: false`, `reason: 'single area without contracts: no cross-area
-pass required'` when one area covers everything with no contracts.
+contract pass required'` when one area covers everything with no contracts.
 
 `promptReserveChars` defaults to `crossAreaPromptReserveChars` (8 000). It is a
 **planning reserve, not a spend**: the cross-area pass is separately budgeted
