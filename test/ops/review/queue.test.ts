@@ -569,7 +569,8 @@ describe('queue report lifetime enforcement', () => {
     expect(acked).toBe(0);
     expect(observed).toBe(0);
     expect(ops).not.toContain('ack');
-    await expect(readdir(dir)).rejects.toThrow();
+    // No evidence bytes were imported: the delivery directory stays empty.
+    expect(await readdir(dir)).toEqual([]);
   });
 
   test('an exhausted caller budget refuses before any queue dispatch', async () => {
@@ -584,6 +585,6 @@ describe('queue report lifetime enforcement', () => {
       client.report(ref, dir, { remainingMs: () => 0 }),
     ).rejects.toThrow(/deadline exhausted/);
     expect(ops).toEqual([]);
-    await expect(readdir(dir)).rejects.toThrow();
+    expect(await readdir(dir)).toEqual([]);
   });
 });

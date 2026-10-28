@@ -187,7 +187,10 @@ async function fixture(mode: Mode) {
     reviewer: 'coderabbit-review-agent-committed-v1',
     reviewer_version: 'offline-v1',
   };
-  const findings = mode === 'clean' ? [] : [{ severity: 'major', text: 'late retained finding' }];
+  const findings =
+    mode === 'clean' || mode === 'authorized-predecessor-append'
+      ? []
+      : [{ severity: 'major', text: 'late retained finding' }];
   const document = {
     version: 1,
     item_id: 'current-final',
@@ -232,6 +235,7 @@ async function fixture(mode: Mode) {
       ...document,
       item_id: 'ancestor-item',
       request_id: ancestorReference.requestId,
+      outcome: 'terminal-clean',
       findings: [],
     }),
   );
