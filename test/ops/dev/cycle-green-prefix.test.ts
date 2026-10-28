@@ -5,7 +5,7 @@
 // head. Real git (work repo + bare origin); every op leg, the probe checks,
 // the install and the forge are scripted. No provider, network or credentials.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { makeDevCycle, renderFindingsSection } from '../../../src/ops/dev/cycle.js';
 import type { DevCheckInput, DevCheckReport } from '../../../src/ops/dev/check.js';
@@ -117,6 +117,14 @@ interface Scenario {
   onProbe?: () => void;
   /** Scripted author-side git commands (a race injected before real git runs). */
   authorHandler?: Parameters<typeof repoEffects>[1];
+  /** Replace the probe worktree's pr.open result (or throw). */
+  openInResult?: () => Promise<OpResult<PrOpenReport>>;
+  /** The findings-section body edit throws. */
+  ghEditThrows?: string;
+  /** The red final check returns this non-failed status instead. */
+  finalCheckStatus?: 'budget-exhausted';
+  /** The final check's ledger record says passed although the leg failed. */
+  finalRecordPassed?: boolean;
 }
 
 async function run(scenario: Scenario) {
@@ -136,6 +144,7 @@ async function run(scenario: Scenario) {
   const gh = {
     getPrBody: async () => body,
     editPrBody: async (_n: number, next: string) => {
+      if (scenario.ghEditThrows !== undefined) throw new Error(scenario.ghEditThrows);
       bodies.push(next);
       body = next;
     },
@@ -158,6 +167,11 @@ async function run(scenario: Scenario) {
       if (scenario.finalCheckMs !== undefined) {
         const now = Date.now();
         vi.spyOn(Date, 'now').mockReturnValue(now + scenario.finalCheckMs);
+      }
+      if (scenario.finalCheckStatus !== undefined) return { status: scenario.finalCheckStatus };
+      if (scenario.finalRecordPassed === true) {
+        await scriptedCheck(author, true, 'k002-final');
+        return { status: 'failed', error: 'dev.check: the final gate failed' };
       }
       return scriptedCheck(author, false, 'k002-final');
     },
@@ -313,6 +327,7 @@ async function run(scenario: Scenario) {
       : {
           openIn: (effects: DevEffects, root: string) => async (input: PrOpenInput) => {
             opens.push({ input, root });
+            if (scenario.openInResult !== undefined) return scenario.openInResult();
             const read = await readWorkState(effects, { target: 'merge-queue' });
             if (!read.ok) throw new Error(read.reason);
             const value: PrOpenReport = {
@@ -775,13 +790,223 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expectAuthorUntouched(r);
   });
 
+  test('a reserve exhausted MID-scan stops after the probed candidates and publishes nothing', async () => {
+    // The first (red) probe consumes the whole reserve; the next is never started.
+    const r = await run({
+      greens: [true, false, false],
+      stop: 'budget',
+      probeAdvanceMs: 60 * 60 * 1000,
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') {
+      expect(r.result.error).toContain('the reserve no longer covers a');
+      expect(r.result.error).toContain('after probing 1 of 2 candidate(s)');
+      expect(r.result.error).toContain('nothing published');
+    }
+    expect(r.probeRoots).toHaveLength(1);
+    expect(r.opens).toEqual([]);
+    expectAuthorUntouched(r);
+  });
+
+  test('a worktree setup that consumes the reserve leaves no room for the install: nothing published', async () => {
+    let advanced = false;
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      authorHandler: (command, args) => {
+        if (!advanced && command === 'git' && args.includes('worktree') && args.includes('add')) {
+          advanced = true;
+          const now = Date.now();
+          vi.spyOn(Date, 'now').mockReturnValue(now + 60 * 60 * 1000);
+        }
+        return undefined;
+      },
+    });
+    expect(advanced).toBe(true);
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('worktree setup the reserve no longer covers an install');
+    expect(r.installs).toEqual([]);
+    expect(r.probeRoots).toEqual([]);
+    expect(repo.git('worktree', 'list', '--porcelain')).not.toContain(r.probePrefix);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('an author HEAD that moves during the probe unbinds the selection: nothing published', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      onProbe: () => {
+        repo.git('commit', '-q', '--allow-empty', '-m', 'the author moved on');
+      },
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') {
+      expect(r.result.error).toContain(`the selected commit ${r.commits[0]!} lost its binding`);
+      expect(r.result.error).toContain('nothing published');
+    }
+    expect(r.pushes.filter((args) => args.includes('push'))).toEqual([]);
+    expect(r.opens).toEqual([]);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('a pr.open refusal after the push surfaces as the pr.open step and keeps the pushed branch', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      openInResult: async () => ({ status: 'needs-human', reason: 'pr.open: forge refused' }),
+    });
+    expect(r.result).toMatchObject({
+      status: 'needs-human',
+      reason: 'dev.cycle (pr.open): pr.open: forge refused',
+    });
+    expect(repo.git('rev-parse', `refs/heads/${r.pub}`).trim()).toBe(r.commits[0]);
+    expect(existsSync(r.probeDir)).toBe(false);
+  });
+
+  test('a findings-section compose failure names the open draft at the published commit', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      ghEditThrows: 'body write refused',
+    });
+    expect(r.result.status).toBe('needs-human');
+    if (r.result.status === 'needs-human')
+      expect(r.result.reason).toBe(
+        `dev.cycle (pr body): draft PR #77 is open at ${r.commits[0]!} but the findings section could not be composed — body write refused`,
+      );
+    expectAuthorUntouched(r);
+  });
+
+  test('a publication that throws after the push attempt keeps the branch and says the remote may carry it', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      openInResult: async () => {
+        throw new Error('forge transport reset');
+      },
+    });
+    expect(r.result.status).toBe('needs-human');
+    if (r.result.status === 'needs-human') {
+      expect(r.result.reason).toContain('then the publication threw — forge transport reset');
+      expect(r.result.reason).toContain(
+        `the remote may carry '${r.pub}', and the local branch is kept`,
+      );
+    }
+    expect(repo.git('rev-parse', `refs/heads/${r.pub}`).trim()).toBe(r.commits[0]);
+    expect(existsSync(r.probeDir)).toBe(false);
+  });
+
+  test.each([
+    ['no publication', undefined, 'failed'],
+    ['a published draft', true, 'needs-human'],
+    ['a failed pr.open', false, 'failed'],
+  ] as const)(
+    'a failed worktree release is reported on %s, never retried',
+    async (_label, green, status) => {
+      const r = await run({
+        greens: [green ?? false, false],
+        stop: 'budget',
+        ...(green === false
+          ? {
+              openInResult: async () => ({
+                status: 'failed' as const,
+                error: 'pr.open: create failed',
+              }),
+            }
+          : {}),
+        ...(green === false ? { greens: [true, false] } : {}),
+        authorHandler: (command, args) =>
+          command === 'git' && args.includes('worktree') && args.includes('remove')
+            ? { exitCode: 1, stdout: '', stderr: 'worktree busy', timedOut: false }
+            : undefined,
+      });
+      expect(r.result.status).toBe(status);
+      const text =
+        r.result.status === 'failed'
+          ? r.result.error
+          : r.result.status === 'needs-human'
+            ? r.result.reason
+            : '';
+      expect(text).toContain(`probe cleanup: worktree remove ${r.probeDir} failed: worktree busy`);
+    },
+  );
+
+  test('a git fault before any probe resource returns the red result with the fault named', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      authorHandler: (command, args) => {
+        if (command === 'git' && args.includes('rev-list')) throw new Error('git spawn failed');
+        return undefined;
+      },
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') {
+      expect(r.result.error).toMatch(/^dev\.cycle \(dev\.check \(final\)\): /);
+      expect(r.result.error).toContain(
+        'the green-prefix fallback faulted before probing: git spawn failed',
+      );
+    }
+    expect(r.probeRoots).toEqual([]);
+  });
+
+  test('a failed dependency-input comparison faults the probe instead of reusing the install', async () => {
+    const r = await run({
+      greens: [true, false, false],
+      stop: 'budget',
+      authorHandler: (command, args) =>
+        command === 'git' && args.includes('diff') && args.includes('--name-only')
+          ? { exitCode: 128, stdout: '', stderr: 'bad object', timedOut: false }
+          : undefined,
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('dependency-input comparison failed: bad object');
+    expect(r.probeRoots).toHaveLength(1);
+    expectAuthorUntouched(r);
+  });
+
+  test('a single verified fix (the red head itself) has no earlier candidate: attributed, nothing probed', async () => {
+    const r = await run({ greens: [false], stop: 'budget' });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('no verified-fix commit precedes the addressed head');
+    expect(r.installs).toEqual([]);
+  });
+
+  test.each([
+    [
+      'a dirty author tree',
+      { beforeFinal: () => writeFileSync(join(repo.root, 'stray.txt'), 'x') },
+    ],
+    ['an author ledger whose last check is not red at T', { finalRecordPassed: true }],
+  ] as const)('%s keeps the red final result verbatim', async (_label, extra) => {
+    const r = await run({ greens: [true, false], stop: 'budget', ...extra });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') expect(r.result.error).not.toContain('green-prefix');
+    expect(r.installs).toEqual([]);
+    expect(r.probeRoots).toEqual([]);
+  });
+
+  test('a final check that is not a red verdict (budget-exhausted) is returned as-is', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      finalCheckStatus: 'budget-exhausted',
+    });
+    expect(r.result.status).toBe('budget-exhausted');
+    expect(r.installs).toEqual([]);
+  });
+
   test.each([
     ['no installDeps hook', { installDeps: null }],
     ['push opted out', { push: false }],
     ['an injected open leg owns the forge (no gh, no openIn)', { injectedOpenOwnsForge: true }],
   ] as const)('%s: the red final result is returned verbatim', async (_label, extra) => {
     const r = await run({ greens: [true, false], stop: 'budget', ...extra });
-    expect(r.result).toEqual({
+    // Status and error identity; a future outer wrapper may add a report.
+    expect(r.result).toMatchObject({
       status: 'failed',
       error:
         'dev.cycle (dev.check (final)): dev.check: 1 gate(s) red (format:check) — record k002-final is in the branch dev-record',
