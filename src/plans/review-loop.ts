@@ -1431,10 +1431,26 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   );
   const publishWithheld = commits.length > 0 && !allRowsOk;
   if (publishWithheld) {
+    // #469: the row states what THIS loop did — it pushed NOTHING (the
+    // mixed-worktree guard held) and withheld the item's reply and resolve
+    // — and NEVER claims the commit is "not published": a --push run's
+    // composition publishes the EXACT verified range over a clean tree at
+    // engine exit (review.address publishOnExit; S6 attempt D pushed
+    // 8f78ca91 after this text had already denied it), so the loop-side row
+    // only ever speaks for itself. The composition settles the row's final
+    // truth after its own publication attempt.
     for (const row of fixReport.jobs) {
       if (row.result.status === 'ok' && (row.result.value as FixReviewItemResult).changed) {
+        // The engine-exit clause is truthful only for a --push run: without
+        // push, publication never happens at engine exit, so the row must not
+        // dangle that possibility (see #469 above — publishOnExit is a --push
+        // composition behavior).
         reasons.push(
-          `item ${sources.get(row.jobId)?.itemId ?? row.jobId}: publish-withheld-mixed-worktree — a sibling fix row failed; the local commit is not published`,
+          `item ${sources.get(row.jobId)?.itemId ?? row.jobId}: publish-withheld-mixed-worktree — a sibling fix row failed; the loop pushed nothing and withheld this item's reply and resolve${
+            opts.publish === false
+              ? '; this run publishes nothing at engine exit (publication requires --push)'
+              : '; publication may still happen at engine exit'
+          }`,
         );
       }
     }

@@ -53,6 +53,31 @@ describe('dev.ready', () => {
       expect(result.value).toMatchObject({ cycleId: 'c002-bbbbbbbb', reviewer: 'agent:reviewer' });
   });
 
+  test('a later blocked agent attempt prevents readiness over an older terminal CodeRabbit cycle', async () => {
+    const state = await seed(repo, (identity) => [
+      cycleRecord({
+        cycleId: 'c002-blocked-agent',
+        reviewer: 'agent:reviewer',
+        base: identity.base,
+        head: identity.head,
+        dirtySha256: identity.dirtySha256,
+        completion: { kind: 'blocked', reason: 'scripted provider unavailable' },
+      }),
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('latest-review-blocked');
+      expect(result.reason).toContain('c002-blocked-agent');
+      expect(result.reason).toContain('scripted provider unavailable');
+      expect(result.reason).not.toContain('stale-review-identity');
+    }
+    const records = repoEffects(repo).openLedger(state.branch).load().records;
+    expect(
+      records.filter((record) => record.kind === 'cycle').map((record) => record.reviewer),
+    ).toEqual(['coderabbit', 'agent:reviewer']);
+  });
+
   test('an unconfigured reviewer terminal cycle cannot satisfy readiness', async () => {
     await repo.write(
       'cq.json',

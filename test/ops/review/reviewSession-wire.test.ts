@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockLanguageModelV4 } from 'ai/test';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AiSdkDriver, serializeRequestForScan } from '../../../src/driver/ai-sdk/index.js';
+import {
+  AiSdkDriver,
+  RG_MINIMUM_VERSION,
+  serializeRequestForScan,
+  type AiSdkDriverOptions,
+} from '../../../src/driver/ai-sdk/index.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
@@ -132,12 +137,20 @@ function expectUserPrompt(serialized: string, prompt: string): void {
   expect(texts).toContain(prompt);
 }
 
-function wireFactory(root: string, model: MockLanguageModelV4, calls: WireCall[]): DriverFactory {
+function wireFactory(
+  root: string,
+  model: MockLanguageModelV4,
+  calls: WireCall[],
+  options: { resolveRg?: AiSdkDriverOptions['resolveRg'] } = {},
+): DriverFactory {
   return {
     resolve: (request) => {
       const driver = new AiSdkDriver({
         sessionsDir: join(root, 'sessions'),
         ...(request.harness === undefined ? {} : { harnessConfig: request.harness }),
+        // Deterministic probe default; tests inject their own when they need
+        // a specific capability outcome.
+        resolveRg: options.resolveRg ?? (async () => ({ ok: true, version: RG_MINIMUM_VERSION })),
         beforeRequest: async (text, contents = [], context) => {
           calls.push({
             text,
@@ -463,6 +476,66 @@ describe('review session wire hook', () => {
     expect(evidence.status).toBe('error');
   });
 
+  it('offers the fixed read-only reference surface and records the rg capability when search is allowed', async () => {
+    const root = await scratch();
+    await writeFile(join(root, 'src/dep.ts'), 'export const dep = 1;\n', 'utf8');
+    const calls: WireCall[] = [];
+    const scanCalls: ScanComponentInput[][] = [];
+    const plan = planFor();
+    let generated = 0;
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        generated += 1;
+        if (generated === 1) return toolCallResult('read', { path: 'src/dep.ts' });
+        return textResult(JSON.stringify({ findings: [] }));
+      },
+    });
+    const evidence = evidenceFor();
+    const result = await runReviewSession(wireFactory(root, model, calls), {
+      ...runInput(root, plan, evidence),
+      searchTools: true,
+      scanSecrets: recordingScanner(scanCalls),
+      onUsage: () => undefined,
+    });
+    expect(result.status).toBe('ok');
+    expect(generated).toBe(2);
+    expect(evidence.status).toBe('complete');
+    expect(evidence.deliveries).toHaveLength(1);
+    // The injected probe's outcome rides the session evidence: search tools
+    // were offered and the capability was observed.
+    expect(evidence.capabilities).toEqual({
+      rg: {
+        available: true,
+        version: RG_MINIMUM_VERSION,
+        minimum: RG_MINIMUM_VERSION,
+        probe: 'ok',
+      },
+    });
+  });
+
+  it('keeps a read-only file-only surface and no capability record when searchTools is false', async () => {
+    const root = await scratch();
+    const calls: WireCall[] = [];
+    const scanCalls: ScanComponentInput[][] = [];
+    const plan = planFor();
+    const model = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => textResult(JSON.stringify({ findings: [] })),
+    });
+    const evidence = evidenceFor();
+    const result = await runReviewSession(wireFactory(root, model, calls), {
+      ...runInput(root, plan, evidence),
+      searchTools: false,
+      scanSecrets: recordingScanner(scanCalls),
+      onUsage: () => undefined,
+    });
+    expect(result.status).toBe('ok');
+    expect(evidence.status).toBe('complete');
+    // A session without any search tool never probes: no capability record.
+    expect(evidence.capabilities).toBeUndefined();
+  });
+
   it('refuses a path-scoped component before dispatch through the outer reviewer', async () => {
     const root = await scratch();
     let resolveCalls = 0;
@@ -491,5 +564,191 @@ describe('review session wire hook', () => {
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('protected content');
     expect(resolveCalls).toBe(0);
+  });
+});
+
+describe('agent bounded rate-limit retry (#551)', () => {
+  it.each([
+    ['retry-after then complete', 'rate-limit', 2000, 60_000, 1000, false, 2, 'ok'],
+    ['zero retry-after then complete', 'rate-limit', 0, 60_000, 1000, false, 2, 'ok'],
+    ['negative retry-after', 'rate-limit', -1, 60_000, 1000, false, 1, 'needs-human'],
+    ['invalid retry-after', 'rate-limit', Number.NaN, 60_000, 1000, false, 1, 'needs-human'],
+    ['fallback then complete', 'rate-limit', undefined, 60_000, 1000, false, 2, 'ok'],
+    ['second rate limit', 'rate-limit', 2000, 60_000, 1000, true, 2, 'needs-human'],
+    ['wait exceeds wall', 'rate-limit', 2000, 1000, 1000, false, 1, 'needs-human'],
+    ['wait exceeds cap', 'rate-limit', 600_000, 900_000, 1000, false, 1, 'needs-human'],
+    ['tokens spent', 'rate-limit', 2000, 60_000, 3, false, 1, 'needs-human'],
+    ['auth refusal', 'auth', 2000, 60_000, 1000, false, 1, 'needs-human'],
+    ['quota refusal', 'quota', 2000, 60_000, 1000, false, 1, 'needs-human'],
+  ] as const)(
+    '%s',
+    async (_label, errorClass, retryAfterMs, wall, tokens, twice, attempts, status) => {
+      const root = await scratch();
+      const plan = planFor();
+      const evidence = evidenceFor();
+      let calls = 0;
+      const waits: number[] = [];
+      const advisories: string[] = [];
+      const factory: DriverFactory = {
+        resolve: (request) => ({
+          lane: 'ai-sdk',
+          modelSpec: request.modelSpec,
+          driver: {
+            run: async (invocation) => {
+              calls++;
+              await request.beforeRequest?.(
+                JSON.stringify({ prompt: [{ role: 'user', content: invocation.prompt }] }),
+                [{ text: invocation.prompt }],
+                { kind: 'model-request' },
+              );
+              return {
+                stopReason: calls === 1 || twice ? 'error' : 'complete',
+                errorClass,
+                structuredOutput: { findings: [] },
+                usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+                ...(retryAfterMs === undefined ? {} : { providerSignals: { retryAfterMs } }),
+              };
+            },
+          },
+        }),
+      };
+      const result = await runReviewSession(factory, {
+        ...runInput(root, plan, evidence),
+        maxTokens: tokens,
+        scanSecrets: recordingScanner([]),
+        onUsage: () => undefined,
+        remainingWallMs: () => wall,
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
+        onAdvisories: (items) => {
+          advisories.push(...items);
+        },
+      });
+      expect(result.status).toBe(status);
+      expect(calls).toBe(attempts);
+      expect(waits).toEqual(attempts === 2 ? [retryAfterMs ?? 30_000] : []);
+      expect(evidence.usage.input).toBe(2 * attempts);
+      expect(evidence.requests).toHaveLength(attempts);
+      expect(evidence.deliveries).toHaveLength(1);
+      if (attempts === 2) {
+        expect(evidence.attempts).toBe(2);
+        expect(advisories.join(' ')).toContain('rate-limit');
+      }
+    },
+  );
+});
+
+describe('agent rate-limit refusal states the wait and cause (#578)', () => {
+  it.each([
+    ['cap', 600_000, 900_000, 1000, 'rate-limit wait 600000ms not retried (cap)'],
+    ['wall', 2000, 1000, 1000, 'rate-limit wait 2000ms not retried (wall)'],
+    ['tokens', 2000, 60_000, 3, 'rate-limit wait 2000ms not retried (tokens)'],
+    ['invalid', -1, 60_000, 1000, 'rate-limit wait -1ms not retried (invalid)'],
+    ['default wait', undefined, 1000, 1000, 'rate-limit wait 30000ms not retried (wall)'],
+  ] as const)('%s', async (_label, retryAfterMs, wall, tokens, stated) => {
+    const root = await scratch();
+    const plan = planFor();
+    const evidence = evidenceFor();
+    let calls = 0;
+    const advisories: string[] = [];
+    const factory: DriverFactory = {
+      resolve: (request) => ({
+        lane: 'ai-sdk',
+        modelSpec: request.modelSpec,
+        driver: {
+          run: async (invocation) => {
+            calls++;
+            await request.beforeRequest?.(
+              JSON.stringify({ prompt: [{ role: 'user', content: invocation.prompt }] }),
+              [{ text: invocation.prompt }],
+              { kind: 'model-request' },
+            );
+            return {
+              stopReason: 'error',
+              errorClass: 'rate-limit',
+              error: 'Rate limit reached for requests',
+              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              ...(retryAfterMs === undefined ? {} : { providerSignals: { retryAfterMs } }),
+            };
+          },
+        },
+      }),
+    };
+    const result = await runReviewSession(factory, {
+      ...runInput(root, plan, evidence),
+      maxTokens: tokens,
+      scanSecrets: recordingScanner([]),
+      onUsage: () => undefined,
+      remainingWallMs: () => wall,
+      sleep: async () => {
+        throw new Error('a refused rate limit must not wait');
+      },
+      onAdvisories: (items) => {
+        advisories.push(...items);
+      },
+    });
+    expect(calls).toBe(1);
+    expect(result).toMatchObject({ status: 'needs-human', errorClass: 'rate-limit' });
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain(stated);
+      expect(result.reason).toContain('Rate limit reached for requests');
+    }
+    expect(advisories).toEqual([`session ${plan.id}: ${stated}`]);
+  });
+
+  it('names the wall when it runs out during the wait', async () => {
+    const root = await scratch();
+    const plan = planFor();
+    const evidence = evidenceFor();
+    let calls = 0;
+    let wall = 60_000;
+    const advisories: string[] = [];
+    const factory: DriverFactory = {
+      resolve: (request) => ({
+        lane: 'ai-sdk',
+        modelSpec: request.modelSpec,
+        driver: {
+          run: async (invocation) => {
+            calls++;
+            await request.beforeRequest?.(
+              JSON.stringify({ prompt: [{ role: 'user', content: invocation.prompt }] }),
+              [{ text: invocation.prompt }],
+              { kind: 'model-request' },
+            );
+            return {
+              stopReason: 'error',
+              errorClass: 'rate-limit',
+              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              providerSignals: { retryAfterMs: 2000 },
+            };
+          },
+        },
+      }),
+    };
+    const result = await runReviewSession(factory, {
+      ...runInput(root, plan, evidence),
+      maxTokens: 1000,
+      scanSecrets: recordingScanner([]),
+      onUsage: () => undefined,
+      remainingWallMs: () => wall,
+      sleep: async () => {
+        wall = 0;
+      },
+      onAdvisories: (items) => {
+        advisories.push(...items);
+      },
+    });
+    expect(calls).toBe(1);
+    expect(result).toMatchObject({ status: 'needs-human', errorClass: 'rate-limit' });
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('rate-limit wait 2000ms not retried (wall)');
+    expect(advisories).toEqual([
+      `session ${plan.id}: rate-limit wait 2000ms before retry 1`,
+      `session ${plan.id}: rate-limit wait 2000ms not retried (wall)`,
+    ]);
   });
 });

@@ -56,6 +56,27 @@ export interface DevCheckInput {
   target?: string;
   /** Explicit `a..b` commit range replacing the default merge-base pin; `b` must be HEAD. */
   range?: string;
+  /**
+   * Opt the automated test:narrow gate INTO the integration suite
+   * (`--include-integration`), for both the --base and --range forms. The
+   * selector's closure can name e2e files for plain src changes, and the
+   * gate refusal can never be satisfied from inside dev.check — the caller
+   * must opt in (S7 dogfood attempt A). Default off; the record carries the
+   * choice (includeIntegration: true) so readers can see the opt-in.
+   */
+  includeIntegration?: boolean;
+  /**
+   * Name the EXACT test files the gate runs (the wrapper's own escape for
+   * a too-broad automatic selection, S7 dogfood attempt B): replaces the
+   * `--base`/`--range` selection entirely, so a `range` supplied alongside
+   * is refused — the record must never pair a range with the
+   * named-selection disclosure. The names ride argv positionals
+   * after the flags, so a dash-prefixed value is refused here (option
+   * injection); the record discloses the narrowing as
+   * `testSelection: { mode: 'named', files }` — a reader must be able to
+   * tell a named gate from an automatic one.
+   */
+  testFiles?: string[];
 }
 
 /** The dev.check report — the ok value and the persisted check record's evidence. */
@@ -298,6 +319,39 @@ export function makeDevCheck(
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
+    // A named selection REPLACES the `--base`/`--range` selection entirely,
+    // so a range supplied alongside it would run no `--range` gate while the
+    // record still carried `range` next to `testSelection: { mode: 'named' }`
+    // — a reader could not tell which selection actually ran. The two
+    // selection inputs are mutually exclusive; refused BEFORE any gate runs,
+    // like the named-selection checks below.
+    if (input.range !== undefined && input.testFiles !== undefined)
+      return {
+        status: 'failed',
+        error:
+          'dev.check: range and testFiles are conflicting selections — testFiles replaces the range entirely; supply the range or the named files, not both',
+      };
+    // Named files ride argv as positionals AFTER the flags, so any
+    // dash-leading segment ("-x" or "test/-evil.test.ts" — a basename
+    // starting with '-' reaches getopt once the shell expands it) could be
+    // read as an option there. The wrapper refuses option-shaped values for
+    // the same reason. Refused BEFORE any gate runs.
+    const dashNamed = input.testFiles?.find((file) => /(^|\/)\-/.test(file));
+    if (dashNamed !== undefined)
+      return {
+        status: 'failed',
+        error: `dev.check: testFiles entries are file names, not options — refused: ${dashNamed}`,
+      };
+    // An empty named selection spreads to zero positionals, so the test:narrow
+    // gate would carry no --base/--range and no files (the wrapper's default
+    // selection runs) while the record still claims { mode: 'named', files:
+    // [] }. Refused BEFORE any gate runs, like the dash check above.
+    if (input.testFiles !== undefined && input.testFiles.length === 0)
+      return {
+        status: 'failed',
+        error:
+          'dev.check: testFiles is empty — a named selection must name at least one file, or omit testFiles to use the range/default selection',
+      };
     const target = input.target ?? DEFAULT_DEV_TARGET;
 
     // A range is resolved to commit shas; its end must BE HEAD, because the
@@ -365,8 +419,15 @@ export function makeDevCheck(
       config?.ok === true &&
       config.config.checks.length > 0 &&
       packageName !== '@camerontaylor/cq-toolkit'
-        ? config.config.checks
+        ? config.config.checks.filter((check) => check.addressOnly !== true)
         : null;
+    if (configuredChecks?.length === 0) {
+      return {
+        status: 'needs-human',
+        reason:
+          'dev.check: no repository checks configured (address-only checks require finding-file scope)',
+      };
+    }
     const configuredPatternsFile =
       configuredChecks !== null ? config?.config.review?.denylistPatternsFile : undefined;
     const configuredPatternsPath =
@@ -420,9 +481,15 @@ export function makeDevCheck(
           effects,
           'test:narrow',
           'pnpm',
-          input.range !== undefined
-            ? ['test:narrow', '--range', `${state.base}..${state.head}`]
-            : ['test:narrow', '--base', state.base],
+          [
+            'test:narrow',
+            ...(input.includeIntegration === true ? ['--include-integration'] : []),
+            ...(input.testFiles !== undefined
+              ? input.testFiles
+              : input.range !== undefined
+                ? ['--range', `${state.base}..${state.head}`]
+                : ['--base', state.base]),
+          ],
           TEST_NARROW_TIMEOUT_MS,
         ),
       );
@@ -488,6 +555,22 @@ export function makeDevCheck(
           head: state.head,
           dirtySha256: state.dirtySha256,
           ...(input.range !== undefined ? { range: input.range } : {}),
+          // Only the legacy test:narrow gate consumes these inputs; with
+          // configured checks (cq.json) no test gate runs, so the record
+          // must not claim a test scope it never had.
+          ...(configuredChecks === null && input.includeIntegration === true
+            ? { includeIntegration: true }
+            : {}),
+          ...(configuredChecks === null
+            ? {
+                testSelection:
+                  input.testFiles !== undefined
+                    ? { mode: 'named', files: [...input.testFiles] }
+                    : input.range !== undefined
+                      ? { mode: 'range' }
+                      : { mode: 'base' },
+              }
+            : {}),
           passed,
           gates,
           loadStamp,

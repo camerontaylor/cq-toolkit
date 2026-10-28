@@ -161,3 +161,16 @@ describe('cq.json effective policy', () => {
     ).toBeUndefined();
   });
 });
+
+test('bounded test adapter defaults to the tests kind', () => {
+  const config: CqConfig = {
+    schemaVersion: 2,
+    checks: [
+      {
+        adapter: 'test-narrow',
+        command: { command: 'node', args: ['scripts/check-related-tests.mjs'] },
+      },
+    ],
+  };
+  expect(resolveCqConfigDefaults(config, flags).checks[0]!.kind).toBe('tests');
+});
