@@ -589,7 +589,7 @@ Branch `fix/s7-dogfood-address-469-v5` @ `de5cefb6` = merge-queue `8fc58c22` (wi
 
 - **dev.check** `k001-de5cefb6`: green (knip skipped).
 - **review.run** @ `de5cefb6`: both reviewers TERMINAL. CodeRabbit `c001` gave 1 major finding: cq.json:73-74 should leave the experimental reviewer route and restore step `wallMs` 1 200 000. Agent `c002` found nothing (4 steps, ~35 k tokens, 0 tool failures).
-- **review.address:** one round, one fix (`zai`/`glm-5.3-flash` worker, 54 s). Commit `86633e93` reverts cq.json to the merge-queue values; disposition `fixed`, `verifiedHead` = `86633e93`, nothing open or failed. 568 868 ms; input 49 750 / output 15 313 / cache-read 53 568 tokens (modeled $0.0115).
+- **review.address:** one round, one fix by the `zai`/`glm-5.3-flash` worker: initial edit 54 s plus feedback 165 s (~219 s of worker time), then reviewer closure 37 s. Commit `86633e93` reverts cq.json to the merge-queue values; disposition `fixed`, `verifiedHead` = `86633e93`, nothing open or failed. 568 868 ms; input 49 750 / output 15 313 / cache-read 53 568 tokens (modeled $0.0115).
 - **Final re-review** @ `86633e93`: CodeRabbit `c004` and agent `c005` both TERMINAL with 0 findings. Final dev.check `k002-86633e93` green.
 - **Publication:** the feature branch was pushed and PR **#620** opened against merge-queue, **ready**, with the generated `cq:dev-readiness` record (base pin `8fc58c22`, head `86633e93`). Nothing was pushed to merge-queue itself.
 - **S7 acceptance is met** for the exercised path: check → review.run → review.address → final gates → push → ready PR with a readiness record.
