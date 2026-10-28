@@ -147,6 +147,15 @@ describe('review.address composition', () => {
       expect(reportOf(result).reasons.join(' ')).toMatch(/budget/);
       // S7 H (D1): the structured budget marker a composition publishes on.
       expect(reportOf(result).stop).toBe('budget');
+      // #490: the budget stop came before any re-review, so the rows are the
+      // dispatched snapshot. 'a' carries its recorded outcome; 'b' was never
+      // attempted and stays open.
+      expect(
+        reportOf(result).findings.map(({ id, status, reason }) => ({ id, status, reason })),
+      ).toEqual([
+        { id: 'a', status: 'deferred', reason: 'needs owner' },
+        { id: 'b', status: 'open', reason: undefined },
+      ]);
       expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
         reportOf(result),
       );
@@ -260,6 +269,11 @@ describe('review.address composition', () => {
       })({ ...f.input, rounds: 1 });
       expect(result.status).toBe('needs-human');
       expect(reportOf(result).openBlocking[0]?.status).toBe('open');
+      // #490: the validated re-review's rows are authoritative; the earlier
+      // claimed fix never overwrites the reopened row.
+      expect(reportOf(result).findings.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: 'a', status: 'open' },
+      ]);
     } finally {
       await f.cleanup();
     }
@@ -329,6 +343,26 @@ describe('review.address composition', () => {
       expect(reportOf(result).reasons.some((reason) => reason.includes('ledger unavailable'))).toBe(
         true,
       );
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('#490: a failed disposition write leaves the dispatched row open', async () => {
+    const f = await fixture();
+    try {
+      const result = await makeReviewAddress({
+        ...f.deps,
+        disposition: async () => ({ status: 'failed', error: 'ledger unavailable' }),
+        review: async () => ({
+          status: 'needs-human',
+          reason: 'review.run: not every configured reviewer completed a terminal cycle',
+        }),
+      })({ ...f.input, rounds: 1 });
+      expect(result.status).toBe('needs-human');
+      expect(reportOf(result).fixes.map((fix) => fix.finding.status)).toEqual(['open']);
+      expect(reportOf(result).findings.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: 'a', status: 'open' },
+      ]);
     } finally {
       await f.cleanup();
     }
@@ -656,6 +690,11 @@ describe('blocked re-review marker (#509)', () => {
     expect(reviews).toBe(2);
     expect(result.status).toBe('needs-human');
     expect(reportOf(result).stop).toBe('rereview-blocked');
+    // #490: no re-review replaced the dispatched rows, so the fixed finding's
+    // row says fixed (S7 H/K/L reported every such row 'open').
+    expect(
+      reportOf(result).findings.map(({ id, status, reason }) => ({ id, status, reason })),
+    ).toEqual([{ id: 'a', status: 'fixed', reason: 'verified' }]);
   });
 
   test('a retry that exhausts the token budget carries budget, never rereview-blocked', async () => {

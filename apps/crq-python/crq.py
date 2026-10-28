@@ -26,6 +26,7 @@ import repair_tick
 import coverage
 import author_quota
 import author_lease
+import review_receipt
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -122,7 +123,15 @@ def event(kind: str, **data: Any) -> None:
 
 
 def load_queue() -> Dict[str, Any]:
-    return json.loads(QUEUE.read_text())
+    q = json.loads(QUEUE.read_text())
+    # Idempotently retire the superseded second-cycle debt. Explicit optional
+    # requeues survive reload; running reviews still have to be harvested.
+    for item in q["items"]:
+        item.pop("boost", None)
+        if (item.get("kind") == "open" and completed_open_cycles(item) >= 1
+                and item.get("state") in ("pending", "blocked") and not item.get("optional_cycle")):
+            item.update(state="done", not_before=None, last_error=None)
+    return q
 
 
 def save_queue(q: Dict[str, Any]) -> None:
@@ -283,18 +292,26 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
             if not line:
                 continue
             try:
-                events.append(json.loads(line))
+                value = json.loads(line)
+                if not isinstance(value, dict) or not isinstance(value.get("type"), str) or value.get("type") not in {
+                        "finding", "complete", "error", "action_required", "status", "heartbeat", "review_context"}:
+                    bad_lines += 1
+                    continue
+                if value.get("type") == "finding" and not (isinstance(value.get("severity"), str) and value["severity"]):
+                    bad_lines += 1
+                events.append(value)
             except ValueError:
                 bad_lines += 1
     errors = [e for e in events if e.get("type") == "error"]
     actions = [e for e in events if e.get("type") == "action_required" or e.get("status") == "awaiting_confirmation"]
     findings = [e for e in events if e.get("type") == "finding"]
-    terminal = [e for e in events if e.get("type") not in ("heartbeat", "finding")]
+    terminal = events
     last = terminal[-1] if terminal else {}
     complete = [e for e in events if e.get("type") == "complete"]
     counts = {s: 0 for s in SEVERITIES}
     for f in findings:
-        counts[f.get("severity", "none")] = counts.get(f.get("severity", "none"), 0) + 1
+        severity = f.get("severity") if isinstance(f.get("severity"), str) else "none"
+        counts[severity] = counts.get(severity, 0) + 1
     res: Dict[str, Any] = {"exit": exit_code, "events": len(events), "bad_lines": bad_lines,
                            "findings": len(findings), "severity_counts": counts}
     if actions:
@@ -307,7 +324,8 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         if SIZE_REFUSAL.search(f"{et} {msg}"):
             res.update(outcome="too_large")
         elif "rate" in et or "limit" in et or "quota" in et or "rate limit" in msg.lower():
-            wait = str((e.get("metadata") or {}).get("waitTime", ""))
+            metadata = e.get("metadata")
+            wait = str(metadata.get("waitTime", "")) if isinstance(metadata, dict) else ""
             m = re.search(r"(\d+)\s*(second|minute|hour)", wait)
             mins = None
             if m:
@@ -322,7 +340,12 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         res.update(outcome="interrupted", message="no exit status recorded")
     elif exit_code != 0:
         res.update(outcome="error", message=f"CLI exit {exit_code}")
-    elif not complete or last.get("type") != "complete":
+    elif bad_lines:
+        res.update(outcome="malformed", message="stream contains malformed or unrecognized events")
+    elif complete and re.search(r"no fresh (detailed )?(file )?review|review (was )?skipped|skipped (this )?review",
+                                str(complete[0].get("message", "")), re.I):
+        res.update(outcome="skipped", message="affirmative no-fresh/skipped completion")
+    elif len(complete) != 1 or not last or last.get("type") != "complete":
         res.update(outcome="interrupted", message="stream did not end with a terminal complete event")
     elif last.get("status") != "review_completed":
         res.update(outcome="skipped", message=f"complete.status={last.get('status')}")
@@ -345,11 +368,11 @@ def findings_md(ndjson: Path, meta: Dict[str, Any], cls: Dict[str, Any]) -> str:
             e = json.loads(line)
         except ValueError:
             continue
-        if e.get("type") != "finding":
+        if not isinstance(e, dict) or e.get("type") != "finding":
             continue
         i += 1
         text = e.get("codegenInstructions") or e.get("comment") or ""
-        out += [f"## F{i} [{e.get('severity')}] {e.get('fileName')}", "", "```text", text.strip()[:4000], "```", ""]
+        out += [f"## F{i} [{e.get('severity')}] {e.get('fileName')}", "", "```text", str(text).strip()[:4000], "```", ""]
     return "\n".join(out) + "\n"
 
 
@@ -567,6 +590,215 @@ def build_synthetic(item: Dict[str, Any]) -> Tuple[str, str, int]:
     return base, head, len(paths)
 
 
+# ----------------------------------------------------------- merged-current Q1
+
+
+def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
+    """Full affected files at T, without blame/survival or historical content."""
+    if not is_ancestor(merge, target):
+        raise NotReady("not-yet-promoted: source merge is not an ancestor of selected target")
+    # An explicit first parent is required. Never guess at missing source history.
+    pre = git("rev-parse", f"{merge}^1")
+    source = run(["git", "diff", "--name-only", "--no-renames", "-z", pre, merge], cwd=CLONE).stdout
+    names = sorted(set(source.rstrip("\0").split("\0"))) if source else []
+    raw = run(["git", "diff", "--name-status", "-M50%", "-z", merge, target], cwd=CLONE).stdout
+    fields = raw.rstrip("\0").split("\0") if raw else []
+    renames = {}
+    removed = []
+    added = []
+    while fields:
+        status = fields.pop(0)
+        old = fields.pop(0)
+        if status.startswith(("R", "C")):
+            new = fields.pop(0)
+            if status.startswith("R"):
+                renames[old] = new
+                removed.append(old)
+                added.append(new)
+        elif status == "D":
+            removed.append(old)
+        elif status == "A":
+            added.append(old)
+    # Git's rename heuristic can arbitrarily pair duplicate identical files.
+    # Such lineage is not enough to claim current scope; retain ambiguity.
+    old_blobs = [git("rev-parse", merge + ":" + path) for path in removed]
+    new_blobs = [git("rev-parse", target + ":" + path) for path in added]
+    result = []
+    total = 0
+    for original in names:
+        path = original
+        evidence = "same-path-current"
+        if not path_exists(target, path) and path in renames:
+            blob = git("rev-parse", merge + ":" + path)
+            path = renames[path]
+            if old_blobs.count(blob) > 1 or new_blobs.count(blob) > 1:
+                result.append({"source_path": original, "path": path, "resolution": "git-rename-M50",
+                               "disposition": "ambiguous", "reason": "duplicate blobs make rename lineage ambiguous"})
+                continue
+            evidence = "git-rename-M50"
+        row = {"source_path": original, "path": path, "resolution": evidence}
+        if any(c in path for c in "\n\r\t\\"):
+            row.update(disposition="unsupported", reason="path cannot be safely scanned")
+            result.append(row)
+            continue
+        ls = run(["git", "ls-tree", "-z", target, "--", ":(literal)" + path], cwd=CLONE).stdout
+        entries = [e for e in ls.split("\0") if e]
+        if not entries:
+            row.update(disposition="deleted", reason="no current path or evidenced rename")
+        elif len(entries) != 1:
+            row.update(disposition="ambiguous", reason="current path resolves to multiple entries")
+        else:
+            mode, typ, rest = entries[0].split(" ", 2)
+            blob = rest.split("\t", 1)[0]
+            row.update(blob=blob, mode=mode)
+            if typ != "blob" or mode not in ("100644", "100755"):
+                row.update(disposition="unsupported", reason="non-regular file; never dereferenced")
+            else:
+                size = int(git("cat-file", "-s", blob))
+                row["bytes"] = size
+                if size > 262144 or total + size > 2097152:
+                    row.update(disposition="unsupported", reason="current content exceeds scope byte cap")
+                else:
+                    data = subprocess.run(["git", "cat-file", "blob", blob], cwd=CLONE,
+                                          capture_output=True, check=True).stdout
+                    try:
+                        data.decode("utf-8")
+                        text = b"\0" not in data
+                    except UnicodeDecodeError:
+                        text = False
+                    if not text:
+                        row.update(disposition="unsupported", reason="binary or non-UTF8 current blob")
+                    elif not size:
+                        row.update(disposition="excluded-with-reason", reason="empty current file")
+                    else:
+                        total += size
+                        row.update(disposition="renamed" if path != original else "included")
+        result.append(row)
+    return result
+
+
+def build_current_projection(target: str, paths: List[str]) -> Tuple[str, str]:
+    """B = T minus selected files; H.tree = T, so B..H contains only additions."""
+    with tempfile.TemporaryDirectory() as td:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(td) / "index"), GIT_LITERAL_PATHSPECS="1")
+        git("read-tree", target, env=env)
+        for path in sorted(set(paths)):
+            git("update-index", "--force-remove", "--", path, env=env)
+        tree = git("write-tree", env=env)
+    ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
+                 GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
+    base = git("commit-tree", tree, "-p", target, "-m", "crq current affected files removed", env=ident)
+    head = git("commit-tree", target + "^{tree}", "-p", base, "-m", "crq current affected files restored", env=ident)
+    return base, head
+
+
+def current_document(item: Dict[str, Any], outcome: str, *, meta=None, cls=None, rdir=None) -> Dict[str, Any]:
+    findings = []
+    artifacts = {}
+    if rdir:
+        for name in ("meta.json", "review.ndjson", "exit.json", "secret-scan.json"):
+            if (rdir / name).exists():
+                artifacts[name] = sha256_file(str(rdir / name))
+        stream = rdir / "review.ndjson"
+        for line in stream.read_text(errors="replace").splitlines() if stream.exists() else []:
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict) and value.get("type") == "finding":
+                findings.append(value)
+    return {"version": 1, "item_id": item["id"], "request_id": item.get("request_id"), "source": item["subject"],
+            "capture": item["capture"], "outcome": outcome, "classification": cls,
+            "counted": bool(cls and cls["counted"]), "findings": findings,
+            "run_id": (meta or {}).get("run_id"), "started_at": (meta or {}).get("started_at"),
+            "artifacts": artifacts, "remediation": "disabled/deferred", "independent_acceptance": False,
+            "cli_functional_acceptance": "pending-D1"}
+
+
+def prepare_current(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[Dict[str, Any]]:
+    if dry:
+        return {"base": "(dispatch-pin)", "head": "(dispatch-pin)", "target": item["subject"]["target_selector"],
+                "cycle": None, "branch": None, "label": "affected current files (not captured)", "notes": []}
+    if any(i.get("kind") == "merged" and i.get("pr") == item["pr"] and i.get("state") == "reviewing"
+           for i in q["items"]):
+        raise NotReady("legacy source review still owns a live/ambiguous run; no new dispatch")
+    if not item.get("capture"):
+        selector = item["subject"]["target_selector"]
+        target = git("rev-parse", review_receipt.SELECTORS[selector] + "^{commit}")
+        paths = current_paths(item["merge_commit"], target)
+        selected = sorted({r["path"] for r in paths if r["disposition"] in ("included", "renamed")})
+        capture = {"target": target, "tree": git("rev-parse", target + "^{tree}"), "paths": paths,
+                   "scope_digest": review_receipt.digest(paths), "policy": review_receipt.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1",
+                   "reviewer_version": run(["coderabbit", "--version"]).stdout.strip()[:100],
+                   "captured_at": iso()}
+        capture["equivalence"] = review_receipt.current_equivalence(capture)
+        if selected:
+            capture["base"], capture["head"] = build_current_projection(target, selected)
+            # Keep objects reachable through GC and daemon/caller restart.
+            for part in ("base", "head"):
+                git("update-ref", f"refs/crq/current/{item['id']}/{part}", capture[part])
+        item["capture"] = capture
+        save_queue(q)
+    capture = item["capture"]
+    for other in q["items"]:
+        if other is item or other.get("kind") != review_receipt.KIND:
+            continue
+        if (other.get("capture") or {}).get("equivalence") != capture["equivalence"]:
+            continue
+        if other.get("receipt_id") and other.get("state") in ("done", "no-current-code", "unsupported"):
+            # Verify retained bytes and semantic proof, never reuse legacy synthetic credit.
+            manifest = review_receipt.read_receipt(STATE / "receipts", other["receipt_id"])
+            document = json.loads((STATE / "receipts" / (manifest["receipt_id"] + ".json")).read_text())
+            if review_receipt.current_equivalence(document["capture"]) != review_receipt.current_equivalence(capture):
+                raise ValueError("reuse receipt scope mismatch")
+            if other["state"] == "done" and not review_receipt.reusable_current(document, capture):
+                continue
+            item.update(state=other["state"], receipt_id=other["receipt_id"], reused_from=other["id"])
+            save_queue(q)
+            return None
+        if other.get("state") == "reviewing":
+            raise NotReady("equivalent current subject already reviewing: " + other["id"])
+    selected = [r for r in capture["paths"] if r["disposition"] in ("included", "renamed")]
+    if not selected:
+        unsupported = any(r["disposition"] in ("unsupported", "ambiguous") for r in capture["paths"])
+        outcome = "unsupported" if unsupported else "no-current-code"
+        item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts", current_document(item, outcome))
+        item["state"] = outcome
+        save_queue(q)
+        return None
+    return {"base": capture["base"], "head": capture["head"], "target": capture["target"],
+            "review_pin": capture["target"], "cycle": None, "branch": None,
+            "label": "affected current files at " + capture["target"], "notes": []}
+
+
+def enqueue_merged(pr: int, merge_sha: str, request_id: str, target_selector: str = "promoted-main") -> Dict[str, Any]:
+    # Verify before touching the queue. PR number alone is never scope authority.
+    info = pr_info(pr)
+    if (info.get("number") != pr or info.get("state") != "MERGED" or
+            (info.get("mergeCommit") or {}).get("oid") != merge_sha or info.get("baseRefName") != "merge-queue"):
+        raise ValueError("source must be a verified merged PR into merge-queue with matching merge SHA")
+    q = load_queue()
+    result = review_receipt.enroll(q, repo=REPO, pr=pr, merge_sha=merge_sha, request_id=request_id,
+                                   at=iso(), target_selector=target_selector)
+    save_queue(q)
+    return review_receipt.status(q, request_id)
+
+
+def current_report(request_id: str, receipt_id: Optional[str] = None, cursor: Optional[str] = None) -> Dict[str, Any]:
+    status = review_receipt.status(load_queue(), request_id)
+    actual = status["receipt_id"]
+    if receipt_id and receipt_id != actual:
+        raise ValueError("receipt does not match request")
+    if not actual:
+        if cursor:
+            raise ValueError("request has no receipt")
+        # Pending path manifests may be large too: supported status is deliberately bounded.
+        return {k: v for k, v in status.items() if k != "capture"}
+    return review_receipt.read_receipt(STATE / "receipts", actual, cursor)
+
+
 # ----------------------------------------------------------- planning a review
 
 
@@ -586,11 +818,11 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     if item.get("pinned_base"):
         # The merge-base only moves when the PR absorbs newer target commits
         # (restack/rebase/merge-in). Then old-pin..head would drag unrelated
-        # target changes into the review, so the old pair cannot complete.
+        # target changes into the review, so prior review evidence is stale.
         # (Ancestry alone is not enough: an old target pin stays an ancestor.)
         if pin != item["pinned_base"]:
             notes.append(f"base drift: merge-base moved {item['pinned_base'][:10]} → {pin[:10]} (PR restacked) "
-                         f"→ earlier cycles void, re-pinned, 2 cycles owed")
+                         f"→ earlier cycles void, re-pinned, 1 cycle owed")
             if not dry:
                 item.setdefault("voided_cycles", []).extend(item.get("cycles", []))
                 item["cycles"] = []
@@ -601,15 +833,15 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     else:
         if item.get("prior_cycles") and item.get("prior_base") and item["prior_base"] != pin:
             notes.append(f"prior cycle-1 base {item['prior_base'][:10]} ≠ current merge-base {pin[:10]} "
-                         f"→ prior cycle cannot pair with a new one; 2 cycles owed")
+                         f"→ prior cycle invalid on this base; 1 cycle owed")
             if not dry:
                 item["voided_prior_cycles"] = item["prior_cycles"]
                 item["prior_cycles"] = 0
         if not dry:
             item["pinned_base"] = pin
             item["target_ref"] = target
-    cycle = item.get("prior_cycles", 0) + len(item.get("cycles", [])) + 1
-    return {"base": pin, "head": head, "target": target, "label": f"cycle {cycle} of 2", "cycle": cycle,
+    cycle = completed_open_cycles(item) + 1
+    return {"base": pin, "head": head, "target": target, "label": "cycle 1 (required)" if cycle == 1 else "additional cycle (optional)", "cycle": cycle,
             "notes": notes, "branch": info["headRefName"], "review_pin": pin}
 
 
@@ -725,13 +957,22 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     run_id = f"{item['id']}-{now().strftime('%Y%m%dT%H%M%SZ')}"
     rdir = RUNS / run_id
     rdir.mkdir(parents=True)
-    ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json")
+    if item["kind"] == review_receipt.KIND:
+        patch = git("diff", "--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color",
+                    "--unified=0", plan["base"], plan["head"])
+        ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"])
+    else:
+        ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json")
     if not ok:
         item["state"] = "blocked"
         item["last_error"] = (f"secret scan failed before upload: {len(scan['denylist_hits'])} denylist + "
                               f"{len(scan['gitleaks_hits'])} gitleaks hit(s) — see {rdir}/secret-scan.json")
         if item["kind"] == author_quota.AUTHOR_KIND and "author_lease" in item:
             item["author_lease"]["secret_scan_blocked"] = True
+            save_queue(q)
+        if item["kind"] == review_receipt.KIND:
+            item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
+                current_document(item, "blocked-secret-scan", rdir=rdir))
             save_queue(q)
         event("blocked", item=item["id"], reason=item["last_error"])
         return run_id
@@ -745,8 +986,8 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # authorizes the agent fallback, instead of failing every tick.
         raise author_quota.AuthorRefused("author head cannot be checked out") from exc
     cli_cmd = ["coderabbit", "review", "--agent"]
-    if item["kind"] == author_quota.AUTHOR_KIND:
-        # Author cycles review the COMMITTED base..head (the original manual cycle 1
+    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND):
+        # Author/current cycles review the COMMITTED base..head (the original manual cycle 1
         # form) on a clean worktree, never uncommitted working-tree edits. The
         # natural argv is deliberately unchanged.
         cli_cmd.append("--committed")
@@ -757,6 +998,9 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
+    if item["kind"] == review_receipt.KIND:
+        meta["capture"] = item["capture"]
+        meta["source"] = item["subject"]
     if item["kind"] in ("merged", "coverage"):
         meta["planned_paths"] = (item.get("measure") or {}).get("synthetic_paths")
         meta["reviewed_tip"] = (item.get("measure") or {}).get("merge_queue")
@@ -994,6 +1238,26 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     cls = classify(rdir / "review.ndjson", exit_code)
     (rdir / "classification.json").write_text(json.dumps(cls, indent=2) + "\n")
     (rdir / "findings.md").write_text(findings_md(rdir / "review.ndjson", meta, cls))
+    if item["kind"] == review_receipt.KIND:
+        # Receipt before queue mutation: a crash here is recovered by re-harvest.
+        partial = any(p["disposition"] in ("unsupported", "ambiguous") for p in item["capture"]["paths"])
+        outcome = ("partial-scope" if partial else "terminal-with-findings" if cls["findings"] else "terminal-clean") if cls["counted"] else cls["outcome"]
+        item["receipt_id"] = review_receipt.write_receipt(STATE / "receipts",
+            current_document(item, outcome, meta=meta, cls=cls, rdir=rdir))
+        item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
+                                              "counted": cls["counted"], "receipt_id": item["receipt_id"]})
+        item["run"] = None
+        # Separate from cycles: repair_tick.backfill must never enqueue these findings.
+        item["state"] = "done" if cls["counted"] else "blocked"
+        item["last_error"] = cls.get("message")
+        if cls["outcome"] == "rate_limited":
+            mins = cls.get("wait_minutes") or CONFIG["rate_limit_default_backoff_min"]
+            q["cooldown_until"] = iso(now() + dt.timedelta(minutes=mins + 2))
+        if cls["outcome"] in ("action_required", "auth"):
+            q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+        save_queue(q)
+        remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
+        return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (no repair)"
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
     attempt = {"run_id": r["run_id"], "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
@@ -1083,13 +1347,30 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     return f"{item['id']}: {o} (not counted) → {item['state']}"
 
 
+def completed_open_cycles(item: Dict[str, Any]) -> int:
+    # Historical prior_cycles credits have no reviewed head. Preserve that
+    # metadata, but only recorded terminal cycles satisfy the head review.
+    return len(item.get("cycles", []))
+
+
+def optional_open(item: Dict[str, Any]) -> bool:
+    return item["kind"] == "open" and completed_open_cycles(item) >= 1
+
+
+def additional_cycle(item: Dict[str, Any]) -> bool:
+    return optional_open(item) or (item["kind"] == author_quota.AUTHOR_KIND
+                                   and (item.get("author") or {}).get("cycle", 1) > 1)
+
+
+def optional_wait(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    return additional_cycle(item) and any(
+        i["state"] == "pending" and rank(i) <= 3 for i in q["items"] if i is not item)
+
+
 def advance_open(item: Dict[str, Any]) -> None:
-    done = item.get("prior_cycles", 0) + len(item.get("cycles", []))
-    if done >= 2:
-        item["state"] = "done"
-    else:
-        item["state"] = "pending"
-        item["boost"] = True  # finish the PR's pair on the same pin before starting new PRs
+    item["state"] = "done" if completed_open_cycles(item) >= 1 else "pending"
+    item.pop("boost", None)
+    item.pop("optional_cycle", None)
 
 
 def ledger_append(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any], rdir: Path) -> None:
@@ -2235,10 +2516,12 @@ def plan_promotion(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def rank(item: Dict[str, Any]) -> int:
-    """0 open PR cycles · 1 open-PR deltas (both awaiting merge) · 2 newly merged
-    follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog ·
-    4 author items and lowest-priority coverage (author dispatches; coverage is
-    only reached by the fallback)."""
+    """Required open 0, open delta 1, merged follow-ups/current 2, backlog 3,
+    author/coverage 4, optional additional cycles 5."""
+    if additional_cycle(item):
+        return 5
+    if item["kind"] == review_receipt.KIND:
+        return 2
     if item["kind"] == "coverage":
         return coverage.COVERAGE_RANK
     if item["kind"] == author_quota.AUTHOR_KIND:
@@ -2252,7 +2535,7 @@ def rank(item: Dict[str, Any]) -> int:
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
     # promotion (and its delta) takes the next start slot ahead of everything (docs/promotion-policy.md)
-    return (0 if item["kind"] == "promotion" else 1, 0 if item.get("boost") else 1, rank(item), item.get("order", 999))
+    return (0 if item["kind"] == "promotion" else 1, 0 if item.get("operator_priority") else 1, rank(item), item.get("order", 999))
 
 
 # ----------------------------------------------------------- enrollment
@@ -2286,6 +2569,8 @@ def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dic
     dup = next((i for i in q["items"] if i["id"] == fields.get("id")), None)
     if dup is not None:  # ids are unique: an existing item (even skipped) is sticky
         return dup
+    if fields.get("kind") == "open":
+        fields["prior_cycles"] = 0  # new PRs always owe a real completed review
     item = {"order": next_order(q), "state": "pending", "cycles": [], "attempts": [], **fields}
     item["notes"] = [f"{iso()} auto-enrolled: {fields.get('why', '')}"]
     item.pop("why", None)
@@ -2298,7 +2583,7 @@ def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dic
 
 def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
     """Each tick: (1) open non-draft PRs into merge-queue (or stacked on a chain
-    ending there) that are not enrolled → open item, two cycles; (2) a PR whose
+    ending there) that are not enrolled → open item, one required cycle; (2) a PR whose
     head moved past its last CLI review, with nothing in flight → one delta item
     for the new commits; (3) PRs merged into merge-queue after the seed →
     never CLI-reviewed: merged-tier item (supersession filter); reviewed at an
@@ -2320,10 +2605,10 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
         if not mine:
             stacked = "" if p["baseRefName"] == "merge-queue" else f", stacked on {p['baseRefName']}"
-            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=(2 - CONFIG["repair"].get("fix_pr_cycles", 1)) if p["headRefName"].startswith("crq/fix-") else 0,
+            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
                      why=f"open PR not yet enrolled{stacked}")
             continue
-        if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") for i in mine):
+        if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") and not optional_open(i) for i in mine):
             continue
         last = last_reviewed(q, n)
         own = False
@@ -2373,7 +2658,7 @@ def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     if not dep:
         return True
     d = next((i for i in q["items"] if i["id"] == dep), None)
-    return d is None or d["state"] in ("done", "skipped")
+    return d is None or d["state"] in ("done", "skipped") or additional_cycle(d)
 
 
 def coverage_fallback(q, log, dry, only):
@@ -2400,7 +2685,7 @@ def coverage_fallback(q, log, dry, only):
             q["items"].append(candidate)
             candidates = [candidate]
     available = False
-    for item in candidates:
+    for item in sorted(candidates, key=sort_key):
         if item.get("not_before") and parse_iso(item["not_before"]) > now() or not deps_met(q, item):
             continue
         available = True
@@ -2491,13 +2776,17 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG['max_inflight']})")
     else:
         for item in sorted(q["items"], key=sort_key):
-            if item["kind"] == "coverage":
-                continue
             if only and item["id"] != only:
                 continue
             if item["state"] != "pending":
                 continue
-            if only and item["kind"] == author_quota.AUTHOR_KIND and not dry:
+            if item["kind"] == "coverage":
+                if item.get("operator_priority"):
+                    started, has_coverage = coverage_fallback(q, log, dry, only)
+                    if started or (dry and has_coverage):
+                        break
+                continue
+            if only and item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) and not dry:
                 # Author enrollment is PENDING NATURAL-ONLY by design. A selective
                 # `crq start <author-id>` would dispatch the author item while a
                 # pending promotion/ordinary item is skipped by the `only` filter,
@@ -2507,6 +2796,18 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 log.append(f"{item['id']}: selective start refused — author items start only "
                            f"from the natural tick (pending natural-only)")
                 break
+            if optional_wait(q, item):
+                item["wait_reason"] = "optional cycle waits until no rank <=3 work is pending"
+                continue
+            if additional_cycle(item):
+                # Coverage gets first refusal even though it uses a fallback.
+                started, has_coverage = coverage_fallback(q, log, dry, only)
+                if started or (dry and has_coverage):
+                    break
+            if item["kind"] == "merged" and any(i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"]
+                                                  for i in q["items"]):
+                item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
+                continue
             if item.get("not_before") and parse_iso(item["not_before"]) > now():
                 item["wait_reason"] = f"backoff until {item['not_before']}"
                 continue
@@ -2532,6 +2833,11 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                     # active-agent quiet gate. Global pause/cooldown/hourly/
                     # inflight gates and the pre-upload secret scan still apply.
                     plan = plan_author(item, dry)
+                elif item["kind"] == review_receipt.KIND:
+                    plan = prepare_current(q, item, dry)
+                    if plan is None:
+                        log.append(f"{item['id']}: {item['state']} (no vendor start)")
+                        continue
                 elif item["kind"] == "merged":
                     plan = plan_merged(item, dry)
                 else:
@@ -2606,12 +2912,12 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
 
 def write_status(q: Dict[str, Any]) -> None:
     items = sorted(q["items"], key=sort_key)
-    owed_open = sum(max(0, 1 - len(i.get("cycles", []))) for i in items
+    owed_open = sum(max(0, 1 - completed_open_cycles(i)) for i in items
                     if i["kind"] == "open" and i["state"] not in ("skipped",))
     rows = []
     for i in items:
         if i["kind"] == "open":
-            cyc = f"{i.get('prior_cycles', 0) + len(i.get('cycles', []))}/2"
+            cyc = f"{completed_open_cycles(i)}/1"
         elif i["kind"] == "promotion":
             cyc = f"{len(i.get('cycles', []))}/1"
             unresolved = sum(1 for b in i.get("blocking", []) if not b.get("resolution"))
@@ -2709,7 +3015,7 @@ def write_status(q: Dict[str, Any]) -> None:
                                                    "promotion_gate_alerts": [x for x in st_p.get("gate_alerts", [])
                                                                              if not x.get("acked")],
                                                    "items": [{k: i.get(k) for k in ("id", "kind", "state",
-                                                              "prior_cycles", "cycles", "pinned_base", "last_error",
+                                                              "prior_cycles", "cycles", "operator_priority", "optional_cycle", "pinned_base", "last_error",
                                                               "wait_reason", "gate_stalled_at")} for i in items]}, indent=2) + "\n")
     try:
         status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=mode)
@@ -2837,7 +3143,7 @@ def with_lock(fn, *a, **kw):
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         fh.close()
-        print("another crq tick holds the lock; exiting")
+        print("another crq tick holds the lock; exiting", file=sys.stderr)
         return None
     try:
         return fn(*a, **kw)
@@ -2880,7 +3186,18 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
         item = next((i for i in q["items"] if i["id"] == item_id), None)
         if not item:
             sys.exit(f"no item {item_id}")
-        if action == "requeue":
+        if action == "requeue" and item["kind"] == review_receipt.KIND:
+            raise ValueError("merged-current retries require explicit lineage/ownership authorization; needs-human")
+        if action in ("prioritize", "deprioritize"):
+            if item["state"] != "pending":
+                raise ValueError("operator priority requires a pending item")
+            if action == "prioritize":
+                item["operator_priority"] = True
+            else:
+                item.pop("operator_priority", None)
+        elif action == "requeue":
+            if optional_open(item):
+                item["optional_cycle"] = True
             item.update(state="pending", not_before=None, failures=0, last_error=None)
         elif action == "skip":
             item.update(state="skipped", last_error=reason or "skipped by owner")
@@ -3000,6 +3317,15 @@ def main() -> int:
     p = sub.add_parser("author-observe", help="charge a genuinely evidenced historical author invocation to the "
                                               "rolling hour (reserved=false); desk approval required before use")
     p.add_argument("manifest", help="observation manifest JSON (binding, started_at, artifact digests)")
+    p = sub.add_parser("enqueue-merged", help="enqueue affected current code; never launches inline")
+    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--merge-sha", required=True)
+    p.add_argument("--request-id", required=True)
+    p.add_argument("--target-selector", choices=sorted(review_receipt.SELECTORS), default="promoted-main")
+    p = sub.add_parser("report", help="read immutable receipt manifest or bounded chunk; no dispatch")
+    p.add_argument("--request-id", required=True)
+    p.add_argument("--receipt-id")
+    p.add_argument("--cursor")
     sub.add_parser("status")
     sub.add_parser("summary", help="refresh only the home-resident fleet summary; no ticks or reviews")
     p = sub.add_parser("synth")
@@ -3013,7 +3339,7 @@ def main() -> int:
     p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
     p.add_argument("finding", help="finding number, or all")
     p.add_argument("disposition")
-    for a in ("requeue", "skip", "block"):
+    for a in ("requeue", "skip", "block", "prioritize", "deprioritize"):
         p = sub.add_parser(a)
         p.add_argument("item")
         p.add_argument("reason", nargs="?")
@@ -3022,6 +3348,19 @@ def main() -> int:
     p.add_argument("run_id")
     args = ap.parse_args()
 
+    if args.cmd in ("enqueue-merged", "report"):
+        try:
+            if args.cmd == "enqueue-merged":
+                result = with_lock(enqueue_merged, args.pr, args.merge_sha, args.request_id, args.target_selector)
+            else:
+                result = current_report(args.request_id, args.receipt_id, args.cursor)
+            if result is None:
+                return 3
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"{args.cmd} refused: {exc}", file=sys.stderr)
+            return 3
     if args.cmd == "_review":
         return cmd_review_child(args.run_id)
     if args.cmd == "selfcheck":

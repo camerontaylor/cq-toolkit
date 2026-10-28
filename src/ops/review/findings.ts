@@ -2,6 +2,62 @@ import { z } from 'zod';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
 import { isCoverageV2Complete } from './internal/reviewCoverageV2.js';
 
+/**
+ * Side-aware location of an exact quoted range in one tree of the reviewed
+ * comparison (R3S additive evidence schema, card R3S of plans/upcoming-20261027).
+ * `side` names the tree the range lives in: `base` for removed code, `head`
+ * for added or surviving code. `start`/`end` are inclusive 1-based line
+ * numbers into that side's pinned blob and `quote` is the exact bytes of
+ * lines start..end (never normalized or trimmed). The validating engine
+ * supplies the pinned blobs; this schema carries only what a producer emits.
+ */
+export const FindingAnchorSchema = z
+  .object({
+    file: z.string().min(1),
+    side: z.enum(['base', 'head']),
+    start: z.number().int().positive(),
+    end: z.number().int().positive(),
+    quote: z.string().min(1),
+  })
+  .strict();
+export type FindingAnchor = z.infer<typeof FindingAnchorSchema>;
+
+/**
+ * Bounded supporting evidence for a finding: an anchor plus the producer's
+ * stated reason it supports the failure scenario. Producers must keep this
+ * small; the schema cap is a hard bound, not a style hint.
+ */
+export const SupportingEvidenceSchema = FindingAnchorSchema.extend({
+  relevance: z.string().min(1),
+}).strict();
+export type SupportingEvidence = z.infer<typeof SupportingEvidenceSchema>;
+
+/**
+ * Version 1 additive agent evidence payload (R3S). `failureScenario` states
+ * the concrete behavior the finding claims; `primary` anchors it;
+ * `supporting` (max 5) may cite dependencies. `validation` appears only on
+ * an INVALID survivor the engine chose to persist: it carries the reasons,
+ * and the rest of the payload stays the raw candidate unchanged. A payload
+ * without `validation` is producer-attested and not yet engine-validated.
+ *
+ * R3S ships the schema and the pure validator only: no runtime producer is
+ * required to emit it before R3W wires the reviewer, and no runtime behavior
+ * change is claimed until R3W consumes it.
+ */
+export const FindingEvidenceV1Schema = z
+  .object({
+    version: z.literal(1),
+    failureScenario: z.string().min(1),
+    primary: FindingAnchorSchema,
+    supporting: z.array(SupportingEvidenceSchema).max(5),
+    validation: z
+      .object({ status: z.literal('invalid'), reasons: z.array(z.string().min(1)).min(1) })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type FindingEvidenceV1 = z.infer<typeof FindingEvidenceV1Schema>;
+
 /** Normalized finding shared by local and forge review producers. */
 export const FindingSchema = z
   .object({
@@ -15,6 +71,14 @@ export const FindingSchema = z
     status: z.enum(['open', 'fixed', 'rejected', 'deferred']),
     reason: z.string().optional(),
     evidence: z.string().optional(),
+    /**
+     * Optional versioned evidence payload. Legacy records (including every
+     * CodeRabbit-shaped finding) lack it and stay valid unchanged; the record
+     * envelope's `schemaVersion` therefore remains 1. The payload versions
+     * itself under its own `version` literal so later evidence schemas can
+     * add a sibling field without breaking any reader of this one.
+     */
+    evidenceV1: FindingEvidenceV1Schema.optional(),
   })
   .strict();
 export type Finding = z.infer<typeof FindingSchema>;
@@ -92,6 +156,9 @@ function mergeFinding(previous: Finding, next: Finding): Finding {
     ...(previous.reason === undefined && next.reason !== undefined ? { reason: next.reason } : {}),
     ...(previous.evidence === undefined && next.evidence !== undefined
       ? { evidence: next.evidence }
+      : {}),
+    ...(previous.evidenceV1 === undefined && next.evidenceV1 !== undefined
+      ? { evidenceV1: next.evidenceV1 }
       : {}),
   };
 }

@@ -260,7 +260,7 @@ export type WorkerErrorClass =
 
 /**
  * Provider limit observations (plain data, RS-14 §1/§4). Lanes populate what
- * the vendor exposes; ops never read them.
+ * the vendor exposes; review sessions may use retryAfterMs for bounded backoff.
  */
 export interface ProviderSignals {
   /** From a Retry-After (or vendor equivalent) on this response. */

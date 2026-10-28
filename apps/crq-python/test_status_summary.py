@@ -17,6 +17,16 @@ loader.exec_module(adapter)
 
 
 class SummaryTest(unittest.TestCase):
+    def test_optional_open_cycles_are_not_pending_review_debt(self):
+        queue = {"items": [
+            {"kind": "open", "state": "pending", "cycles": [{}]},
+            {"kind": "open", "state": "pending", "prior_cycles": 1, "prior_base": "a" * 40},
+            {"kind": "open", "state": "pending", "cycles": []},
+        ]}
+        data = adapter.summarize({"generated_at": "2026-10-28T00:00:00Z"}, queue, {},
+                                 {"max_starts_per_hour": 5}, [], 0)
+        self.assertEqual(data["backlog"]["open"], 2)
+
     def test_gate_stall_visible_after_ack_until_promotion_completes(self):
         at = "2026-10-19T00:00:00Z"
         item = {"id": "promo-stalled", "kind": "promotion", "state": "promoting", "gate_stalled_at": at}

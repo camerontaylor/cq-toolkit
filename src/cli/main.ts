@@ -49,7 +49,7 @@
 // spellings keep their mode/help behavior.
 //
 // MACHINE-MODE ERROR ARTIFACTS (the exact error matrix): when the bare
-// `--json` flag is present the exit code still carries the verdict, stderr
+// `--json` or `-json` flag is present the exit code still carries the verdict, stderr
 // stays EMPTY, and every error site writes ONE JSON error artifact to stdout
 // in place of the (never-written) result:
 //   { "error": { "kind": "usage" | "invalid-input" | "invalid-result" |
@@ -70,7 +70,7 @@
 //     - the plan-lock refusal (transient)                → exit 3
 //     - the runCli last-resort catch                     → exit 1
 //   kind 'usage' (arg-shaped; detected before the mode flag is parsed, so the
-//   raw argv is scanned for a bare `--json` token):
+//   raw argv is scanned for either bare JSON alias):
 //     - missing subcommand / unknown subcommand
 //     - flag-syntax errors (duplicate flags), positional tokens
 //     - valued-reserved rejections (--json=x / --help=x / --h=x /
@@ -432,6 +432,11 @@ function renderPlanHelp(name: string): string {
 
 // --- Dispatch --------------------------------------------------------------
 
+/** Bare aliases select machine mode even when flag parsing cannot finish. */
+function rawNarrationMode(argv: readonly string[]): NarrationMode {
+  return argv.some((token) => token === '--json' || token === '-json') ? 'json' : 'human';
+}
+
 /**
  * The dispatcher proper. Returns the process exit code on every path; only
  * genuinely runtime failures (op crash, journal failure, registry scan
@@ -447,10 +452,10 @@ async function dispatchCli(
   // stdout) — `--help` is the way to opt into the help surface.
   const sub = argv[0];
   // Usage errors below are detected BEFORE (or while) the flags parse, so the
-  // machine-mode decision for THEM is a raw-token scan for a bare `--json`
+  // machine-mode decision for THEM recognizes both bare JSON aliases
   // (the post-parse `mode` below is authoritative for everything after it).
-  const rawMode: NarrationMode = argv.includes('--json') ? 'json' : 'human';
-  if (sub === undefined) {
+  const rawMode = rawNarrationMode(argv);
+  if (sub === undefined || sub === '--json' || sub === '-json') {
     return reportError(
       io,
       rawMode,
@@ -527,8 +532,7 @@ async function dispatchCli(
   }
   // Reserved mode flags — never part of any op input.
   const wantsHelp = parsed.flags['help'] === true || parsed.flags['h'] === true;
-  // A bare `--json` as the LEADING token (`cq --json`) is not in parsed.flags
-  // (argv[0] is the subcommand slot); the raw scan covers it.
+  // Both JSON aliases parse to the same key; rawMode also covers early errors.
   const mode: NarrationMode =
     parsed.flags['json'] === true || rawMode === 'json' ? 'json' : 'human';
   const failOnVerdict = parsed.flags['fail-on-verdict'] === true;
@@ -777,23 +781,48 @@ async function dispatchCli(
 /**
  * Run the CLI over `argv` (process.argv minus node/script). Never throws:
  * every path returns an exit code ({0,1,2,3}; see src/cli/exit.ts).
+ * Dispatch buffers only its finite artifact/help text and narration, never
+ * operation progress (operations receive no CliIo). Only after error
+ * handling finishes are they sent to the real sinks. A sink failure returns 1
+ * without retrying: it may already have accepted some or all of the artifact.
  */
 export async function runCli(argv: string[], io?: CliIo, opts?: RunCliOptions): Promise<number> {
   const sink = io ?? processIo;
+  let artifact: string | undefined;
+  const narration: string[] = [];
+  const buffered: CliIo = {
+    stdout: (chunk) => {
+      if (artifact !== undefined) throw new Error('CLI attempted a second stdout artifact');
+      artifact = chunk;
+    },
+    stderr: (chunk) => {
+      narration.push(chunk);
+    },
+  };
+  let code: number;
   try {
-    return await dispatchCli(argv, sink, opts);
+    code = await dispatchCli(argv, buffered, opts);
   } catch (err) {
     // Last-resort catch (registry scan defect, …): a runtime throw outside a
-    // subcommand's own scope → narrated exit 1 'thrown'.
-    // The mode flag is not resolved at this scope: a raw bare `--json` token
-    // selects the error artifact.
-    return reportError(
-      sink,
-      argv.includes('--json') ? 'json' : 'human',
-      'thrown',
-      argv[0] ?? null,
-      `threw: ${messageOf(err)}`,
-      EXIT_CODES.thrown,
-    );
+    // subcommand's own scope. Preserve an already prepared artifact.
+    code = EXIT_CODES.thrown;
+    if (artifact === undefined) {
+      reportError(
+        buffered,
+        rawNarrationMode(argv),
+        'thrown',
+        argv[0] ?? null,
+        `threw: ${messageOf(err)}`,
+        code,
+      );
+    }
   }
+  // Emission is outside every catch that can construct an error artifact.
+  try {
+    if (artifact !== undefined) sink.stdout(artifact);
+    for (const chunk of narration) sink.stderr(chunk);
+  } catch {
+    return EXIT_CODES.thrown;
+  }
+  return code;
 }
