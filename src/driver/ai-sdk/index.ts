@@ -496,6 +496,8 @@ export class AiSdkDriver implements Driver {
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        // Seam v3: aborted before any provider call — placeholder, not measurement.
+        usageProvenance: 'unmeasured',
         steps: 0,
         denials: [],
         stopReason: 'aborted',
@@ -565,6 +567,8 @@ export class AiSdkDriver implements Driver {
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        // Seam v3: aborted before any provider call — placeholder, not measurement.
+        usageProvenance: 'unmeasured',
         steps: 0,
         denials: [],
         stopReason: 'aborted',
@@ -1011,6 +1015,8 @@ export class AiSdkDriver implements Driver {
 
     const responseMessages: ModelMessage[] = [];
     let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    /** Seam v3: provider usage was actually observed on at least one step. */
+    let usageEvidence = false;
     let completedSteps = 0;
     // Session-log fidelity (item 1.7): the FINAL completed step, so the
     // persisted assistant turn can carry its own usage and requested tool
@@ -1080,6 +1086,7 @@ export class AiSdkDriver implements Driver {
             await observeToolStep(step, false, completedSteps);
             completedSteps += 1;
             toolStep = completedSteps;
+            if (hasReportedUsage(step.usage)) usageEvidence = true;
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
             responseMessages.push(...normalizeToolErrors(step.response.messages));
             lastStep = {
@@ -1119,6 +1126,7 @@ export class AiSdkDriver implements Driver {
             rejection: `the reply carried no parseable object — ${describeError(err)}`,
             mainText: err.text ?? '',
             mainUsage: stepUsage,
+            mainUsageEvidence: usageEvidence,
             mainSteps: completedSteps,
             servedModel:
               typeof err.response?.modelId === 'string' && err.response.modelId !== ''
@@ -1142,6 +1150,8 @@ export class AiSdkDriver implements Driver {
       }
 
       const usage = usageFromSdk(result.usage);
+      // Seam v3: the resolved run's own report decides presence.
+      const resolvedUsageMeasured = hasReportedUsage(result.usage);
       // The observed served model: the SDK prefers the provider-reported
       // response modelId over the requested id (ai@7.0.99), which is exactly
       // the remap-detection fact WorkerResult.model carries. Absent on the
@@ -1189,6 +1199,7 @@ export class AiSdkDriver implements Driver {
             rejection,
             mainText: text,
             mainUsage: usage,
+            mainUsageEvidence: resolvedUsageMeasured,
             mainSteps: completedSteps,
             servedModel,
             responseHeaders: result.response.headers,
@@ -1248,6 +1259,7 @@ export class AiSdkDriver implements Driver {
           ? { structuredOutput }
           : {}),
         usage,
+        usageProvenance: resolvedUsageMeasured ? 'measured' : 'unmeasured',
         steps: completedSteps,
         // PRICING KEY: derived over the OBSERVED served model id — a
         // silently-remapped gateway is priced off the id the response
@@ -1281,6 +1293,7 @@ export class AiSdkDriver implements Driver {
       if (aborted) {
         return {
           usage: stepUsage,
+          usageProvenance: usageEvidence ? 'measured' : 'unmeasured',
           steps: completedSteps,
           sessionId: record.sessionId,
           denials,
@@ -1298,6 +1311,7 @@ export class AiSdkDriver implements Driver {
         if (err.kind === 'budget') {
           return {
             usage: stepUsage,
+            usageProvenance: usageEvidence ? 'measured' : 'unmeasured',
             steps: completedSteps,
             sessionId: record.sessionId,
             denials,
@@ -1308,6 +1322,7 @@ export class AiSdkDriver implements Driver {
         }
         return {
           usage: stepUsage,
+          usageProvenance: usageEvidence ? 'measured' : 'unmeasured',
           steps: completedSteps,
           sessionId: record.sessionId,
           denials,
@@ -1332,6 +1347,7 @@ export class AiSdkDriver implements Driver {
       // understates the run, so no figure is claimed.
       return {
         usage: stepUsage,
+        usageProvenance: usageEvidence ? 'measured' : 'unmeasured',
         steps: completedSteps,
         sessionId: record.sessionId,
         denials,
@@ -1379,6 +1395,8 @@ export class AiSdkDriver implements Driver {
     rejection: string;
     mainText: string;
     mainUsage: Usage;
+    /** Seam v3: whether the MAIN call observed provider usage. */
+    mainUsageEvidence: boolean;
     mainSteps: number;
     servedModel: string | undefined;
     responseHeaders: Record<string, string> | undefined;
@@ -1401,6 +1419,7 @@ export class AiSdkDriver implements Driver {
       rejection,
       mainText,
       mainUsage,
+      mainUsageEvidence,
       mainSteps,
       servedModel,
       responseHeaders,
@@ -1421,8 +1440,10 @@ export class AiSdkDriver implements Driver {
     let repairSteps = 0;
     const verdictExtras = (
       totalUsage: Usage,
-    ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis'> => ({
+      measured: boolean,
+    ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis' | 'usageProvenance'> => ({
       usage: totalUsage,
+      usageProvenance: measured ? 'measured' : 'unmeasured',
       steps: mainSteps + repairSteps,
       ...costField(
         this.pricing,
@@ -1431,8 +1452,12 @@ export class AiSdkDriver implements Driver {
       ),
     });
     /** Usage WITHOUT a derived cost — the mixed-identity (repair remap) verdict refuses to price. */
-    const verdictUsageOnly = (totalUsage: Usage): Pick<WorkerResult, 'usage' | 'steps'> => ({
+    const verdictUsageOnly = (
+      totalUsage: Usage,
+      measured: boolean,
+    ): Pick<WorkerResult, 'usage' | 'steps' | 'usageProvenance'> => ({
       usage: totalUsage,
+      usageProvenance: measured ? 'measured' : 'unmeasured',
       steps: mainSteps + repairSteps,
     });
     const verdictSignals = (): { providerSignals?: ProviderSignals } => {
@@ -1463,7 +1488,7 @@ export class AiSdkDriver implements Driver {
     if (mapped === 'budget' || mapped === 'aborted') {
       return {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
-        ...verdictExtras(mainUsage),
+        ...verdictExtras(mainUsage, mainUsageEvidence),
         sessionId: record.sessionId,
         denials,
         ...capabilityEvidence,
@@ -1477,7 +1502,7 @@ export class AiSdkDriver implements Driver {
     if (finishReason === 'error' || finishReason === 'content-filter') {
       return {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
-        ...verdictExtras(mainUsage),
+        ...verdictExtras(mainUsage, mainUsageEvidence),
         sessionId: record.sessionId,
         denials,
         ...capabilityEvidence,
@@ -1499,7 +1524,7 @@ export class AiSdkDriver implements Driver {
       if (signalAborted(abortSignal)) {
         return {
           ...(servedModel !== undefined ? { model: servedModel } : {}),
-          ...verdictExtras(mainUsage),
+          ...verdictExtras(mainUsage, mainUsageEvidence),
           sessionId: record.sessionId,
           denials,
           ...capabilityEvidence,
@@ -1509,7 +1534,7 @@ export class AiSdkDriver implements Driver {
       }
       return {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
-        ...verdictExtras(mainUsage),
+        ...verdictExtras(mainUsage, mainUsageEvidence),
         sessionId: record.sessionId,
         denials,
         ...capabilityEvidence,
@@ -1538,6 +1563,8 @@ export class AiSdkDriver implements Driver {
       },
     ];
     let repairUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    /** Seam v3: the repair's steps observed provider usage. */
+    let repairUsageEvidence = false;
     try {
       const repair = await generateText({
         model,
@@ -1554,6 +1581,7 @@ export class AiSdkDriver implements Driver {
         onStepFinish: async (step) => {
           await inputs.observeToolStep(step, true, mainSteps + repairSteps);
           repairSteps += 1;
+          if (hasReportedUsage(step.usage)) repairUsageEvidence = true;
           repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
         },
         // No tool EXECUTION: the definitions above have no executors, so a
@@ -1568,6 +1596,10 @@ export class AiSdkDriver implements Driver {
             }),
       });
       const totalUsage = addUsage(mainUsage, usageFromSdk(repair.usage));
+      // Seam v3: the fold is measured only if evidence exists on either side —
+      // the main call, the repair's steps, or the repair result's own report.
+      const totalEvidence =
+        mainUsageEvidence || repairUsageEvidence || hasReportedUsage(repair.usage);
       // The repair is a REAL model call with its OWN served-id observation,
       // judged ONCE for every repair-path verdict — not only the success
       // path (the wrapper cannot see this inner call):
@@ -1613,10 +1645,12 @@ export class AiSdkDriver implements Driver {
        */
       const repairVerdictExtras = (
         usage: Usage,
-      ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis'> =>
+        measured: boolean,
+      ): Pick<WorkerResult, 'usage' | 'steps' | 'costUSD' | 'costBasis' | 'usageProvenance'> =>
         repairIdentity === 'match'
           ? {
               usage,
+              usageProvenance: measured ? 'measured' : 'unmeasured',
               steps: mainSteps + repairSteps,
               ...costField(
                 this.pricing,
@@ -1624,7 +1658,7 @@ export class AiSdkDriver implements Driver {
                 usage,
               ),
             }
-          : verdictUsageOnly(usage);
+          : verdictUsageOnly(usage, measured);
       // The repair's OWN limit headers are the FRESHER observation (the
       // second request consumed capacity after the first) — they take
       // precedence over the main response's whenever the repair returned
@@ -1674,7 +1708,7 @@ export class AiSdkDriver implements Driver {
         if (repairStop === 'error') {
           return {
             ...(verdictModel !== undefined ? { model: verdictModel } : {}),
-            ...repairVerdictExtras(totalUsage),
+            ...repairVerdictExtras(totalUsage, totalEvidence),
             sessionId: record.sessionId,
             denials,
             ...capabilityEvidence,
@@ -1698,7 +1732,7 @@ export class AiSdkDriver implements Driver {
         if (repairStop === 'complete' && repairIdentity === 'mixed' && servedModel !== undefined) {
           return {
             model: servedModel,
-            ...verdictUsageOnly(totalUsage),
+            ...verdictUsageOnly(totalUsage, totalEvidence),
             sessionId: record.sessionId,
             denials,
             ...capabilityEvidence,
@@ -1715,7 +1749,7 @@ export class AiSdkDriver implements Driver {
         return {
           ...(verdictModel !== undefined ? { model: verdictModel } : {}),
           ...(repairStop === 'complete' ? { structuredOutput: repairedValue } : {}),
-          ...repairVerdictExtras(totalUsage),
+          ...repairVerdictExtras(totalUsage, totalEvidence),
           sessionId: record.sessionId,
           denials,
           ...capabilityEvidence,
@@ -1725,7 +1759,7 @@ export class AiSdkDriver implements Driver {
       }
       return {
         ...(verdictModel !== undefined ? { model: verdictModel } : {}),
-        ...repairVerdictExtras(totalUsage),
+        ...repairVerdictExtras(totalUsage, totalEvidence),
         sessionId: record.sessionId,
         denials,
         ...capabilityEvidence,
@@ -1744,6 +1778,8 @@ export class AiSdkDriver implements Driver {
       // structured cuts; an abort-shaped failure is the caller's
       // cancellation, not an error.
       const totalUsage = addUsage(mainUsage, repairUsage);
+      // Seam v3: partial evidence from either call still counts as measured.
+      const totalEvidence = mainUsageEvidence || repairUsageEvidence;
       const aborted =
         signalAborted(abortSignal) || (err instanceof Error && err.name === 'AbortError');
       const signals = providerSignalsFromError(err);
@@ -1756,7 +1792,7 @@ export class AiSdkDriver implements Driver {
         if (err.kind === 'budget') {
           return {
             ...(servedModel !== undefined ? { model: servedModel } : {}),
-            ...verdictExtras(totalUsage),
+            ...verdictExtras(totalUsage, totalEvidence),
             sessionId: record.sessionId,
             denials,
             ...capabilityEvidence,
@@ -1767,6 +1803,7 @@ export class AiSdkDriver implements Driver {
         return {
           ...(servedModel !== undefined ? { model: servedModel } : {}),
           usage: totalUsage,
+          usageProvenance: totalEvidence ? 'measured' : 'unmeasured',
           steps: mainSteps + repairSteps,
           sessionId: record.sessionId,
           denials,
@@ -1810,8 +1847,12 @@ export class AiSdkDriver implements Driver {
           // Same aggregate-pricing rule as the returned-repair paths: only
           // a 'match' (both observed and equal, or neither observed) prices.
           ...(errIdentity === 'match'
-            ? verdictExtras(totalUsage)
-            : { usage: totalUsage, steps: mainSteps + repairSteps }),
+            ? verdictExtras(totalUsage, totalEvidence)
+            : {
+                usage: totalUsage,
+                usageProvenance: totalEvidence ? 'measured' : 'unmeasured',
+                steps: mainSteps + repairSteps,
+              }),
           sessionId: record.sessionId,
           denials,
           ...capabilityEvidence,
@@ -1827,6 +1868,7 @@ export class AiSdkDriver implements Driver {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
         // Failed requests may contain unobserved spend; partial usage cannot price the run.
         usage: totalUsage,
+        usageProvenance: totalEvidence ? 'measured' : 'unmeasured',
         steps: mainSteps + repairSteps,
         sessionId: record.sessionId,
         denials,
@@ -2210,6 +2252,30 @@ function tokenBudgetCondition(maxTokens: number): StopCondition<ToolSet> {
  * exactly `reasoning` — the frozen field stays optional precisely for lanes
  * whose SDK reports reasoning additive to output; this one does not.
  */
+/**
+ * Provider usage PRESENCE (seam v3 provenance). True only when the SDK's raw
+ * usage object carries at least one finite numeric token field — read BEFORE
+ * `usageFromSdk` normalizes missing fields to 0, so a placeholder is never
+ * confused with a measured zero. `completedSteps > 0` is deliberately NOT
+ * evidence: a completed step whose provider reported nothing yields an
+ * all-undefined usage object. `raw` (the provider's unmapped payload) is not
+ * evidence either: we cannot account for it, so the numbers we report are the
+ * normalized zeros, and claiming measurement would be a guess.
+ */
+export function hasReportedUsage(usage: LanguageModelUsage | undefined): boolean {
+  if (usage === undefined) return false;
+  const numeric = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value);
+  return (
+    numeric(usage.inputTokens) ||
+    numeric(usage.outputTokens) ||
+    numeric(usage.totalTokens) ||
+    numeric(usage.inputTokenDetails?.noCacheTokens) ||
+    numeric(usage.inputTokenDetails?.cacheReadTokens) ||
+    numeric(usage.inputTokenDetails?.cacheWriteTokens) ||
+    numeric(usage.outputTokenDetails?.reasoningTokens)
+  );
+}
+
 export function usageFromSdk(usage: LanguageModelUsage): Usage {
   const input = usage.inputTokenDetails?.noCacheTokens ?? usage.inputTokens ?? 0;
   return {

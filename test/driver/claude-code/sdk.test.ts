@@ -1017,6 +1017,9 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       if (outcome.outcome !== 'completed') return; // narrow for TS
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      // Seam v3: the placeholder declares itself unmeasured, so the summary
+      // observer counts it as unknown rather than a known zero.
+      expect(outcome.value.usageProvenance).toBe('unmeasured');
       expect(outcome.value.costUSD).toBeUndefined(); // unmeasured: 0 would be a fabricated fact
       expect(outcome.value.costBasis).toBeUndefined();
     } finally {

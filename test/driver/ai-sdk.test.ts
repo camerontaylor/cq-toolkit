@@ -598,6 +598,41 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('seam v3: a completed step without provider usage is unmeasured; a reported zero is measured', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const runWith = async (usage: unknown) => {
+        const driver = new AiSdkDriver({
+          providers: {
+            mock: () => usageModel(usage as LanguageModelV4GenerateResult['usage']),
+          },
+          sessionsDir: join(scratchDir, 'sessions'),
+        });
+        return driver.run(invocation({ prompt: 'provenance' }));
+      };
+      // The provider reported NO numeric token field: ai@7 yields an
+      // all-undefined LanguageModelUsage, normalization maps it to zeros, and
+      // the placeholder must be declared unmeasured — a completed step alone
+      // is not usage evidence.
+      const missing = await runWith({});
+      expect(missing.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(missing.usageProvenance).toBe('unmeasured');
+      // The provider reported explicit NUMERIC ZEROS: a genuine measured zero.
+      const measuredZero = await runWith({
+        inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 0, text: 0, reasoning: 0 },
+      });
+      expect(measuredZero.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(measuredZero.usageProvenance).toBe('measured');
+      // A normal measured run stays measured.
+      const measured = await runWith(mockUsage());
+      expect(measured.usageProvenance).toBe('measured');
+      expect(measured.usage.input).toBeGreaterThan(0);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('stopReason mapping table (checked in order: aborted → budget → error → complete)', () => {
     // 1. abort dominates every other condition.
     expect(

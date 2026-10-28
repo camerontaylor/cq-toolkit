@@ -90,6 +90,20 @@ Full disposition and blockers live in the R lane's
 `docs/release-evidence/review-debt-disposition-241-242.md` on the release
 preparation branch.
 
+## Seam v3 surface (2026-10-28)
+
+`SEAM_VERSION` is 3. `WorkerResult` (exported from the package root, with `WorkerResultSchema` as
+its strict mirror) carries one additive optional field:
+
+| field             | values                       | absent means                                                            |
+| ----------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `usageProvenance` | `'measured' \| 'unmeasured'` | provenance not reported (legacy/custom) — consumers count it as unknown |
+
+`'measured'` requires raw provider usage evidence; normalized zeros and completed steps are not
+evidence. `usage` keeps its numeric contract, so budgets and derived cost are unaffected. Adopters
+that assert `SEAM_VERSION === 2` must move to 3; no other consumer break is implied because the
+field is optional. See the ADR-0002 amendment of the same date.
+
 ## Required follow-up sequence (owned, not started here)
 
 1. Normal-merge `origin/merge-queue` (≥ `70de728`) into this branch — no

@@ -53,7 +53,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
-import type { Usage } from '../../driver/types.js';
+import type { Usage, WorkerResult } from '../../driver/types.js';
 import { composeSection, mdSafe, type PrEffects } from '../pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../adapters/forge-github/ghEffects.js';
 import type { PrOpenInput, PrOpenReport } from '../pr/open.js';
@@ -80,6 +80,13 @@ import {
   type GreenPrefixProbe,
 } from './internal/greenPrefix.js';
 import { DevCycleCompositionInputSchema } from './registry.js';
+import {
+  createKnownUsageLedger,
+  normalizeUsageObservation,
+  type KnownUsageSummary,
+  type UsageObservation,
+} from '../../shared/knownUsage.js';
+import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 /**
  * Wall time held back from the review and address legs for the publication
@@ -158,6 +165,7 @@ export interface DevCycleCompositionInput {
 
 /** The dev.cycle report — the ok value (a ready, published branch). */
 export interface DevCycleReport {
+  usageSummary: KnownUsageSummary;
   branch: string;
   /** The final reviewed head the PR was opened from. */
   head: string;
@@ -170,6 +178,7 @@ export interface DevCycleReport {
   /** Non-blocking review context from the published comparison. */
   advisories?: string[];
 }
+type DevCycleCoreReport = Omit<DevCycleReport, 'usageSummary'>;
 
 /** The follow-up command dev.cycle reports after publishing a PR. */
 export function followUpCommand(prNumber: number, repoRoot: string, target?: string): string {
@@ -410,16 +419,22 @@ export interface DevCycleDeps {
   ) => (input: PrOpenInput) => Promise<OpResult<PrOpenReport>>;
 }
 
-/** Build the `dev.cycle` op over the injected steps. */
-export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, DevCycleReport> {
+function makeDevCycleCore(
+  deps: DevCycleDeps,
+  observe: DriverUsageObserver,
+): Op<DevCycleCompositionInput, DevCycleCoreReport> {
   return guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
     // ONE run budget across the legs (S7 attempt H): the run started here,
     // and every token a default leg's driver spends is metered here.
     const cycleStarted = Date.now();
     let spentTokens = 0;
-    const drivers = meterDrivers(deps.drivers ?? createDriverFactory(), (tokens) => {
-      spentTokens += tokens;
-    });
+    const drivers = meterDrivers(
+      deps.drivers ?? createDriverFactory(),
+      (tokens) => {
+        spentTokens += tokens;
+      },
+      observe,
+    );
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const check =
       deps.check ?? ((step: DevCheckInput) => makeDevCheck(deps.effects, deps.scanSecrets)(step));
@@ -1283,6 +1298,40 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
   });
 }
 
+/** Build the `dev.cycle` op over the injected steps. */
+export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, DevCycleReport> {
+  return async (input) => {
+    const usageLedger = createKnownUsageLedger();
+    let open = true;
+    const pending = new Set<string>();
+    const observe: DriverUsageObserver = {
+      start: (id) => {
+        if (open) pending.add(id);
+      },
+      settle: (id, observation) => {
+        if (!open) return;
+        usageLedger.record(id, observation);
+        pending.delete(id);
+      },
+    };
+    const result = await makeDevCycleCore(deps, observe)(input);
+    open = false;
+    for (const id of pending) usageLedger.record(id, {});
+    const usageSummary = usageLedger.snapshot();
+    if (result.status === 'ok') return { ...result, value: { ...result.value, usageSummary } };
+    const previous =
+      'report' in result && typeof result.report === 'object' && result.report !== null
+        ? result.report
+        : {};
+    return { ...result, report: { ...previous, usageSummary } };
+  };
+}
+
+export interface DriverUsageObserver {
+  start(id: string): void;
+  settle(id: string, observation: UsageObservation): void;
+}
+
 /**
  * The address report a CLEAN address leg returned as its value (#536 reads
  * its fix chain after red final gates). Structural, never a cast of trust:
@@ -1314,7 +1363,12 @@ function addressReportOf(result: OpResult<unknown>): ReviewAddressReport | undef
  * still shrinks the unspent remainder instead of inflating the next leg's
  * token budget. The error itself is never swallowed or reshaped.
  */
-function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): DriverFactory {
+export function meterDrivers(
+  factory: DriverFactory,
+  spend: (tokens: number) => void,
+  observe: DriverUsageObserver,
+): DriverFactory {
+  let dispatch = 0;
   return {
     resolve: (request) => {
       const resolved = factory.resolve(request);
@@ -1322,6 +1376,19 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
         ...resolved,
         driver: {
           run: async (invocation, options) => {
+            const id = `cycle:${String(dispatch++)}`;
+            try {
+              observe.start(id);
+            } catch {
+              // Telemetry cannot prevent a driver invocation.
+            }
+            const settle = (observation: UsageObservation): void => {
+              try {
+                observe.settle(id, normalizeUsageObservation(observation));
+              } catch {
+                // Telemetry cannot replace the driver result or error.
+              }
+            };
             const meter = (usage: Usage): void => {
               const total =
                 usage.input +
@@ -1332,15 +1399,52 @@ function meterDrivers(factory: DriverFactory, spend: (tokens: number) => void): 
               // Invalid readings must not poison the shared token remainder.
               if (Number.isFinite(total)) spend(total);
             };
+            let result: WorkerResult;
             try {
-              const result = await resolved.driver.run(invocation, options);
-              meter(result.usage);
-              return result;
+              result = await resolved.driver.run.call(resolved.driver, invocation, options);
             } catch (err) {
-              const partial = usageOf(err);
+              let partial: Usage | undefined;
+              try {
+                partial = usageOf(err);
+              } catch {
+                // A malformed error's usage accessor cannot replace that error.
+              }
+              // The numeric debit stays on its existing path: a rejection that
+              // carried tokens still shrinks the shared remainder.
               if (partial !== undefined) meter(partial);
+              // Seam v3: usage attached to a REJECTION declares no provenance,
+              // and values alone never establish measurement — the summary
+              // records it as unknown (no aggregate), exactly like a returned
+              // result whose declaration is absent/unmeasured. Trusting it
+              // would need an explicit error-side provenance contract.
+              settle({});
               throw err;
             }
+            let measured: Usage | undefined;
+            try {
+              measured = normalizeUsageObservation({ usage: result.usage }).usage;
+            } catch {
+              // A malformed usage accessor cannot replace the driver result.
+            }
+            let costUSD: number | undefined;
+            try {
+              const reportedCost = result.costUSD;
+              costUSD = normalizeUsageObservation(
+                reportedCost === undefined ? {} : { costUSD: reportedCost },
+              ).costUSD;
+            } catch {
+              // Cost remains independent of malformed usage telemetry.
+            }
+            if (measured !== undefined) meter(measured);
+            // Seam v3: only an explicit provider measurement reaches the summary.
+            // The numeric debit above is unchanged; cost stays independent, and an
+            // absent/`unmeasured` declaration contributes unknown usage, not zeros.
+            const usageMeasured = usageProvenanceOf(result) === 'measured';
+            settle({
+              ...(usageMeasured && measured !== undefined ? { usage: measured } : {}),
+              ...(costUSD === undefined ? {} : { costUSD }),
+            });
+            return result;
           },
         },
       };
@@ -1363,13 +1467,20 @@ function usageOf(err: unknown): Usage | undefined {
   const usage: unknown = (err as { usage?: unknown }).usage;
   if (typeof usage !== 'object' || usage === null) return undefined;
   const fields = usage as Record<string, unknown>;
+  const { input, output, cacheRead, cacheWrite, reasoning } = fields;
   if (
-    typeof fields.input !== 'number' ||
-    typeof fields.output !== 'number' ||
-    typeof fields.cacheRead !== 'number' ||
-    typeof fields.cacheWrite !== 'number' ||
-    (fields.reasoning !== undefined && typeof fields.reasoning !== 'number')
+    typeof input !== 'number' ||
+    typeof output !== 'number' ||
+    typeof cacheRead !== 'number' ||
+    typeof cacheWrite !== 'number' ||
+    (reasoning !== undefined && typeof reasoning !== 'number')
   )
     return undefined;
-  return usage as Usage;
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    ...(reasoning === undefined ? {} : { reasoning }),
+  };
 }

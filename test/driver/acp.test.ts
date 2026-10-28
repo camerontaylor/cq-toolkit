@@ -1005,6 +1005,8 @@ describe('acp driver specifics (fake ACP server)', () => {
       );
       expect(result.stopReason).toBe('error'); // pinned — never 'complete', however green the wire looks
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 }); // the end_turn measurement folds
+      // Seam v3: the wire carried numeric usage, so the verdict declares measured.
+      expect(result.usageProvenance).toBe('measured');
       const narration = await narrationOf(store, result.sessionId as string);
       const failed = narration.find((line) => line.includes('"permission-answer-failed"'));
       expect(failed !== undefined && failed.includes('"side":"allow"')).toBe(true);
@@ -1739,6 +1741,8 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // usage: null — unmeasured
+      // Seam v3: `usage: null` is no wire measurement, so the placeholder is declared.
+      expect(outcome.value.usageProvenance).toBe('unmeasured');
       expect(outcome.value.costUSD).toBeUndefined(); // never a cost on an unmeasured verdict
       const narration = await narrationOf(store, outcome.value.sessionId as string);
       expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt

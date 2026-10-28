@@ -298,6 +298,20 @@ export interface WorkerResult {
   model?: string;
   structuredOutput?: unknown;
   usage: Usage;
+  /**
+   * Provenance of `usage`, when the lane can state it (seam v3).
+   *
+   * `'measured'` — provider usage was observed for this run; a genuine
+   * all-zero report counts as measured. `'unmeasured'` — `usage` is a
+   * placeholder: no provider measurement was observed (a pre-dispatch abort, a
+   * spawn failure, an uncompilable schema, or a run whose steps carried no
+   * provider usage evidence).
+   *
+   * ABSENT means the lane did not report provenance (legacy results and custom
+   * drivers). Consumers treat absence as UNKNOWN: it never aggregates as a
+   * measurement, and it is never inferred from the token values themselves.
+   */
+  usageProvenance?: 'measured' | 'unmeasured';
   /** Number of completed SDK steps, when the lane can observe them. */
   steps?: number;
   costUSD?: number;
@@ -396,6 +410,8 @@ export interface Driver {
  * The seam contract version (ADR-0002 §2.8): bumped once per frozen surface
  * change, shared with the runner and journal consumers of the seam. v2 adds
  * outputSchema/workspace on the invocation, RunOptions on run, and
- * errorClass/providerSignals on the result.
+ * errorClass/providerSignals on the result. v3 adds `usageProvenance` on the
+ * result: an optional declaration of whether `usage` is a provider measurement
+ * or a placeholder, with absence meaning "not reported" (unknown).
  */
-export const SEAM_VERSION = 2;
+export const SEAM_VERSION = 3;

@@ -30,7 +30,7 @@
 //      wire rule as `error` (present ⇒ stopReason 'error'; an 'error'
 //      verdict without one still parses), `providerSignals` are allowed on
 //      ANY verdict, `outputSchema`/`workspace` ride the invocation,
-//      SEAM_VERSION pins 2, and `errorClassOf` extracts a dispatch class
+//      SEAM_VERSION pins 3 (v3 adds usageProvenance), and `errorClassOf` extracts a dispatch class
 //      from tagged throws only — never guessing.
 //
 // Determinism: hand-rolled mulberry32 PRNG, fixed seeds derived from test
@@ -1258,7 +1258,7 @@ describe('OpInvocation.outputSchema/workspace — seam v2 invocation fields', ()
   });
 });
 
-describe('seam v2 compatibility + version pin (ADR-0002 §2.8)', () => {
+describe('seam compatibility + version pin (ADR-0002 §2.8)', () => {
   test('a v1-shaped WorkerResult WITHOUT the new fields still parses', () => {
     roundTripsThrough(kernelSchema.WorkerResultSchema, {
       usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0 },
@@ -1267,8 +1267,8 @@ describe('seam v2 compatibility + version pin (ADR-0002 §2.8)', () => {
     });
   });
 
-  test('SEAM_VERSION is 2', () => {
-    expect(SEAM_VERSION).toBe(2);
+  test('SEAM_VERSION is 3', () => {
+    expect(SEAM_VERSION).toBe(3);
   });
 });
 

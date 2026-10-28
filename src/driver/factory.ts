@@ -439,6 +439,8 @@ export function withStrictTokenBudgetGuard(driver: Driver, lane: LaneId): Driver
       if (signalAborted(options?.signal)) {
         return {
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          // Seam v3: the governor aborted before the inner driver ran.
+          usageProvenance: 'unmeasured',
           denials: [],
           stopReason: 'aborted',
         };

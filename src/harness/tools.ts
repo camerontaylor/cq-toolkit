@@ -1861,17 +1861,63 @@ export function buildTools(
       // still bounded: scanned bytes/paths fail closed with the honest
       // SEARCH_LIMIT denial, and the same SEARCH_TIMEOUT_MS / abort / group
       // kill as runArgvCommand applies.
-      type MatchSlot = { rel: string; raw: string };
-      const slots: MatchSlot[] = [];
-      const pushMatch = (rel: string, raw: string): void => {
-        slots.push({ rel, raw });
-        if (slots.length <= SEARCH_CANDIDATE_LIMIT + 1) return;
-        // Drop the lexically largest: the survivors stay the true top-N.
-        let largest = 0;
-        for (let i = 1; i < slots.length; i += 1) {
-          if (slots[i]!.rel > slots[largest]!.rel) largest = i;
+      //
+      // The buffer is a MAX-HEAP of capacity SEARCH_CANDIDATE_LIMIT + 1 (the
+      // extra slot makes the final slice report truncation truthfully), so
+      // retaining one candidate costs O(log cap) instead of the O(cap)
+      // re-scan the legacy push-and-linear-drop needed for every streamed
+      // match. Eviction priority is that legacy scan's, exactly: the GREATEST
+      // `rel` by native code-unit order (#613), and for equal `rel` the
+      // EARLIEST remaining insertion — the scan kept the first maximum it
+      // saw, so a later emission of the same name displaces the earlier one.
+      // Duplicate emissions are separate slots: they consume capacity
+      // independently and one of a pair may survive at the boundary.
+      type MatchSlot = { rel: string; raw: string; seq: number };
+      const retained: MatchSlot[] = [];
+      let nextSeq = 0;
+      /** True when `left` is evicted before `right` (legacy max priority). */
+      const greater = (left: MatchSlot, right: MatchSlot): boolean =>
+        left.rel > right.rel || (left.rel === right.rel && left.seq < right.seq);
+      const swapSlots = (left: number, right: number): void => {
+        const held = retained[left]!;
+        retained[left] = retained[right]!;
+        retained[right] = held;
+      };
+      const siftUp = (from: number): void => {
+        let index = from;
+        while (index > 0) {
+          const parent = (index - 1) >> 1;
+          if (!greater(retained[index]!, retained[parent]!)) return;
+          swapSlots(index, parent);
+          index = parent;
         }
-        slots.splice(largest, 1);
+      };
+      const siftDown = (from: number): void => {
+        let index = from;
+        for (;;) {
+          const left = index * 2 + 1;
+          if (left >= retained.length) return;
+          const right = left + 1;
+          const child =
+            right < retained.length && greater(retained[right]!, retained[left]!) ? right : left;
+          if (!greater(retained[child]!, retained[index]!)) return;
+          swapSlots(index, child);
+          index = child;
+        }
+      };
+      const pushMatch = (rel: string, raw: string): void => {
+        const slot: MatchSlot = { rel, raw, seq: nextSeq++ };
+        if (retained.length <= SEARCH_CANDIDATE_LIMIT) {
+          retained.push(slot);
+          siftUp(retained.length - 1);
+          return;
+        }
+        // Full: the legacy push-then-drop always evicted the first maximum,
+        // so an incoming slot that outranks the root is the one dropped, and
+        // any other incoming slot displaces the root instead.
+        if (greater(slot, retained[0]!)) return;
+        retained[0] = slot;
+        siftDown(0);
       };
       const include = grepInclude;
       let includeExhausted = false;
@@ -1896,7 +1942,7 @@ export function buildTools(
           }
           if (!verdict.matched) return true;
           pushMatch(rel, candidate);
-          return slots.length <= SEARCH_CANDIDATE_LIMIT + 1;
+          return retained.length <= SEARCH_CANDIDATE_LIMIT + 1;
         },
       });
       if (includeExhausted) {
@@ -1937,13 +1983,17 @@ export function buildTools(
         };
       }
       if (isAborted(signal)) return cancelled();
-      // #613: ONE comparator everywhere — native code-unit order. The
-      // drop-largest selection above uses native >, so the final sort must
-      // agree (localeCompare could REORDER past the cap and silently
-      // displace a matching candidate).
-      slots.sort((left, right) => (left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0));
-      rawPaths = slots.map((slot) => slot.raw);
-      sawExtraCandidates = slots.length > SEARCH_CANDIDATE_LIMIT;
+      // #613: ONE comparator everywhere — native code-unit order. The heap's
+      // eviction priority uses native >, so this final ordering must agree
+      // (localeCompare could REORDER past the cap and silently displace a
+      // matching candidate). Equal names are ordered by insertion sequence,
+      // which is exactly the order the legacy buffer produced: it kept
+      // insertion order and its rel-only sort was stable.
+      retained.sort((left, right) =>
+        left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : left.seq - right.seq,
+      );
+      rawPaths = retained.map((slot) => slot.raw);
+      sawExtraCandidates = retained.length > SEARCH_CANDIDATE_LIMIT;
     } else {
       const listing = await runArgvCommand('rg', enumerateArgs, {
         env: enumerationEnv,
