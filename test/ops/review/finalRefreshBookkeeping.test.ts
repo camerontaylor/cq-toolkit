@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
-import type { DevLedgerFile } from '../../../src/ops/dev/record.js';
+import { assembleReadiness, type DevLedgerFile } from '../../../src/ops/dev/record.js';
 import { prepareDeferredVendorReview } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
@@ -249,10 +249,12 @@ async function fixture(mode: Mode) {
   let ancestorAppended = false;
   client.status = async (reference) => {
     if (
-      (mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle') &&
+      (mode === 'authorized-predecessor-append' ||
+        mode === 'authorized-predecessor-settle' ||
+        mode === 'older-head-predecessor-pending') &&
       reference.requestId === ancestorReference.requestId
     ) {
-      if (!final) return pending;
+      if (!final || mode === 'older-head-predecessor-pending') return pending;
       const terminalAncestor: QueueStatus = {
         ...pending,
         state: 'terminal-clean',
@@ -511,4 +513,46 @@ test('a seam-owned authorized predecessor settlement is accepted and notified', 
     .filter((debt) => debt?.vendorCompleted === true)
     .map((debt) => debt!.reference.requestId);
   expect(completed).toEqual(expect.arrayContaining(['ancestor-1', f.debt.reference.requestId]));
+});
+
+test('a superseded older-head predecessor permits a clean run but never a clean readiness', async () => {
+  const f = await fixture('older-head-predecessor-pending');
+  const result = await f.run();
+  // RUN acceptance: the successor's own fresh full coverage at the current head is the authority; a
+  // superseded older-head predecessor does not refuse it.
+  expect(result.status, JSON.stringify(result)).toBe('ok');
+  expect(f.events).toContain('ledger-observed');
+  const after = f.store.load().records.filter((record) => record.kind === 'vendor-debt');
+  expect(after.every((record) => record.kind === 'vendor-debt')).toBe(true);
+  const debts = after.flatMap((record) => (record.kind === 'vendor-debt' ? [record.debt] : []));
+  expect(debts.filter((debt) => debt.vendorCompleted === false)).toHaveLength(2);
+  // DURABLE READINESS: any pending ancestor still refuses a clean readiness verdict.
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: {
+      head: f.repo.git('rev-parse', 'HEAD').trim(),
+      base: f.state.base,
+      dirtySha256: 'clean-tree',
+    },
+    ledger: f.store.load(),
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: debts[debts.length - 1],
+    nowIso: f.effects.nowIso(),
+  });
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+});
+
+test('a pending obligation at the current review identity still refuses a clean run', async () => {
+  const f = await fixture('ambiguous-identity-enrollment');
+  const result = await f.run();
+  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
+  expect(result.reason).toContain('remain unsettled at this review identity');
+  expect(result.reason).toContain('ambiguous-enrollment');
 });

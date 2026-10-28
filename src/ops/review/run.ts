@@ -954,20 +954,42 @@ export function makeReviewRun(
           },
         };
       }
-      // Q15d clean refusal: an unsettled AUTHORIZED ANCESTOR obligation is never a clean run. It is
-      // read from the post-refresh ledger, so a predecessor settled by this invocation is not
-      // counted, and it refuses here rather than decorating outer usage or rewriting notifications.
+      // Q15d clean refusal asks ONE question: is an authorized obligation pending AT THIS REVIEW
+      // IDENTITY? It is read from the post-refresh ledger, so a predecessor settled by this
+      // invocation is not counted, and it refuses here rather than decorating outer usage or
+      // rewriting notifications. A superseded OLDER-head predecessor does not refuse the run: its
+      // receipt is carried as a retained obligation and its findings block once imported, while the
+      // durable READINESS gap in record.ts still refuses ANY pending ancestor. Run acceptance and
+      // durable readiness are therefore deliberately different verdicts.
+      const currentIdentity = {
+        head: state.head,
+        base: state.base,
+        dirtySha256: state.dirtySha256,
+      };
       const ancestry = readCurrentEnrollment(
         effects.openLedger(state.branch).load(),
-        { head: state.head, base: state.base, dirtySha256: state.dirtySha256 },
+        currentIdentity,
         target,
       );
-      if (ancestry.kind === 'enrollment' && ancestry.enrollment.pendingAncestry.length > 0)
+      const pendingAtThisIdentity =
+        ancestry.kind === 'ambiguous'
+          ? ancestry.requestIds
+          : ancestry.kind === 'enrollment'
+            ? ancestry.enrollment.pendingAncestry
+                .filter(
+                  (ancestor) =>
+                    ancestor.reference.binding.head === currentIdentity.head &&
+                    ancestor.reference.binding.target === target &&
+                    ancestor.deferral.base === currentIdentity.base,
+                )
+                .map((ancestor) => ancestor.reference.requestId)
+            : [];
+      if (pendingAtThisIdentity.length > 0)
         return {
           status: 'needs-human',
-          reason: `review.run: authorized predecessor obligation(s) remain unsettled (${ancestry.enrollment.pendingAncestry
-            .map((ancestor) => ancestor.reference.requestId)
-            .join(', ')}); a clean completion cannot be claimed`,
+          reason: `review.run: authorized predecessor obligation(s) remain unsettled at this review identity (${pendingAtThisIdentity.join(
+            ', ',
+          )}); a clean completion cannot be claimed`,
           report: record,
         };
       return {
