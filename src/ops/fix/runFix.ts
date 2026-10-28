@@ -653,10 +653,12 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             // branch or link: branchless rows show their stop reason only.
             const branchless = report.planned.filter(
               (row) =>
+                row.branch === pkg.branch &&
                 row.outcome !== 'fixed' &&
                 row.failures.every(isNoArtifactFailure) &&
                 !report.tasks.some(
                   (task) =>
+                    task.branch === row.branch &&
                     task.task.id === row.task.id &&
                     task.outcome !== 'fixed' &&
                     task.failedAttempt !== undefined,
