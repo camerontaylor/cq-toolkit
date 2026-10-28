@@ -156,6 +156,11 @@ describe('review.address composition', () => {
         { id: 'a', status: 'deferred', reason: 'needs owner' },
         { id: 'b', status: 'open', reason: undefined },
       ]);
+      // Deferred and never-attempted rows both stay blocking.
+      expect(reportOf(result).openBlocking.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: 'a', status: 'deferred' },
+        { id: 'b', status: 'open' },
+      ]);
       expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
         reportOf(result),
       );
@@ -363,6 +368,11 @@ describe('review.address composition', () => {
       expect(reportOf(result).findings.map(({ id, status }) => ({ id, status }))).toEqual([
         { id: 'a', status: 'open' },
       ]);
+      // An unpersisted outcome never leaves the blockers.
+      expect(reportOf(result).openBlocking.map(({ id }) => id)).toEqual(['a']);
+      expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
+        reportOf(result),
+      );
     } finally {
       await f.cleanup();
     }
@@ -695,6 +705,9 @@ describe('blocked re-review marker (#509)', () => {
     expect(
       reportOf(result).findings.map(({ id, status, reason }) => ({ id, status, reason })),
     ).toEqual([{ id: 'a', status: 'fixed', reason: 'verified' }]);
+    // …and the draft-facing blockers agree with the rows: the fixed finding
+    // is no longer listed as open blocking.
+    expect(reportOf(result).openBlocking).toEqual([]);
   });
 
   test('a retry that exhausts the token budget carries budget, never rereview-blocked', async () => {
