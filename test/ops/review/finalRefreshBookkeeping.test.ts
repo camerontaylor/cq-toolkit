@@ -465,12 +465,14 @@ test.each([
     expect(result.reason).toContain('unrecognized ledger bytes');
 });
 
-test('an authorized predecessor completion appended by the final refresh is owned and notified', async () => {
+test('an unowned predecessor append outside the refresh still fails closed', async () => {
   const f = await fixture('authorized-predecessor-append');
   const result = await f.run();
-  // The settlement is recognized (not "unrecognized ledger bytes") and ownership is notified.
-  expect(result.status, JSON.stringify(result)).toBe('ok');
-  expect(f.events).toContain('ledger-observed');
+  // The fixture's direct save is NOT the seam's requested mutation, so ownership still refuses it.
+  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
+  expect(result.reason).toContain('final queue refresh changed unrecognized ledger bytes');
+  expect(f.events).not.toContain('ledger-observed');
   const settled = f.store
     .load()
     .records.filter((record) => record.kind === 'vendor-debt')
