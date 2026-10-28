@@ -67,7 +67,7 @@ test('fixed capability sends the request verbatim and reconstructs split UTF-8 o
     ],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
-  expect(child.stdin.read()?.toString()).toBe(request);
+  expect(child.stdin.read()).toEqual(Buffer.from(request));
   expect(child.stdin.writableEnded).toBe(true);
   const bytes = Buffer.from('{"text":"évidence"}\n');
   const split = bytes.indexOf(Buffer.from('é')) + 1;
