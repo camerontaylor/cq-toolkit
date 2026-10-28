@@ -878,8 +878,9 @@ describe('contained grep and glob tools', () => {
       });
       expect(braceArm.ok).toBe(true);
       if (braceArm.ok) {
-        expect(braceArm.output).toContain('a.test.ts');
-        expect(braceArm.output).toContain('x.test.ts');
+        expect(braceArm.output).toContain('--- .test.ts ---');
+        expect(braceArm.output).toContain('--- a.test.ts ---');
+        expect(braceArm.output).not.toContain('--- keep.ts ---');
       }
       const ranged = await grep.execute({ pattern: 'needle', include: 'file[1-x].ts' });
       expect(ranged.ok).toBe(true);
@@ -899,7 +900,11 @@ describe('contained grep and glob tools', () => {
       const pattern = '{a,a}'.repeat(30) + '.ts';
       const result = await grep.execute({ pattern: 'needle', include: pattern });
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.denial.reason).toMatch(/^SEARCH_LIMIT: /);
+      if (!result.ok) {
+        expect(result.denial.reason).toBe(
+          'SEARCH_LIMIT: search denied: include expansion exceeds 256 visited branches',
+        );
+      }
     });
   });
 
@@ -962,29 +967,24 @@ describe('contained grep and glob tools', () => {
           'SEARCH_LIMIT: search denied: include pattern exceeds 256 characters',
         );
       }
-      // #614: budget exhaustion is an HONEST denial, distinguishable from an
-      // ordinary non-match. A budget far below the alternative count forces
-      // exhaustion on any candidate.
+      // #614: 64 distinct alternatives share work on one 203-character candidate.
+      // Their 4,096-state budget must deny rather than silently drop it.
       spawnState.fake = {
-        stdoutChunks: [Buffer.from('deep/dir/file1.ts\0x.test.ts\0')],
+        stdoutChunks: [Buffer.from(`${'a'.repeat(200)}.ts\0`)],
         stderrChunks: [],
         exitCode: 0,
         pid: 4247,
       };
       spawnState.calls.length = 0;
       try {
-        // Monkey-patch the budget through a huge alternative count: 70
-        // alternatives each need state; the per-candidate budget (4096)
-        // still covers them, so instead force exhaustion via deeply nested
-        // unanchored suffix starts: 3-segment path x long literal runs.
         const deep = await grep.execute({
           pattern: 'needle',
-          include: `*a`.repeat(60) + 'z.ts',
+          include: `{${Array.from({ length: 64 }, (_, index) => `${'*a'.repeat(10)}z${index}.ts`).join(',')}}`,
         });
-        expect(deep.ok).toBe(true); // bounded work completes; non-match or match
-        if (deep.ok) {
-          expect(['No matches', '--- x.test.ts ---'].some((o) => deep.output.includes(o))).toBe(
-            true,
+        expect(deep.ok).toBe(false);
+        if (!deep.ok) {
+          expect(deep.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
           );
         }
       } finally {

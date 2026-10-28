@@ -1034,13 +1034,13 @@ export function buildTools(
       reason,
     });
     let visited = 0;
-    const expand = (rest: string, acc: string[]): string[] | undefined => {
+    const expand = (rest: string, acc: string[]): 'alternatives' | 'visits' | undefined => {
       visited += 1;
-      if (visited > SEARCH_INCLUDE_EXPANSION_VISITS) return undefined;
+      if (visited > SEARCH_INCLUDE_EXPANSION_VISITS) return 'visits';
       const open = rest.indexOf('{');
       if (open === -1) {
         if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
       }
       let depth = 0;
       let close = -1;
@@ -1057,7 +1057,7 @@ export function buildTools(
       if (close === -1) {
         // Unbalanced braces stay literal (rg glob-consistent, no expansion).
         if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
       }
       const inner = rest.slice(open + 1, close);
       const parts: string[] = [];
@@ -1074,23 +1074,20 @@ export function buildTools(
       parts.push(current);
       if (parts.length === 1) {
         if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? acc : undefined;
+        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
       }
       const prefix = rest.slice(0, open);
       const suffix = rest.slice(close + 1);
       for (const part of parts) {
-        const next = expand(prefix + part + suffix, acc);
-        if (next === undefined) return undefined;
+        const reason = expand(prefix + part + suffix, acc);
+        if (reason !== undefined) return reason;
       }
-      return acc;
+      return undefined;
     };
-    const out = expand(pattern, []);
-    if (out === undefined) {
-      // The visited-branch cap tripped inside recursion; distinguish it from
-      // the alternatives-count overflow so the denial names the true bound.
-      return overflow('visits');
-    }
-    return { overflow: false, alternatives: out };
+    const alternatives: string[] = [];
+    const reason = expand(pattern, alternatives);
+    if (reason !== undefined) return overflow(reason);
+    return { overflow: false, alternatives };
   };
 
   // ---------------------------------------------------------------------------
