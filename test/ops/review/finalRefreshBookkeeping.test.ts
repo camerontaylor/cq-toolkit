@@ -241,23 +241,53 @@ async function fixture(mode: Mode) {
     }),
   );
   const ancestorReceiptId = createHash('sha256').update(ancestorBytes).digest('hex');
+  let ancestorAppended = false;
   client.status = async (reference) => {
     if (
       mode === 'authorized-predecessor-append' &&
       reference.requestId === ancestorReference.requestId
-    )
-      return final
-        ? {
-            ...pending,
-            state: 'terminal-clean',
-            pr: 42,
-            mergeSha: state.head,
-            itemId: 'ancestor-item',
-            receiptId: ancestorReceiptId,
-            reviewed: true,
-            consumed: true,
-          }
-        : pending;
+    ) {
+      if (!final) return pending;
+      const terminalAncestor: QueueStatus = {
+        ...pending,
+        state: 'terminal-clean',
+        pr: 42,
+        mergeSha: state.head,
+        itemId: 'ancestor-item',
+        receiptId: ancestorReceiptId,
+        reviewed: true,
+        consumed: true,
+      };
+      if (!ancestorAppended && ancestorDebt !== undefined) {
+        // The authorized settlement this refresh now owns: an extra appended snapshot the previous
+        // single-append validation rejected.
+        ancestorAppended = true;
+        const evidence = await importQueueEvidence(
+          join(repo.root, '.cq', 'queue-evidence'),
+          ancestorReceiptId,
+          ancestorBytes,
+        );
+        const latest = store.load();
+        store.save({
+          ...latest,
+          records: [
+            ...latest.records,
+            {
+              kind: 'vendor-debt' as const,
+              at: real.nowIso(),
+              debt: {
+                ...ancestorDebt,
+                queue: terminalAncestor,
+                vendor: 'vendor-completed',
+                vendorCompleted: true,
+                completion: evidence,
+              },
+            },
+          ],
+        });
+      }
+      return terminalAncestor;
+    }
     if (!final || mode === 'pending') return pending;
     if (mode === 'external-append' && !appendedExternal) {
       appendedExternal = true;
