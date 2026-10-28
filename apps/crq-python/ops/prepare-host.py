@@ -26,6 +26,7 @@ LEGACY_SHA = '0e35cd11153fc7ad681f002d580b9b22feb22092'
 CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
     'promotion.record_url_template', 'promotion.alert_agent_host',
+    'promotion.alert_agent_id',
     'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
     'promotion.signer.spool.ssh_key', 'repair.enabled', 'repair.cq_bin',
     'repair.paseo_host',
@@ -99,6 +100,11 @@ def validate(overlay):
             # CRQ expands it only at SSH invocation; retain those config bytes.
             checked = value[1:] if name == 'promotion.signer.spool.ssh_key' and isinstance(value, str) and value.startswith('~/') else value
             host_path(checked)
+        elif name == 'promotion.alert_agent_id':
+            # The alert recipient (a Paseo agent id) is host-specific, like its host.
+            if not isinstance(value, str) or not re.fullmatch(
+                    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', value):
+                raise ValueError('alert_agent_id must be a lowercase Paseo agent UUID')
         elif name == 'promotion.signer.spool.ssh_alias':
             if not isinstance(value, str) or not re.fullmatch(
                     r'[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*', value):
@@ -107,7 +113,7 @@ def validate(overlay):
             raise ValueError('overlay host values must be nonempty strings')
     # Paths/endpoints needed by the model-free runner must be explicit.
     supplied = dict(leaves(overlay['config']))
-    required = CONFIG_KEYS - {'promotion.signer.spool.dir'}
+    required = CONFIG_KEYS - {'promotion.signer.spool.dir', 'promotion.alert_agent_id'}
     if not required <= supplied.keys():
         raise ValueError('missing host config keys: ' + ', '.join(sorted(required - supplied.keys())))
     try:
