@@ -951,6 +951,20 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
           };
         }
         let installedAt = candidates[0]!;
+        // The repo-relative pnpm hook paths a commit configures (`pnpmfile`
+        // in its root .npmrc or pnpm-workspace.yaml), read from the commit.
+        const configuredPnpmfiles = async (commit: string): Promise<string[]> => {
+          const paths: string[] = [];
+          for (const file of ['.npmrc', 'pnpm-workspace.yaml']) {
+            const shown = await gitAt(['show', `${commit}:${file}`]);
+            if (shown.exitCode !== 0) continue;
+            for (const line of shown.stdout.split('\n')) {
+              const match = /^\s*pnpmfile\s*[=:]\s*["']?([^"'#\s]+)["']?/.exec(line);
+              if (match?.[1] !== undefined) paths.push(match[1].replace(/^\.\//, ''));
+            }
+          }
+          return paths;
+        };
         const tmpEffects = (deps.effectsFor ?? makeSubprocessDevEffects)(tmp);
         // Named test files under the author's checkout are re-rooted into the
         // probe checkout (the wrapper refuses paths outside its repository).
@@ -1007,9 +1021,18 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
                   verdict: 'fault',
                   detail: `dependency-input comparison failed: ${changed.stderr.trim().slice(0, 300)}`,
                 };
+              // A custom-named pnpm hook (the `pnpmfile` setting) is an input
+              // too, at whichever path either commit configures.
+              const hooks = new Set([
+                ...(await configuredPnpmfiles(installedAt)),
+                ...(await configuredPnpmfiles(commit)),
+              ]);
               const differs = changed.stdout
                 .split('\0')
-                .some((path) => GREEN_PREFIX_DEPENDENCY_INPUTS.includes(basename(path)));
+                .some(
+                  (path) =>
+                    GREEN_PREFIX_DEPENDENCY_INPUTS.includes(basename(path)) || hooks.has(path),
+                );
               if (differs) {
                 const reinstallMs = Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost);
                 if (reinstallMs <= 0)
