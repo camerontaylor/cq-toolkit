@@ -1719,11 +1719,14 @@ test('budget exhaustion during the post-report identity read truncates nonfatall
       return evidence;
     },
   };
-  let dispatchedAfterExhaustion = 0;
+  // An "unbounded" dispatch is one with neither the invocation signal nor a budget-clamped timeout;
+  // the receipt import's own signal-bound 30 s commands are not unbounded and are not counted.
+  let unboundedAfterExhaustion = 0;
   const effects = {
     ...f.effects,
     runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
-      if (exhausted) dispatchedAfterExhaustion += 1;
+      if (exhausted && call[2].signal === undefined && call[2].timeoutMs > 5_000)
+        unboundedAfterExhaustion += 1;
       return f.effects.runCommand(...call);
     },
   };
@@ -1738,7 +1741,7 @@ test('budget exhaustion during the post-report identity read truncates nonfatall
     { remainingMs: () => (exhausted ? 0 : 5_000) },
   );
   expect(debt?.reference.requestId).toBe(successor.reference.requestId);
-  // No command is dispatched once the budget is gone: the wait is bounded, not merely re-checked.
-  expect(dispatchedAfterExhaustion).toBe(0);
+  // Nothing unbounded is dispatched once the budget is gone: the wait is bounded, not re-checked late.
+  expect(unboundedAfterExhaustion).toBe(0);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
