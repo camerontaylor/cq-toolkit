@@ -106,9 +106,29 @@ class ClassifierTest(unittest.TestCase):
                 path.write_text(json.dumps({"type": "error", "errorType": error_type,
                     "message": "rate limit: login required", "recoverable": True}))
                 cls = crq.classify(path, 1)
-                self.assertEqual(cls["outcome"], "error")
+                self.assertEqual(cls["outcome"], "auth" if error_type == "auth" else "error")
                 self.assertEqual(cls["failure_provenance"]["causes"][0]["source"], "queue")
 
+
+    def test_only_literal_structured_auth_is_an_operational_auth_stop(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for code in ("auth", "AUTH", "auth_error", "authentication", "unknown", None, []):
+                for exit_code in (0, 1, None, 124):
+                    with self.subTest(code=code, exit_code=exit_code):
+                        path.write_text(json.dumps({"type": "error", "errorType": code,
+                            "message": "auth login expired; authenticate", "recoverable": True}))
+                        cls = crq.classify(path, exit_code)
+                        self.assertEqual(cls["outcome"], "auth" if code == "auth" else
+                                         "error")
+                        self.assertFalse(cls["counted"])
+                        self.assertTrue(all(c["source"] == "queue"
+                            for c in cls["failure_provenance"]["causes"]))
+            path.write_text(json.dumps({"type": "error", "errorType": "auth"}) + "\n" +
+                            json.dumps({"type": "action_required"}))
+            cls = crq.classify(path, 1)
+            self.assertEqual(cls["outcome"], "action_required")
+            self.assertFalse(cls["counted"])
 
     def test_recognized_progress_preserves_truthful_terminal_and_findings(self):
         progress_events = [{"type": "status", "status": status}
@@ -770,6 +790,80 @@ class CurrentTest(unittest.TestCase):
             run.assert_called_once()
         self.assertIsNone(crq._FORGE_BUDGET)
 
+
+    def test_auth_classification_pauses_current_ordinary_and_promotion_harvest(self):
+        initial = copy.deepcopy(self.q)
+        auth = {"type": "error", "errorType": "auth", "recoverable": True}
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        mixed = [{"type": "error", "errorType": code}
+                 for code in ("unknown", "scan", "budget", "cancel")] + [vendor]
+        streams = [[auth]] + [events for other in mixed
+                              for events in ([auth, other], [other, auth])]
+        n = 0
+        for kind in (review_receipt.KIND, "pr", "promotion"):
+            for events in streams:
+                with self.subTest(kind=kind, events=events), \
+                     mock.patch.object(crq, "RUNS", self.state / f"auth-runs-{n}"):
+                    n += 1
+                    self.q = copy.deepcopy(initial)
+                    crq.save_queue(self.q)
+                    item = self.enroll(f"auth-{n}")
+                    rdir = self.launch_item(item)
+                    self.terminal_artifacts(item, events)
+                    (rdir / "exit.json").write_text(json.dumps({"exit": 1}))
+                    # A real detached run, stream and classifier feed each harvest route.
+                    item["kind"] = kind
+                    result = self.harvest(item)
+                    cls = json.loads((rdir / "classification.json").read_text())
+                    self.assertEqual(cls["outcome"], "auth")
+                    self.assertFalse(cls["counted"])
+                    self.assertEqual(cls["failure_provenance"]["causes"][:len(events)], [
+                        {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+                        if e["errorType"] == "rate_limit" else
+                        {"source": "queue", "category": "unknown", "code": e["errorType"]}
+                        for e in events])
+                    self.assertTrue(self.q["paused"])
+                    self.assertIn("auth", self.q["pause_reason"])
+                    self.assertIsNone(item["run"])
+                    self.assertNotIn("not_before", item)
+                    self.assertEqual(item.get("cycles", []), [])
+                    self.assertNotIn("coverage", self.q)
+                    if kind == review_receipt.KIND:
+                        document = self.document(item)
+                        self.assertEqual(document["outcome"], "auth")
+                        self.assertFalse(document["counted"])
+                        self.assertEqual(document["classification"], cls)
+                        self.assertFalse(queue_transport._vendor_rate_limit(document))
+                    else:
+                        self.assertIn("PAUSED", result)
+                        self.assertEqual(item["state"], "pending")
+                    crq.save_queue(self.q)
+                    self.assertEqual(self.tick(), 0)
+                    self.assertTrue(crq.load_queue()["paused"])
+
+    def test_prose_auth_and_unknown_mixed_causes_do_not_pause_or_gain_vendor_authority(self):
+        initial = copy.deepcopy(self.q)
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        for n, code in enumerate(("unknown", "AUTH", "auth_error", "scan", "budget", "cancel")):
+            hard = {"type": "error", "errorType": code, "message": "auth login expired"}
+            for order, events in enumerate(([vendor, hard], [hard, vendor])):
+                with self.subTest(code=code, order=order), \
+                     mock.patch.object(crq, "RUNS", self.state / f"not-auth-{n}-{order}"):
+                    self.q = copy.deepcopy(initial)
+                    crq.save_queue(self.q)
+                    item = self.enroll(f"not-auth-{n}-{order}")
+                    rdir = self.launch_item(item)
+                    self.terminal_artifacts(item, events)
+                    self.harvest(item)
+                    document = self.document(item)
+                    self.assertEqual(document["outcome"], "error")
+                    self.assertFalse(document["counted"])
+                    self.assertFalse(self.q["paused"])
+                    self.assertFalse(queue_transport._vendor_rate_limit(document))
+                    self.assertNotIn("cooldown_until", self.q)
+                    self.assertNotIn("coverage", self.q)
+                    self.assertTrue(any(c["source"] == "queue"
+                        for c in document["classification"]["failure_provenance"]["causes"]))
 
     def test_receipt_preserves_all_classification_causes(self):
         item = self.enroll()

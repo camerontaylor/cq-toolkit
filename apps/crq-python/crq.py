@@ -389,6 +389,9 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         hard("unexpected-exit")
     if actions:
         res.update(outcome="action_required", message="structured action required")
+    elif any(e.get("errorType") == "auth" for e in errors):
+        # Operational stop only: auth remains a hard cause, never vendor authority.
+        res.update(outcome="auth", message="structured authentication failure; owner action needed")
     elif errors:
         if vendor_only and proof_complete and type(exit_code) is int and exit_code in (0, 1):
             res.update(outcome="rate_limited")
