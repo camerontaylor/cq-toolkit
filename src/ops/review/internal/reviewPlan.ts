@@ -104,7 +104,7 @@ export interface PlannedReviewSession {
    * them per turn. False is the tool-less fallback; the prompt says so.
    */
   tools: boolean;
-  /** Total step budget for a tool session; absent for tool-less partitions. */
+  /** Effective total step budget; a one-step tool-less fallback retains its ceiling. */
   maxSteps?: number;
 }
 
@@ -546,6 +546,9 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
     // with a small total step allowance, by default; `false` restores the
     // tool-less fallback and its explicit limitation.
     const steps = resolvePartitionSteps(input.partitionTools, bounds.maxSteps);
+    // The final step is reserved for the JSON answer, so a one-step session
+    // has no usable reference-tool step even though its numeric budget is set.
+    const tools = steps !== undefined && steps > 1;
     const legacy = partitionReview({
       head: input.head,
       base: input.base,
@@ -554,7 +557,7 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
       requireReceipt: false,
       instructions: buildPartitionInstructions(
         context,
-        steps === undefined
+        !tools
           ? PARTITION_TOOLLESS_INSTRUCTION
           : input.searchTools === false
             ? PARTITION_READ_INSTRUCTION
@@ -576,14 +579,16 @@ export function createReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
         id: `partition-${String(index + 1)}`,
         prompt: part.prompt,
         placements: [{ component: source.component, start: range.start, end: range.end, offset }],
-        tools: steps !== undefined,
+        tools,
         ...(steps === undefined ? {} : { maxSteps: steps }),
       };
     });
     if (sessions.length === 0) throw new Error('review plan: partitioned mode planned no sessions');
-    if (steps === undefined)
+    if (!tools)
       limitations.push(
-        'partitioned fallback ran without tools: partition findings could not be verified against referenced code',
+        steps === 1
+          ? 'partitioned fallback ran without tools: the one-step budget is reserved for the final answer, so partition findings could not be verified against referenced code'
+          : 'partitioned fallback ran without tools: partition findings could not be verified against referenced code',
       );
     const coverage = ReviewCoverageV2Schema.parse({
       version: 2,

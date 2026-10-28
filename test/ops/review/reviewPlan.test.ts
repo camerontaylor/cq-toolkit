@@ -551,6 +551,40 @@ describe('createReviewPlan partitioned fallback', () => {
     expect(plan.sessions.every((session) => session.maxSteps === 2)).toBe(true);
   });
 
+  it('keeps the explicit one-step partition budget but omits unusable tools', () => {
+    const components = Array.from({ length: 21 }, (_, index) =>
+      tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
+    );
+    const plan = createReviewPlan(planInput(components, { partitionTools: { steps: 1 } }));
+
+    expect(plan.sessions.every((session) => !session.tools)).toBe(true);
+    expect(plan.sessions.every((session) => session.maxSteps === 1)).toBe(true);
+    for (const session of plan.sessions) {
+      expect(session.prompt).toContain('This session has no tools');
+      expect(session.prompt).not.toContain('bounded read-only');
+    }
+    expect(plan.limitations).toEqual([
+      'partitioned fallback ran without tools: the one-step budget is reserved for the final answer, so partition findings could not be verified against referenced code',
+    ]);
+  });
+
+  it('keeps a one-step global ceiling and omits unusable partition tools', () => {
+    const components = Array.from({ length: 21 }, (_, index) =>
+      tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
+    );
+    const plan = createReviewPlan(planInput(components, { session: { maxSteps: 1 } }));
+
+    expect(plan.sessions.every((session) => !session.tools)).toBe(true);
+    expect(plan.sessions.every((session) => session.maxSteps === 1)).toBe(true);
+    for (const session of plan.sessions) {
+      expect(session.prompt).toContain('This session has no tools');
+      expect(session.prompt).not.toContain('bounded read-only');
+    }
+    expect(plan.limitations).toEqual([
+      'partitioned fallback ran without tools: the one-step budget is reserved for the final answer, so partition findings could not be verified against referenced code',
+    ]);
+  });
+
   it('keeps the read-only file-only set when searchTools is false', () => {
     const components = Array.from({ length: 21 }, (_, index) =>
       tracked(`src/f${String(index)}.ts`, ['export const value = 1;']),
