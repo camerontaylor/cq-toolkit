@@ -5,6 +5,30 @@ changes signer custody. Do not render, patch or restart the old runner before th
 owner-approved first monorepo deployment. `CUTOVER.md` and `CUTOVER-COMMANDS.md`
 are archival records of the completed cross-host handover, not current commands.
 
+## Slot scheduling deployment (owner-directed 2026-10-28)
+
+Keep `crq-tick.timer` at `OnCalendar=*:0/12`. The user manager must permit
+`systemd-run --user` transient timers and `systemctl --user --no-block start
+crq-tick.service`. The tick creates/replaces only `crq-slot-wake.timer` and its
+service, with `AccuracySec=1s`; it probes active state to dedupe. Detached review
+completion asks the same tick service to harvest. The tick lock remains the
+single queue writer and protects concurrent harvest. Non-systemd/unavailable
+managers retain the twelve-minute fallback and report no armed precise wake.
+
+No overlay changes or new installed units are required. Render the committed
+config: `max_inflight=10`, `max_starts_per_tick=10`, `review_timeout_min=120`.
+The new ceiling defaults to 10 in code when omitted. The old starts/hour cap
+is only the conservative fallback if repository-scoped usage is unavailable;
+valid vendor remaining slots govern normal admission. Exact next-slot wakes
+recheck usage rather than treating local estimates as spend authority.
+
+Deploy the signer change too: its review argv includes `--deep` and its deadline
+is 120 minutes (stall alert 150 minutes). Signer custody, its existing independent admission policy and
+its service installation remain unchanged. The signer publishes an exact
+rate-limit deadline; the runner retains the latest global deadline on harvest.
+All reviews use `--deep`, and free slots can start concurrent isolated reviews
+in promotion → prioritize → rank order. See [README](../README.md).
+
 ## Private overlay, schema 1
 
 Keep the JSON file outside the deployment checkout and outside every Git

@@ -142,9 +142,9 @@ RESULTS = SPOOL / "results"    # crq-owned, files 0644
 SLEDGER = SPOOL / "ledger"     # crq-owned, files 0644
 
 POLL_SECONDS = 15
-RUN_TIMEOUT_MIN = 75
+RUN_TIMEOUT_MIN = 120
 KILL_AFTER_S = 60
-MAX_STARTS_PER_HOUR = 2  # signer self-cap; the shared ≤5/h budget is the steward's
+MAX_STARTS_PER_HOUR = 2  # signer self-cap; the steward owns shared usage-driven admission
 REQ_MAX_BYTES = 4096
 DESC_MAX = 140
 ITEM_ID = re.compile(r"^promo-[0-9a-f]{10}\+{0,9}$")
@@ -687,7 +687,7 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
             mins = None
             if m:
                 k = {"second": 1 / 60, "minute": 1, "hour": 60}[m.group(2)]
-                mins = int(int(m.group(1)) * k) + 1
+                mins = int(m.group(1)) * k
             res.update(outcome="rate_limited", wait_minutes=mins)
         elif "auth" in et or "login" in msg.lower() or "unauthor" in msg.lower():
             res.update(outcome="auth")
@@ -1046,9 +1046,9 @@ def defer_request(iid: str, reason: str, until_iso: Optional[str] = None) -> Non
 def enter_cooldown(iid: str, minutes: int) -> None:
     """Self-cooldown after a rate-limited run; publish the rate_limit backoff
     so the steward extends its own cooldown too (shared quota)."""
-    until = now() + dt.timedelta(minutes=minutes + 2)
+    until = now() + dt.timedelta(minutes=minutes)
     atomic_json(COOLDOWN, {"until": iso(until)})
-    publish_backoff(iid, "rate_limit", until, minutes + 2)
+    publish_backoff(iid, "rate_limit", until, minutes)
 
 
 # ---------------------------------------------------------------- CLI run
@@ -1056,7 +1056,7 @@ def enter_cooldown(iid: str, minutes: int) -> None:
 
 def run_cli(run_dir: Path, wt: Path, run_base: str) -> Dict[str, Any]:
     """coderabbit review with the hard timeout implemented in Python
-    (threading.Timer → SIGTERM at 75m, SIGKILL 60s later). NO gtimeout, NO
+    (threading.Timer → SIGTERM at 120m, SIGKILL 60s later). NO gtimeout, NO
     Homebrew, NO /usr/local/bin. stdin=DEVNULL; stdout→ndjson, stderr→log
     (both private). --use-credits is never passed."""
     counts = {s: 0 for s in SEVERITIES}
@@ -1064,7 +1064,7 @@ def run_cli(run_dir: Path, wt: Path, run_base: str) -> Dict[str, Any]:
         return {"outcome": "error", "severity_counts": counts}
     run_dir.mkdir(parents=True, exist_ok=True)
     ndjson, errlog = run_dir / "review.ndjson", run_dir / "stderr.log"
-    cmd = [str(CODERABBIT), "review", "--agent", "--base-commit", run_base, "--type", "committed"]
+    cmd = [str(CODERABBIT), "review", "--agent", "--deep", "--base-commit", run_base, "--type", "committed"]
     fired = {"term": False, "kill": False}
 
     def term() -> None:
@@ -1425,7 +1425,7 @@ def process_request(path: Path) -> None:
             record_run(base, run_base, batch, cls["outcome"], clean)
             if cls["outcome"] == "rate_limited":
                 # Nothing final: the pending stands; cooldown + published backoff.
-                enter_cooldown(iid, wait_minutes or 30)
+                enter_cooldown(iid, wait_minutes if wait_minutes is not None else 30)
                 close_out(iid, req, req_sha, outcome="rate_limited", started_at=started_at,
                           severity_counts=counts, posted=posted, wait_minutes=wait_minutes)
                 return

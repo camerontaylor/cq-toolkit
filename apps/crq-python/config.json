@@ -4,8 +4,9 @@
   "worktree_root": "@HOST_WORKTREE_ROOT@",
   "worktree_prefix": "coderabbit-queue-",
   "max_starts_per_hour": 5,
-  "max_inflight": 2,
-  "review_timeout_min": 75,
+  "max_starts_per_tick": 10,
+  "max_inflight": 10,
+  "review_timeout_min": 120,
   "quiet_minutes": 30,
   "rate_limit_default_backoff_min": 30,
   "error_backoff_min": 30,
@@ -44,7 +45,7 @@
         "_ssh_key_note": "Host overlay supplies the dedicated forced-command transport; ssh runs with -F none. No plain-shell fallback."
       }
     },
-    "signer_stall_min": 90,
+    "signer_stall_min": 150,
     "signer_down_min": 30,
     "record_url_template": null
   },

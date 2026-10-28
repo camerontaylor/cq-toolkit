@@ -12,8 +12,30 @@ until the single-runner handover in [ops/CUTOVER.md](ops/CUTOVER.md) is executed
 
 `crq-tick.timer` invokes a model-free tick every twelve minutes. The tick owns
 `state/queue.json`, harvests detached CodeRabbit runs, enrolls new ranges, honors
-server waitTime cooldown and the configured starts/hour and inflight caps, and
-writes repair inbox jobs. Completed reviews count only after terminal success.
+server waitTime cooldown and usage-driven slots, and writes repair inbox jobs.
+Before admission it runs `coderabbit usage --agent` in the repository clone.
+Team included reviews are a count in a rolling 60-minute window (10 slots).
+Each tick fills free slots in promotion → operator priority → rank order, bounded
+by `max_starts_per_tick` and `max_inflight` (both default 10). The legacy
+`max_starts_per_hour` (5) applies only when usage is unavailable or has no valid
+remaining count. Partial usage with a valid remaining count is usable.
+
+The oldest unexpired local start plus 60 minutes predicts the next slot. Vendor
+`rollingWindowMs` refines the window; `fullCapacityInMs` is an upper bound for
+unknown external starts, never mistaken for the next-slot time. A wake always
+rechecks usage. When earlier than the next calendar tick, a deduped transient
+`crq-slot-wake.timer` starts the same `crq-tick.service` at second precision
+(`AccuracySec=1s`). Failed systemd probes/creation leave the calendar fallback.
+Detached completion also requests a harvest tick. Ticks retain the existing
+exclusive lock; detached runs own only their individual worktree/run artifacts.
+
+Every review, including the promotion signer, passes `--deep`; review deadlines
+are 120 minutes with the existing TERM/KILL grace and ownership-aware harvest.
+Ambiguous ownership still retains capacity for operator reconciliation.
+Vendor rate-limit waitTime is preserved to the second, without minute padding;
+local harvest measures cooldown from the recorded exit time and concurrent
+results cannot shorten an existing global cooldown.
+Completed reviews count only after terminal success.
 Secret scanning happens before upload; credits are never enabled automatically.
 
 `crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. It

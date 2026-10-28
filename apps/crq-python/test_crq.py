@@ -66,7 +66,7 @@ class ClassifierTest(unittest.TestCase):
                 cls = crq.classify(path, exit_code)
                 self.assertEqual(cls["outcome"], "rate_limited")
                 self.assertFalse(cls["counted"])
-                self.assertEqual(cls["wait_minutes"], 3)
+                self.assertEqual(cls["wait_seconds"], 120)
                 self.assertEqual(cls["failure_provenance"],
                     {"version": 1, "complete": True, "causes": [cause, cause]})
             hard_events = [
@@ -223,6 +223,12 @@ class ClassifierTest(unittest.TestCase):
 
 class CurrentTest(unittest.TestCase):
     def setUp(self):
+        usage = mock.patch.object(crq.usage_slots, "read_usage", return_value=None)
+        usage.start()
+        self.addCleanup(usage.stop)
+        wake = mock.patch.object(crq, "schedule_slot_wake")
+        wake.start()
+        self.addCleanup(wake.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
