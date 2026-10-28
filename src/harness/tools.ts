@@ -1756,12 +1756,30 @@ export function buildTools(
       // whole include is ONE exclusion when the pattern itself was negated.
       const positives = patternExcluded ? [] : compiled;
       const exclusions = patternExcluded ? compiled : [];
-      // Unanchored globs (no '/') match at ANY depth (rg: 'a*' hits
-      // 'deep2/a.txt'), so try every suffix start; anchored globs match only
-      // from the root. ONE aggregate per-candidate budget (#614) spans all
-      // alternatives, all suffix starts and all NFA steps: exhaustion is an
+      // Unanchored globs (no '/') are BASENAME filters (rg fixtures: 'z'
+      // selects 'deep/sub/z', 'd*' does not select a file merely because a
+      // DIRECTORY is named 'deep'), so one ordinary run checks the final
+      // component instead of every suffix. Anchored globs match only from the
+      // root; a whole-component '**' run still spans components and keeps the
+      // NFA path. ONE aggregate per-candidate budget (#614) spans all
+      // alternatives, all component checks and all NFA steps: exhaustion is an
       // honest fail-closed verdict, never a silent non-match.
+      const ordinaryUnanchoredRun = (glob: CompiledGlob): GlobToken[] | undefined =>
+        !glob.anchored && glob.runs.length === 1 && !isGlobstarRun(glob.runs[0])
+          ? glob.runs[0]
+          : undefined;
+      const basenameOf = (rel: string): string => rel.slice(rel.lastIndexOf('/') + 1);
       const matchOne = (glob: CompiledGlob, rel: string, budget: { left: number }): boolean => {
+        const standalone = ordinaryUnanchoredRun(glob);
+        if (standalone !== undefined) {
+          // #656: only the basename can match, so charge its split and walk it
+          // directly — copying every remaining suffix would charge O(n^2) on
+          // a deep ordinary path and wrongly exhaust the shared budget.
+          const base = basenameOf(rel);
+          budget.left -= base.length;
+          if (budget.left < 0) return false;
+          return matchRun(standalone, base, budget);
+        }
         budget.left -= rel.length; // split the candidate path for this alternative
         if (budget.left < 0) return false;
         const segments = rel.split('/');
@@ -1784,6 +1802,20 @@ export function buildTools(
         rel: string,
         budget: { left: number },
       ): boolean => {
+        const standalone = ordinaryUnanchoredRun(glob);
+        if (standalone !== undefined) {
+          // A '/'-free exclusion applies to every path COMPONENT: excluding a
+          // directory excludes its whole subtree, so any matching component
+          // vetoes the candidate. Charge one split and the component walks
+          // instead of re-matching every ancestor prefix from scratch.
+          budget.left -= rel.length;
+          if (budget.left < 0) return false;
+          for (const component of rel.split('/')) {
+            if (matchRun(standalone, component, budget)) return true;
+            if (budget.left < 0) return false;
+          }
+          return false;
+        }
         if (matchOne(glob, rel, budget)) return true;
         if (budget.left < 0) return false;
         for (let slash = rel.indexOf('/'); slash !== -1; slash = rel.indexOf('/', slash + 1)) {
