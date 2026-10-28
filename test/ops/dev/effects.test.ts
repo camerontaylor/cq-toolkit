@@ -116,11 +116,14 @@ test('subprocess cancellation waits for termination and prevents later child wor
   );
   try {
     await ready;
-    controller.abort(new Error('parent cancelled child'));
+    const reason = { cancelled: 'parent cancelled child' };
+    controller.abort(reason);
     const result = await pending;
     expect(result.exitCode).toBeNull();
     expect(result.timedOut).toBe(false);
     expect(result.stdout).toContain('partial evidence');
+    expect(result).toHaveProperty('interruption.kind', 'abort');
+    expect(result).toHaveProperty('interruption.reason', reason);
   } finally {
     watcher.close();
     controller.abort();
@@ -139,4 +142,16 @@ test('already aborted subprocess never executes its body', async () => {
   );
   expect(result.exitCode).toBeNull();
   expect(result.stdout).toBe('');
+  expect(result).toHaveProperty('interruption.kind', 'abort');
+  expect(result).toHaveProperty('interruption.reason', controller.signal.reason);
+});
+
+test('a numeric command failure has no abort provenance even if the caller later aborts', async () => {
+  const controller = new AbortController();
+  const result = await makeSubprocessDevEffects(dir).runCommand(process.execPath,
+    ['-e', 'process.exit(7)'], { timeoutMs: 10_000, signal: controller.signal });
+  controller.abort({ cancelled: 'after ordinary failure' });
+  expect(result.exitCode).toBe(7);
+  expect(result.timedOut).toBe(false);
+  expect(result).not.toHaveProperty('interruption');
 });
