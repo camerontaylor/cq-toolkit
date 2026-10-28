@@ -68,8 +68,10 @@ interface InvocationLifetime {
   remainingMs(): number;
   /** True only when the deadline fired and the caller did not cancel. */
   expired(): boolean;
-  /** True when the caller cancelled; a cancellation always outranks a deadline stop. */
-  callerAborted(): boolean;
+  /** Read the original caller, even if the combined signal retained an earlier deadline reason. */
+  throwIfCallerAborted(): void;
+  /** Unique to this invocation, including pre-dispatch budget refusals. */
+  deadlineReason: LineageDeadlineExhausted;
   dispose(): void;
 }
 
@@ -86,7 +88,9 @@ function startInvocationLifetime(
   caller: AbortSignal | undefined,
   callerRemaining: (() => number) | undefined,
 ): InvocationLifetime {
+  caller?.throwIfAborted();
   const controller = new AbortController();
+  const deadlineReason = new LineageDeadlineExhausted();
   const started = performance.now();
   const initial = callerRemaining?.() ?? INVOCATION_TOTAL_MS;
   if (!Number.isFinite(initial) || initial <= 0)
@@ -106,7 +110,7 @@ function startInvocationLifetime(
   const timer = setTimeout(
     () => {
       fired = true;
-      controller.abort(new LineageDeadlineExhausted());
+      controller.abort(deadlineReason);
     },
     Math.max(0, remainingMs()),
   );
@@ -115,7 +119,8 @@ function startInvocationLifetime(
     signal: caller ? AbortSignal.any([caller, controller.signal]) : controller.signal,
     remainingMs,
     expired: () => fired && caller?.aborted !== true,
-    callerAborted: () => caller?.aborted === true,
+    throwIfCallerAborted: () => caller?.throwIfAborted(),
+    deadlineReason,
     dispose: () => {
       clearTimeout(timer);
       caller?.removeEventListener('abort', onCallerAbort);
@@ -142,20 +147,16 @@ function boundQueueClient(
     // A caller cancellation (and our own deadline sentinel) keeps its exact reason. Otherwise an
     // exhausted budget is OUR deadline whatever the timer scheduling: the timer callback may not
     // have run yet, so classify by the budget itself, never by `expired()` alone.
+    lifetime.throwIfCallerAborted();
     lifetime.signal.throwIfAborted();
-    if (lifetime.expired() || lifetime.remainingMs() <= 0) throw new LineageDeadlineExhausted();
+    if (lifetime.expired() || lifetime.remainingMs() <= 0) throw lifetime.deadlineReason;
     throw new Error(`queue lifetime exhausted before ${label}`);
   };
   const settle = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
     if (dead || lifetime.signal.aborted || lifetime.remainingMs() <= 0) return refuse(label);
     let detach: () => void = () => undefined;
     const expired = new Promise<never>((_resolve, reject) => {
-      const fail = () =>
-        reject(
-          lifetime.signal.reason instanceof Error
-            ? lifetime.signal.reason
-            : new Error(`queue lifetime exhausted during ${label}`),
-        );
+      const fail = () => reject(lifetime.signal.reason);
       if (lifetime.signal.aborted) {
         fail();
         return;
@@ -165,15 +166,18 @@ function boundQueueClient(
     });
     try {
       const value = await Promise.race([run(), expired]);
+      lifetime.throwIfCallerAborted();
       if (dead) throw new Error(`queue lifetime exhausted during ${label}`);
       return value;
     } catch (error) {
       if (lifetime.signal.aborted || lifetime.remainingMs() <= 0) dead = true;
+      lifetime.throwIfCallerAborted();
       throw error;
     } finally {
       detach();
     }
   };
+  const invocationOptions = { signal: lifetime.signal, remainingMs: lifetime.remainingMs };
   const bounded: DeferredQueueClient & {
     report?: (
       reference: DeferredVendorDebt['reference'],
@@ -181,10 +185,14 @@ function boundQueueClient(
       options?: QueueLineageOptions,
     ) => Promise<unknown>;
   } = {
-    enqueue: (input) => settle('enqueue', () => source.enqueue(input)),
-    bind: (input) => settle('bind', () => source.bind(input)),
-    cancel: (input) => settle('cancel', () => source.cancel(input)),
-    status: (input) => settle('status', () => source.status(input)),
+    enqueue: (input, options) =>
+      settle('enqueue', () => source.enqueue(input, { ...options, ...invocationOptions })),
+    bind: (input, options) =>
+      settle('bind', () => source.bind(input, { ...options, ...invocationOptions })),
+    cancel: (input, options) =>
+      settle('cancel', () => source.cancel(input, { ...options, ...invocationOptions })),
+    status: (input, options) =>
+      settle('status', () => source.status(input, { ...options, ...invocationOptions })),
   };
   const report = (source as { report?: unknown }).report;
   if (typeof report === 'function')
@@ -196,7 +204,7 @@ function boundQueueClient(
             b: string,
             c?: QueueLineageOptions,
           ) => Promise<unknown>
-        ).call(source, reference, evidenceDir, options),
+        ).call(source, reference, evidenceDir, { ...options, ...invocationOptions }),
       );
   return bounded;
 }
@@ -616,6 +624,7 @@ export function currentLedgerDebt(
  * it closed. Only the authorized-ancestry pass treats truncation as nonfatal.
  */
 function signalCheck(lifetime: InvocationLifetime): void {
+  lifetime.throwIfCallerAborted();
   lifetime.signal.throwIfAborted();
 }
 
@@ -625,7 +634,7 @@ function signalCheck(lifetime: InvocationLifetime): void {
  * without throwing.
  */
 function ancestryBoundary(lifetime: InvocationLifetime): 'continue' | 'stop' {
-  if (lifetime.callerAborted()) lifetime.signal.throwIfAborted();
+  lifetime.throwIfCallerAborted();
   if (lifetime.expired()) return 'stop';
   if (lifetime.remainingMs() <= 0) return 'stop';
   if (lifetime.signal.aborted) lifetime.signal.throwIfAborted();
@@ -655,12 +664,25 @@ function boundedEffects(
   };
   return {
     ...effects,
-    runCommand: (command, args, opts) => {
+    runCommand: async (command, args, opts) => {
+      lifetime.throwIfCallerAborted();
       if (lifetime.signal.aborted) return refuse(lifetime.signal.reason);
       const remaining = lifetime.remainingMs();
-      if (remaining <= 0) return refuse(new LineageDeadlineExhausted());
+      if (remaining <= 0) return refuse(lifetime.deadlineReason);
       const timeoutMs = Math.max(1, Math.min(opts.timeoutMs, Math.floor(remaining)));
-      return effects.runCommand(command, args, { ...opts, timeoutMs, signal: lifetime.signal });
+      const result = await effects.runCommand(command, args, {
+        ...opts, timeoutMs, signal: lifetime.signal,
+      });
+      // A failed read needs causal evidence, not merely an expired clock. An abort is ours only
+      // when the adapter reports this invocation's unique reason; a timeout is ours only when
+      // this view shortened the command's cap and the invocation budget has actually expired.
+      if ((result.exitCode !== 0 || result.timedOut) && (
+        (result.interruption?.kind === 'abort' &&
+          result.interruption.reason === lifetime.deadlineReason) ||
+        (result.timedOut && timeoutMs < opts.timeoutMs &&
+          (lifetime.expired() || lifetime.remainingMs() <= 0))
+      )) refusal.error = lifetime.deadlineReason;
+      return result;
     },
   };
 }
@@ -711,7 +733,7 @@ async function refreshAuthorizedAncestry(
     const next = lineageOrder.find((ancestor) => !attempted.has(ancestor.reference.requestId));
     if (next === undefined) {
       // An exhausted lineage never swallows a caller cancellation; deadline/count stops stay nonfatal.
-      if (lifetime.callerAborted()) lifetime.signal.throwIfAborted();
+      lifetime.throwIfCallerAborted();
       return;
     }
     // The caller's cancellation outranks the nonfatal count/deadline stops.
@@ -743,7 +765,8 @@ async function refreshAuthorizedAncestry(
       // nonfatal truncation as expiry between ancestors: keep the verified current enrollment and
       // leave the retained obligations as readiness gaps. Caller cancellation keeps its own exact
       // reason, and any genuine trust/import failure still propagates unchanged.
-      if (error instanceof LineageDeadlineExhausted) return;
+      lifetime.throwIfCallerAborted();
+      if (error === lifetime.deadlineReason) return;
       throw error;
     }
     const refusal: BoundedRefusal = {};
@@ -751,28 +774,23 @@ async function refreshAuthorizedAncestry(
       target,
       base: state.base,
     });
-    if (refusal.error !== undefined) {
-      // `readWorkState` folds thrown faults into `ok:false`; rethrow the bounded view's own outcome
-      // so the caller's exact reason survives and an exhausted budget truncates nonfatally.
-      if (refusal.error instanceof LineageDeadlineExhausted) return;
-      throw refusal.error;
+    lifetime.throwIfCallerAborted();
+    if (!current.ok) {
+      // `readWorkState` folds faults into ok:false. Only this bounded view's proven own deadline
+      // can truncate it; unrelated nonzero/spawn/null results stay hard even at the deadline.
+      if (refusal.error === lifetime.deadlineReason) return;
+      if (refusal.error !== undefined) throw refusal.error;
+      throw new Error('deferred invocation identity changed while settling authorized ancestry');
     }
-    // The real subprocess adapter RESOLVES a failed CommandResult for a cancelled or clamped command
-    // (`exitCode: null, timedOut: false` on cancellation; `timedOut: true` on timeout), and
-    // `readWorkState` folds that into `ok:false`. Classify the lifetime in precedence order — caller
-    // cancellation first (exact reason), then this invocation's own deadline (nonfatal truncation) —
-    // and only then treat an unsuccessful read as a hard identity failure. Nothing else is swallowed:
-    // an unrelated failure, or a timeout while budget remains, still throws.
-    if (lifetime.callerAborted()) lifetime.signal.throwIfAborted();
-    if (lifetime.expired() || lifetime.remainingMs() <= 0) return;
     if (
-      !current.ok ||
       current.state.branch !== state.branch ||
       current.state.head !== state.head ||
       current.state.base !== state.base ||
       current.state.dirtySha256 !== state.dirtySha256
     )
       throw new Error('deferred invocation identity changed while settling authorized ancestry');
+    // Successful reads must prove identity BEFORE a deadline can truncate the pass.
+    if (ancestryBoundary(lifetime) === 'stop') return;
     // The identity read is asynchronous: a cancellation that landed during it must prevent the
     // settlement write and propagate with its exact reason.
     signalCheck(lifetime);
