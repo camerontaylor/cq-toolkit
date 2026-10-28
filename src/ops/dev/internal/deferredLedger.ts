@@ -671,17 +671,22 @@ function boundedEffects(
       if (remaining <= 0) return refuse(lifetime.deadlineReason);
       const timeoutMs = Math.max(1, Math.min(opts.timeoutMs, Math.floor(remaining)));
       const result = await effects.runCommand(command, args, {
-        ...opts, timeoutMs, signal: lifetime.signal,
+        ...opts,
+        timeoutMs,
+        signal: lifetime.signal,
       });
       // A failed read needs causal evidence, not merely an expired clock. An abort is ours only
       // when the adapter reports this invocation's unique reason; a timeout is ours only when
       // this view shortened the command's cap and the invocation budget has actually expired.
-      if ((result.exitCode !== 0 || result.timedOut) && (
-        (result.interruption?.kind === 'abort' &&
+      if (
+        (result.exitCode !== 0 || result.timedOut) &&
+        ((result.interruption?.kind === 'abort' &&
           result.interruption.reason === lifetime.deadlineReason) ||
-        (result.timedOut && timeoutMs < opts.timeoutMs &&
-          (lifetime.expired() || lifetime.remainingMs() <= 0))
-      )) refusal.error = lifetime.deadlineReason;
+          (result.timedOut &&
+            timeoutMs < opts.timeoutMs &&
+            (lifetime.expired() || lifetime.remainingMs() <= 0)))
+      )
+        refusal.error = lifetime.deadlineReason;
       return result;
     },
   };

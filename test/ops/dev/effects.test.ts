@@ -148,8 +148,11 @@ test('already aborted subprocess never executes its body', async () => {
 
 test('a numeric command failure has no abort provenance even if the caller later aborts', async () => {
   const controller = new AbortController();
-  const result = await makeSubprocessDevEffects(dir).runCommand(process.execPath,
-    ['-e', 'process.exit(7)'], { timeoutMs: 10_000, signal: controller.signal });
+  const result = await makeSubprocessDevEffects(dir).runCommand(
+    process.execPath,
+    ['-e', 'process.exit(7)'],
+    { timeoutMs: 10_000, signal: controller.signal },
+  );
   controller.abort({ cancelled: 'after ordinary failure' });
   expect(result.exitCode).toBe(7);
   expect(result.timedOut).toBe(false);
