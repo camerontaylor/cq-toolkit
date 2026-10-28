@@ -10,6 +10,7 @@ import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { importQueueEvidence } from '../../../src/ops/review/internal/queueEvidence.js';
 import type {
   DeferredQueueClient,
+  QueueReference,
   QueueStatus,
 } from '../../../src/ops/review/internal/queueProtocol.js';
 import { cycleRecord } from '../dev/fakes.js';
@@ -189,7 +190,7 @@ it.each([
       const bytes = Buffer.from(JSON.stringify(document));
       const receiptId = createHash('sha256').update(bytes).digest('hex');
       let consumed = false;
-      const client: DeferredQueueClient = {
+      const client = {
         ...queue,
         status: async () => {
           if (!finalPhase || mode === 'pending') return pending;
@@ -205,7 +206,13 @@ it.each([
             consumed,
           };
         },
-        report: async (_reference, root, options) => {
+        report: async (
+          _reference: QueueReference,
+          root: string,
+          options?: {
+            onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+          },
+        ) => {
           const evidence = await importQueueEvidence(root, receiptId, bytes);
           await options?.onEvidenceImported?.({ receiptId, path: join(root, `${receiptId}.json`) });
           consumed = true;
