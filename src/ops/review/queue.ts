@@ -42,10 +42,19 @@ export function makeQueueOps(transport?: QueueTransport): {
     { state: 'pending' | 'consumed'; evidence: QueueEvidence | null } | Unsupported
   >;
 } {
-  function wrap<I, O>(
-    fn: (client: ReturnType<typeof makeQueueClient>, input: I) => Promise<O>,
+  function wrap<I, P, O>(
+    validate: (input: I) => P,
+    fn: (client: ReturnType<typeof makeQueueClient>, input: P) => Promise<O>,
   ): Op<I, O | Unsupported> {
     return async (input) => {
+      let parsed: P;
+      // Only this pre-dispatch boundary can prove a deterministic caller error.
+      // Response schemas also use Zod, so the transport catch must stay separate.
+      try {
+        parsed = validate(input);
+      } catch (error) {
+        return { status: 'failed', error: messageOf(error) };
+      }
       const alias = process.env['CQ_QUEUE_SSH_ALIAS'];
       if (!transport && !alias)
         return {
@@ -56,7 +65,7 @@ export function makeQueueOps(transport?: QueueTransport): {
       try {
         return {
           status: 'ok',
-          value: await fn(makeQueueClient(transport ?? sshQueueTransport(alias!)), input),
+          value: await fn(makeQueueClient(transport ?? sshQueueTransport(alias!)), parsed),
         };
       } catch (error) {
         if (error instanceof QueueUnsupported)
@@ -71,25 +80,39 @@ export function makeQueueOps(transport?: QueueTransport): {
     };
   }
   return {
-    enqueue: wrap(async (client, input) => {
-      const i = QueueEnqueueInputSchema.parse(input);
-      const ref = { requestId: i.requestId, binding: i.binding };
-      if (i.action === 'bind') {
-        if (i.pr === undefined) throw new Error('bind requires pr');
-        return client.bind({ ...ref, pr: i.pr, ...(i.mergeSha ? { mergeSha: i.mergeSha } : {}) });
-      }
-      if (i.pr !== undefined || i.mergeSha !== undefined)
-        throw new Error('PR attachment fields require action=bind');
-      return i.action === 'cancel' ? client.cancel(ref) : client.enqueue(ref);
-    }),
-    queueStatus: wrap((client, input) => client.status(QueueReferenceSchema.parse(input))),
-    report: wrap(async (client, input) => {
-      const i = QueueReportInputSchema.parse(input);
-      const evidence = await client.report(
-        { requestId: i.requestId, binding: i.binding },
-        i.evidenceDir,
-      );
-      return { state: evidence ? 'consumed' : 'pending', evidence };
-    }),
+    enqueue: wrap(
+      (input: QueueEnqueueInput) => {
+        const i = QueueEnqueueInputSchema.parse(input);
+        if (i.action === 'bind') {
+          if (i.pr === undefined) throw new Error('bind requires pr');
+        } else if (i.pr !== undefined || i.mergeSha !== undefined)
+          throw new Error('PR attachment fields require action=bind');
+        return i;
+      },
+      async (client, i) => {
+        const ref = { requestId: i.requestId, binding: i.binding };
+        if (i.action === 'bind')
+          return client.bind({
+            ...ref,
+            pr: i.pr!,
+            ...(i.mergeSha ? { mergeSha: i.mergeSha } : {}),
+          });
+        return i.action === 'cancel' ? client.cancel(ref) : client.enqueue(ref);
+      },
+    ),
+    queueStatus: wrap(
+      (input: QueueReference) => QueueReferenceSchema.parse(input),
+      (client, input) => client.status(input),
+    ),
+    report: wrap(
+      (input: QueueReportInput) => QueueReportInputSchema.parse(input),
+      async (client, i) => {
+        const evidence = await client.report(
+          { requestId: i.requestId, binding: i.binding },
+          i.evidenceDir,
+        );
+        return { state: evidence ? 'consumed' : 'pending', evidence };
+      },
+    ),
   };
 }
