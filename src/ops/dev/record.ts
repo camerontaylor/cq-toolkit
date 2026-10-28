@@ -149,6 +149,22 @@ export interface DevCheckRecord {
   dirtySha256: string;
   /** The explicit `a..b` range, when the run was scoped to one. */
   range?: string;
+  /**
+   * The test:narrow gate ran with `--include-integration` (the caller's
+   * explicit opt-in): integration suites executed inside this check, so a
+   * reader knows the gate's scope was widened (skipped LIVE_GH tests still
+   * count as not-executed for the wrapper's own verdict).
+   */
+  includeIntegration?: boolean;
+  /**
+   * HOW the gate's test files were chosen — a readiness reader must tell a
+   * NARROWED gate from an automatic one: `named` lists the caller's exact
+   * files (the diff was NOT the selection), `range`/`base` are the
+   * automatic diff-driven forms. Always written by current code; OPTIONAL
+   * on read so ledgers written before this field existed still parse (the
+   * same evolution rule as includeIntegration).
+   */
+  testSelection?: { mode: 'base' | 'range' } | { mode: 'named'; files: string[] };
   /** true only when every gate that ran is green. */
   passed: boolean;
   gates: DevCheckGate[];
@@ -251,6 +267,14 @@ const DevCheckRecordSchema = z
     head: z.string().min(1),
     dirtySha256: z.string().min(1),
     range: z.string().min(1).exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testSelection: z
+      .union([
+        z.object({ mode: z.literal('base') }).strict(),
+        z.object({ mode: z.literal('range') }).strict(),
+        z.object({ mode: z.literal('named'), files: z.array(z.string().min(1)).min(1) }).strict(),
+      ])
+      .exactOptional(),
     passed: z.boolean(),
     gates: z.array(DevCheckGateSchema),
     loadStamp: DevLoadStampSchema,

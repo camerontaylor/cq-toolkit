@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { DriverFactory } from '../../../driver/factory.js';
@@ -134,6 +135,10 @@ export async function runReviewSession(
     logToolFailures?: boolean;
     /** Per-request step bound for the ai-sdk lane (cq.json `budgets.step.wallMs`, capped). */
     stepTimeoutMs?: number;
+    /** Remaining engine wall, sampled before backoff and again before retry. */
+    remainingWallMs?: () => number;
+    /** Injectable abortable delay for rate-limit backoff. */
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   },
 ): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass; fatal?: boolean }> {
   const { plan, evidence, signal } = input;
@@ -171,9 +176,15 @@ export async function runReviewSession(
       },
       promptBudget: {
         ...defaultHarnessConfig.promptBudget,
-        maxTools: 3,
-        // This legacy field also bounds the operation's user prompt. The
-        // driver keeps that prompt out of the system message (prompt-once).
+        // The session surface is read plus the two read-only search tools
+        // when allowed: `selectTools` orders edit/bash/write first, so a
+        // tighter budget would silently hide the offered search tools and
+        // the rg-capability probe with them. Withheld search (rg absent or
+        // too old) stays visible as capability evidence, not a smaller
+        // configured surface. This legacy field also bounds the operation's
+        // user prompt; the driver keeps that prompt out of the system
+        // message (prompt-once).
+        maxTools: plan.tools && input.searchTools ? 3 : 1,
         maxSystemPromptChars: input.maxPromptChars,
       },
     },
@@ -265,18 +276,52 @@ export async function runReviewSession(
   };
   let result = await runDriver(input.maxTokens);
   settle(result);
-  // One retry for a transient driver failure (step timeout, network): never for
-  // budget, abort, refusals or model output problems. The failed attempt's
-  // deliveries are discarded so the retry is the single delivery of the ranges;
-  // requests and spend cover both attempts; only deliveries describe the final
-  // attempt. The remaining token allowance guards the retry.
-  if (
-    result.stopReason === 'error' &&
-    result.errorClass === 'transient' &&
-    input.maxTokens - spent > 0
-  ) {
+  // One retry total. Rate limits additionally need a bounded abortable backoff;
+  // auth/quota and other refusals never enter either retry path. Requests and
+  // spend cover both attempts; deliveries describe only the final attempt.
+  const canRetry = () => !signal.aborted && input.maxTokens - spent > 0;
+  let retry = result.stopReason === 'error' && result.errorClass === 'transient' && canRetry();
+  // A rate limit that is not retried keeps the provider's wait and the cause,
+  // so the block reason says why (#578): over the cap, past the wall, out of
+  // tokens, or an unusable retry-after.
+  let refused: { waitMs: number; cause: 'cap' | 'wall' | 'tokens' | 'invalid' } | undefined;
+  if (result.stopReason === 'error' && result.errorClass === 'rate-limit' && !signal.aborted) {
+    const waitMs = result.providerSignals?.retryAfterMs ?? 30_000;
+    // A provider asking for more than two minutes is left blocked, never
+    // retried earlier than its retry-after. Leave a second for actual work.
+    const cause = !canRetry()
+      ? 'tokens'
+      : !Number.isFinite(waitMs) || waitMs < 0
+        ? 'invalid'
+        : waitMs > 120_000
+          ? 'cap'
+          : waitMs + 1000 >= (input.remainingWallMs?.() ?? 0)
+            ? 'wall'
+            : undefined;
+    if (cause !== undefined) refused = { waitMs, cause };
+    else {
+      input.onAdvisories?.([
+        `session ${plan.id}: rate-limit wait ${String(waitMs)}ms before retry 1`,
+      ]);
+      if (input.sleep) await input.sleep(waitMs, signal);
+      else await delay(waitMs, undefined, { signal });
+      signal.throwIfAborted();
+      // Tokens cannot change during the wait and an abort has thrown, so a
+      // refusal here is the wall running out.
+      retry = canRetry() && (input.remainingWallMs?.() ?? 0) > 0;
+      if (!retry) refused = { waitMs, cause: 'wall' };
+    }
+    if (refused)
+      input.onAdvisories?.([
+        `session ${plan.id}: rate-limit wait ${String(refused.waitMs)}ms not retried (${refused.cause})`,
+      ]);
+  }
+  if (retry) {
+    signal.throwIfAborted();
     evidence.deliveries = [];
     evidence.attempts = 2;
+    if (result.errorClass === 'rate-limit')
+      input.onAdvisories?.([`session ${plan.id}: rate-limit retry 1 dispatched`]);
     result = await runDriver(input.maxTokens - spent);
     settle(result);
   }
@@ -284,9 +329,13 @@ export async function runReviewSession(
   if (result.stopReason !== 'complete') {
     if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
     const detail = result.error === undefined ? '' : `: ${boundedErrorText(result.error)}`;
+    const wait =
+      refused === undefined
+        ? ''
+        : `; rate-limit wait ${String(refused.waitMs)}ms not retried (${refused.cause})`;
     return {
       status: 'needs-human',
-      reason: `agent review did not complete (${result.stopReason})${detail}`,
+      reason: `agent review did not complete (${result.stopReason})${wait}${detail}`,
       ...(result.errorClass === undefined ? {} : { errorClass: result.errorClass }),
     };
   }

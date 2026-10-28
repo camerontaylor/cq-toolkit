@@ -215,8 +215,37 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     let worker: AddressWorker | undefined;
     let publishOnExit: (() => Promise<void>) | undefined;
     let cleanStop: (() => string | undefined) | undefined;
-    // Set when stop() observes the token or wall budget spent.
+    // Set by stop() when it observes the token/wall budget spent (after its
+    // parent-cancel and tampered-bookkeeping precedence): every exit from
+    // then on is a budget stop, whichever route reaches finish() — a direct
+    // `finish(stop())`, or the driver wrapper's thrown stop reaching a catch.
     let budgetSpent = false;
+    /**
+     * The exit publication's terminal state, settled by the wrapper below:
+     * 'published' once a push left this process, 'failed' with its error
+     * otherwise. #469's report-truth rule consumes it — the engine, not a
+     * loop-side guess, is the only witness of what was actually pushed.
+     * Irreversible in one direction: once 'published', a later (post-push)
+     * failure never downgrades it — the commit is out regardless of what the
+     * post-push bookkeeping threw.
+     */
+    let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
+    /**
+     * #490: the exact findings array each dispatch started from, mapped to
+     * the number of fixes already recorded then. The local loop's report rows
+     * are that pre-dispatch snapshot until a re-review succeeds, so a run that
+     * stops after fixing (budget, blocked re-review, round cap) would leave
+     * fixed rows reading 'open'. finish() overlays only fixes recorded AFTER
+     * the stamp, and only onto a stamped array: a successful re-review
+     * assigns a new array, so its rows stay authoritative (a reopened defect
+     * stays open). The stamp also carries the blocking severities the
+     * dispatch ran under, so finish() can re-derive openBlocking from the
+     * overlaid rows under the same policy.
+     */
+    const rowsDispatchedAt = new WeakMap<
+      Finding[],
+      { fixes: number; severities: readonly string[] }
+    >();
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -228,8 +257,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         try {
           await publishOnExit();
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // A post-push failure (the inner throws after the witness is set)
+          // must not rewrite the truth: 'published' stays published, so the
+          // withhold rows below never claim a pushed commit stays local.
+          if (exitPublication?.state !== 'published')
+            exitPublication = { state: 'failed', error: message };
           status = 'needs-human';
-          reason = `verified publication failed: ${String(error)}`;
+          reason = `verified publication failed: ${message}`;
           report.reasons.push(reason);
           // The outcome is now the publication failure, not the round cap: a
           // composition must not publish a draft over it.
@@ -260,7 +295,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       ) {
         // Only an engine-attributed budget block may observe a new stop here.
         // Safety/admission errors and arbitrary throws never gain eligibility.
-        if (reviewBudgetBlocked) cleanStop?.();
+        // Consume the late call's return like every other stop() call site: a
+        // surfaced reason is recorded in report.reasons, never silently
+        // dropped. Only the budget branch of stop() sets budgetSpent, and the
+        // gate above already cleared cancellation and tampering in this same
+        // synchronous slice, so the marker below can only ride the budget
+        // exhaustion itself.
+        if (reviewBudgetBlocked) {
+          const lateStop = cleanStop?.();
+          if (lateStop) report.reasons.push(lateStop);
+        }
         if (budgetSpent) marker = 'budget';
       }
       // The structured round-cap marker rides the report envelope — the
@@ -270,6 +314,85 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // envelope (and the publication-failure clearing above, which erases
       // the marker, is included in both).
       if (marker !== undefined) report.stop = marker;
+      // #469: settle the mixed-worktree withhold rows with the engine's own
+      // publication truth. The loop wrote them BEFORE the exit publication
+      // ran ("the loop pushed nothing … may still happen at engine exit");
+      // only the engine knows what its exit push actually did. Amend each
+      // row IN PLACE (a separate appended reason cannot be tied to its item
+      // and would leave the stale claim standing):
+      //   - a settled push → "exit-published": the exact verified range is
+      //     out; only the reply/resolve stay withheld (S6 attempt D's
+      //     8f78ca91 read "not published" while remote head already had it);
+      //   - a failed exit publication → the row names the failure and that
+      //     the commit stays local (the outcome reason carries it too);
+      //   - a run with no push → "publication is off": the commit truly is
+      //     unpublished (the one state where the old text was right);
+      //   - a --push run whose exit publication never ran (finish's guard
+      //     skips publishOnExit on a parent cancel) → "no engine publication
+      //     ran": the dead run can never publish, so the verified commit
+      //     stays local.
+      const settleWithholdRows = (tail: string) => {
+        for (const [index, row] of report.reasons.entries()) {
+          if (row.includes('publish-withheld-mixed-worktree')) {
+            // Keep only the shared item prefix ("item …: " + the label); the
+            // loop-side clauses after it describe the pre-publication state
+            // and are REPLACED by the settled tail, never appended to.
+            const label = 'publish-withheld-mixed-worktree';
+            const at = row.indexOf(label);
+            report.reasons[index] = `${row.slice(0, at + label.length)}${tail}`;
+          }
+        }
+      };
+      if (exitPublication?.state === 'published') {
+        settleWithholdRows(
+          "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
+        );
+      } else if (exitPublication?.state === 'failed') {
+        settleWithholdRows(
+          `; exit publication failed (${exitPublication.error}) — the verified commit stays local`,
+        );
+      } else if (input.push !== true) {
+        settleWithholdRows(
+          '; publication is off for this run (no --push) — the verified commit stays unpublished in the worktree',
+        );
+      } else {
+        // --push was requested, yet no exit publication ever ran: finish's
+        // guard above skips publishOnExit when the parent cancelled (and the
+        // publication's own early-returns never witness a push), so this dead
+        // run can never publish. The loop's stale "publication may still
+        // happen at engine exit" claim would stand forever — replace it with
+        // the engine's terminal truth: the row's own premise is that the loop
+        // pushed nothing, so with no engine push either, the verified commit
+        // stays local.
+        settleWithholdRows(
+          '; no engine publication ran for this run — the verified commit stays local',
+        );
+      }
+      // #490: rows still holding a dispatched snapshot take the outcome each
+      // later fix recorded for them, as the producer recorded it (status,
+      // reason, evidence). A fix whose disposition write failed already reads
+      // 'open', so it leaves its row open. No publication claim is added here.
+      const dispatchedAt = rowsDispatchedAt.get(report.findings);
+      if (dispatchedAt !== undefined) {
+        const later = report.fixes.slice(dispatchedAt.fixes);
+        report.findings = report.findings.map((finding) => {
+          const outcome = later.findLast((fix) => fix.finding.id === finding.id)?.finding;
+          if (outcome === undefined || outcome.status === 'open') return finding;
+          const { reason, evidence } = outcome;
+          const { reason: _reason, evidence: _evidence, ...row } = finding;
+          return {
+            ...row,
+            status: outcome.status,
+            ...(reason === undefined ? {} : { reason }),
+            ...(evidence === undefined ? {} : { evidence }),
+          };
+        });
+        // The same rows, so the same blockers: openBlocking was taken from the
+        // pre-dispatch snapshot, and would still list a finding whose fix
+        // outcome (persisted, or its row would still read 'open') is fixed or
+        // rejected. Deferred and still-open rows stay blocking.
+        report.openBlocking = openBlocking({ findings: report.findings }, dispatchedAt.severities);
+      }
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
       report.findings = report.findings.map((finding) => {
@@ -663,7 +786,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               report.verifiedHead = fix.commit;
             }
           };
-          publishOnExit = async () => {
+          const publishOnExitInner = async (): Promise<void> => {
             if (!input.push || unpublished.size === 0 || parent?.aborted) return;
             if (!publishedBase) throw new Error('publication baseline unavailable');
             const range = (await gitText(workerRoot, ['rev-list', `${publishedBase}..HEAD`]))
@@ -681,8 +804,32 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const branch = publishBranch ?? (await branchName(workerRoot));
             if (parent?.aborted) throw new Error('parent cancelled');
             await gitText(workerRoot, ['push', publishRemote, `HEAD:refs/heads/${branch}`]);
+            // The engine's own witness: a push actually left the process, so
+            // the withhold rows' commit is out (#469). Set ONLY here — an
+            // early return (no push run, nothing unpublished) never counts
+            // as published.
+            exitPublication = { state: 'published' };
             publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
             unpublished.clear();
+          };
+          // The engine witnesses its own exit publication so the report can
+          // state the truth about what was pushed (#469): the inner sets
+          // 'published' only after a real push; a failure before the push is
+          // recorded and rethrown for finish()'s outcome rewrite. A failure
+          // AFTER the push (e.g. the post-push rev-parse) never downgrades
+          // the already-set 'published' witness — the commit is out, so the
+          // settled withhold rows must not claim it stays local.
+          publishOnExit = async () => {
+            try {
+              await publishOnExitInner();
+            } catch (error) {
+              if (exitPublication?.state !== 'published')
+                exitPublication = {
+                  state: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                };
+              throw error;
+            }
           };
           const dispositions = new Map<string, Finding>();
           let bookkeepingFailed = false;
@@ -808,6 +955,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             return entry;
           };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
+            rowsDispatchedAt.set(record.findings, {
+              fixes: report.fixes.length,
+              severities: policy.review.blockingSeverities,
+            });
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
             )

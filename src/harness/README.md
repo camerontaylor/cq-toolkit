@@ -1,6 +1,7 @@
 Toolkit-owned minimal tool surface (read/edit/write/grep/glob/bash), per-op allowlists.
 The pre-F1 `run` tool name and `path`/`oldText`/`newText` edit arguments are
-accepted as one-release aliases.
+accepted as one-release execution aliases. `run` maps to `bash`; it is never a
+seventh advertised tool.
 Land: phase 1 (WS-B).
 
 - `config.ts` / `tools.ts` — the per-op config and the executors (every
@@ -22,13 +23,32 @@ File tools accept `filePath` or `path` for `file_path`. Edit also accepts
 `oldString`/`oldText`, `newString`/`newText`, and `replaceAll`. Equal alias
 values may be supplied together; conflicting values fail validation. Schemas
 remain strict: unrecognised options are rejected. The ai-sdk request advertises
-only canonical fields; compatibility aliases are checked
-and normalized by the schema validator before execution. Model-visible failures start with a stable code followed by prose; see the vocabulary below.
+only canonical fields. Native SDK and MCP registration use the same six
+canonical descriptors, with required keys and `additionalProperties: false`.
+The surface checks compatibility aliases before execution: equal duplicate
+values pass, conflicts and unsupported fields fail. Model-visible failures
+start with a stable code followed by prose; see the vocabulary below.
+The native SDK's registered `tools/list` uses the canonical shape. Its public
+MCP `tools/call` request-handler seam routes raw arguments to the same strict
+harness validator, before the SDK's shape parser can discard aliases. A legacy
+`run` request is permitted only when `bash` was selected; it is absent from
+`tools/list`.
 
 Grep accepts `ignore_case` (`-i` or `ignoreCase`), `output_mode` (`content`,
 `files_with_matches`, `count`), and `head_limit` (0 uses the safety cap).
 Glob includes hidden and ignored files, excluding `.git`, `.hg` and `.svn` directories.
 Grep respects `.gitignore`; both retain workspace containment and path allowlists.
+The grep `glob`/`include` filter is applied during a bounded streaming
+enumeration, so `.gitignore` wins over a request's include pattern; the
+filter is a full-path match where a bare `*.ext` means any depth, brace
+alternatives (`*.{ts,tsx}`) expand bounded (over 64 alternatives is a
+fail-closed `SEARCH_LIMIT` denial), and a large workspace with a narrow
+include streams instead of loading one whole-output buffer — traversal still
+fails closed at honest scanned-bytes/paths caps. Discovery and content are
+budgeted separately: filename discovery is bounded by the candidate-count cap
+for both tools, while the 20 MiB searched-bytes budget binds only grep — an
+oversized candidate is skipped and the search continues, with a truncation
+marker naming the skip.
 Counts are matching lines within the existing search limits; truncation
 markers identify partial results; capped count rows use `+` for lower bounds. Bash accepts `timeoutMs` for `timeout`,
 `workdir`/`cwd` within the workspace (lexical and symlink containment), and
@@ -45,6 +65,14 @@ scanner, input values and error details are omitted. Bash descriptions use
 the same scan rule and appear on their tool message. Diagnostic lines share
 the store's serialized append and torn-tail recovery, and are not replayed
 as conversation turns. Old sessions remain readable.
+
+Session compatibility is forward-only. A new reader resumes an old JSONL
+session. An old reader rejects a session containing new `tool-failure` rows or
+new message fields (`usage`, `toolCalls`, `description`) at its strict line
+schema; it must not ignore them. For downgrade, use the old binary with a fresh
+session and workspace, or restore a session snapshot made before the new rows.
+Upgrade the reader to resume a newer session. Do not delete diagnostic lines
+from a live record to force old-reader acceptance.
 
 `WorkerResult.toolFailures` counts ai-sdk failures even when logging is off,
 including SDK validation failures, unknown tools, execution errors/timeouts, and

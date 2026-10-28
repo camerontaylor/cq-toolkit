@@ -67,6 +67,29 @@ describe('tool argument parity', () => {
       }
     });
   });
+  test('grep glob and include aliases stay identical through the ignore-aware filter (#491)', async () => {
+    await workspace(async (root) => {
+      await mkdir(join(root, '.git'), { recursive: true });
+      await mkdir(join(root, 'ignored'), { recursive: true });
+      await writeFile(join(root, '.gitignore'), 'ignored/\n', 'utf8');
+      await writeFile(join(root, 'a.ts'), 'needle\n', 'utf8');
+      await writeFile(join(root, 'b.js'), 'needle\n', 'utf8');
+      await writeFile(join(root, 'ignored', 'c.ts'), 'needle\n', 'utf8');
+      const grep = buildTools(defaultHarnessConfig, root, 'read-only').find(
+        (tool) => tool.name === 'grep',
+      )!;
+      const viaInclude = await grep.execute({ pattern: 'needle', include: '*.ts' });
+      const viaGlob = await grep.execute({ pattern: 'needle', glob: '*.ts' });
+      expect(viaInclude).toMatchObject({ ok: true });
+      expect(viaGlob).toMatchObject({ ok: true });
+      if (viaInclude.ok && viaGlob.ok) {
+        expect(viaInclude.output).toBe(viaGlob.output);
+        expect(viaInclude.output).toContain('--- a.ts ---');
+        expect(viaInclude.output).not.toContain('c.ts');
+        expect(viaInclude.output).not.toContain('b.js');
+      }
+    });
+  });
   test('reviewer schemas keep a bounded canonical surface', () => {
     const surface = buildTools(defaultHarnessConfig, '.', 'read-only').map((tool) => ({
       type: 'function',

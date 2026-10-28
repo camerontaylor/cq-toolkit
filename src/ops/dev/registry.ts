@@ -40,6 +40,18 @@ const REVIEWER_PATTERN = new RegExp(
   `^(${CODERABBIT_REVIEWER}|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$`,
 );
 
+/**
+ * One testFiles entry. The dev protocol's invariant — a dash-leading segment
+ * is an option-shaped token (`-x`, `--flag`, the literal `--`) and is refused
+ * BEFORE any gate runs — is encoded here so the shared boundary schemas
+ * (dev.check, the dev.review cycle branch, dev.cycle composition) reject it
+ * at the entry point, instead of failing per-leg after a run has started.
+ */
+const TEST_FILE_SEGMENT_SCHEMA = z
+  .string()
+  .min(1)
+  .regex(/^[^-]/, 'testFiles entries are file paths and must not begin with "-"');
+
 // Defaults are applied by the OPS (`target ?? DEFAULT_DEV_TARGET`), not the
 // schemas — the drift pins mirror the hand-written optional input types, so
 // every optional field is `.exactOptional()` (exactOptionalPropertyTypes).
@@ -51,6 +63,8 @@ export const DevCheckInputSchema: z.ZodType<DevCheckInput> = z
       .string()
       .regex(/^[^-\s.][^\s]*\.\.[^-\s.][^\s]*$/, "range must be '<ref>..<ref>'")
       .exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(TEST_FILE_SEGMENT_SCHEMA).min(1).exactOptional(),
   })
   .strict();
 
@@ -65,6 +79,8 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
       .exactOptional(),
     reviewer: z.string().regex(REVIEWER_PATTERN).exactOptional(),
     uncommitted: z.boolean().exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(TEST_FILE_SEGMENT_SCHEMA).min(1).exactOptional(),
   })
   .strict();
 
@@ -139,6 +155,8 @@ export const DevCycleCompositionInputSchema: z.ZodType<DevCycleCompositionInput>
     target: z.string().min(1).exactOptional(),
     push: z.boolean().exactOptional(),
     title: z.string().min(1).exactOptional(),
+    includeIntegration: z.boolean().exactOptional(),
+    testFiles: z.array(TEST_FILE_SEGMENT_SCHEMA).min(1).exactOptional(),
   })
   .strict();
 
@@ -330,37 +348,65 @@ export const registry: OpRegistryEntry[] = [
         ([m, effects, ghEffects, denylist, fs]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
-            // The secret scanner the check leg binds: the SAME two-layer
+            // The secret scanner a check leg binds: the SAME two-layer
             // portable composition the dev.check entry carries (gitleaks
             // defaults; the repo's optional cq.json patterns file rides
-            // makePortableReviewScanner).
-            const configText = await fs
-              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
-              .catch(() => null);
-            const packageText = await fs
-              .readFile(`${input.repoRoot}/package.json`, 'utf8')
-              .catch(() => '{}');
-            let packageName = 'repository';
-            try {
-              const data: unknown = JSON.parse(packageText);
-              if (
-                typeof data === 'object' &&
-                data !== null &&
-                'name' in data &&
-                typeof data.name === 'string'
-              )
-                packageName = data.name;
-            } catch {
-              /* descriptive fallback only */
-            }
-            const scanSecrets =
-              configText !== null && packageName !== '@camerontaylor/cq-toolkit'
-                ? denylist.makePortableReviewScanner(input.repoRoot, dev, configText, packageName)
+            // makePortableReviewScanner) — built for one checkout ROOT, so the
+            // #536 probe worktree gets its own, from its own configuration.
+            const scannerFor = async (root: string, rootEffects: typeof dev) => {
+              const configText = await fs.readFile(`${root}/cq.json`, 'utf8').catch(() => null);
+              const packageText = await fs
+                .readFile(`${root}/package.json`, 'utf8')
+                .catch(() => '{}');
+              let packageName = 'repository';
+              try {
+                const data: unknown = JSON.parse(packageText);
+                if (
+                  typeof data === 'object' &&
+                  data !== null &&
+                  'name' in data &&
+                  typeof data.name === 'string'
+                )
+                  packageName = data.name;
+              } catch {
+                /* descriptive fallback only */
+              }
+              return configText !== null && packageName !== '@camerontaylor/cq-toolkit'
+                ? denylist.makePortableReviewScanner(root, rootEffects, configText, packageName)
                 : undefined;
+            };
+            const scanSecrets = await scannerFor(input.repoRoot, dev);
+            // #536: the red-final-gate fallback's probe worktree binds its own
+            // effects (same construction as `dev`). Its dependency install is
+            // wired ONLY for a pnpm-locked repository: an offline, frozen
+            // install from the existing store — bounded, abortable, no
+            // network and no fallback. Without a lockfile the fallback is off.
+            const pnpmLocked = await fs
+              .access(`${input.repoRoot}/pnpm-lock.yaml`)
+              .then(() => true)
+              .catch(() => false);
             return m.makeDevCycle({
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
+              effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
+              scanSecretsFor: scannerFor,
+              ...(pnpmLocked
+                ? {
+                    installDeps: async (root: string, signal: AbortSignal) => {
+                      const installed = await effects
+                        .makeSubprocessDevEffects(root)
+                        .runCommand('pnpm', ['install', '--offline', '--frozen-lockfile'], {
+                          timeoutMs: m.GREEN_PREFIX_INSTALL_TIMEOUT_MS,
+                          signal,
+                        });
+                      if (installed.exitCode !== 0)
+                        throw new Error(
+                          `pnpm install --offline --frozen-lockfile ${installed.timedOut ? 'timed out' : `exited ${String(installed.exitCode)}`}: ${installed.stderr.trim().slice(-300)}`,
+                        );
+                    },
+                  }
+                : {}),
             })(input);
           }) as Op<unknown, unknown>,
       ),

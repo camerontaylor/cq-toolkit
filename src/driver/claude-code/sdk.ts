@@ -117,6 +117,7 @@ import type { ExpectedInitSurface, HarnessSurface } from '../../harness/surface.
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { toolAliases } from '../../harness/tools.js';
+import { z } from 'zod';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
@@ -205,6 +206,53 @@ export interface AgentSdkModule {
   ): unknown;
   /** `createSdkMcpServer({ name, tools })` — the in-process server config. */
   createSdkMcpServer(options: { name: string; version?: string; tools?: unknown[] }): unknown;
+}
+
+/** MCP's public request-handler seam, kept structural to avoid a runtime MCP dependency. */
+const NativeToolCallRequestSchema = z
+  .object({
+    method: z.literal('tools/call'),
+    params: z
+      .object({
+        name: z.string(),
+        arguments: z.record(z.string(), z.unknown()).optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+/**
+ * The SDK's tool registration normally parses against its advertised schema
+ * before calling the tool handler. Replace only tools/call so legacy fields
+ * reach the harness's strict compatibility validator; keep the canonical
+ * tools/list generated from the strict registered Zod object.
+ */
+export function installNativeToolCallAdapter(
+  config: unknown,
+  surface: HarnessSurface,
+  call: (name: string, args: unknown, extra: unknown) => Promise<SdkToolCallResult>,
+): unknown {
+  const instance = asRecord(config)?.['instance'];
+  const protocol = asRecord(instance)?.['server'];
+  const setHandler = asRecord(protocol)?.['setRequestHandler'];
+  if (typeof setHandler !== 'function') {
+    throw new Error('native SDK MCP server lacks the tools/call request-handler seam');
+  }
+  setHandler.call(
+    protocol,
+    NativeToolCallRequestSchema,
+    (request: z.infer<typeof NativeToolCallRequestSchema>, extra: unknown) => {
+      const { name, arguments: args } = request.params;
+      if (!surface.has(name)) {
+        return Promise.resolve({
+          content: [{ type: 'text', text: `UNKNOWN_TOOL: '${name}' is not a served tool` }],
+          isError: true,
+        });
+      }
+      return call(name, args ?? {}, extra);
+    },
+  );
+  return config;
 }
 
 /** The loader seam: production default = the dynamic import; tests inject a mock module. */
@@ -377,42 +425,41 @@ export class ClaudeCodeSdkTransport implements Driver {
     // tools, plus the SDK's structured-output tool when outputFormat is set.
     observation.expectedSurface = {
       harness: surface !== undefined,
-      // The SDK lane registers the one-release aliases as real tools, so its
-      // init surface lists them; the CLI lane's MCP server advertises only
-      // canonical names and keeps the unexpanded list.
-      tools: allowed.flatMap((name) => [name, ...toolAliases(name)]),
+      tools: allowed,
       internalTools: outputSchema === undefined ? [] : [STRUCTURED_OUTPUT_TOOL],
     };
 
     // --- The one SDK call: options assembly. ------------------------------
     const sandbox = sandboxOption(sandboxPolicy.level);
-    const sdkTools = (surface?.tools ?? []).flatMap((harnessTool) =>
-      [harnessTool.name, ...toolAliases(harnessTool.name)].map((name) =>
-        sdk.tool(
-          name,
-          harnessTool.description,
-          // The zod raw shape — the SDK's declared-input form. Deliberately
-          // the NON-strict shape (what the model sees as the tool's schema):
-          // the SDK pre-validates it, so a type-invalid call never reaches the
-          // core and extra keys are stripped — the parity test's one scoped
-          // transport difference (nothing executes either way).
-          harnessTool.inputSchema.shape,
-          (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
-            runHarnessTool(
-              surface as HarnessSurface,
-              harnessTool.name,
-              args,
-              store,
-              record,
-              observation.denials,
-              // Cancellation reaches the executor: the governed signal (I8 —
-              // forwarded, never decided here) and the SDK's per-call signal,
-              // whichever fires first; `run` then kills its process group.
-              callSignal(signal, extra),
-            ),
-        ),
-      ),
-    );
+    const sdkTools = (surface?.tools ?? []).map((harnessTool) => {
+      const definition = sdk.tool(
+        harnessTool.name,
+        harnessTool.description,
+        // The canonical model-facing shape. The shared surface still
+        // validates calls with its strict compatibility schema.
+        harnessTool.inputSchema.shape,
+        (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
+          runHarnessTool(
+            surface as HarnessSurface,
+            harnessTool.name,
+            args,
+            store,
+            record,
+            observation.denials,
+            // Cancellation reaches the executor: the governed signal (I8 —
+            // forwarded, never decided here) and the SDK's per-call signal,
+            // whichever fires first; `run` then kills its process group.
+            callSignal(signal, extra),
+          ),
+      );
+      const toolDefinition = asRecord(definition);
+      if (!toolDefinition) throw new Error('Claude SDK tool() returned an invalid tool definition');
+      // SDK tool() types accept only a raw shape, but createSdkMcpServer
+      // passes this definition to MCP registerTool, which accepts a Zod
+      // object. Keep the strict object so tools/list advertises the same
+      // additionalProperties: false contract as the other surfaces.
+      return { ...toolDefinition, inputSchema: harnessTool.inputSchema };
+    });
     // The SDK query's option object — named apart from the seam's
     // `RunOptions` parameter (the cancellation SIGNAL lives there; this is
     // the assembled query surface).
@@ -426,6 +473,9 @@ export class ClaudeCodeSdkTransport implements Driver {
       // Built-ins OFF — the only tools the agent can touch are the ones the
       // frozen policy pre-approved below (header's governed-surface rule).
       tools: [],
+      // A legacy call from a resumed conversation may use `run`. Grant that
+      // spelling only when its canonical `bash` was selected; tools/list
+      // remains the same six-tool canonical surface.
       allowedTools: allowed.flatMap((name) => [name, ...toolAliases(name)]).map(qualifiedToolName),
       // Headless posture: un-pre-approved tools are auto-DENIED, never
       // prompted; the denials map into WorkerResult.denials post-settle.
@@ -459,7 +509,20 @@ export class ClaudeCodeSdkTransport implements Driver {
       ...(surface !== undefined
         ? {
             mcpServers: {
-              [MCP_SERVER_NAME]: sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }),
+              [MCP_SERVER_NAME]: installNativeToolCallAdapter(
+                sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }),
+                surface,
+                (name, args, extra) =>
+                  runHarnessTool(
+                    surface,
+                    name,
+                    args,
+                    store,
+                    record,
+                    observation.denials,
+                    callSignal(signal, extra),
+                  ),
+              ),
             },
           }
         : {}),

@@ -350,6 +350,133 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                 "evidence": {
                   "type": "string"
                 },
+                "evidenceV1": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "failureScenario": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "primary": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991,
+                          "type": "integer"
+                        },
+                        "file": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "quote": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "side": {
+                          "enum": [
+                            "base",
+                            "head"
+                          ],
+                          "type": "string"
+                        },
+                        "start": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "file",
+                        "side",
+                        "start",
+                        "end",
+                        "quote"
+                      ],
+                      "type": "object"
+                    },
+                    "supporting": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "end": {
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991,
+                            "type": "integer"
+                          },
+                          "file": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "quote": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "relevance": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "side": {
+                            "enum": [
+                              "base",
+                              "head"
+                            ],
+                            "type": "string"
+                          },
+                          "start": {
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "file",
+                          "side",
+                          "start",
+                          "end",
+                          "quote",
+                          "relevance"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 5,
+                      "type": "array"
+                    },
+                    "validation": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reasons": {
+                          "items": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "status": {
+                          "const": "invalid",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reasons"
+                      ],
+                      "type": "object"
+                    },
+                    "version": {
+                      "const": 1,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "failureScenario",
+                    "primary",
+                    "supporting"
+                  ],
+                  "type": "object"
+                },
                 "file": {
                   "type": "string"
                 },
