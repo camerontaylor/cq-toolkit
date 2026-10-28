@@ -344,7 +344,16 @@ test.each([
 ] as const)('no recognized settlement append grants no new ownership: %s', async (mode) => {
   const f = await fixture(mode);
   const result = await f.run();
-  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  expect(result.status, JSON.stringify(result)).toBe(mode === 'pending' ? 'ok' : 'needs-human');
+  if (mode === 'pending') {
+    expect(result.report).toMatchObject({
+      deferredVendorDebt: {
+        vendorCompleted: false,
+        queue: { state: 'awaiting-pr', consumed: false, reviewed: false },
+      },
+    });
+    expect(f.events).toEqual(['findings-written']);
+  }
   expect(f.events).not.toContain('ledger-observed');
   expect(f.store.load().records.filter((row) => row.kind === 'vendor-debt')).toHaveLength(
     mode === 'external-completed' ? 2 : 1,
