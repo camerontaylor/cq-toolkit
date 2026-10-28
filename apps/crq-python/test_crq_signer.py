@@ -373,7 +373,8 @@ class ReviewPreambleFault(SignerTest):
         return repo, base, s1, batch
 
     def run_item(self, review, diff_files=None, *, chain=None):
-        state = {'clean': False, 'scope_bases': [], 'run_cli_bases': []}
+        state = {'clean': False, 'scope_bases': [], 'run_cli_bases': [],
+                 'stream_sha256': signer.hashlib.sha256(review.encode()).hexdigest()}
         posts, closed = [], []
         actual_scope = signer.capture_review_scope
         actual_record = signer.record_run
@@ -439,6 +440,7 @@ class ReviewPreambleFault(SignerTest):
         self.assertEqual(out['findings'], [])
         self.assertEqual(out['reviewer_faults'],
                          [{'code': 'preamble', 'severity': 'major',
+                           'stream_row': 1, 'stream_sha256': ledger['stream_sha256'],
                            'file': 'src/driver/ai-sdk/step-fetch.ts',
                            'desc': signer.cap(TRUNCATED_PREAMBLE + ' at line 1', 80)}])
         self.assertFalse(ledger['clean'])  # no clean credit for a fault-y stream
@@ -462,6 +464,7 @@ class ReviewPreambleFault(SignerTest):
         self.assertEqual(posts, ['pending', 'error'])
         self.assertEqual(out['reviewer_faults'],
                          [{'code': 'out_of_scope', 'severity': 'major',
+                           'stream_row': 1, 'stream_sha256': ledger['stream_sha256'],
                            'file': 'src/old-feature.ts',
                            'desc': signer.cap('Real-looking stale description. at line 3', 80)}])
         self.assertFalse(ledger['clean'])
@@ -503,7 +506,8 @@ class ReviewPreambleFault(SignerTest):
                                            diff_files={'src/x.ts'})
         self.assertEqual(posts, ['pending', 'error'])
         self.assertEqual(out['reviewer_faults'],
-                         [{'code': 'out_of_scope', 'severity': 'major', 'file': 'src/unrelated.ts',
+                         [{'code': 'out_of_scope', 'severity': 'major',
+                           'stream_row': 1, 'stream_sha256': ledger['stream_sha256'], 'file': 'src/unrelated.ts',
                            'desc': signer.cap('Looks serious but is not in this diff. at line 2', 80)}])
         self.assertFalse(ledger['clean'])
 
@@ -520,6 +524,7 @@ class ReviewPreambleFault(SignerTest):
         self.assertEqual([f['file'] for f in out['findings']], ['src/x.ts'])
         self.assertEqual(out['reviewer_faults'],
                          [{'code': 'preamble', 'severity': 'major',
+                           'stream_row': 1, 'stream_sha256': ledger['stream_sha256'],
                            'file': 'src/driver/ai-sdk/step-fetch.ts',
                            'desc': signer.cap(TRUNCATED_PREAMBLE, 80)}])
         self.assertFalse(ledger['clean'])
@@ -552,6 +557,62 @@ class ReviewPreambleFault(SignerTest):
         self.assertEqual(out.get('findings'), None)
         self.assertEqual(out.get('reviewer_faults'), None)
         self.assertFalse(ledger['clean'])
+
+
+class FaultRowIdentity(SignerTest):
+    def repeated_stream(self):
+        shared = 'A repeated description whose first eighty characters match across both '
+        shared += 'rows and contain no private payload. '
+        first = {'type': 'finding', 'severity': 'major', 'fileName': 'src/unrelated.ts',
+                 'codegenInstructions': shared + 'first suffix'}
+        second = {**first, 'codegenInstructions': shared + 'second suffix'}
+        lines = ['', 'not-json', json.dumps(first),
+                 json.dumps({'type': 'heartbeat'}),
+                 json.dumps({**first, 'severity': 'minor'}), json.dumps(second)]
+        path = self.root / 'review.ndjson'
+        raw = ('\n'.join(lines) + '\n').encode()
+        path.write_bytes(raw)
+        return path, raw
+
+    def test_same_prefix_faults_have_distinct_physical_artifact_row_references(self):
+        path, raw = self.repeated_stream()
+        defects, faults = signer.blocking_findings(path, {'src/x.ts'})
+        self.assertEqual(defects, [])
+        self.assertEqual([f['stream_row'] for f in faults], [3, 6])
+        self.assertEqual(faults[0]['desc'], faults[1]['desc'])
+        self.assertLessEqual(len(faults[0]['desc']), 80)
+        self.assertEqual([f['code'] for f in faults], ['out_of_scope', 'out_of_scope'])
+        self.assertEqual({f['stream_sha256'] for f in faults},
+                         {signer.hashlib.sha256(raw).hexdigest()})
+        self.assertEqual(set(faults[0]),
+                         {'code', 'severity', 'file', 'desc', 'stream_row', 'stream_sha256'})
+
+    def test_same_artifact_references_survive_fresh_module_and_path(self):
+        path, raw = self.repeated_stream()
+        expected = signer.blocking_findings(path, {'src/x.ts'})
+        copied = self.root / 'retained-review.ndjson'
+        copied.write_bytes(raw)
+        fresh_spec = importlib.util.spec_from_file_location(
+            'crq_signer_identity_restart', ROOT / 'signer/crq-signer.py')
+        fresh = importlib.util.module_from_spec(fresh_spec)
+        fresh_spec.loader.exec_module(fresh)
+        self.assertEqual(fresh.blocking_findings(copied, {'src/x.ts'}), expected)
+        copied.write_bytes(b'\n' + raw)
+        _, changed = fresh.blocking_findings(copied, {'src/x.ts'})
+        self.assertEqual([f['stream_row'] for f in changed], [4, 7])
+        self.assertNotEqual(changed[0]['stream_sha256'], expected[1][0]['stream_sha256'])
+
+    def test_result_retains_safe_references_without_granting_clean_credit(self):
+        path, _ = self.repeated_stream()
+        _, faults = signer.blocking_findings(path, {'src/x.ts'})
+        signer.write_result(IID, {'base_sha': BASE, 'batch_sha': BATCH}, None,
+                            outcome='error', posted_state='error', severity_counts={},
+                            reviewer_faults=faults, reason_code='reviewer_fault')
+        result = json.loads((signer.RESULTS / (IID + '.json')).read_text())
+        self.assertEqual(result['reviewer_faults'], faults)
+        self.assertEqual(result['outcome'], 'error')
+        self.assertNotIn('blocking', result)
+        self.assertNotIn('findings', result)
 
 
 class QueueUnknownReasonCode(unittest.TestCase):
