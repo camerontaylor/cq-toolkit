@@ -32,6 +32,12 @@ async function world(
     reviewOutcome?: 'failed' | 'wrong-head' | 'open-finding';
     /** A second thread whose worker crashes: the row genuinely FAILS. */
     failer?: boolean;
+    /** Review rounds (default 1): a multi-round publication-range run. */
+    rounds?: number;
+    /** Distinct commit shas per commit (default: the single `fixed` sha). */
+    incrementingCommits?: boolean;
+    /** Fail every git push from this 1-based ordinal on with the scripted stderr. */
+    failPushFrom?: { ordinal: number; stderr: string };
   } = {},
 ) {
   // The failer knob only has a defined thread order inside the default
@@ -63,6 +69,9 @@ async function world(
   const prompts: string[] = [];
   const reviewInputs: ReviewRunInput[] = [];
   let pushFault: (() => string) | undefined;
+  let pushOrdinal = 0;
+  let commitSeq = 0;
+  const editWrites = new Map<string, number>();
   const files = ['src/a.ts', 'src/b.ts'];
   await mkdir(join(worktree, 'src'), { recursive: true });
   for (const file of files) await writeFile(join(worktree, file), 'BAD\n');
@@ -268,7 +277,11 @@ async function world(
       return ok('');
     }
     if (a[0] === 'commit') {
-      const sha = fixed;
+      // The default world models one fix with the single `fixed` sha; the
+      // incrementing option gives every commit its own sha so a multi-round
+      // run can prove per-range publication truth (A out, B local).
+      commitSeq += 1;
+      const sha = options.incrementingCommits ? `c${String(commitSeq).padStart(39, '0')}` : fixed;
       commits.set(sha, { parent: localHead, message: a[2]!, tree: treeHash(index) });
       trees.set(sha, new Map(index));
       heads.set(cwd, sha);
@@ -313,7 +326,21 @@ async function world(
       return ok(a[1]?.startsWith('refs/cq-review/') ? remote : localHead);
     }
     if (a[0] === 'status') return ok('');
-    if (a[0] === 'rev-list') return ok(a[1] === `${initial}..HEAD` && head !== initial ? head : '');
+    if (a[0] === 'rev-list') {
+      // Only the plain `<base>..<tip>` form walks the parent chain (so a
+      // second round's `publishedBase..HEAD` enumerates exactly the later
+      // commits); every flagged form (--count, --parents, …) keeps the
+      // legacy empty answer.
+      if (!a[1]!.includes('..')) return ok('');
+      const from = a[1]!.split('..')[0]!;
+      const out: string[] = [];
+      let cur = a[1]!.split('..')[1] === 'HEAD' ? head : a[1]!.split('..')[1]!;
+      while (cur !== from && commits.has(cur)) {
+        out.push(cur);
+        cur = commits.get(cur)!.parent;
+      }
+      return cur === from ? ok(out.join('\n')) : { code: 1, stdout: '', stderr: 'bad range' };
+    }
     if (a[0] === 'merge-base') {
       const from = a[2],
         to = a[3] === 'HEAD' ? head : a[3];
@@ -331,10 +358,13 @@ async function world(
     if (a[0] === 'log') return ok(commits.get(a[3]!)?.message ?? '');
     if (a[0] === 'diff' && a[1] === '--quiet') return { code: 1, stdout: '', stderr: '' };
     if (a[0] === 'push') {
+      pushOrdinal += 1;
       if (pushFault !== undefined) {
         const stderr = pushFault();
         return { code: 1, stdout: '', stderr };
       }
+      if (options.failPushFrom !== undefined && pushOrdinal >= options.failPushFrom.ordinal)
+        return { code: 1, stdout: '', stderr: options.failPushFrom.stderr };
       remote = head;
       actions.push('push');
       return ok('');
@@ -356,8 +386,23 @@ async function world(
               denials: [],
             };
           const deferred = human && input.prompt.includes('"id":"T2"');
-          if (!deferred && !input.prompt.startsWith('related-check feedback'))
-            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+          if (!deferred && !input.prompt.startsWith('related-check feedback')) {
+            // In an incrementing-commit world, a later round's re-fix must
+            // be a REAL edit: identical content would be a no-op diff, which
+            // the worker treats as a failed candidate instead of a verified
+            // commit — so every later write appends a refinement line. The
+            // default single-sha world keeps its identical-content re-fixes
+            // (no second commit, unchanged legacy behavior).
+            const file = join(input.workspace!.path, 'src/a.ts');
+            const writes = (editWrites.get(file) ?? 0) + 1;
+            editWrites.set(file, writes);
+            await writeFile(
+              file,
+              writes === 1 || !options.incrementingCommits
+                ? 'GOOD\n'
+                : `GOOD\n// refinement ${String(writes)}\n`,
+            );
+          }
           return {
             stopReason: 'complete',
             structuredOutput: {
@@ -388,7 +433,7 @@ async function world(
       roles: { worker: role, reviewer: role },
       budgets: { run: { maxTokens: options.runBudget ?? 1000 } },
       review: {
-        rounds: 1,
+        rounds: options.rounds ?? 1,
         reviewers: ['agent'],
         ...(options.refuseAdmissionAt ? { addressConcurrency: 1 } : {}),
       },
@@ -456,6 +501,8 @@ async function world(
     resolved,
     reviewerCalls: () => reviewerCalls,
     replies,
+    /** The remote head the fake forge saw: only a successful push moves it. */
+    remoteHead: () => remote,
     /**
      * Arm a persistent git-push fault: EVERY git push after this call
      * returns exit 1 with the scripted stderr, and nothing disarms the
@@ -782,6 +829,59 @@ describe('review.address PR phase-one orchestration', () => {
       expect(row).toBeDefined();
       expect(row).toContain('publication is off for this run');
       expect(row).toContain('stays unpublished');
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  // Publication-range truth (PR review thread PRRT_kwDOUY73E86w9hwK): the
+  // exit-publication witness used to be run-wide, so after round 1's push
+  // succeeded, round 2's pre-mutation push failure could not be recorded
+  // ('published' stood) and finish() stamped BOTH rounds' withhold rows
+  // "exit-published" — claiming round 2's verified commit was out while it
+  // never left the worktree. The real multi-round shape: round 1 pushes
+  // (commit 1 published; its row settles at the push), round 2 verifies
+  // commit 2 and every later push fails before any remote mutation (the
+  // remote head stays at commit 1). Truth: commit 1 published, commit 2
+  // local, needs-human "verified publication failed".
+  test('a later range whose push fails before mutation keeps the earlier range published and its own row local', async () => {
+    const stderr = 'remote storage went read-only mid-run (scripted)';
+    const commitSha = (n: number) => `c${String(n).padStart(39, '0')}`;
+    const w = await world(false, {
+      failer: true,
+      rounds: 2,
+      incrementingCommits: true,
+      failPushFrom: { ordinal: 2, stderr },
+    });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      const reason = result.status === 'needs-human' ? result.reason : '';
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(reason).toContain('verified publication failed');
+      expect(reason).toContain(stderr);
+      // Exactly one push left the process — round 1's. Round 2's failed
+      // before the remote moved, so the remote head is commit 1, not 2.
+      expect(w.actions.filter((action) => action === 'push')).toHaveLength(1);
+      expect(w.remoteHead()).toBe(commitSha(1));
+      const rows = report.reasons.filter((r) => r.includes('publish-withheld-mixed-worktree'));
+      expect(rows).toHaveLength(2);
+      // Round 1's row settled at its own successful push and is never
+      // rewritten by the later failure.
+      expect(rows[0]).toContain('exit-published');
+      expect(rows[0]).not.toContain('stays local');
+      // Round 2's row carries its own range's failure: the commit stays
+      // local, and the earlier success never suppresses it.
+      expect(rows[1]).toContain('exit publication failed');
+      expect(rows[1]).toContain(stderr);
+      expect(rows[1]).toContain('stays local');
+      expect(rows[1]).not.toContain('exit-published');
+      // The per-range truth is inside the persisted artifact too.
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        reasons: string[];
+      };
+      expect(persisted.reasons).toContain(rows[0]);
+      expect(persisted.reasons).toContain(rows[1]);
     } finally {
       await w.cleanup();
     }
