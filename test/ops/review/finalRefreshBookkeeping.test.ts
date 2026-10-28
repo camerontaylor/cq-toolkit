@@ -13,8 +13,10 @@ import { makeQueueClient } from '../../../src/ops/review/internal/queueClient.js
 import { importQueueEvidence } from '../../../src/ops/review/internal/queueEvidence.js';
 import type {
   DeferredQueueClient,
+  QueueReference,
   QueueStatus,
 } from '../../../src/ops/review/internal/queueProtocol.js';
+import type { DeferredVendorDebt } from '../../../src/ops/dev/internal/deferredReview.js';
 import { cycleRecord } from '../dev/fakes.js';
 import { makeTestRepo, repoEffects, type TestRepo } from '../dev/repo.js';
 
@@ -71,7 +73,8 @@ type Mode =
   | 'report-fails'
   | 'foreign-source'
   | 'external-append'
-  | 'external-completed';
+  | 'external-completed'
+  | 'authorized-predecessor-append';
 
 async function fixture(mode: Mode) {
   const repo = await makeTestRepo();
@@ -130,6 +133,37 @@ async function fixture(mode: Mode) {
   store.save({ version: 2, branch: state.branch, records: [origin] });
   const debt = await prepareDeferredVendorReview(real, 'merge-queue', state, client);
   if (!debt) throw new Error('missing genuine persisted debt');
+  // The authorized-ancestor mode adds a pending predecessor that only becomes terminal at the final
+  // refresh, so its settlement is an APPEND this refresh legitimately owns.
+  const ancestorReference: QueueReference = {
+    requestId: 'ancestor-1',
+    binding: { ...debt.reference.binding, head: state.head },
+  };
+  const ancestorDebt: DeferredVendorDebt | undefined =
+    mode === 'authorized-predecessor-append'
+      ? {
+          reference: ancestorReference,
+          originAttempt: debt.originAttempt,
+          deferral: { id: 'ancestor-1', base: state.base, dirtySha256: 'clean-tree' },
+          queue: pending,
+          vendor: 'vendor-blocked-transient',
+          vendorCompleted: false,
+        }
+      : undefined;
+  if (ancestorDebt !== undefined) {
+    const stored = store.load();
+    store.save({
+      ...stored,
+      records: [
+        ...stored.records.map((record) =>
+          record.kind === 'vendor-debt'
+            ? { ...record, debt: { ...record.debt, predecessor: ancestorReference } }
+            : record,
+        ),
+        { kind: 'vendor-debt' as const, debt: ancestorDebt, at: real.nowIso() },
+      ],
+    });
+  }
   const paths = [
     {
       source_path: 'src/a.ts',
@@ -191,7 +225,32 @@ async function fixture(mode: Mode) {
     reviewed: true,
     consumed,
   });
-  client.status = async () => {
+  const ancestorBytes = Buffer.from(
+    JSON.stringify({
+      ...document,
+      item_id: 'ancestor-item',
+      request_id: ancestorReference.requestId,
+      findings: [],
+    }),
+  );
+  const ancestorReceiptId = createHash('sha256').update(ancestorBytes).digest('hex');
+  client.status = async (reference) => {
+    if (
+      mode === 'authorized-predecessor-append' &&
+      reference.requestId === ancestorReference.requestId
+    )
+      return final
+        ? {
+            ...pending,
+            state: 'terminal-clean',
+            pr: 42,
+            mergeSha: state.head,
+            itemId: 'ancestor-item',
+            receiptId: ancestorReceiptId,
+            reviewed: true,
+            consumed: true,
+          }
+        : pending;
     if (!final || mode === 'pending') return pending;
     if (mode === 'external-append' && !appendedExternal) {
       appendedExternal = true;
@@ -205,6 +264,11 @@ async function fixture(mode: Mode) {
   };
   client.report = async (reference, root, options) => {
     expect(final).toBe(true);
+    if (
+      mode === 'authorized-predecessor-append' &&
+      reference.requestId === ancestorReference.requestId
+    )
+      return importQueueEvidence(root, ancestorReceiptId, ancestorBytes);
     expect(reference).toEqual(debt.reference);
     const evidence = await importQueueEvidence(root, receiptId, bytes);
     await options?.onEvidenceImported?.({ receiptId, path: join(root, receiptId + '.json') });
@@ -362,4 +426,21 @@ test.each([
     expect(f.store.load().records.at(-1)).not.toMatchObject({ debt: { vendorCompleted: true } });
   if (['external-append', 'external-completed'].includes(mode) && result.status === 'needs-human')
     expect(result.reason).toContain('unrecognized ledger bytes');
+});
+
+test('an authorized predecessor completion appended by the final refresh is owned and notified', async () => {
+  const f = await fixture('authorized-predecessor-append');
+  const result = await f.run();
+  // The settlement is recognized (not "unrecognized ledger bytes") and ownership is notified.
+  expect(result.status, JSON.stringify(result)).toBe('ok');
+  expect(f.events).toContain('ledger-observed');
+  const settled = f.store
+    .load()
+    .records.filter((record) => record.kind === 'vendor-debt')
+    .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined));
+  const completed = settled.filter((debt) => debt?.vendorCompleted === true);
+  expect(completed.map((debt) => debt!.reference.requestId).sort()).toEqual([
+    'ancestor-1',
+    f.debt.reference.requestId,
+  ]);
 });

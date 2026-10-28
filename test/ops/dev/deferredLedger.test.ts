@@ -1373,3 +1373,46 @@ test('in-flight deadline expiry during an ancestor RPC truncates nonfatally', as
     'authorized predecessor obligation(s) unsettled:',
   );
 });
+
+test('an unrelated trust failure coinciding with expiry still propagates', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  let exhausted = false;
+  const remainingMs = () => (exhausted ? 0 : 5_000);
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId === predecessor.reference.requestId) {
+        // The clock expires first, THEN an unrelated trust failure surfaces: the catch must
+        // classify by the caught outcome, never by the clock.
+        exhausted = true;
+        throw new Error('queue alias status binding mismatch');
+      }
+      return successorStatus;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  await expect(
+    loadCurrentDeferredVendorDebt(effectsFor(f), 'merge-queue', read.state, before, client, undefined, {
+      remainingMs,
+    }),
+  ).rejects.toThrow(/queue alias status binding mismatch/);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** The fixture's effects, unchanged: a small helper keeps the call sites readable. */
+function effectsFor(f: Awaited<ReturnType<typeof fixture>>) {
+  return f.effects;
+}

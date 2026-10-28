@@ -48,6 +48,17 @@ export interface QueueLineageOptions {
 
 /** #632's total, applied once per invocation and never renewed. */
 const INVOCATION_TOTAL_MS = 45_000;
+
+/** PRIVATE provenance marker for THIS invocation's own deadline outcome. Never exported, never a
+ * schema or observer: it exists so the ancestry catch can truncate only on the genuine deadline and
+ * still propagate caller reasons and unrelated status/schema/report-integrity/import failures.
+ */
+class LineageDeadlineExhausted extends Error {
+  constructor() {
+    super('queue delivery unknown: deadline exhausted');
+    this.name = 'LineageDeadlineExhausted';
+  }
+}
 /** Count backstop for authorized-predecessor refreshes in one invocation. */
 const MAX_PREDECESSOR_REFRESHES = 16;
 
@@ -95,7 +106,7 @@ function startInvocationLifetime(
   const timer = setTimeout(
     () => {
       fired = true;
-      controller.abort(new Error('queue delivery unknown: deadline exhausted'));
+      controller.abort(new LineageDeadlineExhausted());
     },
     Math.max(0, remainingMs()),
   );
@@ -128,7 +139,9 @@ function boundQueueClient(
    */
   const refuse = (label: string): never => {
     dead = true;
+    // A caller cancellation (and our own deadline sentinel) keeps its exact reason.
     lifetime.signal.throwIfAborted();
+    if (lifetime.expired()) throw new LineageDeadlineExhausted();
     throw new Error(`queue lifetime exhausted before ${label}`);
   };
   const settle = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
@@ -617,14 +630,6 @@ function ancestryBoundary(lifetime: InvocationLifetime): 'continue' | 'stop' {
   return 'continue';
 }
 
-/** The invocation's OWN deadline is exhausted — never a caller cancellation, which always keeps its
- * own reason. Used to classify an in-flight failure of an authorized-ancestry RPC as the documented
- * nonfatal truncation instead of a preparation failure.
- */
-function deadlineExhausted(lifetime: InvocationLifetime): boolean {
-  return !lifetime.callerAborted() && (lifetime.expired() || lifetime.remainingMs() <= 0);
-}
-
 /** Refreshes the current enrollment's authorized predecessors, sequentially and in FIFO/lineage
  * order. A predecessor is settled only through the existing verified report import, and only the
  * current enrollment is ever returned for continuation or readiness.
@@ -669,7 +674,7 @@ async function refreshAuthorizedAncestry(
       // nonfatal truncation as expiry between ancestors: keep the verified current enrollment and
       // leave the retained obligations as readiness gaps. Caller cancellation keeps its own exact
       // reason, and any genuine trust/import failure still propagates unchanged.
-      if (deadlineExhausted(lifetime)) return;
+      if (error instanceof LineageDeadlineExhausted) return;
       throw error;
     }
     const current = await readWorkState(effects, { target, base: state.base });

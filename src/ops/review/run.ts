@@ -853,17 +853,34 @@ export function makeReviewRun(
           );
           const afterRefresh = effects.openLedger(state.branch).load();
           if (!isDeepStrictEqual(beforeRefresh, afterRefresh)) {
-            const appended = afterRefresh.records.at(-1);
+            // This refresh may settle the current enrollment AND its authorized ancestors, so the
+            // owned shape is an append-only extension in which every added snapshot is a verified
+            // completion of the current enrollment or of one of its authorized ancestors. Any other
+            // extra byte still fails closed.
+            const authority = readCurrentEnrollment(
+              beforeRefresh,
+              { head: state.head, base: state.base, dirtySha256: state.dirtySha256 },
+              target,
+            );
+            const authorized = new Set<string>([deferredVendorDebt.reference.requestId]);
+            if (authority.kind === 'enrollment')
+              for (const ancestor of authority.enrollment.ancestry)
+                authorized.add(ancestor.reference.requestId);
+            const appended = afterRefresh.records.slice(beforeRefresh.records.length);
             if (
               !requestedLedger ||
               !isDeepStrictEqual(requestedLedger, afterRefresh) ||
               !isDeepStrictEqual(
-                { ...afterRefresh, records: afterRefresh.records.slice(0, -1) },
-                beforeRefresh,
+                afterRefresh.records.slice(0, beforeRefresh.records.length),
+                beforeRefresh.records,
               ) ||
-              appended?.kind !== 'vendor-debt' ||
-              !isDeepStrictEqual(appended.debt.reference, deferredVendorDebt.reference) ||
-              !verifiedCompletedDebt(appended.debt)
+              appended.length === 0 ||
+              appended.some(
+                (record) =>
+                  record.kind !== 'vendor-debt' ||
+                  !verifiedCompletedDebt(record.debt) ||
+                  !authorized.has(record.debt.reference.requestId),
+              )
             )
               throw new Error('final queue refresh changed unrecognized ledger bytes');
             if (!deps.noteLedgerWrite)
