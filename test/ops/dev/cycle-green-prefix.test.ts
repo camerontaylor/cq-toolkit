@@ -5,7 +5,7 @@
 // head. Real git (work repo + bare origin); every op leg, the probe checks,
 // the install and the forge are scripted. No provider, network or credentials.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { makeDevCycle, renderFindingsSection } from '../../../src/ops/dev/cycle.js';
 import type { DevCheckReport } from '../../../src/ops/dev/check.js';
@@ -103,10 +103,14 @@ interface Scenario {
   remoteMismatch?: boolean;
   /** The probe check throws. */
   probeThrows?: string;
+  /** Called at the start of each probe check. */
+  onProbe?: () => void;
+  /** Scripted author-side git commands (a race injected before real git runs). */
+  authorHandler?: Parameters<typeof repoEffects>[1];
 }
 
 async function run(scenario: Scenario) {
-  const author = repoEffects(repo);
+  const author = repoEffects(repo, scenario.authorHandler);
   const admitted = repo.git('rev-parse', 'HEAD').trim();
   const commits: string[] = [];
   const verdicts = new Map<string, boolean>();
@@ -258,6 +262,7 @@ async function run(scenario: Scenario) {
       : {
           checkIn: (effects: DevEffects, root: string) => async () => {
             probeRoots.push(root);
+            scenario.onProbe?.();
             if (scenario.probeThrows !== undefined) throw new Error(scenario.probeThrows);
             if (scenario.probeFault !== undefined)
               return { status: 'needs-human', reason: scenario.probeFault };
@@ -296,11 +301,10 @@ async function run(scenario: Scenario) {
     ...(scenario.push === undefined ? {} : { push: scenario.push }),
   });
   const T = commits.at(-1)!;
-  const probeDir = join(
-    dirname(repo.root),
-    '.cq-dev-cycle-probes',
-    `${basename(repo.root)}-${T.slice(0, 12)}`,
-  );
+  const probeParent = join(dirname(repo.root), '.cq-dev-cycle-probes');
+  const probePrefix = `${basename(repo.root)}-${T.slice(0, 12)}-`;
+  // The probe path is run-unique: the one the probes ran in, if any.
+  const probeDir = probeRoots[0] ?? join(probeParent, `${probePrefix}(none)`);
   const pub = `${BRANCH}-cq-green-${T.slice(0, 12)}`;
   return {
     result,
@@ -312,6 +316,8 @@ async function run(scenario: Scenario) {
     probeRoots,
     bodies,
     probeDir,
+    probeParent,
+    probePrefix,
     pub,
     author,
   };
@@ -328,7 +334,11 @@ function expectAuthorUntouched(r: Awaited<ReturnType<typeof run>>): void {
     .records.filter((record) => record.kind === 'check');
   expect(checks.map((record) => record.checkId)).toEqual(['k001-open', 'k002-final']);
   expect(existsSync(r.probeDir)).toBe(false);
-  expect(repo.git('worktree', 'list', '--porcelain')).not.toContain(r.probeDir);
+  const leftovers = existsSync(r.probeParent)
+    ? readdirSync(r.probeParent).filter((name) => name.startsWith(r.probePrefix))
+    : [];
+  expect(leftovers).toEqual([]);
+  expect(repo.git('worktree', 'list', '--porcelain')).not.toContain(r.probePrefix);
 }
 
 describe('dev.cycle red final gates: newest green verified-fix commit (#536)', () => {
@@ -348,6 +358,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     }
     expect(r.probeRoots).toHaveLength(probes);
     expect(r.probeRoots.every((root) => root === r.probeDir)).toBe(true);
+    expect(r.probeDir.startsWith(join(r.probeParent, r.probePrefix))).toBe(true);
     expect(r.installs).toEqual([r.probeDir]);
     // The pinned push sends G's object to the NEW publication branch only.
     expect(r.pushes.filter((args) => args.includes('push'))).toEqual([
@@ -466,6 +477,82 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expect(r.installs).toEqual([]);
     expect(r.probeRoots).toEqual([]);
     expect(r.opens).toEqual([]);
+  });
+
+  test('a branch another process creates between the existence check and creation is never deleted', async () => {
+    let raced: string | undefined;
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      authorHandler: (command, args) => {
+        // Race: right before OUR atomic create, someone else creates the ref.
+        const ref = args.find((arg) => arg.startsWith('refs/heads/') && arg.includes('-cq-green-'));
+        if (command === 'git' && args.includes('update-ref') && !args.includes('-d') && ref) {
+          raced = repo.git('rev-parse', 'HEAD').trim();
+          repo.git('update-ref', ref, raced);
+        }
+        return undefined;
+      },
+    });
+    expect(raced).toBeDefined();
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('could not be created (it may already exist)');
+    expect(repo.git('rev-parse', `refs/heads/${r.pub}`).trim()).toBe(raced);
+    expect(r.probeRoots).toEqual([]);
+    expect(existsSync(r.probeDir)).toBe(false);
+  });
+
+  test('a worktree git materialized before its add failed is still released', async () => {
+    let materialized: string | undefined;
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      authorHandler: (command, args) => {
+        if (command !== 'git' || !args.includes('worktree') || !args.includes('add'))
+          return undefined;
+        // Simulate an interrupted add: git registers and checks out, then fails.
+        const at = args.indexOf('add');
+        materialized = args[at + 1]!;
+        repo.git('worktree', 'add', '-q', materialized, args[at + 2]!);
+        return { exitCode: 1, stdout: '', stderr: 'interrupted checkout', timedOut: false };
+      },
+    });
+    expect(materialized).toBeDefined();
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('the probe worktree could not be created');
+    expect(existsSync(materialized!)).toBe(false);
+    expect(repo.git('worktree', 'list', '--porcelain')).not.toContain(materialized!);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('a reserve exhausted during the publication binding re-reads stops before the push', async () => {
+    let probes = 0;
+    let bound = false;
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      onProbe: () => {
+        probes += 1;
+      },
+      authorHandler: (command, args) => {
+        // The first author re-read after a probe ran: the binding step.
+        if (!bound && command === 'git' && args[0] === 'symbolic-ref' && probes > 0) {
+          bound = true;
+          const now = Date.now();
+          vi.spyOn(Date, 'now').mockReturnValue(now + 60 * 60 * 1000);
+        }
+        return undefined;
+      },
+    });
+    expect(bound).toBe(true);
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('the reserve ran out during the publication binding');
+    expect(r.pushes.filter((args) => args.includes('push'))).toEqual([]);
+    expect(r.opens).toEqual([]);
+    expectAuthorUntouched(r);
   });
 
   test('without a scanner bound to the probe root, the author scanner is never reused: no probe certifies', async () => {

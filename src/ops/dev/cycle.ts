@@ -46,7 +46,8 @@
 import type { GhFn } from '../../adapters/forge-github/gh.js';
 import { makeGhRunner } from '../../adapters/forge-github/gh.js';
 import type { Op, OpResult } from '../../kernel/types.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
@@ -796,7 +797,9 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       const tmp = join(
         dirname(input.repoRoot),
         '.cq-dev-cycle-probes',
-        `${basename(input.repoRoot)}-${T.slice(0, 12)}`,
+        // Run-unique: anything at this path after OUR worktree add is ours,
+        // including a worktree git materialized before failing.
+        `${basename(input.repoRoot)}-${T.slice(0, 12)}-${randomUUID().slice(0, 8)}`,
       );
       const authorBranch = author.state.branch;
       const pub = `${author.state.branch}-cq-green-${T.slice(0, 12)}`;
@@ -813,8 +816,11 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       // The owned lifetime: everything this run creates (the worktree, the
       // branch) is released in the finally below, whatever returns or throws.
       let worktreeAdded = false;
-      // Set only for a branch THIS run created.
-      let branchOwned = false;
+      // The SHA this run last set the publication branch to, defined only
+      // once THIS run created it atomically (update-ref against the zero id).
+      // Release deletes with the same compare-and-swap, so a ref anyone else
+      // created or moved is never deleted — a failed delete is reported.
+      let ownedAt: string | undefined;
       // Set once a push of the branch was ATTEMPTED: the remote may carry it
       // even when verification failed, so the local branch is then kept.
       let pushAttempted = false;
@@ -851,13 +857,14 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
               `worktree remove ${tmp} failed: ${removed.stderr.trim().slice(0, 300)}`,
             );
         }
-        if (branchOwned && !pushAttempted) {
-          const deleted = await gitAt(['branch', '-D', pub]).catch((err: unknown) => ({
-            exitCode: -1,
-            stderr: String(err),
-          }));
+        if (ownedAt !== undefined && !pushAttempted) {
+          const deleted = await gitAt(['update-ref', '-d', `refs/heads/${pub}`, ownedAt]).catch(
+            (err: unknown) => ({ exitCode: -1, stderr: String(err) }),
+          );
           if (deleted.exitCode !== 0)
-            releaseFaults.push(`branch -D ${pub} failed: ${deleted.stderr.trim().slice(0, 300)}`);
+            releaseFaults.push(
+              `delete of '${pub}' at ${ownedAt} failed (left in place): ${deleted.stderr.trim().slice(0, 300)}`,
+            );
         }
       }
       if (releaseFaults.length === 0) return outcome;
@@ -876,15 +883,35 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
       async function probeAndPublish(): Promise<
         { kind: 'none'; attribution: string } | { kind: 'published'; result: OpResult<never> }
       > {
-        const added = await gitAt(['worktree', 'add', '-b', pub, tmp, candidates[0]!]);
-        // The branch was absent a moment ago: if it exists now, this run made it.
-        branchOwned = added.exitCode === 0 || (await branchExists());
+        // Create the branch atomically: update-ref with the zero old id fails
+        // if the ref exists, so success alone proves this run created it.
+        const zero = '0'.repeat(T.length);
+        const created = await gitAt(['update-ref', `refs/heads/${pub}`, candidates[0]!, zero]);
+        if (created.exitCode !== 0)
+          return {
+            kind: 'none',
+            attribution: `no green-prefix publication: the publication branch '${pub}' could not be created (it may already exist) — it is left untouched: ${created.stderr.trim().slice(0, 300)}`,
+          };
+        ownedAt = candidates[0]!;
+        if (existsSync(tmp))
+          return {
+            kind: 'none',
+            attribution: `no green-prefix publication: the probe path ${tmp} already exists — it is left untouched`,
+          };
+        const added = await gitAt(['worktree', 'add', tmp, pub]);
+        // The path was absent and is run-unique: a worktree git registered or
+        // materialized there before failing is still ours to release.
+        worktreeAdded =
+          added.exitCode === 0 ||
+          existsSync(tmp) ||
+          (await gitAt(['worktree', 'list', '--porcelain'])).stdout
+            .split('\n')
+            .includes(`worktree ${tmp}`);
         if (added.exitCode !== 0)
           return {
             kind: 'none',
             attribution: `no green-prefix publication: the probe worktree could not be created — ${added.stderr.trim().slice(0, 300)}`,
           };
-        worktreeAdded = true;
         // The install gets what the reserve leaves after the setup actually
         // spent and one probe (the estimate is re-taken, never the old figure).
         const installMs = Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost);
@@ -917,6 +944,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
                   verdict: 'fault',
                   detail: `checkout failed: ${moved.stderr.trim().slice(0, 300)}`,
                 };
+              ownedAt = commit;
             }
             // A FRESH check leg per candidate: its secret scanner is built from
             // the candidate's own checkout, never the author's cached rules.
@@ -985,6 +1013,13 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
           return {
             kind: 'none',
             attribution: `${scanned} — the selected commit ${G} lost its binding before publication (author or probe state moved) — nothing published`,
+          };
+        // The binding re-reads above spend time too: the reserve is checked
+        // once more immediately before the push, the point of no return.
+        if (left() < 0)
+          return {
+            kind: 'none',
+            attribution: `${scanned} — the reserve ran out during the publication binding (${String(-left())}ms into the publication margin) — nothing published`,
           };
         pushAttempted = true;
         const pushedPub = await publishHead(pub, G, true);
