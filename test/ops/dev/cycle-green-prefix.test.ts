@@ -107,8 +107,10 @@ interface Scenario {
   reviewHead?: string;
   /** Named test files passed to dev.cycle (absolute paths are re-rooted). */
   testFiles?: (root: string) => string[];
-  /** Change a dependency input (package.json) in the fix at this chain index. */
+  /** Change a dependency input in the fix at this chain index. */
   dependencyChangeAt?: number;
+  /** The dependency input changed (default package.json). */
+  dependencyFile?: string;
   /** Called at the start of each probe check. */
   onProbe?: () => void;
   /** Scripted author-side git commands (a race injected before real git runs). */
@@ -172,12 +174,17 @@ async function run(scenario: Scenario) {
       for (const [index, green] of scenario.greens.entries()) {
         await repo.write('src/a.ts', `export const a = ${String(index + 2)};\n`);
         if (scenario.dependencyChangeAt === index)
-          await repo.write('package.json', `{"name":"fixture","version":"1.0.${String(index)}"}\n`);
+          await repo.write(
+            scenario.dependencyFile ?? 'package.json',
+            `{"name":"fixture","version":"1.0.${String(index)}"}\n`,
+          );
         // Commit the fix files only: `.cq/` holds the ledger and stays untracked.
         repo.git(
           'add',
           'src/a.ts',
-          ...(scenario.dependencyChangeAt === index ? ['package.json'] : []),
+          ...(scenario.dependencyChangeAt === index
+            ? [scenario.dependencyFile ?? 'package.json']
+            : []),
         );
         repo.git('commit', '-q', '-m', `fix f${String(index + 1)}`);
         const commit = repo.git('rev-parse', 'HEAD').trim();
@@ -483,11 +490,21 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     const r = await run({
       greens: [true, false],
       stop: 'budget',
-      testFiles: (root) => [join(root, 'test/a.test.ts'), 'test/b.test.ts', '/elsewhere/c.test.ts'],
+      testFiles: (root) => [
+        join(root, 'test/a.test.ts'),
+        join(root, '..fixtures/d.test.ts'),
+        'test/b.test.ts',
+        '/elsewhere/c.test.ts',
+      ],
     });
     expect(r.result.status).toBe('needs-human');
     expect(r.probeSteps.map((step) => step.testFiles)).toEqual([
-      [join(r.probeDir, 'test/a.test.ts'), 'test/b.test.ts', '/elsewhere/c.test.ts'],
+      [
+        join(r.probeDir, 'test/a.test.ts'),
+        join(r.probeDir, '..fixtures/d.test.ts'),
+        'test/b.test.ts',
+        '/elsewhere/c.test.ts',
+      ],
     ]);
     expect(r.probeSteps[0]!.repoRoot).toBe(r.probeDir);
   });
@@ -499,6 +516,17 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expect(r.result.status).toBe('needs-human');
     expect(r.installs).toEqual([r.probeDir, r.probeDir]);
     expect(r.probeRoots).toHaveLength(2);
+  });
+
+  test('a pnpm hook-only change (.pnpmfile.cjs) also reinstalls', async () => {
+    const r = await run({
+      greens: [true, false, false],
+      stop: 'budget',
+      dependencyChangeAt: 1,
+      dependencyFile: '.pnpmfile.cjs',
+    });
+    expect(r.result.status).toBe('needs-human');
+    expect(r.installs).toEqual([r.probeDir, r.probeDir]);
   });
 
   test('candidates with identical dependency inputs share one install', async () => {

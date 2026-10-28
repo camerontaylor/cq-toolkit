@@ -49,7 +49,7 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
@@ -111,6 +111,9 @@ export const GREEN_PREFIX_DEPENDENCY_INPUTS: readonly string[] = [
   'package-lock.json',
   'yarn.lock',
   '.npmrc',
+  // pnpm hooks rewrite manifests and resolution (https://pnpm.io/pnpmfile).
+  '.pnpmfile.cjs',
+  '.pnpmfile.mjs',
 ];
 /** #536: the dependency-install bound in the probe worktree (also capped by the reserve). */
 export const GREEN_PREFIX_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -960,7 +963,10 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
                 testFiles: checkStep.testFiles.map((file) => {
                   if (!isAbsolute(file)) return file;
                   const inside = relative(input.repoRoot, file);
-                  return inside.startsWith('..') || isAbsolute(inside) ? file : join(tmp, inside);
+                  // Outside means a leading '..' SEGMENT ('..fixtures/x' is inside).
+                  const outside =
+                    inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside);
+                  return outside ? file : join(tmp, inside);
                 }),
               }),
         };
