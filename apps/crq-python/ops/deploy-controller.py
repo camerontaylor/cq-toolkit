@@ -570,7 +570,11 @@ def rollback_target(prior: dict) -> dict:
     compat = prior.get("rollback_compatibility")
     if not isinstance(compat, dict):
         raise Refused("prior record lacks its rollback compatibility evidence")
-    return {"prior_head": target, "tag": tag, "rollback_compatibility": compat}
+    deployed = prior.get("target")
+    if not isinstance(deployed, str) or not SHA_RE.fullmatch(deployed):
+        raise Refused("prior record lacks a valid deployed target SHA")
+    return {"prior_head": target, "tag": tag, "deployed": deployed,
+            "rollback_compatibility": compat}
 
 
 def _runner_liveness(helper_module):
@@ -601,6 +605,8 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
     (schema-incompatible prior target)."""
     with effects.controller_lock():
         record = rollback_target(prior)
+        if effects.git("rev-parse", "HEAD") != record["deployed"]:
+            raise Refused("prior record does not describe the current deployment")
         if not rollback_compatible(record["rollback_compatibility"]):
             raise Refused("rollback disabled: queue state the prior target cannot "
                           "provably read (explicit schema marker or author_* state "

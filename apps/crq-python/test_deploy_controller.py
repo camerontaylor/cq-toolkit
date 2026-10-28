@@ -726,7 +726,7 @@ class RollbackPlanTests(ControllerFixture):
         self.prior = {"schema_version": dc.JOURNAL_SCHEMA, "operation": "deploy",
                       "at": "2026-10-27T00:00:00Z",
                       "prior_head": self.before, "prior_tag": "crq-runner/20261027-9",
-                      "tag": self.tag,
+                      "tag": self.tag, "target": self.target,
                       "rollback_compatibility": {"checked": True,
                                                  "schema_observations": [],
                                                  "schema_marker_present": False,
@@ -744,6 +744,73 @@ class RollbackPlanTests(ControllerFixture):
     def at_target(self):
         with self.fake_switch():
             host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+
+    def test_old_deploy_journal_refuses_after_a_second_completed_deployment(self):
+        # Construct C before exercising the actual A -> B -> C controller path.
+        self.command("restore", "--", host.CONFIG)
+        self.command("checkout", "-q", "--detach", self.target)
+        (self.root / "third-release").write_text("third release\n")
+        self.command("add", "third-release")
+        self.command("commit", "-qm", "third release")
+        third = self.command("rev-parse", "HEAD").strip()
+        third_tag = "crq-runner/20261028-2"
+        self.command("tag", "-a", third_tag, "-m", "third fixture approval")
+        self.command("update-ref", "refs/remotes/origin/main", third)
+        self.command("checkout", "-q", "--detach", self.before)
+        self.rendered()
+        with self.fake_switch():
+            dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+            old_path = next(self.record_dir.glob("controller-*.json"))
+            old_journal = json.loads(old_path.read_text())
+            dc.deploy_plan(self.effects, host, third, third_tag, self.overlay_path)
+        self.assertEqual(old_journal["prior_head"], self.before)
+        self.assertEqual(old_journal["target"], self.target)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), third)
+        before = dc.captured_state(self.effects)
+        records = {p.name: p.read_bytes() for p in self.record_dir.iterdir()}
+        with mock.patch.object(dc, "compatibility_record") as compatibility:
+            with mock.patch.object(dc, "drain_check") as drain:
+                with mock.patch.object(host, "switch") as switch:
+                    with mock.patch.object(self.effects, "journal_append") as append:
+                        with self.assertRaisesRegex(dc.Refused, "does not describe the current deployment"):
+                            dc.rollback_plan(self.effects, host, old_journal, self.overlay_path)
+                        compatibility.assert_not_called()
+                        drain.assert_not_called()
+                        switch.assert_not_called()
+                        append.assert_not_called()
+        self.assertEqual(dc.captured_state(self.effects), before)
+        self.assertEqual({p.name: p.read_bytes() for p in self.record_dir.iterdir()}, records)
+
+    def test_missing_or_malformed_deployed_target_cannot_authorize_rollback(self):
+        missing = dict(self.prior)
+        missing.pop("target")
+        for prior in [missing, *[{**self.prior, "target": value} for value in
+                                [None, False, [], {}, "", "a" * 39, "A" * 40,
+                                 self.target + "\n", "a" * 41]]]:
+            with self.subTest(prior=prior):
+                with self.assertRaisesRegex(dc.Refused, "valid deployed target SHA"):
+                    dc.rollback_target(prior)
+
+    def test_matching_deployed_target_is_checked_under_controller_lock(self):
+        self.at_target()
+        actual_git = self.effects.git
+        observed = []
+
+        def git(*args):
+            if args == ("rev-parse", "HEAD"):
+                with (self.effects.state_dir() / dc.LOCK_NAME).open("a") as competing:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append(actual_git(*args))
+                return observed[-1]
+            return actual_git(*args)
+
+        with self.fake_switch(), mock.patch.object(self.effects, "git", side_effect=git):
+            result = dc.rollback_plan(self.effects, host, self.prior, self.overlay_path)
+        self.assertTrue(observed)
+        self.assertEqual(observed[0], self.prior["target"])
+        self.assertEqual(result["rolled_back_to"], self.before)
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
 
     def test_rollback_bad_record_mode_refuses_before_helper(self):
         self.at_target()
