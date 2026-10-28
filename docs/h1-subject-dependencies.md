@@ -495,3 +495,28 @@ errors (`/tmp/h1-macos-repair-static.log`), and Knip passed exit0
 original failed CI launcher's bytes or successful macOS execution. All earlier
 helper-success and production-supply limitations remain unchanged. Final
 format/diff/scans and successor hashes are supplied in the handoff.
+
+### Follow-ups #579 and #581: fixture setup and forwarding fidelity
+
+Boundary-only Node, pnpm, tar and gzip discovery now runs in the offline
+boundary describe's beforeAll, rather than at module collection. Shared Git
+discovery remains available to the existing recompute tests. The boundary still
+fails on missing or unsupported prerequisites: no skip, tool download, version
+substitution, mock executable output or relaxed launcher/provenance check is
+introduced. Exact repository packageManager verification still executes the
+real provisioned tool in the existing scrubbed environment. A focused negative
+case invokes preflight with an absent npm_execpath and requires its exception;
+the sibling recompute and launcher tests remain independently collectible.
+
+The Git forwarding mock now merges the supplied options.env before applying
+its forced isolation overrides. Focused assertions cover a named nonsecret
+field, every forced override, input immutability, absence of a named ambient
+canary and a supplied synthetic Git author identity reaching a real Git child.
+This preserves the adapter's supplied environment without freshly inheriting
+the process environment in the forwarder. Dependency/compiler children retain
+their separate scrubbed environments and existing offline/canary proof.
+
+These changes affect the test fixture only. Production recompute source and
+workflow/schema/authority wiring remain unchanged; #517 production supply is
+still unfixed. New check results and exact hashes are reported in the handoff;
+older evidence above remains historical evidence, not a claim about this head.
