@@ -671,6 +671,111 @@ describe('findReusableCycle', () => {
     }
   });
 
+  test('an intervening genuine blocker refuses reuse even when a no-fresh tail follows it', () => {
+    // The reachable sequence the selector used to resolve: terminal A -> a
+    // genuine blocked attempt B with no authority to resolve it -> exact
+    // affirmative no-fresh C. C is eligible in shape, but B was never
+    // reviewed, so no reuse may be selected over it.
+    for (const reason of [
+      'reviewer stream carried an error event',
+      'reviewer requested action (usage-limit confirmation class) — the cycle never reviewed',
+      'the reviewer CLI timed out after 1500000ms and was stopped — no review completed',
+      'reviewer stream was MALFORMED — 1 line(s) were unparsable or of an unrecognized event type',
+    ]) {
+      const selection = findReusableCycle(
+        [
+          cycleRecord(),
+          cycleRecord({ cycleId: 'c002-aaaaaaaa', completion: { kind: 'blocked', reason } }),
+          cycleRecord({
+            cycleId: 'c003-aaaaaaaa',
+            completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+          }),
+        ],
+        REQUEST,
+      );
+      expect(selection, reason).toBeNull();
+    }
+  });
+
+  test('a structured vendor failure in between is never an eligible no-fresh notice', () => {
+    const selection = findReusableCycle(
+      [
+        cycleRecord(),
+        cycleRecord({
+          cycleId: 'c002-aaaaaaaa',
+          completion: { kind: 'blocked', reason: 'reviewer rate limit exceeded' },
+          vendorFailure: {
+            source: 'vendor',
+            category: 'vendor-rate-limited',
+            codes: ['rate_limited'],
+          },
+        }),
+        cycleRecord({
+          cycleId: 'c003-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+      ],
+      REQUEST,
+    );
+    expect(selection).toBeNull();
+  });
+
+  test('an intervening genuine blocker before a NEWER terminal resets the anchor to that terminal', () => {
+    // A fresh review after the blocker is the evidence that resolves it; the
+    // newer same-identity terminal becomes the selection, not an old anchor.
+    const blocker = cycleRecord({
+      cycleId: 'c002-aaaaaaaa',
+      completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+    });
+    expect(
+      findReusableCycle(
+        [cycleRecord(), blocker, cycleRecord({ cycleId: 'c003-aaaaaaaa' })],
+        REQUEST,
+      ),
+    ).toMatchObject({ basis: 'exact-terminal', cycle: { cycleId: 'c003-aaaaaaaa' } });
+    // …and a later no-fresh tail resolves against that newer terminal only.
+    expect(
+      findReusableCycle(
+        [
+          cycleRecord(),
+          blocker,
+          cycleRecord({ cycleId: 'c003-aaaaaaaa' }),
+          cycleRecord({
+            cycleId: 'c004-aaaaaaaa',
+            completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+          }),
+        ],
+        REQUEST,
+      ),
+    ).toMatchObject({
+      basis: 'no-fresh-tail',
+      cycle: { cycleId: 'c003-aaaaaaaa' },
+      resolvesCycleId: 'c004-aaaaaaaa',
+    });
+  });
+
+  test('consecutive affirmative no-fresh tails stay resolvable and name the latest', () => {
+    const selection = findReusableCycle(
+      [
+        cycleRecord(),
+        cycleRecord({
+          cycleId: 'c002-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+        cycleRecord({
+          cycleId: 'c003-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+      ],
+      REQUEST,
+    );
+    expect(selection).toMatchObject({
+      basis: 'no-fresh-tail',
+      cycle: { cycleId: 'c001-aaaaaaaa' },
+      resolvesCycleId: 'c003-aaaaaaaa',
+    });
+  });
+
   test('a no-fresh-shaped reason that deviates from the recorded verdict wording refuses', () => {
     expect(
       findReusableCycle(
@@ -749,6 +854,99 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
       expect(gap?.detail).toContain('c002-aaaaaaaa');
       expect(gap?.detail).toContain('AFFIRMATIVE no-fresh');
     }
+  });
+
+  test('a persisted resolution cannot paper over an intervening genuine blocker', () => {
+    // The linkage the old selector wrote (or a forged one): reuse names the
+    // terminal A and the no-fresh tail C while genuine blocker B sits between
+    // them. Readiness must refuse exactly as the selector now does — no
+    // review ever resolved B, so C's notice cannot settle it.
+    for (const reason of [
+      'reviewer stream carried an error event',
+      'reviewer requested action (usage-limit confirmation class) — the cycle never reviewed',
+    ]) {
+      const result = assemble([
+        cycleRecord(),
+        cycleRecord({ cycleId: 'c002-aaaaaaaa', completion: { kind: 'blocked', reason } }),
+        cycleRecord({
+          cycleId: 'c003-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+        reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+        checkRecord(),
+      ]);
+      expect(result.ready, reason).toBe(false);
+      if (!result.ready) {
+        const gap = result.gaps.find((entry) => entry.field === 'latest-review-blocked');
+        expect(gap?.detail, reason).toContain('c003-aaaaaaaa');
+      }
+    }
+  });
+
+  test('a structured vendor failure in between refuses the persisted resolution too', () => {
+    const result = assemble([
+      cycleRecord(),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        completion: { kind: 'blocked', reason: 'reviewer rate limit exceeded' },
+        vendorFailure: {
+          source: 'vendor',
+          category: 'vendor-rate-limited',
+          codes: ['rate_limited'],
+        },
+      }),
+      cycleRecord({
+        cycleId: 'c003-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready)
+      expect(result.gaps.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+  });
+
+  test('consecutive affirmative no-fresh tails stay resolvable when the LATEST one is named', () => {
+    const tails = [
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+      cycleRecord({
+        cycleId: 'c003-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+    ];
+    const resolved = assemble([
+      cycleRecord(),
+      ...tails,
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(resolved.ready).toBe(true);
+    // Naming the earlier no-fresh attempt leaves the later one unresolved.
+    const stale = assemble([
+      cycleRecord(),
+      ...tails,
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(stale.ready).toBe(false);
+  });
+
+  test('a newer genuine terminal after the blocker settles readiness on that terminal', () => {
+    const result = assemble([
+      cycleRecord(),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+      }),
+      cycleRecord({ cycleId: 'c003-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(true);
+    if (result.ready) expect(result.record.cycleId).toBe('c003-aaaaaaaa');
   });
 
   test('a resolution record that names the WRONG tail or wrong anchor never resolves', () => {

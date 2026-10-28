@@ -433,6 +433,19 @@ const DevRecordSchema = z.discriminatedUnion('kind', [
 const NO_FRESH_TAIL_PATTERN =
   /^reviewer completed '.+?' with an AFFIRMATIVE no-fresh\/skipped notice \(".+"\) — a fresh detailed review never ran$/u;
 
+/**
+ * True when the cycle is an affirmative no-fresh BLOCKED attempt: the vendor
+ * itself said it never reviewed, with no structured vendor-failure class.
+ * EXACTLY these attempts are eligible for a `no-fresh-tail` reuse — as the
+ * resolved tail, and as every attempt between that tail and its selected
+ * terminal. Nothing else (an error, auth, rate limit, malformed stream, a
+ * deadline kill, or any vendor-failure class) is ever eligible.
+ */
+const isAffirmativeNoFreshAttempt = (cycle: DevCycleRecord): boolean =>
+  cycle.vendorFailure === undefined &&
+  cycle.completion.kind === 'blocked' &&
+  NO_FRESH_TAIL_PATTERN.test(cycle.completion.reason);
+
 /** The exact match {@link findReusableCycle} looks for (record.ts reuse/readiness). */
 export interface ReuseSelectionInput {
   /** The intended PR target of the review request. */
@@ -465,16 +478,21 @@ export type ReuseSelection =
  * scope and reviewer — the readiness anchor's identity fields plus the
  * request shape; a dirty scope mismatch, a changed target at the same
  * merge-base, a moved head or base, or a different reviewer never match),
- * and classify the ledger's latest same-identity attempt:
- *   - the latest cycle IS the selected cycle → `exact-terminal`;
- *   - the latest cycle is an affirmative NO-FRESH blocked attempt (the
- *     vendor itself said it never reviewed) at the same identity, and the
- *     selected cycle precedes it → `no-fresh-tail` carrying
- *     `resolvesCycleId` — the explicit, auditable reuse resolution; the
- *     blocked attempt stays in the ledger verbatim;
- *   - the latest cycle is any OTHER blocked attempt, or a terminal cycle
- *     that is not the selection (an earlier terminal does not paper over a
- *     newer unrelated one) → no reuse (a genuine later blocker refuses).
+ * and classify the ledger's same-identity resolution tail — every attempt
+ * after the selected cycle:
+ *   - there is no tail (the latest cycle IS the selected cycle) →
+ *     `exact-terminal`;
+ *   - EVERY tail attempt is an affirmative NO-FRESH blocked attempt (the
+ *     vendor itself said it never reviewed; retries may each come back
+ *     empty) → `no-fresh-tail` carrying `resolvesCycleId` of the last one —
+ *     the explicit, auditable reuse resolution; every blocked attempt stays
+ *     in the ledger verbatim;
+ *   - the latest cycle is any OTHER blocked attempt, a genuine blocker
+ *     ANYWHERE in the tail, or a terminal cycle that is not the selection
+ *     (an earlier terminal does not paper over a newer unrelated one) → no
+ *     reuse. An intervening genuine blocker is never resolved away by a
+ *     later no-fresh attempt: it was never reviewed, so no reuse may be
+ *     selected over it.
  *
  * Configuration (which reviewers count) is the readiness core's concern;
  * the cycle op additionally re-checks its own scope emptiness before
@@ -500,17 +518,16 @@ export function findReusableCycle(
     .reverse()
     .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
   if (selected === undefined) return null;
-  const latest = cycles.at(-1);
-  if (latest === undefined) return null;
-  if (latest.vendorFailure !== undefined) return null;
-  if (latest.cycleId === selected.cycleId) return { cycle: selected, basis: 'exact-terminal' };
-  if (
-    latest.completion.kind === 'blocked' &&
-    NO_FRESH_TAIL_PATTERN.test(latest.completion.reason)
-  ) {
-    return { cycle: selected, basis: 'no-fresh-tail', resolvesCycleId: latest.cycleId };
-  }
-  return null;
+  const tail = cycles.slice(cycles.lastIndexOf(selected) + 1);
+  const latest = tail.at(-1);
+  if (latest === undefined) return { cycle: selected, basis: 'exact-terminal' };
+  // The WHOLE tail is the resolution: an attempt between the selected
+  // terminal and the latest one is never skipped over. A genuine blocker
+  // there (unknown error, action required, malformed stream, deadline kill,
+  // structured vendor failure) was never reviewed, so it refuses reuse even
+  // when the latest attempt is a resolvable affirmative no-fresh notice.
+  if (!tail.every(isAffirmativeNoFreshAttempt)) return null;
+  return { cycle: selected, basis: 'no-fresh-tail', resolvesCycleId: latest.cycleId };
 }
 
 const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
@@ -1009,12 +1026,34 @@ export function assembleReadiness(
       latestAttempt.base === identity.base &&
       latestAttempt.head === identity.head &&
       latestAttempt.dirtySha256 === identity.dirtySha256;
+    // The reuse row resolves ONLY the eligible tail: every same-identity
+    // full-scope attempt after the named anchor terminal must itself be an
+    // affirmative no-fresh notice. A genuine blocker in between (unknown
+    // error, action required, malformed stream, deadline kill, structured
+    // vendor failure) was never reviewed and is never resolved away —
+    // findReusableCycle refuses it too, so a linkage persisted before that
+    // rule (or forged into the ledger) cannot pass readiness either.
+    const identityCycles = cycles.filter(
+      (entry) =>
+        entry.scope === 'full' &&
+        entry.reviewer === latestAttempt.reviewer &&
+        entry.target === latestAttempt.target &&
+        entry.base === latestAttempt.base &&
+        entry.head === latestAttempt.head &&
+        entry.dirtySha256 === latestAttempt.dirtySha256,
+    );
+    const anchorIndex =
+      cycle === undefined
+        ? -1
+        : identityCycles.findIndex((entry) => entry.cycleId === cycle.cycleId);
+    const resolvedTailIsEligible =
+      anchorIndex >= 0 && identityCycles.slice(anchorIndex + 1).every(isAffirmativeNoFreshAttempt);
     const reuseResolves =
       sameRequest &&
       latestAttempt.scope === 'full' &&
       isConfigured(latestAttempt.reviewer) &&
-      latestAttempt.vendorFailure === undefined &&
-      NO_FRESH_TAIL_PATTERN.test(latestAttempt.completion.reason) &&
+      isAffirmativeNoFreshAttempt(latestAttempt) &&
+      resolvedTailIsEligible &&
       noFreshReuse !== null &&
       noFreshReuse.resolvesCycleId === latestAttempt.cycleId &&
       noFreshReuse.reviewer === latestAttempt.reviewer &&
