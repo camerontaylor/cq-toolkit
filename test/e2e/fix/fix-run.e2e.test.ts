@@ -1406,18 +1406,16 @@ test('cancellation keeps completed unit evidence and one cancelled sibling place
         modelSpec,
         lane: 'ai-sdk',
         driver: {
-          run: async (_request, options) => {
+          run: async (request, options) => {
             workerCalls++;
-            // Unit tests-1: a(edit,feedback) + b(edit,feedback) = 4 calls.
-            if (workerCalls <= 4) {
-              const settled = await scripted()
-                .resolve({ role: 'fixer', modelSpec })
-                .driver.run(_request, options);
-              // Abort after unit tests-1's last call settles, so unit
-              // tests-2 sees the cancellation at its task-loop top.
-              if (workerCalls === 4) controller.abort();
-              return settled;
-            }
+            // The shipped prompt template embeds the unit's worktree path,
+            // which carries the unit's kind/slug segments — the observable
+            // first-unit/second-unit boundary. Unit tests-1 runs to genuine
+            // completion (both tasks commit); the abort fires at the FIRST
+            // tests-2 dispatch, so its task loop sees the cancel at the top.
+            if (!request.prompt.includes(join('tests-2', 'scratch-repo')))
+              return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
+            controller.abort();
             const signal = options?.signal;
             if (!signal) throw new Error('missing inner worker signal');
             return {
@@ -1694,13 +1692,18 @@ test('pre-task unit failure fallback keeps collision-resolved plan segments (iss
       { name: 'scratch.repo', path: '.' },
     ];
     const script = config.checks[0]!;
+    // The shim must forward EVERY appended argument (the related checks pass
+    // task files after the configured argv; relatedCheckCommand appends them
+    // to the command's args) while faulting only in the second unit's
+    // worktree — whose directory name carries the resolved slug.
     config.checks[0] = {
       adapter: 'vitest-json',
       command: {
         command: '/bin/sh',
         args: [
           '-c',
-          `if [ "$(basename "$(pwd)")" = "scratch-repo-2" ]; then echo '{invalid'; exit 1; fi; "${script.command.command}" "${script.command.args.join('" "')}"`,
+          `if [ "$(basename "$(pwd)")" = "scratch-repo-2" ]; then echo '{invalid'; exit 1; fi; exec "${script.command.command}" "${script.command.args.join('" "')}" "$@"`,
+          'sh',
         ],
       },
     };
