@@ -646,7 +646,7 @@ function makeReviewCycle(
             logPath,
             findings: findings.map((finding) => ({
               severity: finding.severity,
-              ...(finding.file ? { fileName: finding.file } : {}),
+              ...(finding.file !== undefined ? { fileName: finding.file } : {}),
               ...(finding.line !== undefined ? { line: finding.line } : {}),
               ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
               ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),

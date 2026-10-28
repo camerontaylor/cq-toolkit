@@ -971,8 +971,8 @@ export function assembleReadiness(
         if (action === 'fixed' || action === 'rejected') continue;
         open.push(
           entry.cycleId === cycle.cycleId
-            ? `${finding.id} (${finding.severity})`
-            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)`,
+            ? `${finding.id} (${finding.severity})${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`
+            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`,
         );
       }
     }
@@ -985,7 +985,7 @@ export function assembleReadiness(
       const action = closed.get(finding.id);
       if (action !== 'fixed' && action !== 'rejected')
         open.push(
-          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)`,
+          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)${finding.file === '' ? ': unresolved: finding has no file path' : ''}`,
         );
     }
     if (open.length > 0) {

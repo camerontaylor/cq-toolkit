@@ -305,7 +305,7 @@ export function makeReviewRun(
                     source: 'coderabbit',
                     severity: finding.severity,
                     text: finding.excerpt ?? '',
-                    ...(finding.fileName ? { file: finding.fileName } : {}),
+                    ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
                     status: disposition?.action ?? 'open',
                     ...(disposition ? { reason: disposition.why } : {}),
                   };
@@ -355,7 +355,7 @@ export function makeReviewRun(
               const base: Finding = {
                 id: item.id,
                 source: 'coderabbit',
-                ...(item.fileName ? { file: item.fileName } : {}),
+                ...(item.fileName !== undefined ? { file: item.fileName } : {}),
                 ...(item.line !== undefined ? { line: item.line } : {}),
                 ...(item.rule !== undefined ? { rule: item.rule } : {}),
                 ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
@@ -436,7 +436,7 @@ export function makeReviewRun(
                 ? cycle.findings.map((item) => ({
                     id: item.id,
                     source: 'coderabbit',
-                    ...(item.fileName ? { file: item.fileName } : {}),
+                    ...(item.fileName !== undefined ? { file: item.fileName } : {}),
                     ...(item.line !== undefined ? { line: item.line } : {}),
                     ...(item.rule !== undefined ? { rule: item.rule } : {}),
                     ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
@@ -704,7 +704,7 @@ export function makeReviewRun(
                         findings: agentFindings.map((finding, index) => ({
                           id: `${id}#f${String(index + 1)}`,
                           severity: finding.severity,
-                          ...(finding.file ? { fileName: finding.file } : {}),
+                          ...(finding.file !== undefined ? { fileName: finding.file } : {}),
                           ...(finding.line !== undefined ? { line: finding.line } : {}),
                           ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
                           ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),

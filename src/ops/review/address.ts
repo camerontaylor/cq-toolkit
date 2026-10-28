@@ -157,7 +157,10 @@ export function addressBatches(findings: readonly Finding[], concurrency: number
     const batch: Finding[] = [];
     for (let i = 0; i < pending.length && batch.length < concurrency;) {
       const finding = pending[i]!;
-      const file = finding.file === undefined ? undefined : posix.normalize(finding.file);
+      const file =
+        finding.file === undefined || finding.file === ''
+          ? undefined
+          : posix.normalize(finding.file);
       if (file === undefined) {
         if (batch.length) break;
         batch.push(finding);
@@ -1123,7 +1126,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   findings: record.findings.map((finding) => ({
                     id: finding.id,
                     severity: finding.severity,
-                    ...(finding.file ? { fileName: finding.file } : {}),
+                    ...(finding.file !== undefined ? { fileName: finding.file } : {}),
                     ...(finding.line !== undefined ? { line: finding.line } : {}),
                     ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
                     ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
@@ -1206,8 +1209,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             await admitRecord(root, record);
             report.verifiedHead ??= record.head;
             publishedBase ??= await gitText(root, ['rev-parse', 'HEAD']);
+            const unresolvedReason = 'unresolved: finding has no file path';
+            const pathless = record.findings.filter(
+              (finding) => finding.status === 'open' && finding.file === '',
+            );
+            for (const finding of pathless) finding.reason = unresolvedReason;
+            noteRound(round, record);
             for (const batch of addressBatches(
-              record.findings.filter((finding) => finding.status === 'open'),
+              record.findings.filter((finding) => finding.status === 'open' && finding.file !== ''),
               policy.review.addressConcurrency,
             )) {
               if (stop()) return;
@@ -1269,6 +1278,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               }
               noteRound(round, record, run);
             }
+            return pathless.length > 0 ? unresolvedReason : undefined;
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
             const findings = record.findings.map((finding) => {
@@ -1794,8 +1804,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 return await finish('ok');
               }
               // Local agent findings share the same engine and round cap as forge threads.
-              await dispatchFindings(root, retainDeferred(agent.value), round);
+              const unresolved = await dispatchFindings(root, retainDeferred(agent.value), round);
               await publishOnExit();
+              if (unresolved) return await finish('needs-human', stop() ?? unresolved);
               continue;
             }
             if (!previous) {
@@ -1846,9 +1857,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               await admitCleanRecord(root, previous);
               return await finish('ok');
             }
-            await dispatchFindings(root, previous, round);
+            const unresolved = await dispatchFindings(root, previous, round);
             await publishOnExit();
             if (stop()) return await finish('needs-human', stop());
+            if (unresolved) return await finish('needs-human', unresolved);
             const priorFindings = priorRoundFindings(previous);
             const refreshed = await review({
               repoRoot: root,
