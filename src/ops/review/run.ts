@@ -24,7 +24,7 @@ import {
   type DeferredVendorDebt,
 } from '../dev/internal/deferredReview.js';
 import type { DeferredQueueClient } from './internal/queueProtocol.js';
-import { DEV_LEDGER_VERSION, type DevCycleRecord } from '../dev/record.js';
+import { DEV_LEDGER_VERSION, type DevCycleRecord, type DevLedgerFile } from '../dev/record.js';
 import {
   makeGitleaksDefaultsScanner,
   makeRepoDiffScanner,
@@ -767,8 +767,25 @@ export function makeReviewRun(
       if (deferredVendorDebt && !stopped()) {
         try {
           const beforeRefresh = structuredClone(effects.openLedger(state.branch).load());
+          // Correlate durable bytes with this loader's mutation, including a
+          // successful write whose return fails; never bless an external append.
+          let requestedLedger: DevLedgerFile | undefined;
           const refreshed = await loadCurrentDeferredVendorDebt(
-            effects,
+            {
+              ...effects,
+              openLedger: (branch) => {
+                const store = effects.openLedger(branch);
+                return {
+                  ...store,
+                  mutate: (update) =>
+                    store.mutate((latest) => {
+                      const change = update(latest);
+                      requestedLedger = structuredClone(change.ledger);
+                      return change;
+                    }),
+                };
+              },
+            },
             target,
             state,
             beforeRefresh,
@@ -783,6 +800,8 @@ export function makeReviewRun(
           if (!isDeepStrictEqual(beforeRefresh, afterRefresh)) {
             const appended = afterRefresh.records.at(-1);
             if (
+              !requestedLedger ||
+              !isDeepStrictEqual(requestedLedger, afterRefresh) ||
               !isDeepStrictEqual(
                 { ...afterRefresh, records: afterRefresh.records.slice(0, -1) },
                 beforeRefresh,
