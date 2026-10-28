@@ -1,10 +1,11 @@
 import { afterEach, expect, test, vi } from 'vitest';
+import { writeFile } from 'node:fs/promises';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import { prepareDeferredVendorReview } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { deferVendorReview } from '../../../src/ops/dev/internal/deferredReview.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
-import type { DevCycleRecord } from '../../../src/ops/dev/record.js';
+import { devLedgerPath, type DevCycleRecord } from '../../../src/ops/dev/record.js';
 import type {
   DeferredQueueClient,
   QueueStatus,
@@ -228,7 +229,12 @@ test('current eligible attempt with failed durable enrollment stays blocking', a
 test('duplicate origin identity is trust uncertainty even when the attempt is stale', async () => {
   const f = await fixture();
   const stale = { ...f.origin, head: 'a'.repeat(40) };
-  f.save(stale, stale);
+  expect(() => f.save(stale, stale)).toThrow(/duplicate record id/);
+  // Model a hand-merged corrupt ledger that bypassed the guarded writer.
+  await writeFile(
+    devLedgerPath(f.repo.root, f.state.branch),
+    JSON.stringify({ version: 2, branch: f.state.branch, records: [stale, stale] }),
+  );
   const result = await f.run();
   expect(result.status).toBe('indeterminate');
   expect(f.effects.calls.some((call) => call.command === 'coderabbit')).toBe(false);
@@ -241,6 +247,9 @@ test('malformed persisted failure never becomes a stale-attempt fallback', async
     head: 'a'.repeat(40),
     vendorFailure: { ...f.origin.vendorFailure!, codes: ['scan'] },
   };
-  expect(() => f.save(malformed)).toThrow();
+  f.save(malformed);
+  const result = await f.run();
+  expect(result.status).toBe('indeterminate');
+  expect(f.effects.calls.some((call) => call.command === 'coderabbit')).toBe(false);
   expect(f.client.enqueue).not.toHaveBeenCalled();
 });
