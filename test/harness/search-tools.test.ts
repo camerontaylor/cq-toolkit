@@ -841,4 +841,99 @@ describe('contained grep and glob tools', () => {
       }
     });
   });
+
+  test('ripgrep bracket classes and negation work in grep include (#604)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'file1.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'file2.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'fileX.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'a.test.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'keep.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // rg fixture: file[12].ts selects exactly file1/file2 (bracket class).
+      const bracket = await grep.execute({ pattern: 'needle', include: 'file[12].ts' });
+      expect(bracket.ok).toBe(true);
+      if (bracket.ok) {
+        expect(bracket.output).toContain('--- file1.ts ---');
+        expect(bracket.output).toContain('--- file2.ts ---');
+        expect(bracket.output).not.toContain('fileX.ts');
+      }
+      // rg fixture: a leading-! exclusion inside a positive set — matches
+      // positives MINUS exclusions ('keep.ts' survives '!*.test.ts').
+      const exclusion = await grep.execute({ pattern: 'needle', include: '!*.test.ts' });
+      expect(exclusion.ok).toBe(true);
+      if (exclusion.ok) {
+        expect(exclusion.output).toBe('No matches'); // all-exclusion: no positives
+      }
+      const ranged = await grep.execute({ pattern: 'needle', include: 'file[1-x].ts' });
+      expect(ranged.ok).toBe(true);
+      if (ranged.ok) {
+        expect(ranged.output).toContain('--- file1.ts ---');
+        expect(ranged.output).not.toContain('--- keep.ts ---');
+      }
+    });
+  });
+
+  test('repeated brace alternatives fail closed on visited-branch work cap (#605)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'x.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // One unique alternative, but 2^30 visited branches without the cap.
+      const pattern = '{a,a}'.repeat(30) + '.ts';
+      const result = await grep.execute({ pattern: 'needle', include: pattern });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.denial.reason).toMatch(/^SEARCH_LIMIT: /);
+    });
+  });
+
+  test('retention and output ordering agree past the candidate cap (#613)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      // 1,005 lowercase candidates plus an uppercase match: with the old
+      // mixed ordering the Z file could be dropped from the retained set
+      // while the output sorted differently.
+      await Promise.all(
+        Array.from({ length: 1_005 }, (_, index) =>
+          writeFile(join(workspace, `a${String(index).padStart(4, '0')}.ts`), 'needle\n', 'utf8'),
+        ),
+      );
+      await writeFile(join(workspace, 'Z.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({
+        pattern: 'needle',
+        include: '*.ts',
+        output_mode: 'files_with_matches',
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('Z.ts');
+        expect(result.truncated).toBe(true);
+      }
+    });
+  });
+
+  test('a pathological include pattern returns promptly with bounded work (#614)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await writeFile(join(workspace, 'aaaats'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // Overlapping backtracking shape under the old regex matcher: with the
+      // bounded matcher this either matches or fails within bounded state.
+      const result = await grep.execute({ pattern: 'needle', include: `${'*a'.repeat(25)}b.ts` });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.output).toBe('No matches');
+      const oversized = await grep.execute({
+        pattern: 'needle',
+        include: `*${'a'.repeat(300)}`, // over the 256-char pattern bound
+      });
+      expect(oversized.ok).toBe(false);
+      if (!oversized.ok) {
+        expect(oversized.denial.reason).toBe(
+          'SEARCH_LIMIT: search denied: include pattern exceeds 256 characters',
+        );
+      }
+    });
+  });
 });
