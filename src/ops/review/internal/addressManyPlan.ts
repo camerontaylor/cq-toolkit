@@ -35,8 +35,13 @@
 //     "no attributable head" is a non-success, including a report with zero
 //     rounds. That deliberately rejects an otherwise-good early report rather
 //     than inventing attribution.
+//   - A per-PR result keeps the producer's asymmetric public shape: a successful
+//     (`ok`) result carries its report in `value`, a non-ok result in `report`.
+//     Aggregation reads exactly that, and a `needs-human` leg whose structured
+//     `report.stop` is `budget` is classified as the budget-stopped outcome —
+//     never success, and never an ordinary needs-human refusal.
 import type { OpResult } from '../../../kernel/types.js';
-import type { ReviewAddressResult } from '../address.js';
+import type { ReviewAddressReport, ReviewAddressResult } from '../address.js';
 import type { Finding } from '../findings.js';
 
 /** The frozen kernel result taxonomy, reused instead of a local status table. */
@@ -850,7 +855,12 @@ export function aggregateAddressMany(input: {
     }
 
     const result = outcome.result!;
-    const report = result.report;
+    // The producer's public shape is asymmetric: a successful result carries its
+    // report in `value`, while non-ok results carry it in `report`. Reading only
+    // `report` would silently discard a real success's head evidence, findings,
+    // fixes per run and vendor debt.
+    const report: ReviewAddressReport | undefined =
+      result.status === 'ok' ? result.value : result.report;
     // The ONLY trusted attribution evidence: the first reviewed head in the
     // report. Zero rounds or a different head is "unattributed", never success,
     // and the original result is retained verbatim either way.
@@ -869,7 +879,11 @@ export function aggregateAddressMany(input: {
         status = trusted ? 'settled-ok' : 'unattributed';
         break;
       case 'needs-human':
-        status = 'settled-needs-human';
+        // The engine's budget path exits needs-human but records the structured
+        // marker `report.stop === 'budget'`: that leg stopped on the budget, so
+        // it is classified as the budget-stopped outcome, never as success and
+        // never as an ordinary needs-human refusal.
+        status = report?.stop === 'budget' ? 'settled-budget-exhausted' : 'settled-needs-human';
         break;
       case 'failed':
         status = 'settled-failed';
@@ -891,8 +905,11 @@ export function aggregateAddressMany(input: {
           : `#${candidate.number} report head ${String(reviewedHead)} is not the admitted head; not success`,
       );
     } else if (status === 'settled-needs-human') totals.needsHuman++;
-    else if (status === 'settled-budget-exhausted') totals.budgetExhausted++;
-    else totals.failed++;
+    else if (status === 'settled-budget-exhausted') {
+      totals.budgetExhausted++;
+      if (result.status === 'needs-human' && report?.stop === 'budget')
+        reasons.push(`#${candidate.number} stopped on the engine's structured budget marker`);
+    } else totals.failed++;
 
     const fixesPerRun = trusted ? report.fixesPerRun : 0;
     totals.fixesPerRun += fixesPerRun;

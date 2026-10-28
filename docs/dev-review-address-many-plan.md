@@ -28,8 +28,10 @@ login allowlist. Rules:
   login stays an unauthorized author. An empty or absent allowlist authorizes
   no bot at all, owner and viewer authority are independent of the type, and no
   trusted bot names are invented.
-- Candidate identity is `(repo, number)`; the admitted head is pinned alongside
-  it. Two PRs on the same branch, and two heads for one number, stay distinct.
+- Candidate identity is `(repo, number)`; a repeated number refuses the listing
+  (below). The **admission ledger** binds the admitted head alongside that
+  identity, so the same PR at a different head is a different admission
+  identity, while two PRs that share one branch stay two distinct candidates.
 - Structural defects — an incomplete listing, a listing or entry for another
   repository, a missing draft flag, a blank head ref, a non-40-hex head, a
   non-positive number, a repeated number — **refuse the listing** with the
@@ -75,7 +77,13 @@ self-contradictory is a refusal: a roll-up over a subset could otherwise report
 `ok` for work that was never admitted.
 
 - Every row carries its original per-PR result verbatim, including when
-  attribution fails.
+  attribution fails. The report itself follows the producer's asymmetric public
+  shape: a successful (`ok`) result carries it in `value`, a non-ok result in
+  `report`.
+- A `needs-human` leg whose structured `report.stop` is `budget` is classified
+  as the budget-stopped outcome (never success, never an ordinary needs-human
+  refusal), with its original result and reason preserved; a bare
+  `budget-exhausted` result maps to the same outcome.
 - The only trusted head evidence is the report's first reviewed head equalling
   the admitted head. A missing report, a mismatched head or zero rounds is
   `unattributed`, which is never success. This deliberately rejects an

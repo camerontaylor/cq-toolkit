@@ -96,11 +96,50 @@ function makeReport(over: Partial<ReviewAddressReport> = {}): ReviewAddressRepor
   };
 }
 
+/** The producer's real success shape: the report rides in `value`, not `report`. */
 const okResult = (report: ReviewAddressReport): ReviewAddressResult => ({
   status: 'ok',
   value: report,
-  report,
 });
+
+/** A minimally valid deferred vendor debt for the head/request under test. */
+const deferredDebt = (head: string, requestId: string, cycleId: string) =>
+  DeferredVendorDebtSchema.parse({
+    reference: {
+      requestId,
+      binding: {
+        kind: 'deferred-author',
+        repo: REPO,
+        producer: 'coderabbit',
+        head,
+        target: 'merge-queue',
+        targetSelector: 'merge-queue',
+      },
+    },
+    queue: {
+      state: 'blocked',
+      pr: 5,
+      mergeSha: null,
+      itemId: null,
+      receiptId: null,
+      consumed: false,
+      enqueued: true,
+      reviewed: false,
+      fixed: false,
+    },
+    originAttempt: {
+      cycleId,
+      head,
+      base: BASE,
+      target: 'merge-queue',
+      scope: 'full',
+      dirtySha256: 'clean-tree',
+      failure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
+    },
+    deferral: { id: `deferral-${cycleId}`, base: BASE, dirtySha256: 'clean-tree' },
+    vendor: 'vendor-blocked-transient',
+    vendorCompleted: false,
+  });
 
 const needHumanResult = (reason: string, report?: ReviewAddressReport): ReviewAddressResult =>
   report === undefined
@@ -747,18 +786,120 @@ describe('aggregateAddressMany truth', () => {
     expect(result.aggregate.totals).toMatchObject({ unattributed: 1, fixesPerRun: 0 });
     expect(result.aggregate.reasons.join(' ')).toContain('not the admitted head');
 
-    const noReport = aggregateAddressMany({
+    // A successful result is value-only in the producer's shape, so a report
+    // with zero rounds is still a report: unattributed, not absent.
+    const noRoundsOutcome = aggregateAddressMany({
       repo: REPO,
       budget: cleanBudget(),
       candidates: [candidates[0]!],
       outcomes: [{ number: 5, headOid: HEAD_A, result: { status: 'ok', value: noRounds } }],
     });
-    expect(noReport.ok).toBe(true);
-    if (!noReport.ok) return;
-    expect(noReport.aggregate.rows[0]).toMatchObject({
+    expect(noRoundsOutcome.ok).toBe(true);
+    if (!noRoundsOutcome.ok) return;
+    expect(noRoundsOutcome.aggregate.rows[0]).toMatchObject({
       status: 'unattributed',
-      attribution: 'absent',
+      attribution: 'unattributed',
+      fixesPerRun: 0,
     });
+
+    // A non-ok result that carries no report at all has no evidence source.
+    const reportless = aggregateAddressMany({
+      repo: REPO,
+      budget: cleanBudget(),
+      candidates: [candidates[0]!],
+      outcomes: [{ number: 5, headOid: HEAD_A, result: failedResult('fixer crashed') }],
+    });
+    expect(reportless.ok).toBe(true);
+    if (!reportless.ok) return;
+    expect(reportless.aggregate.rows[0]).toMatchObject({
+      status: 'settled-failed',
+      attribution: 'absent',
+      deferredVendorDebt: 'absent',
+    });
+  });
+
+  test('consumes the value-only report a real successful result carries', () => {
+    const report = makeReport({
+      rounds: [{ round: 1, record: record(HEAD_A), runs: [] }],
+      findings: [finding('F-5'), finding('F-6', { status: 'fixed' })],
+      fixesPerRun: 2,
+      verifiedHead: HEAD_B,
+      deferredVendorDebt: deferredDebt(HEAD_A, 'req-5', 'cycle-5'),
+    });
+    // Exactly the producer's public shape: no `report` field beside `value`.
+    const success: ReviewAddressResult = { status: 'ok', value: report };
+    const result = aggregateAddressMany({
+      repo: REPO,
+      budget: cleanBudget(),
+      candidates: [candidates[0]!],
+      outcomes: [{ number: 5, headOid: HEAD_A, result: success }],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.aggregate.rows[0]).toMatchObject({
+      status: 'settled-ok',
+      attribution: 'trusted',
+      fixesPerRun: 2,
+      deferredVendorDebt: 'present',
+      publication: 'unknown',
+    });
+    expect(result.aggregate.rows[0]!.result).toEqual({ status: 'ok', value: report });
+    expect(result.aggregate.findings.map((entry) => entry.finding.id)).toEqual(['F-5', 'F-6']);
+    expect(result.aggregate.totals).toMatchObject({ settledOk: 1, fixesPerRun: 2 });
+    expect(result.aggregate.status).toBe('ok');
+  });
+
+  test('classifies a structured budget stop on a needs-human leg as budget-stopped', () => {
+    const report = makeReport({
+      rounds: [{ round: 1, record: record(HEAD_A), runs: [] }],
+      stop: 'budget',
+      reasons: ['token or wall budget exhausted'],
+    });
+    const stopped = needHumanResult('token or wall budget exhausted', report);
+    const result = aggregateAddressMany({
+      repo: REPO,
+      budget: cleanBudget(),
+      candidates: [candidates[0]!],
+      outcomes: [{ number: 5, headOid: HEAD_A, result: stopped }],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.aggregate.rows[0]).toMatchObject({
+      status: 'settled-budget-exhausted',
+      reason: 'token or wall budget exhausted',
+      attribution: 'trusted',
+      publication: 'unknown',
+    });
+    expect(result.aggregate.rows[0]!.result).toBe(stopped);
+    expect(result.aggregate.totals).toMatchObject({
+      budgetExhausted: 1,
+      needsHuman: 0,
+      settledOk: 0,
+    });
+    expect(result.aggregate.status).toBe('budget-exhausted');
+    expect(result.aggregate.reasons.join(' ')).toContain('structured budget marker');
+
+    // Without the structured marker the same status stays an ordinary
+    // needs-human refusal: no reason text is parsed.
+    const plain = aggregateAddressMany({
+      repo: REPO,
+      budget: cleanBudget(),
+      candidates: [candidates[0]!],
+      outcomes: [
+        {
+          number: 5,
+          headOid: HEAD_A,
+          result: needHumanResult(
+            'token or wall budget exhausted',
+            makeReport({ rounds: [{ round: 1, record: record(HEAD_A), runs: [] }] }),
+          ),
+        },
+      ],
+    });
+    expect(plain.ok).toBe(true);
+    if (!plain.ok) return;
+    expect(plain.aggregate.rows[0]).toMatchObject({ status: 'settled-needs-human' });
+    expect(plain.aggregate.status).toBe('needs-human');
   });
 
   test('scopes duplicate finding ids by PR and never merges them', () => {
@@ -954,43 +1095,7 @@ describe('aggregateAddressMany truth', () => {
   });
 
   test('reports enrollment as advisory metadata, separate from the settled outcome', () => {
-    const debt = DeferredVendorDebtSchema.parse({
-      reference: {
-        requestId: 'req-1',
-        binding: {
-          kind: 'deferred-author',
-          repo: REPO,
-          producer: 'coderabbit',
-          head: HEAD_A,
-          target: 'merge-queue',
-          targetSelector: 'merge-queue',
-        },
-      },
-      queue: {
-        state: 'blocked',
-        pr: 5,
-        mergeSha: null,
-        itemId: null,
-        receiptId: null,
-        consumed: false,
-        enqueued: true,
-        reviewed: false,
-        fixed: false,
-        reason: { source: 'vendor', category: 'vendor-unavailable', code: 'con_err' },
-      },
-      originAttempt: {
-        cycleId: 'cycle-1',
-        head: HEAD_A,
-        base: BASE,
-        target: 'merge-queue',
-        scope: 'full',
-        dirtySha256: 'clean-tree',
-        failure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
-      },
-      deferral: { id: 'deferral-1', base: BASE, dirtySha256: 'clean-tree' },
-      vendor: 'vendor-blocked-transient',
-      vendorCompleted: false,
-    });
+    const debt = deferredDebt(HEAD_A, 'req-1', 'cycle-1');
     const withDebt = makeReport({
       rounds: [{ round: 1, record: record(HEAD_B), runs: [] }],
       deferredVendorDebt: debt,
@@ -1028,42 +1133,7 @@ describe('aggregateAddressMany truth', () => {
   });
 
   test('reports debt as unknown when the report head is not attributable', () => {
-    const debt = DeferredVendorDebtSchema.parse({
-      reference: {
-        requestId: 'req-2',
-        binding: {
-          kind: 'deferred-author',
-          repo: REPO,
-          producer: 'coderabbit',
-          head: HEAD_C,
-          target: 'merge-queue',
-          targetSelector: 'merge-queue',
-        },
-      },
-      queue: {
-        state: 'blocked',
-        pr: 5,
-        mergeSha: null,
-        itemId: null,
-        receiptId: null,
-        consumed: false,
-        enqueued: true,
-        reviewed: false,
-        fixed: false,
-      },
-      originAttempt: {
-        cycleId: 'cycle-2',
-        head: HEAD_C,
-        base: BASE,
-        target: 'merge-queue',
-        scope: 'full',
-        dirtySha256: 'clean-tree',
-        failure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
-      },
-      deferral: { id: 'deferral-2', base: BASE, dirtySha256: 'clean-tree' },
-      vendor: 'vendor-blocked-transient',
-      vendorCompleted: false,
-    });
+    const debt = deferredDebt(HEAD_C, 'req-2', 'cycle-2');
     const report = makeReport({
       rounds: [{ round: 1, record: record(HEAD_C), runs: [] }],
       fixesPerRun: 4,
