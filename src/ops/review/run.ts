@@ -976,12 +976,15 @@ export function makeReviewRun(
           ? ancestry.requestIds
           : ancestry.kind === 'enrollment'
             ? ancestry.enrollment.pendingAncestry
-                .filter(
-                  (ancestor) =>
-                    ancestor.reference.binding.head === currentIdentity.head &&
-                    ancestor.reference.binding.target === target &&
-                    ancestor.deferral.base === currentIdentity.base,
-                )
+                .filter((ancestor) => {
+                  const binding = ancestor.reference.binding;
+                  return (
+                    binding.kind === 'deferred-author' &&
+                    binding.head === currentIdentity.head &&
+                    binding.target === target &&
+                    ancestor.deferral.base === currentIdentity.base
+                  );
+                })
                 .map((ancestor) => ancestor.reference.requestId)
             : [];
       if (pendingAtThisIdentity.length > 0)
