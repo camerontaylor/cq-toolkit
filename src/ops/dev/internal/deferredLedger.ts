@@ -41,6 +41,9 @@ export async function prepareDeferredVendorReview(
   state: WorkState,
   client?: DeferredQueueClient,
   signal?: AbortSignal,
+  options?: {
+    onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+  },
 ): Promise<DeferredVendorDebt | undefined> {
   const ledger = effects.openLedger(state.branch).load();
   const retainedDebt = ledger.records.filter((entry) => entry.kind === 'vendor-debt').at(-1);
@@ -91,7 +94,7 @@ export async function prepareDeferredVendorReview(
   if (state.dirtySha256 !== 'clean-tree')
     throw new Error('deferred vendor review requires a committed clean identity');
   if (currentLedgerDebt(ledger, target, state))
-    return loadCurrentDeferredVendorDebt(effects, target, state, ledger, client, signal);
+    return loadCurrentDeferredVendorDebt(effects, target, state, ledger, client, signal, options);
   const origin: VendorOutageOrigin | undefined =
     previous?.originAttempt ??
     (vendor?.vendorFailure &&
@@ -180,7 +183,7 @@ export async function prepareDeferredVendorReview(
     if (['terminal-clean', 'terminal-with-findings', 'reused'].includes(prior.queue.state)) {
       // Recovery may finish after HEAD moves. Settle the retained obligation,
       // then require a real fresh vendor invocation at the new identity.
-      const completed = await consumeDeferredVendorReport(effects, queue, prior, signal);
+      const completed = await consumeDeferredVendorReport(effects, queue, prior, signal, options);
       await persist(completed);
       return undefined;
     }
@@ -203,6 +206,7 @@ export async function prepareDeferredVendorReview(
     effects.openLedger(state.branch).load(),
     queue,
     signal,
+    options,
   );
 }
 
@@ -250,6 +254,9 @@ export async function loadCurrentDeferredVendorDebt(
   ledger: DevLedgerFile,
   client?: DeferredQueueClient,
   signal?: AbortSignal,
+  options?: {
+    onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+  },
 ): Promise<DeferredVendorDebt | undefined> {
   const debt = currentLedgerDebt(ledger, target, state);
   if (!debt) return undefined;
@@ -267,7 +274,7 @@ export async function loadCurrentDeferredVendorDebt(
     debt.vendorCompleted ||
     ['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state)
   ) {
-    fresh = await consumeDeferredVendorReport(effects, queue, fresh, signal);
+    fresh = await consumeDeferredVendorReport(effects, queue, fresh, signal, options);
   }
   signal?.throwIfAborted();
   const current = await readWorkState(effects, { target, base: state.base });

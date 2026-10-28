@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   lstat,
+  link,
   mkdir,
   readFile,
   readdir,
@@ -335,3 +336,86 @@ test('receipt changed while constructing replacement is preserved and owned temp
     await f.repo.cleanup();
   }
 });
+
+function ownershipReceipt() {
+  const paths: unknown[] = [];
+  return JSON.stringify({
+    version: 1,
+    item_id: 'current-ownership',
+    request_id: 'original',
+    source: {
+      repo: 'owner/repo',
+      pr: 1,
+      merge_sha: 'a'.repeat(40),
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    },
+    capture: {
+      target: 'b'.repeat(40),
+      tree: 'c'.repeat(40),
+      paths,
+      scope_digest: createHash('sha256').update('[]').digest('hex'),
+      equivalence: 'd'.repeat(64),
+      policy: 'affected-current-additions-v1',
+      projection: 'current-affected-files/full-file-addition-projection',
+      reviewer: 'coderabbit-review-agent-committed-v1',
+      reviewer_version: 'fixture',
+      captured_at: '2026-10-28T00:00:00Z',
+    },
+    outcome: 'no-current-code',
+    counted: false,
+    classification: null,
+    findings: [],
+    run_id: null,
+    started_at: null,
+    artifacts: {},
+    remediation: 'disabled/deferred',
+    independent_acceptance: false,
+    cli_functional_acceptance: 'pending-D1',
+  });
+}
+
+test.each(['valid', 'changed', 'wrong-name', 'symlink', 'hardlink', 'unregistered'] as const)(
+  'exact queue receipt ownership restoration: %s',
+  async (mode) => {
+    const f = await fixture();
+    try {
+      const bytes = ownershipReceipt();
+      const id = hash(bytes);
+      const folder = join(f.root, '.cq/queue-evidence');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, (mode === 'wrong-name' ? 'e'.repeat(64) : id) + '.json');
+      await writeFile(path, bytes);
+      if (mode === 'symlink') {
+        await unlink(path);
+        await symlink(f.history, path);
+      }
+      if (mode === 'hardlink') await link(path, join(folder, 'extra'));
+      if (mode === 'unregistered') {
+        const fresh = f.make();
+        await fresh.receipt.prepare(f.root);
+        expect(await fresh.receipt.ownedFiles()).not.toContain(path);
+        expect(fresh.fingerprints.has(path)).toBe(false);
+        return;
+      }
+      f.original.fingerprints.set(path, hash(bytes));
+      if (mode === 'wrong-name' || mode === 'symlink' || mode === 'hardlink') {
+        await expect(f.original.receipt.persist()).rejects.toThrow();
+        return;
+      }
+      await f.original.receipt.persist();
+      if (mode === 'changed') await writeFile(path, bytes + '\n');
+      const fresh = f.make();
+      if (mode === 'changed') {
+        await expect(fresh.receipt.prepare(f.root)).rejects.toThrow();
+        expect(fresh.fingerprints.size).toBe(0);
+      } else {
+        await fresh.receipt.prepare(f.root);
+        expect(fresh.fingerprints.get(path)).toBe(id);
+        expect(await fresh.receipt.ownedFiles()).toContain(path);
+      }
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);

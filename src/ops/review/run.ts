@@ -63,6 +63,7 @@ export interface ReviewRunInput {
 export interface ReviewRunDeps {
   drivers: DriverFactory;
   queueClient?: DeferredQueueClient;
+  onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
   /** Abortable CodeRabbit backoff, injected by deterministic tests. */
   sleep?: import('../dev/review.js').DevReviewDeps['sleep'];
   /** Injection seam for the engine; production binds {@link runAgentReviewer}. */
@@ -181,6 +182,7 @@ export function makeReviewRun(
           state,
           deps.queueClient,
           deadline.signal,
+          { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
         );
         if (debt) {
           if (
@@ -769,6 +771,7 @@ export function makeReviewRun(
             effects.openLedger(state.branch).load(),
             deps.queueClient,
             deadline.signal,
+            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
           );
           const imported = deferredReceiptFindings(
             effects

@@ -40,6 +40,7 @@ import {
   type AddressWorker,
 } from './addressWorker.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
+import { parseQueueReceipt } from './internal/queueEvidence.js';
 import {
   resolveDeferredVendorContext,
   type DeferredVendorContextRequest,
@@ -478,6 +479,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       };
       // Bound inside the ownership lock below (it needs the bookkeeping FIFO);
       // reviews only fire after that lock is held, so the binding is always set.
+      let noteEvidenceImportedImpl:
+        | ((evidence: { receiptId: string; path: string }) => Promise<void>)
+        | undefined;
       let noteLedgerWriteImpl: ((branch: string, repoRoot: string) => Promise<void>) | undefined;
       const reviewImplementation =
         deps.review ??
@@ -487,6 +491,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           writeFindingsRecord: async (path, content) => {
             await writeFile(path, content, { flag: 'wx', mode: 0o600 });
             await noteBookkeeping(path);
+          },
+          onEvidenceImported: async (evidence) => {
+            if (!noteEvidenceImportedImpl) throw new Error('queue evidence ownership unavailable');
+            await noteEvidenceImportedImpl(evidence);
           },
           noteLedgerWrite: async (branch, repoRoot) => {
             await noteLedgerWriteImpl?.(branch, repoRoot);
@@ -615,7 +623,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 throw error;
               }
               const revision = bookkeepingRevision;
-              const result = await action();
+              const outcome = await action().then(
+                (value) => ({ ok: true as const, value }),
+                (error: unknown) => ({ ok: false as const, error }),
+              );
+              // Import ownership survives a later ack/settlement failure.
               if (persistedBookkeeping && bookkeepingRevision !== revision) {
                 try {
                   await persistedBookkeeping.persist();
@@ -624,7 +636,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   throw error;
                 }
               }
-              return result;
+              if (!outcome.ok) throw outcome.error;
+              return outcome.value;
             });
             bookkeepingWrites = pending.catch(() => undefined);
             return pending;
@@ -689,6 +702,35 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               relative(repoRoot, devLedgerPath(repoRoot, branch)),
             );
             await noteBookkeeping(path);
+          };
+          // Already inside the review/context bookkeeping FIFO: never re-enter it.
+          const noteQueueEvidence = async (
+            root: string,
+            evidence: { receiptId: string; path: string },
+          ) => {
+            const canonicalRoot = await realpath(root);
+            if (!/^[0-9a-f]{64}$/.test(evidence.receiptId))
+              throw new Error('invalid queue evidence identity');
+            const expected = resolve(
+              canonicalRoot,
+              '.cq/queue-evidence',
+              evidence.receiptId + '.json',
+            );
+            if (evidence.path !== expected || (await realpath(expected)) !== expected)
+              throw new Error('queue evidence path mismatch');
+            const stat = await lstat(expected);
+            if (!stat.isFile() || stat.nlink !== 1)
+              throw new Error('queue evidence is not an ordinary exact file');
+            const bytes = await readFile(expected);
+            const hash = createHash('sha256').update(bytes).digest('hex');
+            if (
+              hash !== evidence.receiptId ||
+              (bookkeeping.has(expected) && bookkeeping.get(expected) !== hash)
+            )
+              throw new Error('queue evidence changed or digest mismatch');
+            parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
+            bookkeeping.set(expected, hash);
+            bookkeepingRevision++;
           };
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
@@ -760,6 +802,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let publishRemote = 'origin';
           let publishedBase: string | undefined;
           let workerRoot = resolve(input.repoRoot);
+          noteEvidenceImportedImpl = (evidence) => noteQueueEvidence(workerRoot, evidence);
           const remember = (fix: AddressFix) => {
             report.fixes.push(fix);
             if (fix.commit) {
@@ -828,6 +871,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 target: input.target ?? 'merge-queue',
                 base: reviewedBase,
                 record,
+                onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
                 ...(parent ? { signal: parent } : {}),
               });
               if (!deps.resolveDeferredVendorContext && context)

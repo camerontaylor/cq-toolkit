@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
@@ -31,9 +31,9 @@ const config: CqConfig = {
   review: { reviewers: ['agent', 'coderabbit'] },
 };
 
-async function fixture() {
+async function fixture(ignoreState = true) {
   const repo = await makeTestRepo();
-  await repo.write('.gitignore', '/.cq/\n');
+  if (ignoreState) await repo.write('.gitignore', '/.cq/\n');
   await repo.write('cq.json', JSON.stringify(config));
   repo.commitAll('configure offline review');
   const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-debt-'));
@@ -557,6 +557,86 @@ test.each([false, true])(
           agentCoverage: { version: 2, head: f.record().head, scope: 'full' },
           completion: { kind: 'terminal' },
         });
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
+function ownershipReceipt() {
+  const paths: unknown[] = [];
+  return JSON.stringify({
+    version: 1,
+    item_id: 'current-ownership',
+    request_id: 'original',
+    source: {
+      repo: 'owner/repo',
+      pr: 1,
+      merge_sha: 'a'.repeat(40),
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    },
+    capture: {
+      target: 'b'.repeat(40),
+      tree: 'c'.repeat(40),
+      paths,
+      scope_digest: createHash('sha256').update('[]').digest('hex'),
+      equivalence: 'd'.repeat(64),
+      policy: 'affected-current-additions-v1',
+      projection: 'current-affected-files/full-file-addition-projection',
+      reviewer: 'coderabbit-review-agent-committed-v1',
+      reviewer_version: 'fixture',
+      captured_at: '2026-10-28T00:00:00Z',
+    },
+    outcome: 'no-current-code',
+    counted: false,
+    classification: null,
+    findings: [],
+    run_id: null,
+    started_at: null,
+    artifacts: {},
+    remediation: 'disabled/deferred',
+    independent_acceptance: false,
+    cli_functional_acceptance: 'pending-D1',
+  });
+}
+
+test.each(['exact', 'unknown', 'wrong-digest', 'changed-known'] as const)(
+  'unignored queue evidence admits only registered exact bytes: %s',
+  async (mode) => {
+    const f = await fixture(false);
+    try {
+      const bytes = ownershipReceipt();
+      const id = createHash('sha256').update(bytes).digest('hex');
+      const path = join(f.repo.root, '.cq/queue-evidence', id + '.json');
+      let imported = false;
+      const result = await makeReviewAddress({
+        config,
+        initialRecord: f.record(),
+        resolveDeferredVendorContext: async (request) => {
+          if (!imported) {
+            imported = true;
+            await mkdir(join(f.repo.root, '.cq/queue-evidence'), { recursive: true });
+            await writeFile(path, bytes);
+            await request.onEvidenceImported?.({
+              receiptId: mode === 'wrong-digest' ? 'e'.repeat(64) : id,
+              path,
+            });
+            if (mode === 'unknown') await writeFile(join(f.repo.root, '.cq/unknown'), 'unknown');
+            if (mode === 'changed-known') {
+              await writeFile(path, bytes + '\n');
+              await request.onEvidenceImported?.({ receiptId: id, path });
+            }
+          }
+          return f.resolver(request);
+        },
+      })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
+      if (mode === 'exact') {
+        expect(result.status, JSON.stringify(result)).toBe('ok');
+        expect(result.status === 'ok' && result.value.deferredVendorDebt?.vendorCompleted).toBe(
+          false,
+        );
+      } else expect(result.status).toBe('needs-human');
     } finally {
       await f.cleanup();
     }

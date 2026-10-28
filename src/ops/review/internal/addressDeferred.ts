@@ -15,6 +15,7 @@ export interface DeferredVendorContextRequest {
   base: string | undefined;
   record: FindingsRecord;
   signal?: AbortSignal;
+  onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
 }
 
 export interface DeferredVendorContext {
@@ -48,6 +49,7 @@ export async function resolveDeferredVendorContext(
     effects.openLedger(state.branch).load(),
     deps.queueClient,
     request.signal,
+    { ...(request.onEvidenceImported ? { onEvidenceImported: request.onEvidenceImported } : {}) },
   );
   if (!debt) return undefined;
   const binding = debt.reference.binding;

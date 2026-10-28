@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeQueueClient } from '../../../src/ops/review/internal/queueClient.js';
@@ -268,3 +268,42 @@ describe('authenticated same-item receipt aliases', () => {
     expect(await makeQueueClient(base).report(reference, dir)).not.toBeNull();
   });
 });
+
+test.each(['success', 'observer-fails', 'ack-fails'] as const)(
+  'verified import ownership precedes ack: %s',
+  async (mode) => {
+    const f = fixture();
+    const dir = await directory();
+    const observed: string[] = [];
+    const client = makeQueueClient(
+      f.transport((_result, op) => {
+        if (op === 'ack') {
+          expect(observed).toEqual([f.receiptId]);
+          if (mode === 'ack-fails') throw new Error('ack interrupted');
+        }
+      }),
+    );
+    const result = client.report(reference, dir, {
+      onEvidenceImported: async (row) => {
+        expect(row).toEqual({ receiptId: f.receiptId, path: join(dir, f.receiptId + '.json') });
+        expect(sha256(await readFile(row.path))).toBe(row.receiptId);
+        expect(f.calls).not.toContain('ack');
+        observed.push(row.receiptId);
+        if (mode === 'observer-fails') throw new Error('owner refuses');
+      },
+    });
+    if (mode === 'success') expect(await result).not.toBeNull();
+    else await expect(result).rejects.toThrow();
+    expect(await readdir(dir)).toEqual([f.receiptId + '.json']);
+    expect(f.calls.includes('ack')).toBe(mode !== 'observer-fails');
+    if (mode === 'success') {
+      let replayed = false;
+      await client.report(reference, dir, {
+        onEvidenceImported: async () => {
+          replayed = true;
+        },
+      });
+      expect(replayed).toBe(true);
+    }
+  },
+);

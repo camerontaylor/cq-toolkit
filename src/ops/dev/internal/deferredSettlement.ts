@@ -11,6 +11,9 @@ interface ReportClient extends DeferredQueueClient {
   report(
     reference: DeferredVendorDebt['reference'],
     evidenceDir: string,
+    options?: {
+      onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+    },
   ): Promise<QueueEvidence | null>;
 }
 function hasReport(client: DeferredQueueClient): client is ReportClient {
@@ -45,6 +48,9 @@ export async function consumeDeferredVendorReport(
   client: DeferredQueueClient,
   debt: DeferredVendorDebt,
   signal?: AbortSignal,
+  options?: {
+    onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+  },
 ): Promise<DeferredVendorDebt> {
   if (!hasReport(client))
     throw new Error('verified queue report capability is required for settlement');
@@ -61,7 +67,7 @@ export async function consumeDeferredVendorReport(
   };
   const root = await command(['rev-parse', '--show-toplevel']);
   const evidenceDir = join(root, '.cq', 'queue-evidence');
-  const delivered = await client.report(debt.reference, evidenceDir);
+  const delivered = await client.report(debt.reference, evidenceDir, options);
   signal?.throwIfAborted();
   if (!delivered) throw new Error('terminal queue status has no verified report');
   const evidence = await readQueueEvidence(evidenceDir, delivered.receiptId);

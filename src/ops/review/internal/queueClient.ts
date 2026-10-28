@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
@@ -121,7 +122,13 @@ export function sshQueueTransport(alias: string): QueueTransport {
 }
 
 export function makeQueueClient(transport: QueueTransport): DeferredQueueClient & {
-  report(input: QueueReference, evidenceDir: string): Promise<QueueEvidence | null>;
+  report(
+    input: QueueReference,
+    evidenceDir: string,
+    options?: {
+      onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+    },
+  ): Promise<QueueEvidence | null>;
 } {
   async function request(
     op: string,
@@ -193,7 +200,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       );
     },
     cancel: async (input) => parseStatus(input, await request('cancel', input)),
-    report: async (input, evidenceDir) => {
+    report: async (input, evidenceDir, options) => {
       const current = await status(input);
       if (!current.receiptId) return null;
       const receiptId = current.receiptId;
@@ -277,6 +284,10 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       )
         throw new Error('receipt original request or alias binding mismatch');
       const evidence = await importQueueEvidence(evidenceDir, receiptId, bytes);
+      await options?.onEvidenceImported?.({
+        receiptId,
+        path: join(evidenceDir, receiptId + '.json'),
+      });
       const ack = parseStatus(
         input,
         await request('ack', input, {
