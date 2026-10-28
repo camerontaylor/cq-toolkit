@@ -16,6 +16,10 @@ import type { DevEffects } from './effects.js';
 import { faultText, guardDevOp } from './effects.js';
 import { DEV_LEDGER_VERSION, type DevDispositionRecord } from './record.js';
 import { DevDispositionInputSchema } from './registry.js';
+import { deferredReceiptFindings } from './internal/deferredReview.js';
+import { readQueueEvidence } from '../review/internal/queueEvidence.js';
+import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { git, gitStdout } from './internal/workState.js';
 
 /** Input of the `dev.disposition` op (plain JSON; the registry schema mirrors it). */
@@ -62,18 +66,42 @@ export function makeDevDisposition(
       'rev-parse HEAD',
     ).trim();
     const store = effects.openLedger(branch);
-    const known = store
-      .load()
-      .records.some(
+    const retained = store.load();
+    const known =
+      retained.records.some(
         (entry) =>
           entry.kind === 'cycle' &&
           entry.findings.some((finding) => finding.id === input.findingId),
-      );
+      ) ||
+      deferredReceiptFindings(
+        retained.records.filter((entry) => entry.kind === 'vendor-debt').map((entry) => entry.debt),
+      ).some((finding) => finding.id === input.findingId);
     if (!known) {
       return {
         status: 'failed',
-        error: `dev.disposition: unknown finding '${input.findingId}' — a disposition must name a finding a dev.review cycle recorded on this branch`,
+        error: `dev.disposition: unknown finding '${input.findingId}' — a disposition must name a cycle finding or a verified imported receipt finding on this branch`,
       };
+    }
+    const imported = retained.records.find(
+      (entry) =>
+        entry.kind === 'vendor-debt' &&
+        entry.debt.vendorCompleted &&
+        deferredReceiptFindings([entry.debt]).some((finding) => finding.id === input.findingId),
+    );
+    if (imported?.kind === 'vendor-debt' && imported.debt.vendorCompleted) {
+      const root = gitStdout(
+        await git(effects, ['rev-parse', '--show-toplevel']),
+        'repository root',
+      ).trim();
+      const evidence = await readQueueEvidence(
+        join(root, '.cq', 'queue-evidence'),
+        imported.debt.completion.receiptId,
+      );
+      if (!isDeepStrictEqual(evidence, imported.debt.completion))
+        return {
+          status: 'failed',
+          error: 'dev.disposition: imported receipt differs from verified immutable bytes',
+        };
     }
     const record: DevDispositionRecord = {
       kind: 'disposition',

@@ -4,6 +4,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { devLedgerPath, parseDevLedger } from '../../dev/record.js';
 import { FindingsRecordSchema } from '../findings.js';
+import { parseQueueReceipt } from './queueEvidence.js';
 
 const sha = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
 const receiptSchema = z
@@ -53,8 +54,20 @@ export function makeAddressBookkeepingReceipt(deps: {
   };
   const allowed = (root: string, branch: string, path: string) => {
     if (path === devLedgerPath(root, branch)) return true;
+    if (
+      dirname(path) === resolve(root, '.cq/queue-evidence') &&
+      /^[0-9a-f]{64}\.json$/.test(relative(resolve(root, '.cq/queue-evidence'), path))
+    )
+      return true;
     const folder = resolve(root, '.cq/review', encodeURIComponent(branch));
     return dirname(path) === folder && /^\d+\.json$/.test(relative(folder, path));
+  };
+  const validateQueueEvidence = (root: string, path: string, bytes: Buffer) => {
+    if (dirname(path) !== resolve(root, '.cq/queue-evidence')) return false;
+    if (relative(resolve(root, '.cq/queue-evidence'), path) !== digest(bytes) + '.json')
+      throw new Error('bookkeeping queue evidence digest mismatch');
+    parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
+    return true;
   };
   const state = async (root: string) => {
     const ref = await deps.git(root, ['symbolic-ref', '--quiet', 'HEAD']);
@@ -96,8 +109,9 @@ export function makeAddressBookkeepingReceipt(deps: {
         const path = resolve(canonical, row.path);
         if (relative(canonical, path) !== row.path || !allowed(canonical, current.branch, path))
           throw new Error('bookkeeping receipt path mismatch');
-        if (digest(await ordinaryBytes(path)) !== row.sha256)
-          throw new Error('bookkeeping receipt bytes changed');
+        const content = await ordinaryBytes(path);
+        if (digest(content) !== row.sha256) throw new Error('bookkeeping receipt bytes changed');
+        validateQueueEvidence(canonical, path, content);
         paths.push(path);
       }
       return paths;
@@ -139,11 +153,19 @@ export function makeAddressBookkeepingReceipt(deps: {
         const content = await ordinaryBytes(path);
         if (digest(content) !== row.sha256) throw new Error('bookkeeping receipt bytes changed');
         const heads: string[] = [];
-        if (path === devLedgerPath(canonical, current.branch)) {
+        if (validateQueueEvidence(canonical, path, content)) {
+          // Receipt ownership conveys no author-head ancestry or review credit.
+        } else if (path === devLedgerPath(canonical, current.branch)) {
           const ledger = parseDevLedger(content.toString('utf8'));
           if (ledger.branch !== current.branch)
             throw new Error('bookkeeping ledger branch mismatch');
           for (const record of ledger.records) {
+            if (record.kind === 'vendor-debt') {
+              if (record.debt.reference.binding.kind !== 'deferred-author')
+                throw new Error('bookkeeping debt requires a deferred author binding');
+              heads.push(record.debt.reference.binding.head, record.debt.deferral.base);
+              continue;
+            }
             heads.push(record.head);
             if (record.kind !== 'disposition') heads.push(record.base);
           }
@@ -176,6 +198,7 @@ export function makeAddressBookkeepingReceipt(deps: {
           digest(await ordinaryBytes(path)) !== hash
         )
           throw new Error('bookkeeping receipt cannot bless changed/unowned bytes');
+        validateQueueEvidence(preparedRoot, path, await ordinaryBytes(path));
         files.push({ path: relative(preparedRoot, path), sha256: hash });
       }
       const receipt = receiptSchema.parse({
@@ -191,9 +214,16 @@ export function makeAddressBookkeepingReceipt(deps: {
       const handle = await open(temp, 'wx', 0o600);
       try {
         await handle.writeFile(bytes);
+        await handle.sync();
         await handle.close();
         await assertUnchanged();
         await rename(temp, deps.path);
+        const directory = await open(dirname(deps.path), 'r');
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
         receiptHash = digest(Buffer.from(bytes));
       } finally {
         // Cancellation never interrupts receipt settlement or owned-temp cleanup.

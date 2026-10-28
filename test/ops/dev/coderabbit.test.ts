@@ -8,6 +8,7 @@ import {
   coderabbitReviewArgv,
   CODERABBIT_REVIEWER,
   decideCompletion,
+  deferredVendorErrorCodes,
   isTransientReviewerFailure,
   parseReviewerStream,
   parseReviewerWaitTime,
@@ -455,5 +456,49 @@ describe('recoverable rate-limit waits (#551)', () => {
       ].join('\n'),
     );
     expect(parsed.rateLimitWait).toBeUndefined();
+  });
+});
+
+describe('structured deferred vendor authority', () => {
+  const vendor = { type: 'error', errorType: 'rate_limit', recoverable: true };
+  const scan = { type: 'error', errorType: 'scan', message: 'Review failed: con_err: fixture' };
+  test('retains all literal causes in source order and accepts only vendor causes', () => {
+    const events = [
+      { type: 'status', status: 'scanning' },
+      vendor,
+      { type: 'heartbeat', status: 'reviewing' },
+      vendor,
+    ];
+    const parsed = parseReviewerStream(events.map((event) => JSON.stringify(event)).join('\n'));
+    expect(parsed.structuredEvents).toEqual(events);
+    expect(deferredVendorErrorCodes(parsed)).toEqual(['rate_limited', 'rate_limited']);
+    expect(parsed.sawComplete).toBe(false);
+  });
+  test.each([
+    [scan],
+    [vendor, scan],
+    [scan, vendor],
+    [{ type: 'error', message: 'Review failed: con_err: fixture' }],
+    [{ ...vendor, recoverable: 'true' }],
+    [{ ...vendor, recoverable: false }],
+    [{ ...vendor, errorType: ['rate_limit'] }],
+    [vendor, { type: 'status', status: 'scan_failed' }],
+    [vendor, { type: 'status', status: 'unknown' }],
+    [vendor, { type: 'status', status: ['reviewing'] }],
+    [vendor, { type: 'status', status: 'cancelled' }],
+    [vendor, { type: 'status', status: 'budget_exhausted' }],
+    [vendor, { type: 'action_required' }],
+    [vendor, { type: 'complete', status: 'review_completed' }],
+    [vendor, { type: 'finding', severity: 'major' }],
+    [vendor, { type: 'unknown' }],
+  ])('refuses contradictory or unrecognized causes: %j', (...events) => {
+    const parsed = parseReviewerStream(events.map((event) => JSON.stringify(event)).join('\n'));
+    expect(parsed.structuredEvents).toEqual(events);
+    expect(deferredVendorErrorCodes(parsed)).toEqual([]);
+  });
+  test('malformed bytes cannot grant vendor authority', () => {
+    expect(
+      deferredVendorErrorCodes(parseReviewerStream(JSON.stringify(vendor) + '\ninvalid')),
+    ).toEqual([]);
   });
 });

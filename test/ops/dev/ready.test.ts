@@ -139,6 +139,97 @@ describe('dev.ready', () => {
     if (result.status === 'needs-human') expect(result.reason).toContain("not 'main'");
   });
 
+  test('a same-identity no-fresh tail resolves to ready through its reuse record (#485)', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: {
+          kind: 'blocked',
+          reason:
+            "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
+            '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran',
+        },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+      {
+        kind: 'reuse',
+        reuseId: 'r001-bbbbbbbb',
+        cycleId: 'c001-aaaaaaaa',
+        basis: 'no-fresh-tail',
+        resolvesCycleId: 'c002-bbbbbbbb',
+        target: 'merge-queue',
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+        scope: 'full',
+        reviewer: 'coderabbit',
+        logPath: '/tmp/reuse.log',
+        at: '2026-10-18T00:30:00.000Z',
+      },
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.cycleId).toBe('c001-aaaaaaaa');
+      expect(result.value.reuse).toBe('r001-bbbbbbbb');
+    }
+  });
+
+  test('the same no-fresh tail without a reuse record stays NOT READY (latest-review-blocked)', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: {
+          kind: 'blocked',
+          reason:
+            "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
+            '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran',
+        },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('latest-review-blocked');
+      expect(result.reason).toContain('c002-bbbbbbbb');
+    }
+  });
+
+  test('a genuine later blocker (CLI error) still refuses readiness over an older terminal', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+      {
+        kind: 'reuse',
+        reuseId: 'r001-bbbbbbbb',
+        cycleId: 'c001-aaaaaaaa',
+        basis: 'no-fresh-tail',
+        resolvesCycleId: 'c002-bbbbbbbb',
+        target: 'merge-queue',
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+        scope: 'full',
+        reviewer: 'coderabbit',
+        logPath: '/tmp/reuse.log',
+        at: '2026-10-18T00:30:00.000Z',
+      },
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('latest-review-blocked');
+  });
+
   test('a corrupt ledger or a detached head is needs-human, never a silent pass', async () => {
     const state = await seed(repo);
     const effects = repoEffects(repo, undefined, {

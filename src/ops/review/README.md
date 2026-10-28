@@ -1,5 +1,11 @@
 # Review addressing
 
+Queue submission and current-scope report consumption use `review.enqueue`,
+`review.queueStatus`, and `review.report`. See [queue client protocol](../../../docs/queue-client.md)
+for the separate queue-v1 capability, deferred pre-PR binding, deployment
+prerequisites, and queue-evidence import. These reports grant no full-branch
+readiness or independent acceptance credit.
+
 `review.address` fixes or records a disposition for local findings or PR
 threads, then re-runs review until clean or the configured round cap. Run
 `review.run` first for a local findings record, or provide `--record`.
