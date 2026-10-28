@@ -1010,9 +1010,9 @@ test('a completed predecessor appended after its successor never displaces the c
     deferredVendorDebt: successor,
     nowIso: f.effects.nowIso(),
   });
-  expect(
-    readiness.ready ? [] : readiness.gaps.map((gap) => gap.detail),
-  ).not.toContain('authorized predecessor obligation(s) unsettled:');
+  expect(readiness.ready ? [] : readiness.gaps.map((gap) => gap.detail)).not.toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
 
   // Replay is inert: no second snapshot, no re-acknowledgement.
   const replay = await loadCurrentDeferredVendorDebt(
@@ -1197,5 +1197,7 @@ test('unrelated roots gain no authority and same-identity duplicates become gaps
   const readiness = f.assemble(ambiguous, f.debt);
   expect(readiness.ready).toBe(false);
   if (readiness.ready) throw new Error('unexpected readiness');
-  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain('ambiguous current enrollment');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'ambiguous current enrollment',
+  );
 });

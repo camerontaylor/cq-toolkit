@@ -455,9 +455,9 @@ describe('dev.ready deferred lineage', () => {
     );
     // A pending CURRENT enrollment is a legitimate continuation: it never becomes an
     // unsettled-ancestry gap (other readiness requirements are not the subject here).
-    expect(result.ok || !result.reason.includes('authorized predecessor obligation(s) unsettled')).toBe(
-      true,
-    );
+    expect(
+      result.ok || !result.reason.includes('authorized predecessor obligation(s) unsettled'),
+    ).toBe(true);
   });
 
   test('an unsettled authorized predecessor blocks readiness and the gap is never clean', async () => {

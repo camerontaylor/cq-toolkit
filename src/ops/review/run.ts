@@ -218,7 +218,10 @@ export function makeReviewRun(
             state,
             deps.queueClient,
             deadline.signal,
-            { remainingMs: remainingWallMs, ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+            {
+              remainingMs: remainingWallMs,
+              ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+            },
           );
         } catch (error) {
           failure = { thrown: true, error };
@@ -840,7 +843,10 @@ export function makeReviewRun(
             beforeRefresh,
             deps.queueClient,
             deadline.signal,
-            { remainingMs: remainingWallMs, ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+            {
+              remainingMs: remainingWallMs,
+              ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+            },
           ).then(
             (value) => ({ ok: true as const, value }),
             (error: unknown) => ({ ok: false as const, error }),

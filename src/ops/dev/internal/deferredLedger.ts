@@ -90,10 +90,13 @@ function startInvocationLifetime(
     if (caller.aborted) onCallerAbort();
     else caller.addEventListener('abort', onCallerAbort, { once: true });
   }
-  const timer = setTimeout(() => {
-    fired = true;
-    controller.abort(new Error('queue delivery unknown: deadline exhausted'));
-  }, Math.max(0, remainingMs()));
+  const timer = setTimeout(
+    () => {
+      fired = true;
+      controller.abort(new Error('queue delivery unknown: deadline exhausted'));
+    },
+    Math.max(0, remainingMs()),
+  );
   timer.unref();
   return {
     signal: caller ? AbortSignal.any([caller, controller.signal]) : controller.signal,
@@ -731,7 +734,9 @@ async function loadCurrentWithLifetime(
     expected = await appendDebt(effects, state, expected, fresh);
   }
   // Only the authorized predecessor chain is refreshed, and only the current enrollment is returned.
-  await refreshAuthorizedAncestry(effects, target, state, queue, lifetime, options, { ledger: expected });
+  await refreshAuthorizedAncestry(effects, target, state, queue, lifetime, options, {
+    ledger: expected,
+  });
   return fresh;
 }
 
