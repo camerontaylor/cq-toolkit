@@ -238,7 +238,8 @@ class CrashRecoveryTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.runs = Path(self.tmp.name) / "runs"
         self.runs.mkdir(parents=True)
-        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock())):
+        for name, value in (("STATE", Path(self.tmp.name) / "state"),
+                            ("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock())):
             p = mock.patch.object(crq, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -466,7 +467,8 @@ class HarvestTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.runs = Path(self.tmp.name) / "runs"
         self.runs.mkdir(parents=True)
-        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
+        for name, value in (("STATE", Path(self.tmp.name) / "state"),
+                            ("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
                             ("remove_worktree", mock.Mock()), ("findings_md", lambda *a, **k: "")):
             p = mock.patch.object(crq, name, value)
             p.start()
@@ -503,6 +505,7 @@ class HarvestTest(unittest.TestCase):
              mock.patch.object(crq.coverage, "record_review") as credit, \
              mock.patch.object(crq.repair_tick, "enqueue") as enqueue:
             msg = crq.harvest_review(q, item, False)
+        self.assertLessEqual(crq.parse_iso((crq.STATE / "next-review-at").read_text().strip()), crq.now())
         self.assertEqual(item["state"], "done")
         self.assertEqual(len(item["author_cycles"]), 1)   # genuine cycle evidence kept
         self.assertEqual(item["cycles"], [])              # so repair backfill never sees it
@@ -577,7 +580,8 @@ class WrapperGroupTest(unittest.TestCase):
         self.runs.mkdir(parents=True)
         self.pgids = []
         self.addCleanup(self._cleanup_groups)
-        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
+        for name, value in (("STATE", Path(self.tmp.name) / "state"),
+                            ("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
                             ("remove_worktree", mock.Mock())):
             p = mock.patch.object(crq, name, value)
             p.start()
