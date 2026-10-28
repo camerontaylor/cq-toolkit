@@ -187,6 +187,12 @@ export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
     else if (reason === 'token or wall budget exhausted') outcome = 'exhausted';
     else if (reason === 'unit stopped for human review') outcome = 'not-started';
   }
+  const failures = failureRowsOf(task, unit);
+  // The refinement above is the row's truthful outcome: branchless failure
+  // rows copy it (a no-attempt row labelled exhausted must not read `unfixed`
+  // in the failed evidence), while retained attempt rows keep their recorded
+  // history verbatim.
+  for (const failure of failures) if (!('branch' in failure)) failure.outcome = outcome;
   return {
     unit,
     task: { id: task.task.id, files: task.task.files },
@@ -196,7 +202,7 @@ export function plannedTaskRowOf(task: FixTaskReport): PlannedTaskRow {
     ...(task.reason === undefined ? {} : { reason: task.reason }),
     branch: task.branch,
     commits: task.commits,
-    failures: failureRowsOf(task, unit),
+    failures,
     ...(task.failedAttemptPublished && task.failedAttempt !== undefined
       ? { publishedBranch: task.failedAttempt.branch }
       : {}),
