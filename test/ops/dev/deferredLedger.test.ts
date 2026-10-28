@@ -1633,7 +1633,7 @@ test('the post-report identity read is clamped to the remaining budget and carri
   let imported = false;
   const calls: { command: string; timeoutMs: number; signal: boolean }[] = [];
   const wrapped = {
-    ...effects,
+    ...f.effects,
     // Arm the recorder only once the receipt has been imported, i.e. the identity read under test.
     runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
       if (imported) calls.push({ command: call[0], timeoutMs: call[2].timeoutMs, signal: call[2].signal !== undefined });
