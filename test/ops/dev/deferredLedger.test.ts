@@ -209,10 +209,19 @@ test('verified current debt permits fresh full agent readiness, reports debt, an
   expect(f.origin.completion.kind).toBe('blocked');
 });
 
-test('missing fresh engine proof, stale enrollment and unrelated later blockers cannot continue', async () => {
+test('missing fresh engine proof blocks otherwise authorized debt readiness', async () => {
   const f = await fixture();
+  expect(f.assemble().ready).toBe(true);
   delete f.agent.agentCoverage;
-  expect(f.assemble().ready).toBe(false);
+  const missingProof = f.assemble();
+  expect(missingProof.ready).toBe(false);
+  if (!missingProof.ready)
+    expect(missingProof.gaps.map((gap) => gap.field)).toEqual(['agent-coverage']);
+});
+
+test('fresh engine proof cannot replace authorized current vendor debt', async () => {
+  const f = await fixture();
+  expect(f.assemble().ready).toBe(true);
   const noDebt = assembleReadiness({
     branch: f.state.branch,
     target: 'merge-queue',
@@ -222,8 +231,24 @@ test('missing fresh engine proof, stale enrollment and unrelated later blockers 
     nowIso: f.effects.nowIso(),
   });
   expect(noDebt.ready).toBe(false);
+  if (!noDebt.ready) expect(noDebt.gaps.some((gap) => gap.field === 'vendor-debt')).toBe(true);
+});
+
+test('an unrelated later vendor blocker blocks debt readiness despite valid agent coverage', async () => {
+  const f = await fixture();
+  expect(f.assemble().ready).toBe(true);
   f.ledger.records.push({ ...f.origin, cycleId: 'new-blocker' });
-  expect(f.assemble().ready).toBe(false);
+  const blocked = f.assemble();
+  expect(blocked.ready).toBe(false);
+  if (!blocked.ready) {
+    expect(blocked.gaps.every((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+    expect(blocked.gaps.some((gap) => gap.detail.includes('persisted outage origin'))).toBe(true);
+  }
+});
+
+test('a changed enrolled head cannot be loaded as current vendor debt', async () => {
+  const f = await fixture();
+  expect(currentLedgerDebt(f.ledger, 'merge-queue', f.state)).toEqual(f.debt);
   f.debt.reference.binding = {
     ...f.debt.reference.binding,
     kind: 'deferred-author',

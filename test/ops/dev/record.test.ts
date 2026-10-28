@@ -835,24 +835,31 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
   });
 
   test('blocking findings on the tail still block readiness through the resolution', () => {
-    const result = assemble([
+    const findingId = 'c002-aaaaaaaa#f1';
+    const records = [
       cycleRecord(),
-      blockedTail(),
+      { ...blockedTail(), findings: [{ id: findingId, severity: 'critical' }] },
       reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
       checkRecord(),
-      cycleRecord({
-        cycleId: 'c000-aaaaaaaa',
-        findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'critical' }],
-      }),
-    ]);
+    ];
+    const result = assemble(records);
     expect(result.ready).toBe(false);
-    if (!result.ready)
-      expect(
-        result.gaps.some(
-          (gap) =>
-            gap.field === 'open-blocking-findings' && gap.detail.includes('c000-aaaaaaaa#f1'),
-        ),
-      ).toBe(true);
+    if (!result.ready) {
+      expect(result.gaps.map((gap) => gap.field)).toEqual(['open-blocking-findings']);
+      expect(result.gaps[0]?.detail).toContain(findingId);
+    }
+    const deferred = assemble([...records, dispositionRecord({ findingId, action: 'deferred' })]);
+    expect(deferred.ready).toBe(false);
+    if (!deferred.ready)
+      expect(deferred.gaps.map((gap) => gap.field)).toEqual(['open-blocking-findings']);
+    for (const action of ['fixed', 'rejected'] as const) {
+      const adjudicated = assemble([...records, dispositionRecord({ findingId, action })]);
+      expect(adjudicated.ready).toBe(true);
+      if (adjudicated.ready) {
+        expect(adjudicated.record.cycleId).toBe('c001-aaaaaaaa');
+        expect(adjudicated.record.reuse).toBe('r001-aaaaaaaa');
+      }
+    }
   });
 
   test('reuse evidence rides the ready record verbatim: the caveat stays authoritative', () => {
