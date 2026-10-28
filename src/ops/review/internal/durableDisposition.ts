@@ -2,11 +2,16 @@ import type { Finding } from '../findings.js';
 import type { DevLedgerFile } from '../../dev/record.js';
 import { deferredReceiptFindings } from '../../dev/internal/deferredReview.js';
 
+// review.run persists this exact reviewer spelling while emitting source 'agent'.
+function normalizedSource(source: string): string {
+  return source === 'agent:reviewer' ? 'agent' : source;
+}
+
 /** Compare original normalized content, before applying any retained disposition. */
 export function sameFindingContent(incoming: Finding, retained: Finding): boolean {
   return (
     incoming.id === retained.id &&
-    incoming.source === retained.source &&
+    normalizedSource(incoming.source) === normalizedSource(retained.source) &&
     incoming.text === retained.text &&
     incoming.file === retained.file &&
     incoming.line === retained.line &&
@@ -48,9 +53,7 @@ export function restoreDurableDisposition(finding: Finding, ledger: DevLedgerFil
       for (const retained of deferredReceiptFindings([record.debt])) observe(retained);
     } else if (record.kind === 'disposition' && record.findingId === finding.id) {
       disposition =
-        witnessed && !ambiguous
-          ? { status: record.action, reason: record.why }
-          : undefined;
+        witnessed && !ambiguous ? { status: record.action, reason: record.why } : undefined;
     }
   }
   return !ambiguous && disposition ? { ...open, ...disposition } : open;
