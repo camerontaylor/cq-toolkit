@@ -42,11 +42,13 @@ until its writer handoff lands.
 - cq.json - production routes: roles.reviewer = opencode-go /
   deepseek-v4.1-flash; review.reviewers = [coderabbit, agent]; budgets.run
   maxTokens 25000000 wallMs 14400000; budgets.step.wallMs 1200000
-- cqConfigDefaults.ts - REVIEW_SESSION_DEFAULTS maxInputChars 60000 maxSteps 15
-  concurrency 4; REVIEW_SIZE_DEFAULTS; agentSeverityMap default high->major,
-  medium->minor; review.searchTools default true
+- cqConfig.ts - REVIEW_SESSION_DEFAULTS maxInputChars 60000 maxSteps 15 concurrency 4;
+  REVIEW_SIZE_DEFAULTS (these defaults plus the cq.json shape they resolve)
+- cqConfigDefaults.ts - default resolution over the parsed config and policy:
+  agentSeverityMap default high->major, medium->minor; review.searchTools default true
 - dev-review.ts, dev-agentReview.ts - session/dev.review consumers of the same seams
-- package.json + pnpm-lock-head.txt + deps-summary.json - toolchain and dependency pins
+- package.json + pnpm-lock-head.txt + deps-summary.json - dependency specifiers, the lockfile
+  header and a summarized resolved toolchain (not pins)
 - oxfmtrc.json - formatter config pin
 
 ## Integrity
