@@ -123,7 +123,7 @@ test('subprocess cancellation waits for termination and prevents later child wor
     expect(result.timedOut).toBe(false);
     expect(result.stdout).toContain('partial evidence');
     expect(result).toHaveProperty('interruption.kind', 'abort');
-    expect(result).toHaveProperty('interruption.reason', reason);
+    expect(result.interruption?.reason).toBe(reason);
   } finally {
     watcher.close();
     controller.abort();
@@ -143,7 +143,7 @@ test('already aborted subprocess never executes its body', async () => {
   expect(result.exitCode).toBeNull();
   expect(result.stdout).toBe('');
   expect(result).toHaveProperty('interruption.kind', 'abort');
-  expect(result).toHaveProperty('interruption.reason', controller.signal.reason);
+  expect(result.interruption?.reason).toBe(controller.signal.reason);
 });
 
 test('a numeric command failure has no abort provenance even if the caller later aborts', async () => {

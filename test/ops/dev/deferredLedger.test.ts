@@ -1930,7 +1930,8 @@ for (const field of ['branch', 'head', 'base', 'dirty'] as const) {
       const result = await t.f.effects.runCommand(...call);
       if (field === 'branch' && call[1].includes('symbolic-ref'))
         result.stdout = 'refs/heads/another-branch\n';
-      if (field === 'head' && call[1].at(-1) === 'HEAD') result.stdout = 'a'.repeat(40) + '\n';
+      if (field === 'head' && call[1].includes('rev-parse') && call[1].at(-1) === 'HEAD')
+        result.stdout = 'a'.repeat(40) + '\n';
       if (field === 'base' && call[1].at(-1) === `${t.read.state.base}^{commit}`)
         result.stdout = 'b'.repeat(40) + '\n';
       // Exhaust ONLY at the final command: every component was successfully read, so the
@@ -1976,9 +1977,10 @@ for (const callerReason of [undefined, new Error('caller after timer'), { cancel
     const t = await ancestryIdentityFixture();
     const controller = new AbortController();
     let timerReason: unknown;
+    let timerResult: CommandResult | undefined;
+    let dispatched: { args: readonly string[]; timeoutMs: number; signal?: AbortSignal } | undefined;
     t.seam.run = async (_command, args, options) => {
-      expect(args).toContain('symbolic-ref');
-      expect(options.timeoutMs).toBeLessThanOrEqual(2_000);
+      dispatched = { args, ...options };
       const signal = options.signal;
       if (!signal) throw new Error('identity command has no invocation signal');
       // Use the REAL subprocess adapter. Its longer test-only child cap makes the invocation's
@@ -1986,10 +1988,8 @@ for (const callerReason of [undefined, new Error('caller after timer'), { cancel
       // No remainingMs flip or synthetic abort metadata supplies the positive evidence.
       const result = await makeSubprocessDevEffects(t.f.repo.root).runCommand(process.execPath,
         ['-e', 'setInterval(() => {}, 1000)'], { timeoutMs: 10_000, signal });
-      expect(signal.aborted).toBe(true);
       timerReason = signal.reason;
-      expect(result).toHaveProperty('interruption.kind', 'abort');
-      expect(result).toHaveProperty('interruption.reason', timerReason);
+      timerResult = result;
       if (callerReason !== undefined) controller.abort(callerReason);
       return result;
     };
@@ -1999,6 +1999,7 @@ for (const callerReason of [undefined, new Error('caller after timer'), { cancel
     else {
       const debt = await pending;
       expect(debt?.reference.requestId).toBe(t.successor.reference.requestId);
+      if (!debt) throw new Error('missing current enrollment');
       const readiness = assembleReadiness({ branch: t.f.state.branch, target: 'merge-queue',
         identity: t.read.state, ledger: t.before, untracked: [], deferredVendorDebt: debt,
         nowIso: t.f.effects.nowIso() });
@@ -2006,6 +2007,13 @@ for (const callerReason of [undefined, new Error('caller after timer'), { cancel
       if (readiness.ready) throw new Error('unexpected readiness');
       expect(readiness.gaps.some((gap) => gap.detail.includes('authorized predecessor obligation'))).toBe(true);
     }
+    // These assertions live OUTSIDE readWorkState's fault-folding boundary: a swallowed assertion
+    // in the adapter seam must never count as proof that the real internal timer fired.
+    expect(dispatched?.args).toContain('symbolic-ref');
+    expect(dispatched?.timeoutMs).toBeLessThanOrEqual(2_000);
+    expect(dispatched?.signal?.aborted).toBe(true);
+    expect(timerResult?.interruption?.kind).toBe('abort');
+    expect(timerResult?.interruption?.reason).toBe(timerReason);
     expect(timerReason).toBeInstanceOf(Error);
     await t.unchanged();
   });
