@@ -276,7 +276,7 @@ test.each(['major', 'clean'] as const)(
       scannerFactory: () => async (components) =>
         components.map((component) => ({ component: component.component, hits: [] })),
     })({ repoRoot: f.repo.root });
-    expect(result.status).toBe('ok');
+    expect(result.status, JSON.stringify(result)).toBe('ok');
     if (result.status !== 'ok') throw Error(JSON.stringify(result));
     const ledger = f.effects.openLedger(f.state.branch).load();
     const retained = retainedReceiptFindings(ledger);
@@ -348,7 +348,7 @@ test.each(['fixed', 'rejected'] as const)(
       scannerFactory: () => async (components) =>
         components.map((component) => ({ component: component.component, hits: [] })),
     })({ repoRoot: f.repo.root });
-    expect(result.status).toBe('ok');
+    expect(result.status, JSON.stringify(result)).toBe('ok');
     if (result.status !== 'ok') throw Error(JSON.stringify(result));
     const finding = result.value.findings.find((item) => item.text === 'changed instruction');
     expect(finding).toMatchObject({ status: 'open', severity: 'major' });
@@ -384,7 +384,7 @@ test.each(['fixed', 'rejected'] as const)(
       scannerFactory: () => async (components) =>
         components.map((component) => ({ component: component.component, hits: [] })),
     })({ repoRoot: f.repo.root });
-    expect(result.status).toBe('ok');
+    expect(result.status, JSON.stringify(result)).toBe('ok');
     if (result.status !== 'ok') throw Error(JSON.stringify(result));
     expect(result.value.findings).toContainEqual({
       ...finding,
