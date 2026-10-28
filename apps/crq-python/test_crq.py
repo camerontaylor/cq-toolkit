@@ -791,6 +791,95 @@ class CurrentTest(unittest.TestCase):
         self.assertIsNone(crq._FORGE_BUDGET)
 
 
+    def test_generic_promotion_errors_exhaust_persisted_retries_without_dispatch_or_split(self):
+        initial = copy.deepcopy(self.q)
+        hard = {"type": "error", "errorType": "unknown", "message": "generic failure"}
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        streams = [[hard], [hard, vendor], [vendor, hard]]
+        limit = crq.CONFIG["max_item_failures"]
+        clock = crq.now().replace(microsecond=0)
+        for n, events in enumerate(streams):
+            with self.subTest(events=events), \
+                 mock.patch.object(crq, "RUNS", self.state / f"generic-runs-{n}"):
+                self.q = copy.deepcopy(initial)
+                crq.save_queue(self.q)
+                item = self.enroll(f"generic-{n}")
+                plan = self.plan_item(item)
+                item.update(kind="promotion", base_sha=self.pre, batch_sha=self.merge)
+                for failure in range(1, limit + 1):
+                    clock += crq.dt.timedelta(hours=2)
+                    with mock.patch.object(crq, "now", return_value=clock), \
+                         mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
+                         mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")), \
+                         mock.patch.object(crq.subprocess, "Popen", return_value=SimpleNamespace(pid=919191)):
+                        crq.launch(self.q, item, plan)
+                        rdir = self.terminal_artifacts(item, events)
+                        self.harvest(item)
+                    cls = json.loads((rdir / "classification.json").read_text())
+                    self.assertEqual(cls["outcome"], "error")
+                    self.assertFalse(cls["counted"])
+                    self.assertEqual([cause["code"] for cause in cls["failure_provenance"]["causes"]],
+                                     [event["errorType"] for event in events])
+                    self.assertFalse(queue_transport._vendor_rate_limit({
+                        "outcome": cls["outcome"], "counted": cls["counted"], "classification": cls}))
+                    self.assertEqual(item["failures"], failure)
+                    self.assertEqual(len(item["attempts"]), failure)
+                    self.assertTrue(all(a["outcome"] == "error" and not a["counted"]
+                                        for a in item["attempts"]))
+                    self.assertIsNone(item["run"])
+                    self.assertEqual(item.get("cycles", []), [])
+                    self.assertNotIn("coverage", self.q)
+                    self.assertFalse(self.q["paused"])
+                    self.assertNotIn("cooldown_until", self.q)
+                    self.assertEqual(item["batch_sha"], self.merge)
+                    self.assertEqual(item["base_sha"], self.pre)
+                    if failure < limit:
+                        self.assertEqual(item["state"], "pending")
+                        self.assertEqual(item["not_before"], crq.iso(clock + crq.dt.timedelta(
+                            minutes=min(60, crq.CONFIG["error_backoff_min"] * 2 ** (failure - 1)))))
+                    else:
+                        self.assertEqual(item["state"], "blocked")
+                        self.assertIsNone(item["not_before"])
+                    crq.save_queue(self.q)
+                    self.q = crq.load_queue()
+                    item = next(i for i in self.q["items"] if i["id"] == item["id"])
+                # A natural tick must not start another review after a restart.
+                self.q["starts"] = []  # No hourly cap may mask the blocked-state refusal.
+                crq.save_queue(self.q)
+                self.assertEqual(self.tick(), 0)
+                self.q = crq.load_queue()
+                item = next(i for i in self.q["items"] if i["id"] == item["id"])
+                self.assertEqual(item["state"], "blocked")
+                self.assertEqual(item["failures"], limit)
+                self.assertEqual(item["last_error"], f"error: {cls.get('message')}")
+                # The real promotion scheduler retains this blocked batch/slot.
+                with mock.patch.dict(crq.PROMO, {"enabled": True}), \
+                     mock.patch.object(crq, "promotion_gate_live", return_value=True), \
+                     mock.patch.object(crq, "promotion_mode", return_value="user"), \
+                     mock.patch.object(crq, "main_sha", return_value=self.pre), \
+                     mock.patch.object(crq, "is_ancestor", return_value=False), \
+                     mock.patch.object(crq, "cut_promotion") as cut, \
+                     mock.patch.object(crq, "split_promotion") as split:
+                    self.q.setdefault("promotion", {})["last_promoted_at"] = crq.iso(clock)
+                    self.assertEqual(crq.promotion_tick(self.q, False), [])
+                    self.assertIs(crq.open_promotion(self.q), item)
+                    cut.assert_not_called()
+                    split.assert_not_called()
+
+    def test_generic_promotion_error_above_existing_limit_blocks_immediately(self):
+        item = self.enroll("already-exhausted")
+        rdir = self.launch_item(item)
+        self.terminal_artifacts(item, [{"type": "error", "errorType": "unknown"}])
+        item.update(kind="promotion", failures=crq.CONFIG["max_item_failures"],
+                    not_before=crq.iso(), batch_sha=self.merge, base_sha=self.pre)
+        self.harvest(item)
+        crq.save_queue(self.q)
+        restored = next(i for i in crq.load_queue()["items"] if i["id"] == item["id"])
+        self.assertEqual(restored["state"], "blocked")
+        self.assertIsNone(restored["not_before"])
+        self.assertEqual(restored["failures"], crq.CONFIG["max_item_failures"] + 1)
+        self.assertFalse(json.loads((rdir / "classification.json").read_text())["counted"])
+
     def test_auth_classification_pauses_current_ordinary_and_promotion_harvest(self):
         initial = copy.deepcopy(self.q)
         auth = {"type": "error", "errorType": "auth", "recoverable": True}
