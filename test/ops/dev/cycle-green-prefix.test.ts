@@ -529,21 +529,30 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expect(r.installs).toEqual([r.probeDir, r.probeDir]);
   });
 
-  test('a content-only change to a custom-named pnpmfile reinstalls', async () => {
-    // The setting is committed before the chain; only the hook content changes.
-    await repo.write('.npmrc', 'pnpmfile=tools/pnpm-hook.cjs\n');
-    await repo.write('tools/pnpm-hook.cjs', 'module.exports = {};\n');
-    repo.git('add', '.npmrc', 'tools/pnpm-hook.cjs');
-    repo.git('commit', '-q', '-m', 'configure a pnpm hook');
-    const r = await run({
-      greens: [true, false, false],
-      stop: 'budget',
-      dependencyChangeAt: 1,
-      dependencyFile: 'tools/pnpm-hook.cjs',
-    });
-    expect(r.result.status).toBe('needs-human');
-    expect(r.installs).toEqual([r.probeDir, r.probeDir]);
-  });
+  test.each([
+    ['.npmrc', 'pnpmfile=tools/pnpm-hook.cjs\n', 'tools/pnpm-hook.cjs'],
+    ['.npmrc', 'pnpmfile = "tools/pnpm hook.cjs"\n', 'tools/pnpm hook.cjs'],
+    ['pnpm-workspace.yaml', 'pnpmfile: "tools/pnpm hook.cjs"\n', 'tools/pnpm hook.cjs'],
+    ['pnpm-workspace.yaml', 'pnpmfile: ./tools/../tools/pnpm-hook.cjs\n', 'tools/pnpm-hook.cjs'],
+    ['pnpm-workspace.yaml', "pnpmfile: 'tools/pnpm hook.cjs' # hook\n", 'tools/pnpm hook.cjs'],
+  ] as const)(
+    'a content-only change to a custom pnpmfile (%s: %j) reinstalls',
+    async (configFile, setting, hook) => {
+      // The setting is committed before the chain; only the hook content changes.
+      await repo.write(configFile, setting);
+      await repo.write(hook, 'module.exports = {};\n');
+      repo.git('add', configFile, hook);
+      repo.git('commit', '-q', '-m', 'configure a pnpm hook');
+      const r = await run({
+        greens: [true, false, false],
+        stop: 'budget',
+        dependencyChangeAt: 1,
+        dependencyFile: hook,
+      });
+      expect(r.result.status).toBe('needs-human');
+      expect(r.installs).toEqual([r.probeDir, r.probeDir]);
+    },
+  );
 
   test('candidates with identical dependency inputs share one install', async () => {
     const r = await run({ greens: [true, false, false], stop: 'budget' });
