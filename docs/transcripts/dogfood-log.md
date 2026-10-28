@@ -582,3 +582,17 @@ Branch `fix/s7-dogfood-address-469-v4` @ `9d282776`: PR #540's head (lint + rela
 - Giles R3/R3b/D1c: N3 runs once, only after #576 merged, holding the CodeRabbit lock exclusively for the whole run (handed over by the queue orchestrator after #266's dispatch). If it hits a rate limit or repeats an N/N2 failure, it stops and goes to Giles; no N4.
 - Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261028-n{,2}/` (triton).
 - Note: merge-queue now carries the S7 source itself (#539 S7I integrate: #469, includeIntegration/testFiles, the parked L/M repairs), so N3 runs from `fix/s7-dogfood-address-469-v5` = merge-queue `8fc58c22` + cq.json (reviewer, step) + this log.
+
+## S7 dogfood attempt N3: dev.cycle opens PR #620 (v5 @ de5cefb6)
+
+Branch `fix/s7-dogfood-address-469-v5` @ `de5cefb6` = merge-queue `8fc58c22` (with #576's retry) + cq.json (reviewer `zai`/`glm-5.3-flash`, step 3 600 000) + the M/N/N2 log above. Same invocation as E–M. It ran under Giles R3c: exactly one run, with in-run CodeRabbit allowed as an explicit dogfood exception. That superseded R3b's lock handover: R4 gives crq sole ownership of CodeRabbit, so the lane took no lock and preempted nothing. Started 2026-10-27T23:41:04Z; exited **0** at 23:58:16Z (17 m 12 s). Run state: `~/.local/state/cq-toolkit/dogfood/s7-devcycle-20261028-n3/` (triton).
+
+- **dev.check** `k001-de5cefb6`: green (knip skipped).
+- **review.run** @ `de5cefb6`: both reviewers TERMINAL. CodeRabbit `c001` gave 1 major finding: cq.json:73-74 should leave the experimental reviewer route and restore step `wallMs` 1 200 000. Agent `c002` found nothing (4 steps, ~35 k tokens, 0 tool failures).
+- **review.address:** one round, one fix by the `zai`/`glm-5.3-flash` worker: initial edit 54 s plus feedback 165 s (~219 s of worker time), then reviewer closure 37 s. Commit `86633e93` reverts cq.json to the merge-queue values; disposition `fixed`, `verifiedHead` = `86633e93`, nothing open or failed. 568 868 ms; input 49 750 / output 15 313 / cache-read 53 568 tokens (modeled $0.0115).
+- **Final re-review** @ `86633e93`: CodeRabbit `c004` and agent `c005` both TERMINAL with 0 findings. Final dev.check `k002-86633e93` green.
+- **Publication:** the feature branch was pushed and PR **#620** opened against merge-queue, **ready**, with the generated `cq:dev-readiness` record (base pin `8fc58c22`, head `86633e93`). Nothing was pushed to merge-queue itself.
+- **S7 acceptance is met** for the exercised path: check → review.run → review.address → final gates → push → ready PR with a readiness record.
+- Limits: neither reviewer hit a rate limit, so #551/#576's wait+retry was **not exercised**, and N3 is no evidence for rate-limit resilience. The diff was tiny (a cq.json override plus a docs log), so the partitioned/session reviewer and the budget-stop publication path were not exercised either (M covers those up to the red final gate).
+- Observation, not a defect: CodeRabbit treated the dogfood-only reviewer/step override as a regression, and the loop reverted it. Its net diff against merge-queue is therefore docs only. A dogfood run that needs a config override should supply it outside the reviewed tree.
+- #620 got one independent critic PASS (no findings), as a head-bound review, plus green exact-head CI. The chancellor merged it at 2026-10-28T00:07:02Z (`088b8676`). No N4.
