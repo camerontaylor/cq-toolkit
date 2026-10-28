@@ -648,6 +648,68 @@ describe('contained grep and glob tools', () => {
     });
   });
 
+  test('escaped brace delimiters and commas follow rg glob expansion (#604)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      for (const name of [
+        '{a,b}.ts',
+        'a.ts',
+        'b.ts',
+        'a,b.ts',
+        'c.ts',
+        'a}.ts',
+        '{b.ts',
+        '\\a.ts',
+        '\\b.ts',
+      ]) {
+        await writeFile(join(workspace, name), 'needle\n', 'utf8');
+      }
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // Verified against rg --files --hidden --no-ignore --glob on this fixture:
+      // one slash escapes a brace/comma; two slashes escape each other.
+      const cases = [
+        {
+          include: '\\{a,b\\}.ts',
+          expected: ['{a,b}.ts'],
+          excluded: ['a.ts', 'b.ts'],
+        },
+        {
+          include: '{a\\,b,c}.ts',
+          expected: ['a,b.ts', 'c.ts'],
+          excluded: ['{a,b}.ts'],
+        },
+        {
+          include: '\\\\{a,b}.ts',
+          expected: ['\\a.ts', '\\b.ts'],
+          excluded: ['a.ts', 'b.ts'],
+        },
+        {
+          include: '{a\\},b}.ts',
+          expected: ['a}.ts', 'b.ts'],
+          excluded: ['a.ts'],
+        },
+        {
+          include: '{a,\\{b}.ts',
+          expected: ['a.ts', '{b.ts'],
+          excluded: ['b.ts'],
+        },
+        {
+          include: '{a}.ts',
+          expected: ['a.ts'],
+          excluded: ['{a,b}.ts'],
+        },
+      ];
+      for (const { include, expected, excluded } of cases) {
+        const result = await grep.execute({ pattern: 'needle', include });
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          for (const name of expected) expect(result.output).toContain(`--- ${name} ---`);
+          for (const name of excluded) expect(result.output).not.toContain(`--- ${name} ---`);
+        }
+      }
+    });
+  });
+
   test('streaming include enumeration fails closed at the scanned-bytes work cap', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, '.git'), { recursive: true });

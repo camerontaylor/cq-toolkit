@@ -1037,16 +1037,41 @@ export function buildTools(
     const expand = (rest: string, acc: string[]): 'alternatives' | 'visits' | undefined => {
       visited += 1;
       if (visited > SEARCH_INCLUDE_EXPANSION_VISITS) return 'visits';
-      const open = rest.indexOf('{');
+      // An escaped brace is data for tokenizeComponent, not an expansion
+      // delimiter. A pair of backslashes escapes itself, leaving the brace
+      // syntactic (the same parity rule applies to closing braces and commas).
+      let escaped = false;
+      let open = -1;
+      for (let i = 0; i < rest.length; i += 1) {
+        const ch = rest[i];
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '{') {
+          open = i;
+          break;
+        }
+      }
       if (open === -1) {
         if (!acc.includes(rest)) acc.push(rest);
         return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
       }
       let depth = 0;
       let close = -1;
+      escaped = false;
       for (let i = open; i < rest.length; i += 1) {
-        if (rest[i] === '{') depth += 1;
-        else if (rest[i] === '}') {
+        const ch = rest[i];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (ch === '{') depth += 1;
+        else if (ch === '}') {
           depth -= 1;
           if (depth === 0) {
             close = i;
@@ -1063,7 +1088,18 @@ export function buildTools(
       const parts: string[] = [];
       let partDepth = 0;
       let current = '';
+      escaped = false;
       for (const ch of inner) {
+        if (escaped) {
+          current += ch;
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          current += ch;
+          escaped = true;
+          continue;
+        }
         if (ch === '{') partDepth += 1;
         else if (ch === '}') partDepth -= 1;
         if (ch === ',' && partDepth === 0) {
@@ -1072,10 +1108,6 @@ export function buildTools(
         } else current += ch;
       }
       parts.push(current);
-      if (parts.length === 1) {
-        if (!acc.includes(rest)) acc.push(rest);
-        return acc.length <= SEARCH_INCLUDE_EXPANSION_LIMIT ? undefined : 'alternatives';
-      }
       const prefix = rest.slice(0, open);
       const suffix = rest.slice(close + 1);
       for (const part of parts) {
