@@ -1150,6 +1150,7 @@ class CliTests(ControllerFixture):
                                      start_new_session=True)
             self.assertEqual(child.wait(timeout=10), 0)
             run_id = "pr611-20261028T012345Z"
+            (self.runner / "state/runs" / run_id).mkdir(parents=True)
             self.write_state("runs/" + run_id + "/exit.json", {"exit": 0})
             self.write_state("runs/" + run_id + "/review.pid", {
                 "pid": child.pid, "pgid": child.pid, "sid": child.pid,
