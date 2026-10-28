@@ -1563,8 +1563,9 @@ test('a caller abort during the post-report identity read prevents the ancestor 
     ...f.effects,
     runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
       const result = await f.effects.runCommand(...call);
-      // Cancellation lands while the post-report identity read is running.
-      if (imported && call[0] === 'git') controller.abort(reason);
+      // Cancellation lands on the ancestry loop's post-report identity read (readWorkState opens
+      // with `symbolic-ref`), i.e. AFTER consumeDeferredVendorReport has fully returned.
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) controller.abort(reason);
       return result;
     },
   };
