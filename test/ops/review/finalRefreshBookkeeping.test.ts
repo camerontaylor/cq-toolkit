@@ -310,7 +310,8 @@ async function fixture(mode: Mode) {
   client.report = async (reference, root, options) => {
     expect(final).toBe(true);
     if (
-      mode === 'authorized-predecessor-append' &&
+      (mode === 'authorized-predecessor-append' ||
+        mode === 'authorized-predecessor-settle') &&
       reference.requestId === ancestorReference.requestId
     )
       return importQueueEvidence(root, ancestorReceiptId, ancestorBytes);
