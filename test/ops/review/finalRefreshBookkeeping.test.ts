@@ -247,8 +247,7 @@ async function fixture(mode: Mode) {
   let ancestorAppended = false;
   client.status = async (reference) => {
     if (
-      (mode === 'authorized-predecessor-append' ||
-        mode === 'authorized-predecessor-settle') &&
+      (mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle') &&
       reference.requestId === ancestorReference.requestId
     ) {
       if (!final) return pending;
@@ -310,8 +309,7 @@ async function fixture(mode: Mode) {
   client.report = async (reference, root, options) => {
     expect(final).toBe(true);
     if (
-      (mode === 'authorized-predecessor-append' ||
-        mode === 'authorized-predecessor-settle') &&
+      (mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle') &&
       reference.requestId === ancestorReference.requestId
     )
       return importQueueEvidence(root, ancestorReceiptId, ancestorBytes);
@@ -504,6 +502,8 @@ test('a seam-owned authorized predecessor settlement is accepted and notified', 
     .records.filter((record) => record.kind === 'vendor-debt')
     .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined));
   expect(
-    settled.filter((debt) => debt?.vendorCompleted === true).map((debt) => debt!.reference.requestId),
+    settled
+      .filter((debt) => debt?.vendorCompleted === true)
+      .map((debt) => debt!.reference.requestId),
   ).toContain('ancestor-1');
 });
