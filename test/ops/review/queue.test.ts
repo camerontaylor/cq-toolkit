@@ -581,9 +581,9 @@ describe('queue report lifetime enforcement', () => {
       return envelope(status);
     };
     const client = makeQueueClient(transport);
-    await expect(
-      client.report(ref, dir, { remainingMs: () => 0 }),
-    ).rejects.toThrow(/deadline exhausted/);
+    await expect(client.report(ref, dir, { remainingMs: () => 0 })).rejects.toThrow(
+      /deadline exhausted/,
+    );
     expect(ops).toEqual([]);
     expect(await readdir(dir)).toEqual([]);
   });

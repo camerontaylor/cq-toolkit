@@ -136,7 +136,8 @@ async function fixture(mode: Mode) {
   // The authorized-ancestor mode adds a pending predecessor that only becomes terminal at the final
   // refresh, so its settlement is an APPEND this refresh legitimately owns.
   const debtBinding = debt.reference.binding;
-  if (debtBinding.kind !== 'deferred-author') throw new Error('fixture debt must be deferred-author');
+  if (debtBinding.kind !== 'deferred-author')
+    throw new Error('fixture debt must be deferred-author');
   const ancestorReference: QueueReference = {
     requestId: 'ancestor-1',
     binding: { ...debtBinding, head: state.head },

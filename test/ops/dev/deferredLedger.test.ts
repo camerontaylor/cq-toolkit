@@ -1405,9 +1405,17 @@ test('an unrelated trust failure coinciding with expiry still propagates', async
   };
   const before = f.effects.openLedger(f.state.branch).load();
   await expect(
-    loadCurrentDeferredVendorDebt(effectsFor(f), 'merge-queue', read.state, before, client, undefined, {
-      remainingMs,
-    }),
+    loadCurrentDeferredVendorDebt(
+      effectsFor(f),
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      undefined,
+      {
+        remainingMs,
+      },
+    ),
   ).rejects.toThrow(/queue alias status binding mismatch/);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
