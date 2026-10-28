@@ -734,8 +734,9 @@ def capture_review_scope(wt: Path, run_base: str) -> Optional[set]:
     guessed scope); an empty set is a real empty diff and rejects every
     located finding as out_of_scope."""
     try:
-        return {line for line in git_in(wt, "diff", "--name-only",
-                                        "--no-ext-diff", f"{run_base}..HEAD").splitlines() if line}
+        names = run(["git", "diff", "--name-only", "-z", "--no-ext-diff",
+                     f"{run_base}..HEAD"], cwd=wt).stdout
+        return {os.fsdecode(name) for name in names.split(b"\0") if name}
     except (RuntimeError, OSError):
         audit("review-scope-unavailable", run_base=run_base)
         return None

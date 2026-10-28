@@ -372,6 +372,38 @@ class ReviewPreambleFault(SignerTest):
                          {'src/delta-only.ts', 'src/new-delta.ts'})
         return repo, base, s1, batch
 
+    def test_scope_keeps_literal_special_filenames_and_rejects_unrelated_path(self):
+        repo, base, _, _ = self.clean_chain()
+        names = ('café.ts', 'quote".ts', 'line\nbreak.ts', 'tab\tname.ts',
+                 ' leading.ts', 'trailing.ts ', ':(glob)*?[x].ts', '$(not-a-command);.ts')
+        paths = {'src/' + name for name in names}
+        for path in paths:
+            (repo / path).write_text('literal path change\n')
+        subprocess.run(['git', '-C', str(repo), 'add', '--', *sorted(paths)],
+                       check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Offline fixture',
+                        '-c', 'user.email=fixture@example.invalid',
+                        'commit', '--quiet', '-m', 'literal names'],
+                       check=True, capture_output=True)
+        scope = signer.capture_review_scope(repo, base)
+        self.assertTrue(paths.issubset(scope), repr(scope))
+        for path in paths:
+            row = {'type': 'finding', 'severity': 'major', 'fileName': path,
+                   'codegenInstructions': 'The value is rendered without escaping. at line 1'}
+            self.assertIsNone(signer.finding_fault(row, scope), repr(path))
+        self.assertEqual(signer.finding_fault({**row, 'fileName': 'src/unrelated.ts'}, scope),
+                         'out_of_scope')
+
+    def test_scope_preserves_filesystem_decoding_without_stripping(self):
+        raw = b' leading\xff.ts\0trailing.ts \0line\nname.ts\0'
+        with mock.patch.object(signer, 'run', return_value=
+                               subprocess.CompletedProcess([], 0, stdout=raw)) as git:
+            scope = signer.capture_review_scope(self.root, BASE)
+        self.assertEqual(scope, {signer.os.fsdecode(name)
+                                 for name in raw.split(b'\0') if name})
+        git.assert_called_once_with(['git', 'diff', '--name-only', '-z', '--no-ext-diff',
+                                     BASE + '..HEAD'], cwd=self.root)
+
     def run_item(self, review, diff_files=None, *, chain=None):
         state = {'clean': False, 'scope_bases': [], 'run_cli_bases': []}
         posts, closed = [], []
