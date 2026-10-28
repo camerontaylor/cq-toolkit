@@ -1045,6 +1045,55 @@ describe('contained grep and glob tools', () => {
     });
   });
 
+  test('ordinary unanchored includes are basename filters at any depth (#656)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await mkdir(join(workspace, 'deep', 'sub'), { recursive: true });
+      await mkdir(join(workspace, 'other'), { recursive: true });
+      await writeFile(join(workspace, 'deep', 'sub', 'z'), 'ordinary-needle\n', 'utf8');
+      await writeFile(join(workspace, 'deep', 'sub', 'a.ts'), 'ordinary-needle\n', 'utf8');
+      await writeFile(join(workspace, 'other', 'deep.ts'), 'ordinary-needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      // rg 14.1.1 fixtures: --glob z selects deep/sub/z; --glob d* and
+      // --glob s* select NOTHING from the same tree, so an unanchored glob is
+      // a basename filter, never an any-component filter.
+      const basename = await grep.execute({ pattern: 'ordinary-needle', include: 'z' });
+      expect(basename.ok).toBe(true);
+      if (basename.ok) {
+        expect(basename.output).toContain('--- deep/sub/z ---');
+        expect(basename.output).not.toContain('deep/sub/a.ts');
+        expect(basename.output).not.toContain('other/deep.ts');
+      }
+      const directoryName = await grep.execute({ pattern: 'ordinary-needle', include: 'd*' });
+      expect(directoryName.ok).toBe(true);
+      if (directoryName.ok) {
+        // 'd*' matches the BASENAME 'deep.ts', never the ancestor directory
+        // 'deep': the deep path is not selected merely because of its parent.
+        expect(directoryName.output).toContain('--- other/deep.ts ---');
+        expect(directoryName.output).not.toContain('deep/sub/z');
+      }
+      // '!z' applies the same basename rule to an exclusion.
+      const negated = await grep.execute({ pattern: 'ordinary-needle', include: '!z' });
+      expect(negated.ok).toBe(true);
+      if (negated.ok) {
+        expect(negated.output).not.toContain('deep/sub/z');
+        expect(negated.output).toContain('--- deep/sub/a.ts ---');
+        expect(negated.output).toContain('--- other/deep.ts ---');
+      }
+      // Excluding a directory excludes its whole subtree (rg: --glob '!deep').
+      const ancestor = await grep.execute({ pattern: 'ordinary-needle', include: '!deep' });
+      expect(ancestor.ok).toBe(true);
+      if (ancestor.ok) {
+        expect(ancestor.output).not.toContain('deep/sub/a.ts');
+        expect(ancestor.output).toContain('--- other/deep.ts ---');
+      }
+      // A whole-component globstar keeps spanning components.
+      const globstar = await grep.execute({ pattern: 'ordinary-needle', include: '**/z' });
+      expect(globstar.ok).toBe(true);
+      if (globstar.ok) expect(globstar.output).toContain('--- deep/sub/z ---');
+    });
+  });
+
   test('a pathological include pattern returns promptly with bounded work (#614)', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, '.git'), { recursive: true });
@@ -1089,9 +1138,11 @@ describe('contained grep and glob tools', () => {
         spawnState.fake = null;
         spawnState.current = null;
       }
-      // Each unanchored suffix copies the remaining path components. The
-      // copied work alone exceeds 4,096 on this 100-component candidate;
-      // a silent No matches verdict would hide exhausted matching.
+      // #656: a '/'-free glob compiles to exactly ONE run, and rg applies it
+      // to the BASENAME only (fixture: --glob z selects deep/sub/z, while
+      // --glob d* selects nothing). The old suffix loop charged and copied
+      // every remaining component, so this 101-component candidate exhausted
+      // the 4,096 budget and denied where the definitive answer is no-match.
       spawnState.fake = {
         stdoutChunks: [Buffer.from(`${'a/'.repeat(100)}x.ts\0`)],
         stderrChunks: [],
@@ -1101,11 +1152,10 @@ describe('contained grep and glob tools', () => {
       spawnState.calls.length = 0;
       try {
         const suffixes = await grep.execute({ pattern: 'needle', include: 'z' });
-        expect(suffixes.ok).toBe(false);
-        if (!suffixes.ok) {
-          expect(suffixes.denial.reason).toBe(
-            'SEARCH_LIMIT: search denied: include match state budget exhausted',
-          );
+        expect(suffixes.ok).toBe(true);
+        if (suffixes.ok) {
+          expect(suffixes.output).toBe('No matches');
+          expect(suffixes.output).not.toContain('SEARCH_LIMIT');
         }
       } finally {
         spawnState.fake = null;
