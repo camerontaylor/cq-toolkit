@@ -13,6 +13,7 @@ import {
 import type { Finding, FindingEvidenceV1 } from '../../../src/ops/review/findings.js';
 import {
   restoreDurableDisposition,
+  retainedFindings,
   sameFindingContent,
 } from '../../../src/ops/review/internal/durableDisposition.js';
 
@@ -251,5 +252,79 @@ describe('restoreDurableDisposition — content-bound authority over the raw led
     expect(
       restoreDurableDisposition(incoming(), ledger([noEvidenceV1Cycle, disposition()])).status,
     ).toBe('open');
+  });
+});
+
+type LedgerFinding = DevCycleRecord['findings'][number];
+
+function ledgerFinding(over: Partial<LedgerFinding> = {}): LedgerFinding {
+  return {
+    id: 'c001-aaaaaaaa#f1',
+    severity: 'major',
+    fileName: 'src/x.ts',
+    excerpt: 'const x = 1;',
+    line: 3,
+    rule: 'no-x',
+    evidence: 'receipt-1',
+    evidenceV1: EVIDENCE_V1,
+    ...over,
+  };
+}
+
+describe('retainedFindings — ONE ledger-ordered projection for every restoration path', () => {
+  test('import cycle, then disposition, then a later genuine cycle stays OPEN (P1)', () => {
+    const imported = cycle({ cycleId: 'c009-aaaaaaaa', reviewer: 'review.address:import' });
+    const restored = retainedFindings(ledger([imported, disposition(), cycle()]));
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({ id: 'c001-aaaaaaaa#f1', status: 'open' });
+  });
+
+  test('the same sequence with CHANGED later content also stays open', () => {
+    const imported = cycle({ cycleId: 'c009-aaaaaaaa', reviewer: 'review.address:import' });
+    const changed = cycle({ findings: [ledgerFinding({ excerpt: 'different text' })] });
+    const restored = retainedFindings(ledger([imported, disposition(), changed]));
+    expect(restored[0]?.status).toBe('open');
+  });
+
+  test('an eligible original witness BEFORE its disposition still restores (positive control)', () => {
+    const restored = retainedFindings(ledger([cycle(), disposition()]));
+    expect(restored[0]).toMatchObject({ status: 'rejected', reason: 'not a real defect' });
+  });
+
+  test('a disposition BEFORE any eligible witness never applies (ledger order)', () => {
+    const restored = retainedFindings(ledger([disposition(), cycle()]));
+    expect(restored[0]?.status).toBe('open');
+  });
+
+  test('an import repeat with different content neither conflicts nor witnesses', () => {
+    const importedDifferent = cycle({
+      cycleId: 'c009-aaaaaaaa',
+      reviewer: 'review.address:import',
+      findings: [ledgerFinding({ excerpt: 'imported repeat text' })],
+    });
+    // Only the genuine cycle is retained; the import repeat contributes nothing.
+    const restored = retainedFindings(ledger([importedDifferent, disposition(), cycle()]));
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.status).toBe('open');
+  });
+
+  test('conflicting original witnesses still fail closed', () => {
+    const conflicting = cycle({
+      cycleId: 'c002-aaaaaaaa',
+      findings: [ledgerFinding({ excerpt: 'other text' })],
+    });
+    expect(() => retainedFindings(ledger([cycle(), conflicting]))).toThrow(
+      /conflicting retained finding identity/,
+    );
+  });
+
+  test('the projection is content-bound: a metadata-only mismatch fails closed as a conflict', () => {
+    const changedEvidence = cycle({
+      cycleId: 'c009-aaaaaaaa',
+      findings: [ledgerFinding({ evidence: 'receipt-2' })],
+    });
+    expect(() => retainedFindings(ledger([changedEvidence, cycle()]))).toThrow(
+      /conflicting retained finding identity/,
+    );
   });
 });

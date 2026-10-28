@@ -69,3 +69,44 @@ export function restoreDurableDisposition(finding: Finding, ledger: DevLedgerFil
   }
   return !ambiguous && disposition ? { ...open, ...disposition } : open;
 }
+
+/**
+ * The ledger's retained-finding projection: every ELIGIBLE original witness row — a
+ * non-import cycle finding or a verified completed receipt finding — deduped by id,
+ * with conflicting content for one id failing closed. Each row carries only the
+ * disposition that an eligible witness PRECEDES in ledger order, so a repeated id in a
+ * `review.address:import` cycle can never lend authority to a later original finding.
+ * The raw ledger is never rewritten.
+ */
+export function retainedFindings(ledger: DevLedgerFile): Finding[] {
+  const collected: Finding[] = [
+    ...ledger.records
+      .filter((record) => record.kind === 'cycle')
+      .filter((record) => record.reviewer !== 'review.address:import')
+      .flatMap((record) =>
+        record.findings.map((finding): Finding => ({
+          id: finding.id,
+          source: record.reviewer,
+          severity: finding.severity,
+          text: finding.excerpt ?? '',
+          status: 'open',
+          ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
+          ...(finding.line !== undefined ? { line: finding.line } : {}),
+          ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+          ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+          ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
+        })),
+      ),
+    ...deferredReceiptFindings(
+      ledger.records.filter((record) => record.kind === 'vendor-debt').map((record) => record.debt),
+    ),
+  ];
+  const byId = new Map<string, Finding>();
+  for (const finding of collected) {
+    const previous = byId.get(finding.id);
+    if (previous !== undefined && !sameFindingContent(previous, finding))
+      throw new Error('conflicting retained finding identity');
+    byId.set(finding.id, restoreDurableDisposition(finding, ledger));
+  }
+  return [...byId.values()];
+}
