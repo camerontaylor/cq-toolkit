@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
@@ -60,7 +60,7 @@ test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and
   const f = await fixture();
   try {
     const results = await Promise.all(f.prs.map(f.resolve));
-    expect(new Set(results.map((result) => result.path)).size).toBe(2);
+    expect(new Set(await Promise.all(results.map((result) => realpath(result.path)))).size).toBe(2);
     expect(new Set(results.map((result) => result.branch)).size).toBe(2);
     const entries = await fileWorktreeRegistry(f.registryPath).load();
     expect(Object.keys(entries).sort()).toEqual(['7', '9']);
@@ -80,7 +80,20 @@ test('concurrent PRs sharing a head ref retain distinct exact-head worktrees and
     expect(f.prs[0].headRefOid).not.toBe(f.prs[1].headRefOid);
     // Reopening both through fresh handles must preserve each PR's identity.
     const reused = await Promise.all(f.prs.map(f.resolve));
-    expect(reused).toEqual(results.map((result) => ({ ...result, reused: true })));
+    // Git may canonicalize macOS /var paths to /private/var between creation and reuse.
+    expect(
+      await Promise.all(
+        reused.map(async (result) => ({ ...result, path: await realpath(result.path) })),
+      ),
+    ).toEqual(
+      await Promise.all(
+        results.map(async (result) => ({
+          ...result,
+          path: await realpath(result.path),
+          reused: true,
+        })),
+      ),
+    );
   } finally {
     await f.repo.cleanup();
   }
