@@ -494,17 +494,7 @@ async function prepareWithLifetime(
   const pin = { id, base: state.base, dirtySha256: 'clean-tree' as const };
   const persist = async (debt: DeferredVendorDebt) => {
     signalCheck(lifetime);
-    const refusal: BoundedRefusal = {};
-    const current = await readWorkState(boundedEffects(effects, lifetime, refusal), {
-      target,
-      base: state.base,
-    });
-    if (refusal.error !== undefined) {
-      // `readWorkState` folds thrown faults into `ok:false`; rethrow the bounded view's own outcome
-      // so the caller's exact reason survives and an exhausted budget truncates nonfatally.
-      if (refusal.error instanceof LineageDeadlineExhausted) return;
-      throw refusal.error;
-    }
+    const current = await readWorkState(effects, { target, base: state.base });
     if (
       !current.ok ||
       current.state.branch !== state.branch ||
@@ -756,7 +746,17 @@ async function refreshAuthorizedAncestry(
       if (error instanceof LineageDeadlineExhausted) return;
       throw error;
     }
-    const current = await readWorkState(effects, { target, base: state.base });
+    const refusal: BoundedRefusal = {};
+    const current = await readWorkState(boundedEffects(effects, lifetime, refusal), {
+      target,
+      base: state.base,
+    });
+    if (refusal.error !== undefined) {
+      // `readWorkState` folds thrown faults into `ok:false`; rethrow the bounded view's own outcome
+      // so the caller's exact reason survives and an exhausted budget truncates nonfatally.
+      if (refusal.error instanceof LineageDeadlineExhausted) return;
+      throw refusal.error;
+    }
     if (
       !current.ok ||
       current.state.branch !== state.branch ||
