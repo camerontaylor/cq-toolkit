@@ -695,8 +695,6 @@ test('a superseded older-head predecessor permits a clean run and stays an outst
     scannerFactory: () => async (components) =>
       components.map((component) => ({ component: component.component, hits: [] })),
   })({ repoRoot: f.repo.root });
-  // The guard refuses the clean completion INSIDE the run; the predecessor stays an obligation.
-  expect(result.status, JSON.stringify(result)).toBe('needs-human');
   // RUN acceptance: the completed successor at this head is the authority; the superseded
   // older-head predecessor does not refuse it (its obligation is carried, never credited).
   expect(result.status, JSON.stringify(result)).toBe('ok');
