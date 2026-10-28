@@ -587,15 +587,23 @@ describe('contained grep and glob tools', () => {
       // filenames (the old whole-output cap): ~21k long names, only two
       // matching files. At 5ef68b24 this request denies with SEARCH_LIMIT
       // before the include filter ever runs; the streaming path finds both.
-      await Promise.all(
-        Array.from({ length: 21_000 }, (_, index) =>
-          writeFile(
-            join(workspace, 'bulk', `${'u'.repeat(200)}-${String(index).padStart(6, '0')}.dat`),
-            'unrelated\n',
-            'utf8',
+      // Bound simultaneous file opens: macOS can exhaust descriptors if all
+      // 21,000 writes start together, before the grep behavior is exercised.
+      for (let start = 0; start < 21_000; start += 64) {
+        await Promise.all(
+          Array.from({ length: Math.min(64, 21_000 - start) }, (_, offset) =>
+            writeFile(
+              join(
+                workspace,
+                'bulk',
+                `${'u'.repeat(200)}-${String(start + offset).padStart(6, '0')}.dat`,
+              ),
+              'unrelated\n',
+              'utf8',
+            ),
           ),
-        ),
-      );
+        );
+      }
       await writeFile(join(workspace, 'hit-a.ts'), 'brace-needle\n', 'utf8');
       await writeFile(join(workspace, 'hit-b.tsx'), 'brace-needle\n', 'utf8');
       await writeFile(join(workspace, 'miss.md'), 'brace-needle\n', 'utf8');
