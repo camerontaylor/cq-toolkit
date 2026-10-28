@@ -1054,14 +1054,19 @@ test('PR summary preserves same-taskpath rows across units (issue 631)', async (
   const controller = new AbortController();
   try {
     // Two units (two identical checks = fixers tests-1/tests-2) over one
-    // package, sequential; task IDs are file paths and repeat across units.
+    // package with three failing tasks; task IDs are file paths and repeat
+    // across units.
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
     const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
       checks: unknown[];
     };
     config.checks.push({ ...(config.checks[0] as object) });
     await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
     await git(f.repo, 'add', '-A');
-    await git(f.repo, 'commit', '-m', 'configure a second unit');
+    await git(f.repo, 'commit', '-m', 'configure a second unit and a third task');
     const isUnit2 = (prompt: string) => prompt.includes(join('tests-2', 'scratch-repo'));
     const drivers: DriverFactory = {
       resolve: ({ modelSpec }) => ({
@@ -1070,16 +1075,40 @@ test('PR summary preserves same-taskpath rows across units (issue 631)', async (
         driver: {
           run: async (request, options) => {
             if (!request.workspace) throw new Error('fixture requires a workspace');
-            // Unit tests-1: fix a, but leave b failing with a retained
-            // patch (branch-bearing failure). Unit tests-2: fix a (so the
-            // unit commits a marker and is assembled), then abort at b's
-            // first dispatch — b is never dispatched and refines to a
-            // branchless cancelled row with the SAME task ID as unit
-            // tests-1's branch-bearing b.
             const line = request.prompt.split('\n').find((text) => text.startsWith('Task: '));
             const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            const isUnit1BorC =
+              !isUnit2(request.prompt) &&
+              task.files.some((file) => file.includes('b.test') || file.includes('c.test'));
+            // Unit tests-1: a fixes and commits (the unit's marker); b and c
+            // fail on every attempt with retained patches — the branch-
+            // bearing twins of unit tests-2's same taskpaths.
+            if (isUnit1BorC) {
+              for (const file of task.files)
+                await writeFile(
+                  join(request.workspace.path, file),
+                  'module.exports = { actual: 1, expected: 3 };\n',
+                );
+              return {
+                stopReason: 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'broken-test',
+                  summary: 'wrong fix',
+                  confidence: 0.8,
+                },
+              };
+            }
+            // Unit tests-2: a fixes and commits (the unit's marker). At b's
+            // FEEDBACK invocation — after b's edit, before b's validation —
+            // the enclosing cancel trips: b records its aborted attempt and
+            // escalates (branch-bearing), and the loop then reaches task c
+            // at its top with the cancel observed, so c carries NO attempt
+            // and refines to a BRANCHLESS cancelled row: the same taskpath
+            // as unit tests-1's branch-bearing c.
             const isB = task.files.some((file) => file.includes('b.test'));
-            if (isB && isUnit2(request.prompt)) {
+            if (isB && isUnit2(request.prompt) && request.prompt.includes('Prior output:')) {
               controller.abort();
               const signal = options?.signal;
               if (!signal) throw new Error('missing inner worker signal');
@@ -1090,24 +1119,9 @@ test('PR summary preserves same-taskpath rows across units (issue 631)', async (
                 wallMs: 0,
               };
             }
-            if (isUnit2(request.prompt) || !isB)
-              return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
-            // Unit tests-1, task b: fail with a retained patch.
-            for (const file of task.files)
-              await writeFile(
-                join(request.workspace.path, file),
-                'module.exports = { actual: 1, expected: 3 };\n',
-              );
-            return {
-              stopReason: 'complete',
-              denials: [],
-              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-              structuredOutput: {
-                outcome: 'broken-test',
-                summary: 'wrong fix',
-                confidence: 0.8,
-              },
-            };
+            // Everything else (unit tests-1 a; unit tests-2 a and b edit)
+            // fixes truthfully.
+            return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
           },
         },
       }),
@@ -1133,23 +1147,46 @@ test('PR summary preserves same-taskpath rows across units (issue 631)', async (
     })({ ...input(f), pr: true, pushFailed: true });
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
     const report = reportOf(result);
-    // Both units assembled (both committed a marker for task a).
+    // Both units assembled (both committed task a's marker).
     expect(bodies).toHaveLength(2);
-    // The same taskpath appears in both units: unit tests-1's b carries a
-    // retained branch, unit tests-2's b is a branchless cancelled row. Each
-    // unit's body must keep ITS rightful row — the unit-blind predecessor
-    // filter dropped tests-2's branchless row because tests-1's b has a
-    // retained attempt under the same task ID.
-    const cancelled = report.planned.find(
-      (row) => row.outcome === 'cancelled' && row.task.id === 'cases/b.test.cjs',
+    // The same taskpath cases/c.test.cjs exists in both units: unit
+    // tests-1's c failed on every attempt with retained branches
+    // (branch-bearing, unresolved), while unit tests-2's c sits at the
+    // loop top after the cancel — no attempts, refined to cancelled
+    // (branchless). The unit-blind predecessor filter dropped tests-2's
+    // branchless c row because tests-1's c task matches on task.id alone
+    // with a retained failed attempt.
+    const branchless = report.planned.find(
+      (row) =>
+        row.outcome === 'cancelled' &&
+        row.unit === 'tests-2/scratch-repo' &&
+        row.task.id === 'cases/c.test.cjs',
     );
-    expect(cancelled?.unit).toBe('tests-2/scratch-repo');
+    if (branchless === undefined) throw new Error('no branchless cancelled row for tests-2 c');
+    expect(branchless.failures.every((failure) => !('branch' in failure))).toBe(true);
+    // The branch-bearing twins keep their history: unit tests-1's b and c
+    // rows carry retained failed-attempt evidence.
+    const retained = report.planned.filter(
+      (row) => row.unit === 'tests-1/scratch-repo' && row.outcome !== 'fixed',
+    );
+    expect(retained.map((row) => row.task.id).toSorted()).toEqual([
+      'cases/b.test.cjs',
+      'cases/c.test.cjs',
+    ]);
+    for (const row of retained)
+      expect(row.failures.some((failure) => 'branch' in failure)).toBe(true);
+    // Each assembled body keeps ITS rightful rows: tests-1's body carries
+    // the retained-branch b/c lines; tests-2's body carries its escalated
+    // b line and the branchless cancelled c line; neither leaks.
     const unit1Body = bodies.find((body) => body.includes('failed/tests-1/')) ?? '';
     const unit2Body = bodies.find((body) => body !== unit1Body) ?? '';
-    expect(unit1Body).toContain('`cases/b.test.cjs`');
+    expect(unit1Body).toContain('`cases/c.test.cjs` — escalated-to-human;');
     expect(unit1Body).toContain('local branch `cq/fixture/failed/tests-1/');
-    expect(unit2Body).toContain('`cases/b.test.cjs` — cancelled;');
-    expect(unit2Body).not.toContain('failed/');
+    expect(unit2Body).toContain('`cases/b.test.cjs` — escalated-to-human;');
+    expect(unit2Body).toContain('`cases/c.test.cjs` — cancelled;');
+    expect(unit2Body).toContain('local branch `cq/fixture/failed/tests-2/');
+    expect(unit1Body).not.toContain('— cancelled;');
+    expect(unit2Body).not.toContain('`cases/c.test.cjs` — escalated-to-human;');
     expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
   } finally {
     await rm(f.root, { recursive: true, force: true });
