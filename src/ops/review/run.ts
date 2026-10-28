@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -18,11 +19,12 @@ import {
 } from '../dev/internal/deferredLedger.js';
 import {
   hasDeferredReviewSources,
+  verifiedCompletedDebt,
   deferredReceiptFindings,
   type DeferredVendorDebt,
 } from '../dev/internal/deferredReview.js';
 import type { DeferredQueueClient } from './internal/queueProtocol.js';
-import { DEV_LEDGER_VERSION, type DevCycleRecord } from '../dev/record.js';
+import { DEV_LEDGER_VERSION, type DevCycleRecord, type DevLedgerFile } from '../dev/record.js';
 import {
   makeGitleaksDefaultsScanner,
   makeRepoDiffScanner,
@@ -764,15 +766,57 @@ export function makeReviewRun(
       let deferredComplete = false;
       if (deferredVendorDebt && !stopped()) {
         try {
-          deferredVendorDebt = await loadCurrentDeferredVendorDebt(
-            effects,
+          const beforeRefresh = structuredClone(effects.openLedger(state.branch).load());
+          // Correlate durable bytes with this loader's mutation, including a
+          // successful write whose return fails; never bless an external append.
+          let requestedLedger: DevLedgerFile | undefined;
+          const refreshed = await loadCurrentDeferredVendorDebt(
+            {
+              ...effects,
+              openLedger: (branch) => {
+                const store = effects.openLedger(branch);
+                return {
+                  ...store,
+                  mutate: (update) =>
+                    store.mutate((latest) => {
+                      const change = update(latest);
+                      requestedLedger = structuredClone(change.ledger);
+                      return change;
+                    }),
+                };
+              },
+            },
             target,
             state,
-            effects.openLedger(state.branch).load(),
+            beforeRefresh,
             deps.queueClient,
             deadline.signal,
             { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+          ).then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({ ok: false as const, error }),
           );
+          const afterRefresh = effects.openLedger(state.branch).load();
+          if (!isDeepStrictEqual(beforeRefresh, afterRefresh)) {
+            const appended = afterRefresh.records.at(-1);
+            if (
+              !requestedLedger ||
+              !isDeepStrictEqual(requestedLedger, afterRefresh) ||
+              !isDeepStrictEqual(
+                { ...afterRefresh, records: afterRefresh.records.slice(0, -1) },
+                beforeRefresh,
+              ) ||
+              appended?.kind !== 'vendor-debt' ||
+              !isDeepStrictEqual(appended.debt.reference, deferredVendorDebt.reference) ||
+              !verifiedCompletedDebt(appended.debt)
+            )
+              throw new Error('final queue refresh changed unrecognized ledger bytes');
+            if (!deps.noteLedgerWrite)
+              throw new Error('final queue settlement requires ledger ownership notification');
+            await deps.noteLedgerWrite(state.branch, input.repoRoot);
+          }
+          if (!refreshed.ok) throw refreshed.error;
+          deferredVendorDebt = refreshed.value;
           const imported = deferredReceiptFindings(
             effects
               .openLedger(state.branch)
