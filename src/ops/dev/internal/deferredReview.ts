@@ -10,6 +10,7 @@ import {
 } from '../../review/findings.js';
 import { QueueEvidenceSchema, type QueueEvidence } from '../../review/internal/queueEvidence.js';
 import {
+  QueueBranch,
   QueueSha,
   QueueToken,
   QueueReferenceSchema,
@@ -93,7 +94,7 @@ export const VendorOutageOriginSchema = z
     cycleId: QueueToken,
     head: QueueSha,
     base: QueueSha,
-    target: QueueToken,
+    target: QueueBranch,
     scope: z.literal('full'),
     dirtySha256: z.literal('clean-tree'),
     failure: VendorFailureProvenanceSchema,

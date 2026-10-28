@@ -18,6 +18,15 @@ MAX_BYTES = 8192
 MAX_RECEIPT_BYTES = 64 * 1024 * 1024
 TOKEN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}"
 SHA = r"[0-9a-f]{40}"
+# A deferred target is a git BRANCH, not a request token. This is the Python mirror of
+# src/shared/refname.ts (the canonical grammar shared with the dev ledger and the TS
+# wire/origin schemas); queue_transport.py cannot import it, so the rules are restated
+# here verbatim and pinned to the shared vector table by test_queue_transport.py.
+# The space rule is explicit (C0 + DEL + literal U+0020), never a `\s` class: Python's
+# Unicode `\s` matches U+0085 while JavaScript's matches U+FEFF, so a shared `\s`
+# would let one implementation accept a target the other rejects. Neither U+0085 nor
+# U+FEFF is forbidden.
+REFNAME_FORBIDDEN = re.compile(r"[~^:?*\[\]\\]")
 READ = {"status", "report"}
 WRITE = {"enqueue", "bind", "cancel", "ack"}
 
@@ -95,6 +104,28 @@ def validate_policy(policy):
     return policy
 
 
+def branch_fault(branch):
+    """Mirror of src/shared/refname.ts branchPathFault; None means a valid branch."""
+    if not isinstance(branch, str):
+        return "branch must be a string"
+    if branch == "" or branch.startswith("/") or branch.endswith("/"):
+        return "branch must be a non-empty relative refname"
+    if branch == "@":
+        return "branch is the single character '@'"
+    for char in branch:
+        if ord(char) < 0x20 or ord(char) == 0x7f or ord(char) == 0x20:
+            return "branch contains a space or control character"
+    if branch.endswith("."):
+        return "branch must not end with '.'"
+    if "@{" in branch:
+        return "branch contains the forbidden '@{' sequence"
+    for segment in branch.split("/"):
+        if (segment == "" or segment.startswith(".") or segment.endswith(".lock")
+                or ".." in segment or REFNAME_FORBIDDEN.search(segment)):
+            return "branch is not a path-safe refname"
+    return None
+
+
 def binding(value):
     if not isinstance(value, dict):
         raise ValueError("invalid binding")
@@ -105,7 +136,8 @@ def binding(value):
     if not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value["repo"]) or value["targetSelector"] not in receipts.SELECTORS:
         raise ValueError("invalid repository or target selector")
     if value["kind"] == "deferred-author":
-        if not all(_match(TOKEN, value[k]) for k in ("producer", "target")) or not _match(SHA, value["head"]):
+        if (not _match(TOKEN, value["producer"]) or not _match(SHA, value["head"])
+                or branch_fault(value["target"]) is not None):
             raise ValueError("invalid producer/head/target")
     elif type(value["pr"]) is not int or value["pr"] <= 0 or not _match(SHA, value["mergeSha"]):
         raise ValueError("invalid merged source")

@@ -1,7 +1,16 @@
 import { z } from 'zod';
+import { branchPathFault } from '../../../shared/refname.js';
 
 /** Queue capability is separate from author-v1/v2 admission and never dispatches. */
 export const QueueToken = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/);
+/**
+ * A deferred target is a git BRANCH, not a request token: reuse the shared refname
+ * grammar instead of widening QueueToken (which must stay strict for request ids,
+ * principals, codes and item ids).
+ */
+export const QueueBranch = z
+  .string()
+  .refine((branch) => branchPathFault(branch) === null, 'target must be a git branch refname');
 export const QueueSha = z.string().regex(/^[0-9a-f]{40}$/);
 export const QueueDigest = z.string().regex(/^[0-9a-f]{64}$/);
 export const QueueRepo = z
@@ -14,7 +23,7 @@ export const DeferredBindingSchema = z
     repo: QueueRepo,
     producer: QueueToken,
     head: QueueSha,
-    target: QueueToken,
+    target: QueueBranch,
     targetSelector: QueueTarget,
   })
   .strict();
