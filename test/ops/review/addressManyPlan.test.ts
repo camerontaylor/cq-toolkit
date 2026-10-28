@@ -79,10 +79,15 @@ const record = (head: string, findings: readonly Finding[] = []): FindingsRecord
 const usage = (input = 0, output = 0) => ({ input, output, cacheRead: 0, cacheWrite: 0 });
 
 function makeReport(over: Partial<ReviewAddressReport> = {}): ReviewAddressReport {
+  const rounds = over.rounds ?? [{ round: 1, record: record(HEAD_A), runs: [] }];
+  const firstHead = rounds[0]?.record.head;
   return {
     source: 'review',
     reportPath: 'review-address-report.json',
-    rounds: [{ round: 1, record: record(HEAD_A), runs: [] }],
+    rounds,
+    // A real producer stamps the witness at admission; fixtures default it to
+    // the first reviewed head and override it where provenance is the subject.
+    ...(firstHead === undefined ? {} : { admissionHead: firstHead }),
     findings: [],
     openBlocking: [],
     fixes: [],
@@ -95,6 +100,13 @@ function makeReport(over: Partial<ReviewAddressReport> = {}): ReviewAddressRepor
     ...over,
   };
 }
+
+/** The same report with no admission witness (a pre-admission refusal). */
+const withoutAdmissionHead = (report: ReviewAddressReport): ReviewAddressReport => {
+  const copy = { ...report };
+  delete copy.admissionHead;
+  return copy;
+};
 
 /** The producer's real success shape: the report rides in `value`, not `report`. */
 const okResult = (report: ReviewAddressReport): ReviewAddressResult => ({
@@ -847,6 +859,59 @@ describe('aggregateAddressMany truth', () => {
     expect(result.aggregate.findings.map((entry) => entry.finding.id)).toEqual(['F-5', 'F-6']);
     expect(result.aggregate.totals).toMatchObject({ settledOk: 1, fixesPerRun: 2 });
     expect(result.aggregate.status).toBe('ok');
+  });
+
+  test('trusts the immutable admission witness, not the refreshed first-round record', () => {
+    // A successful fix/re-review overwrites rounds[0].record with the refreshed
+    // head in the real producer. The witness keeps the admitted head, so the
+    // report stays attributable to the PR the caller dispatched.
+    const report = makeReport({
+      rounds: [{ round: 1, record: record(HEAD_B), runs: [] }],
+      admissionHead: HEAD_A,
+      findings: [finding('F-7')],
+      fixesPerRun: 1,
+      verifiedHead: HEAD_B,
+    });
+    const result = aggregateAddressMany({
+      repo: REPO,
+      budget: cleanBudget(),
+      candidates: [candidates[0]!],
+      outcomes: [{ number: 5, headOid: HEAD_A, result: okResult(report) }],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.aggregate.rows[0]).toMatchObject({
+      status: 'settled-ok',
+      attribution: 'trusted',
+      fixesPerRun: 1,
+      publication: 'unknown',
+    });
+    expect(result.aggregate.rows[0]!.scope.headOid).toBe(HEAD_A);
+    expect(result.aggregate.findings.map((entry) => entry.finding.id)).toEqual(['F-7']);
+    expect(result.aggregate.totals.fixesPerRun).toBe(1);
+
+    // The mirror case: a matching first-round record with no witness is still
+    // not success — rounds are never a fallback.
+    const unwitnessed = aggregateAddressMany({
+      repo: REPO,
+      budget: cleanBudget(),
+      candidates: [candidates[0]!],
+      outcomes: [
+        {
+          number: 5,
+          headOid: HEAD_A,
+          result: okResult(withoutAdmissionHead(makeReport())),
+        },
+      ],
+    });
+    expect(unwitnessed.ok).toBe(true);
+    if (!unwitnessed.ok) return;
+    expect(unwitnessed.aggregate.rows[0]).toMatchObject({
+      status: 'unattributed',
+      attribution: 'unattributed',
+      fixesPerRun: 0,
+    });
+    expect(unwitnessed.aggregate.status).toBe('needs-human');
   });
 
   test('classifies a structured budget stop on a needs-human leg as budget-stopped', () => {

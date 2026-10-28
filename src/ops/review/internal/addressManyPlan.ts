@@ -33,8 +33,10 @@
 //     and owner contract.
 //   - No aggregate row can become success without trusted report-head evidence;
 //     "no attributable head" is a non-success, including a report with zero
-//     rounds. That deliberately rejects an otherwise-good early report rather
-//     than inventing attribution.
+//     rounds. The evidence is the producer's immutable `admissionHead` witness
+//     only: `verifiedHead` advances and `rounds[].record.head` is mutable, so
+//     neither is a fallback. That deliberately rejects an otherwise-good early
+//     report rather than inventing attribution.
 //   - A per-PR result keeps the producer's asymmetric public shape: a successful
 //     (`ok`) result carries its report in `value`, a non-ok result in `report`.
 //     Aggregation reads exactly that, and a `needs-human` leg whose structured
@@ -861,14 +863,18 @@ export function aggregateAddressMany(input: {
     // fixes per run and vendor debt.
     const report: ReviewAddressReport | undefined =
       result.status === 'ok' ? result.value : result.report;
-    // The ONLY trusted attribution evidence: the first reviewed head in the
-    // report. Zero rounds or a different head is "unattributed", never success,
-    // and the original result is retained verbatim either way.
-    const reviewedHead = report?.rounds[0]?.record.head;
+    // The ONLY trusted attribution evidence: the producer's immutable admission
+    // witness. It is captured at the first successful admission and survives a
+    // later refusal; `verifiedHead` advances with fix commits and
+    // `rounds[].record.head` is overwritten by a successful re-review, so
+    // neither is a substitute and neither is used as a fallback. A report with
+    // no witness (pre-admission refusal, or the injected-disposition bypass) is
+    // unattributed, never success.
+    const admittedHead = report?.admissionHead;
     const attribution: AddressManyRow['attribution'] =
       report === undefined
         ? 'absent'
-        : reviewedHead === candidate.headOid
+        : admittedHead === candidate.headOid
           ? 'trusted'
           : 'unattributed';
     const trusted = attribution === 'trusted' && report !== undefined;
@@ -902,7 +908,7 @@ export function aggregateAddressMany(input: {
       reasons.push(
         report === undefined
           ? `#${candidate.number} returned ok without a report; no head evidence, not success`
-          : `#${candidate.number} report head ${String(reviewedHead)} is not the admitted head; not success`,
+          : `#${candidate.number} report admission head ${String(admittedHead)} is not the admitted head; not success`,
       );
     } else if (status === 'settled-needs-human') totals.needsHuman++;
     else if (status === 'settled-budget-exhausted') {

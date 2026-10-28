@@ -84,10 +84,16 @@ self-contradictory is a refusal: a roll-up over a subset could otherwise report
   as the budget-stopped outcome (never success, never an ordinary needs-human
   refusal), with its original result and reason preserved; a bare
   `budget-exhausted` result maps to the same outcome.
-- The only trusted head evidence is the report's first reviewed head equalling
-  the admitted head. A missing report, a mismatched head or zero rounds is
-  `unattributed`, which is never success. This deliberately rejects an
-  otherwise-good early report rather than inventing attribution.
+- The only trusted head evidence is the producer's immutable
+  `report.admissionHead` witness equalling the admitted head. `verifiedHead`
+  advances with verified fix commits and `rounds[].record.head` is
+  **overwritten** by a successful re-review, so neither is evidence and neither
+  is a fallback. A missing report, a missing witness or a mismatch is
+  `unattributed`, which is never success. A report that admitted earlier work
+  keeps its witness through a later refusal; a refusal _before_ admission has
+  none, and the injected-disposition bypass never fabricates one. This
+  deliberately rejects an otherwise-good early report rather than inventing
+  attribution.
 - Findings are scoped by `repo`/`PR`/head and are never deduplicated, globally
   or within one PR: identical ids in two PRs both survive.
 - `fixesPerRun` is counted only from a head-attributed report; the original
