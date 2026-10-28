@@ -1777,7 +1777,9 @@ test('an in-flight caller abort resolved by the adapter keeps the exact caller r
   const client = {
     ...terminal.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
-      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
     report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
       const evidence = await terminal.client.report(ref, root);
       imported = true;
@@ -1798,19 +1800,29 @@ test('an in-flight caller abort resolved by the adapter keeps the exact caller r
     },
   };
   await expect(
-    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
   ).rejects.toThrow(reason);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
 
 test('an in-flight invocation deadline resolved as a timeout truncates nonfatally', async () => {
-  const { f, predecessor, terminal, successorStatus, successor, read } = await successorWithPendingAncestor();
+  const { f, predecessor, terminal, successorStatus, successor, read } =
+    await successorWithPendingAncestor();
   let imported = false;
   let exhausted = false;
   const client = {
     ...terminal.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
-      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
     report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
       const evidence = await terminal.client.report(ref, root);
       imported = true;
@@ -1849,7 +1861,9 @@ test('an unrelated identity read failure remains hard', async () => {
   const client = {
     ...terminal.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
-      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
     report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
       const evidence = await terminal.client.report(ref, root);
       imported = true;
@@ -1861,7 +1875,8 @@ test('an unrelated identity read failure remains hard', async () => {
     ...f.effects,
     runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
       // A timeout result while the budget REMAINS is not this invocation's deadline.
-      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) return adapterTimedOut();
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref'))
+        return adapterTimedOut();
       return f.effects.runCommand(...call);
     },
   };
