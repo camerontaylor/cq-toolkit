@@ -1542,8 +1542,7 @@ test('a vendor-blocked, enqueued ancestor stays ordinary pending vendor work', a
 });
 
 test('a caller abort during the post-report identity read prevents the ancestor append', async () => {
-  const { f, predecessor, successorStatus, read } = await successorWithPendingAncestor();
-  const terminal = terminalReport(f);
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
   const controller = new AbortController();
   const reason = new Error('caller cancelled during the post-report identity read');
   let imported = false;
@@ -1577,8 +1576,7 @@ test('a caller abort during the post-report identity read prevents the ancestor 
 });
 
 test('a caller abort after the final ancestor settlement still propagates from lineage exhaustion', async () => {
-  const { f, predecessor, successorStatus, read } = await successorWithPendingAncestor();
-  const terminal = terminalReport(f);
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
   const controller = new AbortController();
   const reason = new Error('caller cancelled after the final settlement');
   const client = {
