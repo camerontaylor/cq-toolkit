@@ -729,8 +729,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             )
               throw new Error('queue evidence changed or digest mismatch');
             parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
+            if (!persistedBookkeeping)
+              throw new Error('durable queue evidence ownership unavailable');
             bookkeeping.set(expected, hash);
             bookkeepingRevision++;
+            // The caller sends ack immediately after this observer returns. Commit
+            // ownership inline in the FIFO slot, before that irreversible boundary.
+            try {
+              await persistedBookkeeping.persist();
+            } catch (error) {
+              bookkeepingTampered = true;
+              throw error;
+            }
           };
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({

@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
+import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import { expect, test } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
@@ -603,8 +605,8 @@ function ownershipReceipt() {
   });
 }
 
-test.each(['exact', 'unknown', 'wrong-digest', 'changed-known'] as const)(
-  'unignored queue evidence admits only registered exact bytes: %s',
+test.each(['exact', 'wrong-digest'] as const)(
+  'local queue evidence without durable ownership refuses acknowledgement: %s',
   async (mode) => {
     const f = await fixture(false);
     try {
@@ -624,21 +626,151 @@ test.each(['exact', 'unknown', 'wrong-digest', 'changed-known'] as const)(
               receiptId: mode === 'wrong-digest' ? 'e'.repeat(64) : id,
               path,
             });
-            if (mode === 'unknown') await writeFile(join(f.repo.root, '.cq/unknown'), 'unknown');
-            if (mode === 'changed-known') {
-              await writeFile(path, bytes + '\n');
-              await request.onEvidenceImported?.({ receiptId: id, path });
-            }
           }
           return f.resolver(request);
         },
       })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir });
-      if (mode === 'exact') {
-        expect(result.status, JSON.stringify(result)).toBe('ok');
-        expect(result.status === 'ok' && result.value.deferredVendorDebt?.vendorCompleted).toBe(
-          false,
+      // Local mode has no durable private ownership store. Even an exact
+      // import must refuse before the caller can acknowledge its consumption.
+      expect(result.status).toBe('needs-human');
+      if (mode === 'exact')
+        expect(result.status === 'needs-human' && result.reason).toContain(
+          'durable queue evidence ownership unavailable',
         );
-      } else expect(result.status).toBe('needs-human');
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
+test.each(['ack-interrupted', 'persist-refused', 'changed-known'] as const)(
+  'PR import ownership survives interruption before enclosing action settles: %s',
+  async (mode) => {
+    const f = await fixture(false);
+    try {
+      const head = f.record().head;
+      f.repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+      const namespace = createHash('sha256')
+        .update(
+          JSON.stringify([
+            'owner',
+            'repo',
+            7,
+            'merge-queue',
+            null,
+            'owner/repo',
+            'feature/x',
+            'author',
+          ]),
+        )
+        .digest('hex');
+      const ownershipPath = join(
+        await realpath(f.repo.root),
+        '.git/cq-review-address',
+        namespace,
+        'bookkeeping.json',
+      );
+      const ok = (value: unknown): GhResult => ({
+        code: 0,
+        stdout: typeof value === 'string' ? value : JSON.stringify(value),
+        stderr: '',
+      });
+      const gh: GhFn = async (args) => {
+        if (args[0] === 'repo') return ok({ nameWithOwner: 'owner/repo' });
+        if (args[0] === 'pr')
+          return ok({
+            headRefName: 'feature/x',
+            headRepositoryOwner: { login: 'owner' },
+            headRepository: { name: 'repo' },
+          });
+        if (args.includes('user')) return ok('author');
+        if (args.includes('graphql'))
+          return ok({
+            data: {
+              repository: {
+                pullRequest: {
+                  author: { login: 'author' },
+                  headRefName: 'feature/x',
+                  headRefOid: head,
+                  reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+                  reviews: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+                },
+              },
+            },
+          });
+        if (args.some((arg) => arg === 'repos/owner/repo/pulls/7'))
+          return ok({ head: { sha: head } });
+        if (args.some((arg) => arg.includes('/comments') || arg.includes('/reviews')))
+          return ok([]);
+        throw new Error('unexpected offline forge operation');
+      };
+      let resumedAfterObserver = false;
+      let evidenceRoot: string | undefined;
+      let evidencePath: string | undefined;
+      const result = await makeReviewAddress({
+        config,
+        gh,
+        workerFactory: (deps) => ({
+          escalation: createEscalationState,
+          fix: async () => {
+            throw new Error('no findings should dispatch');
+          },
+          withVerifiedHead: async (action) => {
+            await deps.prepareBookkeeping?.();
+            return action(head);
+          },
+        }),
+        review: async (request) => ({
+          status: 'needs-human',
+          reason: 'pending vendor debt',
+          report: {
+            ...f.record(),
+            branch: f.repo.git('-C', request.repoRoot, 'branch', '--show-current').trim(),
+            deferredVendorDebt: f.debt,
+          },
+        }),
+        resolveDeferredVendorContext: async (request) => {
+          evidenceRoot = await realpath(request.repoRoot);
+          const bytes = ownershipReceipt();
+          const id = createHash('sha256').update(bytes).digest('hex');
+          evidencePath = join(evidenceRoot, '.cq/queue-evidence', id + '.json');
+          await mkdir(join(evidenceRoot, '.cq/queue-evidence'), { recursive: true });
+          await writeFile(evidencePath, bytes);
+          if (mode === 'persist-refused') await writeFile(ownershipPath, 'external change');
+          if (!request.onEvidenceImported) throw new Error('observer missing');
+          await request.onEvidenceImported({ receiptId: id, path: evidencePath });
+          // This is the exact point at which QueueClient may send ack. Use a
+          // new reader, with no in-memory fingerprints from the running engine.
+          const fresh = makeAddressBookkeepingReceipt({
+            path: ownershipPath,
+            identity: namespace,
+            fingerprints: new Map(),
+            git: async (root, args) => f.repo.git('-C', root, ...args).trim(),
+          });
+          expect(await fresh.ownedFiles()).toContain(evidencePath);
+          await fresh.prepare(evidenceRoot);
+          resumedAfterObserver = true;
+          if (mode === 'changed-known') {
+            await writeFile(evidencePath, bytes + '\n');
+            await request.onEvidenceImported({ receiptId: id, path: evidencePath });
+          }
+          // Simulate an ack transport failure before context/outer FIFO return.
+          throw new Error('ack interrupted');
+        },
+      })({ repoRoot: f.repo.root, source: 'pr:7', journalDir: f.journalDir });
+      expect(result.status, JSON.stringify(result)).toBe('needs-human');
+      expect(resumedAfterObserver).toBe(mode !== 'persist-refused');
+      if (mode === 'ack-interrupted') {
+        const bytes = JSON.parse(await readFile(ownershipPath, 'utf8')) as {
+          files: Array<{ path: string; sha256: string }>;
+        };
+        expect(evidenceRoot).toBeDefined();
+        expect(evidencePath).toBeDefined();
+        expect(bytes.files).toContainEqual({
+          path: relative(evidenceRoot!, evidencePath!),
+          sha256: createHash('sha256').update(ownershipReceipt()).digest('hex'),
+        });
+      }
     } finally {
       await f.cleanup();
     }

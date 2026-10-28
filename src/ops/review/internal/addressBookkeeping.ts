@@ -214,9 +214,16 @@ export function makeAddressBookkeepingReceipt(deps: {
       const handle = await open(temp, 'wx', 0o600);
       try {
         await handle.writeFile(bytes);
+        await handle.sync();
         await handle.close();
         await assertUnchanged();
         await rename(temp, deps.path);
+        const directory = await open(dirname(deps.path), 'r');
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
         receiptHash = digest(Buffer.from(bytes));
       } finally {
         // Cancellation never interrupts receipt settlement or owned-temp cleanup.
