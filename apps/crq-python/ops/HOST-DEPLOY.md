@@ -131,6 +131,109 @@ No spool probes are authorized by this document. Any new probe requires separate
 recorded owner authorization. Retain the heartbeat endpoint confirmation from the
 old handover as evidence, without inventing new live evidence.
 
+## Controller wrapper (Q7, #395) — proposed, offline-tested only
+
+`ops/deploy-controller.py` wraps (never replaces) the helper's `switch` with
+observable, fail-stopped steps. It is not deployed and grants no new
+authority: the owner approval, tag and target requirements of this document
+are unchanged, and the controller starts nothing.
+
+One JSON artifact on stdout, narration on stderr; exit 0 switched/healthy,
+1 health observation failed, 2 refused before helper entry (deployment surfaces
+unchanged), 3 `recovery_required` (mutation occurred or cannot be excluded).
+Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
+never claims the switch was undone. The controller lock
+is `state/controller.lock`, distinct from the runner's tick lock.
+
+```sh
+# Preflight, drain, helper switch, preservation, journal:
+python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
+  --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
+# After the owner starts units (this document, step 6):
+python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
+  --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  health --interval-seconds 1500
+```
+
+Ordering and guarantees:
+
+1. **Preflight** — full 40-hex target SHA, annotated `crq-runner/` tag peeling
+   to it; prior HEAD/config digests retained; reachability, drift and
+   stopped-unit checks are the helper's own (they run inside its `switch`).
+   The owner must provision a durable, private mode-0700 record directory before
+   invoking the controller. The controller never creates it or missing ancestors;
+   absence, wrong type/mode and ambiguous prior annotated tags refuse before
+   helper entry. A private mode-0600 recovery intent is atomically written and its
+   file and existing record directory synced before any helper call.
+2. **Drain** — every queue item with a recorded run is probed with the
+   runner's own fail-closed `crq.run_liveness` from the same checkout.
+   `alive` or `ambiguous` blocks the controller; it never signals or kills a
+   process (exact owned-PID drain means: verified-none, not a sweep). Drain
+   live/ambiguous work through the documented author-recovery path first.
+3. **Switch** — the helper's `switch` runs unchanged, under its tick lock and
+   drift fence.
+4. **Preservation** — `state/queue.json` (items, starts, author_requests,
+   author_observations) and `state/heartbeat.json` must be byte-identical
+   across the switch; any difference after helper entry requires owner recovery
+   with the affected file names. State is never restored, migrated or rewritten
+   by the controller.
+5. **Rollback compatibility** — recorded before and after: automatic
+   rollback is permitted only when the queue carries **no explicit
+   `schema_version` marker at all** (presence is recorded as the boolean
+   `schema_marker_present`; the marker's VALUE is never interpreted, so even
+   an explicit `"unmarked"` or unknown string is an explicit marker), no
+   `author_*` state keys, and a readable queue — the one shape the recorded
+   prior target is known to read. A present marker of any value, `author_*`
+   keys, an unreadable queue, a missing/unchecked record, or a malformed
+   presence field (only literal boolean `false` proves absence) disables
+   automatic rollback — fail stopped with an explicit operator recovery
+   action, never an old-snapshot restore or an incompatible binary start.
+6. **Health** — `health` requires the runner's completion heartbeat to
+   advance for TWO consecutive observations (strictly increasing UTC
+   timestamps; one slot seen twice is not two slots). `crq.py` assigns and
+   saves `queue.last_tick` before status publication and replaces the
+   completion heartbeat (`WATCHDOG_HOME/heartbeat.json`, resolved as
+   `$XDG_STATE_HOME/crq` or `~/.local/state/crq`) only afterward, so
+   advancing queue saves are intermediate evidence and never count. The
+   heartbeat must name this checkout's `apps/crq-python` runner root and a
+   strict UTC `YYYY-MM-DDTHH:MM:SSZ` tick; a missing, unreadable,
+   malformed or other-checkout heartbeat refuses assessment. Up to ten
+   `state/runs/*/meta.json` receipts are sampled for readability. Tick
+   advancement, service health and receipt readability are distinct
+   checks; advancement alone is not acceptance.
+
+The deploy journal (schema 1) is the only validated rollback input: it
+records `prior_head`, the prior target's own annotated approval tag
+(`prior_tag`), and the compatibility evidence at the top level. When no
+annotated tag names the prior target, `prior_tag` is recorded null and the
+rollback refuses (the owner approves and supplies the artifact); rollback
+never guesses a tag. A malformed recorded `run` on a queue item blocks the
+drain as ambiguous: only a genuinely absent/unstarted run (no `run` key or
+the runner's explicit `run: null` marker) is skipped, so no switch proceeds
+without an absence proof for every recorded run.
+
+Schema-1 records add `transaction_id` and `outcome` without changing legacy
+completed journal inputs. Before entering the helper, a `deploy_pending` or
+`rollback_pending` intent retains the prior HEAD/config/preserved-state digests,
+prior approval tag and intended target/tag. Once the helper is entered, even a
+config-only partial failure with unchanged HEAD requires owner recovery. Any
+helper, preservation, compatibility or completion-write exception produces
+`recovery_required`/exit 3 with that identity. The controller attempts to replace
+the intent with a recovery record; `record_persisted: false` plus
+`record_write_error` explicitly reports a failed final update, retaining the
+original intent when atomic replacement fails. Keep the stdout receipt privately
+if record storage is unavailable. Do not rerun blindly, restore queue snapshots,
+or infer automatic rollback permission from a pending/recovery receipt.
+
+A completed journal is written only after the checks and durable completion
+write succeed. Pending/recovery/unknown outcomes are not rollback inputs;
+verified legacy schema-1 completed deploy journals remain accepted. A journal
+entry (mode 0600, private record directory) records every completed deploy or
+rollback. Rollback reuses the same helper fence with the
+recorded prior target and prior tag; a fresh-target switch to a different
+commit is a new deployment, not a rollback.
+
 ## Subsequent deploy and rollback
 
 Stop timers/records and wait for tick inactivity before invoking `switch`.
