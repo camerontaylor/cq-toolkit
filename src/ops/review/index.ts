@@ -8,6 +8,27 @@
 // FetchedReviewState (frozen five-word ThreadVerdict vocabulary), backed by
 // the R3 config site ./classify.config.js, and ./planReviewBatch.js groups
 // actionable items into fixer batches (per-item isolation default, I6).
+export {
+  makeQueueOps,
+  makeQueueClient,
+  makeConfiguredQueueClient,
+  QueueUnsupported,
+  QueueConfigurationError,
+  sshQueueTransport,
+  importQueueEvidence,
+  readQueueEvidence,
+} from './queue.js';
+export type {
+  DeferredAuthorBinding,
+  DeferredQueueClient,
+  QueueBinding,
+  QueueReference,
+  QueueBindInput,
+  QueueStatus,
+  QueueReason,
+  QueueTransport,
+  QueueEvidence,
+} from './queue.js';
 export type {
   AttachReport,
   RestComment,

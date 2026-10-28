@@ -41,6 +41,8 @@ import type {
 } from '../dev/record.js';
 import { AUTHOR_EVIDENCE_CAVEAT, DEFAULT_DEV_TARGET } from '../dev/record.js';
 import { readReadinessWithGaps, type ReadinessGap } from '../dev/ready.js';
+import { bindPublishedDeferredDebt } from '../dev/internal/deferredLedger.js';
+import type { DeferredQueueClient } from '../review/internal/queueProtocol.js';
 import { CLEAN_TREE, git, gitStdout } from '../dev/internal/workState.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
@@ -163,6 +165,25 @@ export function renderReadinessSection(
     lines.push(`| ${mdLine(gate.name)} | ${mdLine(gate.status)} | ${String(gate.durationMs)} |`);
   }
   lines.push('', '</details>');
+  const debts = new Map(
+    ledger.records
+      .filter((entry) => entry.kind === 'vendor-debt')
+      .map((entry) => [entry.debt.reference.requestId, entry.debt]),
+  );
+  if (debts.size > 0) {
+    lines.push(
+      '',
+      '### Deferred vendor review debt',
+      '',
+      'Pending obligations remain outstanding; completed entries link verified affected-current receipts only. Agent coverage and queue enrollment do not complete vendor review.',
+    );
+    for (const debt of debts.values()) {
+      const binding = debt.reference.binding;
+      lines.push(
+        `- request \`${mdLine(debt.reference.requestId)}\` · head \`${mdLine(binding.kind === 'deferred-author' ? binding.head : binding.mergeSha)}\` · queue \`${mdLine(debt.queue.state)}\` · vendor \`${mdLine(debt.vendor)}\` · vendorCompleted: ${String(debt.vendorCompleted)}${debt.vendorCompleted ? ` · affected-current receipt \`${mdLine(debt.completion.receiptId)}\` (no full-branch or independent credit)` : ''} · origin \`${mdLine(debt.originAttempt.cycleId)}\`${debt.predecessor ? ` · predecessor \`${mdLine(debt.predecessor.requestId)}\`` : ''}`,
+      );
+    }
+  }
   // The dispositions live INSIDE the managed section: a re-run updates this
   // section in place, so the posted evidence can never accumulate duplicate
   // comment copies across re-runs.
@@ -251,7 +272,11 @@ export function renderDispositionsComment(ledger: DevLedgerFile): string {
  * clock) and the gh effects (search/create/edit/comment). Per call:
  * readiness → clean tree → remote head → adopt-or-create → dispositions.
  */
-export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOpenReport> {
+export function makePrOpen(
+  dev: DevEffects,
+  gh: PrEffects,
+  queueClient?: DeferredQueueClient,
+): Op<PrOpenInput, PrOpenReport> {
   return guardDevOp('pr.open', PrOpenInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
@@ -283,7 +308,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
       };
     }
     const draftFallback = input.draft === true && input.draftWhenNotReady === true;
-    const readyRead = await readReadinessWithGaps(dev, 'pr.open', target, policy);
+    const readyRead = await readReadinessWithGaps(dev, 'pr.open', target, policy, queueClient);
     if (!readyRead.ok) {
       // The composition's round-cap path: a not-ready branch still publishes,
       // as a DRAFT whose managed section carries the gaps verbatim. Any other
@@ -411,6 +436,15 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
       }
     } catch (err) {
       return { status: 'failed', error: `pr.open: the PR could not be opened — ${faultText(err)}` };
+    }
+
+    try {
+      await bindPublishedDeferredDebt(dev, target, state, ledger, number, queueClient);
+    } catch (err) {
+      return {
+        status: 'indeterminate',
+        detail: `pr.open: PR #${String(number)} is published, but deferred debt binding is uncertain — ${faultText(err)}; retain the same request identity and replay publication`,
+      };
     }
 
     // The dispositions comment posts ONCE, on creation; the managed body

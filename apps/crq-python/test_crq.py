@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import review_receipt
+import queue_transport
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("crq_current_test", ROOT / "crq.py")
@@ -52,6 +53,172 @@ class ClassifierTest(unittest.TestCase):
             for content in ("bad\n" + json.dumps(COMPLETE), json.dumps(COMPLETE) + "\nbad"):
                 path.write_text(content)
                 self.assertFalse(crq.classify(path, 0)["counted"])
+
+
+    def test_all_causes_exact_vendor_vocabulary_and_exit_contract(self):
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True,
+                  "metadata": {"waitTime": "2 minutes"}}
+        cause = {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for exit_code in (0, 1):
+                path.write_text(json.dumps(vendor) + "\n" + json.dumps(vendor))
+                cls = crq.classify(path, exit_code)
+                self.assertEqual(cls["outcome"], "rate_limited")
+                self.assertFalse(cls["counted"])
+                self.assertEqual(cls["wait_minutes"], 3)
+                self.assertEqual(cls["failure_provenance"],
+                    {"version": 1, "complete": True, "causes": [cause, cause]})
+            hard_events = [
+                {"type": "error", "errorType": "scan", "message": "rate limit auth login quota"},
+                {"type": "error", "errorType": "budget"},
+                {"type": "error", "errorType": "cancel"},
+                {"type": "error", "errorType": "unknown"},
+                {"type": "error", "errorType": "rate_limit", "recoverable": False},
+                {"type": "error", "errorType": "rate_limit", "recoverable": 1},
+                {"type": "error", "errorType": "RATE_LIMIT", "recoverable": True},
+                {"type": "action_required"}, {"type": "status", "status": "cancelled"},
+                {"type": "status", "status": "budget_exhausted"},
+                {"type": "status", "status": "scan_failed"},
+                {"type": "finding", "severity": "major"}, COMPLETE]
+            for hard_event in hard_events:
+                for events in ([vendor, hard_event], [hard_event, vendor]):
+                    with self.subTest(events=events):
+                        path.write_text("\n".join(json.dumps(e) for e in events))
+                        cls = crq.classify(path, 0)
+                        self.assertNotEqual(cls["outcome"], "rate_limited")
+                        self.assertFalse(cls["counted"])
+                        causes = cls["failure_provenance"]["causes"]
+                        self.assertIn(cause, causes)
+                        self.assertTrue(any(c["source"] == "queue" for c in causes))
+            for exit_code in (None, True, "1", -15, 2, 124, 137):
+                with self.subTest(exit_code=exit_code):
+                    path.write_text(json.dumps(vendor))
+                    cls = crq.classify(path, exit_code)
+                    self.assertNotEqual(cls["outcome"], "rate_limited")
+                    self.assertTrue(any(c["source"] == "queue" for c in cls["failure_provenance"]["causes"]))
+            for malformed in ("bad", json.dumps({"type": "unknown"})):
+                path.write_text(json.dumps(vendor) + "\n" + malformed)
+                cls = crq.classify(path, 1)
+                self.assertFalse(cls["failure_provenance"]["complete"])
+                self.assertNotEqual(cls["outcome"], "rate_limited")
+            for error_type in ("review", "auth", "file_limit", "quota", "rate_limit_error"):
+                path.write_text(json.dumps({"type": "error", "errorType": error_type,
+                    "message": "rate limit: login required", "recoverable": True}))
+                cls = crq.classify(path, 1)
+                self.assertEqual(cls["outcome"], "auth" if error_type == "auth" else "error")
+                self.assertEqual(cls["failure_provenance"]["causes"][0]["source"], "queue")
+
+
+    def test_only_literal_structured_auth_is_an_operational_auth_stop(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for code in ("auth", "AUTH", "auth_error", "authentication", "unknown", None, []):
+                for exit_code in (0, 1, None, 124):
+                    with self.subTest(code=code, exit_code=exit_code):
+                        path.write_text(json.dumps({"type": "error", "errorType": code,
+                            "message": "auth login expired; authenticate", "recoverable": True}))
+                        cls = crq.classify(path, exit_code)
+                        self.assertEqual(cls["outcome"], "auth" if code == "auth" else
+                                         "error")
+                        self.assertFalse(cls["counted"])
+                        self.assertTrue(all(c["source"] == "queue"
+                            for c in cls["failure_provenance"]["causes"]))
+            path.write_text(json.dumps({"type": "error", "errorType": "auth"}) + "\n" +
+                            json.dumps({"type": "action_required"}))
+            cls = crq.classify(path, 1)
+            self.assertEqual(cls["outcome"], "action_required")
+            self.assertFalse(cls["counted"])
+
+    def test_recognized_progress_preserves_truthful_terminal_and_findings(self):
+        progress_events = [{"type": "status", "status": status}
+                           for status in ("scanning", "reviewing", "writing")]
+        progress_events.append({"type": "heartbeat", "status": "reviewing"})
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for progress in progress_events:
+                for severity in (None, "minor", "major"):
+                    with self.subTest(progress=progress, severity=severity):
+                        findings = [{"type": "finding", "severity": severity}] if severity else []
+                        path.write_text("\n".join(json.dumps(e) for e in [progress, *findings, COMPLETE]))
+                        cls = crq.classify(path, 0)
+                        self.assertEqual(cls["outcome"], "completed")
+                        self.assertTrue(cls["counted"])
+                        self.assertEqual(cls["findings"], len(findings))
+                        self.assertEqual(cls["failure_provenance"], {"version": 1, "complete": True,
+                            "causes": [{"source": "queue", "category": "unknown", "code": "blocking-finding"}]
+                            if severity == "major" else []})
+
+    def test_progress_alone_trailing_progress_and_missing_exit_never_count(self):
+        progress = {"type": "status", "status": "reviewing"}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for events, exit_code in (([progress], 0), ([COMPLETE, progress], 0),
+                    ([progress, COMPLETE, COMPLETE], 0), ([progress, COMPLETE], None),
+                    ([progress, COMPLETE], True), ([progress, COMPLETE], 1),
+                    ([progress, {**COMPLETE, "status": "review_skipped"}], 0),
+                    ([progress, {**COMPLETE, "message": "No fresh detailed file review"}], 0)):
+                with self.subTest(events=events, exit_code=exit_code):
+                    path.write_text("\n".join(json.dumps(e) for e in events))
+                    cls = crq.classify(path, exit_code)
+                    self.assertFalse(cls["counted"])
+                    self.assertNotEqual(cls["outcome"], "rate_limited")
+                    self.assertTrue(cls["failure_provenance"]["causes"])
+                    if type(exit_code) is not int:
+                        self.assertFalse(cls["failure_provenance"]["complete"])
+
+    def test_unknown_malformed_and_wrong_type_statuses_stay_incomplete(self):
+        bad_events = [{"type": "status", "status": status} for status in
+            ("unknown", "REVIEWING", "reviewing ", "scan_failed", "budget_exhausted",
+             "cancelled", "awaiting_confirmation", None, [], {}, 1, True)]
+        bad_events += [{"type": "review_context", "status": "reviewing"},
+                       {"type": "finding", "severity": "minor", "status": "reviewing"},
+                       {"type": "heartbeat", "status": "scanning"}]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            for bad in bad_events:
+                with self.subTest(bad=bad):
+                    path.write_text("\n".join(json.dumps(e) for e in
+                        [{"type": "status", "status": "reviewing"}, bad, COMPLETE]))
+                    cls = crq.classify(path, 0)
+                    self.assertFalse(cls["counted"])
+                    self.assertFalse(cls["failure_provenance"]["complete"])
+                    self.assertTrue(all(c["source"] == "queue" for c in cls["failure_provenance"]["causes"]))
+
+    def test_progress_preserves_all_ordered_failure_causes_without_authorizing_them(self):
+        progress = {"type": "status", "status": "reviewing"}
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        vendor_cause = {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "stream"
+            path.write_text(json.dumps(progress) + "\n" + json.dumps(vendor))
+            cls = crq.classify(path, 1)
+            self.assertEqual(cls["outcome"], "rate_limited")
+            self.assertFalse(cls["counted"])
+            self.assertEqual(cls["failure_provenance"],
+                             {"version": 1, "complete": True, "causes": [vendor_cause]})
+            for code in ("unknown", "scan", "budget", "cancel"):
+                hard_event = {"type": "error", "errorType": code}
+                hard_cause = {"source": "queue", "category": "unknown", "code": code}
+                for failures, causes in (([vendor, hard_event], [vendor_cause, hard_cause]),
+                                         ([hard_event, vendor], [hard_cause, vendor_cause])):
+                    with self.subTest(code=code, failures=failures):
+                        path.write_text("\n".join(json.dumps(e) for e in [progress, *failures]))
+                        cls = crq.classify(path, 0)
+                        self.assertEqual(cls["outcome"], "error")
+                        self.assertFalse(cls["counted"])
+                        self.assertEqual(cls["failure_provenance"]["causes"], causes)
+            for failure in ({"type": "action_required"}, {"type": "status", "status": "scan_failed"}):
+                path.write_text("\n".join(json.dumps(e) for e in [progress, vendor, failure]))
+                cls = crq.classify(path, 0)
+                self.assertNotEqual(cls["outcome"], "rate_limited")
+                self.assertFalse(cls["counted"])
+                self.assertEqual(cls["failure_provenance"]["causes"][0], vendor_cause)
+                self.assertTrue(any(c["source"] == "queue" for c in cls["failure_provenance"]["causes"]))
+            path.write_text(json.dumps(progress) + "\nbad\n" + json.dumps(vendor))
+            cls = crq.classify(path, 1)
+            self.assertFalse(cls["failure_provenance"]["complete"])
+            self.assertNotEqual(cls["outcome"], "rate_limited")
 
 
 class CurrentTest(unittest.TestCase):
@@ -123,7 +290,7 @@ class CurrentTest(unittest.TestCase):
         self.g("update-ref", "refs/remotes/origin/main", target)
         return target
 
-    def tick(self):
+    def tick(self, dry=False, only=None):
         real_popen = subprocess.Popen
         def fake_child(argv, **kw):
             if argv[0] == sys.executable and "_review" in argv:
@@ -138,7 +305,7 @@ class CurrentTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")))
             stack.enter_context(mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})))
             child = stack.enter_context(mock.patch.object(crq.subprocess, "Popen", side_effect=fake_child))
-            crq.with_lock(crq.tick)
+            crq.with_lock(crq.tick, dry=dry, only=only)
             return sum(call.args[0][0] == sys.executable and "_review" in call.args[0] for call in child.call_args_list)
 
     def plan_item(self, item):
@@ -414,3 +581,342 @@ class CurrentTest(unittest.TestCase):
             log = crq.with_lock(crq.tick)
             self.assertTrue(any("hourly cap" in line for line in log))
             planner.assert_not_called()
+
+    def deferred_entry(self, pr=42):
+        entry = {"binding": {"kind": "deferred-author", "repo": crq.REPO, "producer": "fixture-user",
+                 "head": self.merge, "target": "merge-queue", "targetSelector": "promoted-main"},
+                 "state": "awaiting-merge" if pr else "awaiting-pr", "pr": pr,
+                 "principal": {"server": "retained"}, "deliveries": {"ack": "retained"}, "consumed": True}
+        self.q["queue_client_requests"] = {"deferred-42": entry}
+        crq.save_queue(self.q)
+        return entry
+
+    def forge_data(self, number=42):
+        return {"number": number, "user": {"login": "fixture-user"}, "head": {"sha": self.merge},
+                "base": {"ref": "merge-queue", "repo": {"full_name": crq.REPO}},
+                "state": "closed", "merged": True, "merge_commit_sha": self.merge}
+
+    def test_deferred_merge_saved_before_planning_and_restart_idempotent(self):
+        original = copy.deepcopy(self.deferred_entry())
+        def assert_persisted_then_wait(q, item, dry):
+            persisted = crq.load_queue()
+            self.assertEqual(persisted["queue_client_requests"]["deferred-42"]["state"], "ready-current")
+            self.assertEqual(persisted["merged_current_requests"]["deferred-42"]["item"], item["id"])
+            raise crq.NotReady("fixture wait after durable binding")
+        with mock.patch.object(crq, "gh_json", return_value=self.forge_data()) as forge, \
+             mock.patch.object(crq, "prepare_current", side_effect=assert_persisted_then_wait):
+            self.assertEqual(self.tick(), 0)
+            forge.assert_called_once_with(["api", f"repos/{crq.REPO}/pulls/42"])
+            durable = crq.load_queue()
+            entry = durable["queue_client_requests"]["deferred-42"]
+            for key in ("binding", "principal", "deliveries", "consumed"):
+                self.assertEqual(entry[key], original[key])
+            identity = durable["merged_current_requests"]["deferred-42"]
+            forge.reset_mock()
+            self.assertEqual(self.tick(), 0)
+            forge.assert_not_called()
+            restarted = crq.load_queue()
+            self.assertEqual(restarted["merged_current_requests"]["deferred-42"], identity)
+            self.assertEqual(len(restarted["items"]), 1)
+
+    def test_deferred_drift_and_config_boundary_never_enroll(self):
+        for field in ("producer", "head", "target", "repo"):
+            with self.subTest(field=field):
+                entry = self.deferred_entry()
+                entry["binding"][field] = "other/repo" if field == "repo" else "drift"
+                crq.save_queue(self.q)
+                with mock.patch.object(crq, "gh_json", return_value=self.forge_data()) as forge:
+                    self.assertEqual(self.tick(), 0)
+                    if field == "repo":
+                        forge.assert_not_called()
+                q = crq.load_queue()
+                self.assertEqual(q["items"], [])
+                self.assertNotIn("merged_current_requests", q)
+                self.assertEqual(q["queue_client_requests"]["deferred-42"]["reason"],
+                                 {"source": "queue", "category": "identity", "code": "forge-identity"})
+
+    def test_deferred_transient_retry_and_failed_save_never_dispatch(self):
+        self.deferred_entry()
+        with mock.patch.object(crq, "gh_json", side_effect=RuntimeError("private remote failure")):
+            self.assertEqual(self.tick(), 0)
+        q = crq.load_queue()
+        self.assertEqual(q["queue_client_requests"]["deferred-42"]["state"], "awaiting-merge")
+        self.assertIn("debt retained", q["queue_client_requests"]["deferred-42"]["refreshError"])
+        self.assertNotIn("private remote failure", json.dumps(q))
+        with mock.patch.object(crq, "gh_json", return_value=self.forge_data()), \
+             mock.patch.object(crq, "save_queue", side_effect=OSError("disk full")), \
+             mock.patch.object(crq, "launch") as launch:
+            with self.assertRaises(OSError):
+                self.tick()
+            launch.assert_not_called()
+        self.assertNotIn("merged_current_requests", crq.load_queue())
+        with mock.patch.object(crq, "gh_json", return_value=self.forge_data()), \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("fixture wait")):
+            self.assertEqual(self.tick(), 0)
+        self.assertEqual(crq.load_queue()["queue_client_requests"]["deferred-42"]["state"], "ready-current")
+
+    def test_deferred_only_natural_non_dry_tick_refreshes(self):
+        self.deferred_entry()
+        with mock.patch.object(crq.deferred_refresh, "refresh_deferred", return_value=[]) as refresh:
+            self.tick(dry=True)
+            self.tick(only="selective")
+            refresh.assert_not_called()
+            self.tick()
+            self.assertEqual(refresh.call_count, 1)
+            self.assertEqual(refresh.call_args.kwargs["limit"], 20)
+
+    def test_deferred_lost_publication_exact_all_state_search_and_ambiguity(self):
+        self.deferred_entry(pr=None)
+        search = {"total_count": 1, "incomplete_results": False,
+                  "items": [{"number": 42, "pull_request": {}}]}
+        with mock.patch.object(crq, "gh_json", side_effect=[search, self.forge_data()]) as forge, \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("fixture wait")):
+            self.assertEqual(self.tick(), 0)
+        args = forge.call_args_list[0].args[0]
+        self.assertIn("per_page=2", args)
+        self.assertIn("page=1", args)
+        query = next(a for a in args if a.startswith("q="))
+        self.assertIn("is:pr", query)
+        self.assertIn(self.merge, query)
+        self.assertNotIn("is:open", query)
+        self.assertNotIn("is:merged", query)
+        self.assertEqual(crq.load_queue()["queue_client_requests"]["deferred-42"]["pr"], 42)
+        self.q = {"items": [], "starts": [], "paused": False, "created_at": crq.iso()}
+        self.deferred_entry(pr=None)
+        search["total_count"] = 2
+        search["items"].append({"number": 43, "pull_request": {}})
+        with mock.patch.object(crq, "gh_json", side_effect=[search, self.forge_data(), self.forge_data(43)]):
+            self.assertEqual(self.tick(), 0)
+        q = crq.load_queue()
+        self.assertEqual(q["items"], [])
+        self.assertEqual(q["queue_client_requests"]["deferred-42"]["reason"]["code"], "forge-identity")
+
+    def test_deferred_search_incomplete_empty_and_closed(self):
+        self.deferred_entry(pr=None)
+        for result in ({"total_count": 3, "items": [], "incomplete_results": False},
+                       {"total_count": 1, "items": [], "incomplete_results": False},
+                       {"total_count": 0, "items": [], "incomplete_results": True},
+                       {"total_count": 0, "items": [], "incomplete_results": False}):
+            with self.subTest(result=result), mock.patch.object(crq, "gh_json", return_value=result):
+                self.assertEqual(self.tick(), 0)
+                q = crq.load_queue()
+                self.assertEqual(q["items"], [])
+                self.assertEqual(q["queue_client_requests"]["deferred-42"]["state"], "awaiting-pr")
+                self.assertEqual("refreshError" in q["queue_client_requests"]["deferred-42"],
+                                 result["total_count"] != 0 or result["incomplete_results"])
+        self.q = crq.load_queue()
+        self.deferred_entry()
+        closed = dict(self.forge_data(), merged=False, merge_commit_sha=None)
+        with mock.patch.object(crq, "gh_json", return_value=closed):
+            self.assertEqual(self.tick(), 0)
+        self.assertEqual(crq.load_queue()["queue_client_requests"]["deferred-42"]["state"], "cancelled")
+
+    def test_deferred_forge_timeout_and_invalid_metadata_retain_debt(self):
+        self.deferred_entry()
+        with mock.patch.object(crq, "gh_json", side_effect=subprocess.TimeoutExpired(["gh"], 120)):
+            self.assertEqual(self.tick(), 0)
+        self.assertIn("refreshError", crq.load_queue()["queue_client_requests"]["deferred-42"])
+        for change in ({"base": {"ref": "merge-queue", "repo": {"full_name": "other/repo"}}},
+                       {"base": {"ref": "main", "repo": {"full_name": crq.REPO}}},
+                       {"number": True}, {"merged": True, "merge_commit_sha": None},
+                       {"head": {"sha": "not-immutable"}}, {"merged": True, "state": "open"}):
+            with self.subTest(change=change), mock.patch.object(crq, "gh_json", return_value=dict(self.forge_data(), **change)):
+                self.assertEqual(self.tick(), 0)
+                q = crq.load_queue()
+                self.assertEqual(q["items"], [])
+                self.assertEqual(q["queue_client_requests"]["deferred-42"]["reason"]["code"], "forge-identity")
+
+    def test_deferred_bounded_round_robin_known_requests(self):
+        entry = self.deferred_entry()
+        self.q["queue_client_requests"] = {f"deferred-{n:02}": copy.deepcopy(entry) for n in range(21)}
+        crq.save_queue(self.q)
+        data = dict(self.forge_data(), merged=False, state="open", merge_commit_sha=None)
+        with mock.patch.object(crq, "gh_json", return_value=data) as forge:
+            self.assertEqual(self.tick(), 0)
+            self.assertEqual(forge.call_count, 20)
+            q = crq.load_queue()
+            self.assertEqual(sum("refreshedAt" in e for e in q["queue_client_requests"].values()), 20)
+            self.assertNotIn("refreshedAt", q["queue_client_requests"]["deferred-20"])
+            forge.reset_mock()
+            self.assertEqual(self.tick(), 0)
+            self.assertEqual(forge.call_count, 20)
+            q = crq.load_queue()
+            self.assertTrue(all("refreshedAt" in e for e in q["queue_client_requests"].values()))
+            self.assertEqual(q["items"], [])
+
+    def test_shared_read_budget_stops_mid_search_and_resumes_same_intent(self):
+        entry = copy.deepcopy(self.deferred_entry(pr=None))
+        self.q["queue_client_requests"] = {f"request-{n}": copy.deepcopy(entry) for n in range(3)}
+        crq.save_queue(self.q)
+        original_run = crq.run
+        search = {"total_count": 1, "incomplete_results": False,
+                  "items": [{"number": 42, "pull_request": {}}]}
+        calls = []
+        def fake_run(argv, **kwargs):
+            if argv[0] != "gh":
+                return original_run(argv, **kwargs)
+            calls.append(argv)
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 10)
+            value = search if "search/issues" in argv else dict(self.forge_data(), merged=False, state="open")
+            return SimpleNamespace(stdout=json.dumps(value), returncode=0)
+        with mock.patch.object(crq, "ForgeBudget", return_value=crq.ForgeBudget(requests=3)), \
+             mock.patch.object(crq, "run", side_effect=fake_run):
+            self.tick()
+        saved = crq.load_queue()
+        self.assertEqual(len(calls), 3)  # search+verify first; search second, no verify allowance
+        self.assertEqual(saved["deferred_refresh_cursor"], "request-0")
+        self.assertEqual(saved["queue_client_requests"]["request-1"], entry)
+        self.assertEqual(saved["queue_client_requests"]["request-2"], entry)
+        calls.clear()
+        with mock.patch.object(crq, "ForgeBudget", return_value=crq.ForgeBudget(requests=2)), \
+             mock.patch.object(crq, "run", side_effect=fake_run):
+            self.tick()
+        resumed = crq.load_queue()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(resumed["deferred_refresh_cursor"], "request-1")
+        self.assertEqual(resumed["queue_client_requests"]["request-2"], entry)
+
+    def test_aggregate_deadline_and_budget_context_restored(self):
+        clock = mock.Mock(return_value=10.0)
+        budget = crq.ForgeBudget(requests=2, seconds=3, clock=clock)
+        with crq.forge_window(budget), mock.patch.object(crq, "run",
+                return_value=SimpleNamespace(stdout="{}")) as run:
+            crq.gh_json(["api", "fixture"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            clock.return_value = 13.0
+            with self.assertRaises(crq.deferred_refresh.RefreshExhausted):
+                crq.gh_json(["api", "fixture"])
+            run.assert_called_once()
+        self.assertIsNone(crq._FORGE_BUDGET)
+
+
+    def test_auth_classification_pauses_current_ordinary_and_promotion_harvest(self):
+        initial = copy.deepcopy(self.q)
+        auth = {"type": "error", "errorType": "auth", "recoverable": True}
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        mixed = [{"type": "error", "errorType": code}
+                 for code in ("unknown", "scan", "budget", "cancel")] + [vendor]
+        streams = [[auth]] + [events for other in mixed
+                              for events in ([auth, other], [other, auth])]
+        n = 0
+        for kind in (review_receipt.KIND, "pr", "promotion"):
+            for events in streams:
+                with self.subTest(kind=kind, events=events), \
+                     mock.patch.object(crq, "RUNS", self.state / f"auth-runs-{n}"):
+                    n += 1
+                    self.q = copy.deepcopy(initial)
+                    crq.save_queue(self.q)
+                    item = self.enroll(f"auth-{n}")
+                    rdir = self.launch_item(item)
+                    self.terminal_artifacts(item, events)
+                    (rdir / "exit.json").write_text(json.dumps({"exit": 1}))
+                    # A real detached run, stream and classifier feed each harvest route.
+                    item["kind"] = kind
+                    result = self.harvest(item)
+                    cls = json.loads((rdir / "classification.json").read_text())
+                    self.assertEqual(cls["outcome"], "auth")
+                    self.assertFalse(cls["counted"])
+                    self.assertEqual(cls["failure_provenance"]["causes"][:len(events)], [
+                        {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+                        if e["errorType"] == "rate_limit" else
+                        {"source": "queue", "category": "unknown", "code": e["errorType"]}
+                        for e in events])
+                    self.assertTrue(self.q["paused"])
+                    self.assertIn("auth", self.q["pause_reason"])
+                    self.assertIsNone(item["run"])
+                    self.assertNotIn("not_before", item)
+                    self.assertEqual(item.get("cycles", []), [])
+                    self.assertNotIn("coverage", self.q)
+                    if kind == review_receipt.KIND:
+                        document = self.document(item)
+                        self.assertEqual(document["outcome"], "auth")
+                        self.assertFalse(document["counted"])
+                        self.assertEqual(document["classification"], cls)
+                        self.assertFalse(queue_transport._vendor_rate_limit(document))
+                    else:
+                        self.assertIn("PAUSED", result)
+                        self.assertEqual(item["state"], "pending")
+                    crq.save_queue(self.q)
+                    self.assertEqual(self.tick(), 0)
+                    self.assertTrue(crq.load_queue()["paused"])
+
+    def test_prose_auth_and_unknown_mixed_causes_do_not_pause_or_gain_vendor_authority(self):
+        initial = copy.deepcopy(self.q)
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        for n, code in enumerate(("unknown", "AUTH", "auth_error", "scan", "budget", "cancel")):
+            hard = {"type": "error", "errorType": code, "message": "auth login expired"}
+            for order, events in enumerate(([vendor, hard], [hard, vendor])):
+                with self.subTest(code=code, order=order), \
+                     mock.patch.object(crq, "RUNS", self.state / f"not-auth-{n}-{order}"):
+                    self.q = copy.deepcopy(initial)
+                    crq.save_queue(self.q)
+                    item = self.enroll(f"not-auth-{n}-{order}")
+                    rdir = self.launch_item(item)
+                    self.terminal_artifacts(item, events)
+                    self.harvest(item)
+                    document = self.document(item)
+                    self.assertEqual(document["outcome"], "error")
+                    self.assertFalse(document["counted"])
+                    self.assertFalse(self.q["paused"])
+                    self.assertFalse(queue_transport._vendor_rate_limit(document))
+                    self.assertNotIn("cooldown_until", self.q)
+                    self.assertNotIn("coverage", self.q)
+                    self.assertTrue(any(c["source"] == "queue"
+                        for c in document["classification"]["failure_provenance"]["causes"]))
+
+    def test_receipt_preserves_all_classification_causes(self):
+        item = self.enroll()
+        rdir = self.launch_item(item)
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        (rdir / "review.ndjson").write_text(json.dumps(vendor) + "\n" +
+            json.dumps({"type": "error", "errorType": "scan"}))
+        self.harvest(item)
+        document = self.document(item)
+        self.assertEqual(document["outcome"], "error")
+        self.assertFalse(document["counted"])
+        self.assertEqual(document["classification"]["failure_provenance"]["causes"], [
+            {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"},
+            {"source": "queue", "category": "unknown", "code": "scan"}])
+
+
+    def test_persisted_producer_proof_controls_transport_vendor_authority(self):
+        initial = copy.deepcopy(self.q)
+        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
+        hard = {"type": "error", "errorType": "scan"}
+        launch_at = crq.now()
+        for n, events in enumerate(([vendor], [vendor, hard], [hard, vendor])):
+            with self.subTest(events=events), \
+                 mock.patch.object(crq, "RUNS", self.state / f"runs-{n}"), \
+                 mock.patch.object(crq, "now", return_value=launch_at):
+                self.q = copy.deepcopy(initial)
+                crq.save_queue(self.q)
+                request = f"boundary-{n}"
+                item = self.enroll(request)
+                self.launch_item(item)
+                self.terminal_artifacts(item, events)
+                self.harvest(item)
+                document = self.document(item)
+                self.assertEqual(len(document["classification"]["failure_provenance"]["causes"]), len(events))
+                binding = {"kind": "merged-current", "repo": crq.REPO, "pr": 42,
+                           "mergeSha": self.merge, "targetSelector": "promoted-main"}
+                policy = {"enabled": True, "repo": crq.REPO, "targets": ["promoted-main"],
+                          "branches": ["merge-queue"], "read": ["developer"], "write": ["developer"]}
+                forge = {"repo": crq.REPO, "pr": 42, "target": "merge-queue",
+                         "state": "MERGED", "mergeSha": self.merge}
+                def call(op):
+                    raw = queue_transport.handle(review_receipt.canonical({"v": 1, "op": op,
+                        "requestId": request, "binding": binding}), crq, principal="developer",
+                        policy=policy, verify_source=lambda repo, pr: forge,
+                        receipt_root=self.state / "receipts")
+                    return json.loads(raw)["result"]
+                call("enqueue")
+                status = call("status")
+                self.assertEqual(status["receiptId"], item["receipt_id"])
+                self.assertTrue(status["enqueued"])
+                self.assertEqual(status["state"], "blocked")
+                self.assertFalse(status["reviewed"])
+                self.assertFalse(status["fixed"])
+                self.assertEqual(status["reason"],
+                    {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+                    if n == 0 else {"source": "queue", "category": "unknown", "code": "unclassified"})

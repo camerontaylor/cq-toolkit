@@ -11,7 +11,9 @@ Since the development posture of 2026-10-20 (owner ruling D-J) the protocol
 is ONE completed CLI review-and-address cycle, then one independent
 head-bound review of the opened PR. P2 findings left after that go to
 follow-up issues rather than further loops, and reviewers are given the
-owner rulings as context. The mechanics below are unchanged.
+owner rulings as context. DEC1 (2026-10-27) additionally approves the durable
+vendor-debt path in §6, including continued ready/merge progress before
+vendor recovery. This does not change what counts as vendor completion.
 Non-author means an independent reviewer agent or human. Reviewer and author
 agents may use the same GitHub account; the enabled same-account path records
 distinct agent identities and a review attestation bound to the exact PR head.
@@ -190,12 +192,73 @@ missing evidence is non-passing.
 Response to a blocked cycle: one bounded remediation attempt (install from
 the official source, `auth login` handoff — start the supported flow and
 report what is needed; do not read tokens, do not hang waiting), then one
-more attempt. Still blocked: **stop — the blocker prevents opening the
-PR.** Keep the work and report the blocker plainly. A human or fresh-agent
-review may be independently valuable as I2-style evidence, but it is NOT a
-fallback for the required CodeRabbit cycle and must not be presented as
-one; never substitute another reviewer, never waive the rule silently,
-never invent output or completion values.
+more attempt. Vendor availability, rate-limit and login/operational failures
+may instead follow **approved DEC1: queue review and continue**, including
+after merge. Do not require login repair or vendor recovery as a prerequisite
+to this path. Other failures remain blockers with their actual evidence.
+
+Before proceeding, persist an authorized deferred-author intent with a stable
+request/cycle ID and immutable repository, server-verified forge author
+`user.login`, source head, base branch and target selector. A queue failure
+(authorization, persistence, unsupported deployment, or an unknown reason)
+does not establish debt. After publication, bind the verified PR idempotently;
+if publication or binding loses its response, reconcile that same intent
+against unique verified forge metadata. Never mint another request to bypass
+an uncertain write. Unpublished/cancelled work remains visible and starts no
+vendor review. Changed head/author/target is an identity failure.
+
+A fix that changes the head creates a new immutable enrollment and request ID.
+Keep the genuine original outage attempt separate from this current deferral;
+the successor is not a vendor run. Persist the linked successor before using
+it, then obtain fresh full agent coverage and gates for its head/base. Retain
+the predecessor's published obligations, findings, dispositions and receipts;
+superseding the current deferral neither cancels those obligations nor completes
+vendor review. Replay the same successor after an uncertain write.
+
+The sole runner refreshes only explicitly enrolled PRs within a bounded tick
+budget, observes verified merge provenance and enrolls current-code work.
+Q2 historical interval discovery is unnecessary for this lifecycle. Q1 captures
+the promoted-main target commit/tree at dispatch, resolves affected paths and
+dispositions, and persists an immutable report. Prior author completion keeps
+its source and findings; it is never upgraded to current-code coverage. Only
+proven equivalent target/tree/scope/policy/projection/reviewer evidence can
+avoid another vendor start. Import the complete digest-verified report through
+Q3; acknowledgement means consumed, never findings fixed or independent PASS.
+
+Expose `vendor-pending`, `vendor-blocked-transient`, `vendor-needs-action`,
+and genuine `vendor-completed` separately. A queue status blocked solely by
+typed, proven vendor availability/rate-limit/login provenance remains debt;
+do not reintroduce a vendor gate through a status rename. A generic blocked
+state or prose mentioning an outage is insufficient. A thrown queue status RPC retains debt
+but blocks fresh continuation as queue read/trust uncertainty; it is never
+classified as vendor login or availability failure. Agent fallback uses the
+configured reviewer role and budgets. It supplies agent evidence, never a
+completed vendor cycle. Deterministic gates and independent exact-head
+acceptance remain required. Known substantive blocking findings, scan/tamper,
+stale identity, red CI and privileged trust remain blocking.
+
+A terminal queue status alone never settles debt. Settlement requires Q3's
+complete authorized report delivery and acknowledgement, a digest-verified local
+re-read, exact source/request (or proven equivalent reuse) binding, and Q1's
+counted terminal classifier. The immutable capture target/tree and equivalence
+must verify; missing local capture objects, partial scope, malformed findings,
+unknown outcomes or uncertain report delivery retain pending debt and block
+fresh continuation. This bounded read never fetches or dispatches a vendor.
+Persist the `vendor-completed` snapshot alongside the original pending intent
+and receipt. Its coverage remains affected-current only, with no full-branch or
+independent acceptance credit. Imported findings retain stable receipt IDs and
+raw provenance; critical/major findings need explicit fixed/rejected
+dispositions, while a deferred disposition keeps them blocking. Replaying a
+consumed receipt does not enroll again or duplicate findings. A completed old-head
+receipt cannot authorize a new-head outage or supply its current coverage.
+
+Retain visible debt on the readiness/publication record until genuine review
+or explicit current-scope disposition. Backfill completion is no universal
+merge check. Installed compatible Q1/Q3 service and healthy durable enrollment
+are deployment prerequisites; a live vendor completion is separate feature
+acceptance. Source fixtures or merge alone establish neither deployment nor
+that live completion. No new scheduler, inline paid vendor call, grant renewal,
+repair activation or deployment authority follows from DEC1.
 
 Submitting a review needs no extra user approval — the task's authorized
 scope stands; diffs must merely be secret-scanned first (§1).

@@ -10,6 +10,12 @@ import { assembleReadiness, DEV_LEDGER_VERSION } from '../../../src/ops/dev/reco
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
+import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
+import { deferVendorReview } from '../../../src/ops/dev/internal/deferredReview.js';
+import type {
+  DeferredQueueClient,
+  QueueStatus,
+} from '../../../src/ops/review/internal/queueProtocol.js';
 import { cycleRecord, dispositionRecord } from '../dev/fakes.js';
 import { repoEffects, makeTestRepo, seed } from '../dev/repo.js';
 
@@ -1303,7 +1309,7 @@ it.each(['deadline', 'parent'] as const)(
       const controller = new AbortController();
       const effects = repoEffects(repo, (command) => {
         if (command !== 'coderabbit') return undefined;
-        if (mode === 'deadline') clock += 1001;
+        if (mode === 'deadline') clock += 10_001;
         else controller.abort(new Error('parent stopped reviewer'));
         return {
           exitCode: 0,
@@ -1323,7 +1329,7 @@ it.each(['deadline', 'parent'] as const)(
       const originalRun = effects.runCommand;
       effects.runCommand = async (command, args, opts) => {
         if (command === 'coderabbit') {
-          expect(opts.timeoutMs).toBe(1000);
+          expect(opts.timeoutMs).toBe(10_000);
           expect(opts.signal).toBeDefined();
         }
         return originalRun(command, args, opts);
@@ -1340,7 +1346,7 @@ it.each(['deadline', 'parent'] as const)(
         writeFindingsRecord: async (_path, content) => {
           persisted = JSON.parse(content);
         },
-      })({ repoRoot: repo.root, wallMs: 1000, reviewers: ['coderabbit', 'agent'] });
+      })({ repoRoot: repo.root, wallMs: 10_000, reviewers: ['coderabbit', 'agent'] });
       expect(result.status).toBe('needs-human');
       if (mode === 'deadline') expect(result).toMatchObject({ report: { blockedBudget: true } });
       else expect(result).not.toMatchObject({ report: { blockedBudget: true } });
@@ -2048,6 +2054,169 @@ it('#532: an agent wall stop is attributed through the real review engine', asyn
   }
 });
 
+it.each(['current', 'changed', 'queue-auth'] as const)(
+  'durable vendor debt %s invokes fresh full agent coverage without a paid vendor call',
+  async (scenario) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const config = await readFile(join(repo.root, 'cq.json'), 'utf8');
+      await repo.write('cq.json', config.replace('["agent"]', '["agent","coderabbit"]'));
+      repo.commitAll('configure deferred review');
+      const effects = repoEffects(repo, (command, args) => {
+        if (command === 'coderabbit') throw new Error('must not dispatch paid vendor');
+        if (command === 'gh') return args[0] === 'api' ? 'author' : 'owner/repo';
+        return undefined;
+      });
+      const read = await readWorkState(effects, { target: 'merge-queue' });
+      if (!read.ok) throw new Error(read.reason);
+      const state = read.state;
+      const status: QueueStatus = {
+        state: 'awaiting-pr',
+        pr: null,
+        mergeSha: null,
+        itemId: null,
+        receiptId: null,
+        consumed: false,
+        reviewed: false,
+        fixed: false,
+      };
+      const queue: DeferredQueueClient = {
+        enqueue: async () => status,
+        bind: async () => status,
+        cancel: async () => {
+          throw new Error('do not cancel');
+        },
+        status: async () => {
+          if (scenario === 'queue-auth') throw new Error('queue authorization unavailable');
+          return status;
+        },
+      };
+      const failure = {
+        source: 'vendor' as const,
+        category: 'vendor-unavailable' as const,
+        codes: ['con_err'],
+      };
+      const origin = cycleRecord({
+        head: state.head,
+        base: state.base,
+        dirtySha256: 'clean-tree',
+        cycleId: 'c001-origin',
+        vendorFailure: failure,
+        completion: { kind: 'blocked', reason: 'structured local vendor outage' },
+        findings: [{ id: 'retained', severity: 'major', excerpt: 'prior vendor finding' }],
+      });
+      const debt = await deferVendorReview(
+        queue,
+        {
+          requestId: 'origin-intent',
+          binding: {
+            kind: 'deferred-author',
+            repo: 'owner/repo',
+            producer: 'author',
+            head: state.head,
+            target: 'merge-queue',
+            targetSelector: 'promoted-main',
+          },
+        },
+        'unavailable',
+        { id: 'origin-intent', base: state.base, dirtySha256: 'clean-tree' },
+        {
+          cycleId: origin.cycleId,
+          head: state.head,
+          base: state.base,
+          target: 'merge-queue',
+          scope: 'full',
+          dirtySha256: 'clean-tree',
+          failure,
+        },
+      );
+      effects.openLedger(state.branch).save({
+        version: 2,
+        branch: state.branch,
+        records: [origin, { kind: 'vendor-debt', debt, at: effects.nowIso() }],
+      });
+      if (scenario === 'changed') {
+        await repo.write('src/a.ts', 'export const a = 2;\n');
+        repo.git('add', 'src/a.ts');
+        repo.git('commit', '-qm', 'new current head');
+      }
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        queueClient: queue,
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(0);
+      if (scenario === 'queue-auth') {
+        expect(result.status).toBe('indeterminate');
+        expect(drivers.resolve).not.toHaveBeenCalled();
+      } else {
+        expect(result.status).toBe('ok');
+        expect(result.report?.deferredVendorDebt?.vendorCompleted).toBe(false);
+        if (result.status === 'ok') {
+          expect(result.value.findings).toContainEqual(
+            expect.objectContaining({ id: 'retained', status: 'open' }),
+          );
+          expect(result.value.sources.find((source) => source.kind === 'coderabbit')?.status).toBe(
+            'blocked',
+          );
+        }
+        const ledger = effects.openLedger(state.branch).load();
+        expect(ledger.records.findLast((entry) => entry.kind === 'cycle')).toMatchObject({
+          reviewer: 'agent:reviewer',
+          completion: { kind: 'terminal' },
+          agentCoverage: { version: 2, head: repo.git('rev-parse', 'HEAD').trim(), scope: 'full' },
+        });
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
+
+it.each(['full', 'uncommitted'] as const)(
+  'collects bounded %s context at the reviewed comparison',
+  async (scope) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/committed-context.ts', 'export const committed = 1;\n');
+      repo.commitAll('RUN_CONTEXT_COMMITTED\n\n' + 'x'.repeat(5000));
+      await repo.write('src/dirty-context.ts', 'export const dirty = 1;\n');
+      repo.git('add', 'src/dirty-context.ts');
+      const review = vi.fn<
+        typeof import('../../../src/ops/review/agentReviewer.js').runAgentReviewer
+      >(async () => ({ status: 'needs-human' as const, reason: 'fixture context captured' }));
+      await makeReviewRun({
+        drivers: scriptedDrivers(),
+        runAgentReviewer: review,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, ...(scope === 'uncommitted' ? { uncommitted: true } : {}) });
+      expect(review).toHaveBeenCalledOnce();
+      const input = review.mock.calls[0]!;
+      expect(input[1].scope).toBe(scope);
+      expect(input[1].intent!.length).toBeLessThanOrEqual(4000);
+      expect(input[1].fileList!.length).toBeLessThanOrEqual(4000);
+      expect(input[1].fileList).toContain('src/dirty-context.ts');
+      if (scope === 'full') {
+        expect(input[1].intent).toContain('RUN_CONTEXT_COMMITTED');
+        expect(input[1].intent).toContain('[truncated:');
+        expect(input[1].fileList).toContain('src/committed-context.ts');
+      } else {
+        expect(input[1].intent).toBe('');
+        expect(input[1].fileList).not.toContain('src/committed-context.ts');
+        expect(input[1].base).toBe(repo.git('rev-parse', 'HEAD').trim());
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
 it('#551: review.run completes after the scripted CodeRabbit rate limit', async () => {
   const repo = await makeTestRepo();
   try {

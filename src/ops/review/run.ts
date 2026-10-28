@@ -12,6 +12,16 @@ import {
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import type { DevEffects } from '../dev/effects.js';
 import type { DiffSecretScanner } from '../dev/denylist.js';
+import {
+  prepareDeferredVendorReview,
+  loadCurrentDeferredVendorDebt,
+} from '../dev/internal/deferredLedger.js';
+import {
+  hasDeferredReviewSources,
+  deferredReceiptFindings,
+  type DeferredVendorDebt,
+} from '../dev/internal/deferredReview.js';
+import type { DeferredQueueClient } from './internal/queueProtocol.js';
 import { DEV_LEDGER_VERSION, type DevCycleRecord } from '../dev/record.js';
 import {
   makeGitleaksDefaultsScanner,
@@ -33,6 +43,7 @@ import {
   type ReviewSource,
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { collectBoundedReviewContext } from './internal/reviewContext.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -51,6 +62,8 @@ export interface ReviewRunInput {
 }
 export interface ReviewRunDeps {
   drivers: DriverFactory;
+  queueClient?: DeferredQueueClient;
+  onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
   /** Abortable CodeRabbit backoff, injected by deterministic tests. */
   sleep?: import('../dev/review.js').DevReviewDeps['sleep'];
   /** Injection seam for the engine; production binds {@link runAgentReviewer}. */
@@ -80,7 +93,11 @@ export interface ReviewRunDeps {
  * Both ride the report envelope and are never persisted.
  */
 export type ReviewRunResult = OpResult<FindingsRecord> & {
-  report?: FindingsRecord & { blockedTransient?: true; blockedBudget?: true };
+  report?: FindingsRecord & {
+    blockedTransient?: true;
+    blockedBudget?: true;
+    deferredVendorDebt?: DeferredVendorDebt;
+  };
 };
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
@@ -91,69 +108,6 @@ function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): 
     sources: [{ kind, status: 'blocked', reason, ...(cycleId ? { cycleId } : {}) }],
     findings: [],
   };
-}
-
-/** The reviewer's intent budget; the truncation marker is inside the cap. */
-const REVIEW_INTENT_CAP = 4_000;
-
-function capReviewIntent(text: string): string {
-  if (text.length <= REVIEW_INTENT_CAP) return text;
-  const marker = `\n[truncated: ${String(text.length - REVIEW_INTENT_CAP)} characters omitted]`;
-  if (marker.length >= REVIEW_INTENT_CAP) return text.slice(0, REVIEW_INTENT_CAP);
-  return text.slice(0, REVIEW_INTENT_CAP - marker.length) + marker;
-}
-
-/**
- * The intent and file list are prompt context, not coverage pieces. The engine
- * scans the composed session prompt before upload, so both ride the same
- * beforeRequest gate as the diff.
- */
-async function collectReviewContext(
-  effects: DevEffects,
-  comparison: string,
-  head: string,
-  deadline: { signal?: AbortSignal; remainingWallMs: () => number },
-): Promise<
-  { ok: true; intent: string; fileList: string } | { ok: false; fatal: boolean; reason: string }
-> {
-  const callOptions = (): { timeoutMs: number; signal?: AbortSignal } => ({
-    timeoutMs: Math.max(1, Math.min(60_000, deadline.remainingWallMs())),
-    ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
-  });
-  try {
-    deadline.signal?.throwIfAborted();
-    const log = await effects.runCommand(
-      'git',
-      ['log', '--format=%s%n%n%b', `${comparison}..${head}`],
-      callOptions(),
-    );
-    if (log.exitCode !== 0)
-      return {
-        ok: false,
-        fatal: false,
-        reason: `could not collect review intent (exit ${log.exitCode === null ? 'none (killed)' : String(log.exitCode)})`,
-      };
-    deadline.signal?.throwIfAborted();
-    const numstat = await effects.runCommand(
-      'git',
-      ['diff', '--numstat', ...HARDENED_DIFF_FLAGS, comparison],
-      callOptions(),
-    );
-    if (numstat.exitCode !== 0)
-      return {
-        ok: false,
-        fatal: false,
-        reason: `could not list review diff stats (exit ${numstat.exitCode === null ? 'none (killed)' : String(numstat.exitCode)})`,
-      };
-    deadline.signal?.throwIfAborted();
-    return { ok: true, intent: capReviewIntent(log.stdout), fileList: numstat.stdout };
-  } catch (error) {
-    return {
-      ok: false,
-      fatal: true,
-      reason: `could not collect review context — ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
 }
 
 /** Produce a single normalized record from the configured sources. */
@@ -220,7 +174,96 @@ export function makeReviewRun(
       const budgetBlocks = new Set<ReviewSource['kind']>();
       const budgetStopped = () =>
         !parent?.aborted && (deadline.expired() || remainingWallMs() <= 0);
-      if (coderabbitConfigured) {
+      let deferredVendorDebt: DeferredVendorDebt | undefined;
+      const prepareDebt = async () => {
+        const debt = await prepareDeferredVendorReview(
+          effects,
+          target,
+          state,
+          deps.queueClient,
+          deadline.signal,
+          { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+        );
+        if (debt) {
+          if (
+            input.uncommitted ||
+            !agentConfigured ||
+            policy.review.reviewers.some((source) => source !== 'agent' && source !== 'coderabbit')
+          )
+            throw new Error(
+              'deferred vendor review requires full coverage of every configured nonvendor source',
+            );
+          await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+        }
+        return debt;
+      };
+      if (coderabbitConfigured && agentConfigured) {
+        try {
+          deferredVendorDebt = await prepareDebt();
+        } catch (error) {
+          return {
+            status: 'indeterminate',
+            detail: `review.run: deferred vendor trust/enrollment failed — ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      if (deferredVendorDebt) {
+        const ledger = effects.openLedger(state.branch).load();
+        const dispositions = new Map(
+          ledger.records
+            .filter((entry) => entry.kind === 'disposition')
+            .map((entry) => [entry.findingId, entry]),
+        );
+        records.push({
+          schemaVersion: 1,
+          branch: state.branch,
+          head: state.head,
+          sources: [
+            {
+              kind: 'coderabbit',
+              status: 'blocked',
+              cycleId: deferredVendorDebt.originAttempt.cycleId,
+              reason: deferredVendorDebt.vendorCompleted
+                ? 'verified affected-current vendor completion; full-branch coverage remains agent evidence'
+                : 'vendor review remains outstanding under durable deferred debt',
+            },
+          ],
+          findings: [
+            ...deferredReceiptFindings(
+              ledger.records
+                .filter((entry) => entry.kind === 'vendor-debt')
+                .map((entry) => entry.debt),
+            ).map((finding) => {
+              const disposition = dispositions.get(finding.id);
+              return {
+                ...finding,
+                status: disposition?.action ?? finding.status,
+                ...(disposition ? { reason: disposition.why } : {}),
+              };
+            }),
+            ...ledger.records
+              .filter(
+                (entry): entry is DevCycleRecord =>
+                  entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
+              )
+              .flatMap((entry) =>
+                entry.findings.map((finding): Finding => {
+                  const disposition = dispositions.get(finding.id);
+                  return {
+                    id: finding.id,
+                    source: 'coderabbit',
+                    severity: finding.severity,
+                    text: finding.excerpt ?? '',
+                    ...(finding.fileName ? { file: finding.fileName } : {}),
+                    status: disposition?.action ?? 'open',
+                    ...(disposition ? { reason: disposition.why } : {}),
+                  };
+                }),
+              ),
+          ],
+        });
+      }
+      if (coderabbitConfigured && !deferredVendorDebt) {
         const result = await makeDevReview({
           effects,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
@@ -323,6 +366,16 @@ export function makeReviewRun(
                   }))
                 : [],
           });
+          if (cycle?.vendorFailure && agentConfigured) {
+            try {
+              deferredVendorDebt = await prepareDebt();
+            } catch (error) {
+              return {
+                status: 'needs-human',
+                reason: `review.run: vendor failure retained but durable queue enrollment failed — ${error instanceof Error ? error.message : String(error)}`,
+              };
+            }
+          }
         }
       }
       if (agentConfigured && (deadline.signal?.aborted || remainingWallMs() <= 0)) {
@@ -357,10 +410,13 @@ export function makeReviewRun(
               ),
             );
           else {
-            const context = await collectReviewContext(effects, comparison, state.head, {
-              ...(deadline.signal ? { signal: deadline.signal } : {}),
-              remainingWallMs,
-            });
+            const context = await collectBoundedReviewContext(
+              effects,
+              comparison,
+              state.head,
+              input.uncommitted ? 'uncommitted' : 'full',
+              { ...(deadline.signal ? { signal: deadline.signal } : {}), remainingWallMs },
+            );
             if (!context.ok && context.fatal)
               return { status: 'failed', error: `review.run: ${context.reason}` };
             if (!context.ok) {
@@ -462,8 +518,8 @@ export function makeReviewRun(
                     components,
                     base: reviewedBase,
                     scope: reviewedScope,
-                    intent: context.intent,
-                    fileList: context.fileList,
+                    intent: context.context.intent,
+                    fileList: context.context.fileList,
                     searchTools: policy.review.searchTools,
                     logToolFailures: policy.harness.logToolFailures,
                     session: policy.review.session,
@@ -513,6 +569,11 @@ export function makeReviewRun(
                   });
                   if (blockedReason === undefined && !coverage.ok)
                     blockedReason = `agent review returned no verifiable coverage proof — ${coverage.reason}`;
+                  if (
+                    blockedReason === undefined &&
+                    (deadline.signal?.aborted || remainingWallMs() <= 0)
+                  )
+                    blockedReason = 'review cancelled or wall budget exhausted';
                   const agentFindings = report?.findings ?? [];
                   const advisories = report?.advisories ?? [];
                   const failureEvidence = ReviewCoverageV2Schema.safeParse(report?.coverage);
@@ -556,6 +617,9 @@ export function makeReviewRun(
                           blockedReason === undefined
                             ? { kind: 'terminal' }
                             : { kind: 'blocked', reason: blockedReason },
+                        ...(blockedReason === undefined && coverage.ok
+                          ? { agentCoverage: coverage.coverage }
+                          : {}),
                         findings: agentFindings.map((finding, index) => ({
                           id: `${id}#f${String(index + 1)}`,
                           severity: finding.severity,
@@ -697,7 +761,62 @@ export function makeReviewRun(
           detail: `review.run: findings record write outcome is uncertain at '${path}' — ${error instanceof Error ? error.message : String(error)}`,
         };
       }
-      if (stopped() || !isComplete(record, policy.review.reviewers)) {
+      let deferredComplete = false;
+      if (deferredVendorDebt && !stopped()) {
+        try {
+          deferredVendorDebt = await loadCurrentDeferredVendorDebt(
+            effects,
+            target,
+            state,
+            effects.openLedger(state.branch).load(),
+            deps.queueClient,
+            deadline.signal,
+            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+          );
+          const imported = deferredReceiptFindings(
+            effects
+              .openLedger(state.branch)
+              .load()
+              .records.filter((entry) => entry.kind === 'vendor-debt')
+              .map((entry) => entry.debt),
+          );
+          const unseen = imported.filter(
+            (finding) => !record.findings.some((item) => item.id === finding.id),
+          );
+          if (unseen.length > 0)
+            return {
+              status: 'needs-human',
+              reason:
+                'review.run: newly consumed vendor findings retained; re-run composition to address them',
+              report: {
+                ...record,
+                findings: [...record.findings, ...unseen],
+                ...(deferredVendorDebt ? { deferredVendorDebt } : {}),
+              },
+            };
+          deferredComplete =
+            deferredVendorDebt !== undefined &&
+            hasDeferredReviewSources(record, policy.review.reviewers, deferredVendorDebt, {
+              repo: deferredVendorDebt.reference.binding.repo,
+              producer:
+                deferredVendorDebt.reference.binding.kind === 'deferred-author'
+                  ? deferredVendorDebt.reference.binding.producer
+                  : '',
+              target,
+              head: state.head,
+              base: state.base,
+              dirtySha256: state.dirtySha256,
+              deferralId: deferredVendorDebt.deferral.id,
+            });
+        } catch (error) {
+          return {
+            status: 'needs-human',
+            reason: `review.run: current queue trust could not be verified — ${error instanceof Error ? error.message : String(error)}`,
+            report: record,
+          };
+        }
+      }
+      if (stopped() || (!deferredComplete && !isComplete(record, policy.review.reviewers))) {
         const blockedSources = record.sources.filter((source) => source.status !== 'terminal');
         const blockedTransient =
           !stopped() &&
@@ -719,7 +838,13 @@ export function makeReviewRun(
           },
         };
       }
-      return { status: 'ok', value: record };
+      return {
+        status: 'ok',
+        value: record,
+        ...(deferredComplete && deferredVendorDebt
+          ? { report: { ...record, deferredVendorDebt } }
+          : {}),
+      };
     } finally {
       deadline.dispose();
     }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   lstat,
+  link,
   mkdir,
   readFile,
   readdir,
@@ -12,10 +13,85 @@ import {
 import { dirname, join, relative } from 'node:path';
 import { expect, test } from 'vitest';
 import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
-import { DEV_LEDGER_VERSION, devLedgerPath } from '../../../src/ops/dev/record.js';
+import {
+  DEV_LEDGER_VERSION,
+  devLedgerPath,
+  parseDevLedger,
+  serializeDevLedger,
+} from '../../../src/ops/dev/record.js';
 import { makeTestRepo } from '../dev/repo.js';
 
 const hash = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
+
+test.each(['valid', 'bound-head', 'base', 'changed-bytes'] as const)(
+  'vendor debt bookkeeping validates exact bytes and bound ancestry: %s',
+  async (mode) => {
+    const f = await fixture();
+    try {
+      const base = f.repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim();
+      const ledger = parseDevLedger(f.ledgerText);
+      ledger.records.push({
+        kind: 'vendor-debt',
+        at: '2026-10-28T00:00:00Z',
+        debt: {
+          reference: {
+            requestId: 'intent-1',
+            binding: {
+              kind: 'deferred-author',
+              repo: 'owner/repo',
+              producer: 'author',
+              head: mode === 'bound-head' ? 'f'.repeat(40) : f.head,
+              target: 'merge-queue',
+              targetSelector: 'promoted-main',
+            },
+          },
+          deferral: {
+            id: 'intent-1',
+            base: mode === 'base' ? 'f'.repeat(40) : base,
+            dirtySha256: 'clean-tree',
+          },
+          originAttempt: {
+            cycleId: 'c001-outage',
+            head: f.head,
+            base,
+            target: 'merge-queue',
+            scope: 'full',
+            dirtySha256: 'clean-tree',
+            failure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
+          },
+          vendor: 'vendor-blocked-transient',
+          vendorCompleted: false,
+          queue: {
+            state: 'awaiting-pr',
+            pr: null,
+            mergeSha: null,
+            itemId: null,
+            receiptId: null,
+            consumed: false,
+            reviewed: false,
+            fixed: false,
+          },
+        },
+      });
+      const text = serializeDevLedger(ledger);
+      await writeFile(f.ledger, text);
+      f.original.fingerprints.set(f.ledger, hash(text));
+      await f.original.receipt.persist();
+      if (mode === 'changed-bytes') await writeFile(f.ledger, text + '\n');
+      const fresh = f.make();
+      if (mode === 'valid') {
+        await fresh.receipt.prepare(f.root);
+        expect(fresh.fingerprints.get(f.ledger)).toBe(hash(text));
+        expect(ledger.records.at(-1)).toMatchObject({ debt: { vendorCompleted: false } });
+      } else {
+        await expect(fresh.receipt.prepare(f.root)).rejects.toThrow();
+        expect(fresh.fingerprints.size).toBe(0);
+      }
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
 async function fixture() {
   const repo = await makeTestRepo();
   const root = await realpath(repo.root);
@@ -260,3 +336,86 @@ test('receipt changed while constructing replacement is preserved and owned temp
     await f.repo.cleanup();
   }
 });
+
+function ownershipReceipt() {
+  const paths: unknown[] = [];
+  return JSON.stringify({
+    version: 1,
+    item_id: 'current-ownership',
+    request_id: 'original',
+    source: {
+      repo: 'owner/repo',
+      pr: 1,
+      merge_sha: 'a'.repeat(40),
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    },
+    capture: {
+      target: 'b'.repeat(40),
+      tree: 'c'.repeat(40),
+      paths,
+      scope_digest: createHash('sha256').update('[]').digest('hex'),
+      equivalence: 'd'.repeat(64),
+      policy: 'affected-current-additions-v1',
+      projection: 'current-affected-files/full-file-addition-projection',
+      reviewer: 'coderabbit-review-agent-committed-v1',
+      reviewer_version: 'fixture',
+      captured_at: '2026-10-28T00:00:00Z',
+    },
+    outcome: 'no-current-code',
+    counted: false,
+    classification: null,
+    findings: [],
+    run_id: null,
+    started_at: null,
+    artifacts: {},
+    remediation: 'disabled/deferred',
+    independent_acceptance: false,
+    cli_functional_acceptance: 'pending-D1',
+  });
+}
+
+test.each(['valid', 'changed', 'wrong-name', 'symlink', 'hardlink', 'unregistered'] as const)(
+  'exact queue receipt ownership restoration: %s',
+  async (mode) => {
+    const f = await fixture();
+    try {
+      const bytes = ownershipReceipt();
+      const id = hash(bytes);
+      const folder = join(f.root, '.cq/queue-evidence');
+      await mkdir(folder, { recursive: true });
+      const path = join(folder, (mode === 'wrong-name' ? 'e'.repeat(64) : id) + '.json');
+      await writeFile(path, bytes);
+      if (mode === 'symlink') {
+        await unlink(path);
+        await symlink(f.history, path);
+      }
+      if (mode === 'hardlink') await link(path, join(folder, 'extra'));
+      if (mode === 'unregistered') {
+        const fresh = f.make();
+        await fresh.receipt.prepare(f.root);
+        expect(await fresh.receipt.ownedFiles()).not.toContain(path);
+        expect(fresh.fingerprints.has(path)).toBe(false);
+        return;
+      }
+      f.original.fingerprints.set(path, hash(bytes));
+      if (mode === 'wrong-name' || mode === 'symlink' || mode === 'hardlink') {
+        await expect(f.original.receipt.persist()).rejects.toThrow();
+        return;
+      }
+      await f.original.receipt.persist();
+      if (mode === 'changed') await writeFile(path, bytes + '\n');
+      const fresh = f.make();
+      if (mode === 'changed') {
+        await expect(fresh.receipt.prepare(f.root)).rejects.toThrow();
+        expect(fresh.fingerprints.size).toBe(0);
+      } else {
+        await fresh.receipt.prepare(f.root);
+        expect(fresh.fingerprints.get(path)).toBe(id);
+        expect(await fresh.receipt.ownedFiles()).toContain(path);
+      }
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);

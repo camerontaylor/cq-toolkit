@@ -8,6 +8,7 @@ never own GitHub or queue mutation. See README.md and ops/CUTOVER.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import hashlib
@@ -27,6 +28,7 @@ import coverage
 import author_quota
 import author_lease
 import review_receipt
+import deferred_refresh
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,8 +107,40 @@ def is_ancestor(a: str, b: str) -> bool:
     return run(["git", "merge-base", "--is-ancestor", a, b], cwd=CLONE, check=False).returncode == 0
 
 
+_FORGE_BUDGET = None
+
+
+class ForgeBudget:
+    """One aggregate request/deadline allowance for locked recovery reads."""
+    def __init__(self, requests=24, seconds=30, clock=None):
+        self.clock = clock or time.monotonic
+        self.deadline = self.clock() + seconds
+        self.remaining = requests
+
+    def available(self):
+        return self.remaining > 0 and self.clock() < self.deadline
+
+    def take(self):
+        if not self.available():
+            raise deferred_refresh.RefreshExhausted("aggregate forge budget exhausted; debt retained")
+        self.remaining -= 1
+        return max(0.001, min(10, self.deadline - self.clock()))
+
+
+@contextlib.contextmanager
+def forge_window(budget):
+    global _FORGE_BUDGET
+    previous = _FORGE_BUDGET
+    _FORGE_BUDGET = budget
+    try:
+        yield
+    finally:
+        _FORGE_BUDGET = previous
+
+
 def gh_json(args: List[str]) -> Any:
-    return json.loads(run(["gh", *args], cwd=CLONE, timeout=120).stdout)
+    timeout = _FORGE_BUDGET.take() if _FORGE_BUDGET is not None else 120
+    return json.loads(run(["gh", *args], cwd=CLONE, timeout=timeout).stdout)
 
 
 def paseo_json(args: List[str]) -> Any:
@@ -314,28 +348,63 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         counts[severity] = counts.get(severity, 0) + 1
     res: Dict[str, Any] = {"exit": exit_code, "events": len(events), "bad_lines": bad_lines,
                            "findings": len(findings), "severity_counts": counts}
+    # Authorization is derived from every structured cause, never message text.
+    causes = []
+    proof_complete = ndjson.exists() and bad_lines == 0 and type(exit_code) is int
+    def hard(code):
+        causes.append({"source": "queue", "category": "unknown", "code": code})
+    for _ in range(bad_lines):
+        hard("malformed-stream")
+    for e in events:
+        if e.get("type") == "error":
+            if e.get("errorType") == "rate_limit" and e.get("recoverable") is True:
+                causes.append({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"})
+            else:
+                code = e.get("errorType")
+                hard(code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", code)
+                     else "unknown-error")
+        if e.get("type") == "action_required" or e.get("status") == "awaiting_confirmation":
+            hard("action-required")
+        # Unknown status values are not evidence of a harmless progress event.
+        # In particular scan/budget/cancel statuses must survive a vendor error.
+        if e.get("type") == "finding" and isinstance(e.get("severity"), str) and e["severity"] in BLOCKING_SEVERITIES:
+            hard("blocking-finding")
+        if e.get("type") != "complete" and "status" in e:
+            status = e["status"]
+            # Explicit protocol progress is neutral, never completion/vendor proof.
+            # TS fixtures: status/scanning, reviewing, writing; heartbeat/reviewing.
+            progress = (e["type"] == "status" and isinstance(status, str) and
+                        status in ("scanning", "reviewing", "writing") or
+                        e["type"] == "heartbeat" and status == "reviewing")
+            if not progress:
+                hard(status if isinstance(status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", status)
+                     else "unrecognized-status")
+                proof_complete = False
+    if errors and complete:
+        hard("conflicting-terminal")
+    vendor_only = bool(causes) and all(c["source"] == "vendor" for c in causes)
+    if type(exit_code) is not int:
+        hard("missing-exit")
+    elif exit_code != 0 and not (exit_code == 1 and vendor_only):
+        hard("unexpected-exit")
     if actions:
-        res.update(outcome="action_required", message=str(actions[0])[:400])
+        res.update(outcome="action_required", message="structured action required")
+    elif any(e.get("errorType") == "auth" for e in errors):
+        # Operational stop only: auth remains a hard cause, never vendor authority.
+        res.update(outcome="auth", message="structured authentication failure; owner action needed")
     elif errors:
-        e = errors[0]
-        et = str(e.get("errorType", "")).lower()
-        msg = str(e.get("message", ""))
-        res["message"] = f"{e.get('errorType')}: {msg}"[:400]
-        if SIZE_REFUSAL.search(f"{et} {msg}"):
-            res.update(outcome="too_large")
-        elif "rate" in et or "limit" in et or "quota" in et or "rate limit" in msg.lower():
-            metadata = e.get("metadata")
-            wait = str(metadata.get("waitTime", "")) if isinstance(metadata, dict) else ""
-            m = re.search(r"(\d+)\s*(second|minute|hour)", wait)
-            mins = None
-            if m:
-                k = {"second": 1 / 60, "minute": 1, "hour": 60}[m.group(2)]
-                mins = int(int(m.group(1)) * k) + 1
-            res.update(outcome="rate_limited", wait_minutes=mins)
-        elif "auth" in et or "login" in msg.lower() or "unauthor" in msg.lower():
-            res.update(outcome="auth")
+        if vendor_only and proof_complete and type(exit_code) is int and exit_code in (0, 1):
+            res.update(outcome="rate_limited")
+            waits = []
+            for e in errors:
+                metadata = e.get("metadata")
+                wait = metadata.get("waitTime") if isinstance(metadata, dict) else None
+                m = re.fullmatch(r"(\d+)\s*(second|minute|hour)s?", wait) if isinstance(wait, str) else None
+                if m:
+                    waits.append(int(int(m.group(1)) * {"second": 1 / 60, "minute": 1, "hour": 60}[m.group(2)]) + 1)
+            res["wait_minutes"] = max(waits) if waits else None
         else:
-            res.update(outcome="error")
+            res.update(outcome="error", message="structured failure; see failure provenance")
     elif exit_code is None:
         res.update(outcome="interrupted", message="no exit status recorded")
     elif exit_code != 0:
@@ -353,6 +422,12 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         reviewed = last.get("reviewedFiles") or []
         count = len(reviewed) if isinstance(reviewed, list) else reviewed if isinstance(reviewed, int) and not isinstance(reviewed, bool) and reviewed >= 0 else 0
         res.update(outcome="completed", reviewed_files=count)
+    if not errors and not actions and res["outcome"] != "completed":
+        hard("nonterminal-review")
+    # Unknown statuses also invalidate an otherwise apparently successful stream.
+    if not proof_complete and res["outcome"] == "completed":
+        res.update(outcome="malformed", message="stream contains an unrecognized status")
+    res["failure_provenance"] = {"version": 1, "complete": proof_complete, "causes": causes}
     res["counted"] = res["outcome"] == "completed"
     return res
 
@@ -382,6 +457,77 @@ def findings_md(ndjson: Path, meta: Dict[str, Any], cls: Dict[str, Any]) -> str:
 def pr_info(pr: int) -> Dict[str, Any]:
     return gh_json(["pr", "view", str(pr), "--repo", REPO, "--json",
                     "number,state,isDraft,headRefName,headRefOid,baseRefName,updatedAt,mergeCommit,mergedAt"])
+
+
+def deferred_forge(args: List[str]) -> Any:
+    """Normalize a bounded forge timeout into retryable deferred debt."""
+    try:
+        return gh_json(args)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("deferred forge request timed out") from None
+
+
+def verify_deferred_source(repo: str, pr: int) -> Dict[str, Any]:
+    """Trusted forge identity for one explicitly enrolled request, no discovery."""
+    if repo != REPO or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise ValueError("deferred repository is outside configured scope")
+    if type(pr) is not int or pr <= 0:
+        raise ValueError("invalid deferred PR")
+    data = deferred_forge(["api", f"repos/{repo}/pulls/{pr}"])
+    if not isinstance(data, dict):
+        raise ValueError("missing forge PR metadata")
+    base = data.get("base") or {}
+    head = data.get("head") or {}
+    user = data.get("user") or {}
+    if (not isinstance(base, dict) or not isinstance(head, dict) or not isinstance(user, dict) or
+            not isinstance(base.get("repo"), dict) or base["repo"].get("full_name") != repo or
+            type(data.get("number")) is not int or data["number"] != pr or
+            not isinstance(user.get("login"), str) or not user["login"] or
+            not isinstance(head.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", head["sha"]) or
+            base.get("ref") != "merge-queue" or type(data.get("merged")) is not bool or
+            data.get("state") not in ("open", "closed") or (data["merged"] and data["state"] != "closed")):
+        raise ValueError("invalid forge PR identity")
+    merge = data.get("merge_commit_sha") if data["merged"] else None
+    if data["merged"] and (not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge)):
+        raise ValueError("missing immutable forge merge identity")
+    return {"repo": repo, "pr": pr, "producer": user["login"], "head": head["sha"],
+            "target": base["ref"], "state": "MERGED" if data["merged"] else data["state"].upper(),
+            "mergeSha": merge}
+
+
+def find_deferred_source(repo: str, producer: str, head: str, target: str, limit: int) -> List[Dict[str, Any]]:
+    """Recover a lost publication reply, all states, refusing incomplete search.
+
+    Search is restricted to the explicit request's repo/producer/head/base. Its
+    candidates are re-read as trusted PR metadata; search snippets are no proof.
+    Empty/index-lag results leave the intent unpublished for a later tick.
+    """
+    if (repo != REPO or not isinstance(producer, str) or
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", producer) or
+            not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head) or
+            target != "merge-queue" or type(limit) is not int or limit != 2):
+        raise ValueError("invalid deferred publication binding")
+    query = f"repo:{repo} is:pr author:{producer} base:{target} {head}"
+    result = deferred_forge(["api", "--method", "GET", "search/issues", "-f", "q=" + query,
+                             "-f", "per_page=" + str(limit), "-f", "page=1"])
+    if (not isinstance(result, dict) or result.get("incomplete_results") is not False or
+            type(result.get("total_count")) is not int or not isinstance(result.get("items"), list) or
+            not 0 <= result["total_count"] <= limit or len(result["items"]) != result["total_count"]):
+        raise RuntimeError("deferred publication search incomplete; debt retained")
+    matches = []
+    seen = set()
+    for candidate in result["items"]:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("pull_request"), dict):
+            raise ValueError("search candidate is not a forge PR")
+        number = candidate.get("number")
+        actual = verify_deferred_source(repo, number)
+        if any(actual[k] != value for k, value in (("producer", producer), ("head", head), ("target", target))):
+            raise ValueError("publication candidate identity drift")
+        if number in seen:
+            raise RuntimeError("duplicate search candidate; debt retained")
+        seen.add(number)
+        matches.append(actual)
+    return matches
 
 
 _AGENTS_CACHE: Dict[str, Any] = {}
@@ -2713,6 +2859,16 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
+    if not dry and only is None:
+        budget = ForgeBudget()
+        with forge_window(budget):
+            refreshed = deferred_refresh.refresh_deferred(q,
+                verify_source=verify_deferred_source, find_source=find_deferred_source,
+                at=iso(), limit=20, may_continue=budget.available)
+        if refreshed:
+            # Binding/enrollment must survive a crash before reservation/dispatch.
+            save_queue(q)
+            log.append(f"refreshed {len(refreshed)} deferred author intent(s)")
     starts_before = len(q.get("starts", []))
     for item in list(q["items"]):
         if item["kind"] == "promotion" and item["state"] in SIGNER_STATES:

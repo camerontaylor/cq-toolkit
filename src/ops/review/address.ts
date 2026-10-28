@@ -40,6 +40,16 @@ import {
   type AddressWorker,
 } from './addressWorker.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
+import { parseQueueReceipt } from './internal/queueEvidence.js';
+import {
+  resolveDeferredVendorContext,
+  type DeferredVendorContextRequest,
+  type DeferredVendorContext,
+} from './internal/addressDeferred.js';
+import {
+  hasDeferredReviewSources,
+  type DeferredVendorDebt,
+} from '../dev/internal/deferredReview.js';
 import type { AddressFailedAttempt } from './internal/addressEvidence.js';
 import { FixReviewItemInputSchema } from './registry.js';
 import {
@@ -97,6 +107,8 @@ export interface ReviewAddressReport {
   stop?: 'round-cap' | 'budget' | 'rereview-blocked';
   /** Last admitted head, advanced only by verified fix commits. */
   verifiedHead?: string;
+  /** Durable author debt remains explicit; address success is not vendor completion. */
+  deferredVendorDebt?: DeferredVendorDebt;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -111,6 +123,9 @@ export interface ReviewAddressDeps {
   review?: (input: ReviewRunInput) => Promise<ReviewRunResult>;
   workerFactory?: (deps: Parameters<typeof makeAddressWorker>[0]) => AddressWorker;
   disposition?: (root: string, finding: Finding) => Promise<OpResult<unknown>>;
+  resolveDeferredVendorContext?: (
+    request: DeferredVendorContextRequest,
+  ) => Promise<DeferredVendorContext | undefined>;
 }
 
 /** Deterministic file-disjoint waves. Missing scope is handled explicitly, never fanned out. */
@@ -527,6 +542,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       };
       // Bound inside the ownership lock below (it needs the bookkeeping FIFO);
       // reviews only fire after that lock is held, so the binding is always set.
+      let noteEvidenceImportedImpl:
+        | ((evidence: { receiptId: string; path: string }) => Promise<void>)
+        | undefined;
       let noteLedgerWriteImpl: ((branch: string, repoRoot: string) => Promise<void>) | undefined;
       const reviewImplementation =
         deps.review ??
@@ -536,6 +554,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           writeFindingsRecord: async (path, content) => {
             await writeFile(path, content, { flag: 'wx', mode: 0o600 });
             await noteBookkeeping(path);
+          },
+          onEvidenceImported: async (evidence) => {
+            if (!noteEvidenceImportedImpl) throw new Error('queue evidence ownership unavailable');
+            await noteEvidenceImportedImpl(evidence);
           },
           noteLedgerWrite: async (branch, repoRoot) => {
             await noteLedgerWriteImpl?.(branch, repoRoot);
@@ -664,7 +686,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 throw error;
               }
               const revision = bookkeepingRevision;
-              const result = await action();
+              const outcome = await action().then(
+                (value) => ({ ok: true as const, value }),
+                (error: unknown) => ({ ok: false as const, error }),
+              );
+              // Import ownership survives a later ack/settlement failure.
               if (persistedBookkeeping && bookkeepingRevision !== revision) {
                 try {
                   await persistedBookkeeping.persist();
@@ -673,7 +699,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   throw error;
                 }
               }
-              return result;
+              if (!outcome.ok) throw outcome.error;
+              return outcome.value;
             });
             bookkeepingWrites = pending.catch(() => undefined);
             return pending;
@@ -695,6 +722,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let rereviewStillTransient = false;
           const review = async (request: ReviewRunInput) => {
             const first = await reviewOnce(request);
+            if (
+              first.status === 'needs-human' &&
+              first.report?.deferredVendorDebt &&
+              first.report.blockedBudget !== true &&
+              !stop() &&
+              (await hasRequiredSources(request.repoRoot, first.report))
+            )
+              return first;
             if (first.status !== 'needs-human' || first.report?.blockedTransient !== true || stop())
               return first;
             report.reasons.push('re-review blocked on a network/transient class; retrying once');
@@ -730,6 +765,45 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               relative(repoRoot, devLedgerPath(repoRoot, branch)),
             );
             await noteBookkeeping(path);
+          };
+          // Already inside the review/context bookkeeping FIFO: never re-enter it.
+          const noteQueueEvidence = async (
+            root: string,
+            evidence: { receiptId: string; path: string },
+          ) => {
+            const canonicalRoot = await realpath(root);
+            if (!/^[0-9a-f]{64}$/.test(evidence.receiptId))
+              throw new Error('invalid queue evidence identity');
+            const expected = resolve(
+              canonicalRoot,
+              '.cq/queue-evidence',
+              evidence.receiptId + '.json',
+            );
+            if (evidence.path !== expected || (await realpath(expected)) !== expected)
+              throw new Error('queue evidence path mismatch');
+            const stat = await lstat(expected);
+            if (!stat.isFile() || stat.nlink !== 1)
+              throw new Error('queue evidence is not an ordinary exact file');
+            const bytes = await readFile(expected);
+            const hash = createHash('sha256').update(bytes).digest('hex');
+            if (
+              hash !== evidence.receiptId ||
+              (bookkeeping.has(expected) && bookkeeping.get(expected) !== hash)
+            )
+              throw new Error('queue evidence changed or digest mismatch');
+            parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
+            if (!persistedBookkeeping)
+              throw new Error('durable queue evidence ownership unavailable');
+            bookkeeping.set(expected, hash);
+            bookkeepingRevision++;
+            // The caller sends ack immediately after this observer returns. Commit
+            // ownership inline in the FIFO slot, before that irreversible boundary.
+            try {
+              await persistedBookkeeping.persist();
+            } catch (error) {
+              bookkeepingTampered = true;
+              throw error;
+            }
           };
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
@@ -801,6 +875,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let publishRemote = 'origin';
           let publishedBase: string | undefined;
           let workerRoot = resolve(input.repoRoot);
+          noteEvidenceImportedImpl = (evidence) => noteQueueEvidence(workerRoot, evidence);
           const remember = (fix: AddressFix) => {
             report.fixes.push(fix);
             if (fix.commit) {
@@ -882,6 +957,56 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const dispositions = new Map<string, Finding>();
           let bookkeepingFailed = false;
           let reviewedBase: string | undefined;
+          const hasRequiredSources = async (root: string, record: FindingsRecord) => {
+            if (stop()) return false;
+            const complete = isComplete(record, policy.review.reviewers);
+            if (!policy.review.reviewers.includes('coderabbit')) return complete;
+            return withBookkeepingAccess(root, async () => {
+              if (stop()) return false;
+              const context = await (
+                deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
+              )({
+                repoRoot: root,
+                target: input.target ?? 'merge-queue',
+                base: reviewedBase,
+                record,
+                onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
+                ...(parent ? { signal: parent } : {}),
+              });
+              if (!deps.resolveDeferredVendorContext && context)
+                await noteBookkeeping(devLedgerPath(root, record.branch));
+              if (stop()) return false;
+              if (!context) {
+                if (complete) delete report.deferredVendorDebt;
+                return complete;
+              }
+              if (
+                !complete &&
+                !hasDeferredReviewSources(
+                  record,
+                  policy.review.reviewers,
+                  context.debt,
+                  context.identity,
+                )
+              )
+                return false;
+              // New receipt findings enter the normal dispatcher. Existing
+              // dispositions come from the ledger, never a cached record's
+              // status. A newer record cannot silently adjudicate an old ID.
+              const retained = new Map(context.findings.map((finding) => [finding.id, finding]));
+              record.findings = [
+                ...record.findings.map((finding) => {
+                  const current = retained.get(finding.id);
+                  return current ? { ...finding, ...current, reason: current.reason } : finding;
+                }),
+                ...context.findings.filter(
+                  (finding) => !record.findings.some((item) => item.id === finding.id),
+                ),
+              ];
+              report.deferredVendorDebt = context.debt;
+              return true;
+            });
+          };
           const admitCleanRecord = async (root: string, record: FindingsRecord) => {
             const effects = makeSubprocessDevEffects(root);
             const read = await readWorkState(effects, {
@@ -1640,8 +1765,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             report.findings = previous.findings;
             noteAdvisories(previous);
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-            if (!isComplete(previous, policy.review.reviewers))
+            if (!(await hasRequiredSources(root, previous)))
               return await finish('needs-human', 'review source incomplete');
+            if (stop()) return await finish('needs-human', stop());
+            report.findings = previous.findings;
+            report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             const pending = previous.findings.filter((f) => f.status === 'open');
             if (!pending.length && !report.openBlocking.length && !bookkeepingFailed) {
               await admitCleanRecord(root, previous);
@@ -1659,7 +1787,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               wallMs: Math.max(1, remainingWallMs()),
               ...(priorFindings.length > 0 ? { priorFindings } : {}),
             });
-            if (refreshed.status !== 'ok') {
+            const refreshedRecord =
+              refreshed.status === 'ok'
+                ? refreshed.value
+                : refreshed.status === 'needs-human' &&
+                    refreshed.report?.deferredVendorDebt &&
+                    refreshed.report.blockedBudget !== true &&
+                    !stop() &&
+                    (await hasRequiredSources(root, refreshed.report))
+                  ? FindingsRecordSchema.strip().parse(refreshed.report)
+                  : undefined;
+            if (!refreshedRecord) {
               if (refreshed.report) noteAdvisories(refreshed.report);
               return await finish(
                 'needs-human',
@@ -1668,20 +1806,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               );
             }
             if (
-              refreshed.value.branch !== (await branchName(root)) ||
-              refreshed.value.head !== (await gitText(root, ['rev-parse', 'HEAD']))
+              refreshedRecord.branch !== (await branchName(root)) ||
+              refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
             )
               return await finish('needs-human', 're-review identity changed');
-            previous = retainDeferred(refreshed.value);
+            previous = retainDeferred(refreshedRecord);
+            const complete = await hasRequiredSources(root, previous);
+            if (stop()) return await finish('needs-human', stop());
             noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             noteRound(round, previous).record = previous;
-            if (
-              isComplete(previous, policy.review.reviewers) &&
-              !report.openBlocking.length &&
-              !bookkeepingFailed
-            ) {
+            if (complete && !report.openBlocking.length && !bookkeepingFailed) {
               await admitCleanRecord(root, previous);
               return await finish('ok');
             }
