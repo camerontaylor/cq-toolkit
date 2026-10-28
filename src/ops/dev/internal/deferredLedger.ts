@@ -6,7 +6,10 @@ import { consumeDeferredVendorReport } from './deferredSettlement.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { DevCycleRecord, DevLedgerFile } from '../record.js';
 import { makeConfiguredQueueClient } from '../../review/queue.js';
-import type { DeferredQueueClient } from '../../review/internal/queueProtocol.js';
+import type {
+  DeferredQueueClient,
+  QueueStatus,
+} from '../../review/internal/queueProtocol.js';
 import {
   DeferredVendorDebtSchema,
   VendorFailureProvenanceSchema,
@@ -632,6 +635,29 @@ function ancestryBoundary(lifetime: InvocationLifetime): 'continue' | 'stop' {
   return 'continue';
 }
 
+/** Nonterminal ancestor statuses are only continuable when they are VENDOR-shaped. A queue/scan/
+ * identity/unknown blocker is a genuine trust failure reported by the queue, not ordinary pending
+ * vendor work, so it must propagate instead of being discarded. Mirrors the current-debt rule in
+ * deferredReview.ts so the two paths cannot disagree.
+ */
+function continuableAncestorStatus(queue: QueueStatus): boolean {
+  const vendorReason =
+    queue.reason?.source === 'vendor' &&
+    ['vendor-unavailable', 'vendor-rate-limited', 'vendor-needs-action'].includes(
+      queue.reason.category,
+    );
+  if (queue.reason && !vendorReason) return false;
+  if (queue.state === 'blocked') return queue.enqueued === true && vendorReason;
+  return [
+    'awaiting-pr',
+    'awaiting-merge',
+    'ready-current',
+    'enqueued',
+    'pending',
+    'reviewing',
+  ].includes(queue.state);
+}
+
 /** Refreshes the current enrollment's authorized predecessors, sequentially and in FIFO/lineage
  * order. A predecessor is settled only through the existing verified report import, and only the
  * current enrollment is ever returned for continuation or readiness.
@@ -653,7 +679,11 @@ async function refreshAuthorizedAncestry(
     if (read.kind !== 'enrollment') return;
     const lineageOrder = [...read.enrollment.pendingAncestry].reverse();
     const next = lineageOrder.find((ancestor) => !attempted.has(ancestor.reference.requestId));
-    if (next === undefined) return;
+    if (next === undefined) {
+      // An exhausted lineage never swallows a caller cancellation; deadline/count stops stay nonfatal.
+      if (lifetime.callerAborted()) lifetime.signal.throwIfAborted();
+      return;
+    }
     // The caller's cancellation outranks the nonfatal count/deadline stops.
     if (ancestryBoundary(lifetime) === 'stop') return;
     if (refreshed >= MAX_PREDECESSOR_REFRESHES) return;
@@ -662,8 +692,15 @@ async function refreshAuthorizedAncestry(
     let completed: DeferredVendorDebt;
     try {
       const fresh = await refreshDeferredVendorDebt(queue, next);
-      if (!['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state))
+      if (!['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state)) {
+        // A nonterminal status is only ordinary pending vendor work when it is vendor-shaped; a
+        // queue/scan/identity/unknown blocker is a real trust failure and must not be discarded.
+        if (!continuableAncestorStatus(fresh.queue))
+          throw new Error(
+            `authorized predecessor queue status is a non-vendor blocker: ${String(fresh.queue.state)}/${String(fresh.queue.reason?.category ?? 'no-reason')}`,
+          );
         continue;
+      }
       completed = await consumeDeferredVendorReport(
         effects,
         queue,
@@ -688,6 +725,9 @@ async function refreshAuthorizedAncestry(
       current.state.dirtySha256 !== state.dirtySha256
     )
       throw new Error('deferred invocation identity changed while settling authorized ancestry');
+    // The identity read is asynchronous: a cancellation that landed during it must prevent the
+    // settlement write and propagate with its exact reason.
+    signalCheck(lifetime);
     expected.ledger = await appendDebt(effects, state, expected.ledger, completed);
   }
 }

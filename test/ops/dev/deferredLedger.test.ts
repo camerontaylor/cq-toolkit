@@ -1476,3 +1476,133 @@ test('an exhausted budget before the timer callback still truncates nonfatally',
   expect(debt?.reference.requestId).toBe(successor.reference.requestId);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
+
+/** A pending successor at a new head whose authorized ancestor is still pending at the older head. */
+async function successorWithPendingAncestor() {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  return { f, predecessor, terminal, successorStatus, successor, read };
+}
+
+test('a non-vendor blocker discovered while refreshing an ancestor propagates', async () => {
+  const { f, predecessor, successorStatus, read } = await successorWithPendingAncestor();
+  const blocked: QueueStatus = {
+    ...f.debt.queue,
+    state: 'blocked',
+    reason: { source: 'queue', category: 'identity', code: 'forge-identity' },
+  };
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? blocked : successorStatus,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', read.state, before, client),
+  ).rejects.toThrow(/non-vendor blocker/);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a vendor-blocked, enqueued ancestor stays ordinary pending vendor work', async () => {
+  const { f, predecessor, successorStatus, successor, read } = await successorWithPendingAncestor();
+  const vendorBlocked: QueueStatus = {
+    ...f.debt.queue,
+    state: 'blocked',
+    enqueued: true,
+    reason: { source: 'vendor', category: 'vendor-rate-limited', code: 'rate_limited' },
+  };
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? vendorBlocked : successorStatus,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a caller abort during the post-report identity read prevents the ancestor append', async () => {
+  const { f, predecessor, successorStatus, read } = await successorWithPendingAncestor();
+  const terminal = terminalReport(f);
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled during the post-report identity read');
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      const result = await f.effects.runCommand(...call);
+      // Cancellation lands while the post-report identity read is running.
+      if (imported && call[0] === 'git') controller.abort(reason);
+      return result;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+  ).rejects.toThrow(reason);
+  // No late settlement write: the ledger is exactly as before.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a caller abort after the final ancestor settlement still propagates from lineage exhaustion', async () => {
+  const { f, predecessor, successorStatus, read } = await successorWithPendingAncestor();
+  const terminal = terminalReport(f);
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled after the final settlement');
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+  };
+  const store = f.effects.openLedger(f.state.branch);
+  const before = store.load();
+  const effects = {
+    ...f.effects,
+    openLedger: () => ({
+      ...store,
+      mutate: async <T>(fn: Parameters<typeof store.mutate<T>>[0]) => {
+        const value = await store.mutate(fn);
+        // The settlement is published; cancellation lands before the lineage can be re-read.
+        controller.abort(reason);
+        return value;
+      },
+    }),
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+  ).rejects.toThrow(reason);
+});
