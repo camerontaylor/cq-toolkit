@@ -639,7 +639,7 @@ async function successorReceipt(
   return importQueueEvidence(join(f.repo.root, '.cq', 'queue-evidence'), receiptId, bytes);
 }
 
-test('a clean run refuses clean completion while an authorized predecessor obligation is unsettled', async () => {
+test('a superseded older-head predecessor permits a clean run and stays an outstanding obligation', async () => {
   const f = await fixture();
   const predecessor = f.debt;
   await f.repo.write('src/a.ts', 'export const a = 2;\n');
@@ -697,10 +697,25 @@ test('a clean run refuses clean completion while an authorized predecessor oblig
   })({ repoRoot: f.repo.root });
   // The guard refuses the clean completion INSIDE the run; the predecessor stays an obligation.
   expect(result.status, JSON.stringify(result)).toBe('needs-human');
-  if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
-  expect(result.reason).toContain('authorized predecessor obligation(s) remain unsettled');
-  expect(result.reason).toContain('predecessor');
-  expect(result.reason).not.toContain('not every configured reviewer completed');
+  // RUN acceptance: the completed successor at this head is the authority; the superseded
+  // older-head predecessor does not refuse it (its obligation is carried, never credited).
+  expect(result.status, JSON.stringify(result)).toBe('ok');
+  // DURABLE readiness still reports the outstanding obligation.
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: { head, base: read.state.base, dirtySha256: 'clean-tree' },
+    ledger: f.effects.openLedger(f.state.branch).load(),
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: successor,
+    nowIso: f.effects.nowIso(),
+  });
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
   const settled = f.effects.openLedger(f.state.branch).load();
   const pending = settled.records.filter(
     (entry) =>

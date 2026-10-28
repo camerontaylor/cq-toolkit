@@ -187,7 +187,10 @@ async function fixture(mode: Mode) {
           at: real.nowIso(),
           debt: {
             ...debt,
-            reference: { requestId: 'ambiguous-enrollment', binding: { ...debt.reference.binding } },
+            reference: {
+              requestId: 'ambiguous-enrollment',
+              binding: { ...debt.reference.binding },
+            },
             deferral: { ...debt.deferral, id: 'ambiguous-enrollment' },
           },
         },
