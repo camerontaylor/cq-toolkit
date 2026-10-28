@@ -8,7 +8,7 @@ import {
   type Finding,
   type ReviewSource,
 } from '../../review/findings.js';
-import { QueueEvidenceSchema } from '../../review/internal/queueEvidence.js';
+import { QueueEvidenceSchema, type QueueEvidence } from '../../review/internal/queueEvidence.js';
 import {
   QueueSha,
   QueueToken,
@@ -413,6 +413,51 @@ function receiptFindingText(finding: Record<string, unknown>): string | undefine
   return undefined;
 }
 
+type CapturePathRow = QueueEvidence['document']['capture']['paths'][number];
+
+/** Regular-file descriptor exactly as crq's current_paths records one. */
+function regularPathContent(
+  path: CapturePathRow,
+): { blob: string; mode: string; bytes: number } | undefined {
+  const blob = path['blob'];
+  const mode = path['mode'];
+  const bytes = path['bytes'];
+  if (typeof blob !== 'string' || !QueueSha.safeParse(blob).success) return undefined;
+  if (typeof mode !== 'string' || !['100644', '100755'].includes(mode)) return undefined;
+  if (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0) return undefined;
+  return { blob, mode, bytes };
+}
+
+/** Reviewed current content: a non-empty regular blob the projection could review. */
+function isReviewedContentRow(path: CapturePathRow): boolean {
+  const content = regularPathContent(path);
+  return (
+    content !== undefined &&
+    content.bytes > 0 &&
+    ['included', 'renamed'].includes(path.disposition)
+  );
+}
+
+/** Producer-evidenced no-content row: a content-free deletion, or an empty current
+ * file whose regular descriptor and zero length the producer recorded.
+ */
+function isProvenNoContentRow(path: CapturePathRow): boolean {
+  if (path.disposition === 'deleted')
+    return (
+      path['reason'] === 'no current path or evidenced rename' &&
+      !('blob' in path) &&
+      !('mode' in path) &&
+      !('bytes' in path)
+    );
+  const content = regularPathContent(path);
+  return (
+    content !== undefined &&
+    content.bytes === 0 &&
+    path.disposition === 'excluded-with-reason' &&
+    path['reason'] === 'empty current file'
+  );
+}
+
 /** Strict terminal receipt checks supplement Q3's authenticated byte/source verification.
  * Completion covers only the captured current affected content, never this branch's full diff.
  */
@@ -471,16 +516,12 @@ export function verifiedCompletedDebt(debt: DeferredVendorDebt): boolean {
         document.source.pr === queue.pr &&
         document.source.merge_sha === queue.mergeSha &&
         (document.request_id === reference.requestId || sameItemAlias))) &&
-    document.capture.paths.length > 0 &&
+    // Producer no-content rows (a deletion, an empty current file) may accompany
+    // genuinely reviewed files, but the capture must still carry reviewed content:
+    // an all-no-content capture never establishes completion.
+    document.capture.paths.some(isReviewedContentRow) &&
     document.capture.paths.every(
-      (path) =>
-        ['included', 'renamed'].includes(path.disposition) &&
-        typeof path['blob'] === 'string' &&
-        QueueSha.safeParse(path['blob']).success &&
-        ['100644', '100755'].includes(String(path['mode'])) &&
-        typeof path['bytes'] === 'number' &&
-        Number.isSafeInteger(path['bytes']) &&
-        path['bytes'] >= 0,
+      (path) => isReviewedContentRow(path) || isProvenNoContentRow(path),
     ) &&
     (document.outcome !== 'terminal-clean' || document.findings.length === 0) &&
     (document.outcome !== 'terminal-with-findings' || document.findings.length > 0) &&
