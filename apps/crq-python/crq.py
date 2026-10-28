@@ -26,6 +26,7 @@ import status_summary
 import repair_tick
 import coverage
 import author_quota
+import queue_transport
 import author_lease
 import review_receipt
 import deferred_refresh
@@ -484,7 +485,7 @@ def verify_deferred_source(repo: str, pr: int) -> Dict[str, Any]:
             type(data.get("number")) is not int or data["number"] != pr or
             not isinstance(user.get("login"), str) or not user["login"] or
             not isinstance(head.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", head["sha"]) or
-            base.get("ref") != "merge-queue" or type(data.get("merged")) is not bool or
+            not isinstance(base.get("ref"), str) or not base["ref"] or type(data.get("merged")) is not bool or
             data.get("state") not in ("open", "closed") or (data["merged"] and data["state"] != "closed")):
         raise ValueError("invalid forge PR identity")
     merge = data.get("merge_commit_sha") if data["merged"] else None
@@ -509,7 +510,7 @@ def find_deferred_source(repo: str, producer: str, head: str, target: str, limit
     if (repo != REPO or not isinstance(producer, str) or
             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", producer) or
             not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head) or
-            target != "merge-queue" or type(limit) is not int or limit != 2):
+            queue_transport.branch_fault(target) is not None or type(limit) is not int or limit != 2):
         raise ValueError("invalid deferred publication binding")
     query = f"repo:{repo} is:pr author:{producer} base:{target} {head}"
     result = deferred_forge(["api", "--method", "GET", "search/issues", "-f", "q=" + query,
