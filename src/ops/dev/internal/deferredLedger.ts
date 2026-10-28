@@ -404,7 +404,7 @@ async function prepareWithLifetime(
     previous = undefined;
   if (!previous && !vendor?.vendorFailure) return undefined;
   if (retained === undefined && vendor?.vendorFailure) {
-    lifetime.signal.throwIfAborted();
+    signalCheck(lifetime);
     // An unusable historical attempt is not debt. Admit a genuine fresh review,
     // without treating malformed provenance or ambiguous ledger identity as stale.
     VendorFailureProvenanceSchema.parse(vendor.vendorFailure);
@@ -502,14 +502,7 @@ async function prepareWithLifetime(
   const pin = { id, base: state.base, dirtySha256: 'clean-tree' as const };
   const persist = async (debt: DeferredVendorDebt) => {
     signalCheck(lifetime);
-    const current = await readWorkState(effects, { target, base: state.base });
-    if (
-      !current.ok ||
-      current.state.branch !== state.branch ||
-      current.state.head !== state.head ||
-      current.state.dirtySha256 !== state.dirtySha256
-    )
-      throw new Error('deferred invocation identity changed; replay the same successor');
+    await verifyInvocationIdentity(effects, target, state, lifetime, 'current');
     signalCheck(lifetime);
     await effects.openLedger(state.branch).mutate((latest) => {
       if (!isDeepStrictEqual(latest, ledger))
@@ -626,6 +619,7 @@ export function currentLedgerDebt(
 function signalCheck(lifetime: InvocationLifetime): void {
   lifetime.throwIfCallerAborted();
   lifetime.signal.throwIfAborted();
+  if (lifetime.remainingMs() <= 0) throw lifetime.deadlineReason;
 }
 
 /** Authorized-ancestry boundary. A caller abort propagates with the caller's exact reason BEFORE any
@@ -648,7 +642,7 @@ interface BoundedRefusal {
   error?: unknown;
 }
 
-/** The post-report identity read runs under the SAME invocation lifetime: every command carries the
+/** Every invocation identity read runs under the SAME lifetime: every command carries the
  * combined signal and a timeout clamped to the remaining budget, and a command is refused before
  * dispatch once the caller aborted or the budget is gone. A late check can therefore never follow an
  * unbounded wait. This is a view over the caller's effects — no client, protocol or workState change.
@@ -690,6 +684,42 @@ function boundedEffects(
       return result;
     },
   };
+}
+
+/** Current work fails on deadline exhaustion. Ancestry alone may truncate on a proven own
+ * interruption; successful identity mismatches always reject before any expiry classification.
+ */
+async function verifyInvocationIdentity(
+  effects: DevEffects,
+  target: string,
+  state: WorkState,
+  lifetime: InvocationLifetime,
+  phase: 'current' | 'ancestry',
+): Promise<boolean> {
+  const refusal: BoundedRefusal = {};
+  const current = await readWorkState(boundedEffects(effects, lifetime, refusal), {
+    target,
+    base: state.base,
+  });
+  lifetime.throwIfCallerAborted();
+  if (!current.ok && refusal.error !== undefined) {
+    if (phase === 'ancestry' && refusal.error === lifetime.deadlineReason) return false;
+    throw refusal.error;
+  }
+  if (
+    !current.ok ||
+    current.state.branch !== state.branch ||
+    current.state.head !== state.head ||
+    current.state.base !== state.base ||
+    current.state.dirtySha256 !== state.dirtySha256
+  )
+    throw new Error(
+      'deferred invocation identity changed' +
+        (phase === 'ancestry' ? ' while settling authorized ancestry' : ''),
+    );
+  if (phase === 'ancestry') return ancestryBoundary(lifetime) === 'continue';
+  signalCheck(lifetime);
+  return true;
 }
 
 /** Nonterminal ancestor statuses are only continuable when they are VENDOR-shaped. A queue/scan/
@@ -746,7 +776,7 @@ async function refreshAuthorizedAncestry(
     if (refreshed >= MAX_PREDECESSOR_REFRESHES) return;
     attempted.add(next.reference.requestId);
     refreshed += 1;
-    let completed: DeferredVendorDebt;
+    let completed: DeferredVendorDebt | undefined;
     try {
       const fresh = await refreshDeferredVendorDebt(queue, next);
       if (!['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state)) {
@@ -756,15 +786,15 @@ async function refreshAuthorizedAncestry(
           throw new Error(
             `authorized predecessor queue status is a non-vendor blocker: ${String(fresh.queue.state)}/${String(fresh.queue.reason?.category ?? 'no-reason')}`,
           );
-        continue;
+      } else {
+        completed = await consumeDeferredVendorReport(
+          effects,
+          queue,
+          fresh,
+          lifetime.signal,
+          options,
+        );
       }
-      completed = await consumeDeferredVendorReport(
-        effects,
-        queue,
-        fresh,
-        lifetime.signal,
-        options,
-      );
     } catch (error) {
       // Deadline expiry WHILE an ancestor status/report is in flight is the same documented
       // nonfatal truncation as expiry between ancestors: keep the verified current enrollment and
@@ -774,32 +804,12 @@ async function refreshAuthorizedAncestry(
       if (error === lifetime.deadlineReason) return;
       throw error;
     }
-    const refusal: BoundedRefusal = {};
-    const current = await readWorkState(boundedEffects(effects, lifetime, refusal), {
-      target,
-      base: state.base,
-    });
-    lifetime.throwIfCallerAborted();
-    if (!current.ok) {
-      // `readWorkState` folds faults into ok:false. Only this bounded view's proven own deadline
-      // can truncate it; unrelated nonzero/spawn/null results stay hard even at the deadline.
-      if (refusal.error === lifetime.deadlineReason) return;
-      if (refusal.error !== undefined) throw refusal.error;
-      throw new Error('deferred invocation identity changed while settling authorized ancestry');
+    // Pending vendor work creates the same asynchronous drift window as report delivery.
+    if (!(await verifyInvocationIdentity(effects, target, state, lifetime, 'ancestry'))) return;
+    if (completed !== undefined) {
+      if (ancestryBoundary(lifetime) === 'stop') return;
+      expected.ledger = await appendDebt(effects, state, expected.ledger, completed);
     }
-    if (
-      current.state.branch !== state.branch ||
-      current.state.head !== state.head ||
-      current.state.base !== state.base ||
-      current.state.dirtySha256 !== state.dirtySha256
-    )
-      throw new Error('deferred invocation identity changed while settling authorized ancestry');
-    // Successful reads must prove identity BEFORE a deadline can truncate the pass.
-    if (ancestryBoundary(lifetime) === 'stop') return;
-    // The identity read is asynchronous: a cancellation that landed during it must prevent the
-    // settlement write and propagate with its exact reason.
-    signalCheck(lifetime);
-    expected.ledger = await appendDebt(effects, state, expected.ledger, completed);
   }
 }
 
@@ -857,17 +867,10 @@ async function loadCurrentWithLifetime(
     fresh = await consumeDeferredVendorReport(effects, queue, fresh, lifetime.signal, options);
   }
   signalCheck(lifetime);
-  const current = await readWorkState(effects, { target, base: state.base });
+  await verifyInvocationIdentity(effects, target, state, lifetime, 'current');
   let expected = ledger;
   const latest = effects.openLedger(state.branch).load();
-  if (
-    !current.ok ||
-    current.state.branch !== state.branch ||
-    current.state.head !== state.head ||
-    current.state.base !== state.base ||
-    current.state.dirtySha256 !== state.dirtySha256 ||
-    !isDeepStrictEqual(latest, expected)
-  )
+  if (!isDeepStrictEqual(latest, expected))
     throw new Error('deferred debt or working identity changed while verifying queue status');
   if (
     !matchesDeferredVendorDebt(fresh, {
@@ -890,6 +893,9 @@ async function loadCurrentWithLifetime(
   await refreshAuthorizedAncestry(effects, target, state, queue, lifetime, options, {
     ledger: expected,
   });
+  // Every normal ancestry exit is supervised, including nonterminal, count and deadline stops.
+  // This uses the same bounded view; a proven own interruption keeps ancestry truncation nonfatal.
+  await verifyInvocationIdentity(effects, target, state, lifetime, 'ancestry');
   return fresh;
 }
 
