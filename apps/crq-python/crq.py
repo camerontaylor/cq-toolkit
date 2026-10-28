@@ -500,6 +500,10 @@ def find_deferred_source(repo: str, producer: str, head: str, target: str, limit
 
     Search is restricted to the explicit request's repo/producer/head/base. Its
     candidates are re-read as trusted PR metadata; search snippets are no proof.
+    Search text is not identity: a candidate that re-reads as a well-formed forge
+    PR naming another publication (different producer/head/target) is skipped as
+    search noise. Malformed candidates, an incomplete or over-limit envelope and
+    duplicate candidates still fail closed, as does any malformed trusted re-read.
     Empty/index-lag results leave the intent unpublished for a later tick.
     """
     if (repo != REPO or not isinstance(producer, str) or
@@ -521,11 +525,13 @@ def find_deferred_source(repo: str, producer: str, head: str, target: str, limit
             raise ValueError("search candidate is not a forge PR")
         number = candidate.get("number")
         actual = verify_deferred_source(repo, number)
-        if any(actual[k] != value for k, value in (("producer", producer), ("head", head), ("target", target))):
-            raise ValueError("publication candidate identity drift")
+        # Count every verified candidate before the match test: a duplicate fails
+        # closed whether or not it names this publication.
         if number in seen:
             raise RuntimeError("duplicate search candidate; debt retained")
         seen.add(number)
+        if any(actual[k] != value for k, value in (("producer", producer), ("head", head), ("target", target))):
+            continue  # well-formed forge PR for another publication: search noise
         matches.append(actual)
     return matches
 
@@ -1508,9 +1514,17 @@ def additional_cycle(item: Dict[str, Any]) -> bool:
                                    and (item.get("author") or {}).get("cycle", 1) > 1)
 
 
+def parked_merged_linked_receipt(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    """A merged row parked because a linked current-code receipt owns recovery
+    never starts on its own, so it demands no additional-cycle wait."""
+    return item["kind"] == "merged" and any(
+        i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"] for i in q["items"])
+
+
 def optional_wait(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     return additional_cycle(item) and any(
-        i["state"] == "pending" and rank(i) <= 3 for i in q["items"] if i is not item)
+        i["state"] == "pending" and rank(i) <= 3 and not parked_merged_linked_receipt(q, i)
+        for i in q["items"] if i is not item)
 
 
 def advance_open(item: Dict[str, Any]) -> None:
