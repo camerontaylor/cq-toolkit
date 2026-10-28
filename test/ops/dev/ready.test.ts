@@ -353,7 +353,9 @@ describe('dev.ready deferred lineage', () => {
     cycleId: string,
   ) {
     return cycleRecord({
-      ...identity,
+      head: identity.head,
+      base: identity.base,
+      dirtySha256: identity.dirtySha256,
       cycleId,
       reviewer: 'coderabbit',
       completion: { kind: 'blocked', reason: 'structured vendor outage' },
@@ -425,7 +427,13 @@ describe('dev.ready deferred lineage', () => {
   test('a pending current enrollment alone still continues readiness', async () => {
     const state = await seed(repo, (identity) => [
       vendorCycle(identity, 'c001-vendor-origin'),
-      cycleRecord({ ...identity, cycleId: 'c002-agent', reviewer: 'agent:reviewer' }),
+      cycleRecord({
+        head: identity.head,
+        base: identity.base,
+        dirtySha256: identity.dirtySha256,
+        cycleId: 'c002-agent',
+        reviewer: 'agent:reviewer',
+      }),
     ]);
     const effects = repoEffects(repo);
     effects.openLedger(state.branch).save({
@@ -449,7 +457,13 @@ describe('dev.ready deferred lineage', () => {
   test('an unsettled authorized predecessor blocks readiness and the gap is never clean', async () => {
     const state = await seed(repo, (identity) => [
       vendorCycle(identity, 'c001-vendor-origin'),
-      cycleRecord({ ...identity, cycleId: 'c002-agent', reviewer: 'agent:reviewer' }),
+      cycleRecord({
+        head: identity.head,
+        base: identity.base,
+        dirtySha256: identity.dirtySha256,
+        cycleId: 'c002-agent',
+        reviewer: 'agent:reviewer',
+      }),
     ]);
     const effects = repoEffects(repo);
     const ancestor = pendingDebt({ ...state, head: 'a'.repeat(40) }, 'ancestor');

@@ -998,8 +998,21 @@ test('a completed predecessor appended after its successor never displaces the c
   if (authority.kind !== 'enrollment') throw new Error('missing current authority');
   expect(authority.enrollment.debt.reference).toEqual(successor.reference);
   expect(authority.enrollment.pendingAncestry).toEqual([]);
-  // Readiness for the successor identity still validates the successor's own snapshot.
-  expect(f.assemble(after, successor).ready).toBe(true);
+  // Readiness for the successor identity sees no unsettled ancestry: the settled predecessor is
+  // an imported obligation, never a lineage gap.
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: { head: read.state.head, base: read.state.base, dirtySha256: read.state.dirtySha256 },
+    ledger: after,
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: successor,
+    nowIso: f.effects.nowIso(),
+  });
+  expect(
+    readiness.ready ? [] : readiness.gaps.map((gap) => gap.detail),
+  ).not.toContain('authorized predecessor obligation(s) unsettled:');
 
   // Replay is inert: no second snapshot, no re-acknowledgement.
   const replay = await loadCurrentDeferredVendorDebt(

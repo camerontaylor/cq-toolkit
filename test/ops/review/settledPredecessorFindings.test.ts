@@ -22,7 +22,6 @@ import {
 } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { assembleReadiness } from '../../../src/ops/dev/record.js';
-import { ReviewCoverageV2Schema } from '../../../src/ops/review/internal/reviewCoverageV2.js';
 import { cycleRecord, dispositionRecord } from '../dev/fakes.js';
 import { makeTestRepo, repoEffects, type TestRepo } from '../dev/repo.js';
 
@@ -681,41 +680,6 @@ test('a clean run refuses clean completion while an authorized predecessor oblig
       { kind: 'vendor-debt', debt: successor, at: f.effects.nowIso() },
     ],
   });
-  const coverage = ReviewCoverageV2Schema.parse({
-    version: 2,
-    head,
-    base: read.state.base,
-    scope: 'full',
-    mode: 'session',
-    modeReason: 'fixture',
-    pieces: [
-      {
-        component: 'tracked:fixture',
-        path: 'fixture',
-        sha256: createHash('sha256').update('').digest('hex'),
-        chars: 0,
-        bytes: 0,
-        state: 'excluded',
-        exclusion: { rule: 'fixture/**', limitation: 'empty fixture' },
-      },
-    ],
-    sessions: [],
-  });
-  const drivers = {
-    resolve: vi.fn(() => ({
-      lane: 'ai-sdk',
-      modelSpec: { provider: 'mock', model: 'mock' },
-      driver: {
-        run: async () => ({
-          stopReason: 'complete',
-          structuredOutput: { findings: [], coverage },
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-          denials: [],
-          toolFailures: 0,
-        }),
-      },
-    })),
-  } as unknown as DriverFactory;
   const client = {
     ...f.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
@@ -725,7 +689,7 @@ test('a clean run refuses clean completion while an authorized predecessor oblig
     report: async (): Promise<QueueEvidence> => evidence,
   };
   const result = await makeReviewRun({
-    drivers,
+    drivers: cleanDrivers(),
     queueClient: client,
     effectsFactory: () => f.effects,
     scannerFactory: () => async (components) =>
