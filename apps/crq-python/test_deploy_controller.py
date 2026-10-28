@@ -1141,9 +1141,11 @@ class CliTests(ControllerFixture):
         self.write_state("queue.json", {"items": [], "starts": []})
         if recorded_run:
             # Real probe and dependencies, tracked before the helper clean guard.
-            for name in ("crq.py", "status_summary.py", "repair_tick.py", "coverage.py",
-                         "author_quota.py", "author_lease.py"):
-                shutil.copy(ROOT / name, self.runner / name)
+            # Copy the checkout's production modules, including dependencies
+            # added by a composed target, rather than freezing an old import list.
+            for source in sorted(ROOT.glob("*.py")):
+                if not source.name.startswith("test_"):
+                    shutil.copy(source, self.runner / source.name)
             shutil.copytree(ROOT / "crq_repair", self.runner / "crq_repair",
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             child = subprocess.Popen([sys.executable, "-I", "-B", "-c", "pass"],
