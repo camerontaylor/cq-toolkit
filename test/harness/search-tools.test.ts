@@ -900,7 +900,11 @@ describe('contained grep and glob tools', () => {
       // SEARCH_MATCH_LIMIT is not reached.)
       await Promise.all(
         Array.from({ length: 1_005 }, (_, index) =>
-          writeFile(join(workspace, `a${String(index).padStart(4, '0')}.ts`), 'no match here\n', 'utf8'),
+          writeFile(
+            join(workspace, `a${String(index).padStart(4, '0')}.ts`),
+            'no match here\n',
+            'utf8',
+          ),
         ),
       );
       await writeFile(join(workspace, 'Z.ts'), 'needle\n', 'utf8');

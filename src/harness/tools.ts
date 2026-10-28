@@ -1216,7 +1216,9 @@ export function buildTools(
     }
     const parts = body.split('/');
     return {
-      runs: parts.map((part) => (part === '**' ? [{ kind: 'any-run' }, { kind: 'any-run' }] : tokenizeComponent(part))),
+      runs: parts.map((part) =>
+        part === '**' ? [{ kind: 'any-run' }, { kind: 'any-run' }] : tokenizeComponent(part),
+      ),
       anchored: parts.length > 1,
       exclude,
     };
@@ -1285,7 +1287,10 @@ export function buildTools(
   };
 
   const isGlobstarRun = (run: GlobToken[] | undefined): boolean =>
-    run !== undefined && run.length === 2 && run[0]!.kind === 'any-run' && run[1]!.kind === 'any-run';
+    run !== undefined &&
+    run.length === 2 &&
+    run[0]!.kind === 'any-run' &&
+    run[1]!.kind === 'any-run';
 
   /**
    * Match the component runs against a path's components with iterative NFA
@@ -1588,7 +1593,9 @@ export function buildTools(
           ),
         };
       }
-      if (expansion.alternatives.some((candidate) => candidate.length > SEARCH_INCLUDE_PATTERN_MAX)) {
+      if (
+        expansion.alternatives.some((candidate) => candidate.length > SEARCH_INCLUDE_PATTERN_MAX)
+      ) {
         return {
           ok: false,
           denial: deny(
@@ -1706,9 +1713,7 @@ export function buildTools(
       // drop-largest selection above uses native >, so the final sort must
       // agree (localeCompare could REORDER past the cap and silently
       // displace a matching candidate).
-      slots.sort((left, right) =>
-        left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0,
-      );
+      slots.sort((left, right) => (left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0));
       rawPaths = slots.map((slot) => slot.raw);
       sawExtraCandidates = slots.length > SEARCH_CANDIDATE_LIMIT;
     } else {
