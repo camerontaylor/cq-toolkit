@@ -1314,3 +1314,62 @@ test('a caller abort at the ancestry boundary outranks a zero budget and keeps i
   expect(refreshedAncestors).toEqual([]);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
+
+test('in-flight deadline expiry during an ancestor RPC truncates nonfatally', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  // A wide margin keeps this deterministic: the budget survives the current work and is exhausted
+  // while the ancestor status is still in flight.
+  const budget = 400;
+  const remainingMs = () => budget;
+  const before = f.effects.openLedger(f.state.branch).load();
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      return successorStatus;
+    },
+  };
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs },
+  );
+  // Truncation is nonfatal: the verified current enrollment comes back...
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  // ...nothing is appended, and the retained obligation stays a readiness gap.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: { head: read.state.head, base: read.state.base, dirtySha256: read.state.dirtySha256 },
+    ledger: before,
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: successor,
+    nowIso: f.effects.nowIso(),
+  });
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw new Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+});

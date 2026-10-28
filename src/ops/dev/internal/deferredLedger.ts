@@ -617,6 +617,14 @@ function ancestryBoundary(lifetime: InvocationLifetime): 'continue' | 'stop' {
   return 'continue';
 }
 
+/** The invocation's OWN deadline is exhausted — never a caller cancellation, which always keeps its
+ * own reason. Used to classify an in-flight failure of an authorized-ancestry RPC as the documented
+ * nonfatal truncation instead of a preparation failure.
+ */
+function deadlineExhausted(lifetime: InvocationLifetime): boolean {
+  return !lifetime.callerAborted() && (lifetime.expired() || lifetime.remainingMs() <= 0);
+}
+
 /** Refreshes the current enrollment's authorized predecessors, sequentially and in FIFO/lineage
  * order. A predecessor is settled only through the existing verified report import, and only the
  * current enrollment is ever returned for continuation or readiness.
@@ -644,16 +652,26 @@ async function refreshAuthorizedAncestry(
     if (refreshed >= MAX_PREDECESSOR_REFRESHES) return;
     attempted.add(next.reference.requestId);
     refreshed += 1;
-    const fresh = await refreshDeferredVendorDebt(queue, next);
-    if (!['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state))
-      continue;
-    const completed = await consumeDeferredVendorReport(
-      effects,
-      queue,
-      fresh,
-      lifetime.signal,
-      options,
-    );
+    let completed: DeferredVendorDebt;
+    try {
+      const fresh = await refreshDeferredVendorDebt(queue, next);
+      if (!['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state))
+        continue;
+      completed = await consumeDeferredVendorReport(
+        effects,
+        queue,
+        fresh,
+        lifetime.signal,
+        options,
+      );
+    } catch (error) {
+      // Deadline expiry WHILE an ancestor status/report is in flight is the same documented
+      // nonfatal truncation as expiry between ancestors: keep the verified current enrollment and
+      // leave the retained obligations as readiness gaps. Caller cancellation keeps its own exact
+      // reason, and any genuine trust/import failure still propagates unchanged.
+      if (deadlineExhausted(lifetime)) return;
+      throw error;
+    }
     const current = await readWorkState(effects, { target, base: state.base });
     if (
       !current.ok ||
