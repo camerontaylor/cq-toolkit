@@ -904,6 +904,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
   ] as const)(
     'a failed worktree release is reported on %s, never retried',
     async (_label, green, status) => {
+      let removals = 0;
       const r = await run({
         greens: [green ?? false, false],
         stop: 'budget',
@@ -916,12 +917,16 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
             }
           : {}),
         ...(green === false ? { greens: [true, false] } : {}),
-        authorHandler: (command, args) =>
-          command === 'git' && args.includes('worktree') && args.includes('remove')
-            ? { exitCode: 1, stdout: '', stderr: 'worktree busy', timedOut: false }
-            : undefined,
+        authorHandler: (command, args) => {
+          if (command !== 'git' || !args.includes('worktree') || !args.includes('remove'))
+            return undefined;
+          removals += 1;
+          return { exitCode: 1, stdout: '', stderr: 'worktree busy', timedOut: false };
+        },
       });
       expect(r.result.status).toBe(status);
+      // Exactly one release attempt: a failure is reported, never retried.
+      expect(removals).toBe(1);
       const text =
         r.result.status === 'failed'
           ? r.result.error
@@ -979,12 +984,17 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     [
       'a dirty author tree',
       { beforeFinal: () => writeFileSync(join(repo.root, 'stray.txt'), 'x') },
+      'dev.cycle (dev.check (final)): dev.check: 1 gate(s) red (format:check) — record k002-final is in the branch dev-record',
     ],
-    ['an author ledger whose last check is not red at T', { finalRecordPassed: true }],
-  ] as const)('%s keeps the red final result verbatim', async (_label, extra) => {
+    [
+      'an author ledger whose last check is not red at T',
+      { finalRecordPassed: true },
+      'dev.cycle (dev.check (final)): dev.check: the final gate failed',
+    ],
+  ] as const)('%s keeps the red final result verbatim', async (_label, extra, error) => {
     const r = await run({ greens: [true, false], stop: 'budget', ...extra });
-    expect(r.result.status).toBe('failed');
-    if (r.result.status === 'failed') expect(r.result.error).not.toContain('green-prefix');
+    // The original verdict, exactly (a future outer wrapper may add a report).
+    expect(r.result).toMatchObject({ status: 'failed', error });
     expect(r.installs).toEqual([]);
     expect(r.probeRoots).toEqual([]);
   });
