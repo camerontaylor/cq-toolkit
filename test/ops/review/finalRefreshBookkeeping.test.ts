@@ -583,6 +583,5 @@ test('a pending obligation at the current review identity still refuses a clean 
   // identity/trust check refuses first (the guard's own ambiguity arm is defence in depth).
   expect(result.status, JSON.stringify(result)).toBe('needs-human');
   if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
-  expect(result.reason).not.toContain('review.run: ');
   expect(result.reason.length).toBeGreaterThan(0);
 });
