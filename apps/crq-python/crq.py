@@ -1370,20 +1370,19 @@ def set_rate_cooldown(q, cls, rdir):
     q["cooldown_until"] = iso(max(current, until) if current else until)
 
 
-def schedule_slot_wake(q, usage, log):
-    if q.get("paused") or not any(i["state"] == "pending" for i in q["items"]):
-        return
+def refresh_slot_deadline(q, usage, remaining, gate):
     at = now()
-    cooldown = parse_iso(q.get("cooldown_until"))
-    if cooldown and cooldown > at:
-        deadline = cooldown
-    elif len(inflight(q)) >= CONFIG.get("max_inflight", 10):
-        return  # completion triggers a harvest tick; calendar timer is fallback
-    else:
+    if q.get("paused") or gate == "inflight" or not any(i["state"] == "pending" for i in q["items"]):
+        deadline = at + dt.timedelta(minutes=12)
+    elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > at:
+        deadline = parse_iso(q["cooldown_until"])
+    elif remaining <= 0:
         deadline = usage_slots.next_slot([parse_iso(s) for s in q.get("starts", [])], at, usage)
-    q["slot_wake_at"] = usage_slots.schedule_wake(deadline, at, q.get("slot_wake_at"), run)
-    if q.get("slot_wake_at"):
-        log.append("next slot wake: " + q["slot_wake_at"])
+        deadline = deadline or at + dt.timedelta(seconds=60)
+    else:
+        deadline = at + dt.timedelta(minutes=12)  # available slots, no eligible item
+    usage_slots.write_next(STATE / "next-review-at", deadline)
+    return deadline
 
 
 def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
@@ -1414,6 +1413,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     exit_code = json.loads(exitf.read_text())["exit"]
     if dry:
         return f"would harvest {r['run_id']}"
+    usage_slots.write_next(STATE / "next-review-at", now())
     meta = json.loads((rdir / "meta.json").read_text())
     cls = classify(rdir / "review.ndjson", exit_code)
     (rdir / "classification.json").write_text(json.dumps(cls, indent=2) + "\n")
@@ -2383,6 +2383,7 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             item["mismatch_alerted"] = iso()
             signer_alert(q, item, f"{iid}: signer result does not match crq's request (sha256/item/base/batch) — ignored", log)
         return "; ".join(log)
+    usage_slots.write_next(STATE / "next-review-at", now())
     o, posted = r.get("outcome"), r.get("posted") or {}
     item["signer_result"] = {k: r.get(k) for k in ("outcome", "posted_state", "posted", "blocking", "started_at",
                                                    "ended_at", "wait_minutes", "reason")}
@@ -2854,6 +2855,8 @@ def coverage_fallback(q, log, dry, only):
             i["last_error"] = "coverage tip moved; re-cut"
     candidates = [i for i in candidates if i["state"] == "pending"]
     if not candidates:
+        if any(i["kind"] == "coverage" and i["state"] == "reviewing" for i in q["items"]):
+            return None, False
         for i in q["items"]:
             if i["kind"] == "merged" and i.get("merge_commit"):
                 try:
@@ -3019,6 +3022,64 @@ def start_one(q, log, dry, only, ignore_quiet):
     return started, has_coverage
 
 
+def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False):
+    before_all = len(q.get("starts", []))
+    has_coverage = False
+    global_gate = None
+    q["usage"] = usage
+    slots = (usage["remaining"] if usage is not None else
+             max(0, CONFIG.get("max_starts_per_hour", 5) - starts_last_hour(q)))
+    admissions = min(slots, CONFIG.get("max_starts_per_tick", 10),
+                     max(0, CONFIG.get("max_inflight", 10) - len(inflight(q))))
+    if q.get("paused"):
+        global_gate = "paused"
+        log.append(f"queue paused: {q.get('pause_reason')}")
+    elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > now():
+        global_gate = "cooldown"
+        log.append(f"rate-limit cooldown until {q['cooldown_until']}")
+    elif slots <= 0:
+        global_gate = "slots"
+        log.append("included review slots exhausted" if usage is not None else
+                   "hourly cap reached (usage unavailable; conservative start-log fallback)")
+    elif len(inflight(q)) >= CONFIG.get("max_inflight", 10):
+        global_gate = "inflight"
+        log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG.get('max_inflight', 10)})")
+    else:
+        for _ in range(admissions):
+            before = len(q.get("starts", []))
+            _, candidate = start_one(q, log, dry, only, ignore_quiet)
+            has_coverage = has_coverage or candidate
+            # A dry run, refusal or no eligible candidate cannot reserve more.
+            if dry or only or len(q.get("starts", [])) == before:
+                break
+            if len(inflight(q)) >= CONFIG.get("max_inflight", 10):
+                break
+    spent = len(q.get("starts", [])) - before_all
+    return has_coverage, global_gate, max(0, slots - spent)
+
+
+def slot():
+    """Admission only, under the same lock as tick; no enrollment/harvest/audit."""
+    if (STATE / "runner-disabled").exists():
+        return ["runner disabled for host handover"]
+    q = load_queue()
+    log = []
+    # One short wait at most, bounded to <60s; usage can be slow/unavailable.
+    # After an early local reservation expiry, the next minute retries rather
+    # than trusting fullCapacityInMs as the first available slot.
+    for attempt in range(2):
+        usage = usage_slots.read_usage(CLONE)
+        _, gate, remaining = admit_available(q, usage, log)
+        save_queue(q)
+        deadline = refresh_slot_deadline(q, usage, remaining, gate)
+        delay = (deadline - now()).total_seconds()
+        if attempt == 0 and 0 < delay < 60 and gate in ("slots", "cooldown"):
+            time.sleep(delay)
+            continue
+        break
+    return log
+
+
 def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = False) -> List[str]:
     log: List[str] = []
     if (STATE / "runner-disabled").exists():
@@ -3080,46 +3141,16 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += promotion_tick(q, dry)
     except Exception as exc:  # never let promotion bookkeeping stop the queue
         log.append(f"promotion: error {exc}"[:300])
-    has_coverage = False
-    global_gate = None
-    usage = usage_slots.read_usage(CLONE)
-    q["usage"] = usage
-    slots = (usage["remaining"] if usage is not None else
-             max(0, CONFIG.get("max_starts_per_hour", 5) - starts_last_hour(q)))
-    admissions = min(slots, CONFIG.get("max_starts_per_tick", 10),
-                     max(0, CONFIG.get("max_inflight", 10) - len(inflight(q))))
     pending_at_selection = any(i["state"] == "pending" for i in q["items"])
-    if q.get("paused"):
-        global_gate = "paused"
-        log.append(f"queue paused: {q.get('pause_reason')}")
-    elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > now():
-        global_gate = "cooldown"
-        log.append(f"rate-limit cooldown until {q['cooldown_until']}")
-    elif slots <= 0:
-        global_gate = "slots"
-        log.append("included review slots exhausted" if usage is not None else
-                   "hourly cap reached (usage unavailable; conservative start-log fallback)")
-    elif len(inflight(q)) >= CONFIG.get("max_inflight", 10):
-        global_gate = "inflight"
-        log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG.get('max_inflight', 10)})")
-    else:
-        for _ in range(admissions):
-            before = len(q.get("starts", []))
-            _, candidate = start_one(q, log, dry, only, ignore_quiet)
-            has_coverage = has_coverage or candidate
-            # A dry run, refusal or no eligible candidate cannot reserve more.
-            if dry or only or len(q.get("starts", [])) == before:
-                break
-            if len(inflight(q)) >= CONFIG.get("max_inflight", 10):
-                break
+    usage = usage_slots.read_usage(CLONE)
+    has_coverage, global_gate, remaining = admit_available(q, usage, log, dry, only, ignore_quiet)
     if not dry:
         q["coverage"] = coverage.record_opportunity(q.get("coverage") or coverage.new_ledger(),
             at=q["last_tick"], started=len(q.get("starts", [])) > starts_before,
             pending=pending_at_selection, candidate_exists=has_coverage,
             blocked_reason=global_gate or ("only" if only else None))
         save_queue(q)  # before the slow Paseo calls: a killed tick must not lose a launch
-        schedule_slot_wake(q, usage, log)
-        save_queue(q)
+        refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
         save_queue(q)
@@ -3355,15 +3386,21 @@ def cmd_selfcheck() -> int:
     return 0
 
 
-def with_lock(fn, *a, **kw):
+def with_lock(fn, *a, lock_wait=0, **kw):
     STATE.mkdir(parents=True, exist_ok=True)
     fh = LOCK.open("w")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fh.close()
-        print("another crq tick holds the lock; exiting", file=sys.stderr)
-        return None
+    deadline = time.monotonic() + lock_wait
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fh.close()
+                print("another crq tick holds the lock; exiting", file=sys.stderr)
+                return None
+            time.sleep(min(0.25, remaining))
     try:
         return fn(*a, **kw)
     finally:
@@ -3598,7 +3635,7 @@ def main() -> int:
         with_lock(prepare)
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
-        out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False))
+        out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False), lock_wait=90)
         for line in out or []:
             print(line)
         if not args.dry_run:

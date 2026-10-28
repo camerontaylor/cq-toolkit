@@ -1,6 +1,8 @@
-"""Offline slot arithmetic, systemd dedupe, and real tick admission decisions."""
+"""Offline slot arithmetic, timestamp-first entry, and real admission decisions."""
 import datetime as dt
 import json
+import tempfile
+from pathlib import Path
 import subprocess
 import unittest
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ import usage_slots
 import test_author_quota as fixtures
 
 crq = fixtures.crq
+REFRESH = crq.refresh_slot_deadline
 AT = dt.datetime(2026, 10, 28, 1, 1, tzinfo=dt.timezone.utc)
 
 
@@ -44,29 +47,14 @@ class UsageTest(unittest.TestCase):
         recent = AT - dt.timedelta(minutes=59, seconds=43)
         usage = {'remaining': 0, 'fullCapacityInMs': 300000, 'rollingWindowMs': 3600000}
         self.assertEqual(usage_slots.next_slot([old, recent], AT, usage), AT + dt.timedelta(seconds=17))
-        self.assertEqual(usage_slots.next_slot([], AT, usage), AT + dt.timedelta(minutes=5))
-        self.assertIsNone(usage_slots.next_slot([old], AT, None))
+        self.assertEqual(usage_slots.next_slot([], AT, usage), AT + dt.timedelta(seconds=60))
+        self.assertEqual(usage_slots.next_slot([old], AT, None), AT + dt.timedelta(seconds=60))
 
-    def test_wake_dedupes_checks_liveness_and_retries_failed_creation(self):
-        deadline = AT + dt.timedelta(seconds=17)
-        target = crq.iso(deadline)
-        run = mock.Mock(return_value=SimpleNamespace(returncode=0))
-        self.assertEqual(usage_slots.schedule_wake(deadline, AT, target, run), target)
-        self.assertEqual(run.call_count, 1)
-        run.reset_mock()
-        run.side_effect = [SimpleNamespace(returncode=3), SimpleNamespace(returncode=0),
-                           SimpleNamespace(returncode=0)]
-        self.assertEqual(usage_slots.schedule_wake(deadline, AT, target, run), target)
-        argv = run.call_args.args[0]
-        self.assertIn('--on-active=17s', argv)
-        self.assertIn('--timer-property=AccuracySec=1s', argv)
-        self.assertEqual(argv[-1], 'crq-tick.service')
-        run.reset_mock(side_effect=True)
-        run.return_value = SimpleNamespace(returncode=1)
-        self.assertIsNone(usage_slots.schedule_wake(deadline, AT, None, run))
-        run.reset_mock()
-        self.assertIsNone(usage_slots.schedule_wake(AT + dt.timedelta(minutes=12), AT, None, run))
-        run.assert_not_called()
+    def test_vendor_reservation_lag_retries_within_one_minute(self):
+        starts = [AT - dt.timedelta(hours=1)] + [AT - dt.timedelta(minutes=30)] * 9
+        self.assertEqual(usage_slots.next_slot(starts, AT, {'limit': 10, 'remaining': 0,
+                                                          'fullCapacityInMs': 1800000}),
+                         AT + dt.timedelta(seconds=60))
 
 
 class ConcurrencyTest(unittest.TestCase):
@@ -128,6 +116,34 @@ class ConcurrencyTest(unittest.TestCase):
             crq.tick()
         self.assertEqual(harvest.call_count, 2)
         self.assertEqual(self.started, ['promotion', 'later'])
+
+    def test_slot_multi_start_and_idle_backoff_without_full_tick_work(self):
+        self.items()
+        with mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
+             mock.patch.object(crq, 'now', return_value=AT), \
+             mock.patch.object(crq, 'fetch') as fetch:
+            crq.slot()
+            self.assertEqual(self.started, ['promotion', 'prioritized', 'normal'])
+            fetch.assert_not_called()
+            self.q['items'] = []
+            crq.slot()
+        self.assertEqual((self.root / 'next-review-at').read_text().strip(),
+                         crq.iso(AT + dt.timedelta(minutes=12)))
+
+    def test_slot_waits_subminute_and_rechecks_vendor_before_start(self):
+        self.items()
+        self.q['starts'] = [crq.iso(AT - dt.timedelta(minutes=59, seconds=43))] * 10
+        clock = [AT]
+        self.probe.side_effect = [{'limit': 10, 'remaining': 0}, {'limit': 10, 'remaining': 2}]
+        def sleep(seconds):
+            clock[0] += dt.timedelta(seconds=seconds)
+        with mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
+             mock.patch.object(crq, 'now', side_effect=lambda: clock[0]), \
+             mock.patch.object(crq.time, 'sleep', side_effect=sleep) as wait:
+            crq.slot()
+        wait.assert_called_once_with(17)
+        self.assertEqual(self.probe.call_count, 2)
+        self.assertEqual(self.started, ['promotion', 'prioritized'])
 
     def test_second_precision_cooldown_uses_exit_time_and_never_shortens(self):
         rdir = self.root / 'run'

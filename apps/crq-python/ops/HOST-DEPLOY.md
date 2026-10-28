@@ -7,20 +7,28 @@ are archival records of the completed cross-host handover, not current commands.
 
 ## Slot scheduling deployment (owner-directed 2026-10-28)
 
-Keep `crq-tick.timer` at `OnCalendar=*:0/12`. The user manager must permit
-`systemd-run --user` transient timers and `systemctl --user --no-block start
-crq-tick.service`. The tick creates/replaces only `crq-slot-wake.timer` and its
-service, with `AccuracySec=1s`; it probes active state to dedupe. Detached review
-completion asks the same tick service to harvest. The tick lock remains the
-single queue writer and protects concurrent harvest. Non-systemd/unavailable
-managers retain the twelve-minute fallback and report no armed precise wake.
+Keep `crq-tick.timer` at `OnCalendar=*:0/12`. Render and install the new
+`crq-slot.service` and `crq-slot.timer` through `prepare-host.py`'s existing
+`crq-*` unit rendering path. After the recorded deployment, Giles enables and
+starts `crq-slot.timer` alongside the existing tick timer. Its calendar is every
+minute with `AccuracySec=1s`; its service runs `crq_slot.py` in the rendered CRQ
+root with the same CLI PATH as tick. No transient systemd-run units are needed.
 
-No overlay changes or new installed units are required. Render the committed
-config: `max_inflight=10`, `max_starts_per_tick=10`, `review_timeout_min=120`.
-The new ceiling defaults to 10 in code when omitted. The old starts/hour cap
-is only the conservative fallback if repository-scoped usage is unavailable;
-valid vendor remaining slots govern normal admission. Exact next-slot wakes
-recheck usage rather than treating local estimates as spend authority.
+The admission entry first reads `state/next-review-at`; future hints avoid even
+the queue lock and runner imports. Due entries take the shared lock non-blocking,
+probe repository-scoped usage, and fill free slots. They can wait once for a slot
+less than 60 seconds away. Full ticks wait up to 90 seconds for the lock, retain
+all maintenance duties, and refresh the hint. Harvest clears it; detached review
+completion requests `systemctl --user --no-block start crq-tick.service` for prompt
+harvest. No eligible work backs off twelve minutes. Stop both timers for manual
+maintenance; the recorded deploy's runner-disabled marker also gates admission.
+
+No overlay keys need changing. Render committed config: `max_inflight=10`,
+`max_starts_per_tick=10`, `review_timeout_min=120`. The new ceiling defaults to
+10 in code when omitted. The old starts/hour cap remains the conservative
+fallback when usage is unavailable; valid vendor remaining slots govern normal
+admission. A local slot prediction never authorizes spend without rechecking
+usage. Unknown external starts and vendor admission lag retry within a minute.
 
 Deploy the signer change too: its review argv includes `--deep` and its deadline
 is 120 minutes (stall alert 150 minutes). Signer custody, its existing independent admission policy and

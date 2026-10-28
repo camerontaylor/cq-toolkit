@@ -372,6 +372,10 @@ class HostConfigTests(unittest.TestCase):
         self.assertNotIn('@CRQ_ROOT@', contents)
         self.assertNotIn('repos/coderabbit-queue', contents)
         self.assertIn(str(self.runner / 'crq.py') + ' tick', contents)
+        self.assertIn(str(self.runner / 'crq_slot.py'), contents)
+        slot_timer = (self.base / 'units/crq-slot.timer').read_text()
+        self.assertIn('OnCalendar=*-*-* *:*:00', slot_timer)
+        self.assertIn('AccuracySec=1s', slot_timer)
         self.assertIn(str(self.runner / 'state/repair/inbox'), contents)
 
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze runs in Linux CI')

@@ -1,9 +1,9 @@
 """Offline slot arithmetic and bounded, repository-scoped vendor observations."""
 import datetime as dt
 import json
-import math
+import os
+import tempfile
 import subprocess
-import time
 
 
 def parse_usage(stream):
@@ -50,40 +50,24 @@ def next_slot(starts, at, usage):
     Every wake reads usage again before admitting new work.
     """
     window = dt.timedelta(milliseconds=(usage or {}).get('rollingWindowMs') or 3600000)
-    candidates = [s + window for s in starts if at - window < s <= at]
+    known = [s for s in starts if at - window < s <= at]
+    candidates = [s + window for s in known]
     full = (usage or {}).get('fullCapacityInMs')
     if full and (usage or {}).get('remaining') == 0:
         candidates.append(at + dt.timedelta(milliseconds=full))
+    used = ((usage or {}).get('limit', 10) - (usage or {}).get('remaining', 0))
+    if not known or usage is not None and used > len(known):
+        # Unknown external starts, or local reservations that precede vendor
+        # admission: full-capacity recovery cannot date the FIRST slot.
+        candidates.append(at + dt.timedelta(seconds=60))
     return min(candidates) if candidates else None
 
 
-def schedule_wake(deadline, at, previous, run):
-    """One fixed transient timer; failed probes/creation remain retryable.
-
-    The persistent calendar timer is always the recovery fallback. Only create
-    a wake earlier than its next twelve-minute boundary. State is advisory;
-    systemd's active check prevents stale state from suppressing recreation.
-    """
-    boundary = (int(at.timestamp()) // 720 + 1) * 720
-    if deadline is None or deadline.timestamp() >= boundary:
-        return previous
-    target = deadline.strftime('%Y-%m-%dT%H:%M:%SZ')
-    unit = 'crq-slot-wake'
-    began = time.monotonic()
-    try:
-        active = run(['systemctl', '--user', 'is-active', unit + '.timer'],
-                     check=False, timeout=10).returncode == 0
-        if active and previous and previous <= target and previous > at.strftime('%Y-%m-%dT%H:%M:%SZ'):
-            return previous
-        # Stop both halves so an elapsed but not yet collected service cannot
-        # collide with the fixed transient name on recreation.
-        run(['systemctl', '--user', 'stop', unit + '.timer', unit + '.service'],
-            check=False, timeout=10)
-        delay = max(1, math.ceil((deadline - at).total_seconds() - (time.monotonic() - began)))
-        result = run(['systemd-run', '--user', '--collect', '--unit=' + unit,
-                      '--on-active=' + str(delay) + 's', '--timer-property=AccuracySec=1s',
-                      '/usr/bin/systemctl', '--user', '--no-block', 'start', 'crq-tick.service'],
-                     check=False, timeout=10)
-        return target if result.returncode == 0 else None
-    except (OSError, RuntimeError, subprocess.TimeoutExpired):
-        return None
+def write_next(path, deadline):
+    """A tiny atomic hint, separate from authoritative queue state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = deadline.strftime('%Y-%m-%dT%H:%M:%SZ')
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as out:
+        out.write(stamp + '\n')
+        temporary = out.name
+    os.replace(temporary, path)

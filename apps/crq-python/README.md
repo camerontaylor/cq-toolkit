@@ -21,13 +21,21 @@ by `max_starts_per_tick` and `max_inflight` (both default 10). The legacy
 remaining count. Partial usage with a valid remaining count is usable.
 
 The oldest unexpired local start plus 60 minutes predicts the next slot. Vendor
-`rollingWindowMs` refines the window; `fullCapacityInMs` is an upper bound for
-unknown external starts, never mistaken for the next-slot time. A wake always
-rechecks usage. When earlier than the next calendar tick, a deduped transient
-`crq-slot-wake.timer` starts the same `crq-tick.service` at second precision
-(`AccuracySec=1s`). Failed systemd probes/creation leave the calendar fallback.
-Detached completion also requests a harvest tick. Ticks retain the existing
-exclusive lock; detached runs own only their individual worktree/run artifacts.
+`rollingWindowMs` refines the window; `fullCapacityInMs` describes full recovery,
+not the first slot. Unknown external starts or vendor admission lag trigger a
+short retry. Each wake rechecks usage before spending.
+
+`crq-slot.timer` invokes the small `crq_slot.py` entry every minute with
+`AccuracySec=1s`. Its first step reads `state/next-review-at` (UTC); a future
+hint exits before runner imports, locking or network calls. A due entry takes
+the tick lock non-blocking, refreshes usage and fills eligible free slots. If
+the next slot is less than 60 seconds away it sleeps once and rechecks usage.
+Idle admission backs off twelve minutes. The twelve-minute full tick retains
+enrollment, harvest, status and audits, refreshes the hint, and waits up to 90
+seconds for the lock so a sleeping admission cannot skip maintenance. Harvest
+clears the hint; detached completion also requests a full harvest tick. Both
+entries serialize queue writes; detached runs own individual worktrees and run
+artifacts. No transient wake units are created.
 
 Every review, including the promotion signer, passes `--deep`; review deadlines
 are 120 minutes with the existing TERM/KILL grace and ownership-aware harvest.

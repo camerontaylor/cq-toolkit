@@ -226,7 +226,7 @@ class CurrentTest(unittest.TestCase):
         usage = mock.patch.object(crq.usage_slots, "read_usage", return_value=None)
         usage.start()
         self.addCleanup(usage.stop)
-        wake = mock.patch.object(crq, "schedule_slot_wake")
+        wake = mock.patch.object(crq, "refresh_slot_deadline")
         wake.start()
         self.addCleanup(wake.stop)
         self.temp = tempfile.TemporaryDirectory()

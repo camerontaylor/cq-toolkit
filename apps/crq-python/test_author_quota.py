@@ -211,6 +211,26 @@ class LockTest(unittest.TestCase):
                 self.assertIsNone(crq.with_lock(called))
                 called.assert_not_called()
 
+    def test_full_tick_waits_for_slot_lock_and_then_runs(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(crq, "LOCK", Path(tmp) / "tick.lock"), \
+             mock.patch.object(crq.fcntl, "flock", side_effect=[BlockingIOError(), None, None]), \
+             mock.patch.object(crq.time, "monotonic", side_effect=[0, 0.1]), \
+             mock.patch.object(crq.time, "sleep") as sleep:
+            called = mock.Mock(return_value="ran")
+            self.assertEqual(crq.with_lock(called, lock_wait=90), "ran")
+            sleep.assert_called_once_with(0.25)
+            called.assert_called_once_with()
+
+    def test_full_tick_lock_wait_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(crq, "LOCK", Path(tmp) / "tick.lock"), \
+             mock.patch.object(crq.fcntl, "flock", side_effect=BlockingIOError()), \
+             mock.patch.object(crq.time, "monotonic", side_effect=[0, 89.9, 90]), \
+             mock.patch.object(crq.time, "sleep") as sleep:
+            called = mock.Mock()
+            self.assertIsNone(crq.with_lock(called, lock_wait=90))
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.1)
+            called.assert_not_called()
+
 
 class CrashRecoveryTest(unittest.TestCase):
     def setUp(self):
@@ -682,7 +702,7 @@ class TickTest(unittest.TestCase):
         usage.start()
         self.addCleanup(usage.stop)
         self.patches = [
-            ("schedule_slot_wake", mock.Mock()),
+            ("refresh_slot_deadline", mock.Mock()),
             ("load_queue", lambda: self.q), ("fetch", mock.Mock()), ("enroll", lambda q, dry: []),
             ("promotion_audit", lambda q, dry: []), ("promotion_tick", lambda q, dry: []),
             ("save_queue", mock.Mock()), ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
