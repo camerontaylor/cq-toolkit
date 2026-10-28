@@ -432,9 +432,7 @@ function regularPathContent(
 function isReviewedContentRow(path: CapturePathRow): boolean {
   const content = regularPathContent(path);
   return (
-    content !== undefined &&
-    content.bytes > 0 &&
-    ['included', 'renamed'].includes(path.disposition)
+    content !== undefined && content.bytes > 0 && ['included', 'renamed'].includes(path.disposition)
   );
 }
 
