@@ -595,4 +595,4 @@ Branch `fix/s7-dogfood-address-469-v5` @ `de5cefb6` = merge-queue `8fc58c22` (wi
 - **S7 acceptance is met** for the exercised path: check → review.run → review.address → final gates → push → ready PR with a readiness record.
 - Limits: neither reviewer hit a rate limit, so #551/#576's wait+retry was **not exercised**, and N3 is no evidence for rate-limit resilience. The diff was tiny (a cq.json override plus a docs log), so the partitioned/session reviewer and the budget-stop publication path were not exercised either (M covers those up to the red final gate).
 - Observation, not a defect: CodeRabbit treated the dogfood-only reviewer/step override as a regression, and the loop reverted it. Its net diff against merge-queue is therefore docs only. A dogfood run that needs a config override should supply it outside the reviewed tree.
-- #620 got one independent critic PASS (no findings), as a head-bound review. No N4.
+- #620 got one independent critic PASS (no findings), as a head-bound review, plus green exact-head CI. The chancellor merged it at 2026-10-28T00:07:02Z (`088b8676`). No N4.
