@@ -10,6 +10,7 @@ import {
 } from '../../../src/ops/review/internal/queueEvidence.js';
 import { deferredReceiptFindings } from '../../../src/ops/dev/internal/deferredReview.js';
 import { makeTestRepo, repoEffects, type TestRepo } from './repo.js';
+import type { CommandResult } from '../../../src/ops/dev/effects.js';
 import { checkRecord, cycleRecord } from './fakes.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import {
@@ -1757,5 +1758,117 @@ test('budget exhaustion during the post-report identity read truncates nonfatall
   expect(debt?.reference.requestId).toBe(successor.reference.requestId);
   // Nothing unbounded is dispatched once the budget is gone: the wait is bounded, not re-checked late.
   expect(unboundedAfterExhaustion).toBe(0);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** Adapter-shaped failed results: the real subprocess seam resolves these instead of rejecting. */
+function adapterAborted(): CommandResult {
+  return { exitCode: null, stdout: '', stderr: 'aborted', timedOut: false };
+}
+function adapterTimedOut(): CommandResult {
+  return { exitCode: null, stdout: '', stderr: 'timeout', timedOut: true };
+}
+
+test('an in-flight caller abort resolved by the adapter keeps the exact caller reason', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled in-flight during the bounded identity read');
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      // The bounded identity read opens with `symbolic-ref`: abort there and hand back the
+      // adapter-shaped aborted result, exactly as the real seam does.
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) {
+        controller.abort(reason);
+        return adapterAborted();
+      }
+      return f.effects.runCommand(...call);
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+  ).rejects.toThrow(reason);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('an in-flight invocation deadline resolved as a timeout truncates nonfatally', async () => {
+  const { f, predecessor, terminal, successorStatus, successor, read } = await successorWithPendingAncestor();
+  let imported = false;
+  let exhausted = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) {
+        // The clamped command times out: the budget is now gone and the adapter resolves a failed
+        // result rather than rejecting.
+        exhausted = true;
+        return adapterTimedOut();
+      }
+      return f.effects.runCommand(...call);
+    },
+  };
+  const debt = await loadCurrentDeferredVendorDebt(
+    effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs: () => (exhausted ? 0 : 5_000) },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('an unrelated identity read failure remains hard', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      // A timeout result while the budget REMAINS is not this invocation's deadline.
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) return adapterTimedOut();
+      return f.effects.runCommand(...call);
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, undefined, {
+      remainingMs: () => 5_000,
+    }),
+  ).rejects.toThrow('deferred invocation identity changed while settling authorized ancestry');
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });

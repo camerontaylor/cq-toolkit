@@ -757,6 +757,14 @@ async function refreshAuthorizedAncestry(
       if (refusal.error instanceof LineageDeadlineExhausted) return;
       throw refusal.error;
     }
+    // The real subprocess adapter RESOLVES a failed CommandResult for a cancelled or clamped command
+    // (`exitCode: null, timedOut: false` on cancellation; `timedOut: true` on timeout), and
+    // `readWorkState` folds that into `ok:false`. Classify the lifetime in precedence order — caller
+    // cancellation first (exact reason), then this invocation's own deadline (nonfatal truncation) —
+    // and only then treat an unsuccessful read as a hard identity failure. Nothing else is swallowed:
+    // an unrelated failure, or a timeout while budget remains, still throws.
+    if (lifetime.callerAborted()) lifetime.signal.throwIfAborted();
+    if (lifetime.expired() || lifetime.remainingMs() <= 0) return;
     if (
       !current.ok ||
       current.state.branch !== state.branch ||
