@@ -1010,7 +1010,8 @@ test('a completed predecessor appended after its successor never displaces the c
     deferredVendorDebt: successor,
     nowIso: f.effects.nowIso(),
   });
-  expect(readiness.ready ? [] : readiness.gaps.map((gap) => gap.detail)).not.toContain(
+  // Join the details: an array `toContain` compares whole elements and could never fail here.
+  expect(readiness.ready ? '' : readiness.gaps.map((gap) => gap.detail).join(' ')).not.toContain(
     'authorized predecessor obligation(s) unsettled:',
   );
 
