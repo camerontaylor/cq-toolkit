@@ -1211,7 +1211,7 @@ test('a caller abort before the next wrapped call never dispatches it', async ()
   let statused = 0;
   const client = {
     ...terminal.client,
-    status: async (ref: QueueReference): Promise<QueueStatus> => {
+    status: async (): Promise<QueueStatus> => {
       statused += 1;
       return terminal.client.status();
     },
