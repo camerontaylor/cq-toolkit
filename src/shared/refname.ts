@@ -30,8 +30,12 @@ export function branchPathFault(branch: string): string | null {
     return `branch '${branch}' must be a non-empty relative refname`;
   }
   if (branch === '@') return `branch '${branch}' is the single character '@'`;
-  if (/[\u0000-\u001f\u007f]/.test(branch)) {
-    return `branch '${branch}' contains a control character`;
+  // Written as an explicit code-point test: a control-character regex literal is
+  // what eslint(no-control-regex) forbids, and suppressing that rule here would
+  // hide the intent instead of stating it.
+  for (const char of branch) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return `branch '${branch}' contains a control character`;
   }
   if (branch.endsWith('.')) return `branch '${branch}' must not end with '.'`;
   if (branch.includes('@{')) return `branch '${branch}' contains the forbidden '@{' sequence`;
