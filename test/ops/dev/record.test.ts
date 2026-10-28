@@ -188,6 +188,47 @@ describe('the dev-record format', () => {
     expect(parseDevLedger(serializeDevLedger(legacy))).toEqual(legacy);
   });
 
+  test('Q17b: empty identity strings the review record accepts are stored verbatim', () => {
+    const withEmpties = cycleRecord({
+      findings: [
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: '',
+          excerpt: '',
+          rule: '',
+          evidence: '',
+        },
+      ],
+    });
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [withEmpties],
+    };
+    // The ledger mirrors FindingSchema's acceptance: an empty value is DATA (stored
+    // verbatim), never dropped and never a reason to reject the record.
+    expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+  });
+
+  test('Q17b: id, severity and line keep the review schema strictness', () => {
+    for (const bad of [{ id: '' }, { severity: '' }, { line: 0 }]) {
+      expect(() =>
+        parseDevLedger(
+          JSON.stringify({
+            version: DEV_LEDGER_VERSION,
+            branch: BRANCH,
+            records: [
+              cycleRecord({
+                findings: [{ id: 'f1', severity: 'major', ...bad }] as never,
+              }),
+            ],
+          }),
+        ),
+      ).toThrow(/schema violation/);
+    }
+  });
+
   test('Q17b: a cycle finding refuses unknown keys and out-of-band status/reason', () => {
     const base = { version: DEV_LEDGER_VERSION, branch: BRANCH };
     expect(() =>

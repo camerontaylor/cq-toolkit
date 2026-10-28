@@ -152,6 +152,17 @@ describe('sameFindingContent — identity complete, absence is not a wildcard', 
     expect(sameFindingContent(incoming({ evidenceV1: invalid }), incoming())).toBe(false);
   });
 
+  test('an empty identity string is data, not absence: it matches only itself', () => {
+    expect(sameFindingContent(incoming({ rule: '' }), incoming({ rule: '' }))).toBe(true);
+    expect(sameFindingContent(incoming({ rule: '' }), incoming())).toBe(false);
+    expect(sameFindingContent(incoming(), incoming({ rule: '' }))).toBe(false);
+    expect(sameFindingContent(incoming({ evidence: '' }), incoming({ evidence: '' }))).toBe(true);
+    expect(sameFindingContent(incoming({ evidence: '' }), incoming())).toBe(false);
+    expect(
+      sameFindingContent(incoming({ evidenceV1: undefined }), incoming({ evidenceV1: undefined })),
+    ).toBe(true);
+  });
+
   test('the only source normalization is agent:reviewer -> agent', () => {
     expect(
       sameFindingContent(incoming({ source: 'agent:reviewer' }), incoming({ source: 'agent' })),

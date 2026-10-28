@@ -1027,9 +1027,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const current = retained.get(finding.id);
                   // Q17b: only an identical original witness may lend its disposition.
                   // A same-id row with changed content (or a legacy row missing the
-                  // metadata) never inherits one — no ID-only authority.
-                  if (current === undefined || !sameFindingContent(finding, current))
-                    return finding;
+                  // metadata) never inherits one — no ID-only authority. Such a row is
+                  // reset to OPEN with its cached reason cleared, exactly as the ordinary
+                  // path's restoreDurableDisposition does, so a stale fixed/rejected
+                  // status can never suppress openBlocking.
+                  if (current === undefined) return finding;
+                  if (!sameFindingContent(finding, current)) {
+                    const { reason: _reason, ...row } = finding;
+                    return { ...row, status: 'open' as const };
+                  }
                   return {
                     ...finding,
                     status: current.status,

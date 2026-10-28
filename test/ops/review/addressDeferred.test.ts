@@ -894,3 +894,76 @@ test('P1: the same imported-cycle sequence with CHANGED later content also stays
     await f.cleanup();
   }
 });
+
+test('P2: a content-mismatched cached row is reset to OPEN and loses its cached reason', async () => {
+  const f = await fixture();
+  try {
+    // The ledger witness is LEGACY: it carries no line/rule/evidence, so a cached
+    // row that carries them can never match it.
+    await f.effects.openLedger(f.state.branch).mutate((ledger) => ({
+      ledger: {
+        ...ledger,
+        records: ledger.records.map((entry) =>
+          entry.kind === 'cycle'
+            ? {
+                ...entry,
+                findings: [
+                  { id: 'original-known', severity: 'major', excerpt: 'retained outage finding' },
+                ],
+              }
+            : entry,
+        ),
+      },
+      value: undefined,
+    }));
+    const cached = f.record();
+    cached.findings = [
+      {
+        id: 'original-known',
+        source: 'coderabbit',
+        severity: 'major',
+        text: 'retained outage finding',
+        file: 'src/a.ts',
+        line: 7,
+        rule: 'no-a',
+        status: 'rejected',
+        reason: 'cached adjudication',
+      },
+    ];
+    const seen: { status: string; reason?: string }[] = [];
+    const result = await makeReviewAddress({
+      config,
+      initialRecord: cached,
+      resolveDeferredVendorContext: f.resolver,
+      disposition: async (root, finding) =>
+        makeDevDisposition(f.effects)({
+          repoRoot: root,
+          findingId: finding.id,
+          action: 'deferred',
+          why: 'requires owner',
+        }),
+      workerFactory: () => ({
+        escalation: createEscalationState,
+        fix: async (finding) => {
+          seen.push({
+            status: finding.status,
+            ...(finding.reason === undefined ? {} : { reason: finding.reason }),
+          });
+          return {
+            finding: { ...finding, status: 'deferred', reason: 'requires owner' },
+            observedHead: f.record().head,
+            reason: 'requires owner',
+            validation: [],
+          };
+        },
+      }),
+      review: async () => ({ status: 'ok', value: f.record() }),
+    })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir, rounds: 1 });
+    // The cached 'rejected' status and its reason cannot survive a content mismatch:
+    // the row reaches the fixer as open, so openBlocking still reports it.
+    expect(seen).toEqual([{ status: 'open' }]);
+    expect(result.status).toBe('needs-human');
+  } finally {
+    await f.cleanup();
+  }
+});

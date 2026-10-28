@@ -308,15 +308,23 @@ export interface DevIdentity {
 
 // --- Zod mirrors (parse boundary; key order is the serialize order) --------
 
+/**
+ * The ledger's finding mirror. Identity-bearing STRINGS accept exactly what the
+ * review record (FindingSchema) accepts, including the empty string, and are stored
+ * verbatim: the ledger never rejects a value its producer was allowed to emit, and
+ * never drops one either (an empty value is stored, not treated as absent). `id`,
+ * `severity` and `line` keep their strict constraints because FindingSchema has the
+ * same ones. Widening acceptance cannot invalidate an existing ledger.
+ */
 const DevFindingSchema = z
   .object({
     id: z.string().min(1),
     severity: z.string().min(1),
-    fileName: z.string().min(1).exactOptional(),
-    excerpt: z.string().min(1).exactOptional(),
+    fileName: z.string().exactOptional(),
+    excerpt: z.string().exactOptional(),
     line: z.number().int().positive().exactOptional(),
-    rule: z.string().min(1).exactOptional(),
-    evidence: z.string().min(1).exactOptional(),
+    rule: z.string().exactOptional(),
+    evidence: z.string().exactOptional(),
     evidenceV1: FindingEvidenceV1Schema.exactOptional(),
   })
   .strict();
