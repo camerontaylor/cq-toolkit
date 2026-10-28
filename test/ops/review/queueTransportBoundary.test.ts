@@ -6,7 +6,13 @@ import { sshQueueTransport } from '../../../src/ops/review/internal/queueClient.
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
 
-function childProcess() {
+interface FakeChild extends EventEmitter {
+  stdin: PassThrough;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  kill: () => boolean;
+}
+function childProcess(): FakeChild {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
     stdout: new PassThrough(),
@@ -17,7 +23,7 @@ function childProcess() {
   mocks.spawn.mockReturnValue(child);
   return child;
 }
-const children: ReturnType<typeof childProcess>[] = [];
+const children: FakeChild[] = [];
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => {
   for (const child of children.splice(0)) {
