@@ -1719,9 +1719,17 @@ test('budget exhaustion during the post-report identity read truncates nonfatall
       return evidence;
     },
   };
+  let dispatchedAfterExhaustion = 0;
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (exhausted) dispatchedAfterExhaustion += 1;
+      return f.effects.runCommand(...call);
+    },
+  };
   const before = f.effects.openLedger(f.state.branch).load();
   const debt = await loadCurrentDeferredVendorDebt(
-    f.effects,
+    effects,
     'merge-queue',
     read.state,
     before,
@@ -1730,5 +1738,7 @@ test('budget exhaustion during the post-report identity read truncates nonfatall
     { remainingMs: () => (exhausted ? 0 : 5_000) },
   );
   expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  // No command is dispatched once the budget is gone: the wait is bounded, not merely re-checked.
+  expect(dispatchedAfterExhaustion).toBe(0);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
