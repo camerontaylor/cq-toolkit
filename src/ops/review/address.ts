@@ -108,6 +108,17 @@ export interface ReviewAddressReport {
   stop?: 'round-cap' | 'budget' | 'rereview-blocked';
   /** Last admitted head, advanced only by verified fix commits. */
   verifiedHead?: string;
+  /**
+   * The engine-verified head this invocation's report is attributable to,
+   * captured once at the first successful admission and never advanced by fix
+   * commits or refreshed by a re-review. Consumers that must attribute a report
+   * to an observed head compare against THIS witness; `verifiedHead` (last
+   * admitted) and `rounds[].record.head` (overwritten by `noteRound` after a
+   * successful re-review) are not substitutes. Absent when the invocation
+   * refused before admitting any head — and a report that admitted earlier work
+   * keeps its witness through a later refusal.
+   */
+  admissionHead?: string;
   /** Durable author debt remains explicit; address success is not vendor completion. */
   deferredVendorDebt?: DeferredVendorDebt;
 }
@@ -1014,6 +1025,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               return true;
             });
           };
+          /**
+           * Capture the immutable admission witness exactly once: the
+           * engine-verified head of the first successful admission. It is never
+           * advanced by a verified fix commit and never refreshed by a
+           * re-review, and it is deliberately NOT set on a refusal or on an
+           * injected-disposition bypass (`admitRecord` returns before admission
+           * there), so no caller can fabricate one.
+           */
+          const noteAdmission = (head: string) => {
+            report.admissionHead ??= head;
+          };
           const admitCleanRecord = async (root: string, record: FindingsRecord) => {
             const effects = makeSubprocessDevEffects(root);
             const read = await readWorkState(effects, {
@@ -1033,6 +1055,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 'clean findings record lacks matching full reviewed base/scope; run review.run again',
               );
             if (stop()) throw new Error(stop());
+            // Final guards passed: this clean record's head is the engine-read
+            // head of a comparable, admitted comparison.
+            noteAdmission(state.head);
           };
           const admitRecord = async (root: string, record: FindingsRecord) => {
             if (deps.disposition) return;
@@ -1092,6 +1117,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               await noteBookkeeping(
                 await bookkeepingKey(root, relative(root, devLedgerPath(root, state.branch))),
               );
+              // The ledger mutation above completed for this engine-verified
+              // head: that is the one admission event, so the witness is taken
+              // here and nowhere else. Both admissions funnel through this
+              // function; the `deps.disposition` bypass above returned before
+              // it and must never fabricate a witness.
+              noteAdmission(state.head);
             });
           };
           const recordDisposition = async (root: string, finding: Finding) => {
