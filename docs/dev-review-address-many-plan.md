@@ -23,8 +23,11 @@ login allowlist. Rules:
 - Logins and repositories compare case-insensitively and the listing's original
   spelling is preserved in the candidates.
 - `author.type === 'Bot'` is never authority on its own. Only an explicit
-  allowlist entry authorizes a bot, and an empty or absent allowlist authorizes
-  no bot at all. No trusted bot names are invented.
+  allowlist entry authorizes a bot, and that match requires the server-reported
+  type to be `Bot`: a `User` or `Organization` entry reusing an allowlisted bot
+  login stays an unauthorized author. An empty or absent allowlist authorizes
+  no bot at all, owner and viewer authority are independent of the type, and no
+  trusted bot names are invented.
 - Candidate identity is `(repo, number)`; the admitted head is pinned alongside
   it. Two PRs on the same branch, and two heads for one number, stay distinct.
 - Structural defects — an incomplete listing, a listing or entry for another
@@ -101,7 +104,9 @@ self-contradictory is a refusal: a roll-up over a subset could otherwise report
 
 `test/ops/review/addressManyPlan.test.ts` is scripted and offline: no git, no
 child process, no forge, no queue and no provider. It covers owner/viewer/
-allowlisted-bot selection with original spelling, an empty allowlist, closed,
+allowlisted-bot selection with original spelling, an allowlisted login carried
+by a `User` or `Organization` and a non-allowlisted `Bot` (all excluded), an
+empty allowlist, closed,
 merged, draft and deleted-head exclusions, incomplete listing, repo mismatch,
 invalid facts, duplicate numbers, one branch on two numbers, the exact
 admission boundary and its one-over refusal, invalid reservations, duplicate ids

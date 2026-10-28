@@ -170,6 +170,44 @@ describe('selectAddressMany', () => {
     ]);
   });
 
+  test('requires a server-typed Bot for an allowlisted login and keeps owner authority independent', () => {
+    const selection = selectAddressMany(
+      listing([
+        facts({ number: 1, author: { login: 'Dependabot[BOT]', type: 'Bot' }, headOid: HEAD_A }),
+        facts({ number: 2, author: { login: 'renovate[bot]', type: 'User' }, headOid: HEAD_B }),
+        facts({
+          number: 3,
+          author: { login: 'Renovate[bot]', type: 'Organization' },
+          headOid: HEAD_C,
+        }),
+        facts({ number: 4, author: { login: 'stranger[bot]', type: 'Bot' } }),
+        facts({ number: 5, author: { login: 'OWNER', type: 'User' } }),
+      ]),
+      policy({ botLogins: ['dependabot[bot]', 'renovate[bot]'] }),
+    );
+    expect(selection.ok).toBe(true);
+    if (!selection.ok) return;
+    // A listed login is Bot authority only for a server-typed Bot: the same
+    // login carried by a User or Organization is an unauthorized author, and a
+    // Bot with no allowlist entry stays excluded. Owner authority is
+    // independent of the author type and of the allowlist.
+    expect(
+      selection.candidates.map((candidate) => [
+        candidate.number,
+        candidate.authorLogin,
+        candidate.matchedBy,
+      ]),
+    ).toEqual([
+      [1, 'Dependabot[BOT]', 'bot-allowlist'],
+      [5, 'OWNER', 'owner'],
+    ]);
+    expect(selection.excluded.map((entry) => [entry.number, entry.exclusion])).toEqual([
+      [2, { reason: 'unauthorized-author', authorType: 'User' }],
+      [3, { reason: 'unauthorized-author', authorType: 'Organization' }],
+      [4, { reason: 'unauthorized-author', authorType: 'Bot' }],
+    ]);
+  });
+
   test('excludes closed, merged, draft and deleted-head PRs with their own reasons', () => {
     const selection = selectAddressMany(
       listing([

@@ -199,8 +199,13 @@ function authorizationOf(
   const login = fold(pull.author.login);
   if (login === fold(policy.owner)) return 'owner';
   if (policy.viewer !== undefined && login === fold(policy.viewer)) return 'viewer';
-  if ((policy.botLogins ?? []).some((entry) => fold(entry) === login)) return 'bot-allowlist';
-  return undefined;
+  // An allowlist entry authorizes a BOT only: the server-reported type is part
+  // of the match, so a listing entry that reuses a bot login with type User or
+  // Organization is an unauthorized author, not a bot match. Owner and viewer
+  // authority above stays independent of the type.
+  const allowlisted =
+    pull.author.type === 'Bot' && (policy.botLogins ?? []).some((entry) => fold(entry) === login);
+  return allowlisted ? 'bot-allowlist' : undefined;
 }
 
 /**
