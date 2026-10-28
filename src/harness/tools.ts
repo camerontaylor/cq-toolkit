@@ -1773,6 +1773,24 @@ export function buildTools(
         }
         return false;
       };
+      // rg excludes a directory and all of its descendants when the
+      // directory itself matches a negative glob (for example, !src).
+      // Charge each copied ancestor and its match to the same candidate budget.
+      const matchExcluded = (
+        glob: CompiledGlob,
+        rel: string,
+        budget: { left: number },
+      ): boolean => {
+        if (matchOne(glob, rel, budget)) return true;
+        if (budget.left < 0) return false;
+        for (let slash = rel.indexOf('/'); slash !== -1; slash = rel.indexOf('/', slash + 1)) {
+          budget.left -= slash;
+          if (budget.left < 0) return false;
+          if (matchOne(glob, rel.slice(0, slash), budget)) return true;
+          if (budget.left < 0) return false;
+        }
+        return false;
+      };
       grepInclude = {
         stateBudget: compiled.reduce((total, glob) => {
           return total + glob.runs.reduce((sum, run) => sum + run.length, 0);
@@ -1781,7 +1799,7 @@ export function buildTools(
           const budget = { left: SEARCH_INCLUDE_MATCH_STATE_BUDGET };
           if (positives.length === 0 && exclusions.length === 0) return { matched: false };
           for (const glob of exclusions) {
-            if (matchOne(glob, rel, budget)) return { matched: false };
+            if (matchExcluded(glob, rel, budget)) return { matched: false };
             if (budget.left < 0) return { exhausted: true };
           }
           if (positives.length === 0) return { matched: true }; // exclusions passed

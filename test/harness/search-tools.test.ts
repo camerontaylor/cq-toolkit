@@ -952,6 +952,25 @@ describe('contained grep and glob tools', () => {
     });
   });
 
+  test('negated directory globs veto descendants like rg (#604)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await mkdir(join(workspace, 'src', 'nested'), { recursive: true });
+      await mkdir(join(workspace, 'deep', 'src'), { recursive: true });
+      await writeFile(join(workspace, 'src', 'nested', 'root.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'deep', 'src', 'nested.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'deep', 'keep.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({ pattern: 'needle', include: '!src' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('--- deep/keep.ts ---');
+        expect(result.output).not.toContain('src/nested/root.ts');
+        expect(result.output).not.toContain('deep/src/nested.ts');
+      }
+    });
+  });
+
   test('repeated brace alternatives fail closed on visited-branch work cap (#605)', async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, '.git'), { recursive: true });
@@ -1067,6 +1086,27 @@ describe('contained grep and glob tools', () => {
         expect(suffixes.ok).toBe(false);
         if (!suffixes.ok) {
           expect(suffixes.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+      // A negative anchored glob misses the complete path, but checking
+      // all ancestor directories consumes one shared candidate budget.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from(`${'a/'.repeat(100)}x.ts\0`)],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4250,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const ancestors = await grep.execute({ pattern: 'needle', include: '!z/q' });
+        expect(ancestors.ok).toBe(false);
+        if (!ancestors.ok) {
+          expect(ancestors.denial.reason).toBe(
             'SEARCH_LIMIT: search denied: include match state budget exhausted',
           );
         }
