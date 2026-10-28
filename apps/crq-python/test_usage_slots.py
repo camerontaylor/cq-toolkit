@@ -215,6 +215,21 @@ class ConcurrencyTest(unittest.TestCase):
                 self.assertEqual(self.started, [])
                 self.assertEqual(len(held), 1)
 
+    def test_blocked_signer_reservation_occupies_inflight_capacity(self):
+        signer = dict(id='signer', kind='promotion', state='blocked',
+                      request={'requested_at': crq.iso(AT), 'reconciliation_required': True})
+        self.q['items'] = [signer, dict(id='next', kind='open', state='pending', pr=1)]
+        crq.CONFIG['max_inflight'] = 1
+        self.probe.return_value = {'remaining': 2}
+        usage, held = crq.read_slot_usage(self.q)
+        _, gate, remaining = crq.admit_available(self.q, usage, [], reserved=held)
+        self.assertEqual(held, [signer['request']['requested_at']])
+        self.assertEqual(crq.inflight(self.q), [signer])
+        self.assertEqual(gate, 'inflight')
+        self.assertEqual(remaining, 1)
+        self.assertEqual(self.started, [])
+        self.assertEqual(self.q['starts'], [])
+
     def test_vendor_progress_precedes_usage_and_requires_a_valid_probe(self):
         run = dict(run_id='delayed', started_at=crq.iso(AT))
         self.q['items'] = [dict(id='delayed', kind='open', state='reviewing', run=run)]

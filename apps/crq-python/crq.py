@@ -1102,7 +1102,8 @@ def starts_last_hour(q: Dict[str, Any]) -> int:
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [i for i in q["items"] if i["state"] == "reviewing" or (i["kind"] == "promotion" and i["state"] in SIGNER_STATES)]
+    return [i for i in q["items"] if i["state"] == "reviewing" or (i["kind"] == "promotion" and (
+        i["state"] in SIGNER_STATES or (i.get("request") or {}).get("reconciliation_required")))]
 
 
 def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str:
