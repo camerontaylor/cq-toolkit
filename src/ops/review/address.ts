@@ -230,6 +230,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
      * post-push bookkeeping threw.
      */
     let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
+    /**
+     * #490: the exact findings array each dispatch started from, mapped to
+     * the number of fixes already recorded then. The local loop's report rows
+     * are that pre-dispatch snapshot until a re-review succeeds, so a run that
+     * stops after fixing (budget, blocked re-review, round cap) would leave
+     * fixed rows reading 'open'. finish() overlays only fixes recorded AFTER
+     * the stamp, and only onto a stamped array: a successful re-review
+     * assigns a new array, so its rows stay authoritative (a reopened defect
+     * stays open).
+     */
+    const rowsDispatchedAt = new WeakMap<Finding[], number>();
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -351,6 +362,26 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         settleWithholdRows(
           '; no engine publication ran for this run — the verified commit stays local',
         );
+      }
+      // #490: rows still holding a dispatched snapshot take the outcome each
+      // later fix recorded for them, as the producer recorded it (status,
+      // reason, evidence). A fix whose disposition write failed already reads
+      // 'open', so it leaves its row open. No publication claim is added here.
+      const dispatchedAt = rowsDispatchedAt.get(report.findings);
+      if (dispatchedAt !== undefined) {
+        const later = report.fixes.slice(dispatchedAt);
+        report.findings = report.findings.map((finding) => {
+          const outcome = later.findLast((fix) => fix.finding.id === finding.id)?.finding;
+          if (outcome === undefined || outcome.status === 'open') return finding;
+          const { reason, evidence } = outcome;
+          const { reason: _reason, evidence: _evidence, ...row } = finding;
+          return {
+            ...row,
+            status: outcome.status,
+            ...(reason === undefined ? {} : { reason }),
+            ...(evidence === undefined ? {} : { evidence }),
+          };
+        });
       }
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
@@ -914,6 +945,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             return entry;
           };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
+            rowsDispatchedAt.set(record.findings, report.fixes.length);
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
             )
