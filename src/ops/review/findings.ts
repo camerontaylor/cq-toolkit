@@ -225,7 +225,7 @@ export function isComplete(
 }
 
 export function openBlocking(
-  record: FindingsRecord,
+  record: Pick<FindingsRecord, 'findings'>,
   severities: readonly string[] = ['critical', 'major'],
 ): Finding[] {
   const blocking = new Set(severities.map((severity) => severity.toLowerCase()));

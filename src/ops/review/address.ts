@@ -238,9 +238,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
      * fixed rows reading 'open'. finish() overlays only fixes recorded AFTER
      * the stamp, and only onto a stamped array: a successful re-review
      * assigns a new array, so its rows stay authoritative (a reopened defect
-     * stays open).
+     * stays open). The stamp also carries the blocking severities the
+     * dispatch ran under, so finish() can re-derive openBlocking from the
+     * overlaid rows under the same policy.
      */
-    const rowsDispatchedAt = new WeakMap<Finding[], number>();
+    const rowsDispatchedAt = new WeakMap<
+      Finding[],
+      { fixes: number; severities: readonly string[] }
+    >();
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -369,7 +374,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // 'open', so it leaves its row open. No publication claim is added here.
       const dispatchedAt = rowsDispatchedAt.get(report.findings);
       if (dispatchedAt !== undefined) {
-        const later = report.fixes.slice(dispatchedAt);
+        const later = report.fixes.slice(dispatchedAt.fixes);
         report.findings = report.findings.map((finding) => {
           const outcome = later.findLast((fix) => fix.finding.id === finding.id)?.finding;
           if (outcome === undefined || outcome.status === 'open') return finding;
@@ -382,6 +387,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             ...(evidence === undefined ? {} : { evidence }),
           };
         });
+        // The same rows, so the same blockers: openBlocking was taken from the
+        // pre-dispatch snapshot, and would still list a finding whose fix
+        // outcome (persisted, or its row would still read 'open') is fixed or
+        // rejected. Deferred and still-open rows stay blocking.
+        report.openBlocking = openBlocking({ findings: report.findings }, dispatchedAt.severities);
       }
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
@@ -945,7 +955,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             return entry;
           };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
-            rowsDispatchedAt.set(record.findings, report.fixes.length);
+            rowsDispatchedAt.set(record.findings, {
+              fixes: report.fixes.length,
+              severities: policy.review.blockingSeverities,
+            });
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
             )
