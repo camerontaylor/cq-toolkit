@@ -111,6 +111,8 @@ interface Scenario {
   dependencyChangeAt?: number;
   /** The dependency input changed (default package.json). */
   dependencyFile?: string;
+  /** Inject `open` without `gh` and no `openIn` (the injected leg owns the forge). */
+  injectedOpenOwnsForge?: boolean;
   /** Called at the start of each probe check. */
   onProbe?: () => void;
   /** Scripted author-side git commands (a race injected before real git runs). */
@@ -141,7 +143,13 @@ async function run(scenario: Scenario) {
 
   const op = makeDevCycle({
     effects: author,
-    gh,
+    ...(scenario.injectedOpenOwnsForge === true
+      ? {
+          open: async () => {
+            throw new Error('the injected open leg must not be called on a red final gate');
+          },
+        }
+      : { gh }),
     ...(scenario.push === undefined ? {} : {}),
     check: async () => {
       authorChecks += 1;
@@ -300,22 +308,26 @@ async function run(scenario: Scenario) {
             );
           },
         }),
-    openIn: (effects, root) => async (input) => {
-      opens.push({ input, root });
-      const read = await readWorkState(effects, { target: 'merge-queue' });
-      if (!read.ok) throw new Error(read.reason);
-      const value: PrOpenReport = {
-        number: 77,
-        url: 'https://example.invalid/pull/77',
-        created: true,
-        base: input.target ?? 'merge-queue',
-        head: read.state.head,
-        branch: read.state.branch,
-        evidenceClass: 'author',
-        ready: false,
-      };
-      return { status: 'ok', value };
-    },
+    ...(scenario.injectedOpenOwnsForge === true
+      ? {}
+      : {
+          openIn: (effects: DevEffects, root: string) => async (input: PrOpenInput) => {
+            opens.push({ input, root });
+            const read = await readWorkState(effects, { target: 'merge-queue' });
+            if (!read.ok) throw new Error(read.reason);
+            const value: PrOpenReport = {
+              number: 77,
+              url: 'https://example.invalid/pull/77',
+              created: true,
+              base: input.target ?? 'merge-queue',
+              head: read.state.head,
+              branch: read.state.branch,
+              evidenceClass: 'author',
+              ready: false,
+            };
+            return { status: 'ok', value };
+          },
+        }),
   });
   const result = await op({
     repoRoot: repo.root,
@@ -766,6 +778,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
   test.each([
     ['no installDeps hook', { installDeps: null }],
     ['push opted out', { push: false }],
+    ['an injected open leg owns the forge (no gh, no openIn)', { injectedOpenOwnsForge: true }],
   ] as const)('%s: the red final result is returned verbatim', async (_label, extra) => {
     const r = await run({ greens: [true, false], stop: 'budget', ...extra });
     expect(r.result).toEqual({

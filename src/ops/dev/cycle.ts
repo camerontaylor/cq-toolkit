@@ -713,6 +713,10 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         verbatim.status !== 'failed' ||
         report === undefined ||
         deps.installDeps === undefined ||
+        // An injected publication leg without injected forge effects OWNS the
+        // forge (see `ownForge`): without an injected `openIn`, the fallback
+        // would have to build production forge effects, so it stays off.
+        (deps.openIn === undefined && !ownForge) ||
         !pushed ||
         firstCheck.status !== 'ok' ||
         run.status !== 'ok'
