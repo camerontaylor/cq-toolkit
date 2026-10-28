@@ -24,7 +24,10 @@ describe('branchPathFault', () => {
   test('accepts every approved branch target', () => {
     expect(accepts.length).toBeGreaterThan(0);
     for (const vector of accepts) {
-      expect(branchPathFault(vector.value), `${vector.rule}: ${JSON.stringify(vector.value)}`).toBeNull();
+      expect(
+        branchPathFault(vector.value),
+        `${vector.rule}: ${JSON.stringify(vector.value)}`,
+      ).toBeNull();
     }
   });
 
