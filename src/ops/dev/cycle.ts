@@ -1409,8 +1409,15 @@ export function meterDrivers(
               } catch {
                 // A malformed error's usage accessor cannot replace that error.
               }
+              // The numeric debit stays on its existing path: a rejection that
+              // carried tokens still shrinks the shared remainder.
               if (partial !== undefined) meter(partial);
-              settle(partial === undefined ? {} : { usage: partial });
+              // Seam v3: usage attached to a REJECTION declares no provenance,
+              // and values alone never establish measurement — the summary
+              // records it as unknown (no aggregate), exactly like a returned
+              // result whose declaration is absent/unmeasured. Trusting it
+              // would need an explicit error-side provenance contract.
+              settle({});
               throw err;
             }
             let measured: Usage | undefined;

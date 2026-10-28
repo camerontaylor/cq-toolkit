@@ -57,13 +57,54 @@ describe('dev.cycle known usage', () => {
     await expect(resolved.driver.run(invocation)).rejects.toThrow('unmeasured');
     expect(seen).toEqual(['cycle:0', 'cycle:1', 'cycle:2', 'cycle:3']);
     expect(spent).toBe(18);
+    // Seam v3: the rejected dispatch's structurally valid `error.usage` carries
+    // no provenance declaration, so it contributes UNKNOWN (no aggregate) while
+    // its numeric debit above still counts (spent === 18). Only the two
+    // returned results — both declaring `measured` — are known.
     expect(ledger.snapshot()).toMatchObject({
-      usage: { input: 9, output: 6, cacheRead: 3, cacheWrite: 0 },
-      knownCount: 3,
-      unknownCount: 1,
+      usage: { input: 6, output: 4, cacheRead: 2, cacheWrite: 0 },
+      knownCount: 2,
+      unknownCount: 2,
       unpricedCount: 2,
     });
     expect(ledger.snapshot().costUSD).toBeCloseTo(0.02);
+  });
+
+  it('does not count usage attached to a rejection as known without a provenance declaration', async () => {
+    const ledger = createKnownUsageLedger();
+    const seen: string[] = [];
+    let spent = 0;
+    // Structurally valid tokens on the rejection — the shape proves nothing
+    // about measurement, and the seam-v3 contract forbids inferring it.
+    const original = Object.assign(new Error('driver rejected after partial spend'), {
+      usage: { input: 5, output: 2, cacheRead: 1, cacheWrite: 0 },
+    });
+    const driver = {
+      run: async (): Promise<WorkerResult> => Promise.reject(original),
+    };
+    const factory: DriverFactory = {
+      resolve: (request) => ({ driver, lane: 'ai-sdk', modelSpec: request.modelSpec }),
+    };
+    const resolved = meterDrivers(
+      factory,
+      (tokens) => {
+        spent += tokens;
+      },
+      {
+        start: (id) => {
+          seen.push(id);
+        },
+        settle: (id, observation) => ledger.record(id, observation),
+      },
+    ).resolve({ role: 'reviewer', modelSpec: { provider: 'mock', model: 'm' } });
+
+    // The original error object is rethrown unchanged (identity preserved).
+    await expect(resolved.driver.run(invocation)).rejects.toBe(original);
+    expect(seen).toEqual(['cycle:0']);
+    // The numeric debit still happened: 5 + 2 + 1.
+    expect(spent).toBe(8);
+    // The summary records the dispatch as unknown — no aggregate, no cost.
+    expect(ledger.snapshot()).toEqual({ knownCount: 0, unknownCount: 1, unpricedCount: 1 });
   });
 
   it('preserves a thrown driver error when its partial usage is invalid', async () => {
