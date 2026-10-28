@@ -307,6 +307,95 @@ describe('R3S anchor validator: pinned quote integrity', () => {
     ).toContain('out-of-range');
   });
 
+  it('rejects the trailing split element as a nonexistent final line', () => {
+    const newlineBlob = 'code\n';
+    const oneLine = new Map(context.blobs);
+    oneLine.set(MODIFIED, {
+      base: newlineBlob,
+      head: newlineBlob,
+      baseHunks: [{ start: 1, end: 2 }],
+      headHunks: [{ start: 1, end: 2 }],
+    });
+    oneLine.set(DEPENDENCY, {
+      base: newlineBlob,
+      head: newlineBlob,
+      baseHunks: [],
+      headHunks: [],
+    });
+    const oneLineContext: AnchorValidationContext = { blobs: oneLine, renames: context.renames };
+
+    // Before the fix, split('\n') counted the trailing empty element and the
+    // exact quote 'code\n' incorrectly validated across lines 1..2.
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({ primary: anchor({ start: 1, end: 2, quote: 'code\n' }) }),
+          oneLineContext,
+        ),
+      ),
+    ).toEqual(['out-of-range']);
+    expect(
+      invalidReasons(
+        validateFindingEvidence(
+          evidence({
+            primary: anchor({ start: 1, end: 1, quote: 'code' }),
+            supporting: [
+              {
+                ...anchor({ file: DEPENDENCY, start: 1, end: 2, quote: 'code\n' }),
+                relevance: 'the cited source line',
+              },
+            ],
+          }),
+          oneLineContext,
+        ),
+      ),
+    ).toEqual(['out-of-range', 'supporting-evidence']);
+  });
+
+  it('accepts the final real line when the blob ends with a newline', () => {
+    const newlineBlob = 'first\nlast\n';
+    const finalLine = new Map(context.blobs);
+    finalLine.set(MODIFIED, {
+      base: newlineBlob,
+      head: newlineBlob,
+      baseHunks: [{ start: 2, end: 3 }],
+      headHunks: [{ start: 2, end: 3 }],
+    });
+    const finalLineContext: AnchorValidationContext = {
+      blobs: finalLine,
+      renames: context.renames,
+    };
+
+    valid(
+      validateFindingEvidence(
+        evidence({ primary: anchor({ start: 2, end: 2, quote: 'last' }) }),
+        finalLineContext,
+      ),
+    );
+  });
+
+  it('accepts the final real line when the blob has no final newline', () => {
+    const noFinalNewlineBlob = 'first\nlast';
+    const finalLine = new Map(context.blobs);
+    finalLine.set(MODIFIED, {
+      base: noFinalNewlineBlob,
+      head: noFinalNewlineBlob,
+      baseHunks: [{ start: 2, end: 3 }],
+      headHunks: [{ start: 2, end: 3 }],
+    });
+    const finalLineContext: AnchorValidationContext = {
+      blobs: finalLine,
+      renames: context.renames,
+    };
+
+    valid(
+      validateFindingEvidence(
+        evidence({ primary: anchor({ start: 2, end: 2, quote: 'last' }) }),
+        finalLineContext,
+      ),
+    );
+  });
+
   it('rejects an anchor into an empty file', () => {
     const empty = new Map(context.blobs);
     empty.set(ADDED, {
@@ -581,11 +670,11 @@ describe('R3S anchor validator: changed-hunk overlap', () => {
         evidence({
           primary: anchor({
             start: 2,
-            end: 4,
+            end: 3,
             // Line 2 of the fixture head is the blank line between the
             // import and the changed constant, so the quote starts with a
-            // newline and spans lines 2..4 inclusive.
-            quote: '\nexport const after = 2;\n',
+            // newline and spans the real lines 2..3 inclusive.
+            quote: '\nexport const after = 2;',
           }),
         }),
         twoContext,
