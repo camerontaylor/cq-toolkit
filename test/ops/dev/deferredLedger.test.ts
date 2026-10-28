@@ -1565,12 +1565,20 @@ test('a caller abort during the post-report identity read prevents the ancestor 
       const result = await f.effects.runCommand(...call);
       // Cancellation lands on the ancestry loop's post-report identity read (readWorkState opens
       // with `symbolic-ref`), i.e. AFTER consumeDeferredVendorReport has fully returned.
-      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) controller.abort(reason);
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref'))
+        controller.abort(reason);
       return result;
     },
   };
   await expect(
-    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
   ).rejects.toThrow(reason);
   // No late settlement write: the ledger is exactly as before.
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
@@ -1602,6 +1610,13 @@ test('a caller abort after the final ancestor settlement still propagates from l
     }),
   };
   await expect(
-    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
   ).rejects.toThrow(reason);
 });

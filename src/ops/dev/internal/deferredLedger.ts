@@ -6,10 +6,7 @@ import { consumeDeferredVendorReport } from './deferredSettlement.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { DevCycleRecord, DevLedgerFile } from '../record.js';
 import { makeConfiguredQueueClient } from '../../review/queue.js';
-import type {
-  DeferredQueueClient,
-  QueueStatus,
-} from '../../review/internal/queueProtocol.js';
+import type { DeferredQueueClient, QueueStatus } from '../../review/internal/queueProtocol.js';
 import {
   DeferredVendorDebtSchema,
   VendorFailureProvenanceSchema,
