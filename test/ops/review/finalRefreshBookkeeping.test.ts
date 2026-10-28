@@ -75,7 +75,9 @@ type Mode =
   | 'external-append'
   | 'external-completed'
   | 'authorized-predecessor-append'
-  | 'authorized-predecessor-settle';
+  | 'authorized-predecessor-settle'
+  | 'older-head-predecessor-pending'
+  | 'ambiguous-identity-enrollment';
 
 async function fixture(mode: Mode) {
   const repo = await makeTestRepo();
@@ -146,7 +148,9 @@ async function fixture(mode: Mode) {
     binding: { ...debtBinding, head: 'a'.repeat(40) },
   };
   const ancestorDebt: DeferredVendorDebt | undefined =
-    mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle'
+    mode === 'authorized-predecessor-append' ||
+    mode === 'authorized-predecessor-settle' ||
+    mode === 'older-head-predecessor-pending'
       ? {
           reference: ancestorReference,
           originAttempt: debt.originAttempt,
@@ -167,6 +171,26 @@ async function fixture(mode: Mode) {
             : record,
         ),
         { kind: 'vendor-debt' as const, debt: ancestorDebt, at: real.nowIso() },
+      ],
+    });
+  }
+  if (mode === 'ambiguous-identity-enrollment') {
+    // Two enrollments claim this identity: the runner must refuse a clean completion rather than
+    // pick an arbitrary authority.
+    const stored = store.load();
+    store.save({
+      ...stored,
+      records: [
+        ...stored.records,
+        {
+          kind: 'vendor-debt' as const,
+          at: real.nowIso(),
+          debt: {
+            ...debt,
+            reference: { requestId: 'ambiguous-enrollment', binding: { ...debt.reference.binding } },
+            deferral: { ...debt.deferral, id: 'ambiguous-enrollment' },
+          },
+        },
       ],
     });
   }
@@ -194,7 +218,9 @@ async function fixture(mode: Mode) {
   const findings =
     mode === 'clean' ||
     mode === 'authorized-predecessor-append' ||
-    mode === 'authorized-predecessor-settle'
+    mode === 'authorized-predecessor-settle' ||
+    mode === 'older-head-predecessor-pending' ||
+    mode === 'ambiguous-identity-enrollment'
       ? []
       : [{ severity: 'major', text: 'late retained finding' }];
   const document = {
@@ -527,6 +553,8 @@ test('a superseded older-head predecessor permits a clean run but never a clean 
   const debts = after.flatMap((record) => (record.kind === 'vendor-debt' ? [record.debt] : []));
   expect(debts.filter((debt) => debt.vendorCompleted === false)).toHaveLength(2);
   // DURABLE READINESS: any pending ancestor still refuses a clean readiness verdict.
+  const currentDebt = debts[debts.length - 1];
+  if (!currentDebt) throw new Error('missing current debt');
   const readiness = assembleReadiness({
     branch: f.state.branch,
     target: 'merge-queue',
@@ -538,8 +566,8 @@ test('a superseded older-head predecessor permits a clean run but never a clean 
     ledger: f.store.load(),
     untracked: [],
     configuredReviewers: ['agent', 'coderabbit'],
-    deferredVendorDebt: debts[debts.length - 1],
-    nowIso: f.effects.nowIso(),
+    deferredVendorDebt: currentDebt,
+    nowIso: '2026-10-28T00:00:00Z',
   });
   expect(readiness.ready).toBe(false);
   if (readiness.ready) throw Error('unexpected readiness');
