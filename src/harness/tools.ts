@@ -1290,10 +1290,11 @@ export function buildTools(
   /**
    * Match the component runs against a path's components with iterative NFA
    * state (a set of run positions, advanced one component at a time with a
-   * '**' fixpoint) — total state bounded by pattern length; no recursion,
-   * no backtracking across components. A '**' COMPONENT consumes zero or
-   * more components (rg fixtures: '**/n.ts' hits 'deep/dir/n.ts';
-   * 'deep/**/n.ts' ditto; trailing '**' matches all deeper components).
+   * doublestar fixpoint) — total state bounded by pattern length; no
+   * recursion, no backtracking across components. A doublestar COMPONENT
+   * consumes zero or more components (rg fixtures: doublestar + '/n.ts'
+   * hits 'deep/dir/n.ts'; 'deep' + doublestar + '/n.ts' ditto; a trailing
+   * doublestar matches all deeper components).
    */
   const matchRuns = (runs: GlobToken[][], segments: string[], budget: number): boolean => {
     let states = new Set<number>([0]);
