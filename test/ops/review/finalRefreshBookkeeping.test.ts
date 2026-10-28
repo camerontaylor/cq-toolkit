@@ -74,7 +74,8 @@ type Mode =
   | 'foreign-source'
   | 'external-append'
   | 'external-completed'
-  | 'authorized-predecessor-append';
+  | 'authorized-predecessor-append'
+  | 'authorized-predecessor-settle';
 
 async function fixture(mode: Mode) {
   const repo = await makeTestRepo();
@@ -143,7 +144,7 @@ async function fixture(mode: Mode) {
     binding: { ...debtBinding, head: state.head },
   };
   const ancestorDebt: DeferredVendorDebt | undefined =
-    mode === 'authorized-predecessor-append'
+    mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle'
       ? {
           reference: ancestorReference,
           originAttempt: debt.originAttempt,
@@ -189,7 +190,9 @@ async function fixture(mode: Mode) {
     reviewer_version: 'offline-v1',
   };
   const findings =
-    mode === 'clean' || mode === 'authorized-predecessor-append'
+    mode === 'clean' ||
+    mode === 'authorized-predecessor-append' ||
+    mode === 'authorized-predecessor-settle'
       ? []
       : [{ severity: 'major', text: 'late retained finding' }];
   const document = {
@@ -244,7 +247,8 @@ async function fixture(mode: Mode) {
   let ancestorAppended = false;
   client.status = async (reference) => {
     if (
-      mode === 'authorized-predecessor-append' &&
+      (mode === 'authorized-predecessor-append' ||
+        mode === 'authorized-predecessor-settle') &&
       reference.requestId === ancestorReference.requestId
     ) {
       if (!final) return pending;
@@ -258,7 +262,11 @@ async function fixture(mode: Mode) {
         reviewed: true,
         consumed: true,
       };
-      if (!ancestorAppended && ancestorDebt !== undefined) {
+      if (
+        mode === 'authorized-predecessor-append' &&
+        !ancestorAppended &&
+        ancestorDebt !== undefined
+      ) {
         // The authorized settlement this refresh now owns: an extra appended snapshot the previous
         // single-append validation rejected.
         ancestorAppended = true;
@@ -481,4 +489,20 @@ test('an unowned predecessor append outside the refresh still fails closed', asy
   // The authorized ancestor settlement is the append this validation previously rejected; the
   // current-enrollment append is covered by the clean/findings modes above.
   expect(completed.map((debt) => debt!.reference.requestId)).toContain('ancestor-1');
+});
+
+test('a seam-owned authorized predecessor settlement is accepted and notified', async () => {
+  const f = await fixture('authorized-predecessor-settle');
+  const result = await f.run();
+  // The seam appends the verified predecessor completion through its own requested mutation; the
+  // ownership validation recognizes the authorized append instead of rejecting it.
+  expect(result.status, JSON.stringify(result)).toBe('ok');
+  expect(f.events).toContain('ledger-observed');
+  const settled = f.store
+    .load()
+    .records.filter((record) => record.kind === 'vendor-debt')
+    .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined));
+  expect(
+    settled.filter((debt) => debt?.vendorCompleted === true).map((debt) => debt!.reference.requestId),
+  ).toContain('ancestor-1');
 });
