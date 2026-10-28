@@ -1313,12 +1313,15 @@ export function buildTools(
    * marker run; a glob with '/' is root-anchored.
    */
   const compileRgGlob = (glob: string): CompiledGlob => {
-    const parts = glob.split('/');
+    // A leading '/' anchors at the workspace root; it is not an empty
+    // path component to match before the first real component.
+    const anchored = glob.includes('/');
+    const parts = (glob.startsWith('/') ? glob.slice(1) : glob).split('/');
     return {
       runs: parts.map((part) =>
         part === '**' ? [{ kind: 'any-run' }, { kind: 'any-run' }] : tokenizeComponent(part),
       ),
-      anchored: parts.length > 1,
+      anchored,
     };
   };
 
@@ -1410,10 +1413,15 @@ export function buildTools(
   ): boolean => {
     let states = new Set<number>([0]);
     for (const segment of segments) {
+      budget.left -= states.size; // copy the active states for closure
+      if (budget.left < 0) return false;
       const expanded = new Set<number>(states);
       let grew = true;
       while (grew) {
         grew = false;
+        // Charge the fixpoint walk before copying its states.
+        budget.left -= expanded.size;
+        if (budget.left < 0) return false;
         for (const t of [...expanded]) {
           if (isGlobstarRun(runs[t]) && !expanded.has(t + 1)) {
             expanded.add(t + 1);
@@ -1437,8 +1445,14 @@ export function buildTools(
       states = next;
     }
     for (const t of states) {
+      budget.left -= 1;
+      if (budget.left < 0) return false;
       let c = t;
-      while (isGlobstarRun(runs[c])) c += 1;
+      while (isGlobstarRun(runs[c])) {
+        budget.left -= 1;
+        if (budget.left < 0) return false;
+        c += 1;
+      }
       if (c === runs.length) return true;
     }
     return false;
@@ -1748,12 +1762,35 @@ export function buildTools(
       // alternatives, all suffix starts and all NFA steps: exhaustion is an
       // honest fail-closed verdict, never a silent non-match.
       const matchOne = (glob: CompiledGlob, rel: string, budget: { left: number }): boolean => {
+        budget.left -= rel.length; // split the candidate path for this alternative
+        if (budget.left < 0) return false;
         const segments = rel.split('/');
         if (glob.anchored) {
           return matchRuns(glob.runs, segments, budget);
         }
         for (let start = 0; start < segments.length; start += 1) {
+          // slice copies each remaining component; charge it before copying.
+          budget.left -= segments.length - start;
+          if (budget.left < 0) return false;
           if (matchRuns(glob.runs, segments.slice(start), budget)) return true;
+        }
+        return false;
+      };
+      // rg excludes a directory and all of its descendants when the
+      // directory itself matches a negative glob (for example, !src).
+      // Charge each copied ancestor and its match to the same candidate budget.
+      const matchExcluded = (
+        glob: CompiledGlob,
+        rel: string,
+        budget: { left: number },
+      ): boolean => {
+        if (matchOne(glob, rel, budget)) return true;
+        if (budget.left < 0) return false;
+        for (let slash = rel.indexOf('/'); slash !== -1; slash = rel.indexOf('/', slash + 1)) {
+          budget.left -= slash;
+          if (budget.left < 0) return false;
+          if (matchOne(glob, rel.slice(0, slash), budget)) return true;
+          if (budget.left < 0) return false;
         }
         return false;
       };
@@ -1765,10 +1802,10 @@ export function buildTools(
           const budget = { left: SEARCH_INCLUDE_MATCH_STATE_BUDGET };
           if (positives.length === 0 && exclusions.length === 0) return { matched: false };
           for (const glob of exclusions) {
-            if (matchOne(glob, rel, budget)) return { matched: false };
+            if (matchExcluded(glob, rel, budget)) return { matched: false };
             if (budget.left < 0) return { exhausted: true };
           }
-          if (positives.length === 0) return { matched: false }; // all-exclusion
+          if (positives.length === 0) return { matched: true }; // exclusions passed
           for (const glob of positives) {
             if (matchOne(glob, rel, budget)) return { matched: true };
             if (budget.left < 0) return { exhausted: true };

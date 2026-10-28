@@ -921,14 +921,13 @@ describe('contained grep and glob tools', () => {
         expect(bracket.output).toContain('--- file2.ts ---');
         expect(bracket.output).not.toContain('fileX.ts');
       }
-      // rg fixture: a PATTERN-level leading '!' is ONE exclusion — no
-      // positives remain, so nothing matches ('!*.test.ts' matches nothing;
-      // 'keep.ts' is not a .test.ts file, but with no positives the include
-      // is still empty).
+      // rg --glob '!*.test.ts' retains non-excluded paths when there are
+      // no positive globs. The exclusion still vetoes a.test.ts.
       const exclusion = await grep.execute({ pattern: 'needle', include: '!*.test.ts' });
       expect(exclusion.ok).toBe(true);
       if (exclusion.ok) {
-        expect(exclusion.output).toBe('No matches'); // all-exclusion: no positives
+        expect(exclusion.output).toContain('--- keep.ts ---');
+        expect(exclusion.output).not.toContain('--- a.test.ts ---');
       }
       // rg fixture (P1 #604): an arm starting with '!' inside braces is a
       // LITERAL-'!' component, not an exclusion — '{!*.test.ts,*.test.ts}'
@@ -949,6 +948,35 @@ describe('contained grep and glob tools', () => {
       if (ranged.ok) {
         expect(ranged.output).toContain('--- file1.ts ---');
         expect(ranged.output).not.toContain('--- keep.ts ---');
+      }
+    });
+  });
+
+  test('negated directory globs veto descendants like rg (#604)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      await mkdir(join(workspace, 'src', 'nested'), { recursive: true });
+      await mkdir(join(workspace, 'deep', 'src'), { recursive: true });
+      await writeFile(join(workspace, 'src', 'nested', 'root.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'deep', 'src', 'nested.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'deep', 'keep.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'srcx.ts'), 'needle\n', 'utf8');
+      const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+      const result = await grep.execute({ pattern: 'needle', include: '!src' });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.output).toContain('--- deep/keep.ts ---');
+        expect(result.output).toContain('--- srcx.ts ---');
+        expect(result.output).not.toContain('src/nested/root.ts');
+        expect(result.output).not.toContain('deep/src/nested.ts');
+      }
+      // A leading slash anchors the excluded directory at the workspace root.
+      const anchored = await grep.execute({ pattern: 'needle', include: '!/src' });
+      expect(anchored.ok).toBe(true);
+      if (anchored.ok) {
+        expect(anchored.output).toContain('--- deep/src/nested.ts ---');
+        expect(anchored.output).toContain('--- srcx.ts ---');
+        expect(anchored.output).not.toContain('--- src/nested/root.ts ---');
       }
     });
   });
@@ -1046,6 +1074,74 @@ describe('contained grep and glob tools', () => {
         expect(deep.ok).toBe(false);
         if (!deep.ok) {
           expect(deep.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+      // Each unanchored suffix copies the remaining path components. The
+      // copied work alone exceeds 4,096 on this 100-component candidate;
+      // a silent No matches verdict would hide exhausted matching.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from(`${'a/'.repeat(100)}x.ts\0`)],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4248,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const suffixes = await grep.execute({ pattern: 'needle', include: 'z' });
+        expect(suffixes.ok).toBe(false);
+        if (!suffixes.ok) {
+          expect(suffixes.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+      // A negative anchored glob misses the complete path, but checking
+      // all ancestor directories consumes one shared candidate budget.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from(`${'a/'.repeat(100)}x.ts\0`)],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4250,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const ancestors = await grep.execute({ pattern: 'needle', include: '!z/q' });
+        expect(ancestors.ok).toBe(false);
+        if (!ancestors.ok) {
+          expect(ancestors.denial.reason).toBe(
+            'SEARCH_LIMIT: search denied: include match state budget exhausted',
+          );
+        }
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+      // The first 70-globstar alternative alone exhausts the budget
+      // through epsilon and final-closure work on one candidate component.
+      spawnState.fake = {
+        stdoutChunks: [Buffer.from('a\0')],
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4249,
+      };
+      spawnState.calls.length = 0;
+      try {
+        const globstars = '**/'.repeat(70);
+        const closure = await grep.execute({
+          pattern: 'needle',
+          include: `{${globstars}z,${globstars}q}`,
+        });
+        expect(closure.ok).toBe(false);
+        if (!closure.ok) {
+          expect(closure.denial.reason).toBe(
             'SEARCH_LIMIT: search denied: include match state budget exhausted',
           );
         }
