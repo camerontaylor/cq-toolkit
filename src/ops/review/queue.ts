@@ -53,10 +53,19 @@ export function makeQueueOps(transport?: QueueTransport): {
           reason:
             'Configure CQ_QUEUE_SSH_ALIAS for an activated queue-v1 capability; reviewed D1C deployment required.',
         };
+      let queueTransport: QueueTransport;
+      try {
+        // The only pre-dispatch local step: an alias that cannot form a
+        // capability is a definite configuration failure, not an unknown outcome.
+        // Construction does no I/O, so this catch can never see a remote error.
+        queueTransport = transport ?? sshQueueTransport(alias!);
+      } catch (error) {
+        return { status: 'failed', error: messageOf(error) };
+      }
       try {
         return {
           status: 'ok',
-          value: await fn(makeQueueClient(transport ?? sshQueueTransport(alias!)), input),
+          value: await fn(makeQueueClient(queueTransport), input),
         };
       } catch (error) {
         if (error instanceof QueueUnsupported)

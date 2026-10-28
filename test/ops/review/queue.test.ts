@@ -10,6 +10,7 @@ import {
 import * as queueClient from '../../../src/ops/review/internal/queueClient.js';
 import { readQueueEvidence, sha256 } from '../../../src/ops/review/internal/queueEvidence.js';
 import { FindingsRecordSchema } from '../../../src/ops/review/findings.js';
+import { makeQueueOps } from '../../../src/ops/review/queue.js';
 import { registry } from '../../../src/ops/review/registry.js';
 import type {
   QueueReference,
@@ -332,5 +333,74 @@ describe('complete immutable queue result consumption', () => {
       value: { consumed: true, reviewed: true, fixed: false },
     });
     expect(await readdir(store)).toHaveLength(1);
+  });
+});
+
+describe('public queue local alias classification', () => {
+  const status = {
+    state: 'pending',
+    pr: null,
+    mergeSha: null,
+    itemId: null,
+    receiptId: null,
+    consumed: false,
+    reviewed: false,
+    fixed: false,
+  };
+  test.each(['host;id', '-oProxyCommand=bad', 'host path'])(
+    'malformed operator alias fails every op before any transport invocation: %s',
+    async (alias) => {
+      vi.stubEnv('CQ_QUEUE_SSH_ALIAS', alias);
+      const real = queueClient.sshQueueTransport;
+      const dispatched = vi.fn();
+      // Wrap the real factory: a malformed alias throws there before any spawn.
+      vi.spyOn(queueClient, 'sshQueueTransport').mockImplementation((value: string) => {
+        const transport = real(value);
+        return async (wire: string) => {
+          dispatched();
+          return transport(wire);
+        };
+      });
+      const ops = makeQueueOps();
+      for (const result of [
+        await ops.enqueue(ref),
+        await ops.queueStatus(ref),
+        await ops.report({ ...ref, evidenceDir: 'evidence' }),
+      ])
+        expect(result).toEqual({ status: 'failed', error: 'invalid queue SSH alias' });
+      expect(dispatched).not.toHaveBeenCalled();
+    },
+  );
+  test('malformed alias is reachable as failed through the review registry', async () => {
+    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'host;id');
+    for (const name of ['review.enqueue', 'review.queueStatus', 'review.report']) {
+      const op = await registry.find((entry) => entry.name === name)!.importer();
+      const input = name === 'review.report' ? { ...ref, evidenceDir: 'evidence' } : ref;
+      expect(await op(input)).toMatchObject({ status: 'failed' });
+    }
+  });
+  test.each(['invalid queue SSH alias', 'queue delivery unknown: timeout'])(
+    'injected transport failure keeps its indeterminate verdict: %s',
+    async (detail) => {
+      vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'host;id');
+      const transport: QueueTransport = async () => {
+        throw new Error(detail);
+      };
+      const result = await makeQueueOps(transport).queueStatus(ref);
+      expect(result).toMatchObject({ status: 'indeterminate' });
+      if (result.status === 'indeterminate') expect(result.detail).toContain(detail);
+    },
+  );
+  test('injected transport still succeeds while the local alias is unusable', async () => {
+    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'host;id');
+    const transport: QueueTransport = async () =>
+      JSON.stringify({ v: 1, requestId: ref.requestId, binding: ref.binding, result: status });
+    expect(await makeQueueOps(transport).queueStatus(ref)).toEqual({ status: 'ok', value: status });
+  });
+  test('missing alias remains an explicit needs-human configuration reason', async () => {
+    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', '');
+    const result = await makeQueueOps().queueStatus(ref);
+    expect(result).toMatchObject({ status: 'needs-human' });
+    if (result.status === 'needs-human') expect(result.reason).toContain('CQ_QUEUE_SSH_ALIAS');
   });
 });
