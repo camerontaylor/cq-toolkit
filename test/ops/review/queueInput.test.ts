@@ -27,10 +27,9 @@ describe('public queue local input classification', () => {
     'definite invalid enqueue fails before transport: %j',
     async (input) => {
       const transport = vi.fn<QueueTransport>();
-      expect(await makeQueueOps(transport).enqueue(input)).toMatchObject({
-        status: 'failed',
-        error: expect.any(String),
-      });
+      const result = await makeQueueOps(transport).enqueue(input);
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') expect(typeof result.error).toBe('string');
       expect(transport).not.toHaveBeenCalled();
     },
   );
