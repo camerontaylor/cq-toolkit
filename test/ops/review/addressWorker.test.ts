@@ -1,4 +1,5 @@
 import { watch } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, writeFile, rm, symlink, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -514,15 +515,29 @@ describe('review.address failed-attempt branches', () => {
       { workerAttempts: 2, rescueBase: 1, runPrefix: 'cq-address/collision' },
     );
     try {
-      const collision = 'cq-address/collision/failed/review/fixture/src-a-ts/a1';
-      f.repo.git('update-ref', `refs/heads/${collision}`, f.initial);
+      const digest = (raw: string) => createHash('sha256').update(raw).digest('hex').slice(0, 16);
+      const collision = `cq-address/collision/failed/review-${digest('review')}/fixture-${digest('fixture')}/src-a-ts-${digest('src/a.ts')}/a1`;
+      const identity = Buffer.from(JSON.stringify(['review', 'fixture', 'src/a.ts'])).toString(
+        'base64url',
+      );
+      const collisionSha = f.repo
+        .git(
+          'commit-tree',
+          f.repo.git('write-tree').trim(),
+          '-p',
+          f.initial,
+          '-m',
+          `cq-failed(unfixed): src/a.ts\n\nprovider failed\n\nCq-Run: cq-address/collision\nCq-Unit: review/fixture\nCq-Task: src/a.ts\nCq-Ref-Identity: ${identity}\nCq-Attempt: 1\nCq-Tier: worker\nCq-Model: mock/worker\nCq-Gate: related\nCq-Outcome: unfixed`,
+        )
+        .trim();
+      f.repo.git('update-ref', `refs/heads/${collision}`, collisionSha);
       const failed = await f.engine.fix(finding(), 1);
       expect(failed.failedAttempts?.map((row) => [row.ordinal, row.tier])).toEqual([
         [2, 'worker'],
         [3, 'worker'],
         [4, 'rescue'],
       ]);
-      expect(f.repo.git('rev-parse', collision).trim()).toBe(f.initial);
+      expect(f.repo.git('rev-parse', collision).trim()).toBe(collisionSha);
       for (const row of failed.failedAttempts!) {
         expect(f.repo.git('rev-parse', row.branch).trim()).toBe(row.sha);
         expect(f.repo.git('show', '-s', '--format=%B', row.sha)).toContain(
@@ -1150,7 +1165,9 @@ describe('review.address candidate isolation', () => {
       expect(fix.finding.status).toBe('deferred');
       expect(fix.reason).toContain('provider failed');
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
-      expect(f.attempts[0]?.failedAttempt?.branch).toMatch(/^cq-address\/[^/]+\/failed\/review\//);
+      expect(f.attempts[0]?.failedAttempt?.branch).toMatch(
+        /^cq-address\/[^/]+\/failed\/review-[0-9a-f]{16}\/fixture-[0-9a-f]{16}\/src-a-ts-[0-9a-f]{16}\/a[1-9][0-9]*$/,
+      );
       expect(f.repo.git('show', `${f.attempts[0]!.failedAttempt?.sha}:src/a.ts`)).toContain(
         'PARTIAL',
       );

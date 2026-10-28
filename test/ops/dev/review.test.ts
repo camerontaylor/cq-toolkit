@@ -3,7 +3,7 @@
 // per-path scan components (committed/staged/unstaged/untracked, binary
 // bytes included), the scan BEFORE any reviewer run, honest completion
 // recording, drift refusal, and the finding-id minting in the ledger.
-import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -18,6 +18,9 @@ import {
 } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
+import { makeAgentReviewRunner } from '../../../src/ops/dev/agentReview.js';
+import { makeDevReady } from '../../../src/ops/dev/ready.js';
+import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
 import {
   isCoverageV2Complete,
@@ -32,7 +35,7 @@ import {
 } from '../../../src/ops/dev/review.js';
 import { sshAuthorTransport, type AuthorTransport } from '../../../src/ops/dev/review-transport.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
-import { cycleRecord, makeFakeEffects, stubScanner } from './fakes.js';
+import { checkRecord, cycleRecord, makeFakeEffects, stubScanner } from './fakes.js';
 import { makeTestRepo, repoEffects, seed, type CommandHandler, type TestRepo } from './repo.js';
 
 /** The cycle branch of the composed op. */
@@ -213,6 +216,243 @@ describe('dev.review pre-upload project scan fails closed', () => {
 });
 
 describe('dev.review cycle', () => {
+  test.each(['terminal', 'blocked'] as const)(
+    'configured agent composes the scripted engine, shared lock and %s author evidence',
+    async (outcome) => {
+      const role = { provider: 'scripted', model: 'fixture-reviewer' };
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: role },
+          budgets: { run: { maxTokens: 5000, wallMs: 20000 } },
+          review: { reviewers: ['coderabbit', 'agent'] },
+        }),
+      );
+      repo.commitAll('configure scripted reviewer');
+      const effects = repoEffects(repo);
+      let locked = false;
+      const lock = vi.fn(async (fn: () => unknown) => {
+        expect(locked).toBe(false);
+        locked = true;
+        try {
+          return await fn();
+        } finally {
+          locked = false;
+        }
+      });
+      effects.withHostLock = async (fn) => (await lock(fn)) as Awaited<ReturnType<typeof fn>>;
+      const scanner = capturingScanner();
+      const dispatch = vi.fn(async (invocation: { prompt: string }) => {
+        expect(locked).toBe(true);
+        const payload = wireRequest(invocation.prompt);
+        return payload;
+      });
+      const resolve = vi.fn(
+        (request: {
+          modelSpec: unknown;
+          beforeRequest?: (
+            text: string,
+            contents: readonly { text: string }[],
+            context: { kind: 'model-request' },
+          ) => Promise<void>;
+        }) => {
+          expect(locked).toBe(true);
+          expect(request.modelSpec).toEqual(role);
+          return {
+            lane: 'ai-sdk',
+            modelSpec: role,
+            driver: {
+              run: async (invocation: {
+                prompt: string;
+                toolPolicy: unknown;
+                sandboxPolicy: unknown;
+              }) => {
+                expect(invocation.toolPolicy).toEqual({
+                  mode: 'allowlist',
+                  allow: ['read', 'grep', 'glob'],
+                });
+                expect(invocation.sandboxPolicy).toEqual({ level: 'read-only' });
+                const payload = await dispatch(invocation);
+                await request.beforeRequest?.(payload.text, payload.contents, {
+                  kind: 'model-request',
+                });
+                return {
+                  stopReason: outcome === 'terminal' ? 'complete' : 'error',
+                  error: outcome === 'blocked' ? 'scripted provider unavailable' : undefined,
+                  structuredOutput: { findings: [] },
+                  usage: { input: 12, output: 4, cacheRead: 0, cacheWrite: 0 },
+                  denials: [],
+                };
+              },
+            },
+          };
+        },
+      );
+      const runner = makeAgentReviewRunner({
+        repoRoot: repo.root,
+        readFile: async (path) => {
+          expect(locked).toBe(true);
+          return readFile(path, 'utf8');
+        },
+        drivers: { resolve } as unknown as DriverFactory,
+        scanSecrets: scanner,
+        run: runAgentReviewer,
+      });
+      const state = await readWorkState(effects, { target: 'merge-queue' });
+      expect(state.ok).toBe(true);
+      if (!state.ok) return;
+      const { base, head, dirtySha256 } = state.state;
+      const op = makeDevReview({ effects, scanSecrets: scanner, runAgentReviewer: runner });
+      const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+      expect(result.status).toBe(outcome === 'terminal' ? 'ok' : 'needs-human');
+      expect(lock).toHaveBeenCalledOnce();
+      expect(resolve).toHaveBeenCalledOnce();
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(reviewerCalls(effects)).toEqual([]);
+      expect(scanner.seen.some((c) => c.component === 'request')).toBe(true);
+      const store = effects.openLedger('feature/x');
+      const ledger = store.load();
+      const [cycle] = ledger.records;
+      expect(cycle).toMatchObject({
+        kind: 'cycle',
+        reviewer: 'agent:reviewer',
+        scope: 'full',
+        target: 'merge-queue',
+        base,
+        head,
+        dirtySha256,
+        completion: { kind: outcome },
+      });
+      for (const field of [
+        `reviewer: agent:reviewer`,
+        `base: ${base}`,
+        `head: ${head}`,
+        `dirtySha256: ${dirtySha256}`,
+        'scope: full',
+        `completion: ${outcome}`,
+        'coverage: v2 mode=session',
+      ]) {
+        expect(effects.logs[0]).toContain(field);
+      }
+      if (cycle?.kind !== 'cycle') return;
+      if (outcome === 'blocked' && cycle.completion.kind === 'blocked')
+        expect(cycle.completion.reason).toContain('scripted provider unavailable');
+      expect(cycle.logPath).toContain('/tmp/fake-cq-dev-review/');
+      // A scripted green check supplies the separate check prerequisite; no gate runs here.
+      store.save({
+        ...ledger,
+        records: [...ledger.records, checkRecord({ base, head, dirtySha256 })],
+      });
+      const ready = await makeDevReady(effects)({ repoRoot: repo.root });
+      if (outcome === 'terminal') {
+        expect(ready.status).toBe('ok');
+        if (ready.status === 'ok') {
+          expect(ready.value).toMatchObject({
+            evidenceClass: 'author',
+            reviewer: 'agent:reviewer',
+            cycleId: cycle.cycleId,
+            checkId: 'k001-aaaaaaaa',
+            base,
+            head,
+            dirtySha256,
+          });
+          expect(ready.value.caveat).toContain('not verification');
+        }
+      } else {
+        expect(ready.status).toBe('needs-human');
+        if (ready.status === 'needs-human') expect(ready.reason).toContain('latest-review-blocked');
+      }
+    },
+  );
+
+  test.each([
+    ['missing', undefined, 'requires cq.json'],
+    ['malformed', '{ invalid', 'agent reviewer config:'],
+    [
+      'missing role',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+      }),
+      'roles.reviewer is required',
+    ],
+  ] as const)(
+    'unavailable agent config (%s) records blocked identity without dispatch',
+    async (_name, config, reason) => {
+      const effects = repoEffects(repo);
+      const run = vi.fn();
+      const runner = makeAgentReviewRunner({
+        repoRoot: repo.root,
+        readFile: async () => {
+          if (config === undefined) throw new Error('ENOENT');
+          return config;
+        },
+        drivers: { resolve: vi.fn() } as unknown as DriverFactory,
+        scanSecrets: stubScanner(),
+        run,
+      });
+      const result = await makeDevReview({
+        effects,
+        scanSecrets: stubScanner(),
+        runAgentReviewer: runner,
+      })({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+      expect(result.status).toBe('needs-human');
+      expect(run).not.toHaveBeenCalled();
+      expect(reviewerCalls(effects)).toEqual([]);
+      const [cycle] = effects.openLedger('feature/x').load().records;
+      expect(cycle).toMatchObject({
+        kind: 'cycle',
+        reviewer: 'agent:reviewer',
+        completion: { kind: 'blocked' },
+      });
+      if (cycle?.kind === 'cycle' && cycle.completion.kind === 'blocked')
+        expect(cycle.completion.reason).toContain(reason);
+      expect(effects.logs[0]).toContain('completion: blocked');
+    },
+  );
+
+  test.each(['hit', 'scanner fault', 'symlink', 'oversized'] as const)(
+    'agent safety refusal (%s) precedes dispatch and records no cycle',
+    async (failure) => {
+      if (failure === 'symlink')
+        await symlink('/outside-scripted-workspace', join(repo.root, 'link'));
+      if (failure === 'oversized')
+        await repo.write('big.txt', 'x'.repeat(SCAN_COMPONENT_CAP_BYTES + 1));
+      const effects = repoEffects(repo);
+      const runner = vi.fn();
+      const scanner: DiffSecretScanner =
+        failure === 'scanner fault'
+          ? () => {
+              throw new Error('scripted scanner unavailable');
+            }
+          : stubScanner(
+              failure === 'hit'
+                ? [{ component: 'committed:src/a.ts', ruleId: 'fixture:secret' }]
+                : [],
+            );
+      const result = await makeDevReview({
+        effects,
+        scanSecrets: scanner,
+        runAgentReviewer: runner,
+      })({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain(
+          {
+            hit: 'fixture:secret',
+            'scanner fault': 'scripted scanner unavailable',
+            symlink: "untracked file 'link'",
+            oversized: 'per-file scan cap',
+          }[failure],
+        );
+      expect(runner).not.toHaveBeenCalled();
+      expect(reviewerCalls(effects)).toEqual([]);
+      expect(effects.openLedger('feature/x').load().records).toEqual([]);
+    },
+  );
+
   test('refuses agent cycles when a changed policy file is excluded from the upload scan', async () => {
     await repo.write('policy/denylist/patterns.yml', 'rules: []\n');
     repo.commitAll('change scanner policy');

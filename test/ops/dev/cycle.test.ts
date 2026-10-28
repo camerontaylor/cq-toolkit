@@ -928,6 +928,14 @@ describe('dev.cycle', () => {
     repo.commitAll('budgeted cq.json');
     const state = await seed(repo);
     await seedReadyLedger(state);
+    // Controlled clock: the test asserts an exact 50 ms transfer between the
+    // legs, so the review leg advances a stubbed Date.now by exactly 50 ms
+    // instead of sleeping a real 50 ms (a real timer races the same-ms
+    // boundary: a 49 ms Date.now delta makes the asserted invariant off by
+    // one). Same stub-and-restore pattern as the #532 deadline test above;
+    // no production code changes.
+    const originalNow = Date.now;
+    let clock = originalNow();
     const reviewInputs: ReviewRunInput[] = [];
     const addressInputs: ReviewAddressInput[] = [];
     const review = cleanReview(state);
@@ -936,8 +944,8 @@ describe('dev.cycle', () => {
       check: greenCheck(),
       review: async (input) => {
         reviewInputs.push(input);
-        // The review leg spends 50 ms of the shared run wall.
-        await new Promise((done) => setTimeout(done, 50));
+        // The review leg spends exactly 50 ms of the shared run wall.
+        clock += 50;
         return review(input);
       },
       address: async (input) => {
@@ -947,7 +955,13 @@ describe('dev.cycle', () => {
       open: openFake([]),
       git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
-    const result = await op({ repoRoot: repo.root });
+    let result: Awaited<ReturnType<typeof op>>;
+    try {
+      Date.now = () => clock;
+      result = await op({ repoRoot: repo.root });
+    } finally {
+      Date.now = originalNow;
+    }
     // Pin the cycle outcome before the budget assertions: if a leg refuses
     // (failed gate, review failure), fail on the actual status/reason —
     // serialized into the message — instead of undefined comparisons
@@ -959,11 +973,11 @@ describe('dev.cycle', () => {
     expect(reviewInputs[0]?.wallMs).toBeGreaterThan(budget - 10_000);
     expect(reviewInputs[0]?.maxTokens).toBe(1000);
     // The address leg gets what the review leg left, not a fresh run budget.
-    expect(addressInputs[0]?.wallMs).toBeLessThanOrEqual((reviewInputs[0]?.wallMs ?? 0) - 50);
-    // ...and the remaining wall must not be shrunk further (e.g. by subtracting
-    // the publication reserve a second time): pin a lower bound with slack for
-    // scheduling/timing slop between the legs.
-    expect(addressInputs[0]?.wallMs).toBeGreaterThan((reviewInputs[0]?.wallMs ?? 0) - 50 - 10_000);
+    // The controlled clock makes the 50 ms transfer exact: the address wall
+    // is the review wall minus exactly 50 (not shrunk further, e.g. by
+    // subtracting the publication reserve a second time), and no scheduling
+    // slop bound is needed.
+    expect(addressInputs[0]?.wallMs).toBe((reviewInputs[0]?.wallMs ?? 0) - 50);
     expect(addressInputs[0]?.maxTokens).toBe(1000);
   });
 
