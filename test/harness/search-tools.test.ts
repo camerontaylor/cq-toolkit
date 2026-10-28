@@ -29,6 +29,8 @@ const spawnState = vi.hoisted(() => ({
      * bytes through stdout (a full pipe keeps close blocked after a kill).
      */
     closeAfterDrainBytes?: Buffer[];
+    /** Consume this fake for one spawn only (the rest run the real child). */
+    once?: boolean;
   },
   /** The most recent fake child (kill target for abort/timeout tests). */
   current: null as FakeChildHandle | null,
@@ -45,6 +47,7 @@ vi.mock('node:child_process', async (importOriginal) => {
       return (actual.spawn as SpawnFn)(file, args, ...rest);
     }
     const config = spawnState.fake;
+    if (config.once === true) spawnState.fake = null;
     const stdout = new EventEmitter() as EventEmitter & { pause: () => void };
     stdout.pause = () => {};
     const stderr = new EventEmitter();
@@ -140,6 +143,66 @@ function configWithReadPaths(pathPatterns: string[], maxOutputChars?: number): H
       },
     },
   };
+}
+
+/** The streaming buffer's capacity: SEARCH_CANDIDATE_LIMIT + 1 truncation slot. */
+const CANDIDATE_CAP = 1_001;
+
+/**
+ * The pre-heap retention policy, verbatim, as an independent oracle: push each
+ * emission, then drop the FIRST maximum (`>`-only scan, so among equal names
+ * the earliest insertion goes). Duplicates are separate slots and may consume
+ * capacity on their own.
+ */
+function legacyRetained(emissions: readonly string[]): { rels: string[]; truncated: boolean } {
+  const slots: { rel: string; seq: number }[] = [];
+  emissions.forEach((rel, seq) => {
+    slots.push({ rel, seq });
+    if (slots.length <= CANDIDATE_CAP) return;
+    let largest = 0;
+    for (let index = 1; index < slots.length; index += 1) {
+      if (slots[index]!.rel > slots[largest]!.rel) largest = index;
+    }
+    slots.splice(largest, 1);
+  });
+  slots.sort((left, right) =>
+    left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : left.seq - right.seq,
+  );
+  return { rels: slots.map((slot) => slot.rel), truncated: slots.length > CANDIDATE_CAP - 1 };
+}
+
+/** One matching file per distinct name, written in bounded batches of 64. */
+async function writeCandidateFiles(workspace: string, rels: readonly string[]): Promise<void> {
+  const names = [...new Set(rels)];
+  for (let start = 0; start < names.length; start += 64) {
+    await Promise.all(
+      names
+        .slice(start, start + 64)
+        .map((rel) => writeFile(join(workspace, rel), 'retained-needle\n', 'utf8')),
+    );
+  }
+}
+
+/** The emissions as one chunked, NUL-terminated fake `rg --files` stream. */
+function fakeEnumeration(rels: readonly string[]): Buffer[] {
+  const chunks: Buffer[] = [];
+  for (let start = 0; start < rels.length; start += 128) {
+    chunks.push(
+      Buffer.from(
+        rels
+          .slice(start, start + 128)
+          .map((rel) => `${rel}\0`)
+          .join(''),
+        'utf8',
+      ),
+    );
+  }
+  return chunks;
+}
+
+/** The rendered `--- <path> ---` group headers, in output order. */
+function renderedPaths(output: string): string[] {
+  return [...output.matchAll(/^--- (.+) ---$/gm)].map((match) => match[1]!);
 }
 
 test.each([
@@ -616,6 +679,93 @@ describe('contained grep and glob tools', () => {
         expect(result.output).not.toContain('miss.md');
         expect(result.output).not.toContain('SEARCH_LIMIT');
         expect(result.truncated).toBe(false);
+      }
+    });
+  });
+
+  test('streaming retention keeps the legacy lexical top-1000 under descending, mixed and duplicate emissions', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      // 1,053 emissions over 1,051 distinct names: descending, ascending,
+      // mixed, and same-name duplicates that reach the capacity boundary. The
+      // oracle is the pre-heap policy itself, so this compares retention
+      // rather than restating the heap.
+      const emissions = [
+        ...Array.from({ length: 520 }, (_, index) => `d${String(519 - index).padStart(4, '0')}.ts`),
+        'd0000.ts',
+        'd0000.ts',
+        'd0000.ts',
+        ...Array.from({ length: 500 }, (_, index) => `a${String(index).padStart(4, '0')}.ts`),
+        ...Array.from({ length: 30 }, (_, index) => `m${String(index).padStart(4, '0')}.ts`),
+      ];
+      const expected = legacyRetained(emissions);
+      expect(expected.truncated).toBe(true);
+      await writeCandidateFiles(workspace, emissions);
+      spawnState.fake = {
+        stdoutChunks: fakeEnumeration(emissions),
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4350,
+        once: true,
+      };
+      try {
+        const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+        const result = await grep.execute({ pattern: 'retained-needle', include: '*.ts' });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.truncated).toBe(expected.truncated);
+        expect(result.output).toContain('[truncated: candidate files cap 1000]');
+        // Observable window: the content render keeps at most 100 match lines
+        // (one per file here) in the renderer's lexical order. The retained
+        // tail is internal state and is not claimed here.
+        const retainedNames = [...new Set(expected.rels)].sort((left, right) =>
+          left.localeCompare(right),
+        );
+        expect(renderedPaths(result.output)).toEqual(retainedNames.slice(0, 100));
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
+      }
+    });
+  });
+
+  test('a duplicate of the largest name still consumes a retained slot at the cap (separate-slot rule)', async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, '.git'), { recursive: true });
+      // 1,000 distinct names plus one duplicate of the largest: the legacy
+      // buffer keeps the duplicate as its own slot (the later emission
+      // displaces the earlier copy of the same name), so the +1 truncation
+      // slot is reached although only 1,000 distinct names exist. A
+      // dedupe-based retention would report no truncation at all.
+      const emissions = [
+        ...Array.from({ length: 1_000 }, (_, index) => `x${String(index).padStart(4, '0')}.ts`),
+        'x0999.ts',
+      ];
+      const expected = legacyRetained(emissions);
+      expect(expected.rels).toHaveLength(CANDIDATE_CAP);
+      expect(expected.truncated).toBe(true);
+      await writeCandidateFiles(workspace, emissions);
+      spawnState.fake = {
+        stdoutChunks: fakeEnumeration(emissions),
+        stderrChunks: [],
+        exitCode: 0,
+        pid: 4351,
+        once: true,
+      };
+      try {
+        const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
+        const result = await grep.execute({ pattern: 'retained-needle', include: '*.ts' });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.truncated).toBe(true);
+        expect(result.output).toContain('[truncated: candidate files cap 1000]');
+        const retainedNames = [...new Set(expected.rels)].sort((left, right) =>
+          left.localeCompare(right),
+        );
+        expect(renderedPaths(result.output)).toEqual(retainedNames.slice(0, 100));
+      } finally {
+        spawnState.fake = null;
+        spawnState.current = null;
       }
     });
   });
