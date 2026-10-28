@@ -30,7 +30,10 @@ def command(argv, timeout):
 
 def summarize(status, queue, heartbeat, config, events, now):
     items = queue["items"]
-    backlog = {kind: sum(i["kind"] == kind and i["state"] == "pending" for i in items)
+    backlog = {kind: sum(i["kind"] == kind and i["state"] == "pending"
+                         and not (kind == "open" and
+                                  len(i.get("cycles", [])) >= 1)
+                         for i in items)
                for kind in ("open", "delta", "merged", "promotion", "coverage")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0

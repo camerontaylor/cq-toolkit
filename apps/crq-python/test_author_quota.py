@@ -492,6 +492,22 @@ class HarvestTest(unittest.TestCase):
         self.assertNotIn("coverage", q)
         self.assertIn("no repair/coverage credit", msg)
 
+    def test_one_completed_open_review_finishes_without_a_second_cycle(self):
+        q = empty_queue()
+        rid = "open-run-ok"
+        self._run_dir(rid)
+        item = self._item(q, rid)
+        item["kind"] = "open"
+        cls = dict(outcome="completed", counted=True, findings=0, severity_counts={})
+        with mock.patch.object(crq, "pid_alive", return_value=False), \
+             mock.patch.object(crq, "group_alive", return_value=False), \
+             mock.patch.object(crq, "classify", return_value=cls), \
+             mock.patch.object(crq.repair_tick, "enqueue", return_value=False):
+            crq.harvest_review(q, item, False)
+        self.assertEqual(item["state"], "done")
+        self.assertEqual(len(item["cycles"]), 1)
+        self.assertFalse(item.get("boost"))
+
     def test_every_noncompleted_author_outcome_is_a_consumed_terminal(self):
         for o in ("rate_limited", "action_required", "auth", "error", "interrupted",
                   "skipped", "too_large"):
@@ -586,6 +602,15 @@ class WrapperGroupTest(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertTrue((rdir / "review.pid").exists())
+        if identity.get("_cli_pid"):
+            # Popen returns before GNU timeout creates its legacy process group.
+            # Do not kill the runner until the wrapper has actually detached.
+            wrapper_pid = json.loads((rdir / "review.pid").read_text())["cli_pid"]
+            for _ in range(200):
+                if os.getpgid(wrapper_pid) == wrapper_pid:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(os.getpgid(wrapper_pid), wrapper_pid)
         return proc, rdir
 
     def _crash(self, proc):
@@ -676,6 +701,70 @@ class TickTest(unittest.TestCase):
         p = mock.patch.object(crq.coverage, "record_opportunity", lambda *a, **k: {})
         p.start()
         self.addCleanup(p.stop)
+
+    def test_prioritized_merged_current_starts_naturally_before_open(self):
+        current = dict(id="current", pr=42, kind=crq.review_receipt.KIND,
+                       state="pending", operator_priority=True, order=99)
+        self.q["items"] = [dict(id="pr1", pr=1, kind="open", state="pending", order=1), current]
+        plan = dict(base=BASE, head=HEAD, notes=[], label="current")
+        with mock.patch.object(crq, "prepare_current", return_value=plan), \
+             mock.patch.object(crq, "launch", return_value="run") as launch:
+            crq.tick()
+        self.assertEqual(launch.call_args.args[1]["id"], "current")
+
+    def test_additional_author_cycle_waits_for_required_pending_work(self):
+        item = author_quota.enroll(self.q, **binding(cycle=2), at=crq.iso())["item"]
+        item["operator_priority"] = True
+        self.q["items"].append(dict(id="pr1", pr=1, kind="open", state="pending",
+                                   not_before=crq.iso(crq.now() + dt.timedelta(hours=1))))
+        with mock.patch.object(crq, "launch") as launch:
+            crq.tick()
+        launch.assert_not_called()
+        self.assertEqual(crq.rank(item), 5)
+        self.assertIn("optional cycle waits", item["wait_reason"])
+
+    def test_prioritized_author_starts_before_open(self):
+        item = author_item(self.q)
+        item["operator_priority"] = True
+        self.q["items"].append(dict(id="pr1", pr=1, kind="open", state="pending"))
+        with mock.patch.object(crq, "launch", return_value="run") as launch:
+            crq.tick()
+        self.assertEqual(launch.call_args.args[1]["id"], item["id"])
+
+    def test_prioritized_current_selective_start_still_refused(self):
+        self.q["items"] = [dict(id="current", pr=42, kind=crq.review_receipt.KIND,
+                                state="pending", operator_priority=True)]
+        with mock.patch.object(crq, "launch") as launch:
+            log = crq.tick(False, "current")
+        launch.assert_not_called()
+        self.assertTrue(any("selective start refused" in line for line in log))
+
+    def test_prioritized_optional_waits_even_for_backed_off_merged_current(self):
+        optional = dict(id="pr1", pr=1, kind="open", state="pending", cycles=[{}],
+                        optional_cycle=True, operator_priority=True)
+        pending = dict(id="current", pr=42, kind=crq.review_receipt.KIND, state="pending",
+                       not_before=crq.iso(crq.now() + dt.timedelta(hours=1)))
+        self.q["items"] = [optional, pending]
+        with mock.patch.object(crq, "launch") as launch:
+            crq.tick()
+        launch.assert_not_called()
+        self.assertIn("optional cycle waits", optional["wait_reason"])
+
+    def test_optional_cycle_yields_to_coverage_then_starts_when_idle(self):
+        optional = dict(id="pr1", pr=1, kind="open", state="pending", cycles=[{}], optional_cycle=True)
+        self.q["items"] = [optional]
+        with mock.patch.object(crq, "coverage_fallback", return_value=("coverage-run", True)), \
+             mock.patch.object(crq, "launch") as launch:
+            crq.tick()
+        launch.assert_not_called()
+        info = dict(state="OPEN")
+        plan = dict(base=BASE, head=HEAD, notes=[], label="additional cycle (optional)")
+        with mock.patch.object(crq, "pr_info", return_value=info), \
+             mock.patch.object(crq, "quiet_reason", return_value=None), \
+             mock.patch.object(crq, "plan_open", return_value=plan), \
+             mock.patch.object(crq, "launch", return_value="run") as launch:
+            crq.tick()
+        self.assertEqual(launch.call_args.args[1]["id"], "pr1")
 
     def test_cooldown_blocks_the_author_start(self):
         self.q["cooldown_until"] = crq.iso(crq.now() + dt.timedelta(minutes=10))
@@ -865,6 +954,112 @@ class ObservationTest(unittest.TestCase):
             manifest, now = self._manifest(**over)
             with self.subTest(over=over), self.assertRaises(author_quota.AuthorRefused):
                 author_quota.normalize_observation(manifest, now=now)
+
+
+class OpenCyclePolicyTest(unittest.TestCase):
+    def item(self, **over):
+        return dict(dict(id="pr1", pr=1, kind="open", state="pending", cycles=[], order=1), **over)
+
+    def test_one_completed_cycle_finishes_and_removes_boost(self):
+        item = self.item(cycles=[dict(head=HEAD)], boost=True)
+        crq.advance_open(item)
+        self.assertEqual(item["state"], "done")
+        self.assertNotIn("boost", item)
+        empty = self.item()
+        crq.advance_open(empty)
+        self.assertEqual(empty["state"], "pending")
+
+    def test_fix_prs_cannot_claim_synthetic_prior_credit(self):
+        q = dict(items=[])
+        item = crq.new_item(q, [], True, id="pr1", pr=1, kind="open", prior_cycles=1)
+        self.assertEqual(crq.completed_open_cycles(item), 0)
+        self.assertEqual(item["prior_cycles"], 0)
+        self.assertEqual(crq.completed_open_cycles(self.item(prior_cycles=1)), 0)
+        self.assertEqual(crq.completed_open_cycles(self.item(prior_cycles=1, prior_base=BASE)), 0)
+
+    def test_required_and_optional_labels(self):
+        info = dict(state="OPEN", isDraft=False, headRefOid=HEAD,
+                    baseRefName="merge-queue", headRefName="topic")
+        with mock.patch.object(crq, "git", return_value=BASE):
+            self.assertEqual(crq.plan_open(self.item(), info, False)["label"], "cycle 1 (required)")
+            self.assertEqual(crq.plan_open(self.item(cycles=[{}]), info, False)["label"],
+                             "additional cycle (optional)")
+
+    def test_existing_one_of_two_migrates_idempotently_without_touching_inflight(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "queue.json"
+            old = [self.item(cycles=[{}], boost=True), self.item(id="empty"),
+                   self.item(id="blocked", cycles=[{}], state="blocked"),
+                   self.item(id="inflight", cycles=[{}], state="reviewing"),
+                   self.item(id="optional", cycles=[{}], optional_cycle=True),
+                   self.item(id="synthetic", prior_cycles=1)]
+            path.write_text(json.dumps(dict(items=old)))
+            with mock.patch.object(crq, "QUEUE", path):
+                q = crq.load_queue()
+                self.assertEqual([i["state"] for i in q["items"]],
+                                 ["done", "pending", "done", "reviewing", "pending", "pending"])
+                path.write_text(json.dumps(q))
+                self.assertEqual(crq.load_queue(), q)
+                self.assertTrue(all("boost" not in i for i in q["items"]))
+
+    def test_migration_preserves_incomplete_items_for_admission_validation(self):
+        q = dict(items=[
+            {"id": "author-snapshot-1"},
+            {"id": "no-state", "kind": "open", "cycles": [{}]},
+            {"id": "no-cycles", "kind": "open", "state": "pending"},
+            {"id": "no-kind", "state": "pending", "cycles": [{}]},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "queue.json"
+            before = json.dumps(q).encode()
+            path.write_bytes(before)
+            with mock.patch.object(crq, "QUEUE", path):
+                self.assertEqual(crq.load_queue(), q)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_optional_cycle_lowest_rank_and_never_a_dependency_blocker(self):
+        optional = self.item(cycles=[{}], optional_cycle=True)
+        for kind in ("open", "delta", "merged", "promotion", "coverage", crq.review_receipt.KIND,
+                     author_quota.AUTHOR_KIND):
+            with self.subTest(kind=kind):
+                self.assertLess(crq.rank(self.item(kind=kind)), crq.rank(optional))
+        self.assertTrue(crq.deps_met(dict(items=[optional]), dict(depends_on="pr1")))
+        self.assertFalse(crq.optional_wait(dict(items=[optional]), optional))
+
+    def test_operator_priority_order_and_admin_events_for_any_pending_kind(self):
+        for kind in ("open", "merged", "delta", "coverage", crq.review_receipt.KIND, author_quota.AUTHOR_KIND):
+            with self.subTest(kind=kind):
+                item = self.item(kind=kind, order=99)
+                q = dict(items=[item])
+                with mock.patch.object(crq, "load_queue", return_value=q), \
+                     mock.patch.object(crq, "save_queue") as save, \
+                     mock.patch.object(crq, "write_status"), mock.patch.object(crq, "event") as event:
+                    crq.admin("prioritize", "pr1", "urgent")
+                    self.assertTrue(item["operator_priority"])
+                    self.assertLess(crq.sort_key(item), crq.sort_key(self.item(order=0)))
+                    self.assertLess(crq.sort_key(self.item(kind="promotion")), crq.sort_key(item))
+                    event.assert_called_with("admin_prioritize", item="pr1", reason="urgent")
+                    save.assert_called_with(q)
+                    crq.admin("deprioritize", "pr1", "normal")
+                    self.assertNotIn("operator_priority", item)
+                    event.assert_called_with("admin_deprioritize", item="pr1", reason="normal")
+
+    def test_requeue_completed_open_is_optional_and_survives_reload(self):
+        item = self.item(cycles=[{}], state="done")
+        with mock.patch.object(crq, "load_queue", return_value=dict(items=[item])), \
+             mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "write_status"), \
+             mock.patch.object(crq, "event"):
+            crq.admin("requeue", "pr1", "extra review")
+        self.assertTrue(item["optional_cycle"])
+        self.assertEqual(item["state"], "pending")
+        self.assertEqual(crq.rank(item), 5)
+
+    def test_merged_current_ranks_with_new_followups_before_backlog(self):
+        current = self.item(kind=crq.review_receipt.KIND)
+        self.assertEqual(crq.rank(current), 2)
+        self.assertEqual(crq.rank(current), crq.rank(self.item(kind="merged", source="followup")))
+        self.assertLess(crq.rank(self.item()), crq.rank(current))
+        self.assertLess(crq.rank(current), crq.rank(self.item(kind="merged")))
 
 
 if __name__ == "__main__":
