@@ -651,12 +651,18 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             });
             // Work the run never reached is named without a fabricated
             // branch or link: branchless rows show their stop reason only.
+            // Rows are scoped to this package's unit (branch identity): task
+            // IDs repeat across units, so a retained failure in another unit
+            // neither suppresses this unit's branchless row nor pulls a
+            // foreign unit's row into this body.
             const branchless = report.planned.filter(
               (row) =>
+                row.branch === pkg.branch &&
                 row.outcome !== 'fixed' &&
                 row.failures.every(isNoArtifactFailure) &&
                 !report.tasks.some(
                   (task) =>
+                    task.branch === row.branch &&
                     task.task.id === row.task.id &&
                     task.outcome !== 'fixed' &&
                     task.failedAttempt !== undefined,

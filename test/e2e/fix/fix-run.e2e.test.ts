@@ -1048,6 +1048,114 @@ test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)
   }
 });
 
+test('PR summary preserves same-taskpath rows across units (issue 631)', async () => {
+  const f = await fixture();
+  const bodies: string[] = [];
+  const controller = new AbortController();
+  try {
+    // Two units (two identical checks = fixers tests-1/tests-2) over one
+    // package, sequential; task IDs are file paths and repeat across units.
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      checks: unknown[];
+    };
+    config.checks.push({ ...(config.checks[0] as object) });
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure a second unit');
+    const isUnit2 = (prompt: string) => prompt.includes(join('tests-2', 'scratch-repo'));
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (request, options) => {
+            if (!request.workspace) throw new Error('fixture requires a workspace');
+            // Unit tests-1: fix a, but leave b failing with a retained
+            // patch (branch-bearing failure). Unit tests-2: fix a (so the
+            // unit commits a marker and is assembled), then abort at b's
+            // first dispatch — b is never dispatched and refines to a
+            // branchless cancelled row with the SAME task ID as unit
+            // tests-1's branch-bearing b.
+            const line = request.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            const isB = task.files.some((file) => file.includes('b.test'));
+            if (isB && isUnit2(request.prompt)) {
+              controller.abort();
+              const signal = options?.signal;
+              if (!signal) throw new Error('missing inner worker signal');
+              return {
+                stopReason: 'aborted',
+                denials: [],
+                usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+                wallMs: 0,
+              };
+            }
+            if (isUnit2(request.prompt) || !isB)
+              return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
+            // Unit tests-1, task b: fail with a retained patch.
+            for (const file of task.files)
+              await writeFile(
+                join(request.workspace.path, file),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+            return {
+              stopReason: 'complete',
+              denials: [],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              structuredOutput: {
+                outcome: 'broken-test',
+                summary: 'wrong fix',
+                confidence: 0.8,
+              },
+            };
+          },
+        },
+      }),
+    };
+    const result = await makeFixRun({
+      drivers,
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (raw as { packages: Array<{ body?: string }> }).packages;
+                for (const pkg of packages) bodies.push(pkg.body ?? '');
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true, pushFailed: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const report = reportOf(result);
+    // Both units assembled (both committed a marker for task a).
+    expect(bodies).toHaveLength(2);
+    // The same taskpath appears in both units: unit tests-1's b carries a
+    // retained branch, unit tests-2's b is a branchless cancelled row. Each
+    // unit's body must keep ITS rightful row — the unit-blind predecessor
+    // filter dropped tests-2's branchless row because tests-1's b has a
+    // retained attempt under the same task ID.
+    const cancelled = report.planned.find(
+      (row) => row.outcome === 'cancelled' && row.task.id === 'cases/b.test.cjs',
+    );
+    expect(cancelled?.unit).toBe('tests-2/scratch-repo');
+    const unit1Body = bodies.find((body) => body.includes('failed/tests-1/')) ?? '';
+    const unit2Body = bodies.find((body) => body !== unit1Body) ?? '';
+    expect(unit1Body).toContain('`cases/b.test.cjs`');
+    expect(unit1Body).toContain('local branch `cq/fixture/failed/tests-1/');
+    expect(unit2Body).toContain('`cases/b.test.cjs` — cancelled;');
+    expect(unit2Body).not.toContain('failed/');
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless failure and never-started', async () => {
   const f = await fixture(1000);
   try {
@@ -1401,6 +1509,7 @@ test('cancellation keeps completed unit evidence and truthful sibling rows (issu
     await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
     await git(f.repo, 'add', '-A');
     await git(f.repo, 'commit', '-m', 'configure a second unit');
+    const isUnit2 = (prompt: string) => prompt.includes(join('tests-2', 'scratch-repo'));
     const drivers: DriverFactory = {
       resolve: ({ modelSpec }) => ({
         modelSpec,
