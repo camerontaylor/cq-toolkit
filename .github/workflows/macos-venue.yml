@@ -58,12 +58,17 @@ jobs:
     # push is not a reviewable change. Job-level, never a trigger filter.
     if: ${{ github.ref != 'refs/heads/cq-state' }}
     # The promotion gate refuses a candidate whose required checks have not
-    # all reported within 20 minutes, so a PROMOTED macOS job must finish
-    # under that bound: `max < 20 min` is a promotion test, not only
-    # `p90 <= 15 min`. This is the documented ceiling — it reports a hang as
-    # a red job with a timeout, it never converts a slow or failing run into
-    # a pass.
-    timeout-minutes: 20
+    # all reported within 20 minutes, so a PROMOTED macOS job must still
+    # finish under that bound: `max < 20 min` stays the promotion test, not
+    # only `p90 <= 15 min`. The job ceiling below is therefore a HANG
+    # BACKSTOP, not the promotion bound. Observed on this venue: the unit
+    # phase alone spent ~19 minutes (277 files / 8189 tests on a hosted
+    # macOS runner), which leaves no room for the e2e, build and Knip steps
+    # that follow. 40 minutes keeps the backstop above that observed total
+    # without touching the promotion criteria; it still reports a hang as a
+    # red job with a timeout, and it never converts a slow or failing run
+    # into a pass.
+    timeout-minutes: 40
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
