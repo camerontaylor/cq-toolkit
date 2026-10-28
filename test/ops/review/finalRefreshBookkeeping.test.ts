@@ -139,9 +139,11 @@ async function fixture(mode: Mode) {
   const debtBinding = debt.reference.binding;
   if (debtBinding.kind !== 'deferred-author')
     throw new Error('fixture debt must be deferred-author');
+  // An OLDER head keeps the ancestor out of current-identity selection: it is reachable only
+  // through the current enrollment's authorized predecessor link.
   const ancestorReference: QueueReference = {
     requestId: 'ancestor-1',
-    binding: { ...debtBinding, head: state.head },
+    binding: { ...debtBinding, head: 'a'.repeat(40) },
   };
   const ancestorDebt: DeferredVendorDebt | undefined =
     mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle'
