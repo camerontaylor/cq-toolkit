@@ -1522,7 +1522,7 @@ test('cancellation keeps completed unit evidence and truthful sibling rows (issu
             // first-unit/second-unit boundary. Unit tests-1 runs to genuine
             // completion (both tasks commit); the abort fires at the FIRST
             // tests-2 dispatch, so its task loop sees the cancel at the top.
-            if (!request.prompt.includes(join('tests-2', 'scratch-repo')))
+            if (!isUnit2(request.prompt))
               return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
             controller.abort();
             const signal = options?.signal;
