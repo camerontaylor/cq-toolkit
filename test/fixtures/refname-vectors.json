@@ -8,6 +8,9 @@
     { "value": "a", "accept": true, "rule": "single character" },
     { "value": "a.b", "accept": true, "rule": "internal dot" },
     { "value": "a_b-c.d", "accept": true, "rule": "allowed punctuation" },
+    { "value": "a\u0085b", "accept": true, "rule": "U+0085 NEXT LINE is not forbidden (Python \\s would reject it, ECMAScript \\s would not)" },
+    { "value": "a\ufeffb", "accept": true, "rule": "U+FEFF is not forbidden (ECMAScript \\s would reject it, Python \\s would not)" },
+    { "value": "a\u00a0b", "accept": true, "rule": "U+00A0 NBSP is not forbidden (both \\s sets would reject it)" },
 
     { "value": "", "accept": false, "rule": "empty" },
     { "value": "@", "accept": false, "rule": "single @ character" },

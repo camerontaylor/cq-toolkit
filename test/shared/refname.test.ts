@@ -53,6 +53,18 @@ describe('branchPathFault', () => {
     expect(branchPathFault('release/1.4')).toBeNull();
   });
 
+  test('Unicode whitespace that JS and Python \\s disagree on is accepted by both rules', () => {
+    // The explicit C0/DEL/U+0020 rule replaced a `\s` class precisely so these two
+    // cases cannot split the implementations: Python's `\s` matches U+0085 and
+    // ECMAScript's matches U+FEFF, and neither character is forbidden.
+    expect(branchPathFault('a\u0085b')).toBeNull();
+    expect(branchPathFault('a\ufeffb')).toBeNull();
+    expect(branchPathFault('a\u00a0b')).toBeNull();
+    // The literal space and C0 controls are still refused.
+    expect(branchPathFault('a b')).toMatch(/space or control character/);
+    expect(branchPathFault('a\u001fb')).toMatch(/space or control character/);
+  });
+
   test('record re-export preserves the public API and the local binding', () => {
     // dev/record.ts imports the leaf (its own devLedgerPath caller needs a local
     // binding) and re-exports it, so both the module and the ops barrel answer the

@@ -22,8 +22,11 @@ SHA = r"[0-9a-f]{40}"
 # src/shared/refname.ts (the canonical grammar shared with the dev ledger and the TS
 # wire/origin schemas); queue_transport.py cannot import it, so the rules are restated
 # here verbatim and pinned to the shared vector table by test_queue_transport.py.
-CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-REFNAME_FORBIDDEN = re.compile(r"[\s~^:?*\[\]\\]")
+# The space rule is explicit (C0 + DEL + literal U+0020), never a `\s` class: Python's
+# Unicode `\s` matches U+0085 while JavaScript's matches U+FEFF, so a shared `\s`
+# would let one implementation accept a target the other rejects. Neither U+0085 nor
+# U+FEFF is forbidden.
+REFNAME_FORBIDDEN = re.compile(r"[~^:?*\[\]\\]")
 READ = {"status", "report"}
 WRITE = {"enqueue", "bind", "cancel", "ack"}
 
@@ -109,8 +112,9 @@ def branch_fault(branch):
         return "branch must be a non-empty relative refname"
     if branch == "@":
         return "branch is the single character '@'"
-    if CONTROL.search(branch):
-        return "branch contains a control character"
+    for char in branch:
+        if ord(char) < 0x20 or ord(char) == 0x7f or ord(char) == 0x20:
+            return "branch contains a space or control character"
     if branch.endswith("."):
         return "branch must not end with '.'"
     if "@{" in branch:

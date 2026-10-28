@@ -576,3 +576,20 @@ class BranchTargetGrammarTests(unittest.TestCase):
                                  verify_source=lambda repo, pr: self.fail("must not reach forge"),
                                  receipt_root=root)
         self.assertIn("target branch denied", str(caught.exception))
+
+    def test_unicode_whitespace_parity(self):
+        r"""The P2 fix: JS and Python `\s` disagree, so the rule is explicit instead.
+
+        Python's Unicode `\s` matches U+0085 and ECMAScript's matches U+FEFF; neither
+        character is forbidden by the shared rule, so both must accept them, while the
+        literal space and C0 controls stay refused.
+        """
+        for value in ("a\u0085b", "a\ufeffb", "a\u00a0b"):
+            with self.subTest(accepted=value):
+                self.assertIsNone(transport.branch_fault(value))
+                self.assertEqual(transport.binding(self.binding(target=value))["target"], value)
+        for value in ("a b", "a\u001fb", "a\u007fb", "a\tb"):
+            with self.subTest(rejected=value):
+                self.assertIsNotNone(transport.branch_fault(value))
+                with self.assertRaises(ValueError):
+                    transport.binding(self.binding(target=value))

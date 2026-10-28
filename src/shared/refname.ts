@@ -15,10 +15,16 @@
  *
  * - non-empty, and not the single character `@`;
  * - no leading or trailing `/`, and no empty component (`//`);
- * - no C0 control character (0x00–0x1F) and no DEL (0x7F);
- * - no space, and none of `~ ^ : ? * [ ] \`;
+ * - no C0 control character (0x00–0x1F), no DEL (0x7F), and no literal U+0020 space;
+ * - none of `~ ^ : ? * [ ] \`;
  * - no `..` anywhere, and no `@{`;
  * - no trailing `.`, no component ending in `.lock`, no component starting `.`.
+ *
+ * The whitespace rule is deliberately explicit instead of a `\s` class: JavaScript
+ * and Python define `\s` differently (Python's Unicode `\s` matches U+0085 NEXT
+ * LINE, ECMAScript's matches U+FEFF), so a shared `\s` would make the same target
+ * acceptable in one implementation and rejectable in the other. U+0085 and U+FEFF
+ * are not forbidden here, and the Python mirror states the identical rule.
  *
  * No length cap lives here on purpose. The queue wire bound (8192 bytes) is the
  * ceiling for a transported target and the dev ledger's file name is bounded
@@ -30,12 +36,15 @@ export function branchPathFault(branch: string): string | null {
     return `branch '${branch}' must be a non-empty relative refname`;
   }
   if (branch === '@') return `branch '${branch}' is the single character '@'`;
-  // Written as an explicit code-point test: a control-character regex literal is
-  // what eslint(no-control-regex) forbids, and suppressing that rule here would
-  // hide the intent instead of stating it.
+  // Written as an explicit code-point test, not a `\s` class or a control-character
+  // regex: the C0/DEL/space rule must be identical in JavaScript and Python (their
+  // `\s` sets differ on U+0085 and U+FEFF), and eslint(no-control-regex) forbids a
+  // literal control class. U+0085 and U+FEFF are therefore accepted here.
   for (const char of branch) {
     const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return `branch '${branch}' contains a control character`;
+    if (code < 0x20 || code === 0x7f || code === 0x20) {
+      return `branch '${branch}' contains a space or control character`;
+    }
   }
   if (branch.endsWith('.')) return `branch '${branch}' must not end with '.'`;
   if (branch.includes('@{')) return `branch '${branch}' contains the forbidden '@{' sequence`;
@@ -45,7 +54,7 @@ export function branchPathFault(branch: string): string | null {
       segment.startsWith('.') ||
       segment.endsWith('.lock') ||
       segment.includes('..') ||
-      /[\s~^:?*[\]\\]/.test(segment)
+      /[~^:?*[\]\\]/.test(segment)
     ) {
       return `branch '${branch}' is not a path-safe refname (segment '${segment}')`;
     }
