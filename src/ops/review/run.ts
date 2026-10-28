@@ -764,15 +764,25 @@ export function makeReviewRun(
       let deferredComplete = false;
       if (deferredVendorDebt && !stopped()) {
         try {
-          deferredVendorDebt = await loadCurrentDeferredVendorDebt(
-            effects,
-            target,
-            state,
-            effects.openLedger(state.branch).load(),
-            deps.queueClient,
-            deadline.signal,
-            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
-          );
+          const before = effects.openLedger(state.branch).load();
+          try {
+            deferredVendorDebt = await loadCurrentDeferredVendorDebt(
+              effects,
+              target,
+              state,
+              before,
+              deps.queueClient,
+              deadline.signal,
+              {
+                ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+              },
+            );
+          } finally {
+            // Settlement can persist new ledger bytes before an early or exceptional exit.
+            const after = effects.openLedger(state.branch).load();
+            if (JSON.stringify(after) !== JSON.stringify(before))
+              await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+          }
           const imported = deferredReceiptFindings(
             effects
               .openLedger(state.branch)
