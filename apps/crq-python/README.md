@@ -43,7 +43,9 @@ retains its journaled admission and cannot fall through to another launch.
 If a dated next slot is less than 60 seconds away it sleeps once and
 rechecks; undated one-minute retries never sleep under the lock. In-flight runs
 cap the timestamp hint at the next minute boundary, including while admission
-is paused or cooling down, so completed results are collected within a minute.
+is paused or cooling down, so completed detached review results are collected
+within a minute. Promotion signer results are collected by the full tick and
+may wait up to twelve minutes.
 Without in-flight runs, idle admission backs off twelve minutes. The twelve-minute
 full tick retains enrollment, harvest, status and audits, refreshes the hint, and
 waits up to 90 seconds for the lock so a sleeping admission cannot skip maintenance. Harvest
