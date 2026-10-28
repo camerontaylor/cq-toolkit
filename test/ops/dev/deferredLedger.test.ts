@@ -1627,7 +1627,9 @@ test('the post-report identity read is clamped to the remaining budget and carri
   const client = {
     ...f.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
-      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
     report: terminal.client.report,
   };
   let imported = false;
@@ -1685,7 +1687,9 @@ test('cancellation during the post-report identity read keeps the caller reason'
   const client = {
     ...terminal.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
-      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
     report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
       const evidence = await terminal.client.report(ref, root);
       imported = true;
@@ -1701,18 +1705,28 @@ test('cancellation during the post-report identity read keeps the caller reason'
     },
   };
   await expect(
-    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, controller.signal),
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
   ).rejects.toThrow(reason);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
 });
 
 test('budget exhaustion during the post-report identity read truncates nonfatally', async () => {
-  const { f, predecessor, terminal, successorStatus, successor, read } = await successorWithPendingAncestor();
+  const { f, predecessor, terminal, successorStatus, successor, read } =
+    await successorWithPendingAncestor();
   let exhausted = false;
   const client = {
     ...terminal.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
-      ref.requestId === predecessor.reference.requestId ? terminal.client.status() : successorStatus,
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
     report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
       const evidence = await terminal.client.report(ref, root);
       exhausted = true;
