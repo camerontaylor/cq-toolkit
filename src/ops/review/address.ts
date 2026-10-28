@@ -33,6 +33,7 @@ import {
   type FindingsRecord,
 } from './findings.js';
 import { makeReviewRun, type ReviewRunInput, type ReviewRunResult } from './run.js';
+import { restoreDurableDisposition, sameFindingContent } from './internal/durableDisposition.js';
 import {
   makeAddressWorker,
   type AddressAttempt,
@@ -996,6 +997,15 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (stop()) return false;
               if (!context) {
                 if (complete) delete report.deferredVendorDebt;
+                // Q17b ordinary path: retained dispositions live in the branch ledger, so
+                // restore them here too (the deferred context is not the only authority).
+                // The restoration is content-bound: a same-id row whose original content
+                // differs never inherits a status or reason, and the raw ledger is never
+                // rewritten. Run under the same bookkeeping access as every ledger read.
+                const ledger = makeSubprocessDevEffects(root).openLedger(record.branch).load();
+                record.findings = record.findings.map((finding) =>
+                  restoreDurableDisposition(finding, ledger),
+                );
                 return complete;
               }
               if (
@@ -1015,7 +1025,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               record.findings = [
                 ...record.findings.map((finding) => {
                   const current = retained.get(finding.id);
-                  return current ? { ...finding, ...current, reason: current.reason } : finding;
+                  // Q17b: only an identical original witness may lend its disposition.
+                  // A same-id row with changed content (or a legacy row missing the
+                  // metadata) never inherits one — no ID-only authority.
+                  if (current === undefined || !sameFindingContent(finding, current))
+                    return finding;
+                  return {
+                    ...finding,
+                    status: current.status,
+                    ...(current.reason !== undefined ? { reason: current.reason } : {}),
+                  };
                 }),
                 ...context.findings.filter(
                   (finding) => !record.findings.some((item) => item.id === finding.id),
@@ -1099,6 +1118,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     id: finding.id,
                     severity: finding.severity,
                     ...(finding.file ? { fileName: finding.file } : {}),
+                    ...(finding.line !== undefined ? { line: finding.line } : {}),
+                    ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                    ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                    ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
                     excerpt: finding.text,
                   })),
                   logPath: report.reportPath,

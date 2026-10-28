@@ -55,6 +55,7 @@ import {
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
+import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.
@@ -91,6 +92,20 @@ export interface DevFinding {
   fileName?: string;
   /** The finding's comment (or its first suggestion), when reported. */
   excerpt?: string;
+  /** The reported line, when the producer's contract supplies one (never inferred). */
+  line?: number;
+  /** The reported rule/lint id, when the producer's contract supplies one. */
+  rule?: string;
+  /**
+   * The producer's receipt reference (vendor receipts only), preserved verbatim so a
+   * later projection can prove WHICH receipt this finding came from.
+   */
+  evidence?: string;
+  /**
+   * The R3S versioned agent evidence payload, carried verbatim. It is persisted and
+   * compared structurally; it is never re-derived, repaired or used as authority here.
+   */
+  evidenceV1?: FindingEvidenceV1;
 }
 
 /** Whether one review cycle completed, or was blocked — and why. */
@@ -299,6 +314,10 @@ const DevFindingSchema = z
     severity: z.string().min(1),
     fileName: z.string().min(1).exactOptional(),
     excerpt: z.string().min(1).exactOptional(),
+    line: z.number().int().positive().exactOptional(),
+    rule: z.string().min(1).exactOptional(),
+    evidence: z.string().min(1).exactOptional(),
+    evidenceV1: FindingEvidenceV1Schema.exactOptional(),
   })
   .strict();
 

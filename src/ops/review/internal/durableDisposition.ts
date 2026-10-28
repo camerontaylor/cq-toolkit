@@ -1,6 +1,7 @@
 import type { Finding } from '../findings.js';
 import type { DevLedgerFile } from '../../dev/record.js';
 import { deferredReceiptFindings } from '../../dev/internal/deferredReview.js';
+import { isDeepStrictEqual } from 'node:util';
 
 // review.run persists this exact reviewer spelling while emitting source 'agent'.
 function normalizedSource(source: string): string {
@@ -16,7 +17,13 @@ export function sameFindingContent(incoming: Finding, retained: Finding): boolea
     incoming.file === retained.file &&
     incoming.line === retained.line &&
     incoming.rule === retained.rule &&
-    incoming.severity === retained.severity
+    incoming.severity === retained.severity &&
+    // Receipt identity: a finding from a different receipt never inherits this one's
+    // disposition. One-sided absence fails closed (legacy absence is unknown).
+    incoming.evidence === retained.evidence &&
+    // R3S payload: structural equality only. It is carried evidence, never authority,
+    // so a validation verdict is compared as data and never re-adjudicated here.
+    isDeepStrictEqual(incoming.evidenceV1, retained.evidenceV1)
   );
 }
 
@@ -46,6 +53,10 @@ export function restoreDurableDisposition(finding: Finding, ledger: DevLedgerFil
           text: item.excerpt ?? '',
           severity: item.severity,
           ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+          ...(item.line !== undefined ? { line: item.line } : {}),
+          ...(item.rule !== undefined ? { rule: item.rule } : {}),
+          ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+          ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
           status: 'open',
         });
       }

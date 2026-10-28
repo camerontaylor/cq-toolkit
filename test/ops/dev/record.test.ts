@@ -152,6 +152,70 @@ describe('the dev-record format', () => {
     ).toThrow(/schema violation/);
   });
 
+  test('Q17b: optional finding metadata round-trips and legacy absence still parses', () => {
+    const evidenceV1 = {
+      version: 1 as const,
+      failureScenario: 'reuse keeps every identity-bearing field',
+      primary: { file: 'src/x.ts', side: 'head' as const, start: 1, end: 1, quote: 'x' },
+      supporting: [],
+    };
+    const enriched = cycleRecord({
+      findings: [
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: 'src/x.ts',
+          excerpt: 'x',
+          line: 1,
+          rule: 'no-x',
+          evidence: 'receipt-1',
+          evidenceV1,
+        },
+      ],
+    });
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [enriched],
+    };
+    expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+    // Legacy findings (no metadata at all) still parse: absence is not a schema error.
+    const legacy: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord()],
+    };
+    expect(parseDevLedger(serializeDevLedger(legacy))).toEqual(legacy);
+  });
+
+  test('Q17b: a cycle finding refuses unknown keys and out-of-band status/reason', () => {
+    const base = { version: DEV_LEDGER_VERSION, branch: BRANCH };
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          ...base,
+          records: [
+            cycleRecord({
+              findings: [{ id: 'f1', severity: 'major', mystery: true }] as never,
+            }),
+          ],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          ...base,
+          records: [
+            cycleRecord({
+              findings: [{ id: 'f1', severity: 'major', status: 'rejected' }] as never,
+            }),
+          ],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+  });
+
   test('parse fails closed: bad JSON, wrong version, unknown kind', () => {
     expect(() => parseDevLedger('not json')).toThrow(/not valid JSON/);
     // Anything but the ONE accepted version refuses — including a FUTURE

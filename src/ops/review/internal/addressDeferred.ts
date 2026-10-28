@@ -7,6 +7,7 @@ import {
   type DeferredVendorDebt,
 } from '../../dev/internal/deferredReview.js';
 import { readWorkState } from '../../dev/internal/workState.js';
+import { sameFindingContent } from './durableDisposition.js';
 import type { Finding, FindingsRecord } from '../findings.js';
 
 export interface DeferredVendorContextRequest {
@@ -60,11 +61,14 @@ export async function resolveDeferredVendorContext(
       .map((entry) => [entry.findingId, entry]),
   );
   // Configuration selects coverage, never which retained findings exist.
-  // Address import cycles may repeat an ID; conflicting contents fail closed.
+  // `review.address:import` cycles are REPEAT TRANSPORT: they can never witness
+  // original content or become authority (Q17b). A repeated id with conflicting
+  // contents still fails closed.
   const findings = new Map<string, Finding>();
   const retained = [
     ...ledger.records
       .filter((entry) => entry.kind === 'cycle')
+      .filter((entry) => entry.reviewer !== 'review.address:import')
       .flatMap((entry) =>
         entry.findings.map((finding): Finding => ({
           id: finding.id,
@@ -73,6 +77,10 @@ export async function resolveDeferredVendorContext(
           text: finding.excerpt ?? '',
           status: 'open',
           ...(finding.fileName ? { file: finding.fileName } : {}),
+          ...(finding.line !== undefined ? { line: finding.line } : {}),
+          ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+          ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+          ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
         })),
       ),
     ...deferredReceiptFindings(
@@ -81,12 +89,9 @@ export async function resolveDeferredVendorContext(
   ];
   for (const finding of retained) {
     const previous = findings.get(finding.id);
-    if (
-      previous &&
-      (previous.text !== finding.text ||
-        previous.file !== finding.file ||
-        previous.severity !== finding.severity)
-    )
+    // Same comparator as the disposition helper: every identity-bearing field,
+    // receipt reference and R3S payload included; one-sided metadata is unknown.
+    if (previous !== undefined && !sameFindingContent(previous, finding))
       throw new Error('conflicting retained finding identity');
     const disposition = dispositions.get(finding.id);
     findings.set(finding.id, {
