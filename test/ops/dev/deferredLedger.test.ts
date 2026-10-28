@@ -1424,3 +1424,54 @@ test('an unrelated trust failure coinciding with expiry still propagates', async
 function effectsFor(f: Awaited<ReturnType<typeof fixture>>) {
   return f.effects;
 }
+
+test('an exhausted budget before the timer callback still truncates nonfatally', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  let exhausted = false;
+  const remainingMs = () => (exhausted ? 0 : 5_000);
+  const terminal = terminalReport(f);
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
+      // The budget reaches zero BEFORE the invocation timer callback can run; the very next
+      // internal call must still be classified as OUR deadline, not as a fatal refresh error.
+      exhausted = true;
+      return {
+        ...f.debt.queue,
+        state: 'terminal-clean',
+        pr: 42,
+        mergeSha: f.state.head,
+        itemId: 'current-fixture',
+        reviewed: true,
+        consumed: true,
+      };
+    },
+    report: terminal.client.report,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});

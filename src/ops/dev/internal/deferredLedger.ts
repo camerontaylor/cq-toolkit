@@ -139,9 +139,11 @@ function boundQueueClient(
    */
   const refuse = (label: string): never => {
     dead = true;
-    // A caller cancellation (and our own deadline sentinel) keeps its exact reason.
+    // A caller cancellation (and our own deadline sentinel) keeps its exact reason. Otherwise an
+    // exhausted budget is OUR deadline whatever the timer scheduling: the timer callback may not
+    // have run yet, so classify by the budget itself, never by `expired()` alone.
     lifetime.signal.throwIfAborted();
-    if (lifetime.expired()) throw new LineageDeadlineExhausted();
+    if (lifetime.expired() || lifetime.remainingMs() <= 0) throw new LineageDeadlineExhausted();
     throw new Error(`queue lifetime exhausted before ${label}`);
   };
   const settle = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
