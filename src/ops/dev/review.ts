@@ -46,6 +46,8 @@ import {
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
 import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.js';
+import type { Finding } from '../review/findings.js';
+import { restoreDurableDisposition } from '../review/internal/durableDisposition.js';
 import {
   classifyDeferredVendorFailure,
   type VendorFailureProvenance,
@@ -271,6 +273,14 @@ export interface DevReviewReport {
   dirtySha256: string;
   completion: DevReviewCompletion;
   findings: DevFinding[];
+  /**
+   * Q17b: the FULL normalized projection of the selected cycle's findings — present only
+   * on a REUSE report. `findings` above stays the raw source-cycle evidence; each row here
+   * is that raw finding with its LATEST persisted disposition applied by the authoritative
+   * helper (content-bound, import cycles never witness). A normalizer consumes this field
+   * keyed by id and revalidated against full content; the raw ledger is never rewritten.
+   */
+  retainedFindings?: Finding[];
   /** Report context only: never dispatched or counted as blocking findings. */
   advisories: string[];
   logPath: string;
@@ -502,6 +512,23 @@ function makeReviewCycle(
           dirtySha256: selection.cycle.dirtySha256,
           completion: selection.cycle.completion,
           findings: selection.cycle.findings,
+          retainedFindings: selection.cycle.findings.map((finding) =>
+            restoreDurableDisposition(
+              {
+                id: finding.id,
+                source: selection.cycle.reviewer,
+                text: finding.excerpt ?? '',
+                severity: finding.severity,
+                status: 'open',
+                ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
+                ...(finding.line !== undefined ? { line: finding.line } : {}),
+                ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
+              },
+              ledger,
+            ),
+          ),
           advisories: selection.cycle.advisories ?? [],
           logPath: selection.cycle.logPath,
           untracked: selection.cycle.untracked,
@@ -619,7 +646,11 @@ function makeReviewCycle(
             logPath,
             findings: findings.map((finding) => ({
               severity: finding.severity,
-              ...(finding.file ? { fileName: finding.file } : {}),
+              ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+              ...(finding.line !== undefined ? { line: finding.line } : {}),
+              ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+              ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+              ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
               excerpt: finding.text,
             })),
             advisories,

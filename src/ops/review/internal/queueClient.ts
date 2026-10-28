@@ -12,6 +12,7 @@ import {
   type QueueReference,
   type QueueTransport,
   type QueueBindInput,
+  type QueueLifetimeOptions,
 } from './queueProtocol.js';
 import {
   importQueueEvidence,
@@ -32,6 +33,34 @@ const CommonPage = z.object({
   chunks: z.number().int().positive().max(21846),
   encoding: z.literal('base64-utf8-json'),
 });
+/** The caller's ONE remaining budget, never renewed. Absent means unbounded. */
+function lifetimeRemaining(options: QueueLifetimeOptions | undefined): number | undefined {
+  const remaining = options?.remainingMs?.();
+  if (remaining === undefined) return undefined;
+  return Number.isFinite(remaining) ? remaining : 0;
+}
+
+/** Refuse before dispatching internal work. A caller abort keeps its exact reason — including the
+ * seam's own deadline sentinel — and only an exhausted caller budget is this module's own refusal.
+ */
+function refuseOnLifetime(options: QueueLifetimeOptions | undefined, label: string): void {
+  options?.signal?.throwIfAborted();
+  const remaining = lifetimeRemaining(options);
+  if (remaining !== undefined && remaining <= 0)
+    throw new Error(`queue delivery unknown: deadline exhausted before ${label}`);
+}
+
+/** The caller's lifetime, and only that: report internals never mint a second budget. */
+function requestLifetime(
+  options: QueueLifetimeOptions | undefined,
+): QueueLifetimeOptions | undefined {
+  if (options === undefined) return undefined;
+  return {
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.remainingMs === undefined ? {} : { remainingMs: options.remainingMs }),
+  };
+}
+
 const ManifestSchema = CommonPage.extend({
   kind: z.literal('manifest'),
   cursor: z.string(),
@@ -125,7 +154,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
   report(
     input: QueueReference,
     evidenceDir: string,
-    options?: {
+    options?: QueueLifetimeOptions & {
       onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
     },
   ): Promise<QueueEvidence | null>;
@@ -134,11 +163,13 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
     op: string,
     input: QueueReference,
     extra: Record<string, unknown> = {},
+    options?: QueueLifetimeOptions,
   ): Promise<unknown> {
+    refuseOnLifetime(options, op);
     const ref = QueueReferenceSchema.parse(input);
     const wire = JSON.stringify({ v: 1, op, ...ref, ...extra }) + '\n';
     if (Buffer.byteLength(wire) > QUEUE_WIRE_BYTES) throw new Error('oversized queue request');
-    const raw = await transport(wire);
+    const raw = await transport(wire, requestLifetime(options));
     if (Buffer.byteLength(raw) > QUEUE_WIRE_BYTES) throw new Error('oversized queue response');
     const envelope = z
       .object({
@@ -183,12 +214,13 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       throw new Error('queue alias status binding mismatch');
     return current;
   }
-  const status = async (input: QueueReference) =>
-    parseStatus(input, await request('status', input));
+  const status = async (input: QueueReference, options?: QueueLifetimeOptions) =>
+    parseStatus(input, await request('status', input, {}, options));
   return {
-    enqueue: async (input) => parseStatus(input, await request('enqueue', input)),
+    enqueue: async (input, options) =>
+      parseStatus(input, await request('enqueue', input, {}, options)),
     status,
-    bind: async (input: QueueBindInput) => {
+    bind: async (input: QueueBindInput, options) => {
       const i = QueueBindSchema.parse(input);
       return parseStatus(
         { requestId: i.requestId, binding: i.binding },
@@ -196,19 +228,26 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
           'bind',
           { requestId: i.requestId, binding: i.binding },
           { pr: i.pr, mergeSha: i.mergeSha ?? null },
+          options,
         ),
       );
     },
-    cancel: async (input) => parseStatus(input, await request('cancel', input)),
+    cancel: async (input, options) =>
+      parseStatus(input, await request('cancel', input, {}, options)),
     report: async (input, evidenceDir, options) => {
-      const current = await status(input);
+      // One shared caller budget for the WHOLE delivery: status, manifest, every page, the local
+      // import, the awaited observer and the acknowledgement. Expiry refuses before the next side
+      // effect, so no evidence write, observer call or ack can follow it.
+      refuseOnLifetime(options, 'report status');
+      const current = await status(input, options);
       if (!current.receiptId) return null;
       const receiptId = current.receiptId;
+      refuseOnLifetime(options, 'report manifest');
       const manifest = ManifestSchema.parse(
         z
           .object({ page: ManifestSchema })
           .strict()
-          .parse(await request('report', input, { receiptId, cursor: null })).page,
+          .parse(await request('report', input, { receiptId, cursor: null }, options)).page,
       );
       if (
         manifest.receipt_id !== receiptId ||
@@ -219,11 +258,12 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
         throw new Error('invalid queue manifest');
       const chunks: Buffer[] = [];
       for (let index = 0; index < manifest.chunks; index++) {
+        refuseOnLifetime(options, 'report page');
         const page = z
           .object({ page: ChunkSchema })
           .strict()
           .parse(
-            await request('report', input, { receiptId, cursor: receiptId + ':' + index }),
+            await request('report', input, { receiptId, cursor: receiptId + ':' + index }, options),
           ).page;
         if (
           page.receipt_id !== receiptId ||
@@ -283,19 +323,27 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
               alias.source.targetSelector !== document.source.target_selector)))
       )
         throw new Error('receipt original request or alias binding mismatch');
+      refuseOnLifetime(options, 'report import');
       const evidence = await importQueueEvidence(evidenceDir, receiptId, bytes);
+      refuseOnLifetime(options, 'report observer');
       await options?.onEvidenceImported?.({
         receiptId,
         path: join(evidenceDir, receiptId + '.json'),
       });
+      refuseOnLifetime(options, 'report ack');
       const ack = parseStatus(
         input,
-        await request('ack', input, {
-          receiptId,
-          sha256: receiptId,
-          chunks: manifest.chunks,
-          bytes: manifest.bytes,
-        }),
+        await request(
+          'ack',
+          input,
+          {
+            receiptId,
+            sha256: receiptId,
+            chunks: manifest.chunks,
+            bytes: manifest.bytes,
+          },
+          options,
+        ),
       );
       if (
         !ack.consumed ||

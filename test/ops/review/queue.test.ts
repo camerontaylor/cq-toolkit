@@ -13,7 +13,9 @@ import { FindingsRecordSchema } from '../../../src/ops/review/findings.js';
 import { makeQueueOps } from '../../../src/ops/review/queue.js';
 import { registry } from '../../../src/ops/review/registry.js';
 import type {
+  QueueEnqueueInput,
   QueueReference,
+  QueueStatus,
   QueueTransport,
 } from '../../../src/ops/review/internal/queueProtocol.js';
 import {
@@ -68,6 +70,16 @@ const ref: QueueReference = {
     mergeSha: 'b'.repeat(40),
     targetSelector: 'promoted-main',
   },
+};
+const pendingStatus = {
+  state: 'pending',
+  pr: null,
+  mergeSha: null,
+  itemId: null,
+  receiptId: null,
+  consumed: false,
+  reviewed: false,
+  fixed: false,
 };
 function fixture(clean = false) {
   const paths = [
@@ -337,16 +349,6 @@ describe('complete immutable queue result consumption', () => {
 });
 
 describe('public queue local alias classification', () => {
-  const status = {
-    state: 'pending',
-    pr: null,
-    mergeSha: null,
-    itemId: null,
-    receiptId: null,
-    consumed: false,
-    reviewed: false,
-    fixed: false,
-  };
   test.each(['host;id', '-oProxyCommand=bad', 'host path'])(
     'malformed operator alias fails every op before any transport invocation: %s',
     async (alias) => {
@@ -394,13 +396,195 @@ describe('public queue local alias classification', () => {
   test('injected transport still succeeds while the local alias is unusable', async () => {
     vi.stubEnv('CQ_QUEUE_SSH_ALIAS', 'host;id');
     const transport: QueueTransport = async () =>
-      JSON.stringify({ v: 1, requestId: ref.requestId, binding: ref.binding, result: status });
-    expect(await makeQueueOps(transport).queueStatus(ref)).toEqual({ status: 'ok', value: status });
+      JSON.stringify({
+        v: 1,
+        requestId: ref.requestId,
+        binding: ref.binding,
+        result: pendingStatus,
+      });
+    expect(await makeQueueOps(transport).queueStatus(ref)).toEqual({
+      status: 'ok',
+      value: pendingStatus,
+    });
   });
   test('missing alias remains an explicit needs-human configuration reason', async () => {
     vi.stubEnv('CQ_QUEUE_SSH_ALIAS', '');
     const result = await makeQueueOps().queueStatus(ref);
     expect(result).toMatchObject({ status: 'needs-human' });
     if (result.status === 'needs-human') expect(result.reason).toContain('CQ_QUEUE_SSH_ALIAS');
+  });
+});
+
+describe('public queue local input classification', () => {
+  test.each([
+    { ...ref, action: 'bind' as const },
+    { ...ref, pr: 12 },
+    { ...ref, action: 'cancel' as const, mergeSha: 'a'.repeat(40) },
+  ] satisfies QueueEnqueueInput[])(
+    'action-dependent invalid enqueue fails before dispatch: %j',
+    async (input) => {
+      const transport = vi.fn<QueueTransport>();
+      expect(await makeQueueOps(transport).enqueue(input)).toMatchObject({ status: 'failed' });
+      expect(transport).not.toHaveBeenCalled();
+    },
+  );
+  test('direct SDK schema rejects fail before dispatch for every op', async () => {
+    const transport = vi.fn<QueueTransport>();
+    const ops = makeQueueOps(transport);
+    expect(await ops.enqueue({ ...ref, requestId: '' })).toMatchObject({ status: 'failed' });
+    expect(
+      await ops.queueStatus({ ...ref, binding: { ...ref.binding, repo: '../repo' } }),
+    ).toMatchObject({ status: 'failed' });
+    expect(await ops.report({ ...ref, evidenceDir: '' })).toMatchObject({ status: 'failed' });
+    expect(transport).not.toHaveBeenCalled();
+  });
+  test('invalid input is deterministic even with no queue configuration', async () => {
+    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', '');
+    expect(await makeQueueOps().enqueue({ ...ref, action: 'bind' })).toMatchObject({
+      status: 'failed',
+    });
+    expect(await makeQueueOps().queueStatus(ref)).toMatchObject({ status: 'needs-human' });
+  });
+  test('action-dependent reject stays reachable through the review registry', async () => {
+    vi.stubEnv('CQ_QUEUE_SSH_ALIAS', '');
+    const enqueue = await registry.find((entry) => entry.name === 'review.enqueue')!.importer();
+    expect(await enqueue({ ...ref, action: 'bind' })).toMatchObject({ status: 'failed' });
+  });
+  test('valid commands still dispatch the intended wire payload', async () => {
+    type WireRequest = { op: string; pr?: number; mergeSha?: string };
+    const sent: WireRequest[] = [];
+    const transport: QueueTransport = async (wire) => {
+      sent.push(JSON.parse(wire) as WireRequest);
+      return JSON.stringify({
+        v: 1,
+        requestId: ref.requestId,
+        binding: ref.binding,
+        result: pendingStatus,
+      });
+    };
+    const ops = makeQueueOps(transport);
+    expect(await ops.enqueue(ref)).toMatchObject({ status: 'ok' });
+    expect(await ops.enqueue({ ...ref, action: 'cancel' })).toMatchObject({ status: 'ok' });
+    expect(
+      await ops.enqueue({ ...ref, action: 'bind', pr: 12, mergeSha: 'a'.repeat(40) }),
+    ).toMatchObject({ status: 'ok' });
+    expect(sent.map(({ op }) => op)).toEqual(['enqueue', 'cancel', 'bind']);
+    // The optional mergeSha and the positive pr are only proven by the payload.
+    expect(sent[2]).toMatchObject({ op: 'bind', pr: 12, mergeSha: 'a'.repeat(40) });
+  });
+  test.each([
+    '{}',
+    'not JSON',
+    JSON.stringify({
+      v: 1,
+      requestId: ref.requestId,
+      binding: ref.binding,
+      result: { state: 'x' },
+    }),
+  ])('malformed remote response remains indeterminate: %s', async (raw) => {
+    const transport = vi.fn<QueueTransport>(async () => raw);
+    expect(await makeQueueOps(transport).queueStatus(ref)).toMatchObject({
+      status: 'indeterminate',
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  test('unsupported capability keeps its explicit result', async () => {
+    const transport: QueueTransport = async () =>
+      JSON.stringify({
+        v: 1,
+        requestId: ref.requestId,
+        binding: ref.binding,
+        result: { unsupported: true },
+      });
+    expect(await makeQueueOps(transport).queueStatus(ref)).toMatchObject({
+      status: 'ok',
+      value: { state: 'unsupported' },
+    });
+  });
+});
+
+describe('queue report lifetime enforcement', () => {
+  const receiptId = 'e'.repeat(64);
+  const status: QueueStatus = {
+    state: 'terminal-clean',
+    pr: 12,
+    mergeSha: 'b'.repeat(40),
+    itemId: 'item-1',
+    receiptId,
+    consumed: true,
+    reviewed: true,
+    fixed: false,
+  };
+  const manifest = {
+    version: 1,
+    kind: 'manifest',
+    receipt_id: receiptId,
+    sha256: receiptId,
+    bytes: 1,
+    chunks: 1,
+    encoding: 'base64-utf8-json',
+    cursor: `${receiptId}:0`,
+  };
+  function envelope(result: unknown) {
+    return JSON.stringify({
+      v: 1,
+      requestId: ref.requestId,
+      binding: ref.binding,
+      result,
+    });
+  }
+
+  test('a caller cancellation during receipt delivery prevents the local import, the observer and the ack', async () => {
+    const dir = await directory();
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled before ack');
+    const ops: string[] = [];
+    let observed = 0;
+    let acked = 0;
+    const transport: QueueTransport = async (wire) => {
+      const op = (JSON.parse(wire) as { op: string }).op;
+      ops.push(op);
+      if (op === 'status') return envelope(status);
+      if (op === 'report') {
+        // Cancellation lands while the manifest page is in flight; the next internal step must
+        // refuse before touching the filesystem, the observer or the acknowledgement.
+        controller.abort(reason);
+        return envelope({ page: manifest });
+      }
+      if (op === 'ack') {
+        acked += 1;
+        return envelope(status);
+      }
+      throw new Error(`unexpected queue op: ${op}`);
+    };
+    const client = makeQueueClient(transport);
+    await expect(
+      client.report(ref, dir, {
+        signal: controller.signal,
+        onEvidenceImported: async () => {
+          observed += 1;
+        },
+      }),
+    ).rejects.toThrow(reason);
+    expect(acked).toBe(0);
+    expect(observed).toBe(0);
+    expect(ops).not.toContain('ack');
+    // No evidence bytes were imported: the delivery directory stays empty.
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  test('an exhausted caller budget refuses before any queue dispatch', async () => {
+    const dir = await directory();
+    const ops: string[] = [];
+    const transport: QueueTransport = async (wire) => {
+      ops.push((JSON.parse(wire) as { op: string }).op);
+      return envelope(status);
+    };
+    const client = makeQueueClient(transport);
+    await expect(client.report(ref, dir, { remainingMs: () => 0 })).rejects.toThrow(
+      /deadline exhausted/,
+    );
+    expect(ops).toEqual([]);
+    expect(await readdir(dir)).toEqual([]);
   });
 });

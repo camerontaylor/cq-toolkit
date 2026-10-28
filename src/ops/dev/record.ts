@@ -50,11 +50,16 @@ import {
   type DeferredVendorDebt,
   type VendorFailureProvenance,
 } from './internal/deferredReview.js';
+import { readCurrentEnrollment } from './internal/deferredLedger.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
+import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
+import { branchPathFault } from '../../shared/refname.js';
+
+export { branchPathFault };
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.
@@ -91,6 +96,20 @@ export interface DevFinding {
   fileName?: string;
   /** The finding's comment (or its first suggestion), when reported. */
   excerpt?: string;
+  /** The reported line, when the producer's contract supplies one (never inferred). */
+  line?: number;
+  /** The reported rule/lint id, when the producer's contract supplies one. */
+  rule?: string;
+  /**
+   * The producer's receipt reference (vendor receipts only), preserved verbatim so a
+   * later projection can prove WHICH receipt this finding came from.
+   */
+  evidence?: string;
+  /**
+   * The R3S versioned agent evidence payload, carried verbatim. It is persisted and
+   * compared structurally; it is never re-derived, repaired or used as authority here.
+   */
+  evidenceV1?: FindingEvidenceV1;
 }
 
 /** Whether one review cycle completed, or was blocked — and why. */
@@ -293,12 +312,24 @@ export interface DevIdentity {
 
 // --- Zod mirrors (parse boundary; key order is the serialize order) --------
 
+/**
+ * The ledger's finding mirror. Identity-bearing STRINGS accept exactly what the
+ * review record (FindingSchema) accepts, including the empty string, and are stored
+ * verbatim: the ledger never rejects a value its producer was allowed to emit, and
+ * never drops one either (an empty value is stored, not treated as absent). `id`,
+ * `severity` and `line` keep their strict constraints because FindingSchema has the
+ * same ones. Widening acceptance cannot invalidate an existing ledger.
+ */
 const DevFindingSchema = z
   .object({
     id: z.string().min(1),
     severity: z.string().min(1),
-    fileName: z.string().min(1).exactOptional(),
-    excerpt: z.string().min(1).exactOptional(),
+    fileName: z.string().exactOptional(),
+    excerpt: z.string().exactOptional(),
+    line: z.number().int().positive().exactOptional(),
+    rule: z.string().exactOptional(),
+    evidence: z.string().exactOptional(),
+    evidenceV1: FindingEvidenceV1Schema.exactOptional(),
   })
   .strict();
 
@@ -433,6 +464,19 @@ const DevRecordSchema = z.discriminatedUnion('kind', [
 const NO_FRESH_TAIL_PATTERN =
   /^reviewer completed '.+?' with an AFFIRMATIVE no-fresh\/skipped notice \(".+"\) — a fresh detailed review never ran$/u;
 
+/**
+ * True when the cycle is an affirmative no-fresh BLOCKED attempt: the vendor
+ * itself said it never reviewed, with no structured vendor-failure class.
+ * EXACTLY these attempts are eligible for a `no-fresh-tail` reuse — as the
+ * resolved tail, and as every attempt between that tail and its selected
+ * terminal. Nothing else (an error, auth, rate limit, malformed stream, a
+ * deadline kill, or any vendor-failure class) is ever eligible.
+ */
+const isAffirmativeNoFreshAttempt = (cycle: DevCycleRecord): boolean =>
+  cycle.vendorFailure === undefined &&
+  cycle.completion.kind === 'blocked' &&
+  NO_FRESH_TAIL_PATTERN.test(cycle.completion.reason);
+
 /** The exact match {@link findReusableCycle} looks for (record.ts reuse/readiness). */
 export interface ReuseSelectionInput {
   /** The intended PR target of the review request. */
@@ -465,16 +509,21 @@ export type ReuseSelection =
  * scope and reviewer — the readiness anchor's identity fields plus the
  * request shape; a dirty scope mismatch, a changed target at the same
  * merge-base, a moved head or base, or a different reviewer never match),
- * and classify the ledger's latest same-identity attempt:
- *   - the latest cycle IS the selected cycle → `exact-terminal`;
- *   - the latest cycle is an affirmative NO-FRESH blocked attempt (the
- *     vendor itself said it never reviewed) at the same identity, and the
- *     selected cycle precedes it → `no-fresh-tail` carrying
- *     `resolvesCycleId` — the explicit, auditable reuse resolution; the
- *     blocked attempt stays in the ledger verbatim;
- *   - the latest cycle is any OTHER blocked attempt, or a terminal cycle
- *     that is not the selection (an earlier terminal does not paper over a
- *     newer unrelated one) → no reuse (a genuine later blocker refuses).
+ * and classify the ledger's same-identity resolution tail — every attempt
+ * after the selected cycle:
+ *   - there is no tail (the latest cycle IS the selected cycle) →
+ *     `exact-terminal`;
+ *   - EVERY tail attempt is an affirmative NO-FRESH blocked attempt (the
+ *     vendor itself said it never reviewed; retries may each come back
+ *     empty) → `no-fresh-tail` carrying `resolvesCycleId` of the last one —
+ *     the explicit, auditable reuse resolution; every blocked attempt stays
+ *     in the ledger verbatim;
+ *   - the latest cycle is any OTHER blocked attempt, a genuine blocker
+ *     ANYWHERE in the tail, or a terminal cycle that is not the selection
+ *     (an earlier terminal does not paper over a newer unrelated one) → no
+ *     reuse. An intervening genuine blocker is never resolved away by a
+ *     later no-fresh attempt: it was never reviewed, so no reuse may be
+ *     selected over it.
  *
  * Configuration (which reviewers count) is the readiness core's concern;
  * the cycle op additionally re-checks its own scope emptiness before
@@ -500,17 +549,16 @@ export function findReusableCycle(
     .reverse()
     .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
   if (selected === undefined) return null;
-  const latest = cycles.at(-1);
-  if (latest === undefined) return null;
-  if (latest.vendorFailure !== undefined) return null;
-  if (latest.cycleId === selected.cycleId) return { cycle: selected, basis: 'exact-terminal' };
-  if (
-    latest.completion.kind === 'blocked' &&
-    NO_FRESH_TAIL_PATTERN.test(latest.completion.reason)
-  ) {
-    return { cycle: selected, basis: 'no-fresh-tail', resolvesCycleId: latest.cycleId };
-  }
-  return null;
+  const tail = cycles.slice(cycles.lastIndexOf(selected) + 1);
+  const latest = tail.at(-1);
+  if (latest === undefined) return { cycle: selected, basis: 'exact-terminal' };
+  // The WHOLE tail is the resolution: an attempt between the selected
+  // terminal and the latest one is never skipped over. A genuine blocker
+  // there (unknown error, action required, malformed stream, deadline kill,
+  // structured vendor failure) was never reviewed, so it refuses reuse even
+  // when the latest attempt is a resolvable affirmative no-fresh notice.
+  if (!tail.every(isAffirmativeNoFreshAttempt)) return null;
+  return { cycle: selected, basis: 'no-fresh-tail', resolvesCycleId: latest.cycleId };
 }
 
 const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
@@ -592,29 +640,10 @@ export function parseDevLedger(text: string): DevLedgerFile {
 
 // --- Branch-path safety -----------------------------------------------------
 
-/**
- * A git refname segment (git check-ref-format rules, enforced here
- * fail-closed): no leading '.', no trailing '.lock', no '..' anywhere, and
- * none of the characters git forbids in a refname. A branch name is joined
- * into a path under `.cq/dev/`, so every segment must be path-safe.
- */
-export function branchPathFault(branch: string): string | null {
-  if (branch === '' || branch.startsWith('/') || branch.endsWith('/')) {
-    return `branch '${branch}' must be a non-empty relative refname`;
-  }
-  for (const segment of branch.split('/')) {
-    if (
-      segment === '' ||
-      segment.startsWith('.') ||
-      segment.endsWith('.lock') ||
-      segment.includes('..') ||
-      /[\s~^:?*[\]\\]/.test(segment)
-    ) {
-      return `branch '${branch}' is not a path-safe refname (segment '${segment}')`;
-    }
-  }
-  return null;
-}
+// The refname grammar itself is the shared zero-import leaf (shared/refname.ts):
+// the dev ledger validator and the queue wire/origin schemas must agree on it, and
+// this module cannot host it without closing the queueProtocol -> record ->
+// deferredReview -> queueProtocol runtime cycle.
 
 /**
  * The branch encoded into ONE bounded, collision-free filename segment: a
@@ -820,15 +849,23 @@ export function assembleReadiness(
   const cycles = ledger.records.filter(
     (record): record is DevCycleRecord => record.kind === 'cycle',
   );
-  const latestDebt = ledger.records.filter((record) => record.kind === 'vendor-debt').at(-1)?.debt;
+  // Current authority is the identity-matched enrollment and its authorized predecessor chain,
+  // never the positionally last appended snapshot.
+  const enrollmentRead = readCurrentEnrollment(ledger, identity, input.target);
+  if (enrollmentRead.kind === 'ambiguous')
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `ambiguous current enrollment: ${enrollmentRead.requestIds.join(', ')} claim one identity`,
+    });
+  const enrollment = enrollmentRead.kind === 'enrollment' ? enrollmentRead.enrollment : undefined;
   const binding = debt?.reference.binding;
   const debtValid =
     debt !== undefined &&
     binding?.kind === 'deferred-author' &&
-    latestDebt !== undefined &&
-    JSON.stringify(latestDebt.reference) === JSON.stringify(debt.reference) &&
-    JSON.stringify(latestDebt.originAttempt) === JSON.stringify(debt.originAttempt) &&
-    JSON.stringify(latestDebt.deferral) === JSON.stringify(debt.deferral) &&
+    enrollment !== undefined &&
+    JSON.stringify(enrollment.snapshot.reference) === JSON.stringify(debt.reference) &&
+    JSON.stringify(enrollment.snapshot.originAttempt) === JSON.stringify(debt.originAttempt) &&
+    JSON.stringify(enrollment.snapshot.deferral) === JSON.stringify(debt.deferral) &&
     hasPersistedVendorOutageOrigin(debt.originAttempt, cycles) &&
     matchesDeferredVendorDebt(debt, {
       repo: binding.repo,
@@ -847,6 +884,15 @@ export function assembleReadiness(
       field: 'vendor-debt',
       detail:
         'deferred debt does not match the retained origin, latest enrollment and current identity',
+    });
+  // A pending current enrollment legitimately continues; an unsettled AUTHORIZED ANCESTOR never
+  // does. This is derived from the ledger, so a truncated or unrefreshed lineage is never clean.
+  if (enrollment !== undefined && enrollment.pendingAncestry.length > 0)
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `authorized predecessor obligation(s) unsettled: ${enrollment.pendingAncestry
+        .map((ancestor) => ancestor.reference.requestId)
+        .join(', ')}`,
     });
 
   // Only a FULL-scope terminal cycle satisfies readiness: an
@@ -927,8 +973,8 @@ export function assembleReadiness(
         if (action === 'fixed' || action === 'rejected') continue;
         open.push(
           entry.cycleId === cycle.cycleId
-            ? `${finding.id} (${finding.severity})`
-            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)`,
+            ? `${finding.id} (${finding.severity})${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`
+            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`,
         );
       }
     }
@@ -941,7 +987,7 @@ export function assembleReadiness(
       const action = closed.get(finding.id);
       if (action !== 'fixed' && action !== 'rejected')
         open.push(
-          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)`,
+          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)${finding.file === '' ? ': unresolved: finding has no file path' : ''}`,
         );
     }
     if (open.length > 0) {
@@ -995,6 +1041,10 @@ export function assembleReadiness(
         (record): record is DevReuseRecord =>
           record.kind === 'reuse' && record.basis === 'no-fresh-tail',
       ) ?? null;
+  // The row that actually resolves this readiness, set ONLY where the linkage
+  // is validated below: the ready record attributes this row, so attribution
+  // can never rest on a second, divergent predicate.
+  let resolvedNoFreshReuse: DevReuseRecord | undefined;
   if (
     latestAttempt !== undefined &&
     latestAttempt.completion.kind === 'blocked' &&
@@ -1009,12 +1059,51 @@ export function assembleReadiness(
       latestAttempt.base === identity.base &&
       latestAttempt.head === identity.head &&
       latestAttempt.dirtySha256 === identity.dirtySha256;
+    // The reuse row resolves ONLY the eligible tail: every same-identity
+    // full-scope attempt after the named anchor terminal must itself be an
+    // affirmative no-fresh notice. A genuine blocker in between (unknown
+    // error, action required, malformed stream, deadline kill, structured
+    // vendor failure) was never reviewed and is never resolved away —
+    // findReusableCycle refuses it too, so a linkage persisted before that
+    // rule (or forged into the ledger) cannot pass readiness either.
+    const identityCycles = cycles.filter(
+      (entry) =>
+        entry.scope === 'full' &&
+        entry.reviewer === latestAttempt.reviewer &&
+        entry.target === latestAttempt.target &&
+        entry.base === latestAttempt.base &&
+        entry.head === latestAttempt.head &&
+        entry.dirtySha256 === latestAttempt.dirtySha256,
+    );
+    // The persisted reuse resolves against the terminal cycle IT NAMES — the
+    // blocked attempt's own reviewer at the exact request identity — not the
+    // global readiness anchor, which may be another configured reviewer's
+    // later terminal (PR580 thread 4394615080, tracking #593). The global
+    // anchor keeps its coverage role on the ready record below and must still
+    // exist; it just may not stand in for a different reviewer's evidence.
+    const referencedIndex =
+      noFreshReuse === null
+        ? -1
+        : identityCycles.findIndex(
+            (entry) =>
+              entry.cycleId === noFreshReuse.cycleId &&
+              entry.completion.kind === 'terminal' &&
+              entry.vendorFailure === undefined,
+          );
+    const tailIndex = identityCycles.findIndex((entry) => entry.cycleId === latestAttempt.cycleId);
+    // The full-tail proof stays (Q6 #485 / 70601ab1): every same-reviewer
+    // same-identity attempt AFTER the referenced terminal — the blocked tail
+    // included — must be an eligible affirmative no-fresh notice.
+    const resolvedTailIsEligible =
+      referencedIndex >= 0 &&
+      tailIndex > referencedIndex &&
+      identityCycles.slice(referencedIndex + 1).every(isAffirmativeNoFreshAttempt);
     const reuseResolves =
       sameRequest &&
       latestAttempt.scope === 'full' &&
       isConfigured(latestAttempt.reviewer) &&
-      latestAttempt.vendorFailure === undefined &&
-      NO_FRESH_TAIL_PATTERN.test(latestAttempt.completion.reason) &&
+      isAffirmativeNoFreshAttempt(latestAttempt) &&
+      resolvedTailIsEligible &&
       noFreshReuse !== null &&
       noFreshReuse.resolvesCycleId === latestAttempt.cycleId &&
       noFreshReuse.reviewer === latestAttempt.reviewer &&
@@ -1024,13 +1113,14 @@ export function assembleReadiness(
       noFreshReuse.base === identity.base &&
       noFreshReuse.dirtySha256 === identity.dirtySha256 &&
       ledger.records.indexOf(noFreshReuse) > ledger.records.indexOf(latestAttempt) &&
-      cycle !== undefined &&
-      noFreshReuse.cycleId === cycle.cycleId;
+      cycle !== undefined;
     if (!reuseResolves) {
       gaps.push({
         field: 'latest-review-blocked',
         detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
       });
+    } else if (noFreshReuse !== null) {
+      resolvedNoFreshReuse = noFreshReuse;
     }
   }
 
@@ -1085,15 +1175,6 @@ export function assembleReadiness(
     }
     return { ready: false, gaps };
   }
-  const noFreshReuseFinal = [...ledger.records]
-    .reverse()
-    .find(
-      (record): record is DevReuseRecord =>
-        record.kind === 'reuse' &&
-        record.basis === 'no-fresh-tail' &&
-        record.resolvesCycleId === latestAttempt?.cycleId &&
-        record.cycleId === cycle.cycleId,
-    );
   const readyRecord: DevReadinessRecord = {
     ready: true,
     evidenceClass: 'author',
@@ -1106,7 +1187,7 @@ export function assembleReadiness(
     cycleId: cycle.cycleId,
     reviewer: cycle.reviewer,
     ...(debtValid ? { vendorDebt: debt } : {}),
-    ...(noFreshReuseFinal === undefined ? {} : { reuse: noFreshReuseFinal.reuseId }),
+    ...(resolvedNoFreshReuse === undefined ? {} : { reuse: resolvedNoFreshReuse.reuseId }),
     checkId: check.checkId,
     at: input.nowIso,
   };

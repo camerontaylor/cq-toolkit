@@ -17,6 +17,7 @@ import {
   prepareDeferredVendorReview,
   retainedReceiptFindings,
   loadCurrentDeferredVendorDebt,
+  readCurrentEnrollment,
 } from '../dev/internal/deferredLedger.js';
 import {
   hasDeferredReviewSources,
@@ -46,6 +47,7 @@ import {
   type ReviewSource,
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { sameFindingContent } from './internal/durableDisposition.js';
 import { collectBoundedReviewContext } from './internal/reviewContext.js';
 
 export interface ReviewRunInput {
@@ -217,7 +219,10 @@ export function makeReviewRun(
             state,
             deps.queueClient,
             deadline.signal,
-            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+            {
+              remainingMs: remainingWallMs,
+              ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+            },
           );
         } catch (error) {
           failure = { thrown: true, error };
@@ -304,7 +309,7 @@ export function makeReviewRun(
                     source: 'coderabbit',
                     severity: finding.severity,
                     text: finding.excerpt ?? '',
-                    ...(finding.fileName ? { file: finding.fileName } : {}),
+                    ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
                     status: disposition?.action ?? 'open',
                     ...(disposition ? { reason: disposition.why } : {}),
                   };
@@ -333,21 +338,47 @@ export function makeReviewRun(
         if (result.status === 'ok') {
           const value = result.value as {
             cycleId: string;
-            findings: Array<{ id: string; severity: string; fileName?: string; excerpt?: string }>;
+            findings: Array<{
+              id: string;
+              severity: string;
+              fileName?: string;
+              excerpt?: string;
+              line?: number;
+              rule?: string;
+              evidence?: string;
+              evidenceV1?: Finding['evidenceV1'];
+            }>;
+            retainedFindings?: Finding[];
           };
           records.push({
             schemaVersion: 1,
             branch: state.branch,
             head: state.head,
             sources: [{ kind: 'coderabbit', status: 'terminal', cycleId: value.cycleId }],
-            findings: value.findings.map((item) => ({
-              id: item.id,
-              source: 'coderabbit',
-              ...(item.fileName ? { file: item.fileName } : {}),
-              severity: item.severity,
-              text: item.excerpt ?? '',
-              status: 'open',
-            })),
+            findings: value.findings.map((item) => {
+              const base: Finding = {
+                id: item.id,
+                source: 'coderabbit',
+                ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                ...(item.line !== undefined ? { line: item.line } : {}),
+                ...(item.rule !== undefined ? { rule: item.rule } : {}),
+                ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+                ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
+                severity: item.severity,
+                text: item.excerpt ?? '',
+                status: 'open',
+              };
+              // Q17b: a REUSE report's projection is the only source of a retained
+              // disposition. It is consumed by id AND revalidated against full original
+              // content, so a same-id row with different content never inherits one.
+              const retained = value.retainedFindings?.find((row) => row.id === item.id);
+              if (retained === undefined || !sameFindingContent(base, retained)) return base;
+              return {
+                ...base,
+                status: retained.status,
+                ...(retained.reason !== undefined ? { reason: retained.reason } : {}),
+              };
+            }),
           });
         } else {
           const reason =
@@ -409,7 +440,11 @@ export function makeReviewRun(
                 ? cycle.findings.map((item) => ({
                     id: item.id,
                     source: 'coderabbit',
-                    ...(item.fileName ? { file: item.fileName } : {}),
+                    ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                    ...(item.line !== undefined ? { line: item.line } : {}),
+                    ...(item.rule !== undefined ? { rule: item.rule } : {}),
+                    ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+                    ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
                     severity: item.severity,
                     text: item.excerpt ?? '',
                     status: 'open' as const,
@@ -673,7 +708,13 @@ export function makeReviewRun(
                         findings: agentFindings.map((finding, index) => ({
                           id: `${id}#f${String(index + 1)}`,
                           severity: finding.severity,
-                          ...(finding.file ? { fileName: finding.file } : {}),
+                          ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                          ...(finding.line !== undefined ? { line: finding.line } : {}),
+                          ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                          ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                          ...(finding.evidenceV1 !== undefined
+                            ? { evidenceV1: finding.evidenceV1 }
+                            : {}),
                           excerpt: finding.text,
                         })),
                         ...(advisories.length > 0 ? { advisories } : {}),
@@ -839,24 +880,44 @@ export function makeReviewRun(
             beforeRefresh,
             deps.queueClient,
             deadline.signal,
-            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+            {
+              remainingMs: remainingWallMs,
+              ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+            },
           ).then(
             (value) => ({ ok: true as const, value }),
             (error: unknown) => ({ ok: false as const, error }),
           );
           const afterRefresh = effects.openLedger(state.branch).load();
           if (!isDeepStrictEqual(beforeRefresh, afterRefresh)) {
-            const appended = afterRefresh.records.at(-1);
+            // This refresh may settle the current enrollment AND its authorized ancestors, so the
+            // owned shape is an append-only extension in which every added snapshot is a verified
+            // completion of the current enrollment or of one of its authorized ancestors. Any other
+            // extra byte still fails closed.
+            const authority = readCurrentEnrollment(
+              beforeRefresh,
+              { head: state.head, base: state.base, dirtySha256: state.dirtySha256 },
+              target,
+            );
+            const authorized = new Set<string>([deferredVendorDebt.reference.requestId]);
+            if (authority.kind === 'enrollment')
+              for (const ancestor of authority.enrollment.ancestry)
+                authorized.add(ancestor.reference.requestId);
+            const appended = afterRefresh.records.slice(beforeRefresh.records.length);
             if (
               !requestedLedger ||
               !isDeepStrictEqual(requestedLedger, afterRefresh) ||
               !isDeepStrictEqual(
-                { ...afterRefresh, records: afterRefresh.records.slice(0, -1) },
-                beforeRefresh,
+                afterRefresh.records.slice(0, beforeRefresh.records.length),
+                beforeRefresh.records,
               ) ||
-              appended?.kind !== 'vendor-debt' ||
-              !isDeepStrictEqual(appended.debt.reference, deferredVendorDebt.reference) ||
-              !verifiedCompletedDebt(appended.debt)
+              appended.length === 0 ||
+              appended.some(
+                (record) =>
+                  record.kind !== 'vendor-debt' ||
+                  !verifiedCompletedDebt(record.debt) ||
+                  !authorized.has(record.debt.reference.requestId),
+              )
             )
               throw new Error('final queue refresh changed unrecognized ledger bytes');
             if (!deps.noteLedgerWrite)
@@ -930,6 +991,47 @@ export function makeReviewRun(
           },
         };
       }
+      // Q15d clean refusal asks ONE question: is an authorized obligation pending AT THIS REVIEW
+      // IDENTITY? It is read from the post-refresh ledger, so a predecessor settled by this
+      // invocation is not counted, and it refuses here rather than decorating outer usage or
+      // rewriting notifications. A superseded OLDER-head predecessor does not refuse the run: its
+      // receipt is carried as a retained obligation and its findings block once imported, while the
+      // durable READINESS gap in record.ts still refuses ANY pending ancestor. Run acceptance and
+      // durable readiness are therefore deliberately different verdicts.
+      const currentIdentity = {
+        head: state.head,
+        base: state.base,
+        dirtySha256: state.dirtySha256,
+      };
+      const ancestry = readCurrentEnrollment(
+        effects.openLedger(state.branch).load(),
+        currentIdentity,
+        target,
+      );
+      const pendingAtThisIdentity =
+        ancestry.kind === 'ambiguous'
+          ? ancestry.requestIds
+          : ancestry.kind === 'enrollment'
+            ? ancestry.enrollment.pendingAncestry
+                .filter((ancestor) => {
+                  const binding = ancestor.reference.binding;
+                  return (
+                    binding.kind === 'deferred-author' &&
+                    binding.head === currentIdentity.head &&
+                    binding.target === target &&
+                    ancestor.deferral.base === currentIdentity.base
+                  );
+                })
+                .map((ancestor) => ancestor.reference.requestId)
+            : [];
+      if (pendingAtThisIdentity.length > 0)
+        return {
+          status: 'needs-human',
+          reason: `review.run: authorized predecessor obligation(s) remain unsettled at this review identity (${pendingAtThisIdentity.join(
+            ', ',
+          )}); a clean completion cannot be claimed`,
+          report: record,
+        };
       return {
         status: 'ok',
         value: record,

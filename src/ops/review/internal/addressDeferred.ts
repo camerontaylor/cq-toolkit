@@ -1,12 +1,12 @@
 import { makeSubprocessDevEffects, type DevEffects } from '../../dev/effects.js';
 import type { DeferredQueueClient } from './queueProtocol.js';
 import { loadCurrentDeferredVendorDebt } from '../../dev/internal/deferredLedger.js';
-import {
-  deferredReceiptFindings,
-  type DeferredReviewIdentity,
-  type DeferredVendorDebt,
+import type {
+  DeferredReviewIdentity,
+  DeferredVendorDebt,
 } from '../../dev/internal/deferredReview.js';
 import { readWorkState } from '../../dev/internal/workState.js';
+import { retainedFindings } from './durableDisposition.js';
 import type { Finding, FindingsRecord } from '../findings.js';
 
 export interface DeferredVendorContextRequest {
@@ -54,47 +54,13 @@ export async function resolveDeferredVendorContext(
   if (!debt) return undefined;
   const binding = debt.reference.binding;
   const ledger = effects.openLedger(state.branch).load();
-  const dispositions = new Map(
-    ledger.records
-      .filter((entry) => entry.kind === 'disposition')
-      .map((entry) => [entry.findingId, entry]),
-  );
-  // Configuration selects coverage, never which retained findings exist.
-  // Address import cycles may repeat an ID; conflicting contents fail closed.
-  const findings = new Map<string, Finding>();
-  const retained = [
-    ...ledger.records
-      .filter((entry) => entry.kind === 'cycle')
-      .flatMap((entry) =>
-        entry.findings.map((finding): Finding => ({
-          id: finding.id,
-          source: entry.reviewer,
-          severity: finding.severity,
-          text: finding.excerpt ?? '',
-          status: 'open',
-          ...(finding.fileName ? { file: finding.fileName } : {}),
-        })),
-      ),
-    ...deferredReceiptFindings(
-      ledger.records.filter((entry) => entry.kind === 'vendor-debt').map((entry) => entry.debt),
-    ),
-  ];
-  for (const finding of retained) {
-    const previous = findings.get(finding.id);
-    if (
-      previous &&
-      (previous.text !== finding.text ||
-        previous.file !== finding.file ||
-        previous.severity !== finding.severity)
-    )
-      throw new Error('conflicting retained finding identity');
-    const disposition = dispositions.get(finding.id);
-    findings.set(finding.id, {
-      ...finding,
-      status: disposition?.action ?? finding.status,
-      ...(disposition ? { reason: disposition.why } : {}),
-    });
-  }
+  // Configuration selects coverage, never which retained findings exist. The shared
+  // projection applies the SAME ledger-ordered, content-bound witnessed disposition that
+  // every other restoration path uses: `review.address:import` cycles are repeat
+  // transport and can never witness, so an import cycle cannot lend authority to a
+  // later original finding (Q17b / P1 review of bf3c71d8). Conflicting contents for one
+  // id still fail closed; the raw ledger is never rewritten.
+  const findings = retainedFindings(ledger);
   return {
     debt,
     identity: {
@@ -106,6 +72,6 @@ export async function resolveDeferredVendorContext(
       dirtySha256: state.dirtySha256,
       deferralId: debt.deferral.id,
     },
-    findings: [...findings.values()],
+    findings,
   };
 }
