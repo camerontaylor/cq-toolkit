@@ -1202,14 +1202,19 @@ test('unrelated roots gain no authority and same-identity duplicates become gaps
   );
 });
 
-test('a caller abort between the capture-root read and report dispatch never dispatches it', async () => {
+test('a caller abort before the next wrapped call never dispatches it', async () => {
   const f = await fixture();
   const terminal = terminalReport(f);
   const controller = new AbortController();
-  const reason = new Error('caller cancelled at the report boundary');
+  const reason = new Error('caller cancelled before dispatch');
   let reported = 0;
+  let statused = 0;
   const client = {
     ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      statused += 1;
+      return terminal.client.status();
+    },
     report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
       reported += 1;
       return terminal.client.report(ref, root);
@@ -1222,15 +1227,17 @@ test('a caller abort between the capture-root read and report dispatch never dis
     runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
       const result = await f.effects.runCommand(...call);
       const [command, args] = call;
-      // consumeDeferredVendorReport verifies the local capture root immediately before report.
-      if (command === 'git' && args.includes('--show-toplevel')) controller.abort(reason);
+      // Cancellation lands while the forge identity read is in flight, before any wrapped queue
+      // call is attempted.
+      if (command === 'gh' && args.includes('nameWithOwner')) controller.abort(reason);
       return result;
     },
   };
   await expect(
     loadCurrentDeferredVendorDebt(effects, 'merge-queue', f.state, before, client, controller.signal),
-  ).rejects.toThrow(/caller cancelled at the report boundary/);
-  // The wrapped operation was refused BEFORE dispatch: no report, no ack, no import, no append.
+  ).rejects.toThrow(reason);
+  // The wrapper refuses BEFORE dispatch: no status, no report, no ack, no import, no append.
+  expect(statused).toBe(0);
   expect(reported).toBe(0);
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
   await expect(readdir(evidenceDir)).rejects.toThrow();
