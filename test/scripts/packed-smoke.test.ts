@@ -91,7 +91,10 @@ function installFakeNpm(
     | 'populate-broken-exports'
     | 'populate-missing-bin-cq'
     | 'populate-misrouted-bin-mcp'
-    | 'populate-silent-mcp',
+    | 'populate-silent-mcp'
+    | 'populate-no-integrity'
+    | 'populate-package-integrity'
+    | 'populate-malformed-hidden-lock',
 ): string {
   mkdirSync(binDir, { recursive: true });
   const helper = join(binDir, 'fake-npm-behavior.cjs');
@@ -129,6 +132,12 @@ function installFakeNpm(
     // exports field does not map the root — the bare-specifier SDK import
     // must fail the leg even though the dist file is present.
     'populate-broken-exports': `populate(prefix, ${stubs}); const p = require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/package.json'); const pkg = JSON.parse(require('node:fs').readFileSync(p, 'utf8')); delete pkg.main; pkg.exports = './dist/wrong.js'; require('node:fs').writeFileSync(p, JSON.stringify(pkg));`,
+    // Integrity provenance variants: no source at all (honest null), the
+    // legacy package.json `_integrity` fallback, and a malformed hidden
+    // lockfile that must fall through instead of throwing.
+    'populate-no-integrity': `populate(prefix, ${stubs}); require('node:fs').rmSync(require('node:path').join(prefix, 'node_modules/.package-lock.json'));`,
+    'populate-package-integrity': `populate(prefix, ${stubs}); require('node:fs').rmSync(require('node:path').join(prefix, 'node_modules/.package-lock.json')); const p = require('node:path').join(prefix, 'node_modules/@camerontaylor/cq-toolkit/package.json'); const pkg = JSON.parse(require('node:fs').readFileSync(p, 'utf8')); pkg._integrity = 'sha512-legacy'; require('node:fs').writeFileSync(p, JSON.stringify(pkg));`,
+    'populate-malformed-hidden-lock': `populate(prefix, ${stubs}); require('node:fs').writeFileSync(require('node:path').join(prefix, 'node_modules/.package-lock.json'), '{not json');`,
   };
   writeFileSync(
     helper,
@@ -147,8 +156,14 @@ function installFakeNpm(
       `  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({`,
       `    name: '@camerontaylor/cq-toolkit', version: '9.9.9-fixture',`,
       `    main: './dist/index.js', exports: { '.': './dist/index.js' },`,
-      `    bin: { cq: './dist/cli.js', 'cq-harness-mcp': './dist/harness/mcp/bin.js' },`,
-      `    _integrity: 'sha512-fixture' }));`,
+      `    bin: { cq: './dist/cli.js', 'cq-harness-mcp': './dist/harness/mcp/bin.js' } }));`,
+      // npm v7+ records installed-package integrity in the hidden lockfile,
+      // keyed by the install-root-relative package path — the layout a real
+      // `npm install` produces, and the one the smoke must read.
+      `  fs.writeFileSync(path.join(prefix, 'node_modules/.package-lock.json'), JSON.stringify({`,
+      `    lockfileVersion: 3,`,
+      `    packages: { 'node_modules/@camerontaylor/cq-toolkit': { version: '9.9.9-fixture',`,
+      `      integrity: 'sha512-fixture' } } }));`,
       `  for (const [rel, source] of Object.entries(stubs)) {`,
       `    fs.mkdirSync(path.dirname(path.join(pkg, rel)), { recursive: true });`,
       `    fs.writeFileSync(path.join(pkg, rel), source);`,
@@ -426,6 +441,9 @@ describe('packed-smoke failure paths', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("leg 'cli-bin' failed");
     expect(result.stderr).toContain('bin mapping missing');
+    // This refusal carries no child tails at all; an omitted field must not
+    // interpolate the literal `undefined` into the failure text.
+    expect(result.stderr).not.toContain('undefined');
     expectNoLeftoverPrefixes(dir);
   });
 
@@ -443,6 +461,7 @@ describe('packed-smoke failure paths', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("leg 'mcp-bin' failed");
     expect(result.stderr).toContain('exited early');
+    expect(result.stderr).not.toContain('undefined');
     expectNoLeftoverPrefixes(dir);
   });
 
@@ -476,6 +495,53 @@ describe('packed-smoke failure paths', () => {
   });
 });
 
+describe('packed-smoke installed integrity provenance', () => {
+  function summaryFor(behavior: Parameters<typeof installFakeNpm>[1]): {
+    integrity: string | null;
+    status: number | null;
+    stderr: string;
+  } {
+    const dir = scratch();
+    const tarball = makeTarball(dir);
+    const fake = installFakeNpm(join(dir, 'fake-bin'), behavior);
+    const out = join(dir, 'summary.json');
+    const result = runSmoke([`--tarball=${tarball}`, `--out=${out}`, '--timeout-ms=20000'], {
+      fakeBinDir: fake,
+      tempRoot: dir,
+    });
+    expectNoLeftoverPrefixes(dir);
+    const summary = JSON.parse(readFileSync(out, 'utf8')) as {
+      installed: { integrity: string | null };
+    };
+    return { integrity: summary.installed.integrity, status: result.status, stderr: result.stderr };
+  }
+
+  it('reads integrity from the hidden npm lockfile entry for PKG_DIR', () => {
+    // Covered end-to-end above; pinned here as the provenance contract.
+    expect(summaryFor('populate')).toMatchObject({ integrity: 'sha512-fixture', status: 0 });
+  });
+
+  it('reports null when no install source records integrity', () => {
+    const summary = summaryFor('populate-no-integrity');
+    expect(summary).toMatchObject({ integrity: null, status: 0 });
+    expect(summary.stderr).not.toContain('undefined');
+  });
+
+  it('falls back to the package.json _integrity when the hidden lockfile is absent', () => {
+    expect(summaryFor('populate-package-integrity')).toMatchObject({
+      integrity: 'sha512-legacy',
+      status: 0,
+    });
+  });
+
+  it('ignores a malformed hidden lockfile instead of throwing', () => {
+    expect(summaryFor('populate-malformed-hidden-lock')).toMatchObject({
+      integrity: null,
+      status: 0,
+    });
+  });
+});
+
 describe('packed-smoke happy path over stubs', () => {
   it('passes all legs against a stub-installed package and writes the summary with tarball identity', () => {
     const dir = scratch();
@@ -501,6 +567,8 @@ describe('packed-smoke happy path over stubs', () => {
     expect(summary.tarball.name).toBe('fixture.tgz');
     expect(summary.tarball.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(summary.tarball.bytes).toBeGreaterThan(0);
+    // The stub records integrity ONLY in the hidden npm lockfile, so this
+    // asserts the modern-install provenance path, not a package.json field.
     expect(summary.installed).toEqual({
       name: '@camerontaylor/cq-toolkit',
       version: '9.9.9-fixture',

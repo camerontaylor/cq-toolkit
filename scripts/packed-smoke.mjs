@@ -139,10 +139,17 @@ function runChild(command, args, { cwd, timeoutMs }) {
 async function leg(name, run) {
   const result = await run();
   if (result.ok) return result.value;
+  // Only present, nonempty STRING tails are appended: a leg result that omits
+  // the fields (an early refusal with only a reason) must never interpolate
+  // the literal `undefined` into the failure text.
   const detail = [
     `packed-smoke: leg '${name}' failed: ${result.reason}`,
-    result.stdout === '' ? undefined : `stdout tail:\n${result.stdout}`,
-    result.stderr === '' ? undefined : `stderr tail:\n${result.stderr}`,
+    typeof result.stdout === 'string' && result.stdout !== ''
+      ? `stdout tail:\n${result.stdout}`
+      : undefined,
+    typeof result.stderr === 'string' && result.stderr !== ''
+      ? `stderr tail:\n${result.stderr}`
+      : undefined,
   ]
     .filter(Boolean)
     .join('\n');
@@ -469,6 +476,27 @@ function mcpRoundTrip(bin, manifest, timeoutMs) {
 // Leg 5 — tarball identity + required-artifact scan over the installed tree
 // ---------------------------------------------------------------------------
 
+/**
+ * The installed package's integrity, as the installing npm recorded it. Modern
+ * npm (v7+) keeps it in the hidden `node_modules/.package-lock.json`, keyed by
+ * the install-root-relative package path (= PKG_DIR); older installs and other
+ * package managers may leave it in the package's own package.json. An absent,
+ * malformed or shapeless source yields null — an honest "unavailable", never a
+ * thrown smoke failure and never an invented value.
+ */
+function installedIntegrity(prefix, installedPkg) {
+  try {
+    const lock = JSON.parse(readFileSync(join(prefix, 'node_modules/.package-lock.json'), 'utf8'));
+    const entry = lock?.packages?.[PKG_DIR];
+    if (typeof entry?.integrity === 'string' && entry.integrity !== '') return entry.integrity;
+  } catch {
+    /* no hidden lockfile here (older npm / another layout): fall through */
+  }
+  return typeof installedPkg._integrity === 'string' && installedPkg._integrity !== ''
+    ? installedPkg._integrity
+    : null;
+}
+
 function scanArtifacts(tarball, prefix) {
   const bytes = readFileSync(tarball);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -485,7 +513,7 @@ function scanArtifacts(tarball, prefix) {
     installed: {
       name: installedPkg.name,
       version: installedPkg.version,
-      integrity: installedPkg._integrity ?? null,
+      integrity: installedIntegrity(prefix, installedPkg),
     },
     requiredArtifactsMissing: required,
   };
