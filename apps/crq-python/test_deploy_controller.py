@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -286,6 +287,43 @@ class DrainTests(ControllerFixture):
     def test_missing_queue_entirely_refuses(self):
         with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
             dc.drain_check(self.effects, lambda *a: "harvest")
+
+
+class RunnerProbeTests(ControllerFixture):
+    def write_probe(self, source):
+        (self.runner / "crq.py").write_text(source)
+
+    def test_checkout_runner_and_dependency_ignore_ambient_modules_and_pythonpath(self):
+        (self.runner / "probe_dependency.py").write_text('STATE = "alive"\n')
+        self.write_probe('import probe_dependency\n'
+                         'def run_liveness(*args): return probe_dependency.STATE\n')
+        poison = self.base / "ambient"
+        poison.mkdir()
+        (poison / "probe_dependency.py").write_text('STATE = "harvest"\n')
+        with mock.patch.dict(sys.modules, {"crq": mock.Mock(),
+                                          "probe_dependency": mock.Mock()}):
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(poison)}):
+                probe = dc._runner_liveness(self.effects)
+                self.assertEqual(probe(self.runner / "state/runs/run", {}, {}, True), "alive")
+        self.assertEqual(list(self.runner.rglob("__pycache__")), [])
+
+    def test_missing_or_broken_checkout_import_and_probe_fail_closed(self):
+        probe = dc._runner_liveness(self.effects)
+        self.assertEqual(probe(self.runner / "state/runs/run", {}, {}, True), "ambiguous")
+        for source in ('import missing_checkout_dependency_xyz\n',
+                       'def run_liveness(*args): raise RuntimeError("probe failed")\n',
+                       'def run_liveness(*args): return "unknown"\n',
+                       'def run_liveness(*args): return "harvest"\nprint("noise")\n'):
+            with self.subTest(source=source):
+                self.write_probe(source)
+                self.assertEqual(probe(self.runner / "state/runs/run", {}, {}, True), "ambiguous")
+
+    def test_probe_timeout_and_spawn_failure_are_ambiguous(self):
+        for error in (subprocess.TimeoutExpired("probe", 30), OSError("cannot spawn")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(dc.subprocess, "run", side_effect=error):
+                    self.assertEqual(dc._runner_liveness(self.effects)(
+                        self.runner / "state/runs/run", {}, {}, True), "ambiguous")
 
 
 class PreservationTests(ControllerFixture):
@@ -1081,6 +1119,7 @@ class CliTests(ControllerFixture):
 
     def run_cli(self, *args, env=None):
         merged = dict(os.environ)
+        merged.pop("PYTHONPATH", None)
         if env:
             merged.update(env)
         # The copied helper is imported from the fixture checkout. Prevent
@@ -1093,7 +1132,32 @@ class CliTests(ControllerFixture):
             capture_output=True, text=True, env=merged)
 
     def test_switch_cli_succeeds_with_fake_systemctl_and_emits_json(self):
+        self.switch_cli_fixture()
+
+    def test_switch_cli_drains_real_runner_without_pythonpath(self):
+        self.switch_cli_fixture(recorded_run=True)
+
+    def switch_cli_fixture(self, recorded_run=False):
         self.write_state("queue.json", {"items": [], "starts": []})
+        if recorded_run:
+            # Real probe and dependencies, tracked before the helper clean guard.
+            for name in ("crq.py", "status_summary.py", "repair_tick.py", "coverage.py",
+                         "author_quota.py", "author_lease.py"):
+                shutil.copy(ROOT / name, self.runner / name)
+            shutil.copytree(ROOT / "crq_repair", self.runner / "crq_repair",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            child = subprocess.Popen([sys.executable, "-I", "-B", "-c", "pass"],
+                                     start_new_session=True)
+            self.assertEqual(child.wait(timeout=10), 0)
+            run_id = "pr611-20261028T012345Z"
+            self.write_state("runs/" + run_id + "/exit.json", {"exit": 0})
+            self.write_state("runs/" + run_id + "/review.pid", {
+                "pid": child.pid, "pgid": child.pid, "sid": child.pid,
+                "run_id": run_id, "group_owner": "foreground-v1"})
+            self.write_state("queue.json", {"items": [
+                {"id": "pr611", "run": {"run_id": run_id, "pid": child.pid}}],
+                "starts": []})
+
         # The subprocess cannot inherit this module's POLICY_FLOOR mock, so the
         # fixture copy of the helper pins the fixture baseline directly. The
         # pin commit must contain UNRENDERED committed config, so the helper's
@@ -1106,6 +1170,7 @@ class CliTests(ControllerFixture):
             "POLICY_FLOOR = '" + self.before + "'"))
         # The edited helper bytes must not look like checkout drift: commit the
         # pinned copy into the fixture clone (same content, new commit).
+        self.command("add", "apps/crq-python")
         self.command("commit", "-qam", "fixture floor pin")
         pinned = self.command("rev-parse", "HEAD").strip()
         self.command("update-ref", "refs/remotes/origin/main", pinned)

@@ -489,7 +489,7 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
         effects.record_preflight()
         prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
         plan = {"preflight": pre, "steps": []}
-        drain = drain_check(effects, _runner_liveness(helper_module))
+        drain = drain_check(effects, _runner_liveness(effects))
         plan["steps"].append({"step": "drain", **drain})
         if not drain["drained"]:
             raise Refused("queue-owned reviews alive/ambiguous; drain through the "
@@ -582,20 +582,41 @@ def rollback_target(prior: dict) -> dict:
             "rollback_compatibility": compat}
 
 
-def _runner_liveness(helper_module):
-    """The runner's fail-closed probe (crq.run_liveness), imported from the
-    same checkout as the helper so probe semantics match the deployed runner.
-    Importing crq.py evaluates its deployment config; if that is impossible,
-    drain conservatively refuses: an unverifiable probe is ambiguous by
-    definition, and the operator drains via the documented recovery path."""
-    helper_dir = Path(getattr(helper_module, "__file__", "")).resolve().parent
-    if str(helper_dir) not in sys.path:
-        sys.path.insert(0, str(helper_dir))
-    try:
-        import crq
-    except Exception:  # a broken deployment import must never fake a verdict
-        return _refusing_liveness
-    return crq.run_liveness
+_RUNNER_PROBE = """import importlib.util, json, sys
+from pathlib import Path
+runner = Path(sys.argv[1])
+sys.path.insert(0, str(runner.parent))
+spec = importlib.util.spec_from_file_location("crq", runner)
+module = importlib.util.module_from_spec(spec)
+sys.modules["crq"] = module
+spec.loader.exec_module(module)
+request = json.load(sys.stdin)
+print(json.dumps(module.run_liveness(Path(request["rdir"]), request["item"],
+                                    request["run"], request["has_exit"])))
+"""
+
+
+def _runner_liveness(effects):
+    # A fresh -I interpreter ignores ambient PYTHONPATH, cwd and user site.
+    # Explicit runner source + its directory bind sibling imports without
+    # cached modules. -B preserves the helper's checkout cleanliness fence.
+    runner = effects.root / "apps/crq-python/crq.py"
+
+    def probe(rdir, item, run, has_exit):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", _RUNNER_PROBE, str(runner)],
+                input=json.dumps({"rdir": str(rdir), "item": item,
+                                  "run": run, "has_exit": has_exit}),
+                capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                return "ambiguous"
+            state = json.loads(result.stdout)
+            return state if state in ("alive", "ambiguous", "harvest") else "ambiguous"
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return "ambiguous"
+
+    return probe
 
 
 def _refusing_liveness(*_args, **_kwargs):
@@ -625,7 +646,7 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
                           "cannot provably read; operator recovery required "
                           "(never restore old queue snapshots or start "
                           "incompatible binaries)")
-        drain = drain_check(effects, _runner_liveness(helper_module))
+        drain = drain_check(effects, _runner_liveness(effects))
         if not drain["drained"]:
             raise Refused("cannot roll back with live/ambiguous reviews: "
                           + json.dumps(drain["blocked"])[:400])
