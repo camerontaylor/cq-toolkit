@@ -62,6 +62,9 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
                 findings: [{ severity: 'high', text: 'seeded' }],
               },
               usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+              // Seam v3: this scripted driver models a provider MEASUREMENT, so
+              // the fixture must declare it; absence would count as unknown.
+              usageProvenance: 'measured',
               denials: [],
               toolFailures,
             };
