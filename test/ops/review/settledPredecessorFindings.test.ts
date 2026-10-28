@@ -716,12 +716,13 @@ test('a clean run refuses clean completion while an authorized predecessor oblig
       },
     })),
   } as unknown as DriverFactory;
-  const client: DeferredQueueClient = {
+  const client = {
     ...f.client,
-    status: async (ref) =>
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
       ref.requestId === predecessor.reference.requestId
         ? { ...predecessor.queue, state: 'awaiting-pr', pr: null }
         : successor.queue,
+    report: async (): Promise<QueueEvidence> => evidence,
   };
   const result = await makeReviewRun({
     drivers,

@@ -616,9 +616,8 @@ async function refreshAuthorizedAncestry(
   for (;;) {
     const read = readCurrentEnrollment(expected.ledger, identity, target);
     if (read.kind !== 'enrollment') return;
-    const next = read.enrollment.pendingAncestry.find(
-      (ancestor) => !attempted.has(ancestor.reference.requestId),
-    );
+    const lineageOrder = [...read.enrollment.pendingAncestry].reverse();
+    const next = lineageOrder.find((ancestor) => !attempted.has(ancestor.reference.requestId));
     if (next === undefined) return;
     if (refreshed >= MAX_PREDECESSOR_REFRESHES) return;
     if (ancestryStopped(lifetime)) return;
@@ -666,15 +665,7 @@ export async function loadCurrentDeferredVendorDebt(
     options?.remainingMs,
   );
   try {
-    return await loadCurrentWithLifetime(
-      effects,
-      target,
-      state,
-      ledger,
-      lifetime,
-      boundQueueClient(client ?? makeConfiguredQueueClient(), lifetime),
-      options,
-    );
+    return await loadCurrentWithLifetime(effects, target, state, ledger, lifetime, client, options);
   } finally {
     lifetime.dispose();
   }
@@ -686,11 +677,14 @@ async function loadCurrentWithLifetime(
   state: WorkState,
   ledger: DevLedgerFile,
   lifetime: InvocationLifetime,
-  queue: DeferredQueueClient,
+  client: DeferredQueueClient | undefined,
   options: QueueLineageOptions | undefined,
 ): Promise<DeferredVendorDebt | undefined> {
   const debt = currentLedgerDebt(ledger, target, state);
   if (!debt) return undefined;
+  // Configured only when a debt actually needs the queue: a no-debt readiness read never
+  // requires queue capability. Bounding an already-bounded client is idempotent.
+  const queue = boundQueueClient(client ?? makeConfiguredQueueClient(), lifetime);
   signalCheck(lifetime);
   const repo = await effects.runCommand(
     'gh',

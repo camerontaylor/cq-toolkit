@@ -945,6 +945,8 @@ function pendingTemplate(debt: DeferredVendorDebt): PendingDebt {
 test('a completed predecessor appended after its successor never displaces the current enrollment', async () => {
   const f = await fixture();
   const predecessor = f.debt;
+  // The predecessor's receipt is captured at its own head, before HEAD moves.
+  const terminal = terminalReport(f);
   await f.repo.write('src/a.ts', 'export const a = 2;\n');
   f.repo.git('add', 'src/a.ts');
   f.repo.git('commit', '-qm', 'new head');
@@ -962,9 +964,6 @@ test('a completed predecessor appended after its successor never displaces the c
   const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, client);
   if (!successor) throw new Error('missing successor');
   expect(successor.predecessor).toEqual(predecessor.reference);
-
-  // The predecessor becomes terminal only AFTER its successor is durably enrolled.
-  const terminal = terminalReport(f);
   const terminalClient = {
     ...client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
@@ -1111,6 +1110,7 @@ test('the invocation budget covers current work and fails closed before any pred
 test('a caller abort bounds each RPC and leaves a late terminal value inert', async () => {
   const f = await fixture();
   const predecessor = f.debt;
+  const terminal = terminalReport(f);
   await f.repo.write('src/a.ts', 'export const a = 2;\n');
   f.repo.git('add', 'src/a.ts');
   f.repo.git('commit', '-qm', 'new head');
@@ -1124,7 +1124,6 @@ test('a caller abort bounds each RPC and leaves a late terminal value inert', as
   });
   if (!successor) throw new Error('missing successor');
   const controller = new AbortController();
-  const terminal = terminalReport(f);
   const client = {
     ...f.client,
     status: async (ref: QueueReference): Promise<QueueStatus> => {
