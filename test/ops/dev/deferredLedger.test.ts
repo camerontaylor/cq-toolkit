@@ -1622,7 +1622,8 @@ test('a caller abort after the final ancestor settlement still propagates from l
 });
 
 test('the post-report identity read is clamped to the remaining budget and carries the signal', async () => {
-  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const { f, predecessor, terminal, successorStatus, successor, read } =
+    await successorWithPendingAncestor();
   const client = {
     ...f.client,
     status: async (ref: QueueReference): Promise<QueueStatus> =>
@@ -1631,14 +1632,6 @@ test('the post-report identity read is clamped to the remaining budget and carri
   };
   let imported = false;
   const calls: { command: string; timeoutMs: number; signal: boolean }[] = [];
-  const effects = {
-    ...f.effects,
-    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
-      if (imported) calls.push({ command: call[0], timeoutMs: call[2].timeoutMs, signal: call[2].signal !== undefined });
-      const result = await f.effects.runCommand(...call);
-      return result;
-    },
-  };
   const wrapped = {
     ...effects,
     // Arm the recorder only once the receipt has been imported, i.e. the identity read under test.
