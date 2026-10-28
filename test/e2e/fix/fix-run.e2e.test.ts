@@ -1170,6 +1170,92 @@ test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless 
   }
 });
 
+test('PR summary carries branchless refined rows before finalization (issue 615 #1)', async () => {
+  const f = await fixture(1000);
+  let packageBody = '';
+  try {
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'seed third failing task');
+    const calls: string[] = [];
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (invocation) => {
+            if (!invocation.workspace) throw new Error('fixture requires a workspace');
+            const line = invocation.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            calls.push(task.files[0] ?? '');
+            if (task.files.some((file) => file.includes('a.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/a.test.cjs'),
+                'module.exports = { actual: 1, expected: 1 };\n',
+              );
+            if (task.files.some((file) => file.includes('b.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/b.test.cjs'),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+            return {
+              stopReason: 'complete',
+              denials: [],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              structuredOutput: {
+                outcome: 'broken-test',
+                summary: 'attempt',
+                confidence: 0.8,
+              },
+            };
+          },
+        },
+      }),
+    };
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      budgets?: { run: { maxTokens: number } };
+    };
+    config.budgets = { run: { maxTokens: 5 } };
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure tighter budget');
+    // The predecessor built the Unfixed section from report.planned, which
+    // was empty until finish() — the branchless exhausted row for c and the
+    // never-started remainder were omitted from the uploaded body. The body
+    // must now carry them BEFORE finalization.
+    const result = await makeFixRun({
+      drivers,
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (raw as { packages: Array<{ body?: string }> }).packages;
+                packageBody = packages[0]?.body ?? '';
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(packageBody).toContain('## Unfixed (');
+    expect(packageBody).toContain('`cases/c.test.cjs`');
+    // The retained-branch row still names its local branch in the same body.
+    expect(packageBody).toContain('`cases/b.test.cjs`');
+    expect(packageBody).toContain('local branch `cq/fixture');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test.each(['absolute', 'relative'] as const)(
   'nested check cwd preserves repo-root task identity (%s failure names)',
   async (names) => {
@@ -1297,6 +1383,108 @@ test.each(['active', 'entry', 'after-first'] as const)(
     }
   },
 );
+
+test('cancellation keeps completed unit evidence and one cancelled sibling placeholder (issue 615 #2)', async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let parentSignal: AbortSignal | undefined;
+  let result: Awaited<ReturnType<ReturnType<typeof makeFixRun>>> | undefined;
+  let workerCalls = 0;
+  try {
+    // Two units over one package (two identical checks = two fixers), run
+    // sequentially: the first completes both tasks; the second is cancelled
+    // at its first worker call.
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      checks: unknown[];
+    };
+    config.checks.push({ ...(config.checks[0] as object) });
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure a second unit');
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (_request, options) => {
+            workerCalls++;
+            // Unit tests-1: a(edit,feedback) + b(edit,feedback) = 4 calls.
+            if (workerCalls <= 4) {
+              const settled = await scripted()
+                .resolve({ role: 'fixer', modelSpec })
+                .driver.run(_request, options);
+              // Abort after unit tests-1's last call settles, so unit
+              // tests-2 sees the cancellation at its task-loop top.
+              if (workerCalls === 4) controller.abort();
+              return settled;
+            }
+            const signal = options?.signal;
+            if (!signal) throw new Error('missing inner worker signal');
+            return {
+              stopReason: 'aborted',
+              denials: [],
+              usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+              wallMs: 0,
+            };
+          },
+        },
+      }),
+    };
+    const entry: OpRegistryEntry = {
+      name: 'fixture.fix',
+      inputSchema: z.object({}),
+      importer: async () => async () => {
+        parentSignal = currentJobContext()?.signal;
+        result = await makeFixRun({ drivers })({
+          repoRoot: f.repo,
+          source: 'tests',
+          selector: { mode: 'workspace-all' },
+          journalDir: f.journalDir,
+          push: true,
+        });
+        return { status: 'ok', value: 'settled' };
+      },
+    };
+    await runPlan(
+      { id: 'enclosing', jobs: [{ id: 'fix', op: entry.name, input: {} }] },
+      { concurrency: 1, stopOnError: false },
+      { get: () => entry as unknown as OpRegistryEntry<never, never> },
+      {
+        governor: createGovernor({ maxTokens: 1000 }),
+        signal: controller.signal,
+        allowAdvisory: true,
+      },
+    );
+    expect(parentSignal?.aborted).toBe(true);
+    expect(result?.status).toBe('needs-human');
+    const report = result?.report;
+    expect(report).toBeDefined();
+    if (!report) throw new Error('unreachable');
+    // The completed unit's real evidence survives untouched.
+    const fixedRows = report.planned.filter((row) => row.outcome === 'fixed');
+    expect(fixedRows).toHaveLength(2);
+    for (const row of fixedRows) {
+      expect(row.commits).toHaveLength(1);
+      expect(row.unit).toBe('tests-1/scratch-repo');
+    }
+    // The cancelled unit keeps its real planned rows (a, b) refined to
+    // cancelled — no false never-started placeholder beside them.
+    const cancelledRows = report.planned.filter((row) => row.outcome === 'cancelled');
+    expect(cancelledRows.map((row) => row.task.id).toSorted()).toEqual([
+      'cases/a.test.cjs',
+      'cases/b.test.cjs',
+    ]);
+    for (const row of cancelledRows) expect(row.unit).toBe('tests-2/scratch-repo');
+    const neverStarted = report.planned.filter((row) => row.outcome === 'not-started');
+    expect(neverStarted).toEqual([]);
+    // Distinct identities: every (unit, task) pair appears once.
+    const plannedIds = report.planned.map((row) => `${row.unit}\n${row.task.id}`);
+    expect(new Set(plannedIds).size).toBe(plannedIds.length);
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 
 test.each(['missing-policy', 'scanner-fault'] as const)(
   'real scanner composition refuses %s before worker dispatch',
@@ -1479,6 +1667,63 @@ test.each([
         JSON.stringify({ argv, exit, artifact }, null, 2) + '\n',
       );
     }
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('pre-task unit failure fallback keeps collision-resolved plan segments (issue 615 #3)', async () => {
+  const f = await fixture();
+  try {
+    // Two packages whose normalized slugs collide: 'scratch-repo' and
+    // 'scratch.repo' both derive slug 'scratch-repo', so the plan builder
+    // resolves the second unit to 'scratch-repo-2' and ships kind/slug on
+    // its dispatch. The check script faults (invalid JSON) only inside the
+    // second unit's worktree — its path carries the resolved slug — so that
+    // unit fails at its baseline probe, before deriving any tasks.
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      packages?: Array<{ name: string; path: string }>;
+      checks: Array<{
+        kind?: string;
+        adapter: string;
+        command: { command: string; args: string[] };
+      }>;
+    };
+    config.packages = [
+      { name: 'scratch-repo', path: '.' },
+      { name: 'scratch.repo', path: '.' },
+    ];
+    const script = config.checks[0]!;
+    config.checks[0] = {
+      adapter: 'vitest-json',
+      command: {
+        command: '/bin/sh',
+        args: [
+          '-c',
+          `if [ "$(basename "$(pwd)")" = "scratch-repo-2" ]; then echo '{invalid'; exit 1; fi; "${script.command.command}" "${script.command.args.join('" "')}"`,
+        ],
+      },
+    };
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure colliding packages and probe fault');
+    const result = await makeFixRun({ drivers: scripted() })({ ...input(f) });
+    expect(result.status, JSON.stringify(result)).toBe('failed');
+    const report = reportOf(result);
+    // Unit 1 completed with its real task rows on the base identity.
+    const unit1 = report.planned.filter((row) => row.unit === 'tests-1/scratch-repo');
+    expect(unit1.map((row) => row.outcome).toSorted()).toEqual(['fixed', 'fixed']);
+    // The failed second unit's fallback row carries the SHIPPED segments:
+    // branch and unit label end in the resolved slug, not the collided fold.
+    const fallback = report.planned.find((row) => row.unit === 'tests-1/scratch-repo-2');
+    expect(fallback).toBeDefined();
+    expect(fallback?.branch).toBe('cq/fixture/tests-1/scratch-repo-2');
+    expect(fallback?.outcome).toBe('not-started');
+    expect(fallback?.failures[0]?.branch).toBeUndefined();
+    // Distinct identities: the fallback never shares unit1's identity.
+    const identities = report.planned.map((row) => `${row.unit}\n${row.task.id}`);
+    expect(new Set(identities).size).toBe(identities.length);
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
