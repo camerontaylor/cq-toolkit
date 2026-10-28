@@ -29,6 +29,8 @@ afterEach(async () => {
 async function fixture() {
   const repo = await makeTestRepo();
   repos.push(repo);
+  // Keep runtime evidence out of the changed-head source commit.
+  await repo.write('.gitignore', '/.cq/\n');
   await repo.write('package.json', JSON.stringify({ name: 'settled-fixture' }));
   await repo.write(
     'cq.json',
