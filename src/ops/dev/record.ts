@@ -1012,6 +1012,10 @@ export function assembleReadiness(
         (record): record is DevReuseRecord =>
           record.kind === 'reuse' && record.basis === 'no-fresh-tail',
       ) ?? null;
+  // The row that actually resolves this readiness, set ONLY where the linkage
+  // is validated below: the ready record attributes this row, so attribution
+  // can never rest on a second, divergent predicate.
+  let resolvedNoFreshReuse: DevReuseRecord | undefined;
   if (
     latestAttempt !== undefined &&
     latestAttempt.completion.kind === 'blocked' &&
@@ -1042,12 +1046,29 @@ export function assembleReadiness(
         entry.head === latestAttempt.head &&
         entry.dirtySha256 === latestAttempt.dirtySha256,
     );
-    const anchorIndex =
-      cycle === undefined
+    // The persisted reuse resolves against the terminal cycle IT NAMES — the
+    // blocked attempt's own reviewer at the exact request identity — not the
+    // global readiness anchor, which may be another configured reviewer's
+    // later terminal (PR580 thread 4394615080, tracking #593). The global
+    // anchor keeps its coverage role on the ready record below and must still
+    // exist; it just may not stand in for a different reviewer's evidence.
+    const referencedIndex =
+      noFreshReuse === null
         ? -1
-        : identityCycles.findIndex((entry) => entry.cycleId === cycle.cycleId);
+        : identityCycles.findIndex(
+            (entry) =>
+              entry.cycleId === noFreshReuse.cycleId &&
+              entry.completion.kind === 'terminal' &&
+              entry.vendorFailure === undefined,
+          );
+    const tailIndex = identityCycles.findIndex((entry) => entry.cycleId === latestAttempt.cycleId);
+    // The full-tail proof stays (Q6 #485 / 70601ab1): every same-reviewer
+    // same-identity attempt AFTER the referenced terminal — the blocked tail
+    // included — must be an eligible affirmative no-fresh notice.
     const resolvedTailIsEligible =
-      anchorIndex >= 0 && identityCycles.slice(anchorIndex + 1).every(isAffirmativeNoFreshAttempt);
+      referencedIndex >= 0 &&
+      tailIndex > referencedIndex &&
+      identityCycles.slice(referencedIndex + 1).every(isAffirmativeNoFreshAttempt);
     const reuseResolves =
       sameRequest &&
       latestAttempt.scope === 'full' &&
@@ -1063,13 +1084,14 @@ export function assembleReadiness(
       noFreshReuse.base === identity.base &&
       noFreshReuse.dirtySha256 === identity.dirtySha256 &&
       ledger.records.indexOf(noFreshReuse) > ledger.records.indexOf(latestAttempt) &&
-      cycle !== undefined &&
-      noFreshReuse.cycleId === cycle.cycleId;
+      cycle !== undefined;
     if (!reuseResolves) {
       gaps.push({
         field: 'latest-review-blocked',
         detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
       });
+    } else if (noFreshReuse !== null) {
+      resolvedNoFreshReuse = noFreshReuse;
     }
   }
 
@@ -1124,15 +1146,6 @@ export function assembleReadiness(
     }
     return { ready: false, gaps };
   }
-  const noFreshReuseFinal = [...ledger.records]
-    .reverse()
-    .find(
-      (record): record is DevReuseRecord =>
-        record.kind === 'reuse' &&
-        record.basis === 'no-fresh-tail' &&
-        record.resolvesCycleId === latestAttempt?.cycleId &&
-        record.cycleId === cycle.cycleId,
-    );
   const readyRecord: DevReadinessRecord = {
     ready: true,
     evidenceClass: 'author',
@@ -1145,7 +1158,7 @@ export function assembleReadiness(
     cycleId: cycle.cycleId,
     reviewer: cycle.reviewer,
     ...(debtValid ? { vendorDebt: debt } : {}),
-    ...(noFreshReuseFinal === undefined ? {} : { reuse: noFreshReuseFinal.reuseId }),
+    ...(resolvedNoFreshReuse === undefined ? {} : { reuse: resolvedNoFreshReuse.reuseId }),
     checkId: check.checkId,
     at: input.nowIso,
   };

@@ -826,6 +826,27 @@ describe('findReusableCycle', () => {
       cycle: { cycleId: 'c003-aaaaaaaa' },
     });
   });
+  test('a later AGENT terminal does not disturb the CodeRabbit reuse pair (70601 tail rule intact)', () => {
+    // A(CodeRabbit terminal) -> B(agent terminal) -> C(CodeRabbit affirmative
+    // no-fresh): the selector's identity includes the reviewer, so B is neither
+    // proof nor blocker for this request and the CodeRabbit pair stays A -> C.
+    const selection = findReusableCycle(
+      [
+        cycleRecord(),
+        cycleRecord({ cycleId: 'c002-aaaaaaaa', reviewer: 'agent:reviewer' }),
+        cycleRecord({
+          cycleId: 'c003-aaaaaaaa',
+          completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        }),
+      ],
+      REQUEST,
+    );
+    expect(selection).toMatchObject({
+      basis: 'no-fresh-tail',
+      cycle: { cycleId: 'c001-aaaaaaaa' },
+      resolvesCycleId: 'c003-aaaaaaaa',
+    });
+  });
 });
 
 describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
@@ -947,6 +968,165 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
     ]);
     expect(result.ready).toBe(true);
     if (result.ready) expect(result.record.cycleId).toBe('c003-aaaaaaaa');
+  });
+
+  test('a CR terminal, a later AGENT terminal, then a CR no-fresh tail: the referenced reuse settles ready on the global anchor', () => {
+    // PR580 thread 4394615080 / #593: the persisted reuse is validated against
+    // the terminal IT names (CodeRabbit A), not the global readiness anchor
+    // (agent B) — while the ready record still reports B as its coverage
+    // anchor and the reuse row as its reuse evidence.
+    const result = assemble([
+      cycleRecord(),
+      cycleRecord({ cycleId: 'c002-aaaaaaaa', reviewer: 'agent:reviewer' }),
+      cycleRecord({
+        cycleId: 'c003-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(true);
+    if (result.ready) {
+      expect(result.record.cycleId).toBe('c002-aaaaaaaa');
+      expect(result.record.reviewer).toBe('agent:reviewer');
+      expect(result.record.reuse).toBe('r001-aaaaaaaa');
+    }
+  });
+
+  test('an AGENT blocked attempt between CR efforts does not pollute the same-reviewer tail', () => {
+    // A(CR) -> B(agent blocked error) -> C(CR no-fresh): B is not a terminal and
+    // not a CodeRabbit attempt, so the CodeRabbit tail is only C and the reuse
+    // still resolves. A genuine CodeRabbit blocker in that position refuses.
+    const result = assemble([
+      cycleRecord(),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        reviewer: 'agent:reviewer',
+        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+      }),
+      cycleRecord({
+        cycleId: 'c003-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(true);
+    if (result.ready) {
+      expect(result.record.cycleId).toBe('c001-aaaaaaaa');
+      expect(result.record.reuse).toBe('r001-aaaaaaaa');
+    }
+  });
+
+  test('interleaved CodeRabbit no-fresh tails around a later AGENT terminal stay resolvable', () => {
+    // A(CR) -> C1(CR no-fresh) -> B(agent terminal) -> C2(CR no-fresh): the
+    // same-reviewer tail is [C1, C2], both eligible, resolved by naming C2.
+    const result = assemble([
+      cycleRecord(),
+      cycleRecord({
+        cycleId: 'c002-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+      cycleRecord({ cycleId: 'c003-aaaaaaaa', reviewer: 'agent:reviewer' }),
+      cycleRecord({
+        cycleId: 'c004-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      }),
+      reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c004-aaaaaaaa' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(true);
+    if (result.ready) {
+      expect(result.record.cycleId).toBe('c003-aaaaaaaa');
+      expect(result.record.reuse).toBe('r001-aaaaaaaa');
+    }
+  });
+
+  test('a referenced anchor that is not the tail reviewer terminal at this identity never resolves', () => {
+    const agentTerminal = () =>
+      cycleRecord({ cycleId: 'c002-aaaaaaaa', reviewer: 'agent:reviewer' });
+    const crTail = () =>
+      cycleRecord({
+        cycleId: 'c003-aaaaaaaa',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+      });
+    const notReady = (records: Parameters<typeof assemble>[0], label: string) => {
+      const result = assemble(records);
+      expect(result.ready, label).toBe(false);
+      if (result.ready) return undefined;
+      return result.gaps;
+    };
+    const namesMissing = notReady(
+      [
+        cycleRecord(),
+        agentTerminal(),
+        crTail(),
+        reuseRecord({
+          basis: 'no-fresh-tail',
+          resolvesCycleId: 'c003-aaaaaaaa',
+          cycleId: 'c099-aaaaaaaa',
+        }),
+        checkRecord(),
+      ],
+      'missing referenced cycle',
+    );
+    expect(namesMissing?.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+
+    const namesTail = notReady(
+      [
+        cycleRecord(),
+        agentTerminal(),
+        crTail(),
+        reuseRecord({
+          basis: 'no-fresh-tail',
+          resolvesCycleId: 'c003-aaaaaaaa',
+          cycleId: 'c003-aaaaaaaa',
+        }),
+        checkRecord(),
+      ],
+      'referenced cycle is the blocked tail itself',
+    );
+    expect(namesTail?.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+
+    const namesAgent = notReady(
+      [
+        cycleRecord(),
+        agentTerminal(),
+        crTail(),
+        reuseRecord({
+          basis: 'no-fresh-tail',
+          resolvesCycleId: 'c003-aaaaaaaa',
+          cycleId: 'c002-aaaaaaaa',
+        }),
+        checkRecord(),
+      ],
+      'referenced cycle is the other reviewer terminal',
+    );
+    expect(namesAgent?.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+
+    const namesOtherHead = notReady(
+      [
+        cycleRecord({ cycleId: 'c001-aaaaaaaa', head: 'd'.repeat(40) }),
+        agentTerminal(),
+        crTail(),
+        reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+        checkRecord(),
+      ],
+      'referenced terminal at another head',
+    );
+    expect(namesOtherHead?.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
+
+    const rowBeforeTail = notReady(
+      [
+        cycleRecord(),
+        agentTerminal(),
+        reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c003-aaaaaaaa' }),
+        crTail(),
+        checkRecord(),
+      ],
+      'reuse row ordered before the tail it resolves',
+    );
+    expect(rowBeforeTail?.some((gap) => gap.field === 'latest-review-blocked')).toBe(true);
   });
 
   test('a resolution record that names the WRONG tail or wrong anchor never resolves', () => {
