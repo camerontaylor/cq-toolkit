@@ -1631,12 +1631,21 @@ test('the post-report identity read is clamped to the remaining budget and carri
     report: terminal.client.report,
   };
   let imported = false;
+  let inIdentityRead = false;
   const calls: { command: string; timeoutMs: number; signal: boolean }[] = [];
   const wrapped = {
     ...f.effects,
     // Arm the recorder only once the receipt has been imported, i.e. the identity read under test.
     runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
-      if (imported) calls.push({ command: call[0], timeoutMs: call[2].timeoutMs, signal: call[2].signal !== undefined });
+      // The bounded window starts at the identity read's first command (`symbolic-ref`); the
+      // receipt import's own 30 s commands are outside it.
+      if (imported && (inIdentityRead || call[1].includes('symbolic-ref'))) inIdentityRead = true;
+      if (imported && inIdentityRead)
+        calls.push({
+          command: call[0],
+          timeoutMs: call[2].timeoutMs,
+          signal: call[2].signal !== undefined,
+        });
       const result = await f.effects.runCommand(...call);
       return result;
     },
