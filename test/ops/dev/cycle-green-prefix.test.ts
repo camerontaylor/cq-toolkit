@@ -90,6 +90,19 @@ interface Scenario {
   push?: boolean;
   /** Advance Date.now by this much during the red final check. */
   finalCheckMs?: number;
+  /** Runs at the start of the red final check, with the addressed head. */
+  beforeFinal?: (T: string) => void;
+  /** Use the DEFAULT probe check leg (no checkIn), with these scanner deps. */
+  defaultProbeCheck?: {
+    scanSecrets?: true;
+    scanSecretsFor?: (root: string) => never;
+  };
+  /** Advance Date.now by this much inside each (green) probe. */
+  probeAdvanceMs?: number;
+  /** The remote reports another head after the push (verification fails). */
+  remoteMismatch?: boolean;
+  /** The probe check throws. */
+  probeThrows?: string;
 }
 
 async function run(scenario: Scenario) {
@@ -120,6 +133,7 @@ async function run(scenario: Scenario) {
     check: async () => {
       authorChecks += 1;
       if (authorChecks === 1) return scriptedCheck(author, true, 'k001-open');
+      scenario.beforeFinal?.(commits.at(-1)!);
       if (scenario.finalCheckMs !== undefined) {
         const now = Date.now();
         vi.spyOn(Date, 'now').mockReturnValue(now + scenario.finalCheckMs);
@@ -212,7 +226,11 @@ async function run(scenario: Scenario) {
         pushedSha = args.at(-1)!.split(':')[0];
         return { code: 0, stdout: '', stderr: '' };
       }
-      return { code: 0, stdout: `${pushedSha ?? ''}\trefs/heads/x\n`, stderr: '' };
+      return {
+        code: 0,
+        stdout: `${scenario.remoteMismatch === true ? 'f'.repeat(40) : (pushedSha ?? '')}\trefs/heads/x\n`,
+        stderr: '',
+      };
     },
     effectsFor: (root) => makeSubprocessDevEffects(root),
     ...(scenario.installDeps === null
@@ -224,18 +242,38 @@ async function run(scenario: Scenario) {
               installs.push(root);
             }),
         }),
-    checkIn: (effects, root) => async () => {
-      probeRoots.push(root);
-      if (scenario.probeFault !== undefined)
-        return { status: 'needs-human', reason: scenario.probeFault };
-      const read = await readWorkState(effects, { target: 'merge-queue' });
-      if (!read.ok) throw new Error(read.reason);
-      return scriptedCheck(
-        effects,
-        verdicts.get(read.state.head) === true,
-        `k-probe-${read.state.head.slice(0, 8)}`,
-      );
-    },
+    ...(scenario.defaultProbeCheck?.scanSecrets === true
+      ? { scanSecrets: (async () => ({ ok: true, findings: [] })) as never }
+      : {}),
+    ...(scenario.defaultProbeCheck?.scanSecretsFor === undefined
+      ? {}
+      : {
+          scanSecretsFor: (root: string) => {
+            probeRoots.push(root);
+            return scenario.defaultProbeCheck!.scanSecretsFor!(root);
+          },
+        }),
+    ...(scenario.defaultProbeCheck !== undefined
+      ? {}
+      : {
+          checkIn: (effects: DevEffects, root: string) => async () => {
+            probeRoots.push(root);
+            if (scenario.probeThrows !== undefined) throw new Error(scenario.probeThrows);
+            if (scenario.probeFault !== undefined)
+              return { status: 'needs-human', reason: scenario.probeFault };
+            const read = await readWorkState(effects, { target: 'merge-queue' });
+            if (!read.ok) throw new Error(read.reason);
+            if (scenario.probeAdvanceMs !== undefined) {
+              const now = Date.now();
+              vi.spyOn(Date, 'now').mockReturnValue(now + scenario.probeAdvanceMs);
+            }
+            return scriptedCheck(
+              effects,
+              verdicts.get(read.state.head) === true,
+              `k-probe-${read.state.head.slice(0, 8)}`,
+            );
+          },
+        }),
     openIn: (effects, root) => async (input) => {
       opens.push({ input, root });
       const read = await readWorkState(effects, { target: 'merge-queue' });
@@ -412,6 +450,90 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     }
     expect(r.opens).toEqual([]);
     expectAuthorUntouched(r);
+  });
+
+  test('an existing publication branch is refused and left untouched (never deleted)', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      beforeFinal: (T) => {
+        repo.git('branch', `${BRANCH}-cq-green-${T.slice(0, 12)}`, T);
+      },
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') expect(r.result.error).toContain('already exists');
+    expect(repo.git('rev-parse', `refs/heads/${r.pub}`).trim()).toBe(r.T);
+    expect(r.installs).toEqual([]);
+    expect(r.probeRoots).toEqual([]);
+    expect(r.opens).toEqual([]);
+  });
+
+  test('without a scanner bound to the probe root, the author scanner is never reused: no probe certifies', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      defaultProbeCheck: { scanSecrets: true },
+    });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('no secret scanner could be bound to the probe worktree');
+    expect(r.opens).toEqual([]);
+    expectAuthorUntouched(r);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('the probe scanner is built from the PROBE root; a throw there releases the worktree and branch', async () => {
+    const r = await run({
+      greens: [true, false],
+      stop: 'budget',
+      defaultProbeCheck: {
+        scanSecrets: true,
+        scanSecretsFor: () => {
+          throw new Error('candidate cq.json unreadable');
+        },
+      },
+    });
+    expect(r.probeRoots).toEqual([r.probeDir]);
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('the probe phase threw — candidate cq.json unreadable');
+    expectAuthorUntouched(r);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('a thrown probe check releases the worktree and branch with attribution', async () => {
+    const r = await run({ greens: [true, false], stop: 'budget', probeThrows: 'ledger corrupt' });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed')
+      expect(r.result.error).toContain('the probe phase threw — ledger corrupt');
+    expectAuthorUntouched(r);
+    expect(repo.git('branch', '--list', r.pub).trim()).toBe('');
+  });
+
+  test('a green probe that overruns the reserve publishes nothing', async () => {
+    const r = await run({ greens: [true, false], stop: 'budget', probeAdvanceMs: 60 * 60 * 1000 });
+    expect(r.result.status).toBe('failed');
+    if (r.result.status === 'failed') {
+      expect(r.result.error).toContain('the probes overran the reserve');
+      expect(r.result.error).toContain('nothing published');
+    }
+    expect(r.pushes.filter((args) => args.includes('push'))).toEqual([]);
+    expect(r.opens).toEqual([]);
+    expectAuthorUntouched(r);
+  });
+
+  test('a push whose remote verification fails keeps the local publication branch', async () => {
+    const r = await run({ greens: [true, false], stop: 'budget', remoteMismatch: true });
+    expect(r.result.status).toBe('needs-human');
+    if (r.result.status === 'needs-human') {
+      expect(r.result.reason).toMatch(/^dev\.cycle \(push\): /);
+      expect(r.result.reason).toContain(
+        `the remote may carry '${r.pub}', and the local branch is kept`,
+      );
+    }
+    expect(r.opens).toEqual([]);
+    expect(repo.git('rev-parse', `refs/heads/${r.pub}`).trim()).toBe(r.commits[0]);
+    expect(existsSync(r.probeDir)).toBe(false);
   });
 
   test('an install failure publishes nothing and removes the worktree', async () => {

@@ -370,6 +370,16 @@ export interface DevCycleDeps {
    * for environmental reasons.
    */
   installDeps?: (root: string, signal: AbortSignal) => Promise<void>;
+  /**
+   * #536: the secret scanner for a probe worktree, built from THAT checkout's
+   * own configuration (the registry's portable scanner over the given root).
+   * When the author's check scans with `scanSecrets` but this is absent, the
+   * fallback cannot probe (a probe never runs under another tree's rules).
+   */
+  scanSecretsFor?: (
+    root: string,
+    effects: DevEffects,
+  ) => DiffSecretScanner | undefined | Promise<DiffSecretScanner | undefined>;
   /** #536: the probe worktree's check leg (default: makeDevCheck over its effects). */
   checkIn?: (
     effects: DevEffects,
@@ -689,7 +699,17 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         firstCheck.status !== 'ok'
       )
         return verbatim;
-      const outcome = await publishGreenPrefix(report, redMs, firstCheck.value.head);
+      let outcome: Awaited<ReturnType<typeof publishGreenPrefix>>;
+      try {
+        outcome = await publishGreenPrefix(report, redMs, firstCheck.value.head);
+      } catch (err) {
+        // A fault before any probe resource existed (the owned phase has its
+        // own release): the red result stands, with the fault named.
+        return {
+          status: 'failed',
+          error: `${verbatim.error} — the green-prefix fallback faulted before probing: ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
+        };
+      }
       if (outcome.kind === 'skip') return verbatim;
       if (outcome.kind === 'published') return outcome.result;
       return { status: 'failed', error: `${verbatim.error} — ${outcome.attribution}` };
@@ -767,8 +787,7 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
           : cycleStarted + policy.runWallMs;
       const probeCost = Math.ceil(redMs * 1.25);
       const left = () => deadline - Date.now() - GREEN_PREFIX_PUBLICATION_MARGIN_MS;
-      const installMs = Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost);
-      if (installMs <= 0)
+      if (Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost) <= 0)
         return {
           kind: 'none',
           attribution: `no green-prefix publication: the reserve (${String(Math.max(0, left()))}ms after the publication margin) cannot cover a worktree setup and one ${String(probeCost)}ms probe`,
@@ -779,184 +798,272 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         '.cq-dev-cycle-probes',
         `${basename(input.repoRoot)}-${T.slice(0, 12)}`,
       );
+      const authorBranch = author.state.branch;
       const pub = `${author.state.branch}-cq-green-${T.slice(0, 12)}`;
-      let published = false;
-      let worktreeAdded = false;
-      const finishWith = async <R>(
-        value: R,
-      ): Promise<R | { kind: 'none'; attribution: string }> => {
-        // Clean up OUR worktree and (unless published) OUR branch; a failed
-        // cleanup is reported, never retried or widened.
-        const faults: string[] = [];
-        if (worktreeAdded) {
-          const removed = await gitAt(['worktree', 'remove', '--force', tmp]);
-          if (removed.exitCode !== 0)
-            faults.push(`worktree remove ${tmp} failed: ${removed.stderr.trim().slice(0, 300)}`);
-        }
-        if (!published) {
-          const deleted = await gitAt(['branch', '-D', pub]);
-          if (deleted.exitCode !== 0 && worktreeAdded)
-            faults.push(`branch -D ${pub} failed: ${deleted.stderr.trim().slice(0, 300)}`);
-        }
-        if (faults.length === 0) return value;
-        const note = `; probe cleanup: ${faults.join('; ')}`;
-        if (typeof value === 'object' && value !== null && 'attribution' in value)
-          return { kind: 'none', attribution: `${String(value.attribution)}${note}` };
-        if (typeof value === 'object' && value !== null && 'result' in value) {
-          const result = value.result as OpResult<never>;
-          if (result.status === 'needs-human')
-            return { ...value, result: { ...result, reason: `${result.reason}${note}` } };
-        }
-        return value;
-      };
+      const branchExists = async () =>
+        (await gitAt(['show-ref', '--verify', '--quiet', `refs/heads/${pub}`])).exitCode === 0;
+      // A pre-existing branch of this name (an earlier publication for this
+      // tip, or anything else) is refused and NEVER touched.
+      if (await branchExists())
+        return {
+          kind: 'none',
+          attribution: `no green-prefix publication: the publication branch '${pub}' already exists (an earlier publication for this tip?) — it is left untouched`,
+        };
 
-      const added = await gitAt(['worktree', 'add', '-b', pub, tmp, candidates[0]!]);
-      if (added.exitCode !== 0)
-        return finishWith({
-          kind: 'none' as const,
-          attribution: `no green-prefix publication: the probe worktree could not be created — ${added.stderr.trim().slice(0, 300)}`,
-        });
-      worktreeAdded = true;
+      // The owned lifetime: everything this run creates (the worktree, the
+      // branch) is released in the finally below, whatever returns or throws.
+      let worktreeAdded = false;
+      // Set only for a branch THIS run created.
+      let branchOwned = false;
+      // Set once a push of the branch was ATTEMPTED: the remote may carry it
+      // even when verification failed, so the local branch is then kept.
+      let pushAttempted = false;
+      const setupStarted = Date.now();
+      const releaseFaults: string[] = [];
+      let outcome:
+        | { kind: 'none'; attribution: string }
+        | { kind: 'published'; result: OpResult<never> };
       try {
-        await installDeps(tmp, AbortSignal.timeout(installMs));
+        outcome = await probeAndPublish();
       } catch (err) {
-        return finishWith({
-          kind: 'none' as const,
-          attribution: `no green-prefix publication: the probe worktree's dependency install failed — ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
-        });
-      }
-      const tmpEffects = (deps.effectsFor ?? makeSubprocessDevEffects)(tmp);
-      const probeCheck = (deps.checkIn ?? ((effects) => makeDevCheck(effects, deps.scanSecrets)))(
-        tmpEffects,
-        tmp,
-      );
-      const scan = await scanNewestFirst(
-        candidates,
-        async (commit): Promise<GreenPrefixProbe> => {
-          if (commit !== candidates[0]) {
-            const moved = await deps.effects.runCommand(
-              'git',
-              ['-C', tmp, 'checkout', '--quiet', '-B', pub, commit],
-              { timeoutMs: 60_000 },
+        const text = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+        outcome = pushAttempted
+          ? {
+              kind: 'published',
+              result: {
+                status: 'needs-human',
+                reason: `dev.cycle (green prefix): the push of '${pub}' was attempted, then the publication threw — ${text}; the remote may carry '${pub}', and the local branch is kept`,
+              },
+            }
+          : {
+              kind: 'none',
+              attribution: `no green-prefix publication: the probe phase threw — ${text}`,
+            };
+      } finally {
+        // Release OUR worktree and (unless a push was attempted) OUR branch.
+        // A failed release is reported below, never retried or widened.
+        if (worktreeAdded) {
+          const removed = await gitAt(['worktree', 'remove', '--force', tmp]).catch(
+            (err: unknown) => ({ exitCode: -1, stderr: String(err) }),
+          );
+          if (removed.exitCode !== 0)
+            releaseFaults.push(
+              `worktree remove ${tmp} failed: ${removed.stderr.trim().slice(0, 300)}`,
             );
-            if (moved.exitCode !== 0)
+        }
+        if (branchOwned && !pushAttempted) {
+          const deleted = await gitAt(['branch', '-D', pub]).catch((err: unknown) => ({
+            exitCode: -1,
+            stderr: String(err),
+          }));
+          if (deleted.exitCode !== 0)
+            releaseFaults.push(`branch -D ${pub} failed: ${deleted.stderr.trim().slice(0, 300)}`);
+        }
+      }
+      if (releaseFaults.length === 0) return outcome;
+      const note = `; probe cleanup: ${releaseFaults.join('; ')}`;
+      if (outcome.kind === 'none')
+        return { kind: 'none', attribution: `${outcome.attribution}${note}` };
+      const result = outcome.result;
+      if (result.status === 'needs-human')
+        return { kind: 'published', result: { ...result, reason: `${result.reason}${note}` } };
+      if (result.status === 'failed')
+        return { kind: 'published', result: { ...result, error: `${result.error}${note}` } };
+      if (result.status === 'indeterminate')
+        return { kind: 'published', result: { ...result, detail: `${result.detail}${note}` } };
+      return outcome;
+
+      async function probeAndPublish(): Promise<
+        { kind: 'none'; attribution: string } | { kind: 'published'; result: OpResult<never> }
+      > {
+        const added = await gitAt(['worktree', 'add', '-b', pub, tmp, candidates[0]!]);
+        // The branch was absent a moment ago: if it exists now, this run made it.
+        branchOwned = added.exitCode === 0 || (await branchExists());
+        if (added.exitCode !== 0)
+          return {
+            kind: 'none',
+            attribution: `no green-prefix publication: the probe worktree could not be created — ${added.stderr.trim().slice(0, 300)}`,
+          };
+        worktreeAdded = true;
+        // The install gets what the reserve leaves after the setup actually
+        // spent and one probe (the estimate is re-taken, never the old figure).
+        const installMs = Math.min(GREEN_PREFIX_INSTALL_TIMEOUT_MS, left() - probeCost);
+        if (installMs <= 0)
+          return {
+            kind: 'none',
+            attribution: `no green-prefix publication: after the ${String(Date.now() - setupStarted)}ms worktree setup the reserve no longer covers an install and one ${String(probeCost)}ms probe`,
+          };
+        try {
+          await installDeps(tmp, AbortSignal.timeout(installMs));
+        } catch (err) {
+          return {
+            kind: 'none',
+            attribution: `no green-prefix publication: the probe worktree's dependency install failed — ${(err instanceof Error ? err.message : String(err)).slice(0, 300)}`,
+          };
+        }
+        const tmpEffects = (deps.effectsFor ?? makeSubprocessDevEffects)(tmp);
+        const scan = await scanNewestFirst(
+          candidates,
+          async (commit): Promise<GreenPrefixProbe> => {
+            if (commit !== candidates[0]) {
+              const moved = await deps.effects.runCommand(
+                'git',
+                ['-C', tmp, 'checkout', '--quiet', '-B', pub, commit],
+                { timeoutMs: 60_000 },
+              );
+              if (moved.exitCode !== 0)
+                return {
+                  commit,
+                  verdict: 'fault',
+                  detail: `checkout failed: ${moved.stderr.trim().slice(0, 300)}`,
+                };
+            }
+            // A FRESH check leg per candidate: its secret scanner is built from
+            // the candidate's own checkout, never the author's cached rules.
+            const probeCheck = await probeCheckFor(tmpEffects, tmp);
+            if (probeCheck === undefined)
               return {
                 commit,
                 verdict: 'fault',
-                detail: `checkout failed: ${moved.stderr.trim().slice(0, 300)}`,
+                detail: 'no secret scanner could be bound to the probe worktree',
               };
-          }
-          const probed = await probeCheck({ ...checkStep, repoRoot: tmp });
-          const recordAt = tmpEffects
-            .openLedger(pub)
-            .load()
-            .records.findLast((record) => record.kind === 'check');
-          const atCommit =
-            recordAt?.kind === 'check' && recordAt.head === commit ? recordAt : undefined;
-          if (probed.status === 'ok' && probed.value.passed && probed.value.head === commit)
-            return { commit, verdict: 'green', checkId: probed.value.checkId };
-          if (probed.status === 'failed' && atCommit !== undefined && !atCommit.passed)
-            return {
-              commit,
-              verdict: 'red',
-              checkId: atCommit.checkId,
-              redGates: atCommit.gates.filter((g) => g.status === 'fail').map((g) => g.name),
-            };
+            const probed = await probeCheck({ ...checkStep, repoRoot: tmp });
+            const recordAt = tmpEffects
+              .openLedger(pub)
+              .load()
+              .records.findLast((record) => record.kind === 'check');
+            const atCommit =
+              recordAt?.kind === 'check' && recordAt.head === commit ? recordAt : undefined;
+            if (probed.status === 'ok' && probed.value.passed && probed.value.head === commit)
+              return { commit, verdict: 'green', checkId: probed.value.checkId };
+            if (probed.status === 'failed' && atCommit !== undefined && !atCommit.passed)
+              return {
+                commit,
+                verdict: 'red',
+                checkId: atCommit.checkId,
+                redGates: atCommit.gates.filter((g) => g.status === 'fail').map((g) => g.name),
+              };
+            return { commit, verdict: 'fault', detail: issue(probed).slice(0, 300) };
+          },
+          () =>
+            left() < probeCost
+              ? `the reserve no longer covers a ${String(probeCost)}ms probe plus the publication margin`
+              : undefined,
+        );
+        const scanned = `green-prefix scan over ${A}..${T}: ${scan.stopped ?? `selected ${scan.selected ?? ''}`} [${probeLines(scan.probes).join('; ')}]`;
+        if (scan.selected === undefined)
+          return { kind: 'none', attribution: `${scanned} — nothing published` };
+        const G = scan.selected;
+        // A probe cannot be interrupted mid-check (dev.check takes no signal),
+        // so the reserve is re-checked AFTER it: an overrun publishes nothing.
+        if (left() < 0)
           return {
-            commit,
-            verdict: 'fault',
-            detail: issue(probed).slice(0, 300),
+            kind: 'none',
+            attribution: `${scanned} — the probes overran the reserve (${String(-left())}ms into the publication margin) — nothing published`,
           };
-        },
-        () =>
-          left() < probeCost
-            ? `the reserve no longer covers a ${String(probeCost)}ms probe plus the publication margin`
-            : undefined,
-      );
-      const attribution = `green-prefix scan over ${A}..${T}: ${scan.stopped ?? 'selected'} [${probeLines(scan.probes).join('; ')}] — nothing published`;
-      if (scan.selected === undefined) return finishWith({ kind: 'none' as const, attribution });
-      const G = scan.selected;
 
-      // Bind the selected SHA: the author is still at T, the probe worktree
-      // is on the publication branch at G, clean, with G's green check last.
-      const authorNow = await readWorkState(deps.effects, { target });
-      const pubState = await readWorkState(tmpEffects, { target });
-      const pubCheck = tmpEffects
-        .openLedger(pub)
-        .load()
-        .records.findLast((record) => record.kind === 'check');
-      if (
-        !authorNow.ok ||
-        authorNow.state.head !== T ||
-        authorNow.state.branch !== author.state.branch ||
-        !pubState.ok ||
-        pubState.state.branch !== pub ||
-        pubState.state.head !== G ||
-        pubState.state.dirtySha256 !== CLEAN_TREE ||
-        pubCheck?.kind !== 'check' ||
-        pubCheck.head !== G ||
-        !pubCheck.passed
-      )
-        return finishWith({
-          kind: 'none' as const,
-          attribution: `${attribution.replace(/ — nothing published$/, '')} — the selected commit ${G} lost its binding before publication (author or probe state moved) — nothing published`,
-        });
-      const pushedPub = await publishHead(pub, G, true);
-      if (!pushedPub.ok)
-        return finishWith({
-          kind: 'published' as const,
-          result: { status: 'needs-human', reason: `dev.cycle (push): ${pushedPub.reason}` },
-        });
-      published = true;
-      const openPub = (
-        deps.openIn ??
-        ((effects) => makePrOpen(effects, gh ?? makeSubprocessPrEffects(input.repoRoot)))
-      )(tmpEffects, tmp);
-      const openResult = await openPub({
-        repoRoot: tmp,
-        target,
-        draft: true,
-        draftWhenNotReady: true,
-        ...(input.title === undefined ? {} : { title: input.title }),
-      });
-      if (openResult.status !== 'ok')
-        return finishWith({
-          kind: 'published' as const,
-          result: stepResult('pr.open', openResult) as OpResult<never>,
-        });
-      const pr = openResult.value;
-      if (gh !== undefined) {
-        try {
-          const composed = composeSection(
-            await gh.getPrBody(pr.number),
-            renderFindingsSection(report, {
-              head: G,
-              addressedHead: T,
-              redGates,
-              dropped: droppedFixes(report, chain, G),
-              probes: scan.probes,
-              authorLedger,
-            }),
-          );
-          await gh.editPrBody(pr.number, composed);
-        } catch (err) {
-          return finishWith({
-            kind: 'published' as const,
+        // Bind the selected SHA: the author is still at T, the probe worktree
+        // is on the publication branch at G, clean, with G's green check last.
+        const authorNow = await readWorkState(deps.effects, { target });
+        const pubState = await readWorkState(tmpEffects, { target });
+        const pubCheck = tmpEffects
+          .openLedger(pub)
+          .load()
+          .records.findLast((record) => record.kind === 'check');
+        if (
+          !authorNow.ok ||
+          authorNow.state.head !== T ||
+          authorNow.state.branch !== authorBranch ||
+          !pubState.ok ||
+          pubState.state.branch !== pub ||
+          pubState.state.head !== G ||
+          pubState.state.dirtySha256 !== CLEAN_TREE ||
+          pubCheck?.kind !== 'check' ||
+          pubCheck.head !== G ||
+          !pubCheck.passed
+        )
+          return {
+            kind: 'none',
+            attribution: `${scanned} — the selected commit ${G} lost its binding before publication (author or probe state moved) — nothing published`,
+          };
+        pushAttempted = true;
+        const pushedPub = await publishHead(pub, G, true);
+        if (!pushedPub.ok)
+          return {
+            kind: 'published',
             result: {
               status: 'needs-human',
-              reason: `dev.cycle (pr body): draft PR #${String(pr.number)} is open at ${G} but the findings section could not be composed — ${err instanceof Error ? err.message : String(err)}`,
+              reason: `dev.cycle (push): ${pushedPub.reason}; the remote may carry '${pub}', and the local branch is kept`,
             },
-          });
+          };
+        const openPub = (
+          deps.openIn ??
+          ((effects) => makePrOpen(effects, gh ?? makeSubprocessPrEffects(input.repoRoot)))
+        )(tmpEffects, tmp);
+        const openResult = await openPub({
+          repoRoot: tmp,
+          target,
+          draft: true,
+          draftWhenNotReady: true,
+          ...(input.title === undefined ? {} : { title: input.title }),
+        });
+        if (openResult.status !== 'ok')
+          return {
+            kind: 'published',
+            result: stepResult('pr.open', openResult) as OpResult<never>,
+          };
+        const pr = openResult.value;
+        const dropped = droppedFixes(report, chain, G);
+        if (gh !== undefined) {
+          try {
+            const composed = composeSection(
+              await gh.getPrBody(pr.number),
+              renderFindingsSection(report, {
+                head: G,
+                addressedHead: T,
+                redGates,
+                dropped,
+                probes: scan.probes,
+                authorLedger,
+              }),
+            );
+            await gh.editPrBody(pr.number, composed);
+          } catch (err) {
+            return {
+              kind: 'published',
+              result: {
+                status: 'needs-human',
+                reason: `dev.cycle (pr body): draft PR #${String(pr.number)} is open at ${G} but the findings section could not be composed — ${err instanceof Error ? err.message : String(err)}`,
+              },
+            };
+          }
         }
+        return {
+          kind: 'published',
+          result: {
+            status: 'needs-human',
+            reason: `dev.cycle: NOT READY — the final gates were red at the addressed head ${T} (${redGates.join(', ') || 'see the dev-record'}); draft PR #${String(pr.number)} published from '${pub}' at ${G}, the newest verified-fix commit passing all final gates, dropping ${String(dropped.length)} fix(es); the author branch stays at ${T}; follow-up: ${followUpCommand(pr.number, input.repoRoot, target)}`,
+          },
+        };
       }
-      const dropped = droppedFixes(report, chain, G).length;
-      return finishWith({
-        kind: 'published' as const,
-        result: {
-          status: 'needs-human',
-          reason: `dev.cycle: NOT READY — the final gates were red at the addressed head ${T} (${redGates.join(', ') || 'see the dev-record'}); draft PR #${String(pr.number)} published from '${pub}' at ${G}, the newest verified-fix commit passing all final gates, dropping ${String(dropped)} fix(es); the author branch stays at ${T}; follow-up: ${followUpCommand(pr.number, input.repoRoot, target)}`,
-        },
-      });
+    }
+
+    /**
+     * The probe worktree's check leg, built fresh for its CURRENT checkout:
+     * an injected `checkIn`, else makeDevCheck with a secret scanner bound to
+     * that root (`scanSecretsFor`). When the author's check leg scans with a
+     * configured scanner but none can be bound to the probe root, there is
+     * no leg (undefined): a probe must never run under another tree's rules.
+     */
+    async function probeCheckFor(
+      effects: DevEffects,
+      root: string,
+    ): Promise<((step: DevCheckInput) => Promise<OpResult<DevCheckReport>>) | undefined> {
+      if (deps.checkIn !== undefined) return deps.checkIn(effects, root);
+      if (deps.scanSecretsFor !== undefined)
+        return makeDevCheck(effects, await deps.scanSecretsFor(root, effects));
+      if (deps.scanSecrets !== undefined) return undefined;
+      return makeDevCheck(effects);
     }
 
     // -------- the round-cap / not-ready publication (shared) -------------

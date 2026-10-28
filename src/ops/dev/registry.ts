@@ -348,33 +348,34 @@ export const registry: OpRegistryEntry[] = [
         ([m, effects, ghEffects, denylist, fs]) =>
           (async (input: DevCycleCompositionInput) => {
             const dev = effects.makeSubprocessDevEffects(input.repoRoot);
-            // The secret scanner the check leg binds: the SAME two-layer
+            // The secret scanner a check leg binds: the SAME two-layer
             // portable composition the dev.check entry carries (gitleaks
             // defaults; the repo's optional cq.json patterns file rides
-            // makePortableReviewScanner).
-            const configText = await fs
-              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
-              .catch(() => null);
-            const packageText = await fs
-              .readFile(`${input.repoRoot}/package.json`, 'utf8')
-              .catch(() => '{}');
-            let packageName = 'repository';
-            try {
-              const data: unknown = JSON.parse(packageText);
-              if (
-                typeof data === 'object' &&
-                data !== null &&
-                'name' in data &&
-                typeof data.name === 'string'
-              )
-                packageName = data.name;
-            } catch {
-              /* descriptive fallback only */
-            }
-            const scanSecrets =
-              configText !== null && packageName !== '@camerontaylor/cq-toolkit'
-                ? denylist.makePortableReviewScanner(input.repoRoot, dev, configText, packageName)
+            // makePortableReviewScanner) — built for one checkout ROOT, so the
+            // #536 probe worktree gets its own, from its own configuration.
+            const scannerFor = async (root: string, rootEffects: typeof dev) => {
+              const configText = await fs.readFile(`${root}/cq.json`, 'utf8').catch(() => null);
+              const packageText = await fs
+                .readFile(`${root}/package.json`, 'utf8')
+                .catch(() => '{}');
+              let packageName = 'repository';
+              try {
+                const data: unknown = JSON.parse(packageText);
+                if (
+                  typeof data === 'object' &&
+                  data !== null &&
+                  'name' in data &&
+                  typeof data.name === 'string'
+                )
+                  packageName = data.name;
+              } catch {
+                /* descriptive fallback only */
+              }
+              return configText !== null && packageName !== '@camerontaylor/cq-toolkit'
+                ? denylist.makePortableReviewScanner(root, rootEffects, configText, packageName)
                 : undefined;
+            };
+            const scanSecrets = await scannerFor(input.repoRoot, dev);
             // #536: the red-final-gate fallback's probe worktree binds its own
             // effects (same construction as `dev`). Its dependency install is
             // wired ONLY for a pnpm-locked repository: an offline, frozen
@@ -389,6 +390,7 @@ export const registry: OpRegistryEntry[] = [
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
               effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
+              scanSecretsFor: scannerFor,
               ...(pnpmLocked
                 ? {
                     installDeps: async (root: string, signal: AbortSignal) => {
