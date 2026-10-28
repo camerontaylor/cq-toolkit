@@ -391,6 +391,19 @@ function expectAuthorUntouched(r: Awaited<ReturnType<typeof run>>): void {
   expect(repo.git('worktree', 'list', '--porcelain')).not.toContain(r.probePrefix);
 }
 
+/**
+ * Every #638 exit carries the typed usage envelope. These fixtures script all
+ * legs (no driver is ever dispatched), so the truthful summary is zero known,
+ * zero unknown and zero unpriced — and no invented `usage`/`costUSD` rides it.
+ */
+function expectNoDispatchUsage(r: Awaited<ReturnType<typeof run>>): void {
+  expect(r.result).toHaveProperty('report.usageSummary', {
+    knownCount: 0,
+    unknownCount: 0,
+    unpricedCount: 0,
+  });
+}
+
 describe('dev.cycle red final gates: newest green verified-fix commit (#536)', () => {
   test.each([
     ['green-red-green: the NEWEST green wins', [true, false, true, false], 2, 1],
@@ -406,6 +419,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
         `dropping ${String(greens.length - 1 - selectedIndex)} fix(es)`,
       );
     }
+    expectNoDispatchUsage(r);
     expect(r.probeRoots).toHaveLength(probes);
     expect(r.probeRoots.every((root) => root === r.probeDir)).toBe(true);
     expect(r.probeDir.startsWith(join(r.probeParent, r.probePrefix))).toBe(true);
@@ -448,6 +462,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
       expect(r.result.error).toContain(`${r.commits[0]!} red`);
       expect(r.result.error).toContain('nothing published');
     }
+    expectNoDispatchUsage(r);
     expect(r.pushes.filter((args) => args.includes('push'))).toEqual([]);
     expect(r.opens).toEqual([]);
     expectAuthorUntouched(r);
@@ -459,6 +474,7 @@ describe('dev.cycle red final gates: newest green verified-fix commit (#536)', (
     expect(r.result.status).toBe('needs-human');
     if (r.result.status === 'needs-human')
       expect(r.result.reason).toContain(`at ${r.commits[0]!}, the newest verified-fix commit`);
+    expectNoDispatchUsage(r);
     expect(r.bodies.at(-1)).toContain('## Findings after red final gates');
     expectAuthorUntouched(r);
   });
