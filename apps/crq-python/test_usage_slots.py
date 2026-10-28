@@ -13,6 +13,7 @@ import test_author_quota as fixtures
 
 crq = fixtures.crq
 REFRESH = crq.refresh_slot_deadline
+BACKOFF = crq.apply_signer_backoff
 AT = dt.datetime(2026, 10, 28, 1, 1, tzinfo=dt.timezone.utc)
 
 
@@ -61,6 +62,11 @@ class ConcurrencyTest(unittest.TestCase):
     def setUp(self):
         fixtures.TickTest.setUp(self)
         crq.CONFIG.update(max_inflight=10, max_starts_per_tick=10)
+        self.runs = self.root / 'runs'
+        self.runs.mkdir()
+        runs = mock.patch.object(crq, 'RUNS', self.runs)
+        runs.start()
+        self.addCleanup(runs.stop)
         self.plan = dict(base=fixtures.BASE, head=fixtures.HEAD, target='origin/merge-queue',
                          label='fixture', notes=[])
         self.started = []
@@ -144,6 +150,175 @@ class ConcurrencyTest(unittest.TestCase):
         wait.assert_called_once_with(17)
         self.assertEqual(self.probe.call_count, 2)
         self.assertEqual(self.started, ['promotion', 'prioritized'])
+
+    def test_repeated_usage_does_not_spend_outstanding_reservations(self):
+        self.items()
+        crq.tick()
+        self.assertEqual(len(self.started), 3)
+        with mock.patch.object(crq, 'refresh_slot_deadline', REFRESH):
+            crq.slot()  # unchanged usage still includes the detached reservations
+        self.assertEqual(len(self.started), 3)
+
+    def test_signer_reservations_survive_claims_and_the_local_hour(self):
+        for state in ('requested', 'signer_running', 'blocked'):
+            with self.subTest(state=state):
+                signer = dict(id='signer', kind='promotion', state=state,
+                              request={'requested_at': crq.iso(AT - dt.timedelta(hours=2)),
+                                       'reconciliation_required': state == 'blocked'})
+                self.q['items'] = [signer, dict(id='next', kind='open', state='pending', pr=1)]
+                self.probe.return_value = {'remaining': 1}
+                with mock.patch.object(crq, 'now', return_value=AT):
+                    usage, held = crq.read_slot_usage(self.q)
+                    crq.admit_available(self.q, usage, [], reserved=held)
+                self.assertEqual(self.started, [])
+                self.assertEqual(len(held), 1)
+
+    def test_vendor_progress_precedes_usage_and_requires_a_valid_probe(self):
+        run = dict(run_id='delayed', started_at=crq.iso(AT))
+        self.q['items'] = [dict(id='delayed', kind='open', state='reviewing', run=run)]
+        rdir = self.runs / 'delayed'
+        rdir.mkdir()
+        stream = rdir / 'review.ndjson'
+        stream.write_text('{"type":"review_context"}\n')
+        def late_progress(clone):
+            stream.write_text('{"type":"heartbeat","status":"reviewing"}\n')
+            return {'remaining': 9}
+        self.probe.side_effect = late_progress
+        _, held = crq.read_slot_usage(self.q)
+        self.assertEqual(len(held), 1)
+        self.assertNotIn('vendor_observed', run)
+        self.probe.side_effect = None
+        self.probe.return_value = None
+        crq.read_slot_usage(self.q)
+        self.assertNotIn('vendor_observed', run)
+        self.probe.return_value = {'remaining': 9}
+        _, held = crq.read_slot_usage(self.q)
+        self.assertEqual(held, [])
+        self.assertTrue(run['vendor_observed'])
+        stream.unlink()
+        _, held = crq.read_slot_usage(self.q)
+        self.assertEqual(held, [])
+
+    def test_old_progress_stays_reserved_when_usage_is_unavailable(self):
+        self.items()
+        run = dict(run_id='old-progress', started_at=crq.iso(AT - dt.timedelta(hours=2)))
+        self.q['items'].append(dict(id='old-progress', kind='open', state='reviewing', run=run))
+        rdir = self.runs / run['run_id']
+        rdir.mkdir()
+        (rdir / 'review.ndjson').write_text('{"type":"status","status":"reviewing"}\n')
+        self.probe.return_value = None
+        self.q['starts'] = [crq.iso(AT)] * 4
+        with mock.patch.object(crq, 'now', return_value=AT):
+            usage, held = crq.read_slot_usage(self.q)
+            crq.admit_available(self.q, usage, [], reserved=held)
+        self.assertEqual(held, [run['started_at']])
+        self.assertNotIn('vendor_observed', run)
+        self.assertEqual(self.started, [])
+
+    def test_fallback_counts_recent_holds_once_and_keeps_older_holds(self):
+        self.items()
+        self.q['starts'] = [crq.iso(AT)] * 4
+        with mock.patch.object(crq, 'now', return_value=AT):
+            crq.admit_available(self.q, None, [], reserved=[crq.iso(AT)])
+        self.assertEqual(len(self.started), 1)
+        self.started.clear()
+        self.items()
+        self.q['starts'] = [crq.iso(AT)] * 4
+        with mock.patch.object(crq, 'now', return_value=AT):
+            crq.admit_available(self.q, None, [], reserved=[crq.iso(AT - dt.timedelta(hours=2))])
+        self.assertEqual(self.started, [])
+
+    def test_minute_admission_applies_actual_signer_backoff(self):
+        until = AT + dt.timedelta(minutes=5)
+        for reason, expected in [('rate_limit', 0), ('budget', 3)]:
+            with self.subTest(reason=reason):
+                self.items()
+                self.q['cooldown_until'] = None
+                self.started.clear()
+                with mock.patch.object(crq, 'PROMO', {'enabled': True}), \
+                     mock.patch.object(crq, 'promotion_mode', return_value='signer'), \
+                     mock.patch.object(crq, 'apply_signer_backoff', BACKOFF), \
+                     mock.patch.object(crq.SPOOL, 'read', return_value=json.dumps(
+                         dict(v=1, until=crq.iso(until), reason=reason))), \
+                     mock.patch.object(crq, 'now', return_value=AT), \
+                     mock.patch.object(crq, 'refresh_slot_deadline', REFRESH):
+                    crq.slot()
+                self.assertEqual(len(self.started), expected)
+                if reason == 'rate_limit':
+                    self.assertEqual(self.q['cooldown_until'], crq.iso(until))
+
+    def test_undated_retry_does_not_sleep_under_lock(self):
+        self.items()
+        self.probe.return_value = {'remaining': 0}
+        self.q['items'].append(dict(id='active', kind='open', state='reviewing'))
+        with mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
+             mock.patch.object(crq.time, 'sleep') as sleep:
+            crq.slot()  # real clock advances between deadline calculation and check
+        sleep.assert_not_called()
+        self.assertEqual(self.probe.call_count, 1)
+
+    def test_only_dead_verifiable_exits_reach_harvest(self):
+        self.q['items'] = []
+        for rid in ('dead', 'alive', 'ambiguous', 'no-exit'):
+            self.q['items'].append(dict(id=rid, kind='open', state='reviewing', run={'run_id': rid}))
+            rdir = self.runs / rid
+            rdir.mkdir()
+            if rid != 'no-exit':
+                (rdir / 'exit.json').write_text('{}')
+        def liveness(rdir, item, run, has_exit):
+            return {'dead': 'harvest', 'alive': 'alive', 'ambiguous': 'ambiguous'}[item['id']]
+        with mock.patch.object(crq, 'run_liveness', side_effect=liveness) as probe, \
+             mock.patch.object(crq, 'harvest_review', return_value='collected') as harvest:
+            log = []
+            crq.collect_finished(self.q, log)
+        self.assertEqual(probe.call_count, 3)
+        harvest.assert_called_once_with(self.q, self.q['items'][0], False)
+        self.assertEqual(log, ['collected'])
+
+    def test_minute_collection_records_result_before_refilling_and_honors_auth(self):
+        for outcome in ('completed', 'auth'):
+            with self.subTest(outcome=outcome):
+                self.items()
+                self.q['paused'] = False
+                self.q['author_requests'] = {}
+                self.started.clear()
+                crq.CONFIG['max_inflight'] = 1
+                rdir = fixtures.HarvestTest._run_dir(self, outcome, exit_code=0 if outcome == 'completed' else 1)
+                item = fixtures.HarvestTest._item(self, self.q, outcome)
+                event = ({'type': 'complete', 'status': 'review_completed'} if outcome == 'completed' else
+                         {'type': 'error', 'errorType': 'auth'})
+                (rdir / 'review.ndjson').write_text(json.dumps(event) + '\n')
+                with mock.patch.object(crq, 'pid_alive', return_value=False), \
+                     mock.patch.object(crq, 'group_alive', return_value=False), \
+                     mock.patch.object(crq, 'remove_worktree'), \
+                     mock.patch.object(crq, 'findings_md', return_value=''), \
+                     mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
+                     mock.patch.object(crq, 'fetch') as fetch, \
+                     mock.patch.object(crq, 'enroll') as enroll, \
+                     mock.patch.object(crq, 'promotion_audit') as audit:
+                    crq.slot()
+                fetch.assert_not_called()
+                enroll.assert_not_called()
+                audit.assert_not_called()
+                if outcome == 'completed':
+                    self.assertEqual(item['state'], 'done')
+                    self.assertEqual(len(item['author_cycles']), 1)
+                    self.assertEqual(self.started, ['promotion'])
+                else:
+                    self.assertTrue(self.q['paused'])
+                    self.assertEqual(item['state'], crq.author_quota.AUTHOR_FAILED)
+                    self.assertEqual(self.started, [])
+
+    def test_active_runs_keep_collection_hint_at_next_minute_during_cooldown(self):
+        self.items()
+        self.q['items'][0]['state'] = 'reviewing'
+        at = AT + dt.timedelta(seconds=17)
+        self.q['cooldown_until'] = crq.iso(at + dt.timedelta(hours=1))
+        with mock.patch.object(crq, 'now', return_value=at):
+            actual = REFRESH(self.q, {'remaining': 0}, 0, 'cooldown')
+        self.assertEqual(actual, at + dt.timedelta(hours=1))
+        self.assertEqual((self.root / 'next-review-at').read_text().strip(),
+                         crq.iso(AT + dt.timedelta(minutes=1)))
 
     def test_second_precision_cooldown_uses_exit_time_and_never_shortens(self):
         rdir = self.root / 'run'

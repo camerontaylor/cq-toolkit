@@ -42,6 +42,25 @@ def read_usage(clone):
         return None
 
 
+def vendor_progress(path):
+    """Bounded positive evidence; context/launch/claim alone cannot release a hold."""
+    try:
+        with path.open(errors='replace') as stream:
+            lines = stream.read(65536).splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and (
+                event.get('type') == 'status' and event.get('status') in ('reviewing', 'writing') or
+                event.get('type') == 'heartbeat' and event.get('status') == 'reviewing'):
+            return True
+    return False
+
+
 def next_slot(starts, at, usage):
     """Known starts give the earliest candidate, never permission to spend.
 

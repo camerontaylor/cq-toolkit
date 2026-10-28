@@ -15,10 +15,13 @@ local starts/hour cap. Every runner and signer review passes `--deep` with a
 120-minute deadline. Rate-limit cooldown uses exact waitTime without padding.
 The next local slot expiry is cross-checked against vendor usage. A minute timer
 runs a timestamp-first entry: future hints exit before imports/lock/network;
-due entries take the shared lock non-blocking and fill free slots, sleeping once
-when the next slot is less than 60 seconds away. Idle admission backs off twelve
-minutes. The 12-minute maintenance tick refreshes the hint and waits up to 90
-seconds for that lock; harvest clears the hint. Completion requests prompt
+due entries take the shared lock non-blocking, collect only ownership-verified
+terminal detached results, apply signer cooldown, and fill slots after protecting
+outstanding reservations. Dated subminute slots may sleep once; undated minute
+retries do not. In-flight runs cap hints at the next minute for result collection,
+including during pause/cooldown. Other idle admission backs off twelve minutes.
+The 12-minute maintenance tick refreshes the hint and waits up to 90 seconds for
+that lock; harvest clears the hint. Completion requests prompt
 harvest. Operational fallback and
 residual ownership rules: [CRQ contract](../apps/crq-python/README.md#runtime-ownership),
 [deployment](../apps/crq-python/ops/HOST-DEPLOY.md#slot-scheduling-deployment-owner-directed-2026-10-28).

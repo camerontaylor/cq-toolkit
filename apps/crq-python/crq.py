@@ -1377,8 +1377,8 @@ def set_rate_cooldown(q, cls, rdir):
     q["cooldown_until"] = iso(max(current, until) if current else until)
 
 
-def refresh_slot_deadline(q, usage, remaining, gate):
-    at = now()
+def refresh_slot_deadline(q, usage, remaining, gate, at=None):
+    at = now() if at is None else at
     if q.get("paused") or gate == "inflight" or not any(i["state"] == "pending" for i in q["items"]):
         deadline = at + dt.timedelta(minutes=12)
     elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > at:
@@ -1388,8 +1388,12 @@ def refresh_slot_deadline(q, usage, remaining, gate):
         deadline = deadline or at + dt.timedelta(seconds=60)
     else:
         deadline = at + dt.timedelta(minutes=12)  # available slots, no eligible item
-    usage_slots.write_next(STATE / "next-review-at", deadline)
-    return deadline
+    hint = deadline
+    if inflight(q):
+        # Even paused/exhausted admission must collect completed runs each minute.
+        hint = min(hint, at.replace(second=0, microsecond=0) + dt.timedelta(minutes=1))
+    usage_slots.write_next(STATE / "next-review-at", hint)
+    return deadline  # admission time, not the earlier result-collection hint
 
 
 def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
@@ -3037,13 +3041,69 @@ def start_one(q, log, dry, only, ignore_quiet):
     return started, has_coverage
 
 
-def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False):
+def read_slot_usage(q):
+    """Subtract reservations lacking vendor evidence BEFORE the usage snapshot.
+
+    Aggregate usage cannot identify an unclaimed signer or a detached child
+    still preparing its CLI session. Never reallocate those promised slots.
+    Signer claims/start journals are pre-admission too: retain their hold until
+    the result is harvested. Local progress may be cached only after a valid
+    subsequent usage observation, never from a pid or review_context alone.
+    """
+    held = []
+    observed = []
+    for item in q["items"]:
+        request = item.get("request") or {}
+        if item.get("kind") == "promotion" and (
+                item["state"] in SIGNER_STATES or request.get("reconciliation_required")):
+            held.append(request.get("requested_at"))
+        elif item["state"] == "reviewing":
+            run = item.get("run") or {}
+            if run.get("vendor_observed"):
+                continue
+            run_id = run.get("run_id")
+            if run_id and usage_slots.vendor_progress(RUNS / run_id / "review.ndjson"):
+                observed.append(run)
+            else:
+                held.append(run.get("started_at"))
+    usage = usage_slots.read_usage(CLONE)
+    if usage is not None:
+        for run in observed:
+            run["vendor_observed"] = True
+    else:
+        held.extend(run.get("started_at") for run in observed)
+    return usage, held
+
+
+def collect_finished(q, log):
+    """Terminal detached reviews only; no enrollment, repairs or promotion audits."""
+    for item in list(q["items"]):
+        if item["state"] != "reviewing" or not item.get("run"):
+            continue
+        run = item["run"]
+        rdir = RUNS / run["run_id"]
+        if not (rdir / "exit.json").exists():
+            continue
+        if run_liveness(rdir, item, run, True) != "harvest":
+            continue  # live or unverifiable owners retain their capacity
+        msg = harvest_review(q, item, False)
+        if msg:
+            log.append(msg)
+
+
+def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, reserved=()):
     before_all = len(q.get("starts", []))
     has_coverage = False
     global_gate = None
     q["usage"] = usage
-    slots = (usage["remaining"] if usage is not None else
-             max(0, CONFIG.get("max_starts_per_hour", 5) - starts_last_hour(q)))
+    if usage is not None:
+        slots = max(0, usage["remaining"] - len(reserved))
+    else:
+        # Recent reservations are already in starts; older/undated outstanding
+        # promises still need protection after their local rolling hour expires.
+        cutoff = now() - dt.timedelta(hours=1)
+        old_holds = sum(1 for stamp in reserved if not stamp or parse_iso(stamp) <= cutoff)
+        slots = max(0, CONFIG.get("max_starts_per_hour", 5) - starts_last_hour(q) - old_holds)
     admissions = min(slots, CONFIG.get("max_starts_per_tick", 10),
                      max(0, CONFIG.get("max_inflight", 10) - len(inflight(q))))
     if q.get("paused"):
@@ -3074,7 +3134,7 @@ def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False):
 
 
 def slot():
-    """Admission only, under the same lock as tick; no enrollment/harvest/audit."""
+    """Collect terminal reviews and admit under the tick lock; no enrollment/audit."""
     if (STATE / "runner-disabled").exists():
         return ["runner disabled for host handover"]
     q = load_queue()
@@ -3083,11 +3143,15 @@ def slot():
     # After an early local reservation expiry, the next minute retries rather
     # than trusting fullCapacityInMs as the first available slot.
     for attempt in range(2):
-        usage = usage_slots.read_usage(CLONE)
-        _, gate, remaining = admit_available(q, usage, log)
+        collect_finished(q, log)
+        if PROMO.get("enabled") and promotion_mode() == "signer":
+            apply_signer_backoff(q, log)
+        usage, reserved = read_slot_usage(q)
+        _, gate, remaining = admit_available(q, usage, log, reserved=reserved)
         save_queue(q)
-        deadline = refresh_slot_deadline(q, usage, remaining, gate)
-        delay = (deadline - now()).total_seconds()
+        at = now()
+        deadline = refresh_slot_deadline(q, usage, remaining, gate, at=at)
+        delay = (deadline - at).total_seconds()
         if attempt == 0 and 0 < delay < 60 and gate in ("slots", "cooldown"):
             time.sleep(delay)
             continue
@@ -3157,8 +3221,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     except Exception as exc:  # never let promotion bookkeeping stop the queue
         log.append(f"promotion: error {exc}"[:300])
     pending_at_selection = any(i["state"] == "pending" for i in q["items"])
-    usage = usage_slots.read_usage(CLONE)
-    has_coverage, global_gate, remaining = admit_available(q, usage, log, dry, only, ignore_quiet)
+    usage, reserved = read_slot_usage(q)
+    has_coverage, global_gate, remaining = admit_available(q, usage, log, dry, only, ignore_quiet, reserved=reserved)
     if not dry:
         q["coverage"] = coverage.record_opportunity(q.get("coverage") or coverage.new_ledger(),
             at=q["last_tick"], started=len(q.get("starts", [])) > starts_before,

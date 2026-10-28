@@ -19,6 +19,12 @@ Each tick fills free slots in promotion → operator priority → rank order, bo
 by `max_starts_per_tick` and `max_inflight` (both default 10). The legacy
 `max_starts_per_hour` (5) applies only when usage is unavailable or has no valid
 remaining count. Partial usage with a valid remaining count is usable.
+Outstanding local reservations are subtracted from vendor remaining slots.
+A detached run's hold clears only after structured vendor progress precedes a
+valid usage probe; context/launch alone is insufficient. Signer requests retain
+their hold through claiming until result harvest, including requests deferred
+past their local rolling hour. This can conservatively hold one extra slot for
+a running signer. The local fallback counts recent reservations once.
 
 The oldest unexpired local start plus 60 minutes predicts the next slot. Vendor
 `rollingWindowMs` refines the window; `fullCapacityInMs` describes full recovery,
@@ -28,10 +34,16 @@ short retry. Each wake rechecks usage before spending.
 `crq-slot.timer` invokes the small `crq_slot.py` entry every minute with
 `AccuracySec=1s`. Its first step reads `state/next-review-at` (UTC); a future
 hint exits before runner imports, locking or network calls. A due entry takes
-the tick lock non-blocking, refreshes usage and fills eligible free slots. If
-the next slot is less than 60 seconds away it sleeps once and rechecks usage.
-Idle admission backs off twelve minutes. The twelve-minute full tick retains
-enrollment, harvest, status and audits, refreshes the hint, and waits up to 90
+the tick lock non-blocking, collects only terminal detached reviews through the
+existing ownership-aware harvest path, applies published signer cooldown, then
+refreshes usage and fills eligible free slots. Live or unverifiable runs retain
+capacity. If a dated next slot is less than 60 seconds away it sleeps once and
+rechecks; undated one-minute retries never sleep under the lock. In-flight runs
+cap the timestamp hint at the next minute boundary, including while admission
+is paused or cooling down, so completed results are collected within a minute.
+Without in-flight runs, idle admission backs off twelve minutes. The twelve-minute
+full tick retains enrollment, harvest, status and audits, refreshes the hint, and
+waits up to 90
 seconds for the lock so a sleeping admission cannot skip maintenance. Harvest
 clears the hint; detached completion also requests a full harvest tick. Both
 entries serialize queue writes; detached runs own individual worktrees and run

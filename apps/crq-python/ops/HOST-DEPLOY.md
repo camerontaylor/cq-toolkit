@@ -16,9 +16,13 @@ root with the same CLI PATH as tick. No transient systemd-run units are needed.
 
 The admission entry first reads `state/next-review-at`; future hints avoid even
 the queue lock and runner imports. Due entries take the shared lock non-blocking,
-probe repository-scoped usage, and fill free slots. They can wait once for a slot
-less than 60 seconds away. Full ticks wait up to 90 seconds for the lock, retain
-all maintenance duties, and refresh the hint. Harvest clears it; detached review
+collect dead, ownership-verified detached results, apply signer-published cooldown,
+probe repository-scoped usage, and fill free slots after reserving unconfirmed
+local starts. They can wait once for a dated slot less than 60 seconds away;
+undated retries do not sleep under the lock. While local runs are in flight,
+the hint is capped at the next minute boundary for collection even during
+pause/cooldown. No enrollment or audits run in the minute entry. Full ticks wait
+up to 90 seconds for the lock, retain all maintenance duties, and refresh the hint. Harvest clears it; detached review
 completion requests `systemctl --user --no-block start crq-tick.service` for prompt
 harvest. No eligible work backs off twelve minutes. Stop both timers for manual
 maintenance; the recorded deploy's runner-disabled marker also gates admission.
