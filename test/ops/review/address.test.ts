@@ -210,6 +210,38 @@ describe('review.address composition', () => {
     ).toEqual([['a', 'b'], ['alias'], ['unknown'], ['c']]);
     expect(() => addressBatches([], 0)).toThrow('positive');
   });
+  test('empty-file scope is a singleton and retains its own empty identity', () => {
+    const empty = { ...finding('empty'), file: '' };
+    const batches = addressBatches([finding('a'), empty, finding('b')], 2);
+    expect(batches.map((batch) => batch.map((row) => row.id))).toEqual([['a'], ['empty'], ['b']]);
+    expect(batches[1]?.[0]).toBe(empty);
+    expect(empty).toHaveProperty('file', '');
+  });
+
+  test('mixed findings run eligible work and stop before re-review with the empty row OPEN', async () => {
+    const f = await fixture([finding('a'), { ...finding('empty'), file: '' }]);
+    try {
+      const result = await makeReviewAddress(f.deps)(f.input);
+      expect(result.status).toBe('needs-human');
+      expect(f.calls).toEqual(['fix:a', 'disposition:deferred']);
+      const report = reportOf(result);
+      if (result.status !== 'needs-human') throw new Error('missing empty-file refusal');
+      expect(result.reason).toBe(
+        `unresolved: finding has no file path; report: ${report.reportPath}`,
+      );
+      expect(report.reasons).toContain('unresolved: finding has no file path');
+      expect(report.findings.find((row) => row.id === 'empty')).toMatchObject({
+        file: '',
+        status: 'open',
+        reason: 'unresolved: finding has no file path',
+      });
+      expect(report.openBlocking.find((row) => row.id === 'empty')).toHaveProperty('file', '');
+      expect(report.fixes.map((fix) => fix.finding.id)).toEqual(['a']);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   test('no token default or missing roles dispatches work; durable report survives every refusal', async () => {
     const f = await fixture();
     try {

@@ -100,6 +100,19 @@ describe('parseReviewerStream', () => {
     expect(parsed.findings[0]).toEqual({ severity: 'minor', fileName: 'a.ts' });
   });
 
+  test.each(['', 'src/a.ts', undefined, null, 7])(
+    'fileName preserves string identity without accepting other values: %s',
+    (fileName) => {
+      const parsed = parseReviewerStream(
+        JSON.stringify({ type: 'finding', severity: 'major', fileName }),
+      );
+      expect(parsed.findings).toHaveLength(1);
+      if (typeof fileName === 'string')
+        expect(parsed.findings[0]).toHaveProperty('fileName', fileName);
+      else expect(parsed.findings[0]).not.toHaveProperty('fileName');
+    },
+  );
+
   test('non-JSON lines count as unparsed and contribute nothing', () => {
     const parsed = parseReviewerStream(
       `progress noise 42%\n${JSON.stringify({ type: 'complete', status: 'review_completed' })}\nnot json {`,
@@ -339,6 +352,22 @@ describe('decideCompletion — the three-part protocol definition', () => {
     expect(decideCompletion(0, stream)).toEqual({ kind: 'terminal' });
     // Severities are preserved whatever the completion verdict.
     expect(stream.findings[0]?.severity).toBe('minor');
+  });
+
+  test.each([
+    { type: 'finding', severity: '', fileName: '' },
+    { type: '', severity: 'major', fileName: '' },
+    { type: 'complete', status: '' },
+  ])('empty semantic fields still fail closed: %j', (event) => {
+    const stream = parseReviewerStream(
+      [event, { type: 'complete', status: 'review_completed' }]
+        .map((item) => JSON.stringify(item))
+        .join('\n'),
+    );
+    expect(stream.findings).toEqual([]);
+    expect(decideCompletion(0, stream).kind).toBe('blocked');
+    if (event.type !== 'complete') expect(stream.unparsedLines).toBe(1);
+    else expect(stream).not.toHaveProperty('completeStatus');
   });
 
   test('a finding event WITHOUT a severity is malformed — never a fabricated nonblocking none', () => {

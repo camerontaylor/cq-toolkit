@@ -47,6 +47,7 @@ import {
   type ReviewSource,
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { sameFindingContent } from './internal/durableDisposition.js';
 import { collectBoundedReviewContext } from './internal/reviewContext.js';
 
 export interface ReviewRunInput {
@@ -308,7 +309,7 @@ export function makeReviewRun(
                     source: 'coderabbit',
                     severity: finding.severity,
                     text: finding.excerpt ?? '',
-                    ...(finding.fileName ? { file: finding.fileName } : {}),
+                    ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
                     status: disposition?.action ?? 'open',
                     ...(disposition ? { reason: disposition.why } : {}),
                   };
@@ -337,21 +338,47 @@ export function makeReviewRun(
         if (result.status === 'ok') {
           const value = result.value as {
             cycleId: string;
-            findings: Array<{ id: string; severity: string; fileName?: string; excerpt?: string }>;
+            findings: Array<{
+              id: string;
+              severity: string;
+              fileName?: string;
+              excerpt?: string;
+              line?: number;
+              rule?: string;
+              evidence?: string;
+              evidenceV1?: Finding['evidenceV1'];
+            }>;
+            retainedFindings?: Finding[];
           };
           records.push({
             schemaVersion: 1,
             branch: state.branch,
             head: state.head,
             sources: [{ kind: 'coderabbit', status: 'terminal', cycleId: value.cycleId }],
-            findings: value.findings.map((item) => ({
-              id: item.id,
-              source: 'coderabbit',
-              ...(item.fileName ? { file: item.fileName } : {}),
-              severity: item.severity,
-              text: item.excerpt ?? '',
-              status: 'open',
-            })),
+            findings: value.findings.map((item) => {
+              const base: Finding = {
+                id: item.id,
+                source: 'coderabbit',
+                ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                ...(item.line !== undefined ? { line: item.line } : {}),
+                ...(item.rule !== undefined ? { rule: item.rule } : {}),
+                ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+                ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
+                severity: item.severity,
+                text: item.excerpt ?? '',
+                status: 'open',
+              };
+              // Q17b: a REUSE report's projection is the only source of a retained
+              // disposition. It is consumed by id AND revalidated against full original
+              // content, so a same-id row with different content never inherits one.
+              const retained = value.retainedFindings?.find((row) => row.id === item.id);
+              if (retained === undefined || !sameFindingContent(base, retained)) return base;
+              return {
+                ...base,
+                status: retained.status,
+                ...(retained.reason !== undefined ? { reason: retained.reason } : {}),
+              };
+            }),
           });
         } else {
           const reason =
@@ -413,7 +440,11 @@ export function makeReviewRun(
                 ? cycle.findings.map((item) => ({
                     id: item.id,
                     source: 'coderabbit',
-                    ...(item.fileName ? { file: item.fileName } : {}),
+                    ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                    ...(item.line !== undefined ? { line: item.line } : {}),
+                    ...(item.rule !== undefined ? { rule: item.rule } : {}),
+                    ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+                    ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
                     severity: item.severity,
                     text: item.excerpt ?? '',
                     status: 'open' as const,
@@ -677,7 +708,13 @@ export function makeReviewRun(
                         findings: agentFindings.map((finding, index) => ({
                           id: `${id}#f${String(index + 1)}`,
                           severity: finding.severity,
-                          ...(finding.file ? { fileName: finding.file } : {}),
+                          ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                          ...(finding.line !== undefined ? { line: finding.line } : {}),
+                          ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                          ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                          ...(finding.evidenceV1 !== undefined
+                            ? { evidenceV1: finding.evidenceV1 }
+                            : {}),
                           excerpt: finding.text,
                         })),
                         ...(advisories.length > 0 ? { advisories } : {}),

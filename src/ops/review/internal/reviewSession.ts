@@ -357,9 +357,9 @@ export async function runReviewSession(
     value: parsed.data.findings.map((item, index) => ({
       id: `${plan.id}-${index + 1}`,
       source: 'agent',
-      ...(item.file ? { file: item.file } : {}),
+      ...(item.file !== undefined ? { file: item.file } : {}),
       ...(item.line ? { line: item.line } : {}),
-      ...(item.rule ? { rule: item.rule } : {}),
+      ...(item.rule !== undefined ? { rule: item.rule } : {}),
       severity: input.severityMap[item.severity] ?? 'minor',
       text: item.text,
       status: 'open',

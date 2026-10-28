@@ -56,6 +56,7 @@ import {
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
+import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
 import { branchPathFault } from '../../shared/refname.js';
 
 export { branchPathFault };
@@ -95,6 +96,20 @@ export interface DevFinding {
   fileName?: string;
   /** The finding's comment (or its first suggestion), when reported. */
   excerpt?: string;
+  /** The reported line, when the producer's contract supplies one (never inferred). */
+  line?: number;
+  /** The reported rule/lint id, when the producer's contract supplies one. */
+  rule?: string;
+  /**
+   * The producer's receipt reference (vendor receipts only), preserved verbatim so a
+   * later projection can prove WHICH receipt this finding came from.
+   */
+  evidence?: string;
+  /**
+   * The R3S versioned agent evidence payload, carried verbatim. It is persisted and
+   * compared structurally; it is never re-derived, repaired or used as authority here.
+   */
+  evidenceV1?: FindingEvidenceV1;
 }
 
 /** Whether one review cycle completed, or was blocked — and why. */
@@ -297,12 +312,24 @@ export interface DevIdentity {
 
 // --- Zod mirrors (parse boundary; key order is the serialize order) --------
 
+/**
+ * The ledger's finding mirror. Identity-bearing STRINGS accept exactly what the
+ * review record (FindingSchema) accepts, including the empty string, and are stored
+ * verbatim: the ledger never rejects a value its producer was allowed to emit, and
+ * never drops one either (an empty value is stored, not treated as absent). `id`,
+ * `severity` and `line` keep their strict constraints because FindingSchema has the
+ * same ones. Widening acceptance cannot invalidate an existing ledger.
+ */
 const DevFindingSchema = z
   .object({
     id: z.string().min(1),
     severity: z.string().min(1),
-    fileName: z.string().min(1).exactOptional(),
-    excerpt: z.string().min(1).exactOptional(),
+    fileName: z.string().exactOptional(),
+    excerpt: z.string().exactOptional(),
+    line: z.number().int().positive().exactOptional(),
+    rule: z.string().exactOptional(),
+    evidence: z.string().exactOptional(),
+    evidenceV1: FindingEvidenceV1Schema.exactOptional(),
   })
   .strict();
 
@@ -946,8 +973,8 @@ export function assembleReadiness(
         if (action === 'fixed' || action === 'rejected') continue;
         open.push(
           entry.cycleId === cycle.cycleId
-            ? `${finding.id} (${finding.severity})`
-            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)`,
+            ? `${finding.id} (${finding.severity})${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`
+            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`,
         );
       }
     }
@@ -960,7 +987,7 @@ export function assembleReadiness(
       const action = closed.get(finding.id);
       if (action !== 'fixed' && action !== 'rejected')
         open.push(
-          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)`,
+          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)${finding.file === '' ? ': unresolved: finding has no file path' : ''}`,
         );
     }
     if (open.length > 0) {
