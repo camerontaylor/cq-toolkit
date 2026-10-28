@@ -332,8 +332,10 @@ function mcpRoundTrip(bin, manifest, timeoutMs) {
     // deadline is cleared ONLY in done; every other terminal path — early
     // exit, bad surface, or the deadline itself firing — kills the child.
     let phase = 'collecting';
+    let deadlineFired = false;
     const childErr = () => stderr.slice(-2_000);
     const timedOut = () => {
+      deadlineFired = true;
       child.kill('SIGKILL');
     };
     const deadline = setTimeout(timedOut, timeoutMs);
@@ -358,7 +360,7 @@ function mcpRoundTrip(bin, manifest, timeoutMs) {
         // SIGKILL of a server that never exited — fails the leg.
         phase = 'done';
         clearTimeout(deadline);
-        if (signal === 'SIGKILL') {
+        if (deadlineFired) {
           resolveLeg({
             ok: false,
             reason: `MCP bin did not exit within the ${timeoutMs}ms leg deadline after responding (hung past EOF)`,
@@ -378,6 +380,17 @@ function mcpRoundTrip(bin, manifest, timeoutMs) {
         return;
       }
       if (phase === 'collecting') {
+        if (deadlineFired) {
+          // The deadline fired before the responses arrived: report the
+          // timeout as such, not as an unrelated early process exit.
+          resolveLeg({
+            ok: false,
+            reason: `MCP bin did not serve initialize/tools/list within the ${timeoutMs}ms leg deadline (collecting-phase timeout)`,
+            stdout: '',
+            stderr: childErr(),
+          });
+          return;
+        }
         finish({
           ok: false,
           reason: `MCP bin exited early (code ${code}, signal ${signal}) before the round trip completed`,

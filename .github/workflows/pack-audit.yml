@@ -144,6 +144,19 @@ jobs:
             --out="${RUNNER_TEMP}/packed-smoke-summary.json"
           echo '--- packed smoke summary ---'
           cat "${RUNNER_TEMP}/packed-smoke-summary.json"
+      # Retain the smoke's JSON summary as a workflow artifact (docs/
+      # 0.2-release-runbook.md asks the release operator to retain it). The
+      # step's own failure still fails the job with its named-leg stderr;
+      # this upload only runs on success, so a failed smoke never produces a
+      # summary artifact that could be mistaken for evidence of a pass.
+      - name: Retain packed-smoke summary artifact
+        if: success()
+        # v4.6.2, immutable commit pin (repo convention in this file)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: packed-smoke-summary
+          path: ${{ runner.temp }}/packed-smoke-summary.json
+          if-no-files-found: error
       - name: Install pinned gitleaks v8.30.1 (digest-pinned)
         run: |
           set -euo pipefail
