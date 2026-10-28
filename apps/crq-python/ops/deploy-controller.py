@@ -63,6 +63,10 @@ JOURNAL_SCHEMA = 1
 
 TAG_RE = re.compile(r"crq-runner/[0-9]{8}-[0-9]+")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# launch(): item ID + UTC timestamp; author IDs add ._ and promotion retries +.
+# Retain legacy hex IDs, but accept only bounded ASCII filesystem components.
+RUN_ID_RE = re.compile(
+    r"(?:[0-9a-f-]{8,64}|[A-Za-z0-9][A-Za-z0-9._+-]*-[0-9]{8}T[0-9]{6}Z)")
 
 # Queue surfaces the controller must observe and preserve (never rewrite).
 # The queue file is the single ledger: items, starts, author_requests and
@@ -288,7 +292,8 @@ def drain_check(effects: Effects, liveness) -> dict:
                             "reason": "malformed recorded run metadata"})
             continue
         run_id = r.get("run_id")
-        if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f-]{8,64}", run_id):
+        if (not isinstance(run_id, str) or len(run_id) > 255
+                or not RUN_ID_RE.fullmatch(run_id)):
             blocked.append({"item": item.get("id"), "state": "ambiguous",
                             "reason": "malformed run id"})
             continue

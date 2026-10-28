@@ -184,6 +184,60 @@ class DrainTests(ControllerFixture):
         # the probe is only invoked for well-formed recorded runs
         self.assertEqual(calls, [("pr1", "a" * 32, False), ("pr2", "b" * 32, False)])
 
+    def test_runner_generated_ids_probe_exact_recorded_directory_and_exit(self):
+        # crq.launch appends this UTC format to the enrollment/promotion ID.
+        # author_quota permits ._ in its up-to-80-character request IDs;
+        # cut_promotion adds + to repeated promotion item IDs.
+        item_ids = ["pr610", "pr610-merged", "pr610-delta-abcdef0",
+                    "promo-abcdef0123-delta++",
+                    "author-" + "Request._-" + "a" * 70]
+        runs = self.runner / "state/runs"
+        for item_id in item_ids:
+            with self.subTest(item_id=item_id):
+                run_id = item_id + "-20261028T012345Z"
+                rdir = runs / run_id
+                rdir.mkdir(parents=True)
+                (rdir / "exit.json").write_text('{"exit":0}\n')
+                item = {"id": item_id, "run": {"run_id": run_id}}
+                self.write_state("queue.json", {"items": [item]})
+                probe = mock.Mock(return_value="harvest")
+                result = dc.drain_check(self.effects, probe)
+                self.assertEqual(result, {"drained": True, "blocked": []})
+                probe.assert_called_once_with(rdir, item, item["run"], True)
+
+    def test_runner_generated_ids_keep_alive_and_ambiguous_runs_blocked(self):
+        for state in ("alive", "ambiguous"):
+            with self.subTest(state=state):
+                run_id = "pr610-20261028T012345Z"
+                item = {"id": "pr610", "run": {"run_id": run_id}}
+                self.write_state("queue.json", {"items": [item]})
+                probe = mock.Mock(return_value=state)
+                result = dc.drain_check(self.effects, probe)
+                self.assertFalse(result["drained"])
+                self.assertEqual(result["blocked"], [
+                    {"item": "pr610", "state": state, "run": run_id}])
+                probe.assert_called_once_with(
+                    self.runner / "state/runs" / run_id, item, item["run"], False)
+
+    def test_unsafe_or_malformed_run_ids_never_reach_liveness(self):
+        valid = "pr610-20261028T012345Z"
+        invalid = [None, False, 17, [], {}, "", ".", "..", "../" + valid,
+                   "/" + valid, "nested/" + valid, "nested\\" + valid,
+                   " " + valid, valid + " ", valid + "\n", valid + "\r",
+                   valid + "\t", valid + "\x00", valid + "\x1b", "é" + valid,
+                   "pr610", "pr610-20261028t012345z", "pr610-20261028T01234Z",
+                   "-" + valid, "a" * 239 + "-20261028T012345Z"]
+        for run_id in invalid:
+            with self.subTest(run_id=run_id):
+                self.write_state("queue.json", {"items": [
+                    {"id": "pr610", "run": {"run_id": run_id}}]})
+                probe = mock.Mock(side_effect=AssertionError("unsafe path reached probe"))
+                result = dc.drain_check(self.effects, probe)
+                self.assertFalse(result["drained"])
+                self.assertEqual(result["blocked"], [{
+                    "item": "pr610", "state": "ambiguous", "reason": "malformed run id"}])
+                probe.assert_not_called()
+
     def test_absent_and_explicit_null_runs_are_the_only_skips(self):
         self.write_state("queue.json", {"items": [
             {"id": "pr1"},                      # never started
