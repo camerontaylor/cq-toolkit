@@ -1313,12 +1313,15 @@ export function buildTools(
    * marker run; a glob with '/' is root-anchored.
    */
   const compileRgGlob = (glob: string): CompiledGlob => {
-    const parts = glob.split('/');
+    // A leading '/' anchors at the workspace root; it is not an empty
+    // path component to match before the first real component.
+    const anchored = glob.includes('/');
+    const parts = (glob.startsWith('/') ? glob.slice(1) : glob).split('/');
     return {
       runs: parts.map((part) =>
         part === '**' ? [{ kind: 'any-run' }, { kind: 'any-run' }] : tokenizeComponent(part),
       ),
-      anchored: parts.length > 1,
+      anchored,
     };
   };
 

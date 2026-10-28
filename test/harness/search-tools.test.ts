@@ -960,13 +960,23 @@ describe('contained grep and glob tools', () => {
       await writeFile(join(workspace, 'src', 'nested', 'root.ts'), 'needle\n', 'utf8');
       await writeFile(join(workspace, 'deep', 'src', 'nested.ts'), 'needle\n', 'utf8');
       await writeFile(join(workspace, 'deep', 'keep.ts'), 'needle\n', 'utf8');
+      await writeFile(join(workspace, 'srcx.ts'), 'needle\n', 'utf8');
       const grep = tool(buildTools(defaultHarnessConfig, workspace, 'read-only'), 'grep');
       const result = await grep.execute({ pattern: 'needle', include: '!src' });
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.output).toContain('--- deep/keep.ts ---');
+        expect(result.output).toContain('--- srcx.ts ---');
         expect(result.output).not.toContain('src/nested/root.ts');
         expect(result.output).not.toContain('deep/src/nested.ts');
+      }
+      // A leading slash anchors the excluded directory at the workspace root.
+      const anchored = await grep.execute({ pattern: 'needle', include: '!/src' });
+      expect(anchored.ok).toBe(true);
+      if (anchored.ok) {
+        expect(anchored.output).toContain('--- deep/src/nested.ts ---');
+        expect(anchored.output).toContain('--- srcx.ts ---');
+        expect(anchored.output).not.toContain('--- src/nested/root.ts ---');
       }
     });
   });
