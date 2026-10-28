@@ -5,6 +5,42 @@ changes signer custody. Do not render, patch or restart the old runner before th
 owner-approved first monorepo deployment. `CUTOVER.md` and `CUTOVER-COMMANDS.md`
 are archival records of the completed cross-host handover, not current commands.
 
+## Slot scheduling deployment (owner-directed 2026-10-28)
+
+Keep `crq-tick.timer` at `OnCalendar=*:0/12`. Render and install the new
+`crq-slot.service` and `crq-slot.timer` through `prepare-host.py`'s existing
+`crq-*` unit rendering path. After the recorded deployment, Giles enables and
+starts `crq-slot.timer` alongside the existing tick timer. Its calendar is every
+minute with `AccuracySec=1s`; its service runs `crq_slot.py` in the rendered CRQ
+root with the same CLI PATH as tick. No transient systemd-run units are needed.
+
+The admission entry first reads `state/next-review-at`; future hints avoid even
+the queue lock and runner imports. Due entries take the shared lock non-blocking,
+collect dead, ownership-verified detached results, apply signer-published cooldown,
+probe repository-scoped usage, and fill free slots after reserving unconfirmed
+local starts. They can wait once for a dated slot less than 60 seconds away;
+undated retries do not sleep under the lock. While local runs are in flight,
+the hint is capped at the next minute boundary for collection even during
+pause/cooldown. No enrollment or audits run in the minute entry. Full ticks wait
+up to 90 seconds for the lock, retain all maintenance duties, and refresh the hint. Harvest clears it; detached review
+completion requests `systemctl --user --no-block start crq-tick.service` for prompt
+harvest. No eligible work backs off twelve minutes. Stop both timers for manual
+maintenance; the recorded deploy's runner-disabled marker also gates admission.
+
+No overlay keys need changing. Render committed config: `max_inflight=10`,
+`max_starts_per_tick=10`, `review_timeout_min=120`. The new ceiling defaults to
+10 in code when omitted. The old starts/hour cap remains the conservative
+fallback when usage is unavailable; valid vendor remaining slots govern normal
+admission. A local slot prediction never authorizes spend without rechecking
+usage. Unknown external starts and vendor admission lag retry within a minute.
+
+Deploy the signer change too: its review argv includes `--deep` and its deadline
+is 120 minutes (stall alert 150 minutes). Signer custody, its existing independent admission policy and
+its service installation remain unchanged. The signer publishes an exact
+rate-limit deadline; the runner retains the latest global deadline on harvest.
+All reviews use `--deep`, and free slots can start concurrent isolated reviews
+in promotion → prioritize → rank order. See [README](../README.md).
+
 ## Private overlay, schema 1
 
 Keep the JSON file outside the deployment checkout and outside every Git

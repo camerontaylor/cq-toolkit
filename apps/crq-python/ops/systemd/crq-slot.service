@@ -1,0 +1,10 @@
+[Unit]
+Description=CRQ fast review-slot admission
+[Service]
+Type=oneshot
+Nice=10
+Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=@CRQ_ROOT@
+ExecStart=/usr/bin/env python3 @CRQ_ROOT@/crq_slot.py
+TimeoutStartSec=10min
+KillMode=process

@@ -150,7 +150,7 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(meta["author"], {"request_id": REQ, "base": BASE, "head": HEAD,
                                           "target": "origin/merge-queue", "cycle": 1})
         self.assertEqual(meta["cmd"],
-                         ["coderabbit", "review", "--agent", "--committed", "--base-commit", BASE])
+                         ["coderabbit", "review", "--agent", "--deep", "--committed", "--base-commit", BASE])
         self.assertNotIn("--use-credits", meta["cmd"])
         self.assertNotIn("--credits", meta["cmd"])
 
@@ -164,7 +164,7 @@ class LaunchTest(unittest.TestCase):
              mock.patch.object(crq.subprocess, "Popen", return_value=SimpleNamespace(pid=7)):
             crq.launch(q, item, plan)
         meta = json.loads((self.runs / item["run"]["run_id"] / "meta.json").read_text())
-        self.assertEqual(meta["cmd"], ["coderabbit", "review", "--agent", "--base-commit", BASE])
+        self.assertEqual(meta["cmd"], ["coderabbit", "review", "--agent", "--deep", "--base-commit", BASE])
 
     def test_secret_scan_refusal_blocks_before_spawn_and_consumes_no_start(self):
         q = empty_queue()
@@ -211,6 +211,26 @@ class LockTest(unittest.TestCase):
                 self.assertIsNone(crq.with_lock(called))
                 called.assert_not_called()
 
+    def test_full_tick_waits_for_slot_lock_and_then_runs(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(crq, "LOCK", Path(tmp) / "tick.lock"), \
+             mock.patch.object(crq.fcntl, "flock", side_effect=[BlockingIOError(), None, None]), \
+             mock.patch.object(crq.time, "monotonic", side_effect=[0, 0.1]), \
+             mock.patch.object(crq.time, "sleep") as sleep:
+            called = mock.Mock(return_value="ran")
+            self.assertEqual(crq.with_lock(called, lock_wait=90), "ran")
+            sleep.assert_called_once_with(0.25)
+            called.assert_called_once_with()
+
+    def test_full_tick_lock_wait_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(crq, "LOCK", Path(tmp) / "tick.lock"), \
+             mock.patch.object(crq.fcntl, "flock", side_effect=BlockingIOError()), \
+             mock.patch.object(crq.time, "monotonic", side_effect=[0, 89.9, 90]), \
+             mock.patch.object(crq.time, "sleep") as sleep:
+            called = mock.Mock()
+            self.assertIsNone(crq.with_lock(called, lock_wait=90))
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.1)
+            called.assert_not_called()
+
 
 class CrashRecoveryTest(unittest.TestCase):
     def setUp(self):
@@ -218,7 +238,8 @@ class CrashRecoveryTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.runs = Path(self.tmp.name) / "runs"
         self.runs.mkdir(parents=True)
-        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock())):
+        for name, value in (("STATE", Path(self.tmp.name) / "state"),
+                            ("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock())):
             p = mock.patch.object(crq, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -446,7 +467,8 @@ class HarvestTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.runs = Path(self.tmp.name) / "runs"
         self.runs.mkdir(parents=True)
-        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
+        for name, value in (("STATE", Path(self.tmp.name) / "state"),
+                            ("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
                             ("remove_worktree", mock.Mock()), ("findings_md", lambda *a, **k: "")):
             p = mock.patch.object(crq, name, value)
             p.start()
@@ -483,6 +505,7 @@ class HarvestTest(unittest.TestCase):
              mock.patch.object(crq.coverage, "record_review") as credit, \
              mock.patch.object(crq.repair_tick, "enqueue") as enqueue:
             msg = crq.harvest_review(q, item, False)
+        self.assertLessEqual(crq.parse_iso((crq.STATE / "next-review-at").read_text().strip()), crq.now())
         self.assertEqual(item["state"], "done")
         self.assertEqual(len(item["author_cycles"]), 1)   # genuine cycle evidence kept
         self.assertEqual(item["cycles"], [])              # so repair backfill never sees it
@@ -557,7 +580,8 @@ class WrapperGroupTest(unittest.TestCase):
         self.runs.mkdir(parents=True)
         self.pgids = []
         self.addCleanup(self._cleanup_groups)
-        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
+        for name, value in (("STATE", Path(self.tmp.name) / "state"),
+                            ("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
                             ("remove_worktree", mock.Mock())):
             p = mock.patch.object(crq, name, value)
             p.start()
@@ -678,7 +702,11 @@ class TickTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.q = empty_queue()
+        usage = mock.patch.object(crq.usage_slots, "read_usage", return_value=None)
+        usage.start()
+        self.addCleanup(usage.stop)
         self.patches = [
+            ("refresh_slot_deadline", mock.Mock()),
             ("load_queue", lambda: self.q), ("fetch", mock.Mock()), ("enroll", lambda q, dry: []),
             ("promotion_audit", lambda q, dry: []), ("promotion_tick", lambda q, dry: []),
             ("save_queue", mock.Mock()), ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
@@ -871,8 +899,11 @@ class DeadlineClassifyTest(unittest.TestCase):
         (rdir / "meta.json").write_text(json.dumps({"run_id": rid, "cmd": ["coderabbit", "review"],
                                                     "worktree": "/w"}))
         with mock.patch.object(crq.subprocess, "Popen",
-                               return_value=SimpleNamespace(pid=5, wait=lambda: rc)):
+                               return_value=SimpleNamespace(pid=5, wait=lambda: rc)), \
+             mock.patch.object(crq, "run") as wake:
             crq.cmd_review_child(rid)
+            wake.assert_called_once_with(["systemctl", "--user", "--no-block", "start",
+                                          "crq-tick.service"], check=False, timeout=10)
         return json.loads((rdir / "exit.json").read_text())
 
     def test_timed_out_covers_124_and_137_only(self):

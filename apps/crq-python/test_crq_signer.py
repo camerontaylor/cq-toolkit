@@ -2,11 +2,13 @@
 keep all six levels, and the secret scan judges rename sides separately.
 Isolated: every path, token mint and API call is patched; no network."""
 import importlib.util
+import datetime as dt
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('crq_signer_under_test', ROOT / 'signer/crq-signer.py')
@@ -227,6 +229,34 @@ class RenameScan(SignerTest):
             {'rule': 'env-any', 'file': 'new.env', 'line': 6},
             {'rule': 'env-any', 'file': 'old.env', 'line': 12},
         ])
+
+
+class DeepSlotTest(SignerTest):
+    def test_deep_argv_and_longer_deadline(self):
+        binary = self.root / 'fake-cli'
+        binary.touch()
+        with mock.patch.object(signer, 'CODERABBIT', binary), \
+             mock.patch.object(signer.subprocess, 'Popen', return_value=SimpleNamespace(pid=123, wait=lambda: 0)) as spawn, \
+             mock.patch.object(signer.threading, 'Timer') as timer, \
+             mock.patch.object(signer, 'classify', return_value={'outcome': 'completed'}):
+            signer.run_cli(self.root / 'run', self.root, BASE)
+        self.assertIn('--deep', spawn.call_args.args[0])
+        self.assertEqual(timer.call_args_list[0].args[0], 120 * 60)
+        self.assertEqual(timer.call_args_list[1].args[0], 120 * 60 + 60)
+
+    def test_rate_limit_seconds_survive_signer_backoff(self):
+        stream = self.root / 'review.ndjson'
+        stream.write_text(json.dumps({'type': 'error', 'errorType': 'rate_limit',
+                                      'metadata': {'waitTime': '17 seconds'}}))
+        self.patch('COOLDOWN', self.root / 'cooldown.json')
+        cls = signer.classify(stream, 1)
+        self.assertEqual(cls['wait_minutes'] * 60, 17)
+        at = dt.datetime(2026, 10, 28, tzinfo=dt.timezone.utc)
+        with mock.patch.object(signer, 'now', return_value=at), \
+             mock.patch.object(signer, 'publish_backoff') as backoff:
+            signer.enter_cooldown(IID, cls['wait_minutes'])
+        self.assertEqual(backoff.call_args.args[2], at + dt.timedelta(seconds=17))
+        self.assertEqual(json.loads(signer.COOLDOWN.read_text())['until'], signer.iso(at + dt.timedelta(seconds=17)))
 
 
 if __name__ == '__main__':
