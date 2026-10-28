@@ -13,6 +13,12 @@ import {
   type ReviewCoverageV2,
 } from './internal/reviewCoverageV2.js';
 import { runReviewSession, scanReviewUpload, totalUsage } from './internal/reviewSession.js';
+import {
+  createKnownUsageLedger,
+  normalizeUsageObservation,
+  type KnownUsageSummary,
+  type UsageObservation,
+} from '../../shared/knownUsage.js';
 
 export interface AgentReviewerInput {
   repoRoot: string;
@@ -48,6 +54,8 @@ export interface AgentReviewerInput {
 export interface AgentReviewReport {
   findings: Finding[];
   usage: number;
+  /** Driver results observed before this report's terminal snapshot. */
+  usageSummary?: KnownUsageSummary;
   coverage: ReviewCoverageV2;
   advisories: string[];
   limitations: string[];
@@ -120,12 +128,21 @@ export async function runAgentReviewer(
     if (Date.now() >= deadline) throw wallBudgetError;
   };
   let report: AgentReviewReport | undefined;
+  const usageLedger = createKnownUsageLedger();
+  let reportOpen = true;
+  const pendingUsage = new Set<string>();
+  const closeUsage = (): void => {
+    reportOpen = false;
+    for (const id of pendingUsage) usageLedger.record(id, {});
+    pendingUsage.clear();
+  };
   const active = new Set<ReviewCoverageV2['sessions'][number]>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled: (() => void) | undefined;
   const snapshot = (): AgentReviewReport | undefined => {
     if (report === undefined) return undefined;
     updatePieces(report.coverage);
+    report.usageSummary = usageLedger.snapshot();
     return structuredClone(report);
   };
   try {
@@ -166,6 +183,7 @@ export async function runAgentReviewer(
       report = {
         findings: [],
         usage: 0,
+        usageSummary: usageLedger.snapshot(),
         coverage: plan.coverage,
         advisories: plan.advisories,
         limitations: plan.limitations,
@@ -249,13 +267,61 @@ export async function runAgentReviewer(
         };
         active.add(evidence);
         report!.coverage.sessions.push(evidence);
+        let dispatch = 0;
+        const observedDrivers: DriverFactory = {
+          resolve: (request) => {
+            const resolved = drivers.resolve(request);
+            return {
+              ...resolved,
+              driver: {
+                ...resolved.driver,
+                run: async (invocation, options) => {
+                  const id = `${session.id}:${String(dispatch++)}`;
+                  if (reportOpen) pendingUsage.add(id);
+                  const settleUsage = (read: () => UsageObservation): void => {
+                    if (!reportOpen) return;
+                    try {
+                      usageLedger.record(id, normalizeUsageObservation(read()));
+                    } catch {
+                      // A telemetry accessor or ledger failure cannot replace the driver outcome.
+                      try {
+                        usageLedger.record(id, {});
+                      } catch {
+                        // The dispatch was already recorded; retain the first observation.
+                      }
+                    } finally {
+                      pendingUsage.delete(id);
+                    }
+                  };
+                  let returned = false;
+                  try {
+                    const value = await resolved.driver.run.call(
+                      resolved.driver,
+                      invocation,
+                      options,
+                    );
+                    returned = true;
+                    settleUsage(() => ({
+                      usage: value.usage,
+                      ...(value.costUSD === undefined ? {} : { costUSD: value.costUSD }),
+                    }));
+                    return value;
+                  } catch (error) {
+                    if (!returned) settleUsage(() => ({}));
+                    throw error;
+                  }
+                },
+              },
+            };
+          },
+        };
         let result: Awaited<ReturnType<typeof runReviewSession>>;
         try {
           await scanReviewUpload(input.scanSecrets, [
             { component: 'review-prompt', path: 'review-request.txt', text: session.prompt },
           ]);
           ensureActive();
-          result = await runReviewSession(drivers, {
+          result = await runReviewSession(observedDrivers, {
             repoRoot: input.repoRoot,
             role: input.role,
             severityMap: input.severityMap,
@@ -382,8 +448,11 @@ export async function runAgentReviewer(
       controller.signal.addEventListener('abort', cancelled, { once: true });
       timer = setTimeout(() => controller.abort(wallBudgetError), Math.max(0, input.wallMs));
     });
-    return await Promise.race([work(), stopped]);
+    const result = await Promise.race([work(), stopped]);
+    closeUsage();
+    return result;
   } catch (error) {
+    closeUsage();
     for (const evidence of active)
       evidence.status = controller.signal.aborted ? 'aborted' : 'error';
     const partial = snapshot();

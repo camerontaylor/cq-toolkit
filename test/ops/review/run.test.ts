@@ -81,7 +81,11 @@ describe('review.run', () => {
         drivers,
         effectsFactory: () => repoEffects(repo),
       })({ repoRoot: repo.root });
-      expect(result).toEqual({ status: 'needs-human', reason: 'review.run: cq.json is required' });
+      expect(result).toEqual({
+        status: 'needs-human',
+        reason: 'review.run: cq.json is required',
+        usageSummary: { knownCount: 0, unknownCount: 0, unpricedCount: 0 },
+      });
       expect(drivers.resolve).not.toHaveBeenCalled();
     } finally {
       await repo.cleanup();
@@ -1682,6 +1686,7 @@ it('keeps blocked evidence when an engine report carries malformed coverage', as
         report: {
           findings: [],
           usage: 1,
+          usageSummary: { knownCount: 0, unknownCount: 1, unpricedCount: 1 },
           coverage: malformed as never,
           advisories: ['fixture advisory'],
           limitations: ['fixture limitation'],
@@ -1733,6 +1738,7 @@ it('maps blocked partial findings to the ledger cycle so a disposition closes th
             },
           ],
           usage: 1,
+          usageSummary: { knownCount: 0, unknownCount: 1, unpricedCount: 1 },
           coverage: undefined as never,
           advisories: ['blocked advisory'],
           limitations: [],
@@ -2156,6 +2162,8 @@ it.each(['current', 'changed', 'queue-auth'] as const)(
       } else {
         expect(result.status).toBe('ok');
         expect(result.report?.deferredVendorDebt?.vendorCompleted).toBe(false);
+        expect(result.usageSummary).toMatchObject({ knownCount: 1, unknownCount: 0 });
+        expect(result.report).not.toHaveProperty('usageSummary');
         if (result.status === 'ok') {
           expect(result.value.findings).toContainEqual(
             expect.objectContaining({ id: 'retained', status: 'open' }),

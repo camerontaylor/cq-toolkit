@@ -45,6 +45,21 @@ export type OpResult<R> =
   | { status: 'budget-exhausted' }
   | { status: 'indeterminate'; detail: string };
 
+/** Typed telemetry carried beside the frozen op result, including failed exits. */
+export interface KnownUsageSummary {
+  usage?: Usage;
+  costUSD?: number;
+  knownCount: number;
+  unknownCount: number;
+  unpricedCount: number;
+}
+
+/** Consumer artifact: preserves the exact result and its optional envelopes. */
+export type OpResultArtifact<R> = OpResult<R> & {
+  report?: unknown;
+  usageSummary?: KnownUsageSummary;
+};
+
 /**
  * Lifecycle state of one job in a run. Frozen, exactly these six values:
  * `queued` (not yet dispatched), `running` (in flight), `blocked`
