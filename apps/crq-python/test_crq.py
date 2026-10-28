@@ -1027,12 +1027,16 @@ class DeferredSourceSearchTest(unittest.TestCase):
                     self.find()
 
     def test_malformed_trusted_reread_and_binding_are_refused(self):
+        # A non-merge-queue base ref is now a legitimate configured target, so the
+        # malformed-reread probe uses a trusted re-read that names another repository
+        # (and the binding loop uses actually invalid ref strings).
         self.result = self.envelope(
-            self.pr(12, base={"ref": "main", "repo": {"full_name": crq.REPO}}))
+            self.pr(12, base={"ref": "release/1.4", "repo": {"full_name": "other/repo"}}))
         with self.assertRaises(ValueError):
             self.find()
         for over in (dict(repo="other/repo"), dict(producer="author name"), dict(head="xyz"),
-                     dict(target="main"), dict(limit=3), dict(limit=True)):
+                     dict(target="a..b"), dict(target="release//1.4"), dict(limit=3),
+                     dict(limit=True)):
             with self.subTest(over=over):
                 with self.assertRaises(ValueError):
                     self.find(**over)
