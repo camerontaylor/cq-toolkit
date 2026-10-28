@@ -78,6 +78,20 @@ export const QueueReasonSchema = z
   })
   .strict();
 export type QueueReason = z.infer<typeof QueueReasonSchema>;
+/** Authenticated same-item identity relation; never completion or coverage authority. */
+export const QueueRequestAliasSchema = z
+  .object({
+    v: z.literal(1),
+    reference: QueueReferenceSchema,
+    originalRequestId: QueueToken,
+    itemId: QueueToken,
+    source: MergedBindingSchema,
+    policy: z.literal('affected-current-additions-v1'),
+    receiptId: QueueDigest,
+    receiptEquivalence: QueueDigest,
+  })
+  .strict();
+export type QueueRequestAlias = z.infer<typeof QueueRequestAliasSchema>;
 export const QueueStatusSchema = z
   .object({
     state: QueueStateSchema,
@@ -93,6 +107,7 @@ export const QueueStatusSchema = z
     reusedFrom: z.string().nullable().exactOptional(),
     receiptSource: MergedBindingSchema.nullable().exactOptional(),
     receiptEquivalence: QueueDigest.nullable().exactOptional(),
+    requestAlias: QueueRequestAliasSchema.nullable().exactOptional(),
   })
   .strict();
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;

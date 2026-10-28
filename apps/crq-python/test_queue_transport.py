@@ -375,6 +375,109 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(self.call("status")["state"], "awaiting-merge")
 
 
+    def alias_fixture(self):
+        # The original is enrolled directly by Q1, without a queue-client principal.
+        item = receipts.enroll(self.q, repo="owner/repo", pr=12, merge_sha="b" * 40,
+                               request_id="original-1", at=self.runner.iso())["item"]
+        paths = [{"source_path": "a.ts", "path": "a.ts", "resolution": "same-path-current",
+                  "disposition": "included", "blob": "a" * 40, "mode": "100644", "bytes": 20}]
+        capture = {"target": "c" * 40, "tree": "d" * 40, "paths": paths,
+                   "scope_digest": receipts.digest(paths), "policy": receipts.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1", "reviewer_version": "fixture"}
+        capture["equivalence"] = receipts.current_equivalence(capture)
+        doc = {"version": 1, "item_id": item["id"], "request_id": "original-1",
+               "source": copy.deepcopy(item["subject"]), "capture": copy.deepcopy(capture),
+               "outcome": "terminal-with-findings", "counted": True,
+               "classification": {"counted": True, "outcome": "completed"},
+               "findings": [{"severity": "major", "text": "retained " * 1500}]}
+        item.update(state="done", capture=capture, receipt_id=receipts.write_receipt(self.tmp.name, doc))
+        self.call("enqueue")
+        self.call("bind", pr=12, mergeSha="b" * 40)
+        return doc
+
+    def test_authenticated_alias_original_q1_principal_and_request_specific_delivery(self):
+        doc = self.alias_fixture()
+        result = self.call("status")
+        proof = result["requestAlias"]
+        self.assertEqual(proof["reference"], {"requestId": "request-1", "binding": self.b})
+        self.assertEqual(proof["originalRequestId"], "original-1")
+        self.assertEqual(proof["itemId"], doc["item_id"])
+        self.assertEqual(proof["receiptId"], self.q["items"][0]["receipt_id"])
+        self.assertEqual(proof["receiptEquivalence"], receipts.current_equivalence(doc["capture"]))
+        self.assertNotIn("original-1", self.q["queue_client_requests"])
+        manifest = self.call("report", receiptId=proof["receiptId"], cursor=None)["page"]
+        ack = {"receiptId": proof["receiptId"], **{k: manifest[k] for k in ("sha256", "chunks", "bytes")}}
+        with self.assertRaisesRegex(ValueError, "complete"): self.call("ack", **ack)
+        for index in range(manifest["chunks"]):
+            self.call("report", receiptId=proof["receiptId"], cursor=proof["receiptId"] + ":" + str(index))
+        consumed = self.call("ack", **ack)
+        self.assertTrue(consumed["consumed"])
+        self.assertEqual(consumed["requestAlias"], proof)
+        self.assertEqual(self.call("ack", **ack)["requestAlias"], proof)
+        self.assertEqual(doc["request_id"], "original-1")
+
+    def test_alias_proof_rejects_malformed_mapping_item_source_and_capture(self):
+        doc = self.alias_fixture()
+        valid = copy.deepcopy(self.q)
+        def original(q): del q["merged_current_requests"]["original-1"]
+        def alias_binding(q): q["merged_current_requests"]["request-1"]["binding"]["pr"] = 99
+        def original_binding(q): q["merged_current_requests"]["original-1"]["binding"]["policy"] = "other"
+        def other_item(q): q["merged_current_requests"]["original-1"]["item"] = "other-item"
+        def duplicate(q): q["items"].append(copy.deepcopy(q["items"][0]))
+        def nondeterministic(q):
+            q["items"][0]["id"] = "arbitrary-item"
+            for value in q["merged_current_requests"].values(): value["item"] = "arbitrary-item"
+        def wrong_kind(q): q["items"][0]["kind"] = "author"
+        def wrong_pr(q): q["items"][0]["pr"] = 99
+        def wrong_merge(q): q["items"][0]["merge_commit"] = "f" * 40
+        def wrong_original(q): q["items"][0]["request_id"] = None
+        def wrong_subject(q): q["items"][0]["subject"]["policy"] = "other"
+        def stale_capture(q): q["items"][0]["capture"]["tree"] = "f" * 40
+        def stale_retained(q): q["items"][0]["capture"]["equivalence"] = "f" * 64
+        for mutate in (original, alias_binding, original_binding, other_item, duplicate,
+                       nondeterministic, wrong_kind, wrong_pr, wrong_merge, wrong_original,
+                       wrong_subject, stale_capture, stale_retained):
+            self.q = copy.deepcopy(valid)
+            mutate(self.q)
+            before = copy.deepcopy(self.q)
+            with self.subTest(fault=mutate.__name__), self.assertRaises(ValueError): self.call("status")
+            self.assertEqual(self.q, before)
+        for field, value in (("request_id", "forged-original"), ("item_id", "other-item"),
+                             ("source", {**doc["source"], "policy": "other"})):
+            self.q = copy.deepcopy(valid)
+            changed = {**doc, field: value}
+            self.q["items"][0]["receipt_id"] = receipts.write_receipt(self.tmp.name, changed)
+            with self.subTest(document=field), self.assertRaises(ValueError): self.call("status")
+        self.q = copy.deepcopy(valid)
+        changed = copy.deepcopy(doc)
+        changed["capture"]["equivalence"] = "f" * 64
+        self.q["items"][0]["receipt_id"] = receipts.write_receipt(self.tmp.name, changed)
+        with self.assertRaises(ValueError): self.call("status")
+
+    def test_alias_authorization_identity_pause_and_noncounted_do_not_gain_credit(self):
+        doc = self.alias_fixture()
+        self.policy["read"] = []
+        with self.assertRaisesRegex(ValueError, "denied"): self.call("status")
+        self.policy["read"] = ["developer"]
+        self.b["head"] = "f" * 40
+        with self.assertRaisesRegex(ValueError, "binding"): self.call("status")
+        self.b["head"] = "a" * 40
+        self.q["queue_client_requests"]["request-1"]["reason"] = {
+            "source": "queue", "category": "identity", "code": "forge-identity"}
+        blocked = self.call("status")
+        self.assertIsNone(blocked.get("requestAlias"))
+        self.assertFalse(blocked["reviewed"])
+        self.q["queue_client_requests"]["request-1"].pop("reason")
+        doc.update(outcome="no-current-code", counted=False, classification={"counted": False})
+        self.q["items"][0]["receipt_id"] = receipts.write_receipt(self.tmp.name, doc)
+        result = self.call("status")
+        self.assertIsNotNone(result["requestAlias"])
+        self.assertFalse(result["reviewed"])
+        self.assertFalse(result["consumed"])
+        self.assertEqual(result["state"], "no-current-code")
+
+
 def bridge(root, raw):
     """Cross-language offline SDK fixture; each request restarts the server process.
 

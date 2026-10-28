@@ -86,10 +86,23 @@ function fixture(clean = false) {
       source_path: 'src/a.ts',
     },
   ]);
+  const itemId =
+    'current-' +
+    sha256(
+      Buffer.from(
+        JSON.stringify({
+          merge_sha: 'b'.repeat(40),
+          policy: 'affected-current-additions-v1',
+          pr: 12,
+          repo: 'owner/repo',
+          target_selector: 'promoted-main',
+        }),
+      ),
+    ).slice(0, 32);
   const document = {
     version: 1,
-    item_id: 'current-1',
-    request_id: 'original-alias',
+    item_id: itemId,
+    request_id: ref.requestId,
     source: {
       repo: 'owner/repo',
       pr: 12,
@@ -128,7 +141,7 @@ function fixture(clean = false) {
     state: document.outcome,
     pr: 12,
     mergeSha: 'b'.repeat(40),
-    itemId: 'current-1',
+    itemId,
     receiptId,
     consumed: false,
     reviewed: true,
@@ -186,7 +199,7 @@ function fixture(clean = false) {
 }
 
 describe('complete immutable queue result consumption', () => {
-  test('large individual finding, alias, restart and idempotent isolated import', async () => {
+  test('large individual finding, original request, restart and idempotent isolated import', async () => {
     const f = fixture();
     const dir = await directory();
     expect(f.bytes.length).toBeGreaterThan(8192);

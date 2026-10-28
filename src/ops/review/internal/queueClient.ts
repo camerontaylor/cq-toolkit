@@ -154,14 +154,37 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       );
     return envelope.result;
   }
+  function parseStatus(input: QueueReference, value: unknown) {
+    const current = QueueStatusSchema.parse(value);
+    const alias = current.requestAlias;
+    if (
+      alias &&
+      (!isDeepStrictEqual(alias.reference, input) ||
+        alias.originalRequestId === input.requestId ||
+        current.reusedFrom ||
+        alias.itemId !== current.itemId ||
+        alias.receiptId !== current.receiptId ||
+        alias.receiptEquivalence !== current.receiptEquivalence ||
+        !isDeepStrictEqual(alias.source, current.receiptSource) ||
+        alias.source.repo !== input.binding.repo ||
+        alias.source.targetSelector !== input.binding.targetSelector ||
+        alias.source.pr !== current.pr ||
+        alias.source.mergeSha !== current.mergeSha ||
+        (input.binding.kind === 'merged-current' &&
+          !isDeepStrictEqual(alias.source, input.binding)))
+    )
+      throw new Error('queue alias status binding mismatch');
+    return current;
+  }
   const status = async (input: QueueReference) =>
-    QueueStatusSchema.parse(await request('status', input));
+    parseStatus(input, await request('status', input));
   return {
-    enqueue: async (input) => QueueStatusSchema.parse(await request('enqueue', input)),
+    enqueue: async (input) => parseStatus(input, await request('enqueue', input)),
     status,
     bind: async (input: QueueBindInput) => {
       const i = QueueBindSchema.parse(input);
-      return QueueStatusSchema.parse(
+      return parseStatus(
+        { requestId: i.requestId, binding: i.binding },
         await request(
           'bind',
           { requestId: i.requestId, binding: i.binding },
@@ -169,7 +192,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
         ),
       );
     },
-    cancel: async (input) => QueueStatusSchema.parse(await request('cancel', input)),
+    cancel: async (input) => parseStatus(input, await request('cancel', input)),
     report: async (input, evidenceDir) => {
       const current = await status(input);
       if (!current.receiptId) return null;
@@ -236,8 +259,26 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
               (document.source.pr !== b.pr || document.source.merge_sha !== b.mergeSha))))
       )
         throw new Error('receipt source binding mismatch');
+      const alias = current.requestAlias;
+      if (
+        !reused &&
+        (document.item_id !== current.itemId ||
+          (document.request_id !== input.requestId && !alias) ||
+          (alias &&
+            (alias.originalRequestId !== document.request_id ||
+              alias.itemId !== document.item_id ||
+              alias.receiptId !== receiptId ||
+              alias.receiptEquivalence !== document.capture.equivalence ||
+              alias.policy !== document.source.policy ||
+              alias.source.repo !== document.source.repo ||
+              alias.source.pr !== document.source.pr ||
+              alias.source.mergeSha !== document.source.merge_sha ||
+              alias.source.targetSelector !== document.source.target_selector)))
+      )
+        throw new Error('receipt original request or alias binding mismatch');
       const evidence = await importQueueEvidence(evidenceDir, receiptId, bytes);
-      const ack = QueueStatusSchema.parse(
+      const ack = parseStatus(
+        input,
         await request('ack', input, {
           receiptId,
           sha256: receiptId,
@@ -245,7 +286,12 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
           bytes: manifest.bytes,
         }),
       );
-      if (!ack.consumed || ack.receiptId !== receiptId)
+      if (
+        !ack.consumed ||
+        ack.receiptId !== receiptId ||
+        ack.itemId !== current.itemId ||
+        !isDeepStrictEqual(ack.requestAlias ?? null, current.requestAlias ?? null)
+      )
         throw new Error('queue acknowledgement mismatch');
       return evidence;
     },

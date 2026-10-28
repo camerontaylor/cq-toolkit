@@ -197,6 +197,52 @@ def _vendor_rate_limit(document):
     return all(type(cause) is dict and cause == allowed for cause in proof["causes"])
 
 
+def _request_alias(q, req, entry, document, receipt_id):
+    """Project identity only from authenticated locked state and verified bytes.
+
+    Original requests and explicit equivalent reuse keep their separate paths.
+    No principal comparison for the original: it may have been enrolled by Q1.
+    """
+    maps = q.get("merged_current_requests")
+    if type(maps) is not dict:
+        raise ValueError("invalid alias request mappings")
+    alias = maps.get(req["requestId"])
+    if type(alias) is not dict or set(alias) != {"binding", "item"}:
+        raise ValueError("missing alias request mapping")
+    items = [item for item in q["items"] if item.get("id") == alias["item"]]
+    if len(items) != 1:
+        raise ValueError("alias requires unique item")
+    item = items[0]
+    if item.get("reused_from"):
+        return None
+    if item.get("request_id") == req["requestId"]:
+        return None
+    subject = alias.get("binding")
+    b = req["binding"]
+    expected = {"repo": b["repo"], "pr": entry.get("pr"), "merge_sha": entry.get("mergeSha"),
+                "target_selector": b["targetSelector"], "policy": receipts.POLICY}
+    original = item.get("request_id")
+    if (not _match(TOKEN, original) or original == req["requestId"] or subject != expected
+            or maps.get(original) != alias or item.get("subject") != subject
+            or item.get("kind") != receipts.KIND
+            or item.get("id") != "current-" + receipts.digest(subject)[:32]
+            or item.get("pr") != subject["pr"] or item.get("merge_commit") != subject["merge_sha"]
+            or document.get("request_id") != original or document.get("item_id") != item["id"]
+            or document.get("source") != subject or item.get("receipt_id") != receipt_id):
+        raise ValueError("invalid alias item/source/original binding")
+    retained = document.get("capture")
+    capture = item.get("capture")
+    equivalence = receipts.current_equivalence(retained)
+    if (receipts.current_equivalence(capture) != equivalence
+            or retained.get("equivalence") != equivalence or capture.get("equivalence") != equivalence):
+        raise ValueError("alias capture equivalence mismatch")
+    return {"v": 1, "reference": {"requestId": req["requestId"], "binding": b},
+            "originalRequestId": original, "itemId": item["id"],
+            "source": {"kind": "merged-current", "repo": subject["repo"], "pr": subject["pr"],
+                       "mergeSha": subject["merge_sha"], "targetSelector": subject["target_selector"]},
+            "policy": receipts.POLICY, "receiptId": receipt_id, "receiptEquivalence": equivalence}
+
+
 def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     policy = validate_policy(policy)
     req = decode(raw)
@@ -280,6 +326,10 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                 raise ValueError("source revalidation required before receipt consumption")
         elif receipt_id and result["state"] == "blocked" and document.get("outcome") == "blocked-secret-scan":
             result["reason"] = {"source": "queue", "category": "scan", "code": "blocked-secret-scan"}
+        if receipt_id and entry.get("reason") is None:
+            alias = _request_alias(q, req, entry, document, receipt_id)
+            if alias is not None:
+                result["requestAlias"] = alias
         if op in {"report", "ack"}:
             if not receipt_id or req["receiptId"] != receipt_id:
                 raise ValueError("receipt/request mismatch")
