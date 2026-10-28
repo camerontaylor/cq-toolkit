@@ -375,10 +375,36 @@ export const registry: OpRegistryEntry[] = [
               configText !== null && packageName !== '@camerontaylor/cq-toolkit'
                 ? denylist.makePortableReviewScanner(input.repoRoot, dev, configText, packageName)
                 : undefined;
+            // #536: the red-final-gate fallback's probe worktree binds its own
+            // effects (same construction as `dev`). Its dependency install is
+            // wired ONLY for a pnpm-locked repository: an offline, frozen
+            // install from the existing store — bounded, abortable, no
+            // network and no fallback. Without a lockfile the fallback is off.
+            const pnpmLocked = await fs
+              .access(`${input.repoRoot}/pnpm-lock.yaml`)
+              .then(() => true)
+              .catch(() => false);
             return m.makeDevCycle({
               effects: dev,
               gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
               ...(scanSecrets === undefined ? {} : { scanSecrets }),
+              effectsFor: (root: string) => effects.makeSubprocessDevEffects(root),
+              ...(pnpmLocked
+                ? {
+                    installDeps: async (root: string, signal: AbortSignal) => {
+                      const installed = await effects
+                        .makeSubprocessDevEffects(root)
+                        .runCommand('pnpm', ['install', '--offline', '--frozen-lockfile'], {
+                          timeoutMs: m.GREEN_PREFIX_INSTALL_TIMEOUT_MS,
+                          signal,
+                        });
+                      if (installed.exitCode !== 0)
+                        throw new Error(
+                          `pnpm install --offline --frozen-lockfile ${installed.timedOut ? 'timed out' : `exited ${String(installed.exitCode)}`}: ${installed.stderr.trim().slice(-300)}`,
+                        );
+                    },
+                  }
+                : {}),
             })(input);
           }) as Op<unknown, unknown>,
       ),
