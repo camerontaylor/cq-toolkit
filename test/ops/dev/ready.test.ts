@@ -435,7 +435,9 @@ describe('dev.ready deferred lineage', () => {
         reviewer: 'agent:reviewer',
       }),
     ]);
-    const effects = repoEffects(repo);
+    const effects = repoEffects(repo, (command, args) =>
+      command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
+    );
     effects.openLedger(state.branch).save({
       version: 2,
       branch: state.branch,
@@ -465,7 +467,9 @@ describe('dev.ready deferred lineage', () => {
         reviewer: 'agent:reviewer',
       }),
     ]);
-    const effects = repoEffects(repo);
+    const effects = repoEffects(repo, (command, args) =>
+      command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
+    );
     const ancestor = pendingDebt({ ...state, head: 'a'.repeat(40) }, 'ancestor');
     const current = {
       ...pendingDebt(state, 'current'),
