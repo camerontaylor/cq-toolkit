@@ -446,17 +446,38 @@ export function verifiedCompletedDebt(debt: DeferredVendorDebt): boolean {
         document.source.pr === queue.pr &&
         document.source.merge_sha === queue.mergeSha &&
         document.request_id === reference.requestId)) &&
-    document.capture.paths.length > 0 &&
-    document.capture.paths.every(
+    // Q1 may retain supported no-content rows beside genuinely reviewed files.
+    // Empty/deleted-only captures are uncounted and never establish completion.
+    document.capture.paths.some(
       (path) =>
         ['included', 'renamed'].includes(path.disposition) &&
+        typeof path['bytes'] === 'number' &&
+        path['bytes'] > 0,
+    ) &&
+    document.capture.paths.every((path) => {
+      if (path.disposition === 'deleted')
+        return (
+          path['reason'] === 'no current path or evidenced rename' &&
+          !('blob' in path) &&
+          !('mode' in path) &&
+          !('bytes' in path)
+        );
+      const regular =
         typeof path['blob'] === 'string' &&
         QueueSha.safeParse(path['blob']).success &&
-        ['100644', '100755'].includes(String(path['mode'])) &&
+        typeof path['mode'] === 'string' &&
+        ['100644', '100755'].includes(path['mode']) &&
         typeof path['bytes'] === 'number' &&
-        Number.isSafeInteger(path['bytes']) &&
-        path['bytes'] >= 0,
-    ) &&
+        Number.isSafeInteger(path['bytes']);
+      if (path.disposition === 'excluded-with-reason')
+        return regular && path['reason'] === 'empty current file' && path['bytes'] === 0;
+      return (
+        ['included', 'renamed'].includes(path.disposition) &&
+        regular &&
+        typeof path['bytes'] === 'number' &&
+        path['bytes'] > 0
+      );
+    }) &&
     (document.outcome !== 'terminal-clean' || document.findings.length === 0) &&
     (document.outcome !== 'terminal-with-findings' || document.findings.length > 0) &&
     document.findings.every(
