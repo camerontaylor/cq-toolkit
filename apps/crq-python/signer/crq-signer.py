@@ -655,11 +655,19 @@ SIZE_REFUSAL = re.compile(r"too (large|big|many (files|changes|lines))|diff (is 
                           r"|exceed\w* (the )?(max\w*|limit|size)", re.I)
 
 
+def _review_lines(raw: bytes) -> List[str]:
+    """Shared NDJSON boundaries: physical LF rows, with CRLF whitespace valid.
+    Lone CR never separates records: multi-record CR-only output fails JSON
+    parsing and cannot become completed coverage. Keep raw bytes for hashing.
+    """
+    return raw.decode(errors="replace").split("\n")
+
+
 def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     bad_lines = 0
     if ndjson.exists():
-        for line in ndjson.read_text(errors="replace").splitlines():
+        for line in _review_lines(ndjson.read_bytes()):
             line = line.strip()
             if not line:
                 continue
@@ -792,19 +800,23 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
 
 def blocking_findings(ndjson: Path,
                       diff_files: Optional[set] = None
-                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split critical/major rows into blocking defects and reviewer faults.
     Defects keep the old shape ({n, severity, file, line, title}); faults
-    carry {code, severity, file, desc} only, desc a bounded (80-char) copy of
-    the row's own declared title/body for adjudication provenance. Titles are
+    retain code/severity/file/desc, adding stream_row (1-based physical LF
+    row) and stream_sha256 (exact captured artifact bytes). Together these
+    identify repeated rows without exposing more reviewer text. The desc is
+    an 80-char copy of the row's own declared title/body. Titles are
     capped at 120 chars with control characters stripped — never raw CLI
     output, which can carry auth material. A fault is NEVER dropped into a
     clean pass (a broken reviewer stream is not coverage) and NEVER minted
     into blocking defect evidence (prompt boilerplate must not block a
     promotion, #529)."""
     defects: List[Dict[str, Any]] = []
-    faults: List[Dict[str, str]] = []
-    for line in ndjson.read_text(errors="replace").splitlines():
+    faults: List[Dict[str, Any]] = []
+    raw = ndjson.read_bytes()
+    stream_sha256 = hashlib.sha256(raw).hexdigest()
+    for stream_row, line in enumerate(_review_lines(raw), 1):
         try:
             e = json.loads(line)
         except ValueError:
@@ -815,6 +827,7 @@ def blocking_findings(ndjson: Path,
         fault = finding_fault(e, diff_files)
         if fault is not None:
             faults.append({"code": fault, "severity": e["severity"],
+                           "stream_row": stream_row, "stream_sha256": stream_sha256,
                            "file": e.get("fileName") if isinstance(e.get("fileName"), str) else None,
                            "desc": cap(str(e.get("title") or e.get("codegenInstructions")
                                            or e.get("comment") or ""), 80)})
@@ -1269,7 +1282,7 @@ def write_result(iid: str, req: Optional[Dict[str, Any]], request_sha256: Option
                  posted: Optional[Dict[str, Any]] = None,
                  blocking: Optional[Dict[str, int]] = None,
                  findings: Optional[List[Dict[str, Any]]] = None,
-                 reviewer_faults: Optional[List[Dict[str, str]]] = None,
+                 reviewer_faults: Optional[List[Dict[str, Any]]] = None,
                  wait_minutes: Optional[int] = None, reason: Optional[str] = None,
                  reason_code: Optional[str] = None,
                  started_at: Optional[str] = None) -> None:
@@ -1277,7 +1290,8 @@ def write_result(iid: str, req: Optional[Dict[str, Any]], request_sha256: Option
     output, no matched secret text, no tokens — ever. reason_code is from
     REASON_CODES and only on rejected/error results (R5); the free-text
     reason is for humans/audit only. reviewer_faults are bounded diagnostics
-    ({code, severity, file}) for rows that carried no reviewable defect —
+    (code/severity/file/desc plus artifact hash and physical row reference)
+    for rows that carried no reviewable defect —
     they never become blocking evidence nor a clean pass (#529)."""
     if (RESULTS / f"{iid}.json").exists():
         return  # terminal identity is immutable across retries/recovery
@@ -1334,7 +1348,7 @@ def close_out(iid: str, req: Optional[Dict[str, Any]], req_sha: Optional[str], *
               posted: Optional[Dict[str, Any]] = None,
               findings: Optional[List[Dict[str, Any]]] = None,
               blocking: Optional[Dict[str, int]] = None,
-              reviewer_faults: Optional[List[Dict[str, str]]] = None,
+              reviewer_faults: Optional[List[Dict[str, Any]]] = None,
               wait_minutes: Optional[int] = None, reason: Optional[str] = None,
               reason_code: Optional[str] = None) -> None:
     """Write the result, audit, and consume the request (the .claimed marker
@@ -1505,7 +1519,7 @@ def process_request(path: Path) -> None:
         # Coverage rule: success needs clean recorded coverage of base..batch.
         runs = load_runs()
         findings: List[Dict[str, Any]] = []
-        reviewer_faults: List[Dict[str, str]] = []
+        reviewer_faults: List[Dict[str, Any]] = []
         diff_files: Optional[set] = None  # set below, per-run (covered path has no run)
         counts: Dict[str, int] = {s: 0 for s in SEVERITIES}
         wait_minutes: Optional[int] = None
