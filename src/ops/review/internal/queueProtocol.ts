@@ -51,7 +51,12 @@ export const QueueBindSchema = QueueReferenceSchema.extend({
   mergeSha: QueueSha.exactOptional(),
 }).strict();
 export type QueueBindInput = z.infer<typeof QueueBindSchema>;
-export type QueueTransport = (request: string) => Promise<string>;
+/** One caller budget shared across the entire operation, never renewed per page (#632 contract). */
+export interface QueueLifetimeOptions {
+  signal?: AbortSignal;
+  remainingMs?: () => number;
+}
+export type QueueTransport = (request: string, options?: QueueLifetimeOptions) => Promise<string>;
 export const QUEUE_WIRE_BYTES = 8192;
 export const QueueStateSchema = z.enum([
   'awaiting-pr',
@@ -125,10 +130,10 @@ export type QueueStatus = z.infer<typeof QueueStatusSchema>;
  * bind attaches verified forge metadata; it never changes this binding or renews an author grant.
  */
 export interface DeferredQueueClient {
-  enqueue(input: QueueReference): Promise<QueueStatus>;
-  bind(input: QueueBindInput): Promise<QueueStatus>;
-  cancel(input: QueueReference): Promise<QueueStatus>;
-  status(input: QueueReference): Promise<QueueStatus>;
+  enqueue(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueStatus>;
+  bind(input: QueueBindInput, options?: QueueLifetimeOptions): Promise<QueueStatus>;
+  cancel(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueStatus>;
+  status(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueStatus>;
 }
 
 /** JSON-valued --binding plus flags only; no positional arguments. */
