@@ -189,11 +189,19 @@ Ordering and guarantees:
    presence field (only literal boolean `false` proves absence) disables
    automatic rollback — fail stopped with an explicit operator recovery
    action, never an old-snapshot restore or an incompatible binary start.
-6. **Health** — `health` requires `last_tick` to advance for TWO consecutive
-   observations (strictly increasing UTC timestamps; one slot seen twice is
-   not two slots) and samples up to ten `state/runs/*/meta.json` receipts for
-   readability. Tick advancement, service health and receipt readability are
-   distinct checks; advancement alone is not acceptance.
+6. **Health** — `health` requires the runner's completion heartbeat to
+   advance for TWO consecutive observations (strictly increasing UTC
+   timestamps; one slot seen twice is not two slots). `crq.py` assigns and
+   saves `queue.last_tick` before status publication and replaces the
+   completion heartbeat (`WATCHDOG_HOME/heartbeat.json`, resolved as
+   `$XDG_STATE_HOME/crq` or `~/.local/state/crq`) only afterward, so
+   advancing queue saves are intermediate evidence and never count. The
+   heartbeat must name this checkout's `apps/crq-python` runner root and a
+   strict UTC `YYYY-MM-DDTHH:MM:SSZ` tick; a missing, unreadable,
+   malformed or other-checkout heartbeat refuses assessment. Up to ten
+   `state/runs/*/meta.json` receipts are sampled for readability. Tick
+   advancement, service health and receipt readability are distinct
+   checks; advancement alone is not acceptance.
 
 The deploy journal (schema 1) is the only validated rollback input: it
 records `prior_head`, the prior target's own annotated approval tag

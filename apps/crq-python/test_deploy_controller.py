@@ -31,6 +31,9 @@ def _load(name, path):
 dc = _load("crq_deploy_controller", OPS / "deploy-controller.py")
 host = _load("crq_prepare_host", OPS / "prepare-host.py")
 
+# Sentinel distinguishing "no root argument" from an explicit None root.
+_MISSING_ROOT = object()
+
 
 class ControllerFixture(unittest.TestCase):
     """A temporary deployment clone with a real helper, fake systemctl."""
@@ -342,6 +345,50 @@ class PreservationTests(ControllerFixture):
 
 
 class HealthTests(ControllerFixture):
+    """Causal completion-heartbeat fixtures under an isolated WATCHDOG_HOME.
+
+    crq.py persists queue.last_tick before status publication and replaces
+    the completion heartbeat only after it. These fixtures reproduce that
+    producer order against the controller's real WATCHDOG_HOME resolution —
+    never a mocked read seam, never the actual user's heartbeat.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.xdg = self.base / "xdg-state"
+        self.watchdog = self.xdg / "crq"
+        self.watchdog.mkdir(parents=True)
+        isolated = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.xdg)})
+        isolated.start()
+        self.addCleanup(isolated.stop)
+
+    def complete_tick(self, tick, root=_MISSING_ROOT):
+        """Atomically replace the completion heartbeat exactly as crq.py
+        write_heartbeat() does: producer-shaped JSON, tmp + replace.
+        root is written verbatim (None/other values included) so fixtures
+        can prove root binding; only _MISSING_ROOT means this checkout."""
+        payload = {"last_tick": tick, "stale_alarm_min": 36,
+                   "schedule_id": "crq-tick",
+                   "root": str(self.runner) if root is _MISSING_ROOT else root,
+                   "alert_agent_id": None, "alert_agent_host": None}
+        tmp = self.watchdog / ".heartbeat.json.tmp"
+        tmp.write_text(json.dumps(payload) + "\n")
+        tmp.replace(self.watchdog / "heartbeat.json")
+
+    def write_raw_heartbeat(self, raw):
+        (self.watchdog / "heartbeat.json").write_text(raw)
+
+    def observe_after(self, ticks):
+        """Complete the given ticks between observations (the real producer
+        runs between wall-clock slots; the controller only ever reads)."""
+        remaining = iter(ticks)
+
+        def observe(prior):
+            self.complete_tick(next(remaining))
+            return dc.health_observation(self.effects, prior)
+
+        return observe
+
     def observe_fixtures(self):
         runs = self.runner / "state/runs"
         runs.mkdir(parents=True, exist_ok=True)
@@ -350,60 +397,124 @@ class HealthTests(ControllerFixture):
         (runs / "run-b").mkdir(exist_ok=True)
         (runs / "run-b/meta.json").write_bytes(b"{broken")
 
-    def test_two_advancing_observations_are_healthy_with_receipt_sample(self):
+    def test_two_completed_replacements_are_healthy_with_receipt_sample(self):
         self.observe_fixtures()
-        ticks = iter(["2026-10-28T00:00:00Z", "2026-10-28T00:05:00Z",
-                      "2026-10-28T00:10:00Z"])
-        self.write_state("queue.json", {})
-        effects = self.effects
-
-        def read_json(rel):
-            return {"last_tick": next(ticks)}
-
-        effects.read_json = read_json
-        result = dc.two_slot_health(effects, lambda prior:
-                                    dc.health_observation(effects, prior))
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:05:00Z", "2026-10-28T00:10:00Z"]))
         self.assertTrue(result["healthy"])
         first, second = result["observations"]
         self.assertEqual(first["observed_tick"], "2026-10-28T00:05:00Z")
         self.assertEqual(second["observed_tick"], "2026-10-28T00:10:00Z")
         self.assertEqual(first["receipts"], {"sampled": 2, "readable": 1})
 
-    def test_same_tick_twice_is_one_slot_not_two(self):
-        fixed = "2026-10-28T00:00:00Z"
-        self.write_state("queue.json", {"last_tick": fixed})
-        result = dc.two_slot_health(self.effects, lambda prior:
-                                    dc.health_observation(self.effects, prior))
+    def test_advancing_queue_saves_cannot_substitute_for_completion(self):
+        self.complete_tick("2026-10-28T00:00:00Z")
+        self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
+        queue_ticks = iter(["2026-10-28T00:05:00Z", "2026-10-28T00:10:00Z"])
+
+        def observe(prior):
+            # The queue keeps saving advancing ticks (crq.py persists
+            # last_tick before completion) while no tick ever completes.
+            self.write_state("queue.json", {"last_tick": next(queue_ticks)})
+            return dc.health_observation(self.effects, prior)
+
+        result = dc.two_slot_health(self.effects, observe)
+        self.assertFalse(result["healthy"])
+        self.assertIn("first observation", result["reason"])
+        queue = json.loads((self.runner / "state/queue.json").read_text())
+        self.assertEqual(queue["last_tick"], "2026-10-28T00:05:00Z")
+        self.assertEqual(result["observations"][0]["observed_tick"],
+                         "2026-10-28T00:00:00Z")
+
+    def test_queue_tick_alone_never_satisfies_the_baseline(self):
+        self.write_state("queue.json", {"last_tick": "2026-10-28T00:10:00Z"})
+        with self.assertRaisesRegex(dc.Refused, "no completion heartbeat"):
+            dc._tick_value(self.effects)
+
+    def test_same_completed_tick_seen_twice_is_one_slot_not_two(self):
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:00:00Z"]))
         self.assertFalse(result["healthy"])
         self.assertIn("first observation", result["reason"])
 
     def test_second_observation_stalled_is_unhealthy(self):
-        ticks = iter(["2026-10-28T00:00:00Z", "2026-10-28T00:05:00Z",
-                      "2026-10-28T00:05:00Z"])
-        self.write_state("queue.json", {})
-        effects = self.effects
-
-        def read_json(rel):
-            return {"last_tick": next(ticks)}
-
-        effects.read_json = read_json
-        result = dc.two_slot_health(effects, lambda prior:
-                                    dc.health_observation(effects, prior))
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:05:00Z", "2026-10-28T00:05:00Z"]))
         self.assertFalse(result["healthy"])
         self.assertIn("second observation", result["reason"])
 
-    def test_no_tick_source_refuses(self):
-        with self.assertRaisesRegex(dc.Refused, "no last_tick"):
+    def test_regressing_completion_is_not_advancement(self):
+        self.complete_tick("2026-10-28T00:05:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:10:00Z", "2026-10-28T00:00:00Z"]))
+        self.assertFalse(result["healthy"])
+        self.assertIn("second observation", result["reason"])
+
+    def test_missing_baseline_heartbeat_refuses(self):
+        with self.assertRaisesRegex(dc.Refused, "no completion heartbeat"):
             dc._tick_value(self.effects)
 
-    def test_heartbeat_fallback_when_queue_has_no_tick(self):
-        self.write_state("heartbeat.json", {"last_tick": "2026-10-28T00:00:00Z"})
-        self.assertEqual(dc._tick_value(self.effects), "2026-10-28T00:00:00Z")
+    def test_observation_stage_corruption_refuses(self):
+        self.complete_tick("2026-10-28T00:00:00Z")
 
-    def test_malformed_timestamp_is_not_health_evidence(self):
-        self.write_state("queue.json", {"last_tick": "yesterday-ish"})
-        with self.assertRaises(ValueError):
-            dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        def observe(prior):
+            self.write_raw_heartbeat("{broken")
+            return dc.health_observation(self.effects, prior)
+
+        with self.assertRaisesRegex(dc.Refused, "not valid JSON"):
+            dc.two_slot_health(self.effects, observe)
+
+    def test_invalid_json_heartbeat_refuses(self):
+        self.write_raw_heartbeat("{broken")
+        with self.assertRaisesRegex(dc.Refused, "not valid JSON"):
+            dc._tick_value(self.effects)
+
+    def test_non_object_heartbeat_refuses(self):
+        for raw in ['["2026-10-28T00:00:00Z"]\n', '"2026-10-28T00:00:00Z"\n',
+                    "7\n"]:
+            with self.subTest(raw=raw):
+                self.write_raw_heartbeat(raw)
+                with self.assertRaisesRegex(dc.Refused, "not a JSON object"):
+                    dc._tick_value(self.effects)
+
+    def test_heartbeat_not_bound_to_this_checkout_refuses(self):
+        other = self.base / "other-deploy/apps/crq-python"
+        for root in [None, str(other), 12345]:
+            with self.subTest(root=root):
+                self.complete_tick("2026-10-28T00:00:00Z", root=root)
+                with self.assertRaisesRegex(dc.Refused, "runner directory"):
+                    dc._tick_value(self.effects)
+
+    def test_calendar_invalid_timestamp_refuses(self):
+        for tick in ["2026-02-30T00:00:00Z", "2026-13-01T00:00:00Z",
+                     "2026-10-28T24:00:00Z", "2026-10-28T00:60:00Z"]:
+            with self.subTest(tick=tick):
+                self.complete_tick(tick)
+                with self.assertRaisesRegex(dc.Refused, "strict UTC"):
+                    dc._tick_value(self.effects)
+
+    def test_non_strict_timestamp_shape_refuses(self):
+        for tick in ["2026-10-28T00:00:00+00:00", "2026-10-28 00:00:00Z",
+                     "2026-1-28T00:00:00Z", "2026-10-28T00:00:00",
+                     "2026-10-28T00:00:00.000Z", "yesterday-ish"]:
+            with self.subTest(tick=tick):
+                self.complete_tick(tick)
+                with self.assertRaisesRegex(dc.Refused, "strict UTC"):
+                    dc._tick_value(self.effects)
+
+    def test_non_string_last_tick_refuses(self):
+        self.complete_tick(20261028)  # the producer only ever writes strings
+        with self.assertRaisesRegex(dc.Refused, "strict UTC"):
+            dc._tick_value(self.effects)
+
+    def test_unreadable_heartbeat_refuses(self):
+        self.complete_tick("2026-10-28T00:00:00Z")
+        (self.watchdog / "heartbeat.json").chmod(0o000)
+        with self.assertRaisesRegex(dc.Refused, "unreadable"):
+            dc._tick_value(self.effects)
 
 
 class RollbackDecisionTests(unittest.TestCase):
@@ -1212,12 +1323,37 @@ class CliTests(ControllerFixture):
         self.assertEqual(artifact["target"], pinned)
         self.assertTrue(artifact["automatic_rollback_permitted"])
 
-    def test_health_cli_reports_stale_without_advancement(self):
+    def test_health_cli_missing_heartbeat_refuses_with_isolated_env(self):
+        # The CLI subprocess resolves WATCHDOG_HOME from its own environment:
+        # an isolated XDG_STATE_HOME means the actual user heartbeat is never
+        # consulted, and no queue tick can substitute for it.
         self.write_state("queue.json", {"last_tick": "2026-10-28T00:00:00Z"})
-        result = self.run_cli("health")
+        result = self.run_cli("health",
+                              env={"XDG_STATE_HOME": str(self.base / "cli-xdg")})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("refused:", result.stderr)
+        self.assertIn("completion heartbeat", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_health_cli_stale_heartbeat_is_unhealthy_with_unchanged_shape(self):
+        xdg = self.base / "cli-xdg"
+        (xdg / "crq").mkdir(parents=True)
+        payload = {"last_tick": "2026-10-28T00:00:00Z", "stale_alarm_min": 36,
+                   "schedule_id": None, "root": str(self.runner),
+                   "alert_agent_id": None, "alert_agent_host": None}
+        (xdg / "crq/heartbeat.json").write_text(json.dumps(payload) + "\n")
+        # An advancing queue save must not mask the stale completion slot.
+        self.write_state("queue.json", {"last_tick": "2026-10-28T00:20:00Z"})
+        result = self.run_cli("health", env={"XDG_STATE_HOME": str(xdg)})
         self.assertEqual(result.returncode, 1)
         artifact = json.loads(result.stdout)
+        self.assertEqual(artifact["operation"], "health")
         self.assertFalse(artifact["healthy"])
+        self.assertIn("first observation", artifact["reason"])
+        first = artifact["observations"][0]
+        self.assertEqual(first["observed_tick"], "2026-10-28T00:00:00Z")
+        self.assertFalse(first["advanced"])
+        self.assertIn("receipts", first)
 
     def test_refusal_exits_2_with_stderr_reason_and_no_stdout_artifact(self):
         result = self.run_cli("switch", "--sha", "nothex", "--tag", self.tag)

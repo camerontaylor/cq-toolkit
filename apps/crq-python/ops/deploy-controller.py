@@ -19,7 +19,9 @@ renderer, switcher or scheduler. The controller's additions:
     byte-identical (never restored, rewritten or migrated by the controller);
   * operator-approved activation: the controller renders/installs nothing and
     starts nothing; the runbook's owner steps start units;
-  * two advancing-tick health observations AFTER owner activation, plus
+  * two advancing completed-tick health observations AFTER owner activation,
+    read only from the runner's completion heartbeat (crq.py replaces it
+    after status publication; the earlier queue saves prove nothing), plus
     representative receipt readability (distinct checks);
   * fail-stopped, owner-approved automatic rollback, only to a recorded
     compatible previous target: same helper path, same drift/stopped-unit
@@ -120,6 +122,32 @@ class Effects:
 
     def exists(self, rel: str) -> bool:
         return (self.state_dir() / rel).exists()
+
+    def read_completion_heartbeat(self):
+        """The runner's completion heartbeat (crq.py write_heartbeat), read
+        from its actual WATCHDOG_HOME — $XDG_STATE_HOME/crq or
+        ~/.local/state/crq — never from the checkout's queue/state saves.
+
+        Returns None only when no heartbeat exists yet; one that is present
+        but unreadable or not a JSON object refuses assessment.
+        """
+        home = Path(os.environ.get("XDG_STATE_HOME",
+                                   str(Path.home() / ".local/state"))) / "crq"
+        try:
+            raw = (home / "heartbeat.json").read_text()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise Refused("completion heartbeat unreadable: "
+                          + str(exc)[:120]) from exc
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            raise Refused("completion heartbeat is not valid JSON: "
+                          + str(exc)[:120]) from exc
+        if not isinstance(payload, dict):
+            raise Refused("completion heartbeat is not a JSON object")
+        return payload
 
     def git(self, *args: str) -> str:
         result = subprocess.run(["git", "-C", str(self.root), *args],
@@ -338,18 +366,50 @@ def _parse_iso(value):
     return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 
 
+# crq.py iso() shape exactly: zero-padded calendar fields, UTC Z, no
+# subsecond digits and no offset. Matching the shape is not calendar
+# validation; _strict_tick adds that.
+TICK_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+
+
+def _strict_tick(value: str) -> bool:
+    """Producer-shaped AND calendar-real: strptime rejects 2026-02-30,
+    month 13, hour 24 — shapes that merely look like timestamps never pass."""
+    if not TICK_RE.match(value):
+        return False
+    try:
+        _parse_iso(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _tick_value(effects: Effects) -> str:
-    if effects.exists("queue.json"):
-        queue = effects.read_json("queue.json")
-        value = queue.get("last_tick")
-        if isinstance(value, str) and value:
-            return value
-    if effects.exists("heartbeat.json"):
-        heartbeat = effects.read_json("heartbeat.json")
-        value = heartbeat.get("last_tick")
-        if isinstance(value, str) and value:
-            return value
-    raise Refused("no last_tick observed in queue or heartbeat; cannot assess health")
+    """The last COMPLETED tick, read only from the runner's completion
+    heartbeat.
+
+    crq.py assigns queue.last_tick before dispatch and save_queue persists
+    it before write_status; write_heartbeat atomically replaces the
+    completion heartbeat only after status publication. Advancing queue
+    saves therefore prove nothing about completed ticks and are never read
+    here, and a heartbeat that does not name this checkout's runner
+    directory is some other deployment's completion, not this one's.
+    """
+    heartbeat = effects.read_completion_heartbeat()
+    if heartbeat is None:
+        raise Refused("no completion heartbeat observed under the runner's "
+                      "WATCHDOG_HOME; cannot assess health")
+    expected_root = str(effects.root / "apps/crq-python")
+    root = heartbeat.get("root")
+    if root != expected_root:
+        raise Refused("completion heartbeat root " + repr(root)[:80]
+                      + " is not this checkout's runner directory "
+                      + repr(expected_root))
+    value = heartbeat.get("last_tick")
+    if not isinstance(value, str) or not _strict_tick(value):
+        raise Refused("completion heartbeat last_tick " + repr(value)[:80]
+                      + " is not a strict UTC YYYY-MM-DDTHH:MM:SSZ timestamp")
+    return value
 
 
 def health_observation(effects: Effects, prior_tick: str) -> dict:
@@ -689,7 +749,8 @@ def main(argv=None) -> int:
                               help="owner-approved rollback to the recorded prior target")
     rollback.add_argument("--prior-record", required=True, type=Path,
                           help="a controller journal entry naming the prior target")
-    health = sub.add_parser("health", help="two advancing-tick observations")
+    health = sub.add_parser("health",
+                            help="two advancing completed-tick observations")
     health.add_argument("--interval-seconds", type=int, default=0,
                         help="seconds between observations (caller-timed)")
     args = parser.parse_args(argv)
