@@ -13,6 +13,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import deferred_refresh
 import review_receipt
 import queue_transport
 
@@ -920,3 +921,233 @@ class CurrentTest(unittest.TestCase):
                 self.assertEqual(status["reason"],
                     {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
                     if n == 0 else {"source": "queue", "category": "unknown", "code": "unclassified"})
+
+
+class DeferredSourceSearchTest(unittest.TestCase):
+    """Q14: publication recovery reads search text as a hint, never as identity.
+
+    The search request carries the head sha as free text, so unrelated well-formed
+    PRs by the same producer and base come back. Those are skipped; malformed
+    candidates, an incomplete envelope and duplicates still fail closed.
+    """
+
+    def setUp(self):
+        self.result = self.envelope()
+        self.metadata = {}
+        patch = mock.patch.object(crq, "deferred_forge", self.forge)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def forge(self, argv):
+        """The only forge boundary: search envelope or one PR's raw metadata."""
+        if "search/issues" in argv:
+            return self.result
+        return self.metadata[int(argv[-1].rsplit("/", 1)[-1])]
+
+    def pr(self, number, head="a" * 40, **over):
+        record = {"number": number, "state": "open", "merged": False, "merge_commit_sha": None,
+                  "user": {"login": "author"}, "head": {"sha": head},
+                  "base": {"ref": "merge-queue", "repo": {"full_name": crq.REPO}}}
+        record.update(over)
+        self.metadata[number] = record
+        return {"number": number, "pull_request": {"url": f"fixture/{number}"}}
+
+    def envelope(self, *items, **over):
+        return dict({"incomplete_results": False, "total_count": len(items),
+                     "items": list(items)}, **over)
+
+    def find(self, **over):
+        args = dict({"repo": crq.REPO, "producer": "author", "head": "a" * 40,
+                     "target": "merge-queue", "limit": 2}, **over)
+        return crq.find_deferred_source(**args)
+
+    def test_nonmatching_wellformed_candidate_is_skipped_not_blocking(self):
+        self.result = self.envelope(self.pr(12), self.pr(13, head="c" * 40))
+        self.assertEqual([m["pr"] for m in self.find()], [12])
+
+    def test_all_nonmatching_candidates_read_as_unpublished(self):
+        self.result = self.envelope(self.pr(12, head="c" * 40), self.pr(13, head="d" * 40))
+        self.assertEqual(self.find(), [])
+
+    def test_matching_candidate_after_noise_is_still_recovered(self):
+        self.result = self.envelope(self.pr(12, head="c" * 40), self.pr(13))
+        self.assertEqual([m["pr"] for m in self.find()], [13])
+
+    def test_refresh_reads_search_noise_as_unpublished_not_an_identity_blocker(self):
+        q = {"items": [], "queue_client_requests": {"request-1": {
+            "binding": {"kind": "deferred-author", "repo": crq.REPO, "producer": "author",
+                        "head": "a" * 40, "target": "merge-queue", "targetSelector": "promoted-main"},
+            "state": "awaiting-pr", "createdAt": "before"}}}
+        self.result = self.envelope(self.pr(12, head="c" * 40), self.pr(13, head="d" * 40))
+        self.assertEqual(deferred_refresh.refresh_deferred(
+            q, verify_source=crq.verify_deferred_source, find_source=crq.find_deferred_source,
+            at="now"), ["request-1"])
+        entry = q["queue_client_requests"]["request-1"]
+        self.assertEqual(entry["state"], "awaiting-pr")
+        self.assertNotIn("reason", entry)          # never an identity blocker
+        self.assertNotIn("refreshError", entry)    # not vendor debt either
+        self.assertEqual(q["deferred_refresh_cursor"], "request-1")
+        self.assertEqual(q["items"], [])
+
+    def test_bound_intent_still_fails_closed_on_head_drift(self):
+        q = {"items": [], "queue_client_requests": {"request-1": {
+            "binding": {"kind": "deferred-author", "repo": crq.REPO, "producer": "author",
+                        "head": "a" * 40, "target": "merge-queue", "targetSelector": "promoted-main"},
+            "state": "awaiting-merge", "pr": 12, "createdAt": "before"}}}
+        self.pr(12, head="c" * 40)                 # bound head no longer the PR head
+        deferred_refresh.refresh_deferred(q, verify_source=crq.verify_deferred_source,
+                                          find_source=crq.find_deferred_source, at="now")
+        self.assertEqual(q["queue_client_requests"]["request-1"]["reason"]["category"], "identity")
+        self.assertEqual(q["items"], [])
+
+    def test_malformed_incomplete_and_over_limit_searches_fail_closed(self):
+        row = self.pr(12)
+        cases = [
+            ("candidate is not a forge PR", ValueError, dict(items=[17], total_count=1)),
+            ("candidate names no pull request", ValueError, dict(items=[{"number": 12}], total_count=1)),
+            ("incomplete index", RuntimeError,
+             dict(items=[], total_count=0, incomplete_results=True)),
+            ("total above the bounded limit", RuntimeError,
+             dict(items=[self.pr(12), self.pr(13), self.pr(14)], total_count=3)),
+            ("count disagrees with items", RuntimeError, dict(items=[row], total_count=2)),
+        ]
+        for label, expected, envelope in cases:
+            with self.subTest(label):
+                self.result = dict({"incomplete_results": False}, **envelope)
+                with self.assertRaises(expected):
+                    self.find()
+
+    def test_duplicate_candidates_fail_closed_whether_or_not_they_match(self):
+        row = self.pr(12)
+        for label, head in (("matching", "a" * 40), ("non-matching", "c" * 40)):
+            with self.subTest(label):
+                self.pr(12, head=head)
+                self.result = self.envelope(row, row)
+                with self.assertRaises(RuntimeError):
+                    self.find()
+
+    def test_malformed_trusted_reread_and_binding_are_refused(self):
+        self.result = self.envelope(
+            self.pr(12, base={"ref": "main", "repo": {"full_name": crq.REPO}}))
+        with self.assertRaises(ValueError):
+            self.find()
+        for over in (dict(repo="other/repo"), dict(producer="author name"), dict(head="xyz"),
+                     dict(target="main"), dict(limit=3), dict(limit=True)):
+            with self.subTest(over=over):
+                with self.assertRaises(ValueError):
+                    self.find(**over)
+
+
+class OptionalCycleWaitTest(unittest.TestCase):
+    """Q14: a parked merged row never starts, so it must not demand a wait."""
+
+    def optional(self, **over):
+        return dict(dict(id="pr1", pr=1, kind="open", state="pending", cycles=[{}],
+                         optional_cycle=True, order=1), **over)
+
+    def merged(self, pr=42, **over):
+        return dict(dict(id=f"merged-{pr}", pr=pr, kind="merged", state="pending", order=2), **over)
+
+    def receipt(self, pr=42, **over):
+        return dict(dict(id=f"current-{pr}", pr=pr, kind=crq.review_receipt.KIND,
+                         state="pending", order=3), **over)
+
+    @staticmethod
+    def callsite_parks(item, items):
+        """crq.tick()'s admission predicate, verbatim from the base pin."""
+        return item["kind"] == "merged" and any(
+            i.get("kind") == crq.review_receipt.KIND and i.get("pr") == item["pr"] for i in items)
+
+    def test_parked_merged_row_does_not_demand_an_optional_wait(self):
+        optional, merged, receipt = self.optional(), self.merged(), self.receipt()
+        q = dict(items=[optional, merged, receipt])
+        # A pending linked receipt is startable work in its own right: it still demands the wait.
+        self.assertTrue(crq.optional_wait(q, optional))
+        for state in ("done", "blocked", "skipped"):
+            with self.subTest(receipt_state=state):
+                receipt["state"] = state      # the park rule ignores the receipt state
+                # Terminal receipt: only the parked merged row is left, and it never starts.
+                self.assertFalse(crq.optional_wait(q, optional))
+
+    def test_optional_cycle_still_waits_for_startable_required_work(self):
+        optional = self.optional()
+        self.assertTrue(crq.optional_wait(dict(items=[optional, self.merged()]), optional))
+        self.assertTrue(crq.optional_wait(
+            dict(items=[optional, self.merged(), self.receipt(pr=43)]), optional))
+        self.assertTrue(crq.optional_wait(dict(items=[optional, self.receipt()]), optional))
+        self.assertTrue(crq.optional_wait(dict(items=[
+            optional, self.merged(), self.receipt(),
+            dict(id="pr9", pr=9, kind="open", state="pending", order=4)]), optional))
+
+    def test_park_predicate_matches_the_admission_callsite_for_every_row_shape(self):
+        cases = [[self.merged(), self.receipt()],
+                 [self.merged(), self.receipt(state="done")],
+                 [self.merged(), self.receipt(pr=43)],
+                 [self.merged()],
+                 [self.receipt(), self.merged(pr=43)],
+                 [self.merged(), dict(id="cov", pr=42, kind="coverage", state="pending")],
+                 [self.receipt()]]
+        for items in cases:
+            for item in items:
+                with self.subTest(rows=[i["id"] for i in items], row=item["id"]):
+                    self.assertEqual(crq.parked_merged_linked_receipt(dict(items=items), item),
+                                     self.callsite_parks(item, items))
+
+
+class OptionalCycleAdmissionTest(unittest.TestCase):
+    """Q14: the parked row yields the start slot instead of starving rank 5."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.q = {"created_at": crq.iso(), "items": [], "starts": [], "paused": False}
+        for name, value in (
+                ("load_queue", lambda: self.q), ("fetch", mock.Mock()),
+                ("enroll", lambda q, dry: []), ("promotion_audit", lambda q, dry: []),
+                ("promotion_tick", lambda q, dry: []), ("save_queue", mock.Mock()),
+                ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
+                ("notify_owner", mock.Mock()), ("event", mock.Mock()),
+                ("coverage_fallback", lambda *a: (None, False)),
+                ("promotion_mode", lambda: "user"), ("apply_signer_backoff", mock.Mock()),
+                ("STATE", self.root), ("PROMO", {"enabled": False}),
+                ("CONFIG", {"max_starts_per_hour": 5, "max_inflight": 2,
+                            "stale_alarm_min": 36, "repair": {}})):
+            patch = mock.patch.object(crq, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        for name in ("backfill", "archive_legacy", "reconcile_fix_prs"):
+            patch = mock.patch.object(crq.repair_tick, name, mock.Mock())
+            patch.start()
+            self.addCleanup(patch.stop)
+        patch = mock.patch.object(crq.coverage, "record_opportunity", lambda *a, **k: {})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def rows(self):
+        """The linked receipt is terminal: the park rule ignores its state."""
+        return (dict(id="pr1", pr=1, kind="open", state="pending", cycles=[{}],
+                     optional_cycle=True, order=1),
+                dict(id="merged-42", pr=42, kind="merged", state="pending", order=2),
+                dict(id="current-42", pr=42, kind=crq.review_receipt.KIND, state="done", order=3))
+
+    def start(self):
+        plan = dict(base="a" * 40, head="b" * 40, notes=[], label="additional cycle (optional)")
+        with mock.patch.object(crq, "pr_info", return_value={"state": "OPEN"}), \
+             mock.patch.object(crq, "quiet_reason", return_value=None), \
+             mock.patch.object(crq, "plan_open", return_value=plan), \
+             mock.patch.object(crq, "launch", return_value="run") as launch:
+            crq.tick()
+        return launch
+
+    def test_parked_merged_row_no_longer_starves_the_optional_cycle(self):
+        self.q["items"] = list(self.rows())
+        launch = self.start()
+        self.assertEqual(launch.call_args.args[1]["id"], "pr1")
+
+    def test_startable_required_work_still_precedes_the_optional_cycle(self):
+        optional, merged, receipt = self.rows()
+        open_row = dict(id="pr9", pr=9, kind="open", state="pending", order=0)
+        self.q["items"] = [open_row, merged, receipt, optional]
+        launch = self.start()
+        self.assertEqual(launch.call_args.args[1]["id"], "pr9")
