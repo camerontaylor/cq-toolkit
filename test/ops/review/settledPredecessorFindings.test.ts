@@ -649,10 +649,12 @@ test('a clean run refuses clean completion while an authorized predecessor oblig
   if (!read.ok) throw new Error(read.reason);
   const head = read.state.head;
   const evidence = await successorReceipt(f, 'successor', head);
+  const binding = predecessor.reference.binding;
+  if (binding.kind !== 'deferred-author') throw new Error('fixture debt must be deferred-author');
   const successor: DeferredVendorDebt = {
     reference: {
       requestId: 'successor',
-      binding: { ...predecessor.reference.binding, head },
+      binding: { ...binding, head },
     },
     originAttempt: predecessor.originAttempt,
     deferral: { id: 'successor', base: read.state.base, dirtySha256: 'clean-tree' },

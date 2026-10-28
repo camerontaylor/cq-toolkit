@@ -927,9 +927,11 @@ function syntheticDebt(
   head: string,
   predecessor?: QueueReference,
 ): PendingDebt {
+  const binding = template.reference.binding;
+  if (binding.kind !== 'deferred-author') throw new Error('fixture debt must be deferred-author');
   return {
     ...template,
-    reference: { requestId, binding: { ...template.reference.binding, head } },
+    reference: { requestId, binding: { ...binding, head } },
     deferral: { ...template.deferral, id: requestId },
     ...(predecessor === undefined ? {} : { predecessor }),
   };
