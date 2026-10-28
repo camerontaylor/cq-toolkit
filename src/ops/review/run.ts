@@ -17,6 +17,7 @@ import {
   prepareDeferredVendorReview,
   retainedReceiptFindings,
   loadCurrentDeferredVendorDebt,
+  readCurrentEnrollment,
 } from '../dev/internal/deferredLedger.js';
 import {
   hasDeferredReviewSources,
@@ -217,7 +218,7 @@ export function makeReviewRun(
             state,
             deps.queueClient,
             deadline.signal,
-            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+            { remainingMs: remainingWallMs, ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
           );
         } catch (error) {
           failure = { thrown: true, error };
@@ -839,7 +840,7 @@ export function makeReviewRun(
             beforeRefresh,
             deps.queueClient,
             deadline.signal,
-            { ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
+            { remainingMs: remainingWallMs, ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}) },
           ).then(
             (value) => ({ ok: true as const, value }),
             (error: unknown) => ({ ok: false as const, error }),
@@ -930,6 +931,22 @@ export function makeReviewRun(
           },
         };
       }
+      // Q15d clean refusal: an unsettled AUTHORIZED ANCESTOR obligation is never a clean run. It is
+      // read from the post-refresh ledger, so a predecessor settled by this invocation is not
+      // counted, and it refuses here rather than decorating outer usage or rewriting notifications.
+      const ancestry = readCurrentEnrollment(
+        effects.openLedger(state.branch).load(),
+        { head: state.head, base: state.base, dirtySha256: state.dirtySha256 },
+        target,
+      );
+      if (ancestry.kind === 'enrollment' && ancestry.enrollment.pendingAncestry.length > 0)
+        return {
+          status: 'needs-human',
+          reason: `review.run: authorized predecessor obligation(s) remain unsettled (${ancestry.enrollment.pendingAncestry
+            .map((ancestor) => ancestor.reference.requestId)
+            .join(', ')}); a clean completion cannot be claimed`,
+          report: record,
+        };
       return {
         status: 'ok',
         value: record,

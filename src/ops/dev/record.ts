@@ -50,6 +50,7 @@ import {
   type DeferredVendorDebt,
   type VendorFailureProvenance,
 } from './internal/deferredReview.js';
+import { readCurrentEnrollment } from './internal/deferredLedger.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
@@ -837,15 +838,23 @@ export function assembleReadiness(
   const cycles = ledger.records.filter(
     (record): record is DevCycleRecord => record.kind === 'cycle',
   );
-  const latestDebt = ledger.records.filter((record) => record.kind === 'vendor-debt').at(-1)?.debt;
+  // Current authority is the identity-matched enrollment and its authorized predecessor chain,
+  // never the positionally last appended snapshot.
+  const enrollmentRead = readCurrentEnrollment(ledger, identity, input.target);
+  if (enrollmentRead.kind === 'ambiguous')
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `ambiguous current enrollment: ${enrollmentRead.requestIds.join(', ')} claim one identity`,
+    });
+  const enrollment = enrollmentRead.kind === 'enrollment' ? enrollmentRead.enrollment : undefined;
   const binding = debt?.reference.binding;
   const debtValid =
     debt !== undefined &&
     binding?.kind === 'deferred-author' &&
-    latestDebt !== undefined &&
-    JSON.stringify(latestDebt.reference) === JSON.stringify(debt.reference) &&
-    JSON.stringify(latestDebt.originAttempt) === JSON.stringify(debt.originAttempt) &&
-    JSON.stringify(latestDebt.deferral) === JSON.stringify(debt.deferral) &&
+    enrollment !== undefined &&
+    JSON.stringify(enrollment.snapshot.reference) === JSON.stringify(debt.reference) &&
+    JSON.stringify(enrollment.snapshot.originAttempt) === JSON.stringify(debt.originAttempt) &&
+    JSON.stringify(enrollment.snapshot.deferral) === JSON.stringify(debt.deferral) &&
     hasPersistedVendorOutageOrigin(debt.originAttempt, cycles) &&
     matchesDeferredVendorDebt(debt, {
       repo: binding.repo,
@@ -864,6 +873,15 @@ export function assembleReadiness(
       field: 'vendor-debt',
       detail:
         'deferred debt does not match the retained origin, latest enrollment and current identity',
+    });
+  // A pending current enrollment legitimately continues; an unsettled AUTHORIZED ANCESTOR never
+  // does. This is derived from the ledger, so a truncated or unrefreshed lineage is never clean.
+  if (enrollment !== undefined && enrollment.pendingAncestry.length > 0)
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `authorized predecessor obligation(s) unsettled: ${enrollment.pendingAncestry
+        .map((ancestor) => ancestor.reference.requestId)
+        .join(', ')}`,
     });
 
   // Only a FULL-scope terminal cycle satisfies readiness: an

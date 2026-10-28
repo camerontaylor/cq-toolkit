@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
@@ -11,13 +12,17 @@ import type {
   QueueReference,
   QueueStatus,
 } from '../../../src/ops/review/internal/queueProtocol.js';
-import { deferVendorReview } from '../../../src/ops/dev/internal/deferredReview.js';
+import {
+  deferVendorReview,
+  type DeferredVendorDebt,
+} from '../../../src/ops/dev/internal/deferredReview.js';
 import {
   retainedReceiptFindings,
   prepareDeferredVendorReview,
 } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { assembleReadiness } from '../../../src/ops/dev/record.js';
+import { ReviewCoverageV2Schema } from '../../../src/ops/review/internal/reviewCoverageV2.js';
 import { cycleRecord, dispositionRecord } from '../dev/fakes.js';
 import { makeTestRepo, repoEffects, type TestRepo } from '../dev/repo.js';
 
@@ -574,4 +579,167 @@ test('a rejected durable ledger write never owns the attempt', async () => {
   expect(result.detail).toContain('durable ledger write failed');
   expect(note).not.toHaveBeenCalled();
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** A verified successor receipt at `head`, imported the way the queue report path does. */
+async function successorReceipt(
+  f: Awaited<ReturnType<typeof fixture>>,
+  requestId: string,
+  head: string,
+): Promise<QueueEvidence> {
+  const paths = [
+    {
+      source_path: 'src/a.ts',
+      path: 'src/a.ts',
+      resolution: 'same-path-current',
+      disposition: 'included',
+      blob: f.repo.git('rev-parse', `${head}:src/a.ts`).trim(),
+      mode: '100644',
+      bytes: 20,
+    },
+  ];
+  const captureIdentity = {
+    target: head,
+    tree: f.repo.git('rev-parse', `${head}^{tree}`).trim(),
+    paths,
+    scope_digest: digestReceipt(paths),
+    policy: 'affected-current-additions-v1',
+    projection: 'current-affected-files/full-file-addition-projection',
+    reviewer: 'coderabbit-review-agent-committed-v1',
+    reviewer_version: 'fixture-v1',
+  };
+  const document = {
+    version: 1,
+    source: {
+      repo: 'owner/repo',
+      pr: 42,
+      merge_sha: head,
+      target_selector: 'promoted-main',
+      policy: 'affected-current-additions-v1',
+    },
+    capture: {
+      ...captureIdentity,
+      equivalence: digestReceipt(captureIdentity),
+      captured_at: '2026-10-28T00:00:00Z',
+    },
+    item_id: 'successor-item',
+    request_id: requestId,
+    outcome: 'terminal-clean',
+    counted: true,
+    classification: { counted: true, outcome: 'completed', findings: 0 },
+    findings: [],
+    run_id: 'genuine-successor-run',
+    started_at: '2026-10-28T00:00:00Z',
+    artifacts: {},
+    remediation: 'disabled/deferred',
+    independent_acceptance: false,
+    cli_functional_acceptance: 'pending-D1',
+  };
+  const bytes = Buffer.from(JSON.stringify(document));
+  const receiptId = createHash('sha256').update(bytes).digest('hex');
+  return importQueueEvidence(join(f.repo.root, '.cq', 'queue-evidence'), receiptId, bytes);
+}
+
+test('a clean run refuses clean completion while an authorized predecessor obligation is unsettled', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.commitAll('new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const head = read.state.head;
+  const evidence = await successorReceipt(f, 'successor', head);
+  const successor: DeferredVendorDebt = {
+    reference: {
+      requestId: 'successor',
+      binding: { ...predecessor.reference.binding, head },
+    },
+    originAttempt: predecessor.originAttempt,
+    deferral: { id: 'successor', base: read.state.base, dirtySha256: 'clean-tree' },
+    predecessor: predecessor.reference,
+    queue: {
+      ...predecessor.queue,
+      state: 'terminal-clean',
+      pr: 42,
+      mergeSha: head,
+      itemId: 'successor-item',
+      receiptId: evidence.receiptId,
+      consumed: true,
+      reviewed: true,
+    },
+    vendor: 'vendor-completed',
+    vendorCompleted: true,
+    completion: evidence,
+  };
+  f.effects.openLedger(f.state.branch).save({
+    version: 2,
+    branch: f.state.branch,
+    records: [
+      ...f.effects.openLedger(f.state.branch).load().records,
+      { kind: 'vendor-debt', debt: successor, at: f.effects.nowIso() },
+    ],
+  });
+  const coverage = ReviewCoverageV2Schema.parse({
+    version: 2,
+    head,
+    base: read.state.base,
+    scope: 'full',
+    mode: 'session',
+    modeReason: 'fixture',
+    pieces: [
+      {
+        component: 'tracked:fixture',
+        path: 'fixture',
+        sha256: createHash('sha256').update('').digest('hex'),
+        chars: 0,
+        bytes: 0,
+        state: 'excluded',
+        exclusion: { rule: 'fixture/**', limitation: 'empty fixture' },
+      },
+    ],
+    sessions: [],
+  });
+  const drivers = {
+    resolve: vi.fn(() => ({
+      lane: 'ai-sdk',
+      modelSpec: { provider: 'mock', model: 'mock' },
+      driver: {
+        run: async () => ({
+          stopReason: 'complete',
+          structuredOutput: { findings: [], coverage },
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          toolFailures: 0,
+        }),
+      },
+    })),
+  } as unknown as DriverFactory;
+  const client: DeferredQueueClient = {
+    ...f.client,
+    status: async (ref) =>
+      ref.requestId === predecessor.reference.requestId
+        ? { ...predecessor.queue, state: 'awaiting-pr', pr: null }
+        : successor.queue,
+  };
+  const result = await makeReviewRun({
+    drivers,
+    queueClient: client,
+    effectsFactory: () => f.effects,
+    scannerFactory: () => async (components) =>
+      components.map((component) => ({ component: component.component, hits: [] })),
+  })({ repoRoot: f.repo.root });
+  // The guard refuses the clean completion INSIDE the run; the predecessor stays an obligation.
+  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
+  expect(result.reason).toContain('authorized predecessor obligation(s) remain unsettled');
+  expect(result.reason).toContain('predecessor');
+  expect(result.reason).not.toContain('not every configured reviewer completed');
+  const settled = f.effects.openLedger(f.state.branch).load();
+  const pending = settled.records.filter(
+    (entry) =>
+      entry.kind === 'vendor-debt' &&
+      entry.debt.reference.requestId === predecessor.reference.requestId,
+  );
+  expect(pending).toHaveLength(1);
+  expect(pending[0]!.kind === 'vendor-debt' && pending[0]!.debt.vendorCompleted).toBe(false);
 });

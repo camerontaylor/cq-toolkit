@@ -35,6 +35,286 @@ function requestId(
     .digest('hex')}`;
 }
 
+/** The #632 lifetime contract, adopted with its exact names and semantics: one caller budget
+ * shared across the entire invocation, never renewed per reference or per page.
+ */
+export interface QueueLineageOptions {
+  onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+  /** Caller cancellation, combined with this invocation's own deadline. */
+  signal?: AbortSignal;
+  /** Caller remaining lifetime in ms; the invocation total below is the ceiling. */
+  remainingMs?: () => number;
+}
+
+/** #632's total, applied once per invocation and never renewed. */
+const INVOCATION_TOTAL_MS = 45_000;
+/** Count backstop for authorized-predecessor refreshes in one invocation. */
+const MAX_PREDECESSOR_REFRESHES = 16;
+
+interface InvocationLifetime {
+  /** Caller cancellation combined with the invocation deadline. */
+  signal: AbortSignal;
+  remainingMs(): number;
+  /** True only when the deadline fired and the caller did not cancel. */
+  expired(): boolean;
+  dispose(): void;
+}
+
+function combineCallerSignals(
+  primary: AbortSignal | undefined,
+  secondary: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (primary && secondary) return AbortSignal.any([primary, secondary]);
+  return primary ?? secondary;
+}
+
+/** One deadline per invocation: min(caller remaining, start + 45 s total), #632's math. */
+function startInvocationLifetime(
+  caller: AbortSignal | undefined,
+  callerRemaining: (() => number) | undefined,
+): InvocationLifetime {
+  const controller = new AbortController();
+  const started = performance.now();
+  const initial = callerRemaining?.() ?? INVOCATION_TOTAL_MS;
+  if (!Number.isFinite(initial) || initial <= 0)
+    throw new Error('queue delivery unknown: deadline exhausted');
+  const deadline = started + Math.min(INVOCATION_TOTAL_MS, initial);
+  let fired = false;
+  const remainingMs = () => {
+    const fromCaller = callerRemaining?.() ?? INVOCATION_TOTAL_MS;
+    if (!Number.isFinite(fromCaller)) return 0;
+    return Math.min(deadline - performance.now(), fromCaller);
+  };
+  const onCallerAbort = () => controller.abort(caller?.reason);
+  if (caller) {
+    if (caller.aborted) onCallerAbort();
+    else caller.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  const timer = setTimeout(() => {
+    fired = true;
+    controller.abort(new Error('queue delivery unknown: deadline exhausted'));
+  }, Math.max(0, remainingMs()));
+  timer.unref();
+  return {
+    signal: caller ? AbortSignal.any([caller, controller.signal]) : controller.signal,
+    remainingMs,
+    expired: () => fired && caller?.aborted !== true,
+    dispose: () => {
+      clearTimeout(timer);
+      caller?.removeEventListener('abort', onCallerAbort);
+    },
+  };
+}
+
+/** Every client call is bounded by the invocation lifetime. An unabortable RPC is raced, and a
+ * late resolution is dropped: once the race loses, the client is dead, so no import, ack,
+ * observer call or ledger write can follow a timed-out RPC. Bounding the same lifetime twice is
+ * idempotent (both races share one signal).
+ */
+function boundQueueClient(
+  source: DeferredQueueClient,
+  lifetime: InvocationLifetime,
+): DeferredQueueClient {
+  let dead = lifetime.remainingMs() <= 0;
+  const settle = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
+    if (dead) throw new Error(`queue lifetime exhausted before ${label}`);
+    let detach: () => void = () => undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      const fail = () =>
+        reject(
+          lifetime.signal.reason instanceof Error
+            ? lifetime.signal.reason
+            : new Error(`queue lifetime exhausted during ${label}`),
+        );
+      if (lifetime.signal.aborted) {
+        fail();
+        return;
+      }
+      lifetime.signal.addEventListener('abort', fail, { once: true });
+      detach = () => lifetime.signal.removeEventListener('abort', fail);
+    });
+    try {
+      const value = await Promise.race([run(), expired]);
+      if (dead) throw new Error(`queue lifetime exhausted during ${label}`);
+      return value;
+    } catch (error) {
+      if (lifetime.signal.aborted || lifetime.remainingMs() <= 0) dead = true;
+      throw error;
+    } finally {
+      detach();
+    }
+  };
+  const bounded: DeferredQueueClient & {
+    report?: (
+      reference: DeferredVendorDebt['reference'],
+      evidenceDir: string,
+      options?: QueueLineageOptions,
+    ) => Promise<unknown>;
+  } = {
+    enqueue: (input) => settle('enqueue', () => source.enqueue(input)),
+    bind: (input) => settle('bind', () => source.bind(input)),
+    cancel: (input) => settle('cancel', () => source.cancel(input)),
+    status: (input) => settle('status', () => source.status(input)),
+  };
+  const report = (source as { report?: unknown }).report;
+  if (typeof report === 'function')
+    bounded.report = (reference, evidenceDir, options) =>
+      settle('report', () =>
+        (
+          report as (
+            a: DeferredVendorDebt['reference'],
+            b: string,
+            c?: QueueLineageOptions,
+          ) => Promise<unknown>
+        ).call(source, reference, evidenceDir, options),
+      );
+  return bounded;
+}
+
+interface DebtGroup {
+  requestId: string;
+  snapshots: DeferredVendorDebt[];
+}
+
+/** Group the append-only snapshots by immutable request identity. A pending → completed upgrade
+ * inside one group is the only permitted difference; conflicting bytes fail closed.
+ */
+function debtGroups(ledger: DevLedgerFile): DebtGroup[] {
+  const groups = new Map<string, DeferredVendorDebt[]>();
+  for (const entry of ledger.records) {
+    if (entry.kind !== 'vendor-debt') continue;
+    const debt = DeferredVendorDebtSchema.parse(entry.debt);
+    const existing = groups.get(debt.reference.requestId);
+    if (!existing) {
+      groups.set(debt.reference.requestId, [debt]);
+      continue;
+    }
+    const first = existing[0]!;
+    if (
+      !isDeepStrictEqual(first.reference, debt.reference) ||
+      !isDeepStrictEqual(first.originAttempt, debt.originAttempt) ||
+      !isDeepStrictEqual(first.deferral, debt.deferral)
+    )
+      throw new Error('deferred ledger holds conflicting snapshots for one request identity');
+    existing.push(debt);
+  }
+  return [...groups.entries()].map(([requestId, snapshots]) => ({ requestId, snapshots }));
+}
+
+function lastSnapshot(group: DebtGroup): DeferredVendorDebt {
+  return group.snapshots[group.snapshots.length - 1]!;
+}
+
+function matchesEnrollmentIdentity(
+  debt: DeferredVendorDebt,
+  identity: { head: string; base: string; dirtySha256: string },
+  target: string,
+): boolean {
+  const binding = debt.reference.binding;
+  return (
+    binding.kind === 'deferred-author' &&
+    binding.head === identity.head &&
+    binding.target === target &&
+    debt.deferral.base === identity.base &&
+    debt.deferral.dirtySha256 === identity.dirtySha256
+  );
+}
+
+export interface CurrentEnrollment {
+  /** The identity-matched enrollment (its newest snapshot). */
+  debt: DeferredVendorDebt;
+  /** That enrollment's own ledger snapshot: the originAttempt/deferral proof readiness shares. */
+  snapshot: DeferredVendorDebt;
+  /** Authorized ancestry, nearest first, from the enrollment's predecessor chain. */
+  ancestry: readonly DeferredVendorDebt[];
+  /** Authorized ancestry whose obligation is still open. */
+  pendingAncestry: readonly DeferredVendorDebt[];
+}
+
+export type CurrentEnrollmentRead =
+  | { kind: 'none' }
+  /** Two distinct enrollments claim one identity: never an authority, always a readiness gap. */
+  | { kind: 'ambiguous'; requestIds: readonly string[] }
+  | { kind: 'enrollment'; enrollment: CurrentEnrollment };
+
+/** The ONE current-authority proof, shared by continuation selection and readiness assembly.
+ * Authority is the identity-matched enrollment and its authorized predecessor chain, never the
+ * positionally last appended snapshot; unrelated roots and other identities gain nothing.
+ */
+export function readCurrentEnrollment(
+  ledger: DevLedgerFile,
+  identity: { head: string; base: string; dirtySha256: string },
+  target: string,
+): CurrentEnrollmentRead {
+  const groups = debtGroups(ledger);
+  const matching = groups.filter((group) =>
+    matchesEnrollmentIdentity(lastSnapshot(group), identity, target),
+  );
+  if (matching.length === 0) return { kind: 'none' };
+  if (matching.length > 1)
+    return { kind: 'ambiguous', requestIds: matching.map((group) => group.requestId) };
+  const group = matching[0]!;
+  const debt = lastSnapshot(group);
+  const byRequestId = new Map(groups.map((entry) => [entry.requestId, entry]));
+  const ancestry: DeferredVendorDebt[] = [];
+  const pendingAncestry: DeferredVendorDebt[] = [];
+  const visited = new Set<string>([group.requestId]);
+  let cursor = debt.predecessor;
+  while (cursor !== undefined) {
+    const link = byRequestId.get(cursor.requestId);
+    if (!link) throw new Error('authorized predecessor lineage is missing a retained snapshot');
+    if (!isDeepStrictEqual(lastSnapshot(link).reference, cursor))
+      throw new Error('authorized predecessor lineage conflicts with the retained snapshot');
+    if (visited.has(link.requestId)) throw new Error('authorized predecessor lineage cycles');
+    visited.add(link.requestId);
+    const ancestor = lastSnapshot(link);
+    ancestry.push(ancestor);
+    if (!ancestor.vendorCompleted) pendingAncestry.push(ancestor);
+    cursor = ancestor.predecessor;
+  }
+  return { kind: 'enrollment', enrollment: { debt, snapshot: debt, ancestry, pendingAncestry } };
+}
+
+/** The enrollment preparation advances from: never a snapshot some other group references as its
+ * predecessor, so a completed predecessor appended after its successor cannot be mistaken for it.
+ */
+function advancementEnrollment(
+  ledger: DevLedgerFile,
+  target: string,
+): DeferredVendorDebt | undefined {
+  const groups = debtGroups(ledger);
+  const referenced = new Set<string>();
+  for (const group of groups) {
+    const predecessor = lastSnapshot(group).predecessor;
+    if (predecessor !== undefined) referenced.add(predecessor.requestId);
+  }
+  const candidates = groups.filter((group) => {
+    if (referenced.has(group.requestId)) return false;
+    const binding = lastSnapshot(group).reference.binding;
+    return binding.kind === 'deferred-author' && binding.target === target;
+  });
+  const selected = candidates[candidates.length - 1] ?? groups[groups.length - 1];
+  return selected === undefined ? undefined : lastSnapshot(selected);
+}
+
+/** Publish one completed snapshot atomically, requiring the ledger we validated to be unchanged. */
+async function appendDebt(
+  effects: DevEffects,
+  state: WorkState,
+  expected: DevLedgerFile,
+  debt: DeferredVendorDebt,
+): Promise<DevLedgerFile> {
+  return effects.openLedger(state.branch).mutate((latest) => {
+    if (!isDeepStrictEqual(latest, expected))
+      throw new Error('deferred ledger changed while settling authorized ancestry');
+    const next: DevLedgerFile = {
+      ...latest,
+      records: [...latest.records, { kind: 'vendor-debt' as const, debt, at: effects.nowIso() }],
+    };
+    return { ledger: next, value: next };
+  });
+}
+
 /** Called before vendor dispatch and again after a positively typed local vendor failure.
  * Returned debt is durable before any fresh nondeferred review is invoked.
  */
@@ -44,13 +324,34 @@ export async function prepareDeferredVendorReview(
   state: WorkState,
   client?: DeferredQueueClient,
   signal?: AbortSignal,
-  options?: {
-    onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
-  },
+  options?: QueueLineageOptions,
 ): Promise<DeferredVendorDebt | undefined> {
   const ledger = effects.openLedger(state.branch).load();
-  const retainedDebt = ledger.records.filter((entry) => entry.kind === 'vendor-debt').at(-1);
-  let previous = retainedDebt?.debt;
+  // ONE deadline per invocation, started before the first gh/status call and shared with the
+  // load this preparation triggers; it is never renewed for later references.
+  const lifetime = startInvocationLifetime(
+    combineCallerSignals(signal, options?.signal),
+    options?.remainingMs,
+  );
+  try {
+    return await prepareWithLifetime(effects, target, state, ledger, lifetime, client, options);
+  } finally {
+    lifetime.dispose();
+  }
+}
+
+/** The preparation body under the invocation lifetime; never creates a second budget. */
+async function prepareWithLifetime(
+  effects: DevEffects,
+  target: string,
+  state: WorkState,
+  ledger: DevLedgerFile,
+  lifetime: InvocationLifetime,
+  client: DeferredQueueClient | undefined,
+  options: QueueLineageOptions | undefined,
+): Promise<DeferredVendorDebt | undefined> {
+  const retained = advancementEnrollment(ledger, target);
+  let previous = retained;
   const vendor = ledger.records
     .filter(
       (entry): entry is DevCycleRecord => entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
@@ -64,8 +365,8 @@ export async function prepareDeferredVendorReview(
   )
     previous = undefined;
   if (!previous && !vendor?.vendorFailure) return undefined;
-  if (!retainedDebt && vendor?.vendorFailure) {
-    signal?.throwIfAborted();
+  if (retained === undefined && vendor?.vendorFailure) {
+    lifetime.signal.throwIfAborted();
     // An unusable historical attempt is not debt. Admit a genuine fresh review,
     // without treating malformed provenance or ambiguous ledger identity as stale.
     VendorFailureProvenanceSchema.parse(vendor.vendorFailure);
@@ -97,7 +398,15 @@ export async function prepareDeferredVendorReview(
   if (state.dirtySha256 !== 'clean-tree')
     throw new Error('deferred vendor review requires a committed clean identity');
   if (currentLedgerDebt(ledger, target, state))
-    return loadCurrentDeferredVendorDebt(effects, target, state, ledger, client, signal, options);
+    return loadCurrentWithLifetime(
+      effects,
+      target,
+      state,
+      ledger,
+      lifetime,
+      boundQueueClient(client ?? makeConfiguredQueueClient(), lifetime),
+      options,
+    );
   const origin: VendorOutageOrigin | undefined =
     previous?.originAttempt ??
     (vendor?.vendorFailure &&
@@ -126,20 +435,20 @@ export async function prepareDeferredVendorReview(
     throw new Error('a newer vendor blocker is not authorized by the retained outage origin');
   if (origin.target !== target)
     throw new Error('deferred vendor target changed; prior debt retained');
-  signal?.throwIfAborted();
+  signalCheck(lifetime);
   const command = async (args: string[]) => {
     const result = await effects.runCommand('gh', args, {
       timeoutMs: 30_000,
-      ...(signal ? { signal } : {}),
+      signal: lifetime.signal,
     });
     if (result.exitCode !== 0 || result.timedOut)
       throw new Error('cannot verify deferred forge identity');
-    signal?.throwIfAborted();
+    signalCheck(lifetime);
     return result.stdout.trim();
   };
   const repo = await command(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']);
   const producer = await command(['api', 'user', '--jq', '.login']);
-  const queue = client ?? makeConfiguredQueueClient();
+  const queue = boundQueueClient(client ?? makeConfiguredQueueClient(), lifetime);
   const id = requestId(repo, producer, target, state, origin);
   const reference = {
     requestId: id,
@@ -154,7 +463,7 @@ export async function prepareDeferredVendorReview(
   };
   const pin = { id, base: state.base, dirtySha256: 'clean-tree' as const };
   const persist = async (debt: DeferredVendorDebt) => {
-    signal?.throwIfAborted();
+    signalCheck(lifetime);
     const current = await readWorkState(effects, { target, base: state.base });
     if (
       !current.ok ||
@@ -163,7 +472,7 @@ export async function prepareDeferredVendorReview(
       current.state.dirtySha256 !== state.dirtySha256
     )
       throw new Error('deferred invocation identity changed; replay the same successor');
-    signal?.throwIfAborted();
+    signalCheck(lifetime);
     await effects.openLedger(state.branch).mutate((latest) => {
       if (!isDeepStrictEqual(latest, ledger))
         throw new Error('deferred ledger changed; replay the same successor');
@@ -182,11 +491,17 @@ export async function prepareDeferredVendorReview(
   if (previous) {
     const prior = DeferredVendorDebtSchema.parse(previous);
     prior.queue = await queue.status(prior.reference);
-    signal?.throwIfAborted();
+    signalCheck(lifetime);
     if (['terminal-clean', 'terminal-with-findings', 'reused'].includes(prior.queue.state)) {
       // Recovery may finish after HEAD moves. Settle the retained obligation,
       // then require a real fresh vendor invocation at the new identity.
-      const completed = await consumeDeferredVendorReport(effects, queue, prior, signal, options);
+      const completed = await consumeDeferredVendorReport(
+        effects,
+        queue,
+        prior,
+        lifetime.signal,
+        options,
+      );
       await persist(completed);
       return undefined;
     }
@@ -202,13 +517,13 @@ export async function prepareDeferredVendorReview(
     const debt = await deferVendorReview(queue, reference, failure, pin, origin);
     await persist(debt);
   }
-  return loadCurrentDeferredVendorDebt(
+  return loadCurrentWithLifetime(
     effects,
     target,
     state,
     effects.openLedger(state.branch).load(),
+    lifetime,
     queue,
-    signal,
     options,
   );
 }
@@ -224,17 +539,26 @@ export function retainedReceiptFindings(ledger: DevLedgerFile): Finding[] {
   ).map((finding) => restoreDurableDisposition(finding, ledger));
 }
 
-/** Latest exact enrollment only. Never fall back past a newer debt snapshot. */
+/** Latest exact enrollment only, selected by identity — never by append position, so a completed
+ * predecessor appended after its successor can never displace it. With two distinct enrollments
+ * claiming one identity, continuation keeps the newest matching snapshot and readiness reports the
+ * ambiguity as a gap instead of crashing.
+ */
 export function currentLedgerDebt(
   ledger: DevLedgerFile,
   target: string,
   state: Pick<WorkState, 'head' | 'base' | 'dirtySha256'>,
 ): DeferredVendorDebt | undefined {
-  const entry = ledger.records.filter((record) => record.kind === 'vendor-debt').at(-1);
-  if (!entry) return undefined;
-  const debt = DeferredVendorDebtSchema.parse(entry.debt);
+  const identity = { head: state.head, base: state.base, dirtySha256: state.dirtySha256 };
+  const matching = debtGroups(ledger).filter((group) =>
+    matchesEnrollmentIdentity(lastSnapshot(group), identity, target),
+  );
+  const selected = matching[matching.length - 1];
+  if (selected === undefined) return undefined;
+  const debt = lastSnapshot(selected);
   const binding = debt.reference.binding;
   if (binding.kind !== 'deferred-author') throw new Error('deferred author binding required');
+  // Selection already enforces these; kept as defence in depth against future edits.
   if (
     binding.head !== state.head ||
     binding.target !== target ||
@@ -258,6 +582,72 @@ export function currentLedgerDebt(
   return debt;
 }
 
+/** Current work checks the combined signal directly: a caller abort or an exhausted deadline fails
+ * it closed. Only the authorized-ancestry pass treats truncation as nonfatal.
+ */
+function signalCheck(lifetime: InvocationLifetime): void {
+  lifetime.signal.throwIfAborted();
+}
+
+/** Authorized-ancestry boundary: a deadline or the count backstop stops the pass WITHOUT throwing;
+ * a caller abort still propagates identically.
+ */
+function ancestryStopped(lifetime: InvocationLifetime): boolean {
+  if (lifetime.expired()) return true;
+  return lifetime.remainingMs() <= 0;
+}
+
+/** Refreshes the current enrollment's authorized predecessors, sequentially and in FIFO/lineage
+ * order. A predecessor is settled only through the existing verified report import, and only the
+ * current enrollment is ever returned for continuation or readiness.
+ */
+async function refreshAuthorizedAncestry(
+  effects: DevEffects,
+  target: string,
+  state: WorkState,
+  queue: DeferredQueueClient,
+  lifetime: InvocationLifetime,
+  options: QueueLineageOptions | undefined,
+  expected: { ledger: DevLedgerFile },
+): Promise<void> {
+  const identity = { head: state.head, base: state.base, dirtySha256: state.dirtySha256 };
+  let refreshed = 0;
+  const attempted = new Set<string>();
+  for (;;) {
+    const read = readCurrentEnrollment(expected.ledger, identity, target);
+    if (read.kind !== 'enrollment') return;
+    const next = read.enrollment.pendingAncestry.find(
+      (ancestor) => !attempted.has(ancestor.reference.requestId),
+    );
+    if (next === undefined) return;
+    if (refreshed >= MAX_PREDECESSOR_REFRESHES) return;
+    if (ancestryStopped(lifetime)) return;
+    signalCheck(lifetime);
+    attempted.add(next.reference.requestId);
+    refreshed += 1;
+    const fresh = await refreshDeferredVendorDebt(queue, next);
+    if (!['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state))
+      continue;
+    const completed = await consumeDeferredVendorReport(
+      effects,
+      queue,
+      fresh,
+      lifetime.signal,
+      options,
+    );
+    const current = await readWorkState(effects, { target, base: state.base });
+    if (
+      !current.ok ||
+      current.state.branch !== state.branch ||
+      current.state.head !== state.head ||
+      current.state.base !== state.base ||
+      current.state.dirtySha256 !== state.dirtySha256
+    )
+      throw new Error('deferred invocation identity changed while settling authorized ancestry');
+    expected.ledger = await appendDebt(effects, state, expected.ledger, completed);
+  }
+}
+
 /** Authoritative bounded read; generic RPC failure retains debt and refuses continuation.
  * No ledger lock is held over network reads and there is no refresh/retry loop.
  */
@@ -268,30 +658,57 @@ export async function loadCurrentDeferredVendorDebt(
   ledger: DevLedgerFile,
   client?: DeferredQueueClient,
   signal?: AbortSignal,
-  options?: {
-    onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
-  },
+  options?: QueueLineageOptions,
+): Promise<DeferredVendorDebt | undefined> {
+  // ONE deadline per invocation, started before the gh identity read and the first status/report.
+  const lifetime = startInvocationLifetime(
+    combineCallerSignals(signal, options?.signal),
+    options?.remainingMs,
+  );
+  try {
+    return await loadCurrentWithLifetime(
+      effects,
+      target,
+      state,
+      ledger,
+      lifetime,
+      boundQueueClient(client ?? makeConfiguredQueueClient(), lifetime),
+      options,
+    );
+  } finally {
+    lifetime.dispose();
+  }
+}
+
+async function loadCurrentWithLifetime(
+  effects: DevEffects,
+  target: string,
+  state: WorkState,
+  ledger: DevLedgerFile,
+  lifetime: InvocationLifetime,
+  queue: DeferredQueueClient,
+  options: QueueLineageOptions | undefined,
 ): Promise<DeferredVendorDebt | undefined> {
   const debt = currentLedgerDebt(ledger, target, state);
   if (!debt) return undefined;
-  signal?.throwIfAborted();
+  signalCheck(lifetime);
   const repo = await effects.runCommand(
     'gh',
     ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-    { timeoutMs: 30_000, ...(signal ? { signal } : {}) },
+    { timeoutMs: 30_000, signal: lifetime.signal },
   );
   if (repo.exitCode !== 0 || repo.timedOut || repo.stdout.trim() !== debt.reference.binding.repo)
     throw new Error('cannot verify the deferred debt repository');
-  const queue = client ?? makeConfiguredQueueClient();
   let fresh = await refreshDeferredVendorDebt(queue, debt);
   if (
     debt.vendorCompleted ||
     ['terminal-clean', 'terminal-with-findings', 'reused'].includes(fresh.queue.state)
   ) {
-    fresh = await consumeDeferredVendorReport(effects, queue, fresh, signal, options);
+    fresh = await consumeDeferredVendorReport(effects, queue, fresh, lifetime.signal, options);
   }
-  signal?.throwIfAborted();
+  signalCheck(lifetime);
   const current = await readWorkState(effects, { target, base: state.base });
+  let expected = ledger;
   const latest = effects.openLedger(state.branch).load();
   if (
     !current.ok ||
@@ -299,7 +716,7 @@ export async function loadCurrentDeferredVendorDebt(
     current.state.head !== state.head ||
     current.state.base !== state.base ||
     current.state.dirtySha256 !== state.dirtySha256 ||
-    !isDeepStrictEqual(latest, ledger)
+    !isDeepStrictEqual(latest, expected)
   )
     throw new Error('deferred debt or working identity changed while verifying queue status');
   if (
@@ -316,22 +733,11 @@ export async function loadCurrentDeferredVendorDebt(
   )
     throw new Error('queue status does not authorize deferred vendor continuation');
   if (fresh.vendorCompleted && !isDeepStrictEqual(debt, fresh)) {
-    signal?.throwIfAborted();
-    await effects.openLedger(state.branch).mutate((retained) => {
-      if (!isDeepStrictEqual(retained, ledger))
-        throw new Error('ledger changed before vendor settlement');
-      return {
-        ledger: {
-          ...retained,
-          records: [
-            ...retained.records,
-            { kind: 'vendor-debt' as const, debt: fresh, at: effects.nowIso() },
-          ],
-        },
-        value: undefined,
-      };
-    });
+    signalCheck(lifetime);
+    expected = await appendDebt(effects, state, expected, fresh);
   }
+  // Only the authorized predecessor chain is refreshed, and only the current enrollment is returned.
+  await refreshAuthorizedAncestry(effects, target, state, queue, lifetime, options, { ledger: expected });
   return fresh;
 }
 

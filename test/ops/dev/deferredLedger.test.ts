@@ -17,6 +17,7 @@ import {
   loadCurrentDeferredVendorDebt,
   bindPublishedDeferredDebt,
   prepareDeferredVendorReview,
+  readCurrentEnrollment,
 } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { renderReadinessSection } from '../../../src/ops/pr/open.js';
 import {
@@ -27,6 +28,7 @@ import {
   type DevLedgerFile,
 } from '../../../src/ops/dev/record.js';
 import { deferVendorReview } from '../../../src/ops/dev/internal/deferredReview.js';
+import type { DeferredVendorDebt } from '../../../src/ops/dev/internal/deferredReview.js';
 import type {
   DeferredQueueClient,
   QueueReference,
@@ -914,4 +916,272 @@ test.each([
     loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, terminal.client),
   ).rejects.toThrow('genuine complete');
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
+});
+
+type PendingDebt = Extract<DeferredVendorDebt, { vendorCompleted: false }>;
+
+/** A pending debt cloned onto a new request identity/head, keeping the template's origin. */
+function syntheticDebt(
+  template: PendingDebt,
+  requestId: string,
+  head: string,
+  predecessor?: QueueReference,
+): PendingDebt {
+  return {
+    ...template,
+    reference: { requestId, binding: { ...template.reference.binding, head } },
+    deferral: { ...template.deferral, id: requestId },
+    ...(predecessor === undefined ? {} : { predecessor }),
+  };
+}
+
+function pendingTemplate(debt: DeferredVendorDebt): PendingDebt {
+  if (debt.vendorCompleted) throw new Error('fixture debt must be pending');
+  return debt;
+}
+
+test('a completed predecessor appended after its successor never displaces the current enrollment', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const client: DeferredQueueClient = {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+    cancel: async () => {
+      throw new Error('must not cancel a published predecessor');
+    },
+  };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, client);
+  if (!successor) throw new Error('missing successor');
+  expect(successor.predecessor).toEqual(predecessor.reference);
+
+  // The predecessor becomes terminal only AFTER its successor is durably enrolled.
+  const terminal = terminalReport(f);
+  const terminalClient = {
+    ...client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: terminal.client.report,
+  };
+  const ledger = f.effects.openLedger(f.state.branch).load();
+  const refreshed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    ledger,
+    terminalClient,
+  );
+  // Only the current enrollment is returned; the settled predecessor is never authority.
+  expect(refreshed?.reference.requestId).toBe(successor.reference.requestId);
+  const after = f.effects.openLedger(f.state.branch).load();
+  const appended = after.records.filter((entry) => entry.kind === 'vendor-debt').at(-1);
+  if (appended?.kind !== 'vendor-debt') throw new Error('missing appended snapshot');
+  expect(appended.debt.reference).toEqual(predecessor.reference);
+  expect(appended.debt.vendorCompleted).toBe(true);
+  expect(currentLedgerDebt(after, 'merge-queue', read.state)?.reference).toEqual(
+    successor.reference,
+  );
+  const authority = readCurrentEnrollment(
+    after,
+    { head: read.state.head, base: read.state.base, dirtySha256: read.state.dirtySha256 },
+    'merge-queue',
+  );
+  if (authority.kind !== 'enrollment') throw new Error('missing current authority');
+  expect(authority.enrollment.debt.reference).toEqual(successor.reference);
+  expect(authority.enrollment.pendingAncestry).toEqual([]);
+  // Readiness for the successor identity still validates the successor's own snapshot.
+  expect(f.assemble(after, successor).ready).toBe(true);
+
+  // Replay is inert: no second snapshot, no re-acknowledgement.
+  const replay = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    after,
+    terminalClient,
+  );
+  expect(replay?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(after);
+});
+
+test('the authorized-predecessor pass stops nonfatally at the count backstop', async () => {
+  const f = await fixture();
+  const ancestors: PendingDebt[] = [];
+  let link: QueueReference | undefined;
+  for (let index = 0; index < 17; index += 1) {
+    const ancestor = syntheticDebt(
+      pendingTemplate(f.debt),
+      `ancestor-${String(index).padStart(2, '0')}`,
+      `${String(index).padStart(2, '0')}${'b'.repeat(38)}`,
+      link,
+    );
+    ancestors.push(ancestor);
+    link = ancestor.reference;
+  }
+  const current = syntheticDebt(
+    pendingTemplate(f.debt),
+    f.debt.reference.requestId,
+    f.state.head,
+    link,
+  );
+  const records = f.ledger.records.filter((entry) => entry.kind !== 'vendor-debt');
+  f.effects.openLedger(f.state.branch).save({
+    version: 2,
+    branch: f.state.branch,
+    records: [
+      ...records,
+      ...ancestors.map((debt) => ({ kind: 'vendor-debt' as const, debt, at: f.effects.nowIso() })),
+      { kind: 'vendor-debt' as const, debt: current, at: f.effects.nowIso() },
+    ],
+  });
+  const refreshed: string[] = [];
+  const client: DeferredQueueClient = {
+    ...f.client,
+    status: async (ref) => {
+      if (ref.requestId.startsWith('ancestor-')) refreshed.push(ref.requestId);
+      return { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+    },
+  };
+  const ledger = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    f.state,
+    ledger,
+    client,
+  );
+  // Truncation is nonfatal: the current enrollment is still returned...
+  expect(debt?.reference.requestId).toBe(current.reference.requestId);
+  // ...after exactly K refreshes, oldest first (FIFO), never renewing the budget...
+  expect(refreshed).toHaveLength(16);
+  expect(refreshed).toEqual(ancestors.slice(0, 16).map((ancestor) => ancestor.reference.requestId));
+  expect(refreshed).not.toContain('ancestor-16');
+  // ...and nothing is appended: an unsettled obligation stays visible to readiness.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(ledger);
+  const authority = readCurrentEnrollment(
+    ledger,
+    { head: f.state.head, base: f.state.base, dirtySha256: f.state.dirtySha256 },
+    'merge-queue',
+  );
+  if (authority.kind !== 'enrollment') throw new Error('missing current authority');
+  expect(authority.enrollment.pendingAncestry).toHaveLength(17);
+  const readiness = f.assemble(ledger, current);
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw new Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+});
+
+test('the invocation budget covers current work and fails closed before any predecessor refresh', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const remainingMs = () => {
+    calls += 1;
+    return calls === 1 ? 5_000 : 0;
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const refreshed: string[] = [];
+  const client: DeferredQueueClient = {
+    ...f.client,
+    status: async (ref) => {
+      refreshed.push(ref.requestId);
+      return f.debt.queue;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, before, client, undefined, {
+      remainingMs,
+    }),
+  ).rejects.toThrow();
+  expect(refreshed).toEqual([]);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a caller abort bounds each RPC and leaves a late terminal value inert', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  const controller = new AbortController();
+  const terminal = terminalReport(f);
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
+      controller.abort(new Error('caller cancelled'));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return terminal.client.status();
+    },
+    report: terminal.client.report,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      f.effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(/caller cancelled/);
+  // The late terminal value was never imported, acknowledged or persisted.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('unrelated roots gain no authority and same-identity duplicates become gaps', async () => {
+  const f = await fixture();
+  const identity = { head: f.state.head, base: f.state.base, dirtySha256: f.state.dirtySha256 };
+  const unrelated = syntheticDebt(pendingTemplate(f.debt), 'other-root', 'f'.repeat(40));
+  const withUnrelated = {
+    ...f.ledger,
+    records: [
+      ...f.ledger.records,
+      { kind: 'vendor-debt' as const, debt: unrelated, at: f.effects.nowIso() },
+    ],
+  };
+  const read = readCurrentEnrollment(withUnrelated, identity, 'merge-queue');
+  if (read.kind !== 'enrollment') throw new Error('unrelated root displaced the enrollment');
+  expect(read.enrollment.debt.reference).toEqual(f.debt.reference);
+  expect(read.enrollment.ancestry).toEqual([]);
+  expect(read.enrollment.pendingAncestry).toEqual([]);
+  expect(currentLedgerDebt(withUnrelated, 'merge-queue', f.state)?.reference).toEqual(
+    f.debt.reference,
+  );
+
+  const duplicate = syntheticDebt(pendingTemplate(f.debt), 'intent-2', f.state.head);
+  const ambiguous = {
+    ...f.ledger,
+    records: [
+      ...f.ledger.records,
+      { kind: 'vendor-debt' as const, debt: duplicate, at: f.effects.nowIso() },
+    ],
+  };
+  const ambiguousRead = readCurrentEnrollment(ambiguous, identity, 'merge-queue');
+  expect(ambiguousRead.kind).toBe('ambiguous');
+  if (ambiguousRead.kind !== 'ambiguous') throw new Error('unreachable');
+  expect([...ambiguousRead.requestIds].sort()).toEqual(['intent-1', 'intent-2']);
+  const readiness = f.assemble(ambiguous, f.debt);
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw new Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain('ambiguous current enrollment');
 });
