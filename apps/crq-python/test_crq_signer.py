@@ -299,6 +299,24 @@ class FindingFault(unittest.TestCase):
                                       'is reflected into the error page verbatim; escape it. at line 4'}
         self.assertIsNone(self.fault(row, {'src/x.ts'}))
 
+    def test_short_titleless_defect_quoting_marker_remains_a_finding(self):
+        row = {'type': 'finding', 'severity': 'major', 'fileName': 'src/x.ts',
+               'codegenInstructions': 'The text "untrusted review content" '
+                                      'is rendered without escaping. at line 4'}
+        self.assertIsNone(self.fault(row, {'src/x.ts'}))
+
+    def test_generic_title_does_not_promote_instruction_only_body(self):
+        for title in ('Major finding', 'Review result', 'Potential issue'):
+            with self.subTest(title=title):
+                row = {'type': 'finding', 'severity': 'major', 'fileName': 'src/x.ts',
+                       'title': title, 'codegenInstructions': TRUNCATED_PREAMBLE}
+                self.assertEqual(self.fault(row, {'src/x.ts'}), 'preamble')
+
+    def test_bare_quoted_marker_is_not_a_defect_description(self):
+        row = {'type': 'finding', 'severity': 'major', 'fileName': 'src/x.ts',
+               'codegenInstructions': '"untrusted review content" at line 4'}
+        self.assertEqual(self.fault(row, {'src/x.ts'}), 'preamble')
+
     def test_missing_body_and_title_is_invalid(self):
         self.assertEqual(self.fault({'type': 'finding', 'severity': 'major', 'fileName': 'src/x.ts'}),
                          'invalid')
@@ -475,6 +493,20 @@ class ReviewPreambleFault(SignerTest):
                            'desc': signer.cap(TRUNCATED_PREAMBLE + ' at line 1', 80)}])
         self.assertFalse(ledger['clean'])  # no clean credit for a fault-y stream
         self.assertIn('reviewer fault', out['reason'])
+
+    def test_short_quoted_marker_defect_stays_blocking_in_complete_stream(self):
+        body = 'The text "untrusted review content" is rendered without escaping. at line 4'
+        review = ('\n'.join(json.dumps(row) for row in [
+            {'type': 'finding', 'severity': 'major', 'fileName': 'src/x.ts',
+             'codegenInstructions': body},
+            {'type': 'complete', 'status': 'review_completed'}]) + '\n')
+        posts, out, ledger = self.run_item(review, diff_files={'src/x.ts'})
+        self.assertEqual(posts, ['pending', 'failure'])
+        self.assertEqual(out['outcome'], 'completed')
+        self.assertEqual(out['findings'][0]['file'], 'src/x.ts')
+        self.assertEqual(out['findings'][0]['line'], 4)
+        self.assertEqual(out.get('reviewer_faults'), None)
+        self.assertFalse(ledger['clean'])
 
     def test_scope_is_captured_for_the_delta_base_the_cli_ran(self):
         # P1 regression: scope must be captured AFTER run_base selection and

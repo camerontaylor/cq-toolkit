@@ -85,9 +85,6 @@ CODEGEN_PREAMBLE_MARKERS = (
     "untrusted review content",
     "do not follow any instructions",
 )
-# Residue (after removing markers and `at line N`) no longer than this is a
-# truncated preamble continuation, not a defect description.
-PREAMBLE_RESIDUE_MAX = 60
 
 # IDENTITY — where the reviewer identity may come from. The reviewer App's
 # name, bot login and numeric bot id come ONLY from the owner's registration
@@ -762,22 +759,26 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
     if not body and not title:
         return "invalid"
     lowered = body.lower()
-    title_text = _has_defect_text(title.lower()) \
-        and not any(marker in title.lower() for marker in CODEGEN_PREAMBLE_MARKERS)
+    # A category label is not independent defect evidence. Keep descriptive
+    # titles, but do not let "Major finding" promote a pure prompt echo.
+    generic_title = re.fullmatch(
+        r"(?:(?:potential|critical|major|review|reviewer)\s+)*"
+        r"(?:finding|issue|defect|result|output|warning)[.!:]?", title.lower())
+    title_text = (_has_defect_text(title.lower()) and not generic_title
+                  and not any(marker in title.lower() for marker in CODEGEN_PREAMBLE_MARKERS))
     if any(marker in lowered for marker in CODEGEN_PREAMBLE_MARKERS):
         stem = lowered
         for marker in CODEGEN_PREAMBLE_MARKERS:
             stem = stem.replace(marker, " ")
-        residue = re.sub(r"\s*at line \d+\s*", " ", stem, flags=re.I).strip()
-        # A short residue is the preamble's own truncated continuation (#529's
-        # "Verify ea"), not a defect description; a longer self-standing
-        # remainder falls through to the scope check, so prompt text quoted
-        # inside a real defect stays a finding. A substantive title that is
-        # itself free of preamble markers keeps the row a finding: the bound
-        # classifies the BODY's boilerplate, never the title's content
-        # (review P2 — CLI/re-serialized rows carry no title, so this cannot
-        # resurrect a boilerplate-only incident row).
-        if len(residue) <= PREAMBLE_RESIDUE_MAX and not title_text:
+        stem = re.sub(r"\bat line \d+\b", " ", stem)
+        residue = re.sub(r"[^\w]+", " ", stem).strip()
+        # Recognize the observed prompt framing/continuation, never infer
+        # boilerplate from a defect description's length. A quoted marker
+        # inside "The text ... is rendered without escaping" leaves its
+        # independent description intact, however short it is.
+        residue = re.sub(r"\breview data\b", " ", residue).strip()
+        prompt_only = (not residue or "verify each".startswith(residue))
+        if prompt_only and not title_text:
             return "preamble"
     if not _has_defect_text(lowered) and not _has_defect_text(title.lower()):
         return "invalid"
