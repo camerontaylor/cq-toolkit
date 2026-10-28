@@ -147,11 +147,11 @@ is `state/controller.lock`, distinct from the runner's tick lock.
 
 ```sh
 # Preflight, drain, helper switch, preservation, journal:
-python3 ops/deploy-controller.py --root /srv/crq-deploy \
+python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
   --overlay /private/host.json --record-dir /private/crq-deploy-records \
   switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
 # After the owner starts units (this document, step 6):
-python3 ops/deploy-controller.py --root /srv/crq-deploy \
+python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
   --overlay /private/host.json --record-dir /private/crq-deploy-records \
   health --interval-seconds 1500
 ```
