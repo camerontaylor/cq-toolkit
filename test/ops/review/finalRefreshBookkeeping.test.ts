@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, expect, test } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
-import type { DevLedgerFile } from '../../../src/ops/dev/record.js';
+import { assembleReadiness, type DevLedgerFile } from '../../../src/ops/dev/record.js';
 import { prepareDeferredVendorReview } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
@@ -13,8 +13,10 @@ import { makeQueueClient } from '../../../src/ops/review/internal/queueClient.js
 import { importQueueEvidence } from '../../../src/ops/review/internal/queueEvidence.js';
 import type {
   DeferredQueueClient,
+  QueueReference,
   QueueStatus,
 } from '../../../src/ops/review/internal/queueProtocol.js';
+import type { DeferredVendorDebt } from '../../../src/ops/dev/internal/deferredReview.js';
 import { cycleRecord } from '../dev/fakes.js';
 import { makeTestRepo, repoEffects, type TestRepo } from '../dev/repo.js';
 
@@ -71,7 +73,11 @@ type Mode =
   | 'report-fails'
   | 'foreign-source'
   | 'external-append'
-  | 'external-completed';
+  | 'external-completed'
+  | 'authorized-predecessor-append'
+  | 'authorized-predecessor-settle'
+  | 'older-head-predecessor-pending'
+  | 'ambiguous-identity-enrollment';
 
 async function fixture(mode: Mode) {
   const repo = await makeTestRepo();
@@ -130,6 +136,67 @@ async function fixture(mode: Mode) {
   store.save({ version: 2, branch: state.branch, records: [origin] });
   const debt = await prepareDeferredVendorReview(real, 'merge-queue', state, client);
   if (!debt) throw new Error('missing genuine persisted debt');
+  // The authorized-ancestor mode adds a pending predecessor that only becomes terminal at the final
+  // refresh, so its settlement is an APPEND this refresh legitimately owns.
+  const debtBinding = debt.reference.binding;
+  if (debtBinding.kind !== 'deferred-author')
+    throw new Error('fixture debt must be deferred-author');
+  // An OLDER head keeps the ancestor out of current-identity selection: it is reachable only
+  // through the current enrollment's authorized predecessor link.
+  const ancestorReference: QueueReference = {
+    requestId: 'ancestor-1',
+    binding: { ...debtBinding, head: 'a'.repeat(40) },
+  };
+  const ancestorDebt: DeferredVendorDebt | undefined =
+    mode === 'authorized-predecessor-append' ||
+    mode === 'authorized-predecessor-settle' ||
+    mode === 'older-head-predecessor-pending'
+      ? {
+          reference: ancestorReference,
+          originAttempt: debt.originAttempt,
+          deferral: { id: 'ancestor-1', base: state.base, dirtySha256: 'clean-tree' },
+          queue: pending,
+          vendor: 'vendor-blocked-transient',
+          vendorCompleted: false,
+        }
+      : undefined;
+  if (ancestorDebt !== undefined) {
+    const stored = store.load();
+    store.save({
+      ...stored,
+      records: [
+        ...stored.records.map((record) =>
+          record.kind === 'vendor-debt'
+            ? { ...record, debt: { ...record.debt, predecessor: ancestorReference } }
+            : record,
+        ),
+        { kind: 'vendor-debt' as const, debt: ancestorDebt, at: real.nowIso() },
+      ],
+    });
+  }
+  if (mode === 'ambiguous-identity-enrollment') {
+    // Two enrollments claim this identity: the runner must refuse a clean completion rather than
+    // pick an arbitrary authority.
+    const stored = store.load();
+    store.save({
+      ...stored,
+      records: [
+        ...stored.records,
+        {
+          kind: 'vendor-debt' as const,
+          at: real.nowIso(),
+          debt: {
+            ...debt,
+            reference: {
+              requestId: 'ambiguous-enrollment',
+              binding: { ...debt.reference.binding },
+            },
+            deferral: { ...debt.deferral, id: 'ambiguous-enrollment' },
+          },
+        },
+      ],
+    });
+  }
   const paths = [
     {
       source_path: 'src/a.ts',
@@ -151,7 +218,14 @@ async function fixture(mode: Mode) {
     reviewer: 'coderabbit-review-agent-committed-v1',
     reviewer_version: 'offline-v1',
   };
-  const findings = mode === 'clean' ? [] : [{ severity: 'major', text: 'late retained finding' }];
+  const findings =
+    mode === 'clean' ||
+    mode === 'authorized-predecessor-append' ||
+    mode === 'authorized-predecessor-settle' ||
+    mode === 'older-head-predecessor-pending' ||
+    mode === 'ambiguous-identity-enrollment'
+      ? []
+      : [{ severity: 'major', text: 'late retained finding' }];
   const document = {
     version: 1,
     item_id: 'current-final',
@@ -191,7 +265,69 @@ async function fixture(mode: Mode) {
     reviewed: true,
     consumed,
   });
-  client.status = async () => {
+  const ancestorBytes = Buffer.from(
+    JSON.stringify({
+      ...document,
+      item_id: 'ancestor-item',
+      request_id: ancestorReference.requestId,
+      outcome: 'terminal-clean',
+      findings: [],
+    }),
+  );
+  const ancestorReceiptId = createHash('sha256').update(ancestorBytes).digest('hex');
+  let ancestorAppended = false;
+  client.status = async (reference) => {
+    if (
+      (mode === 'authorized-predecessor-append' ||
+        mode === 'authorized-predecessor-settle' ||
+        mode === 'older-head-predecessor-pending') &&
+      reference.requestId === ancestorReference.requestId
+    ) {
+      if (!final || mode === 'older-head-predecessor-pending') return pending;
+      const terminalAncestor: QueueStatus = {
+        ...pending,
+        state: 'terminal-clean',
+        pr: 42,
+        mergeSha: state.head,
+        itemId: 'ancestor-item',
+        receiptId: ancestorReceiptId,
+        reviewed: true,
+        consumed: true,
+      };
+      if (
+        mode === 'authorized-predecessor-append' &&
+        !ancestorAppended &&
+        ancestorDebt !== undefined
+      ) {
+        // The authorized settlement this refresh now owns: an extra appended snapshot the previous
+        // single-append validation rejected.
+        ancestorAppended = true;
+        const evidence = await importQueueEvidence(
+          join(repo.root, '.cq', 'queue-evidence'),
+          ancestorReceiptId,
+          ancestorBytes,
+        );
+        const latest = store.load();
+        store.save({
+          ...latest,
+          records: [
+            ...latest.records,
+            {
+              kind: 'vendor-debt' as const,
+              at: real.nowIso(),
+              debt: {
+                ...ancestorDebt,
+                queue: terminalAncestor,
+                vendor: 'vendor-completed',
+                vendorCompleted: true,
+                completion: evidence,
+              },
+            },
+          ],
+        });
+      }
+      return terminalAncestor;
+    }
     if (!final || mode === 'pending') return pending;
     if (mode === 'external-append' && !appendedExternal) {
       appendedExternal = true;
@@ -205,6 +341,11 @@ async function fixture(mode: Mode) {
   };
   client.report = async (reference, root, options) => {
     expect(final).toBe(true);
+    if (
+      (mode === 'authorized-predecessor-append' || mode === 'authorized-predecessor-settle') &&
+      reference.requestId === ancestorReference.requestId
+    )
+      return importQueueEvidence(root, ancestorReceiptId, ancestorBytes);
     expect(reference).toEqual(debt.reference);
     const evidence = await importQueueEvidence(root, receiptId, bytes);
     await options?.onEvidenceImported?.({ receiptId, path: join(root, receiptId + '.json') });
@@ -362,4 +503,88 @@ test.each([
     expect(f.store.load().records.at(-1)).not.toMatchObject({ debt: { vendorCompleted: true } });
   if (['external-append', 'external-completed'].includes(mode) && result.status === 'needs-human')
     expect(result.reason).toContain('unrecognized ledger bytes');
+});
+
+test('an unowned predecessor append outside the refresh still fails closed', async () => {
+  const f = await fixture('authorized-predecessor-append');
+  const result = await f.run();
+  // The fixture's direct save is NOT the seam's requested mutation, so ownership still refuses it.
+  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
+  expect(result.reason).toContain('final queue refresh changed unrecognized ledger bytes');
+  expect(f.events).not.toContain('ledger-observed');
+  const settled = f.store
+    .load()
+    .records.filter((record) => record.kind === 'vendor-debt')
+    .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined));
+  const completed = settled.filter((debt) => debt?.vendorCompleted === true);
+  // The authorized ancestor settlement is the append this validation previously rejected; the
+  // current-enrollment append is covered by the clean/findings modes above.
+  expect(completed.map((debt) => debt!.reference.requestId)).toContain('ancestor-1');
+});
+
+test('a seam-owned authorized predecessor settlement is accepted and notified', async () => {
+  const f = await fixture('authorized-predecessor-settle');
+  const beforeRecords = f.store
+    .load()
+    .records.filter((record) => record.kind === 'vendor-debt').length;
+  const result = await f.run();
+  // The seam appends the verified predecessor completion through its own requested mutation; the
+  // ownership validation recognizes the authorized append instead of rejecting it.
+  expect(result.status, JSON.stringify(result)).toBe('ok');
+  expect(f.events).toContain('ledger-observed');
+  // Explicit >=2 authorized-appended proof: this refresh appends the current enrollment AND the
+  // authorized predecessor, which the previous single-append predicate could not accept together.
+  const debtRecords = f.store.load().records.filter((record) => record.kind === 'vendor-debt');
+  expect(debtRecords.length - beforeRecords).toBeGreaterThanOrEqual(2);
+  const completed = debtRecords
+    .map((record) => (record.kind === 'vendor-debt' ? record.debt : undefined))
+    .filter((debt) => debt?.vendorCompleted === true)
+    .map((debt) => debt!.reference.requestId);
+  expect(completed).toEqual(expect.arrayContaining(['ancestor-1', f.debt.reference.requestId]));
+});
+
+test('a superseded older-head predecessor permits a clean run but never a clean readiness', async () => {
+  const f = await fixture('older-head-predecessor-pending');
+  const result = await f.run();
+  // RUN acceptance: the successor's own fresh full coverage at the current head is the authority; a
+  // superseded older-head predecessor does not refuse it.
+  expect(result.status, JSON.stringify(result)).toBe('ok');
+  expect(f.events).toContain('ledger-observed');
+  const after = f.store.load().records.filter((record) => record.kind === 'vendor-debt');
+  expect(after.every((record) => record.kind === 'vendor-debt')).toBe(true);
+  const debts = after.flatMap((record) => (record.kind === 'vendor-debt' ? [record.debt] : []));
+  expect(debts.filter((debt) => debt.vendorCompleted === false)).toHaveLength(2);
+  // DURABLE READINESS: any pending ancestor still refuses a clean readiness verdict.
+  const currentDebt = debts[debts.length - 1];
+  if (!currentDebt) throw new Error('missing current debt');
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: {
+      head: f.repo.git('rev-parse', 'HEAD').trim(),
+      base: f.state.base,
+      dirtySha256: 'clean-tree',
+    },
+    ledger: f.store.load(),
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: currentDebt,
+    nowIso: '2026-10-28T00:00:00Z',
+  });
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+});
+
+test('a pending obligation at the current review identity still refuses a clean run', async () => {
+  const f = await fixture('ambiguous-identity-enrollment');
+  const result = await f.run();
+  // Two enrollments claim this identity: the runner must never report a clean completion, whichever
+  // identity/trust check refuses first (the guard's own ambiguity arm is defence in depth).
+  expect(result.status, JSON.stringify(result)).toBe('needs-human');
+  if (result.status !== 'needs-human') throw Error(JSON.stringify(result));
+  expect(result.reason.length).toBeGreaterThan(0);
 });

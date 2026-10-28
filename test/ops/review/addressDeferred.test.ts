@@ -612,7 +612,7 @@ test.each(['exact', 'wrong-digest'] as const)(
     try {
       const bytes = ownershipReceipt();
       const id = createHash('sha256').update(bytes).digest('hex');
-      const path = join(f.repo.root, '.cq/queue-evidence', id + '.json');
+      const path = join(await realpath(f.repo.root), '.cq/queue-evidence', id + '.json');
       let imported = false;
       const result = await makeReviewAddress({
         config,
@@ -771,6 +771,332 @@ test.each(['ack-interrupted', 'persist-refused', 'changed-known'] as const)(
           sha256: createHash('sha256').update(ownershipReceipt()).digest('hex'),
         });
       }
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
+test('P1: an imported-cycle disposition cannot lend status to a later original finding (same content)', async () => {
+  const f = await fixture();
+  try {
+    const finding = {
+      id: 'c009-aaaaaaaa#f1',
+      severity: 'major',
+      fileName: 'src/a.ts',
+      excerpt: 'const x = 1;',
+      line: 1,
+      rule: 'no-x',
+      evidence: 'receipt-9',
+    };
+    await f.effects.openLedger(f.state.branch).mutate((ledger) => ({
+      ledger: {
+        ...ledger,
+        records: [
+          ...ledger.records,
+          cycleRecord({
+            head: f.state.head,
+            base: f.state.base,
+            dirtySha256: 'clean-tree',
+            cycleId: 'c009-aaaaaaaa',
+            reviewer: 'review.address:import',
+            findings: [finding],
+          }),
+          {
+            kind: 'disposition',
+            findingId: finding.id,
+            action: 'rejected',
+            why: 'imported repeat',
+            head: f.state.head,
+            at: '2026-10-17T00:00:00.000Z',
+          },
+          cycleRecord({
+            head: f.state.head,
+            base: f.state.base,
+            dirtySha256: 'clean-tree',
+            cycleId: 'c010-aaaaaaaa',
+            findings: [finding],
+          }),
+        ],
+      },
+      value: undefined,
+    }));
+    const context = await f.resolver({
+      repoRoot: f.repo.root,
+      target: 'merge-queue',
+      base: f.state.base,
+      record: f.record(),
+    });
+    const row = context?.findings.find((item) => item.id === finding.id);
+    // The import cycle is repeat transport: no eligible witness precedes the
+    // disposition, so the later original finding stays OPEN.
+    expect(row).toMatchObject({ status: 'open' });
+    expect(row?.reason).toBeUndefined();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('P1: the same imported-cycle sequence with CHANGED later content also stays open', async () => {
+  const f = await fixture();
+  try {
+    const imported = {
+      id: 'c009-aaaaaaaa#f1',
+      severity: 'major',
+      fileName: 'src/a.ts',
+      excerpt: 'imported repeat text',
+      line: 1,
+      rule: 'no-x',
+    };
+    const original = { ...imported, excerpt: 'genuine original text' };
+    await f.effects.openLedger(f.state.branch).mutate((ledger) => ({
+      ledger: {
+        ...ledger,
+        records: [
+          ...ledger.records,
+          cycleRecord({
+            head: f.state.head,
+            base: f.state.base,
+            dirtySha256: 'clean-tree',
+            cycleId: 'c009-aaaaaaaa',
+            reviewer: 'review.address:import',
+            findings: [imported],
+          }),
+          {
+            kind: 'disposition',
+            findingId: imported.id,
+            action: 'fixed',
+            why: 'imported repeat',
+            head: f.state.head,
+            at: '2026-10-17T00:00:00.000Z',
+          },
+          cycleRecord({
+            head: f.state.head,
+            base: f.state.base,
+            dirtySha256: 'clean-tree',
+            cycleId: 'c010-aaaaaaaa',
+            findings: [original],
+          }),
+        ],
+      },
+      value: undefined,
+    }));
+    const context = await f.resolver({
+      repoRoot: f.repo.root,
+      target: 'merge-queue',
+      base: f.state.base,
+      record: f.record(),
+    });
+    const row = context?.findings.find((item) => item.id === imported.id);
+    expect(row).toMatchObject({ status: 'open', text: 'genuine original text' });
+    expect(row?.reason).toBeUndefined();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('P2: a content-mismatched cached row is reset to OPEN and loses its cached reason', async () => {
+  const f = await fixture();
+  try {
+    // The ledger witness is LEGACY: it carries no line/rule/evidence, so a cached
+    // row that carries them can never match it.
+    await f.effects.openLedger(f.state.branch).mutate((ledger) => ({
+      ledger: {
+        ...ledger,
+        records: ledger.records.map((entry) =>
+          entry.kind === 'cycle'
+            ? {
+                ...entry,
+                findings: [
+                  { id: 'original-known', severity: 'major', excerpt: 'retained outage finding' },
+                ],
+              }
+            : entry,
+        ),
+      },
+      value: undefined,
+    }));
+    const cached = f.record();
+    cached.findings = [
+      {
+        id: 'original-known',
+        source: 'coderabbit',
+        severity: 'major',
+        text: 'retained outage finding',
+        file: 'src/a.ts',
+        line: 7,
+        rule: 'no-a',
+        status: 'rejected',
+        reason: 'cached adjudication',
+      },
+    ];
+    const seen: { status: string; reason?: string }[] = [];
+    const result = await makeReviewAddress({
+      config,
+      initialRecord: cached,
+      resolveDeferredVendorContext: f.resolver,
+      disposition: async (root, finding) =>
+        makeDevDisposition(f.effects)({
+          repoRoot: root,
+          findingId: finding.id,
+          action: 'deferred',
+          why: 'requires owner',
+        }),
+      workerFactory: () => ({
+        escalation: createEscalationState,
+        fix: async (finding) => {
+          seen.push({
+            status: finding.status,
+            ...(finding.reason === undefined ? {} : { reason: finding.reason }),
+          });
+          return {
+            finding: { ...finding, status: 'deferred', reason: 'requires owner' },
+            observedHead: f.record().head,
+            reason: 'requires owner',
+            validation: [],
+          };
+        },
+      }),
+      review: async () => ({ status: 'ok', value: f.record() }),
+    })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir, rounds: 1 });
+    // The cached 'rejected' status and its reason cannot survive a content mismatch:
+    // the row reaches the fixer as open, so openBlocking still reports it.
+    expect(seen).toEqual([{ status: 'open' }]);
+    expect(result.status).toBe('needs-human');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test.each([false, true])(
+  'real admission preserves empty-file identity and OPEN nondispatchable debt (absent companion=%s)',
+  async (withAbsent) => {
+    const f = await fixture();
+    try {
+      const { assembleReadiness } = await import('../../../src/ops/dev/record.js');
+      const record = f.record();
+      const coverage = record.sources[1]?.coverage;
+      if (!coverage || !('version' in coverage) || coverage.version !== 2)
+        throw new Error('fixture requires genuine v2 agent coverage');
+      // Match the genuine full agent source supplied by fixture(), without inventing
+      // any finding witness or letting the import cycle lend disposition authority.
+      await f.effects.openLedger(f.state.branch).mutate((ledger) => ({
+        ledger: {
+          ...ledger,
+          records: [
+            ...ledger.records,
+            cycleRecord({
+              cycleId: 'agent-current-empty-file',
+              reviewer: 'agent:reviewer',
+              head: f.state.head,
+              base: f.state.base,
+              dirtySha256: 'clean-tree',
+              agentCoverage: coverage,
+            }),
+          ],
+        },
+        value: undefined,
+      }));
+      record.findings = [
+        {
+          id: 'empty-file',
+          source: 'coderabbit',
+          severity: 'major',
+          text: 'empty identity',
+          file: '',
+          status: 'open',
+        },
+      ];
+      if (withAbsent)
+        record.findings.push({
+          id: 'absent-file',
+          source: 'coderabbit',
+          severity: 'major',
+          text: 'absent identity',
+          status: 'open',
+        });
+      const fixed: string[] = [];
+      let reviews = 0;
+      const result = await makeReviewAddress({
+        config,
+        initialRecord: record,
+        resolveDeferredVendorContext: f.resolver,
+        // NO deps.disposition: that seam bypasses admitRecord entirely (1088 at 9d).
+        // The stopped predecessor's missing import cycle was caused by that bypass,
+        // not evidence that dispatch was unentered or batching changed the finding.
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (finding) => {
+            fixed.push(finding.id);
+            return {
+              finding: { ...finding, status: 'deferred', reason: 'requires owner' },
+              observedHead: f.state.head,
+              reason: 'requires owner',
+              validation: [],
+            };
+          },
+        }),
+        review: async () => {
+          reviews++;
+          return { status: 'ok', value: f.record() };
+        },
+      })({ repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir, rounds: 1 });
+      const reason = 'unresolved: finding has no file path';
+      expect(result, JSON.stringify(result)).toMatchObject({ status: 'needs-human' });
+      if (result.status !== 'needs-human' || !result.report)
+        throw new Error('missing refusal report');
+      const report = result.report;
+      expect(result.reason).toBe(`${reason}; report: ${report.reportPath}`);
+      expect(report.reasons).toContain(reason);
+      expect(report.admissionHead).toBe(f.state.head);
+      expect(report.findings.find((row) => row.id === 'empty-file')).toMatchObject({
+        file: '',
+        status: 'open',
+        reason,
+      });
+      expect(report.openBlocking.find((row) => row.id === 'empty-file')).toMatchObject({
+        file: '',
+        status: 'open',
+        reason,
+      });
+      expect(fixed).toEqual(withAbsent ? ['absent-file'] : []);
+      expect(reviews).toBe(0);
+      expect(report.fixes.some((fix) => fix.finding.id === 'empty-file')).toBe(false);
+      expect(report.fixesPerRun).toBe(0);
+      expect(report.rounds).toHaveLength(1);
+      if (!withAbsent) expect(report.rounds[0]?.runs).toEqual([]);
+      const ledger = f.effects.openLedger(f.state.branch).load();
+      const imported = ledger.records.findLast(
+        (entry) => entry.kind === 'cycle' && entry.reviewer === 'review.address:import',
+      );
+      expect(imported?.kind).toBe('cycle');
+      if (imported?.kind !== 'cycle') throw new Error('real import cycle missing');
+      expect(imported.findings.find((row) => row.id === 'empty-file')).toHaveProperty(
+        'fileName',
+        '',
+      );
+      if (withAbsent)
+        expect(imported.findings.find((row) => row.id === 'absent-file')).not.toHaveProperty(
+          'fileName',
+        );
+      expect(
+        ledger.records.some(
+          (entry) => entry.kind === 'disposition' && entry.findingId === 'empty-file',
+        ),
+      ).toBe(false);
+      const readiness = assembleReadiness({
+        branch: f.state.branch,
+        target: 'merge-queue',
+        identity: { base: f.state.base, head: f.state.head, dirtySha256: 'clean-tree' },
+        ledger,
+        untracked: [],
+        nowIso: f.effects.nowIso(),
+      });
+      expect(readiness.ready).toBe(false);
+      if (readiness.ready) throw new Error('pathless OPEN finding cannot be ready');
+      const gap = readiness.gaps.find((entry) => entry.field === 'open-blocking-findings');
+      expect(gap?.detail).toContain('empty-file');
+      expect(gap?.detail).toContain(reason);
     } finally {
       await f.cleanup();
     }

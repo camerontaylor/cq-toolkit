@@ -22,6 +22,8 @@ import { makeAgentReviewRunner } from '../../../src/ops/dev/agentReview.js';
 import { makeDevReady } from '../../../src/ops/dev/ready.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
+import { parseDevLedger, serializeDevLedger } from '../../../src/ops/dev/record.js';
+import { restoreDurableDisposition } from '../../../src/ops/review/internal/durableDisposition.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
@@ -497,7 +499,13 @@ describe('dev.review cycle', () => {
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
-  test('agent:reviewer runs the scripted read-only reviewer and records a terminal ledger cycle', async () => {
+  test.each([
+    ['src/a.ts', 'fixture-rule'],
+    ['', 'fixture-rule'],
+    [undefined, 'fixture-rule'],
+    ['src/a.ts', ''],
+    ['src/a.ts', undefined],
+  ])('agent:reviewer records file %j and rule %j identity verbatim', async (file, rule) => {
     const effects = repoEffects(repo);
     const run = vi.fn(
       async (invocation: {
@@ -513,9 +521,9 @@ describe('dev.review cycle', () => {
           structuredOutput: {
             findings: [
               {
-                file: 'src/a.ts',
+                ...(file === undefined ? {} : { file }),
                 line: 1,
-                rule: 'fixture-rule',
+                ...(rule === undefined ? {} : { rule }),
                 severity: 'high',
                 text: 'Seeded agent finding',
               },
@@ -573,7 +581,7 @@ describe('dev.review cycle', () => {
     expect(result.value.findings).toEqual([
       expect.objectContaining({
         severity: 'major',
-        fileName: 'src/a.ts',
+        ...(file === undefined ? {} : { fileName: file }),
         excerpt: 'Seeded agent finding',
       }),
     ]);
@@ -584,6 +592,56 @@ describe('dev.review cycle', () => {
       reviewer: 'agent:reviewer',
       completion: { kind: 'terminal' },
     });
+    if (cycle?.kind !== 'cycle') throw new Error('missing agent cycle');
+    if (file === undefined) expect(cycle.findings[0]).not.toHaveProperty('fileName');
+    else expect(cycle.findings[0]).toHaveProperty('fileName', file);
+    if (rule === undefined) {
+      expect(result.value.findings[0]).not.toHaveProperty('rule');
+      expect(cycle.findings[0]).not.toHaveProperty('rule');
+    } else {
+      expect(result.value.findings[0]).toHaveProperty('rule', rule);
+      expect(cycle.findings[0]).toHaveProperty('rule', rule);
+    }
+    if (rule === '' || rule === undefined) {
+      const produced = cycle.findings[0]!;
+      const persisted = parseDevLedger(
+        serializeDevLedger({
+          ...effects.openLedger('feature/x').load(),
+          records: [
+            cycle,
+            {
+              kind: 'disposition',
+              findingId: produced.id,
+              action: 'rejected',
+              why: 'reviewed original identity',
+              head: cycle.head,
+              at: cycle.at,
+            },
+          ],
+        }),
+      );
+      // Reuse the ACTUAL producer's persisted ID. Fresh cycles mint different
+      // IDs; this checks same-ID replay rather than cross-cycle inheritance.
+      const absentRule = {
+        id: produced.id,
+        source: 'agent',
+        severity: 'major',
+        text: 'Seeded agent finding',
+        file: 'src/a.ts',
+        line: 1,
+        status: 'open' as const,
+      };
+      const restoredAbsent = restoreDurableDisposition(absentRule, persisted);
+      expect(restoredAbsent.status).toBe(rule === '' ? 'open' : 'rejected');
+      if (rule === '') {
+        expect(restoredAbsent).not.toHaveProperty('reason');
+        expect(restoreDurableDisposition({ ...absentRule, rule: '' }, persisted)).toMatchObject({
+          status: 'rejected',
+          reason: 'reviewed original identity',
+          rule: '',
+        });
+      } else expect(restoredAbsent.reason).toBe('reviewed original identity');
+    }
     expect(effects.logs[0]).toContain('coverage: v2 mode=session');
     expect(effects.logs[0]).toContain('advisories: none');
     expect(run).toHaveBeenCalledOnce();

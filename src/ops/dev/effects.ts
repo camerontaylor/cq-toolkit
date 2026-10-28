@@ -35,6 +35,8 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** Present only when this command was interrupted by its supplied abort signal. */
+  interruption?: { kind: 'abort'; reason: unknown };
 }
 
 /** Generous capture ceiling for a gate's output (a big lint report must not truncate into a fault). */
@@ -178,6 +180,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
           stdout: '',
           stderr: `command cancelled before dispatch: ${faultText(opts.signal.reason)}`,
           timedOut: false,
+          interruption: { kind: 'abort', reason: opts.signal.reason },
         });
         return;
       }
@@ -204,11 +207,14 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
           ) {
             // The command RAN and exited non-zero (or was killed on
             // timeout): a verdict the caller classifies, not a fault.
-            const settled = {
+            const settled: CommandResult = {
               exitCode: typeof code === 'number' ? code : null,
               stdout,
               stderr,
               timedOut: error.killed === true && code !== 'ABORT_ERR',
+              ...(code === 'ABORT_ERR' && opts.signal?.aborted
+                ? { interruption: { kind: 'abort' as const, reason: opts.signal.reason } }
+                : {}),
             };
             if (code === 'ABORT_ERR' && child.exitCode === null && child.signalCode === null)
               child.once('close', () => resolvePromise(settled));

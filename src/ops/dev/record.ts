@@ -50,11 +50,16 @@ import {
   type DeferredVendorDebt,
   type VendorFailureProvenance,
 } from './internal/deferredReview.js';
+import { readCurrentEnrollment } from './internal/deferredLedger.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
+import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
+import { branchPathFault } from '../../shared/refname.js';
+
+export { branchPathFault };
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.
@@ -91,6 +96,20 @@ export interface DevFinding {
   fileName?: string;
   /** The finding's comment (or its first suggestion), when reported. */
   excerpt?: string;
+  /** The reported line, when the producer's contract supplies one (never inferred). */
+  line?: number;
+  /** The reported rule/lint id, when the producer's contract supplies one. */
+  rule?: string;
+  /**
+   * The producer's receipt reference (vendor receipts only), preserved verbatim so a
+   * later projection can prove WHICH receipt this finding came from.
+   */
+  evidence?: string;
+  /**
+   * The R3S versioned agent evidence payload, carried verbatim. It is persisted and
+   * compared structurally; it is never re-derived, repaired or used as authority here.
+   */
+  evidenceV1?: FindingEvidenceV1;
 }
 
 /** Whether one review cycle completed, or was blocked — and why. */
@@ -293,12 +312,24 @@ export interface DevIdentity {
 
 // --- Zod mirrors (parse boundary; key order is the serialize order) --------
 
+/**
+ * The ledger's finding mirror. Identity-bearing STRINGS accept exactly what the
+ * review record (FindingSchema) accepts, including the empty string, and are stored
+ * verbatim: the ledger never rejects a value its producer was allowed to emit, and
+ * never drops one either (an empty value is stored, not treated as absent). `id`,
+ * `severity` and `line` keep their strict constraints because FindingSchema has the
+ * same ones. Widening acceptance cannot invalidate an existing ledger.
+ */
 const DevFindingSchema = z
   .object({
     id: z.string().min(1),
     severity: z.string().min(1),
-    fileName: z.string().min(1).exactOptional(),
-    excerpt: z.string().min(1).exactOptional(),
+    fileName: z.string().exactOptional(),
+    excerpt: z.string().exactOptional(),
+    line: z.number().int().positive().exactOptional(),
+    rule: z.string().exactOptional(),
+    evidence: z.string().exactOptional(),
+    evidenceV1: FindingEvidenceV1Schema.exactOptional(),
   })
   .strict();
 
@@ -609,29 +640,10 @@ export function parseDevLedger(text: string): DevLedgerFile {
 
 // --- Branch-path safety -----------------------------------------------------
 
-/**
- * A git refname segment (git check-ref-format rules, enforced here
- * fail-closed): no leading '.', no trailing '.lock', no '..' anywhere, and
- * none of the characters git forbids in a refname. A branch name is joined
- * into a path under `.cq/dev/`, so every segment must be path-safe.
- */
-export function branchPathFault(branch: string): string | null {
-  if (branch === '' || branch.startsWith('/') || branch.endsWith('/')) {
-    return `branch '${branch}' must be a non-empty relative refname`;
-  }
-  for (const segment of branch.split('/')) {
-    if (
-      segment === '' ||
-      segment.startsWith('.') ||
-      segment.endsWith('.lock') ||
-      segment.includes('..') ||
-      /[\s~^:?*[\]\\]/.test(segment)
-    ) {
-      return `branch '${branch}' is not a path-safe refname (segment '${segment}')`;
-    }
-  }
-  return null;
-}
+// The refname grammar itself is the shared zero-import leaf (shared/refname.ts):
+// the dev ledger validator and the queue wire/origin schemas must agree on it, and
+// this module cannot host it without closing the queueProtocol -> record ->
+// deferredReview -> queueProtocol runtime cycle.
 
 /**
  * The branch encoded into ONE bounded, collision-free filename segment: a
@@ -837,15 +849,23 @@ export function assembleReadiness(
   const cycles = ledger.records.filter(
     (record): record is DevCycleRecord => record.kind === 'cycle',
   );
-  const latestDebt = ledger.records.filter((record) => record.kind === 'vendor-debt').at(-1)?.debt;
+  // Current authority is the identity-matched enrollment and its authorized predecessor chain,
+  // never the positionally last appended snapshot.
+  const enrollmentRead = readCurrentEnrollment(ledger, identity, input.target);
+  if (enrollmentRead.kind === 'ambiguous')
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `ambiguous current enrollment: ${enrollmentRead.requestIds.join(', ')} claim one identity`,
+    });
+  const enrollment = enrollmentRead.kind === 'enrollment' ? enrollmentRead.enrollment : undefined;
   const binding = debt?.reference.binding;
   const debtValid =
     debt !== undefined &&
     binding?.kind === 'deferred-author' &&
-    latestDebt !== undefined &&
-    JSON.stringify(latestDebt.reference) === JSON.stringify(debt.reference) &&
-    JSON.stringify(latestDebt.originAttempt) === JSON.stringify(debt.originAttempt) &&
-    JSON.stringify(latestDebt.deferral) === JSON.stringify(debt.deferral) &&
+    enrollment !== undefined &&
+    JSON.stringify(enrollment.snapshot.reference) === JSON.stringify(debt.reference) &&
+    JSON.stringify(enrollment.snapshot.originAttempt) === JSON.stringify(debt.originAttempt) &&
+    JSON.stringify(enrollment.snapshot.deferral) === JSON.stringify(debt.deferral) &&
     hasPersistedVendorOutageOrigin(debt.originAttempt, cycles) &&
     matchesDeferredVendorDebt(debt, {
       repo: binding.repo,
@@ -864,6 +884,15 @@ export function assembleReadiness(
       field: 'vendor-debt',
       detail:
         'deferred debt does not match the retained origin, latest enrollment and current identity',
+    });
+  // A pending current enrollment legitimately continues; an unsettled AUTHORIZED ANCESTOR never
+  // does. This is derived from the ledger, so a truncated or unrefreshed lineage is never clean.
+  if (enrollment !== undefined && enrollment.pendingAncestry.length > 0)
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `authorized predecessor obligation(s) unsettled: ${enrollment.pendingAncestry
+        .map((ancestor) => ancestor.reference.requestId)
+        .join(', ')}`,
     });
 
   // Only a FULL-scope terminal cycle satisfies readiness: an
@@ -944,8 +973,8 @@ export function assembleReadiness(
         if (action === 'fixed' || action === 'rejected') continue;
         open.push(
           entry.cycleId === cycle.cycleId
-            ? `${finding.id} (${finding.severity})`
-            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)`,
+            ? `${finding.id} (${finding.severity})${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`
+            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`,
         );
       }
     }
@@ -958,7 +987,7 @@ export function assembleReadiness(
       const action = closed.get(finding.id);
       if (action !== 'fixed' && action !== 'rejected')
         open.push(
-          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)`,
+          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)${finding.file === '' ? ': unresolved: finding has no file path' : ''}`,
         );
     }
     if (open.length > 0) {

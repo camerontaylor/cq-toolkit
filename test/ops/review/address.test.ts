@@ -185,6 +185,9 @@ describe('review.address composition', () => {
       const result = await makeReviewAddress(f.deps)({ ...f.input, concurrency: 1, rounds: 1 });
       const report = reportOf(result);
       expect(f.calls.filter((call) => call.startsWith('fix:'))).toEqual(['fix:a', 'fix:b']);
+      // The injected disposition makes `admitRecord` return before admission, so
+      // this run must never claim an admission witness it did not earn.
+      expect(report.admissionHead).toBeUndefined();
       expect(report.rounds).toHaveLength(1);
       expect(report.rounds[0]).toMatchObject({ round: 1, record: { findings: report.findings } });
       expect(report.rounds[0]).toHaveProperty('runs', [
@@ -207,6 +210,38 @@ describe('review.address composition', () => {
     ).toEqual([['a', 'b'], ['alias'], ['unknown'], ['c']]);
     expect(() => addressBatches([], 0)).toThrow('positive');
   });
+  test('empty-file scope is a singleton and retains its own empty identity', () => {
+    const empty = { ...finding('empty'), file: '' };
+    const batches = addressBatches([finding('a'), empty, finding('b')], 2);
+    expect(batches.map((batch) => batch.map((row) => row.id))).toEqual([['a'], ['empty'], ['b']]);
+    expect(batches[1]?.[0]).toBe(empty);
+    expect(empty).toHaveProperty('file', '');
+  });
+
+  test('mixed findings run eligible work and stop before re-review with the empty row OPEN', async () => {
+    const f = await fixture([finding('a'), { ...finding('empty'), file: '' }]);
+    try {
+      const result = await makeReviewAddress(f.deps)(f.input);
+      expect(result.status).toBe('needs-human');
+      expect(f.calls).toEqual(['fix:a', 'disposition:deferred']);
+      const report = reportOf(result);
+      if (result.status !== 'needs-human') throw new Error('missing empty-file refusal');
+      expect(result.reason).toBe(
+        `unresolved: finding has no file path; report: ${report.reportPath}`,
+      );
+      expect(report.reasons).toContain('unresolved: finding has no file path');
+      expect(report.findings.find((row) => row.id === 'empty')).toMatchObject({
+        file: '',
+        status: 'open',
+        reason: 'unresolved: finding has no file path',
+      });
+      expect(report.openBlocking.find((row) => row.id === 'empty')).toHaveProperty('file', '');
+      expect(report.fixes.map((fix) => fix.finding.id)).toEqual(['a']);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   test('no token default or missing roles dispatches work; durable report survives every refusal', async () => {
     const f = await fixture();
     try {
@@ -218,6 +253,7 @@ describe('review.address composition', () => {
         expect(result.status).toBe('needs-human');
         expect(f.calls).toEqual([]);
         const report = reportOf(result);
+        expect(report.admissionHead).toBeUndefined();
         expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
       }
     } finally {
@@ -394,8 +430,77 @@ describe('review.address composition', () => {
       const invalid = await makeReviewAddress(f.deps)({ ...f.input, source: 'pr:0' });
       expect(invalid.status).toBe('failed');
       expect(reportOf(invalid).usage.input).toBe(0);
+      expect(reportOf(invalid).admissionHead).toBeUndefined();
       const clean = await makeReviewAddress(f.deps)(f.input);
       expect(clean.status).toBe('ok');
+      // The clean exit is admitted through `admitCleanRecord`'s final guards, so
+      // it carries the engine-read head even though no worker ran.
+      expect(reportOf(clean).admissionHead).toBe(f.record().head);
+      expect(f.calls).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('a successful re-review refreshes the first-round record but not the admission witness', async () => {
+    const f = await fixture([finding('a')]);
+    const { disposition: _bypass, ...realDeps } = f.deps;
+    try {
+      // Real admission writes the engine's own ledger, so the fixture must ignore
+      // `.cq/` before the run: the clean exit validates a clean publication tree.
+      await f.repo.write('.gitignore', '/.cq/\n');
+      f.repo.commitAll('ignore engine state');
+      const admittedHead = f.record().head;
+      let fixedHead = '';
+      const deps: ReviewAddressDeps = {
+        ...realDeps,
+        initialRecord: f.record(),
+        // Real admission: the injected disposition would bypass `admitRecord`,
+        // and a bypass may never fabricate a witness.
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async (target) => {
+            await f.repo.write(`src/${target.id}.ts`, 'export const fixed = 1;\n');
+            fixedHead = f.repo.commitAll(`fix ${target.id}`);
+            return {
+              finding: { ...target, status: 'fixed' as const, reason: 'fixed' },
+              reason: 'fixed',
+              observedHead: fixedHead,
+              commit: fixedHead,
+              validation: [],
+            };
+          },
+        }),
+        review: async () => ({
+          status: 'ok' as const,
+          value: { ...f.record(), head: fixedHead, findings: [] },
+        }),
+      };
+      const result = await makeReviewAddress(deps)({ ...f.input, rounds: 1 });
+      const report = reportOf(result);
+      expect(result.status, report.reasons.join(' | ')).toBe('ok');
+      expect(fixedHead).not.toBe(admittedHead);
+      // The mutable producer view really was refreshed to the verified fix head…
+      expect(report.rounds[0]?.record.head).toBe(fixedHead);
+      // …while the immutable witness still names the admitted head.
+      expect(report.admissionHead).toBe(admittedHead);
+      expect(report.verifiedHead).toBe(fixedHead);
+      expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('a head-matching record refused for its sources never fabricates a witness', async () => {
+    const f = await fixture([finding('a')]);
+    const { disposition: _bypass, ...realDeps } = f.deps;
+    try {
+      const result = await makeReviewAddress({
+        ...realDeps,
+        initialRecord: { ...f.record(), sources: [] },
+      })(f.input);
+      expect(result.status).toBe('needs-human');
+      expect(reportOf(result).reasons.join(' ')).toMatch(/review source incomplete/);
+      // The head matched, but the run refused before any admission.
+      expect(reportOf(result).admissionHead).toBeUndefined();
       expect(f.calls).toEqual([]);
     } finally {
       await f.cleanup();

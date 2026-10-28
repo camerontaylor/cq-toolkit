@@ -1,7 +1,16 @@
 import { z } from 'zod';
+import { branchPathFault } from '../../../shared/refname.js';
 
 /** Queue capability is separate from author-v1/v2 admission and never dispatches. */
 export const QueueToken = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/);
+/**
+ * A deferred target is a git BRANCH, not a request token: reuse the shared refname
+ * grammar instead of widening QueueToken (which must stay strict for request ids,
+ * principals, codes and item ids).
+ */
+export const QueueBranch = z
+  .string()
+  .refine((branch) => branchPathFault(branch) === null, 'target must be a git branch refname');
 export const QueueSha = z.string().regex(/^[0-9a-f]{40}$/);
 export const QueueDigest = z.string().regex(/^[0-9a-f]{64}$/);
 export const QueueRepo = z
@@ -14,7 +23,7 @@ export const DeferredBindingSchema = z
     repo: QueueRepo,
     producer: QueueToken,
     head: QueueSha,
-    target: QueueToken,
+    target: QueueBranch,
     targetSelector: QueueTarget,
   })
   .strict();
@@ -42,7 +51,12 @@ export const QueueBindSchema = QueueReferenceSchema.extend({
   mergeSha: QueueSha.exactOptional(),
 }).strict();
 export type QueueBindInput = z.infer<typeof QueueBindSchema>;
-export type QueueTransport = (request: string) => Promise<string>;
+/** One caller budget shared across the entire operation, never renewed per page (#632 contract). */
+export interface QueueLifetimeOptions {
+  signal?: AbortSignal;
+  remainingMs?: () => number;
+}
+export type QueueTransport = (request: string, options?: QueueLifetimeOptions) => Promise<string>;
 export const QUEUE_WIRE_BYTES = 8192;
 export const QueueStateSchema = z.enum([
   'awaiting-pr',
@@ -116,10 +130,10 @@ export type QueueStatus = z.infer<typeof QueueStatusSchema>;
  * bind attaches verified forge metadata; it never changes this binding or renews an author grant.
  */
 export interface DeferredQueueClient {
-  enqueue(input: QueueReference): Promise<QueueStatus>;
-  bind(input: QueueBindInput): Promise<QueueStatus>;
-  cancel(input: QueueReference): Promise<QueueStatus>;
-  status(input: QueueReference): Promise<QueueStatus>;
+  enqueue(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueStatus>;
+  bind(input: QueueBindInput, options?: QueueLifetimeOptions): Promise<QueueStatus>;
+  cancel(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueStatus>;
+  status(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueStatus>;
 }
 
 /** JSON-valued --binding plus flags only; no positional arguments. */

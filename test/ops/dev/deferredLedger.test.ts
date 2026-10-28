@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
 import { makeQueueClient } from '../../../src/ops/review/queue.js';
-import { writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
 import {
@@ -10,6 +10,7 @@ import {
 } from '../../../src/ops/review/internal/queueEvidence.js';
 import { deferredReceiptFindings } from '../../../src/ops/dev/internal/deferredReview.js';
 import { makeTestRepo, repoEffects, type TestRepo } from './repo.js';
+import { makeSubprocessDevEffects, type CommandResult } from '../../../src/ops/dev/effects.js';
 import { checkRecord, cycleRecord } from './fakes.js';
 import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import {
@@ -17,6 +18,7 @@ import {
   loadCurrentDeferredVendorDebt,
   bindPublishedDeferredDebt,
   prepareDeferredVendorReview,
+  readCurrentEnrollment,
 } from '../../../src/ops/dev/internal/deferredLedger.js';
 import { renderReadinessSection } from '../../../src/ops/pr/open.js';
 import {
@@ -24,9 +26,11 @@ import {
   findReusableCycle,
   parseDevLedger,
   serializeDevLedger,
+  devLedgerPath,
   type DevLedgerFile,
 } from '../../../src/ops/dev/record.js';
 import { deferVendorReview } from '../../../src/ops/dev/internal/deferredReview.js';
+import type { DeferredVendorDebt } from '../../../src/ops/dev/internal/deferredReview.js';
 import type {
   DeferredQueueClient,
   QueueReference,
@@ -914,4 +918,1505 @@ test.each([
     loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, f.ledger, terminal.client),
   ).rejects.toThrow('genuine complete');
   expect(f.effects.openLedger(f.state.branch).load()).toEqual(f.ledger);
+});
+
+type PendingDebt = Extract<DeferredVendorDebt, { vendorCompleted: false }>;
+
+/** A pending debt cloned onto a new request identity/head, keeping the template's origin. */
+function syntheticDebt(
+  template: PendingDebt,
+  requestId: string,
+  head: string,
+  predecessor?: QueueReference,
+): PendingDebt {
+  const binding = template.reference.binding;
+  if (binding.kind !== 'deferred-author') throw new Error('fixture debt must be deferred-author');
+  return {
+    ...template,
+    reference: { requestId, binding: { ...binding, head } },
+    deferral: { ...template.deferral, id: requestId },
+    ...(predecessor === undefined ? {} : { predecessor }),
+  };
+}
+
+function pendingTemplate(debt: DeferredVendorDebt): PendingDebt {
+  if (debt.vendorCompleted) throw new Error('fixture debt must be pending');
+  return debt;
+}
+
+test('a completed predecessor appended after its successor never displaces the current enrollment', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  // The predecessor's receipt is captured at its own head, before HEAD moves.
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const client: DeferredQueueClient = {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+    cancel: async () => {
+      throw new Error('must not cancel a published predecessor');
+    },
+  };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, client);
+  if (!successor) throw new Error('missing successor');
+  expect(successor.predecessor).toEqual(predecessor.reference);
+  const terminalClient = {
+    ...client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: terminal.client.report,
+  };
+  const ledger = f.effects.openLedger(f.state.branch).load();
+  const refreshed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    ledger,
+    terminalClient,
+  );
+  // Only the current enrollment is returned; the settled predecessor is never authority.
+  expect(refreshed?.reference.requestId).toBe(successor.reference.requestId);
+  const after = f.effects.openLedger(f.state.branch).load();
+  const appended = after.records.filter((entry) => entry.kind === 'vendor-debt').at(-1);
+  if (appended?.kind !== 'vendor-debt') throw new Error('missing appended snapshot');
+  expect(appended.debt.reference).toEqual(predecessor.reference);
+  expect(appended.debt.vendorCompleted).toBe(true);
+  expect(currentLedgerDebt(after, 'merge-queue', read.state)?.reference).toEqual(
+    successor.reference,
+  );
+  const authority = readCurrentEnrollment(
+    after,
+    { head: read.state.head, base: read.state.base, dirtySha256: read.state.dirtySha256 },
+    'merge-queue',
+  );
+  if (authority.kind !== 'enrollment') throw new Error('missing current authority');
+  expect(authority.enrollment.debt.reference).toEqual(successor.reference);
+  expect(authority.enrollment.pendingAncestry).toEqual([]);
+  // Readiness for the successor identity sees no unsettled ancestry: the settled predecessor is
+  // an imported obligation, never a lineage gap.
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: { head: read.state.head, base: read.state.base, dirtySha256: read.state.dirtySha256 },
+    ledger: after,
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: successor,
+    nowIso: f.effects.nowIso(),
+  });
+  // Join the details: an array `toContain` compares whole elements and could never fail here.
+  expect(readiness.ready ? '' : readiness.gaps.map((gap) => gap.detail).join(' ')).not.toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+
+  // Replay is inert: no second snapshot, no re-acknowledgement.
+  const replay = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    after,
+    terminalClient,
+  );
+  expect(replay?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(after);
+});
+
+test('the authorized-predecessor pass stops nonfatally at the count backstop', async () => {
+  const f = await fixture();
+  const ancestors: PendingDebt[] = [];
+  let link: QueueReference | undefined;
+  for (let index = 0; index < 17; index += 1) {
+    const ancestor = syntheticDebt(
+      pendingTemplate(f.debt),
+      `ancestor-${String(index).padStart(2, '0')}`,
+      `${String(index).padStart(2, '0')}${'b'.repeat(38)}`,
+      link,
+    );
+    ancestors.push(ancestor);
+    link = ancestor.reference;
+  }
+  const current = syntheticDebt(
+    pendingTemplate(f.debt),
+    f.debt.reference.requestId,
+    f.state.head,
+    link,
+  );
+  const records = f.ledger.records.filter((entry) => entry.kind !== 'vendor-debt');
+  f.effects.openLedger(f.state.branch).save({
+    version: 2,
+    branch: f.state.branch,
+    records: [
+      ...records,
+      ...ancestors.map((debt) => ({ kind: 'vendor-debt' as const, debt, at: f.effects.nowIso() })),
+      { kind: 'vendor-debt' as const, debt: current, at: f.effects.nowIso() },
+    ],
+  });
+  const refreshed: string[] = [];
+  const client: DeferredQueueClient = {
+    ...f.client,
+    status: async (ref) => {
+      if (ref.requestId.startsWith('ancestor-')) refreshed.push(ref.requestId);
+      return { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+    },
+  };
+  const ledger = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    f.state,
+    ledger,
+    client,
+  );
+  // Truncation is nonfatal: the current enrollment is still returned...
+  expect(debt?.reference.requestId).toBe(current.reference.requestId);
+  // ...after exactly K refreshes, oldest first (FIFO), never renewing the budget...
+  expect(refreshed).toHaveLength(16);
+  expect(refreshed).toEqual(ancestors.slice(0, 16).map((ancestor) => ancestor.reference.requestId));
+  expect(refreshed).not.toContain('ancestor-16');
+  // ...and nothing is appended: an unsettled obligation stays visible to readiness.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(ledger);
+  const authority = readCurrentEnrollment(
+    ledger,
+    { head: f.state.head, base: f.state.base, dirtySha256: f.state.dirtySha256 },
+    'merge-queue',
+  );
+  if (authority.kind !== 'enrollment') throw new Error('missing current authority');
+  expect(authority.enrollment.pendingAncestry).toHaveLength(17);
+  const readiness = f.assemble(ledger, current);
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw new Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+});
+
+test('the invocation budget covers current work and fails closed before any predecessor refresh', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const remainingMs = () => {
+    calls += 1;
+    return calls === 1 ? 5_000 : 0;
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const refreshed: string[] = [];
+  const client: DeferredQueueClient = {
+    ...f.client,
+    status: async (ref) => {
+      refreshed.push(ref.requestId);
+      return f.debt.queue;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', f.state, before, client, undefined, {
+      remainingMs,
+    }),
+  ).rejects.toThrow();
+  expect(refreshed).toEqual([]);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a caller abort bounds each RPC and leaves a late terminal value inert', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  const controller = new AbortController();
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
+      controller.abort(new Error('caller cancelled'));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return terminal.client.status();
+    },
+    report: terminal.client.report,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      f.effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(/caller cancelled/);
+  // The late terminal value was never imported, acknowledged or persisted.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('unrelated roots gain no authority and same-identity duplicates become gaps', async () => {
+  const f = await fixture();
+  const identity = { head: f.state.head, base: f.state.base, dirtySha256: f.state.dirtySha256 };
+  const unrelated = syntheticDebt(pendingTemplate(f.debt), 'other-root', 'f'.repeat(40));
+  const withUnrelated = {
+    ...f.ledger,
+    records: [
+      ...f.ledger.records,
+      { kind: 'vendor-debt' as const, debt: unrelated, at: f.effects.nowIso() },
+    ],
+  };
+  const read = readCurrentEnrollment(withUnrelated, identity, 'merge-queue');
+  if (read.kind !== 'enrollment') throw new Error('unrelated root displaced the enrollment');
+  expect(read.enrollment.debt.reference).toEqual(f.debt.reference);
+  expect(read.enrollment.ancestry).toEqual([]);
+  expect(read.enrollment.pendingAncestry).toEqual([]);
+  expect(currentLedgerDebt(withUnrelated, 'merge-queue', f.state)?.reference).toEqual(
+    f.debt.reference,
+  );
+
+  const duplicate = syntheticDebt(pendingTemplate(f.debt), 'intent-2', f.state.head);
+  const ambiguous = {
+    ...f.ledger,
+    records: [
+      ...f.ledger.records,
+      { kind: 'vendor-debt' as const, debt: duplicate, at: f.effects.nowIso() },
+    ],
+  };
+  const ambiguousRead = readCurrentEnrollment(ambiguous, identity, 'merge-queue');
+  expect(ambiguousRead.kind).toBe('ambiguous');
+  if (ambiguousRead.kind !== 'ambiguous') throw new Error('unreachable');
+  expect([...ambiguousRead.requestIds].sort()).toEqual(['intent-1', 'intent-2']);
+  const readiness = f.assemble(ambiguous, f.debt);
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw new Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'ambiguous current enrollment',
+  );
+});
+
+test('a caller abort before the next wrapped call never dispatches it', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(f);
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled before dispatch');
+  let reported = 0;
+  let statused = 0;
+  const client = {
+    ...terminal.client,
+    status: async (): Promise<QueueStatus> => {
+      statused += 1;
+      return terminal.client.status();
+    },
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      reported += 1;
+      return terminal.client.report(ref, root);
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const evidenceDir = join(f.repo.root, '.cq', 'queue-evidence');
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      const result = await f.effects.runCommand(...call);
+      const [command, args] = call;
+      // Cancellation lands while the forge identity read is in flight, before any wrapped queue
+      // call is attempted.
+      if (command === 'gh' && args.includes('nameWithOwner')) controller.abort(reason);
+      return result;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      f.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(reason);
+  // The wrapper refuses BEFORE dispatch: no status, no report, no ack, no import, no append.
+  expect(statused).toBe(0);
+  expect(reported).toBe(0);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+  await expect(readdir(evidenceDir)).rejects.toThrow();
+});
+
+test('a caller abort at the ancestry boundary outranks a zero budget and keeps its reason', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled at the ancestry boundary');
+  let exhausted = false;
+  const remainingMs = () => (exhausted ? 0 : 5_000);
+  const store = f.effects.openLedger(f.state.branch);
+  const before = store.load();
+  const refreshedAncestors: string[] = [];
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId === predecessor.reference.requestId) refreshedAncestors.push(ref.requestId);
+      return successorStatus;
+    },
+  };
+  let loads = 0;
+  const effects = {
+    ...f.effects,
+    openLedger: () => ({
+      ...store,
+      // The final ledger read is the last local step before the ancestry boundary.
+      load: () => {
+        const ledger = store.load();
+        loads += 1;
+        if (loads === 1) {
+          exhausted = true;
+          controller.abort(reason);
+        }
+        return ledger;
+      },
+    }),
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+      {
+        remainingMs,
+      },
+    ),
+  ).rejects.toThrow(reason);
+  // The caller's cancellation is the reason, never a silent nonfatal truncation.
+  expect(refreshedAncestors).toEqual([]);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('in-flight deadline expiry during an ancestor RPC truncates nonfatally', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  // A wide margin keeps this deterministic: the budget survives the current work and is exhausted
+  // while the ancestor status is still in flight.
+  const budget = 400;
+  const remainingMs = () => budget;
+  const before = f.effects.openLedger(f.state.branch).load();
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      return successorStatus;
+    },
+  };
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs },
+  );
+  // Truncation is nonfatal: the verified current enrollment comes back...
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  // ...nothing is appended, and the retained obligation stays a readiness gap.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+  const readiness = assembleReadiness({
+    branch: f.state.branch,
+    target: 'merge-queue',
+    identity: { head: read.state.head, base: read.state.base, dirtySha256: read.state.dirtySha256 },
+    ledger: before,
+    untracked: [],
+    configuredReviewers: ['agent', 'coderabbit'],
+    deferredVendorDebt: successor,
+    nowIso: f.effects.nowIso(),
+  });
+  expect(readiness.ready).toBe(false);
+  if (readiness.ready) throw new Error('unexpected readiness');
+  expect(readiness.gaps.map((gap) => gap.detail).join(' ')).toContain(
+    'authorized predecessor obligation(s) unsettled:',
+  );
+});
+
+test('an unrelated trust failure coinciding with expiry still propagates', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  let exhausted = false;
+  const remainingMs = () => (exhausted ? 0 : 5_000);
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId === predecessor.reference.requestId) {
+        // The clock expires first, THEN an unrelated trust failure surfaces: the catch must
+        // classify by the caught outcome, never by the clock.
+        exhausted = true;
+        throw new Error('queue alias status binding mismatch');
+      }
+      return successorStatus;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effectsFor(f),
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      undefined,
+      {
+        remainingMs,
+      },
+    ),
+  ).rejects.toThrow(/queue alias status binding mismatch/);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** The fixture's effects, unchanged: a small helper keeps the call sites readable. */
+function effectsFor(f: Awaited<ReturnType<typeof fixture>>) {
+  return f.effects;
+}
+
+test('an exhausted budget before the timer callback still truncates nonfatally', async () => {
+  const f = await fixture();
+  const predecessor = f.debt;
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  let exhausted = false;
+  const remainingMs = () => (exhausted ? 0 : 5_000);
+  const terminal = terminalReport(f);
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> => {
+      if (ref.requestId !== predecessor.reference.requestId) return successorStatus;
+      // The budget reaches zero BEFORE the invocation timer callback can run; the very next
+      // internal call must still be classified as OUR deadline, not as a fatal refresh error.
+      exhausted = true;
+      return {
+        ...f.debt.queue,
+        state: 'terminal-clean',
+        pr: 42,
+        mergeSha: f.state.head,
+        itemId: 'current-fixture',
+        reviewed: true,
+        consumed: true,
+      };
+    },
+    report: terminal.client.report,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** A pending successor at a new head whose authorized ancestor is still pending at the older head. */
+async function successorWithPendingAncestor() {
+  const f = await fixture();
+  const predecessor = f.debt;
+  const terminal = terminalReport(f);
+  await f.repo.write('src/a.ts', 'export const a = 2;\n');
+  f.repo.git('add', 'src/a.ts');
+  f.repo.git('commit', '-qm', 'new head');
+  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  if (!read.ok) throw new Error(read.reason);
+  const successorStatus: QueueStatus = { ...f.debt.queue, state: 'awaiting-pr', pr: null };
+  const successor = await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, {
+    ...f.client,
+    enqueue: async () => successorStatus,
+    status: async () => successorStatus,
+  });
+  if (!successor) throw new Error('missing successor');
+  return { f, predecessor, terminal, successorStatus, successor, read };
+}
+
+test('a non-vendor blocker discovered while refreshing an ancestor propagates', async () => {
+  const { f, predecessor, successorStatus, read } = await successorWithPendingAncestor();
+  const blocked: QueueStatus = {
+    ...f.debt.queue,
+    state: 'blocked',
+    reason: { source: 'queue', category: 'identity', code: 'forge-identity' },
+  };
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? blocked : successorStatus,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  await expect(
+    loadCurrentDeferredVendorDebt(f.effects, 'merge-queue', read.state, before, client),
+  ).rejects.toThrow(/non-vendor blocker/);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a vendor-blocked, enqueued ancestor stays ordinary pending vendor work', async () => {
+  const { f, predecessor, successorStatus, successor, read } = await successorWithPendingAncestor();
+  const vendorBlocked: QueueStatus = {
+    ...f.debt.queue,
+    state: 'blocked',
+    enqueued: true,
+    reason: { source: 'vendor', category: 'vendor-rate-limited', code: 'rate_limited' },
+  };
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId ? vendorBlocked : successorStatus,
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a caller abort during the post-report identity read prevents the ancestor append', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled during the post-report identity read');
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      const result = await f.effects.runCommand(...call);
+      // Cancellation lands on the ancestry loop's post-report identity read (readWorkState opens
+      // with `symbolic-ref`), i.e. AFTER consumeDeferredVendorReport has fully returned.
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref'))
+        controller.abort(reason);
+      return result;
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(reason);
+  // No late settlement write: the ledger is exactly as before.
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('a caller abort after the final ancestor settlement still propagates from lineage exhaustion', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled after the final settlement');
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+  };
+  const store = f.effects.openLedger(f.state.branch);
+  const before = store.load();
+  const effects = {
+    ...f.effects,
+    openLedger: () => ({
+      ...store,
+      mutate: async <T>(fn: Parameters<typeof store.mutate<T>>[0]) => {
+        const value = await store.mutate(fn);
+        // The settlement is published; cancellation lands before the lineage can be re-read.
+        controller.abort(reason);
+        return value;
+      },
+    }),
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(reason);
+});
+
+test('the post-report identity read is clamped to the remaining budget and carries the signal', async () => {
+  const { f, predecessor, terminal, successorStatus, successor, read } =
+    await successorWithPendingAncestor();
+  const client = {
+    ...f.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: terminal.client.report,
+  };
+  let imported = false;
+  let inIdentityRead = false;
+  const calls: { command: string; timeoutMs: number; signal: boolean }[] = [];
+  const wrapped = {
+    ...f.effects,
+    // Arm the recorder only once the receipt has been imported, i.e. the identity read under test.
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      // The bounded window starts at the identity read's first command (`symbolic-ref`); the
+      // receipt import's own 30 s commands are outside it.
+      if (imported && (inIdentityRead || call[1].includes('symbolic-ref'))) inIdentityRead = true;
+      if (imported && inIdentityRead)
+        calls.push({
+          command: call[0],
+          timeoutMs: call[2].timeoutMs,
+          signal: call[2].signal !== undefined,
+        });
+      const result = await f.effects.runCommand(...call);
+      return result;
+    },
+  };
+  const recordingClient = {
+    ...client,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    wrapped,
+    'merge-queue',
+    read.state,
+    before,
+    recordingClient,
+    undefined,
+    { remainingMs: () => 5_000 },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  const gitCalls = calls.filter((call) => call.command === 'git');
+  expect(gitCalls.length).toBeGreaterThan(0);
+  for (const call of gitCalls) {
+    expect(call.timeoutMs).toBeLessThanOrEqual(5_000);
+    expect(call.signal).toBe(true);
+  }
+});
+
+test('cancellation during the post-report identity read keeps the caller reason', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled during the bounded identity read');
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported) controller.abort(reason);
+      return f.effects.runCommand(...call);
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(reason);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('budget exhaustion during the post-report identity read truncates nonfatally', async () => {
+  const { f, predecessor, terminal, successorStatus, successor, read } =
+    await successorWithPendingAncestor();
+  let exhausted = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      exhausted = true;
+      return evidence;
+    },
+  };
+  // An "unbounded" dispatch is one with neither the invocation signal nor a budget-clamped timeout;
+  // the receipt import's own signal-bound 30 s commands are not unbounded and are not counted.
+  let unboundedAfterExhaustion = 0;
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (exhausted && call[2].signal === undefined && call[2].timeoutMs > 5_000)
+        unboundedAfterExhaustion += 1;
+      return f.effects.runCommand(...call);
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs: () => (exhausted ? 0 : 5_000) },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  // Nothing unbounded is dispatched once the budget is gone: the wait is bounded, not re-checked late.
+  expect(unboundedAfterExhaustion).toBe(0);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** Adapter-shaped failed results: the real subprocess seam resolves these instead of rejecting. */
+function adapterAborted(): CommandResult {
+  return { exitCode: null, stdout: '', stderr: 'aborted', timedOut: false };
+}
+function adapterTimedOut(): CommandResult {
+  return { exitCode: null, stdout: '', stderr: 'timeout', timedOut: true };
+}
+
+test('an in-flight caller abort resolved by the adapter keeps the exact caller reason', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled in-flight during the bounded identity read');
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      // The bounded identity read opens with `symbolic-ref`: abort there and hand back the
+      // adapter-shaped aborted result, exactly as the real seam does.
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) {
+        controller.abort(reason);
+        return adapterAborted();
+      }
+      return f.effects.runCommand(...call);
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      read.state,
+      before,
+      client,
+      controller.signal,
+    ),
+  ).rejects.toThrow(reason);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('an in-flight invocation deadline resolved as a timeout truncates nonfatally', async () => {
+  const { f, predecessor, terminal, successorStatus, successor, read } =
+    await successorWithPendingAncestor();
+  let imported = false;
+  let exhausted = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) {
+        // The clamped command times out: the budget is now gone and the adapter resolves a failed
+        // result rather than rejecting.
+        exhausted = true;
+        return adapterTimedOut();
+      }
+      return f.effects.runCommand(...call);
+    },
+  };
+  const debt = await loadCurrentDeferredVendorDebt(
+    effects,
+    'merge-queue',
+    read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs: () => (exhausted ? 0 : 5_000) },
+  );
+  expect(debt?.reference.requestId).toBe(successor.reference.requestId);
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+test('an unrelated identity read failure remains hard', async () => {
+  const { f, predecessor, terminal, successorStatus, read } = await successorWithPendingAncestor();
+  let imported = false;
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      // A timeout result while the budget REMAINS is not this invocation's deadline.
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref'))
+        return adapterTimedOut();
+      return f.effects.runCommand(...call);
+    },
+  };
+  await expect(
+    loadCurrentDeferredVendorDebt(effects, 'merge-queue', read.state, before, client, undefined, {
+      remainingMs: () => 5_000,
+    }),
+  ).rejects.toThrow('deferred invocation identity changed while settling authorized ancestry');
+  expect(f.effects.openLedger(f.state.branch).load()).toEqual(before);
+});
+
+/** Arm only the post-import identity read; capture-tree verification is a separate window. */
+async function ancestryIdentityFixture() {
+  const setup = await successorWithPendingAncestor();
+  const { f, predecessor, terminal, successorStatus } = setup;
+  let imported = false;
+  let readingIdentity = false;
+  const seam = { run: f.effects.runCommand };
+  const client = {
+    ...terminal.client,
+    status: async (ref: QueueReference): Promise<QueueStatus> =>
+      ref.requestId === predecessor.reference.requestId
+        ? terminal.client.status()
+        : successorStatus,
+    report: async (ref: QueueReference, root: string): Promise<QueueEvidence> => {
+      const evidence = await terminal.client.report(ref, root);
+      imported = true;
+      return evidence;
+    },
+  };
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (imported && call[0] === 'git' && call[1].includes('symbolic-ref')) readingIdentity = true;
+      return readingIdentity ? seam.run(...call) : f.effects.runCommand(...call);
+    },
+  };
+  const before = f.effects.openLedger(f.state.branch).load();
+  const path = devLedgerPath(f.repo.root, f.state.branch);
+  const bytes = await readFile(path);
+  const unchanged = async () => expect(await readFile(path)).toEqual(bytes);
+  return { ...setup, client, effects, before, unchanged, seam };
+}
+
+for (const field of ['branch', 'head', 'base', 'dirty'] as const) {
+  test(`a successful changed ${field} at deadline rejects before truncation`, async () => {
+    const t = await ancestryIdentityFixture();
+    let exhausted = false;
+    t.seam.run = async (...call) => {
+      const result = await t.f.effects.runCommand(...call);
+      if (field === 'branch' && call[1].includes('symbolic-ref'))
+        result.stdout = 'refs/heads/another-branch\n';
+      if (field === 'head' && call[1].includes('rev-parse') && call[1].at(-1) === 'HEAD')
+        result.stdout = 'a'.repeat(40) + '\n';
+      if (field === 'base' && call[1].at(-1) === `${t.read.state.base}^{commit}`)
+        result.stdout = 'b'.repeat(40) + '\n';
+      // Exhaust ONLY at the final command: every component was successfully read, so the
+      // mismatch cannot be hidden by an earlier pre-dispatch refusal.
+      if (call[1].includes('ls-files')) {
+        if (field === 'dirty') result.stdout = 'unexpected-untracked.ts\0';
+        exhausted = true;
+      }
+      return result;
+    };
+    await expect(
+      loadCurrentDeferredVendorDebt(
+        t.effects,
+        'merge-queue',
+        t.read.state,
+        t.before,
+        t.client,
+        undefined,
+        { remainingMs: () => (exhausted ? 0 : 5_000) },
+      ),
+    ).rejects.toThrow('deferred invocation identity changed while settling authorized ancestry');
+    expect(exhausted).toBe(true);
+    await t.unchanged();
+  });
+}
+
+for (const outcome of ['nonzero', 'spawn', 'untagged-kill', 'foreign-abort'] as const) {
+  test(`an unrelated ${outcome} identity failure at deadline stays hard`, async () => {
+    const t = await ancestryIdentityFixture();
+    let exhausted = false;
+    t.seam.run = async () => {
+      exhausted = true;
+      if (outcome === 'spawn') throw new Error('git spawn failed');
+      if (outcome === 'nonzero')
+        return { exitCode: 128, stdout: '', stderr: 'unrelated Git failure', timedOut: false };
+      if (outcome === 'foreign-abort')
+        return {
+          ...adapterAborted(),
+          interruption: { kind: 'abort', reason: new Error('another operation') },
+        };
+      return adapterAborted();
+    };
+    await expect(
+      loadCurrentDeferredVendorDebt(
+        t.effects,
+        'merge-queue',
+        t.read.state,
+        t.before,
+        t.client,
+        undefined,
+        { remainingMs: () => (exhausted ? 0 : 5_000) },
+      ),
+    ).rejects.toThrow('deferred invocation identity changed while settling authorized ancestry');
+    await t.unchanged();
+  });
+}
+
+for (const callerReason of [
+  undefined,
+  new Error('caller after timer'),
+  { cancelled: 'caller after timer' },
+]) {
+  test(`the internal timer during identity read preserves ${callerReason === undefined ? 'own truncation' : typeof callerReason === 'object' && callerReason instanceof Error ? 'the caller Error' : 'the caller object'}`, async () => {
+    const t = await ancestryIdentityFixture();
+    const controller = new AbortController();
+    let timerReason: unknown;
+    let timerResult: CommandResult | undefined;
+    let dispatched:
+      | { args: readonly string[]; timeoutMs: number; signal?: AbortSignal }
+      | undefined;
+    t.seam.run = async (_command, args, options) => {
+      dispatched = { args, ...options };
+      const signal = options.signal;
+      if (!signal) throw new Error('identity command has no invocation signal');
+      // Use the REAL subprocess adapter. Its longer test-only child cap makes the invocation's
+      // actual internal timer win deterministically; the seam's clamped input is asserted above.
+      // No remainingMs flip or synthetic abort metadata supplies the positive evidence.
+      const result = await makeSubprocessDevEffects(t.f.repo.root).runCommand(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        { timeoutMs: 10_000, signal },
+      );
+      timerReason = signal.reason;
+      timerResult = result;
+      if (callerReason !== undefined) controller.abort(callerReason);
+      return result;
+    };
+    const pending = loadCurrentDeferredVendorDebt(
+      t.effects,
+      'merge-queue',
+      t.read.state,
+      t.before,
+      t.client,
+      controller.signal,
+      { remainingMs: () => 2_000 },
+    );
+    if (callerReason !== undefined) await expect(pending).rejects.toBe(callerReason);
+    else {
+      const debt = await pending;
+      expect(debt?.reference.requestId).toBe(t.successor.reference.requestId);
+      if (!debt) throw new Error('missing current enrollment');
+      const readiness = assembleReadiness({
+        branch: t.f.state.branch,
+        target: 'merge-queue',
+        identity: t.read.state,
+        ledger: t.before,
+        untracked: [],
+        deferredVendorDebt: debt,
+        nowIso: t.f.effects.nowIso(),
+      });
+      expect(readiness.ready).toBe(false);
+      if (readiness.ready) throw new Error('unexpected readiness');
+      expect(
+        readiness.gaps.some((gap) => gap.detail.includes('authorized predecessor obligation')),
+      ).toBe(true);
+    }
+    // These assertions live OUTSIDE readWorkState's fault-folding boundary: a swallowed assertion
+    // in the adapter seam must never count as proof that the real internal timer fired.
+    expect(dispatched?.args).toContain('symbolic-ref');
+    expect(dispatched?.timeoutMs).toBeLessThanOrEqual(2_000);
+    expect(dispatched?.signal?.aborted).toBe(true);
+    expect(timerResult?.interruption?.kind).toBe('abort');
+    expect(timerResult?.interruption?.reason).toBe(timerReason);
+    expect(timerReason).toBeInstanceOf(Error);
+    await t.unchanged();
+  });
+}
+
+test('an already cancelled caller outranks an initially zero budget', async () => {
+  const t = await ancestryIdentityFixture();
+  const controller = new AbortController();
+  const reason = { cancelled: 'before entry' };
+  controller.abort(reason);
+  await expect(
+    loadCurrentDeferredVendorDebt(
+      t.effects,
+      'merge-queue',
+      t.read.state,
+      t.before,
+      t.client,
+      controller.signal,
+      { remainingMs: () => 0 },
+    ),
+  ).rejects.toBe(reason);
+  await t.unchanged();
+});
+
+for (const cancel of [false, true]) {
+  test(`source queue options retain one lifetime and observer, cancelled=${String(cancel)}`, async () => {
+    const t = await ancestryIdentityFixture();
+    const controller = new AbortController();
+    const reason = { cancelled: 'during report' };
+    const actions: string[] = [];
+    let sourceOptions: { signal?: AbortSignal; remainingMs?: () => number } | undefined;
+    const observer = async () => {
+      actions.push('observer');
+    };
+    const client = {
+      ...t.client,
+      status: async (
+        ref: QueueReference,
+        options?: { signal?: AbortSignal; remainingMs?: () => number },
+      ) => {
+        expect(options?.signal).toBeDefined();
+        expect(options?.remainingMs?.()).toBeGreaterThan(0);
+        if (sourceOptions) {
+          expect(options?.signal).toBe(sourceOptions.signal);
+          expect(options?.remainingMs).toBe(sourceOptions.remainingMs);
+        } else sourceOptions = options;
+        return t.client.status(ref);
+      },
+      report: async (
+        ref: QueueReference,
+        root: string,
+        options?: {
+          signal?: AbortSignal;
+          remainingMs?: () => number;
+          onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
+        },
+      ) => {
+        expect(options?.signal).toBe(sourceOptions?.signal);
+        expect(options?.remainingMs).toBe(sourceOptions?.remainingMs);
+        expect(options?.onEvidenceImported).toBe(observer);
+        const evidence = await t.client.report(ref, root);
+        actions.push('import');
+        if (cancel) controller.abort(reason);
+        options?.signal?.throwIfAborted();
+        await options?.onEvidenceImported?.({ receiptId: evidence.receiptId, path: root });
+        actions.push('ack');
+        return evidence;
+      },
+    };
+    const pending = loadCurrentDeferredVendorDebt(
+      t.effects,
+      'merge-queue',
+      t.read.state,
+      t.before,
+      client,
+      controller.signal,
+      { remainingMs: () => 5_000, onEvidenceImported: observer },
+    );
+    if (cancel) {
+      await expect(pending).rejects.toBe(reason);
+      expect(actions).toEqual(['import']);
+      await t.unchanged();
+    } else {
+      expect((await pending)?.reference.requestId).toBe(t.successor.reference.requestId);
+      expect(actions).toEqual(['import', 'observer', 'ack']);
+    }
+  });
+}
+
+/** Current pending enrollment with no ancestors: only the invocation's identity work is observed. */
+async function currentIdentityFixture() {
+  const f = await fixture();
+  const before = f.effects.openLedger(f.state.branch).load();
+  const path = devLedgerPath(f.repo.root, f.state.branch);
+  const bytes = await readFile(path);
+  const unchanged = async () => expect(await readFile(path)).toEqual(bytes);
+  return { f, before, unchanged };
+}
+
+test('current identity commands share the queue lifetime and remaining budget without ancestors', async () => {
+  const t = await currentIdentityFixture();
+  const calls: Parameters<typeof t.f.effects.runCommand>[] = [];
+  let queueSignal: AbortSignal | undefined;
+  const effects = {
+    ...t.f.effects,
+    runCommand: async (...call: Parameters<typeof t.f.effects.runCommand>) => {
+      if (call[0] === 'git') calls.push(call);
+      return t.f.effects.runCommand(...call);
+    },
+  };
+  const client: DeferredQueueClient = {
+    ...t.f.client,
+    status: async (reference, options) => {
+      queueSignal = options?.signal;
+      return t.f.client.status(reference, options);
+    },
+  };
+  const debt = await loadCurrentDeferredVendorDebt(
+    effects,
+    'merge-queue',
+    t.f.state,
+    t.before,
+    client,
+    undefined,
+    { remainingMs: () => 5_000 },
+  );
+  expect(debt?.reference).toEqual(t.f.debt.reference);
+  expect(queueSignal).toBeDefined();
+  expect(calls.length).toBeGreaterThanOrEqual(6);
+  for (const call of calls) {
+    expect(call[2].signal).toBe(queueSignal);
+    expect(call[2].timeoutMs).toBeLessThanOrEqual(5_000);
+  }
+  await t.unchanged();
+});
+
+for (const outcome of ['budget', 'timeout', 'caller-error', 'caller-object'] as const) {
+  test(`current identity ${outcome} is hard with no ancestors and preserves the reason`, async () => {
+    const t = await currentIdentityFixture();
+    const controller = new AbortController();
+    const reason =
+      outcome === 'caller-object'
+        ? { cancelled: 'current identity' }
+        : new Error('current identity cancelled');
+    let exhausted = false;
+    let interrupted = false;
+    const effects = {
+      ...t.f.effects,
+      runCommand: async (...call: Parameters<typeof t.f.effects.runCommand>) => {
+        if (call[0] === 'git' && call[1].includes('symbolic-ref') && outcome !== 'budget') {
+          interrupted = true;
+          if (outcome === 'timeout') {
+            exhausted = true;
+            return adapterTimedOut();
+          }
+          controller.abort(reason);
+          return adapterAborted();
+        }
+        const result = await t.f.effects.runCommand(...call);
+        if (call[0] === 'git' && call[1].includes('ls-files')) {
+          exhausted = true;
+          interrupted = true;
+        }
+        return result;
+      },
+    };
+    const pending = loadCurrentDeferredVendorDebt(
+      effects,
+      'merge-queue',
+      t.f.state,
+      t.before,
+      t.f.client,
+      controller.signal,
+      { remainingMs: () => (exhausted ? 0 : 5_000) },
+    );
+    if (outcome.startsWith('caller')) await expect(pending).rejects.toBe(reason);
+    else await expect(pending).rejects.toThrow('queue delivery unknown: deadline exhausted');
+    expect(interrupted).toBe(true);
+    await t.unchanged();
+  });
+}
+
+test('the real internal timer interrupts current identity work as a hard deadline without ancestors', async () => {
+  const t = await currentIdentityFixture();
+  let dispatched: Parameters<typeof t.f.effects.runCommand>[2] | undefined;
+  let timerResult: CommandResult | undefined;
+  let timerReason: unknown;
+  const effects = {
+    ...t.f.effects,
+    runCommand: async (...call: Parameters<typeof t.f.effects.runCommand>) => {
+      if (call[0] !== 'git' || !call[1].includes('symbolic-ref'))
+        return t.f.effects.runCommand(...call);
+      dispatched = call[2];
+      // The parent has no signal. Refuse the fixture dispatch instead of starting an orphan.
+      if (!call[2].signal) return adapterAborted();
+      timerResult = await makeSubprocessDevEffects(t.f.repo.root).runCommand(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        { timeoutMs: 10_000, signal: call[2].signal },
+      );
+      timerReason = call[2].signal.reason;
+      return timerResult;
+    },
+  };
+  const caught: unknown = await loadCurrentDeferredVendorDebt(
+    effects,
+    'merge-queue',
+    t.f.state,
+    t.before,
+    t.f.client,
+    undefined,
+    { remainingMs: () => 2_000 },
+  ).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  // All proof assertions stay outside readWorkState's error folding.
+  expect(timerReason).toBeInstanceOf(Error);
+  expect(caught).toBe(timerReason);
+  expect(dispatched?.signal?.aborted).toBe(true);
+  expect(dispatched?.timeoutMs).toBeLessThanOrEqual(2_000);
+  expect(timerResult?.interruption?.kind).toBe('abort');
+  expect(timerResult?.interruption?.reason).toBe(timerReason);
+  await t.unchanged();
+});
+
+test('preparation persistence uses its existing lifetime for every identity command', async () => {
+  const f = await fixture();
+  f.effects.openLedger(f.state.branch).save({
+    ...f.ledger,
+    records: f.ledger.records.filter((record) => record.kind !== 'vendor-debt'),
+  });
+  const calls: Parameters<typeof f.effects.runCommand>[] = [];
+  const effects = {
+    ...f.effects,
+    runCommand: async (...call: Parameters<typeof f.effects.runCommand>) => {
+      if (call[0] === 'git') calls.push(call);
+      return f.effects.runCommand(...call);
+    },
+  };
+  const debt = await prepareDeferredVendorReview(
+    effects,
+    'merge-queue',
+    f.state,
+    f.client,
+    undefined,
+    { remainingMs: () => 5_000 },
+  );
+  expect(debt).toBeDefined();
+  expect(calls.length).toBeGreaterThanOrEqual(12);
+  const signal = calls[0]?.[2].signal;
+  expect(signal).toBeDefined();
+  for (const call of calls) {
+    expect(call[2].signal).toBe(signal);
+    expect(call[2].timeoutMs).toBeLessThanOrEqual(5_000);
+  }
+});
+
+for (const status of ['awaiting-pr', 'vendor-blocked'] as const) {
+  for (const field of ['branch', 'head', 'base', 'dirty'] as const) {
+    for (const expires of [false, true]) {
+      test(`nonterminal ${status} ancestor changed ${field} rejects, final-command expiry=${String(expires)}`, async () => {
+        const t = await successorWithPendingAncestor();
+        let refreshed = false;
+        let exhausted = false;
+        let finalCommand = false;
+        const path = devLedgerPath(t.f.repo.root, t.f.state.branch);
+        const bytes = await readFile(path);
+        const client: DeferredQueueClient = {
+          ...t.f.client,
+          status: async (reference) => {
+            if (reference.requestId !== t.predecessor.reference.requestId) return t.successorStatus;
+            refreshed = true;
+            return status === 'awaiting-pr'
+              ? t.successorStatus
+              : {
+                  ...t.successorStatus,
+                  state: 'blocked',
+                  enqueued: true,
+                  reason: {
+                    source: 'vendor',
+                    category: 'vendor-rate-limited',
+                    code: 'rate_limited',
+                  },
+                };
+          },
+        };
+        const effects = {
+          ...t.f.effects,
+          runCommand: async (...call: Parameters<typeof t.f.effects.runCommand>) => {
+            const result = await t.f.effects.runCommand(...call);
+            if (!refreshed || call[0] !== 'git') return result;
+            if (field === 'branch' && call[1].includes('symbolic-ref'))
+              result.stdout = 'refs/heads/drifted\n';
+            if (field === 'head' && call[1].includes('rev-parse') && call[1].at(-1) === 'HEAD')
+              result.stdout = 'a'.repeat(40) + '\n';
+            if (field === 'base' && call[1].at(-1) === `${t.read.state.base}^{commit}`)
+              result.stdout = 'b'.repeat(40) + '\n';
+            if (call[1].includes('ls-files')) {
+              finalCommand = true;
+              if (field === 'dirty') result.stdout = 'drifted.ts\0';
+              if (expires) exhausted = true;
+            }
+            return result;
+          },
+        };
+        await expect(
+          loadCurrentDeferredVendorDebt(
+            effects,
+            'merge-queue',
+            t.read.state,
+            t.f.effects.openLedger(t.f.state.branch).load(),
+            client,
+            undefined,
+            { remainingMs: () => (exhausted ? 0 : 5_000) },
+          ),
+        ).rejects.toThrow('identity changed');
+        expect(refreshed).toBe(true);
+        expect(finalCommand).toBe(true);
+        expect(exhausted).toBe(expires);
+        expect(await readFile(path)).toEqual(bytes);
+      });
+    }
+  }
+}
+
+test('a matching pending ancestor at identity-read expiry retains debt without an append', async () => {
+  const t = await successorWithPendingAncestor();
+  let refreshed = false;
+  let exhausted = false;
+  let verified = false;
+  const path = devLedgerPath(t.f.repo.root, t.f.state.branch);
+  const bytes = await readFile(path);
+  const effects = {
+    ...t.f.effects,
+    runCommand: async (...call: Parameters<typeof t.f.effects.runCommand>) => {
+      const result = await t.f.effects.runCommand(...call);
+      if (refreshed && call[0] === 'git' && call[1].includes('ls-files')) {
+        verified = true;
+        exhausted = true;
+      }
+      return result;
+    },
+  };
+  const client: DeferredQueueClient = {
+    ...t.f.client,
+    status: async (reference) => {
+      if (reference.requestId === t.predecessor.reference.requestId) refreshed = true;
+      return t.successorStatus;
+    },
+  };
+  const before = t.f.effects.openLedger(t.f.state.branch).load();
+  const debt = await loadCurrentDeferredVendorDebt(
+    effects,
+    'merge-queue',
+    t.read.state,
+    before,
+    client,
+    undefined,
+    { remainingMs: () => (exhausted ? 0 : 5_000) },
+  );
+  expect(verified).toBe(true);
+  expect(debt?.reference).toEqual(t.successor.reference);
+  expect(await readFile(path)).toEqual(bytes);
 });

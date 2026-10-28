@@ -89,7 +89,7 @@ export async function readReadinessWithGaps(
   const debt = (policy?.reviewers ?? ['coderabbit', 'agent']).includes('coderabbit')
     ? await loadCurrentDeferredVendorDebt(effects, target, state, ledger, queueClient)
     : undefined;
-  if (debt?.vendorCompleted) ledger = effects.openLedger(state.branch).load();
+  if (debt !== undefined) ledger = effects.openLedger(state.branch).load();
   const assembled = assembleReadiness({
     branch: state.branch,
     target,

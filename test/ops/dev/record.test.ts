@@ -152,6 +152,111 @@ describe('the dev-record format', () => {
     ).toThrow(/schema violation/);
   });
 
+  test('Q17b: optional finding metadata round-trips and legacy absence still parses', () => {
+    const evidenceV1 = {
+      version: 1 as const,
+      failureScenario: 'reuse keeps every identity-bearing field',
+      primary: { file: 'src/x.ts', side: 'head' as const, start: 1, end: 1, quote: 'x' },
+      supporting: [],
+    };
+    const enriched = cycleRecord({
+      findings: [
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: 'src/x.ts',
+          excerpt: 'x',
+          line: 1,
+          rule: 'no-x',
+          evidence: 'receipt-1',
+          evidenceV1,
+        },
+      ],
+    });
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [enriched],
+    };
+    expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+    // Legacy findings (no metadata at all) still parse: absence is not a schema error.
+    const legacy: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord()],
+    };
+    expect(parseDevLedger(serializeDevLedger(legacy))).toEqual(legacy);
+  });
+
+  test('Q17b: empty identity strings the review record accepts are stored verbatim', () => {
+    const withEmpties = cycleRecord({
+      findings: [
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: '',
+          excerpt: '',
+          rule: '',
+          evidence: '',
+        },
+      ],
+    });
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [withEmpties],
+    };
+    // The ledger mirrors FindingSchema's acceptance: an empty value is DATA (stored
+    // verbatim), never dropped and never a reason to reject the record.
+    expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+  });
+
+  test('Q17b: id, severity and line keep the review schema strictness', () => {
+    for (const bad of [{ id: '' }, { severity: '' }, { line: 0 }]) {
+      expect(() =>
+        parseDevLedger(
+          JSON.stringify({
+            version: DEV_LEDGER_VERSION,
+            branch: BRANCH,
+            records: [
+              cycleRecord({
+                findings: [{ id: 'f1', severity: 'major', ...bad }] as never,
+              }),
+            ],
+          }),
+        ),
+      ).toThrow(/schema violation/);
+    }
+  });
+
+  test('Q17b: a cycle finding refuses unknown keys and out-of-band status/reason', () => {
+    const base = { version: DEV_LEDGER_VERSION, branch: BRANCH };
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          ...base,
+          records: [
+            cycleRecord({
+              findings: [{ id: 'f1', severity: 'major', mystery: true }] as never,
+            }),
+          ],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          ...base,
+          records: [
+            cycleRecord({
+              findings: [{ id: 'f1', severity: 'major', status: 'rejected' }] as never,
+            }),
+          ],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+  });
+
   test('parse fails closed: bad JSON, wrong version, unknown kind', () => {
     expect(() => parseDevLedger('not json')).toThrow(/not valid JSON/);
     // Anything but the ONE accepted version refuses — including a FUTURE
@@ -401,6 +506,30 @@ describe('assembleReadiness', () => {
       expect(open?.detail).not.toContain('#f3');
     }
   });
+
+  test.each(['', undefined, 'a.ts'])(
+    'open empty-file readiness names the nondispatchable reason without changing other paths: %j',
+    (fileName) => {
+      const result = assemble([
+        cycleRecord({
+          findings: [
+            {
+              id: 'empty-path',
+              severity: 'major',
+              ...(fileName === undefined ? {} : { fileName }),
+            },
+          ],
+        }),
+        checkRecord(),
+      ]);
+      expect(result.ready).toBe(false);
+      if (result.ready) return;
+      const detail = result.gaps.find((gap) => gap.field === 'open-blocking-findings')?.detail;
+      expect(detail).toContain('empty-path');
+      if (fileName === '') expect(detail).toContain('unresolved: finding has no file path');
+      else expect(detail).not.toContain('unresolved: finding has no file path');
+    },
+  );
 
   test('fixed and rejected dispositions close blocking findings; minor never blocks', () => {
     const cycle = cycleRecord({
