@@ -89,6 +89,7 @@ async function fixture(mode: Mode) {
   );
   repo.commitAll('configure final refresh fixture');
   const real = repoEffects(repo, (command, args) => {
+    if (command === 'git') return undefined; // Delegate to the harness's real Git.
     if (command === 'gh') return args[0] === 'api' ? 'author' : 'owner/repo';
     throw new Error('unexpected offline command: ' + command);
   });
