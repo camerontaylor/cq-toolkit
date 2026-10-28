@@ -612,7 +612,7 @@ test.each(['exact', 'wrong-digest'] as const)(
     try {
       const bytes = ownershipReceipt();
       const id = createHash('sha256').update(bytes).digest('hex');
-      const path = join(f.repo.root, '.cq/queue-evidence', id + '.json');
+      const path = join(await realpath(f.repo.root), '.cq/queue-evidence', id + '.json');
       let imported = false;
       const result = await makeReviewAddress({
         config,

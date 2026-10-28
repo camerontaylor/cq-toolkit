@@ -56,6 +56,9 @@ import {
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
 import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
+import { branchPathFault } from '../../shared/refname.js';
+
+export { branchPathFault };
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.
@@ -636,29 +639,10 @@ export function parseDevLedger(text: string): DevLedgerFile {
 
 // --- Branch-path safety -----------------------------------------------------
 
-/**
- * A git refname segment (git check-ref-format rules, enforced here
- * fail-closed): no leading '.', no trailing '.lock', no '..' anywhere, and
- * none of the characters git forbids in a refname. A branch name is joined
- * into a path under `.cq/dev/`, so every segment must be path-safe.
- */
-export function branchPathFault(branch: string): string | null {
-  if (branch === '' || branch.startsWith('/') || branch.endsWith('/')) {
-    return `branch '${branch}' must be a non-empty relative refname`;
-  }
-  for (const segment of branch.split('/')) {
-    if (
-      segment === '' ||
-      segment.startsWith('.') ||
-      segment.endsWith('.lock') ||
-      segment.includes('..') ||
-      /[\s~^:?*[\]\\]/.test(segment)
-    ) {
-      return `branch '${branch}' is not a path-safe refname (segment '${segment}')`;
-    }
-  }
-  return null;
-}
+// The refname grammar itself is the shared zero-import leaf (shared/refname.ts):
+// the dev ledger validator and the queue wire/origin schemas must agree on it, and
+// this module cannot host it without closing the queueProtocol -> record ->
+// deferredReview -> queueProtocol runtime cycle.
 
 /**
  * The branch encoded into ONE bounded, collision-free filename segment: a
