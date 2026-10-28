@@ -914,7 +914,11 @@ describe('contained grep and glob tools', () => {
       if (result.ok) {
         expect(result.output).toContain('Z.ts');
         expect(result.output).not.toContain('a0000.ts');
-        expect(result.truncated).toBe(false);
+        // All 1,006 paths match include *.ts, so the 1,000-candidate cap
+        // excludes five paths before content matching; the honest cap
+        // marker is part of the response.
+        expect(result.truncated).toBe(true);
+        expect(result.output).toContain('[truncated: candidate files cap 1000]');
       }
     });
   });
