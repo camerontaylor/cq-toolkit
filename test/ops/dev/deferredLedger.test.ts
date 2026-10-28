@@ -2269,7 +2269,7 @@ test('the real internal timer interrupts current identity work as a hard deadlin
     { remainingMs: () => 2_000 },
   ).then(
     () => undefined,
-    (error) => error,
+    (error: unknown) => error,
   );
   // All proof assertions stay outside readWorkState's error folding.
   expect(timerReason).toBeInstanceOf(Error);
