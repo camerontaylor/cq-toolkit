@@ -162,6 +162,20 @@ class HostConfigTests(unittest.TestCase):
                 overlay['config']['promotion']['record_url_template'] = template
                 host.validate(overlay)
 
+    def test_alert_agent_id_is_optional_and_rendered(self):
+        host.validate(self.overlay)  # absent: the committed recipient stays
+        overlay = copy.deepcopy(self.overlay)
+        agent = '5626afa6-1349-4051-ae3a-e39d42cf8daa'
+        overlay['config']['promotion']['alert_agent_id'] = agent
+        host.validate(overlay)
+        config = json.loads(host.render(self.root, overlay))
+        self.assertEqual(config['promotion']['alert_agent_id'], agent)
+        for bad in ['', '5626afa6', agent.upper(), agent + '\n', 5, None]:
+            with self.subTest(bad=bad):
+                overlay['config']['promotion']['alert_agent_id'] = bad
+                with self.assertRaisesRegex(ValueError, 'alert_agent_id'):
+                    host.validate(overlay)
+
     def test_spool_alias_matches_runtime_client_format(self):
         import crq
 

@@ -242,15 +242,43 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     // `finish(stop())`, or the driver wrapper's thrown stop reaching a catch.
     let budgetSpent = false;
     /**
-     * The exit publication's terminal state, settled by the wrapper below:
-     * 'published' once a push left this process, 'failed' with its error
-     * otherwise. #469's report-truth rule consumes it — the engine, not a
-     * loop-side guess, is the only witness of what was actually pushed.
-     * Irreversible in one direction: once 'published', a later (post-push)
-     * failure never downgrades it — the commit is out regardless of what the
-     * post-push bookkeeping threw.
+     * The terminal state of the most recent publication attempt for the
+     * CURRENT outstanding range, settled by the wrapper below: 'published'
+     * once a push left this process, 'failed' with its error otherwise.
+     * #469's report-truth rule consumes it — the engine, not a loop-side
+     * guess, is the only witness of what was actually pushed. Per-range
+     * (publication-range truth, PRRT_kwDOUY73E86w9hwK): a verified commit
+     * remembered after a settled push opens a NEW outstanding range and
+     * resets a 'published' witness, so a later range's pre-push failure is
+     * recorded instead of being suppressed by the earlier range's success.
+     * Irreversible within one attempt: once 'published', a post-push failure
+     * of that same attempt never downgrades it — the commit is out
+     * regardless of what the post-push bookkeeping threw.
      */
     let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
+    /**
+     * Publication-range truth (PRRT_kwDOUY73E86w9hwK): withhold rows settle
+     * PER RANGE, at the moment that range's truth is decided — never all at
+     * once at exit. A successful push settles every not-yet-settled row
+     * immediately (at the witness below); finish() settles only the rows
+     * still unsettled, by the most recent attempt. Indices are stable:
+     * report.reasons is append-only and settled rows are replaced in place.
+     */
+    const settledWithholdRows = new Set<number>();
+    const settleWithholdRows = (tail: string) => {
+      for (const [index, row] of report.reasons.entries()) {
+        if (!row.includes('publish-withheld-mixed-worktree')) continue;
+        // A settled row keeps the shared label, so re-match it here and skip.
+        if (settledWithholdRows.has(index)) continue;
+        // Keep only the shared item prefix ("item …: " + the label); the
+        // loop-side clauses after it describe the pre-publication state and
+        // are REPLACED by the settled tail, never appended to.
+        const label = 'publish-withheld-mixed-worktree';
+        const at = row.indexOf(label);
+        report.reasons[index] = `${row.slice(0, at + label.length)}${tail}`;
+        settledWithholdRows.add(index);
+      }
+    };
     /**
      * #490: the exact findings array each dispatch started from, mapped to
      * the number of fixes already recorded then. The local loop's report rows
@@ -335,15 +363,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // envelope (and the publication-failure clearing above, which erases
       // the marker, is included in both).
       if (marker !== undefined) report.stop = marker;
-      // #469: settle the mixed-worktree withhold rows with the engine's own
-      // publication truth. The loop wrote them BEFORE the exit publication
-      // ran ("the loop pushed nothing … may still happen at engine exit");
-      // only the engine knows what its exit push actually did. Amend each
-      // row IN PLACE (a separate appended reason cannot be tied to its item
-      // and would leave the stale claim standing):
+      // #469 + publication-range truth: settle the mixed-worktree withhold
+      // rows with the engine's own publication truth. The loop wrote them
+      // BEFORE the exit publication ran ("the loop pushed nothing … may
+      // still happen at engine exit"); only the engine knows what its exit
+      // push actually did. A successful push already settled its range's
+      // rows AT the push; only rows of the CURRENT outstanding range reach
+      // here, and they take the most recent actual attempt's truth. Each
+      // row is amended IN PLACE (a separate appended reason cannot be tied
+      // to its item and would leave the stale claim standing):
       //   - a settled push → "exit-published": the exact verified range is
       //     out; only the reply/resolve stay withheld (S6 attempt D's
-      //     8f78ca91 read "not published" while remote head already had it);
+      //     8f78ca91 read "not published" while remote head already had
+      //     it). Normally a no-op here — the push settles its rows at the
+      //     witness itself — but it stands as the truthful branch for the
+      //     most-recent-attempt rule;
       //   - a failed exit publication → the row names the failure and that
       //     the commit stays local (the outcome reason carries it too);
       //   - a run with no push → "publication is off": the commit truly is
@@ -352,18 +386,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       //     skips publishOnExit on a parent cancel) → "no engine publication
       //     ran": the dead run can never publish, so the verified commit
       //     stays local.
-      const settleWithholdRows = (tail: string) => {
-        for (const [index, row] of report.reasons.entries()) {
-          if (row.includes('publish-withheld-mixed-worktree')) {
-            // Keep only the shared item prefix ("item …: " + the label); the
-            // loop-side clauses after it describe the pre-publication state
-            // and are REPLACED by the settled tail, never appended to.
-            const label = 'publish-withheld-mixed-worktree';
-            const at = row.indexOf(label);
-            report.reasons[index] = `${row.slice(0, at + label.length)}${tail}`;
-          }
-        }
-      };
       if (exitPublication?.state === 'published') {
         settleWithholdRows(
           "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
@@ -864,6 +886,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const remember = (fix: AddressFix) => {
             report.fixes.push(fix);
             if (fix.commit) {
+              // Publication-range truth: a verified commit arriving after a
+              // settled push opens a NEW outstanding range. The previous
+              // push's 'published' witness speaks only for its own range —
+              // whose withhold rows it already settled at the push — so it
+              // must not suppress the record of THIS range's later failure.
+              // A 'failed' witness stands: it is the most recent actual
+              // attempt for the still-outstanding range.
+              if (exitPublication?.state === 'published') exitPublication = undefined;
               unpublished.add(fix.commit);
               report.verifiedHead = fix.commit;
             }
@@ -891,6 +921,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             // early return (no push run, nothing unpublished) never counts
             // as published.
             exitPublication = { state: 'published' };
+            // Publication-range truth: settle the not-yet-settled withhold
+            // rows NOW, at the witness, before the post-push rev-parse can
+            // throw. Invariant — every row settled here describes a commit
+            // this push carried out, without inferring anything from the
+            // row's prose: each unsettled row was written for an item whose
+            // verified commit entered `unpublished` (remember runs before
+            // the loop writes its row) and leaves it only through a
+            // successful push — which settles the rows outstanding at that
+            // moment — or the loop's own ok-push reset, which only runs on
+            // a round that wrote no withhold rows while none were left
+            // unsettled; so the rows still unsettled name commits of THIS
+            // outstanding range, which the checks above proved identical to
+            // the pushed range (and the push sends HEAD, so any earlier
+            // verified commit rides along inside it). A later range's
+            // failure must never rewrite these rows.
+            settleWithholdRows(
+              "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
+            );
             publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
             unpublished.clear();
           };
