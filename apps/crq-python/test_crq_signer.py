@@ -545,6 +545,31 @@ class ReviewPreambleFault(SignerTest):
         self.assertEqual(posts, ['pending', 'failure'])
         self.assertEqual(out.get('reviewer_faults'), None)
 
+    def test_lone_cr_major_and_complete_fail_closed_without_clean_coverage(self):
+        review = ndjson('major', codegen='A real race on socket close. at line 2')
+        posts, out, ledger = self.run_item(review.replace('\n', '\r'),
+                                           diff_files={'src/x.ts'})
+        self.assertEqual(posts, ['pending', 'error'])
+        self.assertEqual(out['outcome'], 'error')
+        self.assertFalse(ledger['clean'])
+        self.assertNotIn('blocking', out)
+        self.assertNotIn('findings', out)
+
+    def assert_major_remains_blocking(self, separator):
+        review = ndjson('major', codegen='A real race on socket close. at line 2')
+        posts, out, ledger = self.run_item(review.replace('\n', separator),
+                                           diff_files={'src/x.ts'})
+        self.assertEqual(posts, ['pending', 'failure'])
+        self.assertEqual(out['blocking'], {'critical': 0, 'major': 1})
+        self.assertEqual(len(out['findings']), 1)
+        self.assertFalse(ledger['clean'])
+
+    def test_lf_major_finding_remains_blocking(self):
+        self.assert_major_remains_blocking('\n')
+
+    def test_crlf_major_finding_remains_blocking(self):
+        self.assert_major_remains_blocking('\r\n')
+
     def test_malformed_event_row_mints_nothing_and_propagates_terminal_error(self):
         # A malformed (non-JSON) event line makes classify() fail closed to
         # outcome=error: no finding, no fault, no clean credit, and the
@@ -586,6 +611,22 @@ class FaultRowIdentity(SignerTest):
                          {signer.hashlib.sha256(raw).hexdigest()})
         self.assertEqual(set(faults[0]),
                          {'code', 'severity', 'file', 'desc', 'stream_row', 'stream_sha256'})
+
+    def test_lf_and_crlf_fault_references_match_physical_rows_and_exact_bytes(self):
+        path, raw = self.repeated_stream()
+        complete = json.dumps({'type': 'complete', 'status': 'review_completed'}).encode()
+        for separator in (b'\n', b'\r\n'):
+            with self.subTest(separator=repr(separator)):
+                # Remove the intentionally malformed row for completed classification.
+                valid = raw.replace(b'not-json', b'') + complete + b'\n'
+                captured = valid.replace(b'\n', separator)
+                path.write_bytes(captured)
+                self.assertEqual(signer.classify(path, 0)['outcome'], 'completed')
+                defects, faults = signer.blocking_findings(path, {'src/x.ts'})
+                self.assertEqual(defects, [])
+                self.assertEqual([f['stream_row'] for f in faults], [3, 6])
+                self.assertEqual({f['stream_sha256'] for f in faults},
+                                 {signer.hashlib.sha256(captured).hexdigest()})
 
     def test_same_artifact_references_survive_fresh_module_and_path(self):
         path, raw = self.repeated_stream()

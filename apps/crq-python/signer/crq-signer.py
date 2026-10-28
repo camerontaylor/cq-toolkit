@@ -658,11 +658,19 @@ SIZE_REFUSAL = re.compile(r"too (large|big|many (files|changes|lines))|diff (is 
                           r"|exceed\w* (the )?(max\w*|limit|size)", re.I)
 
 
+def _review_lines(raw: bytes) -> List[str]:
+    """Shared NDJSON boundaries: physical LF rows, with CRLF whitespace valid.
+    Lone CR never separates records: multi-record CR-only output fails JSON
+    parsing and cannot become completed coverage. Keep raw bytes for hashing.
+    """
+    return raw.decode(errors="replace").split("\n")
+
+
 def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     bad_lines = 0
     if ndjson.exists():
-        for line in ndjson.read_text(errors="replace").splitlines():
+        for line in _review_lines(ndjson.read_bytes()):
             line = line.strip()
             if not line:
                 continue
@@ -806,7 +814,7 @@ def blocking_findings(ndjson: Path,
     faults: List[Dict[str, Any]] = []
     raw = ndjson.read_bytes()
     stream_sha256 = hashlib.sha256(raw).hexdigest()
-    for stream_row, line in enumerate(raw.decode(errors="replace").split("\n"), 1):
+    for stream_row, line in enumerate(_review_lines(raw), 1):
         try:
             e = json.loads(line)
         except ValueError:
