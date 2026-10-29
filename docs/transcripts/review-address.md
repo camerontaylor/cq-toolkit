@@ -568,7 +568,7 @@ test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="21/23" f
 The first checkpoint contains four new provenance failures and one separate
 existing fixture step-budget failure. The second contains the admission race and
 fresh-follow-up false rejection. Durable captured stdout is retained under
-`~/…/{admission-accepted,admission-rejection}-before.log`.
+`~/…/{closure,admission-rejection}-before.log`.
 The wrapper intentionally removes its temporary JSON report; these are stdout
 artifacts, not reconstructed JSON.
 
