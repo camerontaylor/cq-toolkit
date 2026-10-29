@@ -344,6 +344,38 @@ class PromotionAuditAckTest(unittest.TestCase):
         self.assertEqual(retained[-1]["to"], "f" * 40)
         self.assertEqual(audit["alerts"], alerts)
 
+    def test_retention_rejects_malformed_nonempty_identities_without_clock_expiry(self):
+        self.ack()
+        q = self.load()
+        audit = q["promotion_audit"]
+        acknowledged = audit["records"][0]
+        open_record = dict(acknowledged, to="c" * 40, at="2026-10-29T00:01:00Z")
+        future_record = dict(acknowledged, to="d" * 40, at="2999-01-01T00:00:00Z")
+        valid = [acknowledged, open_record, future_record]
+        malformed = [dict(acknowledged, **{field: value}) for field, value in (
+            ("from", "bad"), ("from", "b" * 39), ("from", "B" * 40),
+            ("from", "g" * 40), ("to", "bad"), ("to", "a" * 39),
+            ("to", "A" * 40), ("to", "g" * 40), ("at", "not-a-time"),
+            ("at", "2026-02-30T00:00:00Z"), ("at", "2026-10-29T00:00:00+00:00"),
+            ("at", "2026-10-29T00:00:00.000Z"), ("at", "2026-10-29T00:00:00"),
+            ("at", "2026-10-29T00:00:00Ztrailing"),
+        )]
+        audit["alerts"].extend(dict(x, acked=None) for x in [open_record, future_record, *malformed])
+        recent = self.recent_audits()
+        audit["records"] = [*valid, *malformed, *recent]
+        alerts = json.loads(json.dumps(audit["alerts"]))
+        before = json.loads(json.dumps(valid))
+        self.advance_audit(q)
+        retained = audit["records"]
+        self.assertEqual(len(retained), 303)
+        for index, record in enumerate(valid):
+            self.assertIs(retained[index], record)
+        self.assertEqual(retained[:3], before)
+        self.assertEqual(retained[3:-1], recent[1:])
+        self.assertEqual(retained[-1]["to"], "f" * 40)
+        self.assertEqual(audit["alerts"], alerts)
+        self.assertTrue(audit["alerts"][0]["acked"])
+
     def test_retention_preserves_duplicate_exact_identities_and_ack_refusal(self):
         q = self.load()
         original = q["promotion_audit"]["records"][0]
