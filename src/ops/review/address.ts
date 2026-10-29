@@ -1,4 +1,4 @@
-import { makeGitMutex } from '../../adapters/git/mutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   mkdir,
