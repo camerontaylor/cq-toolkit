@@ -1531,7 +1531,9 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         return f"{item['id']}: {o} (not counted) → {item['state']} (author, no retry)"
     if item["kind"] == "promotion" and o in ("skipped", "too_large"):
         item["state"] = "split_needed"  # promotion_tick re-cuts a smaller prefix (never reported as success)
-    elif item["kind"] == "promotion":  # retried, never blocked: promotion must not stall on a flaky run
+    elif item["kind"] == "promotion" and o == "error" and item["failures"] >= CONFIG["max_item_failures"]:
+        item.update(state="blocked", not_before=None)
+    elif item["kind"] == "promotion":  # other failures retain the existing promotion retry policy
         item["state"] = "pending"
         item["not_before"] = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
     elif o in ("skipped", "too_large") or item["failures"] >= CONFIG["max_item_failures"]:
