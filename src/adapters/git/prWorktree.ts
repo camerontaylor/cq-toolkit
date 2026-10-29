@@ -247,6 +247,8 @@ export interface PrWorktreeOpts {
   pr: number;
   /** The PR's head branch name (origin truth, fetched in step a). */
   headRefName: string;
+  /** Admission-pinned head: refuse changed truth before registry or checkout mutation. */
+  expectedHead?: string;
   /**
    * The generic command runner — the SAME GhFn shape as gh.ts, resolving
    * with the exit code instead of throwing. The spawned bin is the caller's
@@ -496,6 +498,12 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
       fetchHeadArgs,
     );
   }
+
+  if (
+    opts.expectedHead !== undefined &&
+    (!/^[a-f0-9]{40,64}$/.test(opts.expectedHead) || fetchHead.stdout.trim() !== opts.expectedHead)
+  )
+    throw new Error('PR fetched head changed since admission; checkout left untouched');
 
   // CRITICAL SECTION — the consult → scan → create walk runs under the
   // registry's lock: two jobs resolving the SAME PR concurrently would

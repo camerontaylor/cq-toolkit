@@ -725,7 +725,12 @@ const runLoop = async (
     repoRoot: '/fake/repo',
     ...(o.expectedHead ? { expectedHead: o.expectedHead } : {}),
     gh: o.ghHook ? (args) => o.ghHook!(args, ghRunner) : ghRunner,
-    git: o.gitHook ? (args) => o.gitHook!(args, gitRunner) : gitRunner,
+    git: (args) =>
+      args.slice(2).join(' ') === 'rev-parse --path-format=absolute --git-common-dir'
+        ? Promise.resolve({ code: 0, stdout: `${scratch}\n`, stderr: '' })
+        : o.gitHook
+          ? o.gitHook(args, gitRunner)
+          : gitRunner(args),
     ...(o.signal ? { signal: o.signal } : {}),
     registry: memoryRegistry(),
     driver: { model: 'test-model', provider: 'test-provider' },
