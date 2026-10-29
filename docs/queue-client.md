@@ -139,7 +139,9 @@ calling principal:
    `Host * !<alias>`). Check it offline with `ssh -G <alias>`: there must be a
    single `identityfile`, `forwardagent no` and `controlmaster false`.
 
-Rollback: set `"enabled": false` first. Every call then returns `unsupported`
-with no restart. Then comment out the `authorized_keys` line, and remove the
+Rollback: `"enabled": false` is the fast off. Otherwise-valid authorized requests
+then return `unsupported` with no restart; malformed or unauthorized requests are
+still refused earlier. For full rollback, revoke server authorization first by
+commenting out the `authorized_keys` line, keep managed backups, then retire the
 client key and alias. Queue requests and receipts are never deleted; deferred
 debt stays inspectable and can be cancelled with `review.enqueue --action=cancel`.
