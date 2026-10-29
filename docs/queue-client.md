@@ -125,6 +125,7 @@ calling principal:
    Do not run the dispatcher with `python3 -I`: it imports its sibling transport
    modules. Never accept these variables from the client (`PermitUserEnvironment`
    stays off). `PATH` must resolve the CLI tools the runner uses for forge reads.
+
 3. Create the policy file (mode 0600) disabled. Turn it on only for an approved
    window:
 
