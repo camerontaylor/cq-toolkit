@@ -708,6 +708,7 @@ class TickTest(unittest.TestCase):
         self.patches = [
             ("refresh_slot_deadline", mock.Mock()),
             ("load_queue", lambda: self.q), ("fetch", mock.Mock()), ("enroll", lambda q, dry: []),
+            ("discover_merged", lambda q, budget: []),
             ("promotion_audit", lambda q, dry: []), ("promotion_tick", lambda q, dry: []),
             ("save_queue", mock.Mock()), ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
             ("notify_owner", mock.Mock()), ("event", mock.Mock()), ("coverage_fallback", lambda *a: (None, False)),
