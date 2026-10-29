@@ -105,3 +105,41 @@ D1C must review/activate that exact capability under existing deployment trust,
 after compatible Q1 service/state and healthy dispatch. Disabled/old runners
 return unsupported or a transport refusal with a deployment prerequisite.
 Q3 source/test success alone does not establish activation or live acceptance.
+
+## Operator activation (queue-v1)
+
+Activation is an operator action under existing deployment trust. It changes no
+runner code, signer or unit. Install exactly one restricted client identity per
+calling principal:
+
+1. Generate a dedicated client key on the calling host. The private key never
+   leaves that host.
+2. On the queue host, add one `authorized_keys` line for the account that owns
+   the queue state. The line uses `restrict` and a fixed forced command, and sets
+   the server-only principal and policy inside that command:
+
+   ```text
+   restrict,command="/usr/bin/env PATH=<cli-path> CRQ_QUEUE_PRINCIPAL=<principal> CRQ_QUEUE_POLICY=<policy.json> python3 <runner-root>/apps/crq-python/capability_dispatcher.py" ssh-ed25519 <public-key> <comment>
+   ```
+
+   Do not run the dispatcher with `python3 -I`: it imports its sibling transport
+   modules. Never accept these variables from the client (`PermitUserEnvironment`
+   stays off). `PATH` must resolve the CLI tools the runner uses for forge reads.
+3. Create the policy file (mode 0600) disabled. Turn it on only for an approved
+   window:
+
+   ```json
+   {"enabled": false, "repo": "<owner/repo>", "read": ["<principal>"], "write": ["<principal>"], "targets": ["promoted-main"], "branches": ["<base-branch>"], "max_requests": 50}
+   ```
+
+4. On the calling host, define the alias named by `CQ_QUEUE_SSH_ALIAS`. The
+   transport passes its own non-interactive options but reads the user's SSH
+   configuration, so make sure no catch-all `Host *` block adds other identity
+   files, agent forwarding or connection sharing to the alias (for example
+   `Host * !<alias>`). Check it offline with `ssh -G <alias>`: there must be a
+   single `identityfile`, `forwardagent no` and `controlmaster false`.
+
+Rollback: set `"enabled": false` first. Every call then returns `unsupported`
+with no restart. Then comment out the `authorized_keys` line, and remove the
+client key and alias. Queue requests and receipts are never deleted; deferred
+debt stays inspectable and can be cancelled with `review.enqueue --action=cancel`.
