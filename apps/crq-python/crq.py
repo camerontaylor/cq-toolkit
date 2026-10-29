@@ -1378,6 +1378,11 @@ def set_rate_cooldown(q, cls, rdir):
     q["cooldown_until"] = iso(max(current, until) if current else until)
 
 
+def has_collectable_runs(q):
+    """Match the minute harvester's reviewing/run eligibility without probing owners."""
+    return any(i["state"] == "reviewing" and i.get("run") for i in q["items"])
+
+
 def refresh_slot_deadline(q, usage, remaining, gate, at=None):
     at = now() if at is None else at
     if q.get("paused") or gate == "inflight" or not any(i["state"] == "pending" for i in q["items"]):
@@ -1390,8 +1395,8 @@ def refresh_slot_deadline(q, usage, remaining, gate, at=None):
     else:
         deadline = at + dt.timedelta(minutes=12)  # available slots, no eligible item
     hint = deadline
-    if inflight(q):
-        # Even paused/exhausted admission must collect completed runs each minute.
+    if has_collectable_runs(q):
+        # Detached reviews need minute collection; signer holds await full ticks.
         hint = min(hint, at.replace(second=0, microsecond=0) + dt.timedelta(minutes=1))
     usage_slots.write_next(STATE / "next-review-at", hint)
     return deadline  # admission time, not the earlier result-collection hint

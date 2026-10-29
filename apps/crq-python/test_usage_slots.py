@@ -368,7 +368,7 @@ class ConcurrencyTest(unittest.TestCase):
 
     def test_active_runs_keep_collection_hint_at_next_minute_during_cooldown(self):
         self.items()
-        self.q['items'][0]['state'] = 'reviewing'
+        self.q['items'][0].update(state='reviewing', run={'run_id': 'active', 'pid': 1234})
         at = AT + dt.timedelta(seconds=17)
         self.q['cooldown_until'] = crq.iso(at + dt.timedelta(hours=1))
         with mock.patch.object(crq, 'now', return_value=at):
@@ -376,6 +376,54 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual(actual, at + dt.timedelta(hours=1))
         self.assertEqual((self.root / 'next-review-at').read_text().strip(),
                          crq.iso(AT + dt.timedelta(minutes=1)))
+
+    def test_signer_only_inflight_preserves_ceiling_without_minute_hint(self):
+        for state in ('requested', 'signer_running', 'blocked'):
+            with self.subTest(state=state):
+                signer = dict(id='signer', kind='promotion', state=state,
+                              request={'requested_at': crq.iso(AT), 'reconciliation_required': state == 'blocked'})
+                self.q['items'] = [signer, dict(id='next', kind='open', state='pending', pr=1)]
+                crq.CONFIG['max_inflight'] = 1
+                self.probe.return_value = {'remaining': 2}
+                usage, held = crq.read_slot_usage(self.q)
+                _, gate, remaining = crq.admit_available(self.q, usage, [], reserved=held)
+                deadline = REFRESH(self.q, usage, remaining, gate, at=AT)
+                self.assertEqual(crq.inflight(self.q), [signer])
+                self.assertFalse(crq.has_collectable_runs(self.q))
+                self.assertEqual(gate, 'inflight')
+                self.assertEqual(self.started, [])
+                self.assertEqual(deadline, AT + dt.timedelta(minutes=12))
+                self.assertEqual((self.root / 'next-review-at').read_text().strip(), crq.iso(deadline))
+
+    def test_collection_eligibility_matches_reviewing_run_guard(self):
+        for state, run, expected in [('reviewing', None, False), ('reviewing', {}, False),
+                                     ('reviewing', {'run_id': 'launching', 'pid': None, 'launch_pending': True}, True),
+                                     ('reviewing', {'run_id': 'active', 'pid': 1234}, True),
+                                     ('blocked', {'run_id': 'retained', 'pid': 1234}, False)]:
+            with self.subTest(state=state, run=run):
+                item = dict(id='detached', kind='open', state=state)
+                if run is not None:
+                    item['run'] = run
+                self.q['items'] = [item]
+                self.assertEqual(crq.has_collectable_runs(self.q), expected)
+                REFRESH(self.q, {'remaining': 1}, 1, None, at=AT)
+                delta = dt.timedelta(minutes=1 if expected else 12)
+                self.assertEqual((self.root / 'next-review-at').read_text().strip(), crq.iso(AT + delta))
+
+    def test_collection_hint_never_postpones_slot_or_cooldown_deadline(self):
+        for detached in (False, True):
+            for gate, seconds in [('slots', 10), ('cooldown', 10), ('cooldown', 300)]:
+                with self.subTest(detached=detached, gate=gate, seconds=seconds):
+                    self.q['items'] = [dict(id='next', kind='open', state='pending')]
+                    if detached:
+                        self.q['items'].append(dict(id='active', kind='open', state='reviewing', run={'run_id': 'active'}))
+                    self.q['cooldown_until'] = crq.iso(AT + dt.timedelta(seconds=seconds)) if gate == 'cooldown' else None
+                    self.q['starts'] = [crq.iso(AT - dt.timedelta(hours=1) + dt.timedelta(seconds=seconds))]
+                    usage = {'remaining': 0, 'limit': 1}
+                    deadline = REFRESH(self.q, usage, 0, gate, at=AT)
+                    self.assertEqual(deadline, AT + dt.timedelta(seconds=seconds))
+                    hint = min(deadline, AT + dt.timedelta(minutes=1)) if detached else deadline
+                    self.assertEqual((self.root / 'next-review-at').read_text().strip(), crq.iso(hint))
 
     def test_second_precision_cooldown_uses_exit_time_and_never_shortens(self):
         rdir = self.root / 'run'
