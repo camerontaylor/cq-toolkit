@@ -6,10 +6,37 @@ import builtins
 import io
 import os
 import sys
+import subprocess
 from types import SimpleNamespace
 from unittest import mock
 import tempfile
 from pathlib import Path
+
+# This entire fixture module needs no child processes, including local Git.
+# Audit events cover absolute executables, shell/executable kwargs and aliases
+# captured before a mock could replace subprocess.Popen or os process helpers.
+_process_boundary_active = False
+
+
+def _deny_processes(event, args):
+    if _process_boundary_active and event in {
+            "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn",
+            "os.spawn", "os.fork", "os.forkpty", "pty.spawn"}:
+        raise AssertionError("offline queue fixture forbids child processes")
+
+
+sys.addaudithook(_deny_processes)
+
+
+def setUpModule():
+    global _process_boundary_active
+    _process_boundary_active = True
+
+
+def tearDownModule():
+    global _process_boundary_active
+    _process_boundary_active = False
+
 
 import queue_transport as transport
 import review_receipt as receipts
@@ -17,6 +44,17 @@ import capability_dispatcher as dispatcher
 
 
 class QueueTransportTests(unittest.TestCase):
+    def test_process_boundary_denies_absolute_shell_and_local_git_aliases(self):
+        run_alias = subprocess.run
+        for command, kwargs in (([sys.executable, "-c", "pass"], {}),
+                ("true", {"shell": True, "executable": "/bin/sh"}),
+                (["/usr/bin/git", "status"], {"cwd": self.tmp.name})):
+            with self.subTest(command=command), self.assertRaisesRegex(AssertionError, "forbids child"):
+                run_alias(command, **kwargs)
+        system_alias = os.system
+        with self.assertRaisesRegex(AssertionError, "forbids child"):
+            system_alias("true")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -66,6 +104,56 @@ class QueueTransportTests(unittest.TestCase):
         self.call("bind", pr=12, mergeSha="b" * 40)
         self.assertEqual(len(self.q["items"]), 1)
         self.assertEqual(self.q["items"][0]["attempts"], [])
+
+    def test_original_pr_only_replay_after_merged_recovery_preserves_ready_state(self):
+        self.call("enqueue")
+        self.call("bind", pr=12, mergeSha=None)
+        self.call("bind", pr=12, mergeSha="b" * 40)
+        before = copy.deepcopy(self.q)
+        self.assertEqual(before["queue_client_requests"]["request-1"]["state"], "ready-current")
+        # Round-trip durable state and re-import the handler to model a restart.
+        self.q = json.loads(json.dumps(self.q))
+        import importlib
+        importlib.reload(transport)
+        for _ in range(2):
+            result = self.call("bind", pr=12, mergeSha=None)
+            self.assertEqual(result["state"], "pending")
+            self.assertEqual(result["mergeSha"], "b" * 40)
+            self.assertEqual(self.q, before)
+
+    def test_merged_pr_only_replay_revalidates_identity_without_mutation(self):
+        self.merged()
+        before = copy.deepcopy(self.q)
+        original_forge = copy.deepcopy(self.forge)
+        for key, value in (("repo", "foreign/repo"), ("pr", 99),
+                ("producer", "foreign-author"), ("head", "e" * 40),
+                ("target", "main"), ("mergeSha", "e" * 40), ("state", "OPEN")):
+            self.forge = {**original_forge, key: value}
+            with self.subTest(forge_field=key), self.assertRaises(ValueError):
+                self.call("bind", pr=12, mergeSha=None)
+            self.assertEqual(self.q, before)
+        self.forge = original_forge
+        for pr, sha in ((99, None), (12, "e" * 40)):
+            with self.subTest(pr=pr, mergeSha=sha), self.assertRaisesRegex(ValueError, "conflicting"):
+                self.call("bind", pr=pr, mergeSha=sha)
+            self.assertEqual(self.q, before)
+        self.policy["write"].append("other-developer")
+        raw = receipts.canonical({"v": 1, "op": "bind", "requestId": "request-1",
+                                  "binding": self.b, "pr": 12, "mergeSha": None})
+        with self.assertRaisesRegex(ValueError, "principal mismatch"):
+            transport.handle(raw, self.runner, principal="other-developer", policy=self.policy,
+                             verify_source=lambda repo, pr: self.forge, receipt_root=self.tmp.name)
+        self.assertEqual(self.q, before)
+        for key, value in (("producer", "other-cycle"), ("head", "f" * 40),
+                           ("target", "other-target")):
+            if key == "target":
+                self.policy["branches"].append(value)
+            original = self.b[key]
+            self.b[key] = value
+            with self.subTest(binding_field=key), self.assertRaisesRegex(ValueError, "binding"):
+                self.call("bind", pr=12, mergeSha=None)
+            self.b[key] = original
+            self.assertEqual(self.q, before)
 
     def test_unauthorized_and_wrong_forge_refuse_without_mutation(self):
         self.policy["write"] = []

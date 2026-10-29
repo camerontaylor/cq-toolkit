@@ -310,11 +310,14 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             if b["kind"] != "deferred-author" or entry["state"] == "cancelled":
                 raise ValueError("intent cannot be bound")
             pr, merge_sha = req["pr"], req["mergeSha"]
-            if entry.get("pr", pr) != pr or entry.get("mergeSha") not in (None, merge_sha):
+            if entry.get("pr", pr) != pr or (merge_sha is not None and entry.get("mergeSha") not in (None, merge_sha)):
                 raise ValueError("conflicting PR/merge binding")
-            _forge(verify_source, b, pr, merge_sha, policy)
+            # A lost PR-only response may be replayed after merged recovery.
+            # Revalidate the established merge without downgrading durable state.
+            _forge(verify_source, b, pr, merge_sha or entry.get("mergeSha"), policy)
             entry.pop("reason", None)
-            entry.update(pr=pr, state="awaiting-merge")
+            if entry.get("mergeSha") is None:
+                entry.update(pr=pr, state="awaiting-merge")
             if merge_sha is not None:
                 _enroll(q, b, rid, pr, merge_sha, runner.iso())
                 entry.update(mergeSha=merge_sha, state="ready-current")
