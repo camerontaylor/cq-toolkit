@@ -1,6 +1,7 @@
 """Atomic, allow-listed fleet summary; no review launches or git fetches."""
 import datetime as dt
 import coverage
+import review_receipt
 import repair_tick
 import json
 import os
@@ -26,6 +27,83 @@ def command(argv, timeout):
     if result.returncode:
         raise RuntimeError(f"{Path(argv[0]).name} probe exited {result.returncode}")
     return result.stdout
+
+
+def merged_current(queue, receipt_root=None):
+    """Discovery truth and verified receipt truth remain separate, at retained T."""
+    counts = {key: 0 for key in ("pending", "reviewing", "blocked", "unverified",
+        "proven_terminal", "no_current_code", "partial_scope", "unsupported")}
+    exclusions = {}
+    targets = set()
+    for item in queue["items"]:
+        if item["kind"] != review_receipt.KIND:
+            continue
+        state = item["state"]
+        if state in ("pending", "reviewing", "blocked"):
+            counts[state] += 1
+            continue
+        try:
+            receipt_id = item["receipt_id"]
+            if receipt_root is None:
+                raise ValueError("receipt bytes unavailable")
+            review_receipt.read_receipt(receipt_root, receipt_id)
+            document = read(Path(receipt_root) / (receipt_id + ".json"))
+            capture = document["capture"]
+            # Follow only retained queue lineage with matching receipt/state;
+            # reject dangling/cyclic links and verify the original source binding.
+            origin = item
+            visited = set()
+            while origin.get("reused_from"):
+                parent_id = origin["reused_from"]
+                if parent_id in visited:
+                    raise ValueError("receipt reuse lineage cycles")
+                visited.add(parent_id)
+                matches = [candidate for candidate in queue["items"]
+                           if candidate.get("id") == parent_id]
+                if len(matches) != 1:
+                    raise ValueError("receipt reuse lineage missing or ambiguous")
+                parent = matches[0]
+                if (parent.get("kind") != review_receipt.KIND or
+                        parent.get("receipt_id") != receipt_id or parent.get("state") != state):
+                    raise ValueError("receipt reuse lineage mismatch")
+                origin = parent
+            if (document.get("source") != origin.get("subject") or
+                    capture != origin.get("capture") or
+                    capture.get("equivalence") != review_receipt.current_equivalence(capture) or
+                    review_receipt.current_equivalence(item["capture"]) !=
+                    review_receipt.current_equivalence(capture)):
+                raise ValueError("receipt binding mismatch")
+            outcome = document["outcome"]
+            if state == "done" and review_receipt.reusable_current(document, capture):
+                category = "partial_scope" if outcome == "partial-scope" else "proven_terminal"
+            elif (state == "no-current-code" and outcome == "no-current-code" and
+                  all(p.get("disposition") == "deleted" or
+                      p.get("disposition") == "excluded-with-reason" and p.get("reason") == "empty current file"
+                      for p in capture["paths"])):
+                category = "no_current_code"
+            elif state == "unsupported" and outcome == "unsupported":
+                category = "unsupported"
+            else:
+                raise ValueError("terminal state lacks proof")
+            counts[category] += 1
+            targets.add(capture["target"])
+            for path in capture["paths"]:
+                disposition = path.get("disposition", "unknown")
+                if disposition not in ("included", "renamed"):
+                    exclusions[disposition] = exclusions.get(disposition, 0) + 1
+        except (KeyError, TypeError, ValueError, OSError):
+            counts["unverified"] += 1
+    discovery = queue.get("merged_reconcile") or {}
+    allowed = ("after", "before", "complete", "complete_through", "next_cursor", "represented",
+               "intents", "unsupported", "duplicates_seen", "records_read", "inventory_digest")
+    natural = queue.get("merged_discovery") or {}
+    return {"natural_discovery": {key: natural[key] for key in ("after", "before", "complete", "error") if key in natural},
+            "discovery": {key: discovery[key] for key in allowed if key in discovery},
+            "watermark": queue.get("merged_watermark"), "receipts": counts,
+            "path_exclusions": exclusions, "captured_targets": sorted(targets)[:32],
+            "additional_captured_targets": max(0, len(targets) - 32),
+            "coverage_at_today_target": "unverified", "legacy_done_is_review_proof": False}
+
 
 
 def summarize(status, queue, heartbeat, config, events, now):
@@ -61,6 +139,7 @@ def summarize(status, queue, heartbeat, config, events, now):
     # Freshness must follow completed ticks, never status-file writes or probes.
     timestamp(last_tick)
     return {
+        "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
         "starts_60m": sum(now - 3600 <= timestamp(s) <= now for s in queue.get("starts", [])),
@@ -174,6 +253,7 @@ def publish(root, queue, config, schedule, home=None, now=None, *, promotion_mod
     data.update(schema_version=2, generated_at=generated)
     data["promotion"]["mode"] = promotion_mode
     data["systemd_timers"], data["systemd_services"] = systemd_activity()
+    data["merged_current"] = merged_current(queue, root / "state/receipts")
     data["repair"] = repair_tick.digest(root, queue)
     data["utilization"] = coverage.utilization_digest(queue, queue.get("coverage") or coverage.new_ledger(),
         now=now, max_starts_per_hour=config["max_starts_per_hour"])

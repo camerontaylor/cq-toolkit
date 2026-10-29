@@ -30,6 +30,7 @@ import queue_transport
 import author_lease
 import review_receipt
 import deferred_refresh
+import merged_reconcile
 import usage_slots
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -953,6 +954,105 @@ def current_report(request_id: str, receipt_id: Optional[str] = None, cursor: Op
     return review_receipt.read_receipt(STATE / "receipts", actual, cursor)
 
 
+def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
+    """Caller owns tick.lock; persist source/page before reads and Q1 before watermark."""
+    interval = merged_reconcile.normalize_interval(after, before)
+    if before >= iso():
+        raise merged_reconcile.ReconcileRefused("upper bound must precede scan startup")
+    merged_reconcile.normalize_page_budget(page_budget)
+    key = review_receipt.digest({"repo": REPO, "base": "merge-queue", **interval})
+    path = STATE / "reconcile" / (key + ".json")
+    wrapper = json.loads(path.read_text()) if path.exists() else None
+    if wrapper is not None and (not isinstance(wrapper, dict) or
+            wrapper.get("digest") != review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})):
+        raise merged_reconcile.ReconcileRefused("source/checkpoint wrapper digest mismatch")
+
+    def save_wrapper():
+        wrapper["digest"] = review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})
+        repair_tick.atomic(path, wrapper)
+
+    def forge(query):
+        try:
+            return gh_json(["api", "graphql", "-f", "query=" + query])
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, deferred_refresh.RefreshExhausted):
+            raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
+
+    if wrapper is None:
+        source = merged_reconcile.freeze_source(forge, repo=REPO, base="merge-queue")
+        wrapper = {"source": source, "checkpoint": None}
+        if not dry_run:
+            save_wrapper()
+    source = wrapper["source"]
+
+    def persist(checkpoint):
+        wrapper["checkpoint"] = checkpoint
+        save_wrapper()
+
+    raw = wrapper["checkpoint"]
+    if raw and raw.get("complete"):
+        result = merged_reconcile.load_checkpoint(raw, interval, page_budget, repo=REPO,
+                                                   base="merge-queue", allow_complete=True)
+    else:
+        result = merged_reconcile.reconcile(None,
+            lambda cursor: merged_reconcile.number_page(forge, source, cursor, repo=REPO, base="merge-queue"),
+            repo=REPO, **interval, page_budget=page_budget, checkpoint_raw=raw,
+            checkpoint_save=persist, dry_run=dry_run)
+    summary = {**result["summary"], "inventory_digest": result["digest"],
+               "source": source, "checkpoint_key": key}
+    if result["complete"]:
+        existing = [v["binding"] for v in q.get("merged_current_requests", {}).values()]
+        plan = merged_reconcile.enrollment_plan(result, repo=REPO, existing_requests=existing, dry_run=dry_run)
+        if not dry_run:
+            # The adapter validated live forge provenance for each exact slot.
+            # No second per-PR read of mutable metadata, no inline review launch.
+            staged = json.loads(json.dumps(q))
+            for entry in plan["entries"]:
+                if entry["disposition"] != "intent":
+                    continue
+                binding = {k: v for k, v in entry["binding"].items() if k != "policy"}
+                review_receipt.enroll(staged, **binding, request_id=entry["request_id"], at=iso())
+            staged["merged_reconcile"] = summary
+            # Completeness does not confer review credit, even on old done/skipped items.
+            save_queue(staged)
+            q.clear()
+            q.update(staged)
+    elif not dry_run:
+        q["merged_reconcile"] = summary
+        save_queue(q)
+    return summary
+
+
+def discover_merged(q, budget):
+    """Natural nonselective tick, same bounded inventory and overlap replay."""
+    active = q.get("merged_discovery") or {}
+    if active and not active.get("complete"):
+        after, before = active["after"], active["before"]
+    else:
+        watermark = q.get("merged_watermark") or q["created_at"]
+        after = iso(parse_iso(watermark) - dt.timedelta(minutes=5))
+        before = iso(now() - dt.timedelta(seconds=1))
+    if after >= before:
+        return []
+    # Record the frozen bounds in queue too: a crash after source pinning but
+    # before page one must not cause the next tick to choose a different upper.
+    if not active or active.get("complete"):
+        q["merged_discovery"] = {"after": after, "before": before, "complete": False}
+        save_queue(q)
+    try:
+        with forge_window(budget):
+            result = reconcile_merged(q, after=after, before=before, page_budget=4)
+        q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
+        save_queue(q)
+        if result["complete"]:
+            q["merged_watermark"] = before
+            save_queue(q)
+        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"]
+    except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
+        q["merged_discovery"]["error"] = str(exc)[:200]
+        save_queue(q)
+        return ["merged discovery incomplete; cursor/debt retained: " + str(exc)[:200]]
+
+
 # ----------------------------------------------------------- planning a review
 
 
@@ -969,34 +1069,20 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     target = f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head)
     notes = []
-    if item.get("pinned_base"):
-        # The merge-base only moves when the PR absorbs newer target commits
-        # (restack/rebase/merge-in). Then old-pin..head would drag unrelated
-        # target changes into the review, so prior review evidence is stale.
-        # (Ancestry alone is not enough: an old target pin stays an ancestor.)
-        if pin != item["pinned_base"]:
-            notes.append(f"base drift: merge-base moved {item['pinned_base'][:10]} → {pin[:10]} (PR restacked) "
-                         f"→ earlier cycles void, re-pinned, 1 cycle owed")
-            if not dry:
-                item.setdefault("voided_cycles", []).extend(item.get("cycles", []))
-                item["cycles"] = []
-                item["prior_cycles"] = 0
-                item["pinned_base"] = pin
-        else:
-            pin = item["pinned_base"]
-    else:
-        if item.get("prior_cycles") and item.get("prior_base") and item["prior_base"] != pin:
-            notes.append(f"prior cycle-1 base {item['prior_base'][:10]} ≠ current merge-base {pin[:10]} "
-                         f"→ prior cycle invalid on this base; 1 cycle owed")
-            if not dry:
-                item["voided_prior_cycles"] = item["prior_cycles"]
-                item["prior_cycles"] = 0
-        if not dry:
-            item["pinned_base"] = pin
-            item["target_ref"] = target
-    cycle = completed_open_cycles(item) + 1
-    return {"base": pin, "head": head, "target": target, "label": "cycle 1 (required)" if cycle == 1 else "additional cycle (optional)", "cycle": cycle,
-            "notes": notes, "branch": info["headRefName"], "review_pin": pin}
+    for record in item.get("cycles", []):
+        if (record.get("base") == pin and record.get("head") == head and
+                record.get("dirty_diff") == "clean tree" and record.get("run_id") and
+                record.get("range_policy") == "full-range-once-v1"):
+            raise NothingToReview("exact captured base/head range already reviewed")
+    if item.get("pinned_base") and pin != item["pinned_base"]:
+        notes.append("base drift: retain prior evidence; review the newly captured range once")
+    if not dry:
+        item["pinned_base"] = pin
+        item["target_ref"] = target
+    cycle = len(item.get("cycles", [])) + 1
+    return {"base": pin, "head": head, "target": target, "label": "one review of captured range", "cycle": cycle,
+            "notes": notes, "branch": info["headRefName"], "review_pin": pin,
+            "range_policy": "full-range-once-v1"}
 
 
 class NothingToReview(Exception):
@@ -1013,53 +1099,22 @@ def ensure_commit(pr: int, sha: str) -> bool:
 
 
 def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
-    """One informational review of what the last CLI review did not see.
-    Open PRs: since..head. Merged PRs: since..final head against the target as
-    it was at merge. Restacked (pin moved / since not an ancestor): replay the
-    reviewed head onto the new pin with merge-tree and review new-head vs that
-    replay, so only post-review changes show; a conflicting replay falls back
-    to the full PR diff (still ONE review, not a two-cycle redo)."""
-    merged = info["state"] == "MERGED"
+    """Conservative full-range fallback when equivalent scope is unproven."""
     if info["state"] not in ("OPEN", "MERGED"):
         raise NotReady(f"PR is {info['state']}")
     head = info["headRefOid"]
     if not ensure_commit(item["pr"], head):
-        raise NotReady(f"head {head[:10]} not fetchable")
-    target = f"{info['mergeCommit']['oid']}^1" if merged else f"origin/{info['baseRefName']}"
+        raise NotReady("source head unavailable")
+    target = f"{info['mergeCommit']['oid']}^1" if info["state"] == "MERGED" else f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head)
-    base, review_head = pin, head
-    scope = "full PR diff (no usable last CLI-reviewed head)"
-    since = item.get("since")
-    if since and ensure_commit(item["pr"], since):
-        since = git("rev-parse", f"{since}^{{commit}}")
-        if since == head:
-            raise NothingToReview(f"head {head[:10]} is the last CLI-reviewed head")
-        if is_ancestor(since, head) and git("merge-base", target, since) == pin:
-            base, scope = since, f"delta since last CLI-reviewed head {since[:10]}"
-        else:
-            m = run(["git", "merge-tree", "--write-tree", "--no-messages", pin, since], cwd=CLONE, check=False)
-            tree = m.stdout.split()[0] if m.returncode == 0 and m.stdout.strip() else None
-            if tree is None:
-                scope = f"full PR diff (reviewed head {since[:10]} does not replay cleanly onto {pin[:10]})"
-            elif tree == git("rev-parse", f"{head}^{{tree}}"):
-                raise NothingToReview(f"pure restack of reviewed head {since[:10]} onto {pin[:10]}; nothing unreviewed")
-            else:
-                scope = f"delta since {since[:10]}, replayed onto restacked pin {pin[:10]}"
-                if not dry:
-                    ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
-                                 GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
-                    base = run(["git", "commit-tree", tree, "-p", pin, "-m",
-                                f"crq replay: PR #{item['pr']} reviewed head {since[:10]} on {pin[:10]}"],
-                               cwd=CLONE, env=ident).stdout.strip()
-                    review_head = run(["git", "commit-tree", f"{head}^{{tree}}", "-p", base, "-m",
-                                       f"crq replay head: PR #{item['pr']} at {head[:10]}"],
-                                      cwd=CLONE, env=ident).stdout.strip()
-                    git("update-ref", f"refs/crq/synth/pr{item['pr']}-delta-base", base)
-                    git("update-ref", f"refs/crq/synth/pr{item['pr']}-delta-head", review_head)
-    when = "post-merge" if merged else "post-cycle"
-    return {"base": base, "head": review_head, "pr_head": head, "target": target,
-            "label": f"informational {when} review — {scope}", "cycle": None, "notes": [],
-            "branch": None if merged else info["headRefName"], "review_pin": pin}
+    for record in item.get("cycles", []):
+        if (record.get("base") == pin and record.get("head") == head and
+                record.get("range_policy") == "full-range-once-v1" and record.get("run_id")):
+            raise NothingToReview("equivalent captured full range already reviewed")
+    return {"base": pin, "head": head, "pr_head": head, "target": target,
+            "label": "one full-range review (prior equivalent scope unproven)", "cycle": None,
+            "notes": [], "branch": info.get("headRefName") if info["state"] == "OPEN" else None,
+            "review_pin": pin, "range_policy": "full-range-once-v1"}
 
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -1141,8 +1196,8 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # authorizes the agent fallback, instead of failing every tick.
         raise author_quota.AuthorRefused("author head cannot be checked out") from exc
     cli_cmd = ["coderabbit", "review", "--agent", "--deep"]
-    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND):
-        # Author/current cycles review the COMMITTED base..head (the original manual cycle 1
+    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) or plan.get("range_policy"):
+        # Author/current/full-range cycles review the COMMITTED base..head (the original manual cycle 1
         # form) on a clean worktree, never uncommitted working-tree edits. The
         # natural argv is deliberately unchanged.
         cli_cmd.append("--committed")
@@ -1151,7 +1206,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
-            "dirty_diff": "clean tree", "started_at": iso(),
+            "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
     if item["kind"] == review_receipt.KIND:
         meta["capture"] = item["capture"]
@@ -1467,7 +1522,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["last_error"] = None
         record = {"run_id": r["run_id"], "cycle": meta["cycle"], "base": meta["base"], "head": meta["head"],
                   "pr_head": meta.get("pr_head", meta["head"]),
-                  "dirty_diff": "clean tree", "ndjson": str(rdir / "review.ndjson"),
+                  "dirty_diff": "clean tree", "range_policy": meta.get("range_policy"), "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
         if item["kind"] == author_quota.AUTHOR_KIND:
             # Genuine cycle evidence, but NEVER repair debt and NEVER promoted
@@ -2790,19 +2845,11 @@ def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dic
 
 
 def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
-    """Each tick: (1) open non-draft PRs into merge-queue (or stacked on a chain
-    ending there) that are not enrolled → open item, one required cycle; (2) a PR whose
-    head moved past its last CLI review, with nothing in flight → one delta item
-    for the new commits; (3) PRs merged into merge-queue after the seed →
-    never CLI-reviewed: merged-tier item (supersession filter); reviewed at an
-    older head: post-merge delta; reviewed at the merged head: recorded, skipped."""
+    """Enroll open PR work only; merged discovery uses the durable numeric adapter."""
     log: List[str] = []
     try:
         opened = gh_json(["pr", "list", "--repo", REPO, "--state", "open", "--limit", "200", "--json",
                           "number,isDraft,baseRefName,headRefName,headRefOid"])
-        merged = gh_json(["pr", "list", "--repo", REPO, "--state", "merged", "--base", "merge-queue", "--limit",
-                          "100", "--search", f"merged:>={q['created_at'][:10]}", "--json",
-                          "number,mergedAt,mergeCommit,headRefOid"])
     except Exception as exc:
         return [f"enrollment skipped: {exc}"[:300]]
     by_head = {p["headRefName"]: p for p in opened}
@@ -2818,46 +2865,28 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") and not optional_open(i) for i in mine):
             continue
+        try:
+            if not ensure_commit(n, head):
+                raise NotReady("source head unavailable")
+            pin = git("merge-base", f"origin/{p['baseRefName']}", head)
+        except (NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+            log.append(f"PR #{n}: range identity unavailable; enrollment deferred")
+            continue
         last = last_reviewed(q, n)
-        own = False
         if last and reviewed_head(last) != head:
             try:
-                own = repair_tick.own_range(sys.modules[__name__], q, reviewed_head(last), head)
+                if repair_tick.own_range(sys.modules[__name__], q, reviewed_head(last), head):
+                    continue
             except Exception:
-                own = False
-        if last and not own and reviewed_head(last) != head and not any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
-            new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", pr=n, kind="delta", followup="open",
-                     since=reviewed_head(last), why=f"head moved {reviewed_head(last)[:10]} → {head[:10]} after CLI review")
-    seeded_at = parse_iso(q["created_at"])
-    for p in sorted(merged, key=lambda x: x["mergedAt"]):
-        n, head = p["number"], p["headRefOid"]
-        if parse_iso(p["mergedAt"]) <= seeded_at or any(i["pr"] == n and i["kind"] == "merged" for i in q["items"]):
-            continue
-        mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
-        if any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
-            continue  # this merged head already has its delta (done, skipped as a pure restack, …): sticky
-        if any(i["state"] in ("reviewing", "repairing") for i in mine):
-            continue  # harvest first
-        for i in mine:
-            if i["kind"] == "open" and i["state"] == "pending":
-                i["state"] = "skipped"
-                i["last_error"] = "merged before its cycles ran → post-merge follow-up"
-        if any(i["kind"] == "delta" and i["state"] == "pending" for i in mine):
-            continue  # a pending delta now plans against the merged head
-        last = last_reviewed(q, n)
-        common = dict(pr=n, merge_commit=p["mergeCommit"]["oid"], merged_at=p["mergedAt"])
-        if last is None:
-            item = new_item(q, log, dry, id=f"pr{n}-merged", kind="merged", source="followup",
-                            why="merged after the seed without a CLI review → merged-tier", **common)
-            apply_measure(item)
-        elif reviewed_head(last) == head:
-            new_item(q, log, dry, id=f"pr{n}-merged", kind="merged", source="followup", state="skipped",
-                     last_error=f"merged head {head[:10]} already CLI-reviewed ({last['run_id']})",
-                     why="merged after the seed; merged head already reviewed", **common)
-        else:
-            new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", kind="delta", followup="merged",
-                     since=reviewed_head(last), why=f"merged with commits after its last CLI review "
-                     f"({reviewed_head(last)[:10]} → {head[:10]}) → post-merge delta", **common)
+                pass  # without repair proof the full range remains owed
+        evidence = [record for item in mine for record in item.get("cycles", [])]
+        equivalent = any(record.get("base") == pin and record.get("head") == head and
+                         record.get("range_policy") == "full-range-once-v1" and record.get("run_id")
+                         for record in evidence)
+        identity = f"pr{n}-range-{pin[:10]}-{head[:10]}"
+        if not equivalent and not any(i["id"] == identity for i in mine):
+            new_item(q, log, dry, id=identity, pr=n, kind="delta", followup="open",
+                     why="current full range lacks equivalent captured evidence; retain earlier cycles/findings")
     return log
 
 
@@ -3184,6 +3213,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     fetch()
     if not dry and only is None:
         budget = ForgeBudget()
+        log += discover_merged(q, budget)
         with forge_window(budget):
             refreshed = deferred_refresh.refresh_deferred(q,
                 verify_source=verify_deferred_source, find_source=find_deferred_source,
@@ -3343,6 +3373,8 @@ def write_status(q: Dict[str, Any]) -> None:
           f"{', '.join(i['id'] + ' (' + ((i.get('run') or {}).get('run_id') or 'signer ' + i['state']) + ')' for i in inflight(q)) or 'none'}",
           f"- legacy addressing: {', '.join(i['id'] + ' agent ' + i['addressing']['agent_id'][:8] for i in items if i['state'] == 'addressing') or 'none'}",
           f"- open-PR CLI reviews still owed: {owed_open}",
+          "- merged-current discovery/receipt proof (retained capture T): " +
+          json.dumps(status_summary.merged_current(q, STATE / "receipts"), sort_keys=True),
           f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'} · mode {mode}"
           f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
           f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}"
@@ -3674,6 +3706,11 @@ def main() -> int:
     p.add_argument("--merge-sha", required=True)
     p.add_argument("--request-id", required=True)
     p.add_argument("--target-selector", choices=sorted(review_receipt.SELECTORS), default="promoted-main")
+    p = sub.add_parser("reconcile-merged", help="bounded interval inventory and enrollment; no inline dispatch")
+    p.add_argument("--after", required=True)
+    p.add_argument("--before", required=True)
+    p.add_argument("--page-budget", type=int, required=True)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("report", help="read immutable receipt manifest or bounded chunk; no dispatch")
     p.add_argument("--request-id", required=True)
     p.add_argument("--receipt-id")
@@ -3700,9 +3737,15 @@ def main() -> int:
     p.add_argument("run_id")
     args = ap.parse_args()
 
-    if args.cmd in ("enqueue-merged", "report"):
+    if args.cmd in ("enqueue-merged", "report", "reconcile-merged"):
         try:
-            if args.cmd == "enqueue-merged":
+            if args.cmd == "reconcile-merged":
+                def reconcile_command():
+                    with forge_window(ForgeBudget()):
+                        return reconcile_merged(load_queue(), after=args.after, before=args.before,
+                                                page_budget=args.page_budget, dry_run=args.dry_run)
+                result = with_lock(reconcile_command)
+            elif args.cmd == "enqueue-merged":
                 result = with_lock(enqueue_merged, args.pr, args.merge_sha, args.request_id, args.target_selector)
             else:
                 result = current_report(args.request_id, args.receipt_id, args.cursor)
@@ -3710,7 +3753,7 @@ def main() -> int:
                 return 3
             print(json.dumps(result, sort_keys=True))
             return 0
-        except (ValueError, OSError, RuntimeError) as exc:
+        except (ValueError, OSError, RuntimeError, merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
             print(f"{args.cmd} refused: {exc}", file=sys.stderr)
             return 3
     if args.cmd == "_review":

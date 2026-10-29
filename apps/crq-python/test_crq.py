@@ -1,4 +1,5 @@
 """Offline Q1 integration: real temporary Git; fake forge/provider/processes."""
+import atexit
 import base64
 import contextlib
 import copy
@@ -6,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -23,6 +25,220 @@ crq = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = crq
 spec.loader.exec_module(crq)
 COMPLETE = {"type": "complete", "status": "review_completed", "reviewedFiles": ["affected.py"]}
+
+
+# Registered by CurrentTest before its first Git invocation. No other class
+# needs a real process, and no selected fixture needs a real scanner.
+OFFLINE_REPOS = set()
+
+
+_TRACE_OBSERVER_RESTORE = None
+
+
+def install_failure_observer():
+    """Observe framework rendering after module setup; preserve its result."""
+    global _TRACE_OBSERVER_RESTORE
+    if _TRACE_OBSERVER_RESTORE is not None:
+        return
+    result_class = unittest.result.TestResult
+    original = result_class._exc_info_to_string
+
+    def observe(result, err, test):
+        rendered = original(result, err, test)
+        payload = ("\nQ2_IMMEDIATE_FAILURE " + test.id() + "\n" + rendered).encode("utf-8")
+        marker = b"\nQ2_IMMEDIATE_FAILURE_TRUNCATED limit=16384\n"
+        if len(payload) > 16384:
+            payload = payload[:16384 - len(marker)] + marker
+        sys.stderr.write(payload.decode("utf-8", errors="ignore"))
+        sys.stderr.flush()
+        return rendered
+
+    def restore():
+        global _TRACE_OBSERVER_RESTORE
+        if result_class._exc_info_to_string is observe:
+            result_class._exc_info_to_string = original
+        _TRACE_OBSERVER_RESTORE = None
+
+    # Register restoration before mutation, including exceptional setup exits.
+    atexit.register(restore)
+    _TRACE_OBSERVER_RESTORE = restore
+    result_class._exc_info_to_string = observe
+    sys.stderr.write("Q2_TRACE_OBSERVER activation=end-test_crq.setUpModule "
+                     "renderer=unittest.result.TestResult._exc_info_to_string\n")
+    sys.stderr.flush()
+
+
+def offline_git_boundary(real_popen, home, violations):
+    """Build the fail-closed fixture launcher; tests inject a captured mock."""
+    def refuse(stage):
+        sys.stderr.write("Q2_GUARD_REFUSAL stage=" + stage + "\n")
+        sys.stderr.flush()
+        violations.append("unexpected process boundary")
+        raise AssertionError("unmocked process in offline fixture")
+
+    def local_git(args):
+        # Exact observed fixture/adapter shapes; no global Git options, aliases,
+        # remote commands, arbitrary config, helpers or option-shaped operands.
+        if not args or not all(isinstance(v, str) for v in args):
+            return False
+        cmd, *tail = args
+        operand = lambda v: bool(v) and not v.startswith("-")
+        if cmd == "init":
+            return tail == ["-q"]
+        if cmd == "config":
+            return tail in (["user.email", "fixture@localhost"], ["user.name", "fixture"])
+        if cmd == "add":
+            return tail == ["."]
+        if cmd == "commit":
+            return len(tail) == 2 and tail[0] == "-qm" and operand(tail[1])
+        if cmd == "mv":
+            return len(tail) == 2 and all(operand(v) for v in tail)
+        if cmd in {"rev-parse", "read-tree"}:
+            return len(tail) == 1 and operand(tail[0])
+        if cmd == "write-tree":
+            return not tail
+        if cmd == "update-ref":
+            return (len(tail) == 2 and tail[0].startswith(("refs/remotes/origin/", "refs/crq/current/"))
+                    and bool(re.fullmatch(r"[0-9a-f]{40}", tail[1])))
+        if cmd == "merge-base":
+            if tail[:1] == ["--is-ancestor"]:
+                tail = tail[1:]
+            return len(tail) == 2 and all(operand(v) for v in tail)
+        if cmd == "cat-file":
+            return len(tail) == 2 and tail[0] in {"-e", "-s", "blob"} and operand(tail[1])
+        if cmd == "ls-tree":
+            return len(tail) == 4 and tail[0] == "-z" and operand(tail[1]) and tail[2] == "--" and operand(tail[3])
+        if cmd == "update-index":
+            return len(tail) == 3 and tail[:2] == ["--force-remove", "--"] and operand(tail[2])
+        if cmd == "commit-tree":
+            return (len(tail) == 5 and tail[1] == "-p" and tail[3] == "-m"
+                    and all(operand(tail[n]) for n in (0, 2, 4)))
+        if cmd == "diff":
+            shapes = (["--name-status"], ["--no-ext-diff"],
+                      ["--name-only", "--no-renames", "-z"],
+                      ["--name-status", "-M50%", "-z"],
+                      ["--text", "--no-textconv", "--no-ext-diff", "--no-renames", "--no-color", "--unified=0"],
+                      ["--no-color", "--no-ext-diff", "--unified=0"])
+            return any(tail[:-2] == flags and len(tail) == len(flags) + 2
+                       and all(operand(v) for v in tail[-2:]) for flags in shapes)
+        return False
+
+    def offline_process(argv, *args, **kwargs):
+        if (not isinstance(argv, (list, tuple)) or not argv or
+                argv[0] not in {"git", "/usr/bin/git"} or args or
+                not local_git(list(argv[1:]))):
+            refuse("process-or-git-shape")
+        # Validate names AND values before the captured launcher sees anything.
+        # Construct its kwargs explicitly below: never forward caller kwargs.
+        validators = {
+            "cwd": lambda v: type(v) in (str, Path, type(home)),
+            "env": lambda v: v is None or (type(v) is dict and
+                all(type(k) is str and type(value) is str for k, value in v.items())),
+            "stdin": lambda v: v is None or (type(v) is int and v in (subprocess.PIPE, subprocess.DEVNULL)),
+            "stdout": lambda v: v is None or (type(v) is int and v in (subprocess.PIPE, subprocess.DEVNULL)),
+            "stderr": lambda v: v is None or (type(v) is int and v in (subprocess.PIPE, subprocess.DEVNULL)),
+            "text": lambda v: type(v) is bool,
+            "universal_newlines": lambda v: type(v) is bool,
+            "close_fds": lambda v: v is True,
+            "shell": lambda v: v is False,
+            "executable": lambda v: v is None,
+            "preexec_fn": lambda v: v is None,
+            "pass_fds": lambda v: type(v) is tuple and not v,
+        }
+        if any(key not in validators or not validators[key](value) for key, value in kwargs.items()):
+            refuse("keyword-value")
+        cwd = Path(kwargs.get("cwd") or ".").resolve()
+        if cwd not in OFFLINE_REPOS:
+            refuse("cwd")
+        # Fresh repos use empty templates. Never inherit Git environment,
+        # user/system config, hooks, signing, attributes, fsmonitor or helpers.
+        incoming = kwargs.get("env") or {}
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LANG": "C",
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
+               "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
+               "GIT_TERMINAL_PROMPT": "0", "GIT_TEMPLATE_DIR": str(home / "templates")}
+        for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+                    "GIT_INDEX_FILE", "GIT_LITERAL_PATHSPECS"):
+            if key in incoming:
+                env[key] = incoming[key]
+        launch_kwargs = {"cwd": str(cwd), "env": env, "close_fds": True,
+                         "stdin": kwargs.get("stdin"), "stdout": kwargs.get("stdout"),
+                         "stderr": kwargs.get("stderr")}
+        for key in ("text", "universal_newlines"):
+            if key in kwargs:
+                launch_kwargs[key] = kwargs[key]
+        options = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                   "-c", "core.attributesFile=/dev/null", "-c", "protocol.allow=never",
+                   "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
+        if argv[1] == "diff":
+            options += ["--no-pager"]
+            argv = [*argv[:2], "--no-ext-diff", "--no-textconv", *argv[2:]]
+        return real_popen(["/usr/bin/git", *options, *argv[1:]], **launch_kwargs)
+
+    return offline_process
+
+
+def setUpModule():
+    isolation = tempfile.TemporaryDirectory(prefix="q2-offline-git-")
+    unittest.addModuleCleanup(isolation.cleanup)
+    home = Path(isolation.name)
+    (home / "templates").mkdir()
+    violations = []
+    offline_process = offline_git_boundary(subprocess.Popen, home, violations)
+
+    def assert_no_violations():
+        if violations:
+            raise AssertionError("offline fixture attempted an unexpected process")
+
+    patch = mock.patch.object(subprocess, "Popen", side_effect=offline_process)
+    patch.start()
+    unittest.addModuleCleanup(assert_no_violations)
+    unittest.addModuleCleanup(patch.stop)
+    install_failure_observer()
+
+
+class OfflineBoundaryTest(unittest.TestCase):
+    def test_process_capabilities_refused_before_captured_launcher(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td).resolve()
+            OFFLINE_REPOS.add(repo)
+            self.addCleanup(OFFLINE_REPOS.discard, repo)
+            launcher = mock.Mock()
+            boundary = offline_git_boundary(launcher, repo, [])
+            callback = mock.Mock()
+            forbidden = [{"preexec_fn": callback}, {"pass_fds": (3,)},
+                         {"executable": "/bin/sh"}, {"shell": True},
+                         {"user": 0}, {"group": 0}, {"extra_groups": []},
+                         {"start_new_session": True}, {"process_group": 0},
+                         {"umask": 0}, {"unknown_option": None},
+                         {"close_fds": False}, {"stdout": 123},
+                         {"text": "yes"}, {"env": {"X": object()}}]
+            for options in forbidden:
+                with self.subTest(option=next(iter(options))):
+                    with self.assertRaises(AssertionError):
+                        boundary(["git", "rev-parse", "HEAD"], cwd=repo, **options)
+            launcher.assert_not_called()
+            callback.assert_not_called()
+
+    def test_ordinary_runner_shape_reaches_only_captured_launcher(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td).resolve()
+            OFFLINE_REPOS.add(repo)
+            self.addCleanup(OFFLINE_REPOS.discard, repo)
+            launcher = mock.Mock(return_value=mock.sentinel.child)
+            boundary = offline_git_boundary(launcher, repo, [])
+            child = boundary(["git", "rev-parse", "HEAD"], cwd=str(repo), env=None,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.assertIs(child, mock.sentinel.child)
+            launcher.assert_called_once()
+            argv = launcher.call_args.args[0]
+            options = launcher.call_args.kwargs
+            self.assertEqual(argv[0], "/usr/bin/git")
+            self.assertEqual(argv[-2:], ["rev-parse", "HEAD"])
+            self.assertEqual(set(options), {"cwd", "env", "close_fds", "stdin", "stdout", "stderr", "text"})
+            self.assertEqual(options["cwd"], str(repo))
+            self.assertIs(options["close_fds"], True)
+            self.assertEqual(options["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
 
 
 class ClassifierTest(unittest.TestCase):
@@ -235,6 +451,8 @@ class CurrentTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
+        OFFLINE_REPOS.add(self.repo.resolve())
+        self.addCleanup(OFFLINE_REPOS.discard, self.repo.resolve())
         self.g("init", "-q")
         self.g("config", "user.email", "fixture@localhost")
         self.g("config", "user.name", "fixture")
@@ -260,6 +478,8 @@ class CurrentTest(unittest.TestCase):
         def fake_version(argv, **kw):
             if argv == ["coderabbit", "--version"]:
                 return SimpleNamespace(stdout="fixture-cli-1\n", returncode=0)
+            if argv[0] == "gh":
+                raise AssertionError("unmocked forge call in offline fixture")
             return real_run(argv, **kw)
         patch = mock.patch.object(crq, "run", side_effect=fake_version)
         patch.start()
@@ -297,13 +517,16 @@ class CurrentTest(unittest.TestCase):
         self.g("update-ref", "refs/remotes/origin/main", target)
         return target
 
-    def tick(self, dry=False, only=None):
+    def tick(self, dry=False, only=None, discovery=False):
         real_popen = subprocess.Popen
         def fake_child(argv, **kw):
             if argv[0] == sys.executable and "_review" in argv:
                 return SimpleNamespace(pid=919191)
             return real_popen(argv, **kw)
         with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(crq, "promotion_mode", return_value="user"))
+            if not discovery:
+                stack.enter_context(mock.patch.object(crq, "discover_merged", return_value=[]))
             for name in ("fetch", "write_status", "write_heartbeat", "notify_owner"):
                 stack.enter_context(mock.patch.object(crq, name))
             for name in ("enroll", "promotion_audit", "promotion_tick"):
@@ -574,7 +797,9 @@ class CurrentTest(unittest.TestCase):
     def test_selective_start_refuses_and_caps_prevent_capture(self):
         item = self.enroll()
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \
+             mock.patch.object(crq, "discover_merged", return_value=[]), \
              mock.patch.object(crq, "write_status"), mock.patch.object(crq, "write_heartbeat"), \
+             mock.patch.object(crq, "promotion_mode", return_value="user"), \
              mock.patch.object(crq, "promotion_tick", return_value=[]), \
              mock.patch.object(crq, "promotion_audit", return_value=[]), \
              mock.patch.object(crq.repair_tick, "reconcile_fix_prs"), \
@@ -929,6 +1154,255 @@ class CurrentTest(unittest.TestCase):
                     if n == 0 else {"source": "queue", "category": "unknown", "code": "unclassified"})
 
 
+    def forge_inventory(self, count=125):
+        def forge(args):
+            query = args[-1]
+            repository = {"id": "repo-id", "nameWithOwner": crq.REPO}
+            if "issues(last:" in query:
+                repository.update(issues={"totalCount": 0, "nodes": []},
+                                  pullRequests={"totalCount": count, "nodes": [{"number": count}]})
+            else:
+                for value in re.findall(r"issueOrPullRequest\(number:(\d+)\)", query):
+                    number = int(value)
+                    repository["n" + value] = {"__typename": "PullRequest", "number": number,
+                        "baseRefName": "merge-queue", "mergedAt": "2026-10-02T00:00:00Z",
+                        "mergeCommit": {"oid": self.merge}, "headRefOid": self.merge}
+            return {"data": {"repository": repository}}
+        return forge
+
+
+    def reconcile_inventory(self, budget=1, dry=False):
+        return crq.with_lock(crq.reconcile_merged, self.q, after="2026-10-01T00:00:00Z",
+            before="2026-10-03T00:00:00Z", page_budget=budget, dry_run=dry)
+
+
+    def test_inventory_restart_all_125_and_idempotent_legacy_states_no_credit(self):
+        self.q["items"] = [{"id": "old", "kind": "merged", "pr": 1, "state": "skipped",
+                           "cycles": [], "order": 0}]
+        crq.save_queue(self.q)
+        forge = self.forge_inventory()
+        with mock.patch.object(crq, "gh_json", side_effect=forge) as calls,              mock.patch.object(crq, "launch") as launch:
+            first = self.reconcile_inventory()
+            self.assertFalse(first["complete"])
+            self.assertEqual(len(crq.load_queue()["items"]), 1)
+            self.q = crq.load_queue()
+            self.assertFalse(self.reconcile_inventory()["complete"])
+            self.q = crq.load_queue()
+            final = self.reconcile_inventory()
+            self.assertTrue(final["complete"])
+            self.assertEqual(final["represented"], 125)
+            self.assertEqual(final["reviewed"], 0)
+            self.assertEqual(len(crq.load_queue()["items"]), 126)
+            calls.reset_mock()
+            self.q = crq.load_queue()
+            self.reconcile_inventory()
+            calls.assert_not_called()
+            launch.assert_not_called()
+        self.assertEqual(crq.load_queue()["items"][0]["state"], "skipped")
+        self.assertNotIn("merged_watermark", crq.load_queue())
+
+
+    def test_inventory_page_atomic_before_next_fetch_and_save_failure_stops(self):
+        actual = self.forge_inventory()
+        observed = []
+        def forge(args):
+            if "issueOrPullRequest(number:51)" in args[-1]:
+                wrappers = list((self.state / "reconcile").glob("*.json"))
+                checkpoint = json.loads(wrappers[0].read_text())["checkpoint"]
+                self.assertEqual(checkpoint["pages_read"], 1)
+                self.assertFalse(checkpoint["complete"])
+                observed.append(True)
+            return actual(args)
+        with mock.patch.object(crq, "gh_json", side_effect=forge):
+            self.assertTrue(self.reconcile_inventory(budget=4)["complete"])
+        self.assertEqual(observed, [True])
+        # New isolated interval state: first source persistence fails before page1.
+        for path in (self.state / "reconcile").glob("*.json"):
+            path.unlink()
+        with mock.patch.object(crq, "gh_json", side_effect=actual) as calls,              mock.patch.object(crq.repair_tick, "atomic", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.reconcile_inventory(budget=4)
+            self.assertEqual(calls.call_count, 1)
+
+
+    def test_inventory_dry_run_and_transient_resume_no_enrollment(self):
+        before = crq.QUEUE.read_bytes()
+        with mock.patch.object(crq, "gh_json", side_effect=self.forge_inventory()):
+            self.assertTrue(self.reconcile_inventory(budget=4, dry=True)["complete"])
+        self.assertEqual(crq.QUEUE.read_bytes(), before)
+        self.assertFalse((self.state / "reconcile").exists())
+        actual = self.forge_inventory()
+        def fail(args):
+            if "issueOrPullRequest(number:51)" in args[-1]:
+                raise RuntimeError("offline")
+            return actual(args)
+        with mock.patch.object(crq, "gh_json", side_effect=fail):
+            result = self.reconcile_inventory(budget=4)
+        self.assertFalse(result["complete"])
+        cursor = result["next_cursor"]
+        self.assertEqual(crq.load_queue()["items"], [])
+        self.q = crq.load_queue()
+        with mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+            result = self.reconcile_inventory(budget=4)
+        self.assertIn("number:51)", forge.call_args_list[0].args[0][-1])
+        self.assertIsNotNone(cursor)
+        self.assertTrue(result["complete"])
+
+
+    def test_natural_discovery_overlap_watermark_and_dry_selective_gating(self):
+        actual = self.forge_inventory()
+        self.q["created_at"] = "2026-10-01T00:00:00Z"
+        crq.save_queue(self.q)
+        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+            self.tick(dry=True, discovery=True)
+            self.tick(only="selection", discovery=True)
+            self.assertNotIn("merged_watermark", crq.load_queue())
+            self.tick(discovery=True)
+        q = crq.load_queue()
+        watermark = q["merged_watermark"]
+        self.assertEqual(q["merged_reconcile"]["represented"], 125)
+        self.assertEqual(q["merged_discovery"]["before"], watermark)
+        # Advancing an interval replays 5 minutes; request bindings dedupe.
+        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+            self.tick(discovery=True)
+        q = crq.load_queue()
+        self.assertEqual(q["merged_reconcile"]["after"],
+                         crq.iso(crq.parse_iso(watermark) - crq.dt.timedelta(minutes=5)))
+        self.assertEqual(len(q["items"]), 125)
+
+
+    def test_aggregate_budget_request_timeout_and_deferred_cursor_retained(self):
+        clock = mock.Mock(return_value=10.0)
+        budget = crq.ForgeBudget(requests=1, seconds=3, clock=clock)
+        with crq.forge_window(budget), mock.patch.object(crq, "run", return_value=SimpleNamespace(stdout="{}")) as run:
+            crq.gh_json(["api", "fixture"])
+            self.assertEqual(run.call_args.kwargs["timeout"], 3)
+            with self.assertRaises(crq.deferred_refresh.RefreshExhausted):
+                crq.gh_json(["api", "fixture"])
+            self.assertEqual(run.call_count, 1)
+        self.deferred_entry()
+        initial = copy.deepcopy(self.q)
+        ids = crq.deferred_refresh.refresh_deferred(self.q,
+            verify_source=lambda *a: self.fail("must not fetch"), find_source=lambda *a: [],
+            at=crq.iso(), may_continue=budget.available)
+        self.assertEqual(ids, [])
+        self.assertEqual(self.q, initial)
+        clock.return_value = 14
+        self.assertFalse(crq.ForgeBudget(requests=2, seconds=0, clock=clock).available())
+
+
+    def test_once_per_range_preserves_restacked_cycles_and_refuses_same_head_shortcut(self):
+        info = {"state": "OPEN", "isDraft": False, "headRefOid": self.merge,
+                "baseRefName": "merge-queue", "headRefName": "fixture"}
+        item = {"pr": 42, "cycles": [{"run_id": "legacy", "base": self.pre, "head": self.merge,
+                                    "findings": 2}], "prior_cycles": 1, "pinned_base": self.pre}
+        saved = copy.deepcopy(item["cycles"])
+        plan = crq.plan_open(item, info, False)
+        self.assertEqual(item["cycles"], saved)
+        self.assertEqual(plan["label"], "one review of captured range")
+        # Same-head legacy credit has no scope policy; full review is still owed.
+        self.assertEqual(crq.plan_delta(item, info, False)["base"], self.merge)
+        item["cycles"].append({"run_id": "proven", "base": self.merge, "head": self.merge,
+                              "dirty_diff": "clean tree", "range_policy": "full-range-once-v1"})
+        with self.assertRaises(crq.NothingToReview):
+            crq.plan_open(item, info, False)
+        crq.advance_open(item)
+        self.assertEqual(item["state"], "done")
+
+
+    def test_reconcile_cli_flags_only_and_one_json_result_no_dispatch(self):
+        with mock.patch.object(sys, "argv", ["crq", "reconcile-merged", "--after=2026-10-01T00:00:00Z",
+             "--before=2026-10-03T00:00:00Z", "--page-budget=4", "--dry-run"]),              mock.patch.object(crq, "gh_json", side_effect=self.forge_inventory()),              mock.patch.object(crq, "launch") as launch, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(crq.main(), 0)
+        self.assertTrue(json.loads(out.getvalue())["complete"])
+        self.assertEqual(crq.load_queue()["items"], [])
+        launch.assert_not_called()
+
+
+    def test_real_tick_recovery_budget_shared_and_exhausted_debt_untouched(self):
+        self.q["created_at"] = "2026-10-01T00:00:00Z"
+        entry = self.deferred_entry()
+        self.q["queue_client_requests"] = {f"request-{n:02}": copy.deepcopy(entry) for n in range(3)}
+        crq.save_queue(self.q)
+        original_run = crq.run
+        actual_forge = self.forge_inventory()
+        calls = []
+        budget = crq.ForgeBudget(requests=5, seconds=30)
+        def fake_run(argv, **kwargs):
+            if argv[0] != "gh":
+                return original_run(argv, **kwargs)
+            calls.append(argv)
+            self.assertLessEqual(kwargs["timeout"], 10)
+            value = actual_forge(argv[1:]) if argv[2] == "graphql" else self.forge_data()
+            return SimpleNamespace(stdout=json.dumps(value), returncode=0)
+        with mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+            self.tick(discovery=True)
+        q = crq.load_queue()
+        self.assertEqual(len(calls), 5)  # ceiling + 3 numeric pages + 1 deferred read
+        self.assertEqual(q["merged_reconcile"]["represented"], 125)
+        self.assertEqual(q["deferred_refresh_cursor"], "request-00")
+        self.assertEqual(q["queue_client_requests"]["request-01"], entry)
+        self.assertEqual(q["queue_client_requests"]["request-02"], entry)
+
+
+    def test_future_bound_refuses_before_forge_and_full_range_dispatch_is_committed(self):
+        with mock.patch.object(crq, "gh_json") as forge:
+            with self.assertRaises(crq.merged_reconcile.ReconcileRefused):
+                crq.reconcile_merged(self.q, after="2026-10-01T00:00:00Z",
+                                     before="2099-01-01T00:00:00Z", page_budget=1)
+            forge.assert_not_called()
+        self.g("update-ref", "refs/remotes/origin/merge-queue", self.pre)
+        item = {"id": "open-range", "kind": "open", "pr": 42, "state": "pending", "cycles": [],
+                "attempts": [], "failures": 0}
+        self.q["items"].append(item)
+        info = {"state": "OPEN", "isDraft": False, "headRefOid": self.merge,
+                "baseRefName": "merge-queue", "headRefName": "fixture"}
+        plan = crq.plan_open(item, info, False)
+        guarded_popen = subprocess.Popen
+        def fake_child(argv, **kwargs):
+            expected = [sys.executable, str(Path(crq.__file__).resolve()), "_review",
+                        (item.get("run") or {}).get("run_id")]
+            if argv == expected:
+                return SimpleNamespace(pid=919191)
+            return guarded_popen(argv, **kwargs)
+        with mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
+             mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")), \
+             mock.patch.object(crq.subprocess, "Popen", side_effect=fake_child):
+            crq.launch(self.q, item, plan)
+        meta = json.loads((crq.RUNS / item["run"]["run_id"] / "meta.json").read_text())
+        self.assertIn("--committed", meta["cmd"])
+        self.assertEqual(meta["range_policy"], "full-range-once-v1")
+
+
+    def test_range_enrollment_recovers_heads_and_isolates_unavailable_prs(self):
+        opened = [{"number": n, "headRefOid": self.merge, "baseRefName": "merge-queue",
+                   "headRefName": f"fixture-{n}", "isDraft": False} for n in (42, 43, 44, 45)]
+        self.q["items"] = [{"id": f"pr{n}", "pr": n, "kind": "open", "state": "done",
+                            "cycles": [], "order": n} for n in (42, 43, 44, 45)]
+        real_git = crq.git
+        reads = 0
+        def merge_base(*args, **kwargs):
+            nonlocal reads
+            if args[0] == "merge-base":
+                reads += 1
+                if reads == 2:
+                    raise RuntimeError("head moved after recovery")
+            return real_git(*args, **kwargs)
+        with mock.patch.object(crq, "gh_json", return_value=opened), \
+             mock.patch.object(crq, "ensure_commit", side_effect=[False, True, True, True]) as recover, \
+             mock.patch.object(crq, "git", side_effect=merge_base):
+            log = crq.enroll(self.q, False)
+        self.assertEqual([call.args[0] for call in recover.call_args_list], [42, 43, 44, 45])
+        self.assertEqual([item["pr"] for item in self.q["items"] if item["kind"] == "delta"], [43, 45])
+        self.assertEqual(sum("enrollment deferred" in line for line in log), 2)
+        # Same frozen range is represented once across enrollment replay.
+        with mock.patch.object(crq, "gh_json", return_value=opened[1:2]), \
+             mock.patch.object(crq, "ensure_commit", return_value=True):
+            crq.enroll(self.q, False)
+        self.assertEqual(sum(item["kind"] == "delta" and item["pr"] == 43 for item in self.q["items"]), 1)
+
+
+
 class DeferredSourceSearchTest(unittest.TestCase):
     """Q14: publication recovery reads search text as a hint, never as identity.
 
@@ -1108,13 +1582,18 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
     """Q14: the parked row yields the start slot instead of starving rank 5."""
 
     def setUp(self):
+        usage = mock.patch.object(crq.usage_slots, "read_usage", return_value=None)
+        usage.start()
+        self.addCleanup(usage.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.q = {"created_at": crq.iso(), "items": [], "starts": [], "paused": False}
         for name, value in (
                 ("load_queue", lambda: self.q), ("fetch", mock.Mock()),
-                ("enroll", lambda q, dry: []), ("promotion_audit", lambda q, dry: []),
+                ("gh_json", mock.Mock(side_effect=AssertionError("unmocked forge in admission fixture"))),
+                ("enroll", lambda q, dry: []), ("discover_merged", lambda q, budget: []),
+                ("promotion_audit", lambda q, dry: []),
                 ("promotion_tick", lambda q, dry: []), ("save_queue", mock.Mock()),
                 ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
                 ("notify_owner", mock.Mock()), ("event", mock.Mock()),
