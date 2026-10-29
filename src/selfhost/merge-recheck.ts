@@ -83,6 +83,7 @@ import type { SettleTuple } from '../policy/queue/settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
 import { parseIndependentReview } from '../shared/independent-review.js';
+import type { IndependentReviewAttestation } from '../shared/independent-review.js';
 
 /**
  * The ONE GraphQL document the recheck reads, paged by three independent
@@ -317,9 +318,18 @@ export function trustPolicyFromConfig(cfg: TrustPolicyConfig): TrustPolicy {
  */
 export const CONSERVATIVE_TRUST_POLICY: TrustPolicy = Object.freeze(trustPolicyFromConfig({}));
 
+/** Existing trusted-account marker evidence; supplies no new verification authority. */
+export interface AuthenticatedR4Evidence {
+  readonly actorKey: string;
+  readonly reviewNodeId: string | null;
+  readonly reviewCommitOid: string;
+  readonly submittedAt: string;
+  readonly attestation: Readonly<IndependentReviewAttestation>;
+}
+
 /** judgeAtHead's verdict. */
 export type HeadJudgment =
-  | { accepted: true; by: string[] }
+  | { accepted: true; by: string[]; readonly authenticatedR4?: AuthenticatedR4Evidence }
   | {
       accepted: false;
       reason: 'objection_outstanding' | 'no_head_bound_acceptance';
@@ -841,7 +851,7 @@ const sameAccountAgentAccepted = (
   snapshot: PrSnapshot,
   headSha: string,
   policy: TrustPolicy,
-): string | null => {
+): AuthenticatedR4Evidence | null => {
   if (policy.allowSameAccountAgentReview !== true) return null;
   const author = snapshot.authorLogin?.toLowerCase();
   if (author === undefined || author === '') return null;
@@ -882,7 +892,14 @@ const sameAccountAgentAccepted = (
     STRUCTURAL_EXCLUDED_LOGINS.some((login) => bareName(login) === bare)
   )
     return null;
-  return `user:${bare}`;
+  return Object.freeze({
+    actorKey: `user:${bare}`,
+    reviewNodeId: latest.nodeId,
+    reviewCommitOid: latest.commitOid,
+    // The existing selection loop validated every candidate's submission time.
+    submittedAt: latest.submittedAt as string,
+    attestation: Object.freeze({ ...attestation }),
+  });
 };
 
 /**
@@ -941,7 +958,10 @@ export function judgeAtHead(
   }
   return {
     accepted: true,
-    by: [...new Set([...acceptors, ...(agentAcceptor === null ? [] : [agentAcceptor])])].sort(),
+    by: [
+      ...new Set([...acceptors, ...(agentAcceptor === null ? [] : [agentAcceptor.actorKey])]),
+    ].sort(),
+    ...(agentAcceptor === null ? {} : { authenticatedR4: agentAcceptor }),
   };
 }
 

@@ -49,7 +49,12 @@ import {
   judgeAtHead,
   trustPolicyFromConfig,
 } from './merge-recheck.js';
-import type { PrSnapshot, SnapshotThread, TrustPolicy } from './merge-recheck.js';
+import type {
+  AuthenticatedR4Evidence,
+  PrSnapshot,
+  SnapshotThread,
+  TrustPolicy,
+} from './merge-recheck.js';
 import {
   ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
   parseSameAccountReviewFlag,
@@ -197,6 +202,8 @@ export interface AcceptanceResult {
   subject: string;
   /** Actor keys whose head-bound acceptance counted (empty on fail). */
   acceptedBy: string[];
+  /** Existing authenticated same-account marker, from the same successful snapshot. */
+  readonly authenticatedR4?: AuthenticatedR4Evidence;
   /** Log-safe lines (counts, actor keys, reasons — never review bodies). */
   report: string[];
 }
@@ -261,7 +268,7 @@ const judgeSnapshot = async (
   subject: string,
   snapshot: PrSnapshot,
   report: string[],
-): Promise<RuleFailure | { by: string[] }> => {
+): Promise<RuleFailure | { by: string[]; readonly authenticatedR4?: AuthenticatedR4Evidence }> => {
   if (input.state === 'open' && !snapshot.open) return { rule: 'state', reason: 'pr is not open' };
   if (input.state === 'merged' && snapshot.open) {
     return { rule: 'state', reason: 'pr is still open (expected merged)' };
@@ -298,7 +305,12 @@ const judgeSnapshot = async (
   if (!judgment.accepted) {
     return { rule: 'acceptance', reason: `${judgment.reason}: ${judgment.detail}` };
   }
-  return { by: judgment.by };
+  return {
+    by: judgment.by,
+    ...(judgment.authenticatedR4 === undefined
+      ? {}
+      : { authenticatedR4: judgment.authenticatedR4 }),
+  };
 };
 
 /**
@@ -351,7 +363,16 @@ export async function judgeAcceptance(
     const outcome = await judgeSnapshot(deps, input, subject, snapshot, report);
     if ('rule' in outcome) return fail(outcome.rule, outcome.reason);
     report.push(`pass: accepted by ${outcome.by.join(', ')}`);
-    return { verdict: 'pass', pr: input.pr, subject, acceptedBy: outcome.by, report };
+    return {
+      verdict: 'pass',
+      pr: input.pr,
+      subject,
+      acceptedBy: outcome.by,
+      report,
+      ...(outcome.authenticatedR4 === undefined
+        ? {}
+        : { authenticatedR4: outcome.authenticatedR4 }),
+    };
   } catch (error) {
     return fail('error', `acceptance failed: ${describeError(error)}`);
   }
