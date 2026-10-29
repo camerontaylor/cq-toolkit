@@ -1,4 +1,16 @@
-import { readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  link,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
@@ -13,6 +25,55 @@ import {
   runAddressReviewLoop,
   withAddressOwnership,
 } from '../../../src/ops/review/internal/addressOwnership.js';
+
+// Filesystem fault gates are test-only. Every unaffected operation is real.
+const fsFaults = vi.hoisted(() => ({
+  link: undefined as
+    | undefined
+    | ((phase: 'before' | 'after', source: string, destination: string) => Promise<void>),
+  open: undefined as
+    | undefined
+    | ((path: string, flags: string | number | undefined) => Promise<void>),
+  sync: undefined as undefined | ((path: string) => Promise<void>),
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    link: async (...args: Parameters<typeof actual.link>) => {
+      await fsFaults.link?.('before', String(args[0]), String(args[1]));
+      await actual.link(...args);
+      await fsFaults.link?.('after', String(args[0]), String(args[1]));
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      await fsFaults.open?.(String(args[0]), args[1]);
+      const file = await actual.open(...args);
+      const sync = file.sync.bind(file);
+      file.sync = async () => {
+        await fsFaults.sync?.(String(args[0]));
+        await sync();
+      };
+      return file;
+    },
+  };
+});
+
+const authorityStore = (guardPath: string) =>
+  join(dirname(guardPath), 'cq-review-address-ownership.store');
+async function authorityState(guardPath: string): Promise<{ state: string; epoch: string }> {
+  const anchor = JSON.parse(await readFile(guardPath, 'utf8')) as {
+    version: number;
+    state: string;
+    epoch: string;
+  };
+  if (anchor.version !== 2) return anchor; // Deliberately foreign damage fixture.
+  const store = authorityStore(guardPath);
+  const names = (await readdir(store)).filter((name) => /^[0-9]{6}\.json$/.test(name)).sort();
+  return JSON.parse(await readFile(join(store, names.at(-1)!), 'utf8')) as {
+    state: string;
+    epoch: string;
+  };
+}
 
 const NOW = 1_793_145_600_000;
 
@@ -169,9 +230,7 @@ test('direct loop owns lifetime; only a live private bridge reenters and inherit
         await expect(runReviewLoop(opts)).rejects.toThrow('stop before mutable resolution');
       }
       expect(visited).toBe(true);
-      expect((JSON.parse(await readFile(owner.guardPath, 'utf8')) as { state: string }).state).toBe(
-        'quarantined',
-      );
+      expect((await authorityState(owner.guardPath)).state).toBe('quarantined');
     } finally {
       await f.repo.cleanup();
     }
@@ -384,9 +443,7 @@ test('unawaited admission is registered before asynchronous ownership validation
       }),
     ).rejects.toThrow('detached work requires quarantine');
     await task?.catch(() => undefined);
-    expect((JSON.parse(await readFile(owner.guardPath, 'utf8')) as { state: string }).state).toBe(
-      'quarantined',
-    );
+    expect((await authorityState(owner.guardPath)).state).toBe('quarantined');
     await expect(
       (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
         async () => undefined,
@@ -600,9 +657,7 @@ test('abandoned inner work quarantines immediately and later settlement cannot r
         // Models the governor returning while the actual implementation survives.
       }),
     ).rejects.toThrow('detached work requires quarantine');
-    expect((JSON.parse(await readFile(owner.guardPath, 'utf8')) as { state: string }).state).toBe(
-      'quarantined',
-    );
+    expect((await authorityState(owner.guardPath)).state).toBe('quarantined');
     const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
     await expect(contender.withLock(async () => undefined)).rejects.toThrow('attended recovery');
     release.resolve();
@@ -641,10 +696,7 @@ test('parent abort and replaced ownership guard refuse subsequent tracked mutati
         }),
       ).rejects.toThrow(/parent fixture cancelled|lost owner/);
       expect(mutations).toBe(0);
-      const guard = JSON.parse(await readFile(owner.guardPath, 'utf8')) as {
-        state: string;
-        epoch: string;
-      };
+      const guard = await authorityState(owner.guardPath);
       expect(guard.state).toBe(fault === 'abort' ? 'quarantined' : 'active');
       if (fault === 'guard') expect(guard.epoch).toBe('foreign');
       const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
@@ -654,6 +706,591 @@ test('parent abort and replaced ownership guard refuse subsequent tracked mutati
     }
   }
 });
+
+const FOREIGN_GUARD = '{"version":1,"epoch":"foreign","state":"active","resources":[]}\n';
+async function damageGuard(guardPath: string, damage: 'replace' | 'remove' | 'rewrite') {
+  if (damage === 'remove') await unlink(guardPath);
+  else if (damage === 'rewrite') await writeFile(guardPath, FOREIGN_GUARD);
+  else {
+    const foreign = `${guardPath}.foreign`;
+    await writeFile(foreign, FOREIGN_GUARD);
+    await rename(foreign, guardPath);
+  }
+}
+async function preservedDamage(guardPath: string, damage: 'replace' | 'remove' | 'rewrite') {
+  if (damage === 'remove') await expect(lstat(guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  else expect(await readFile(guardPath, 'utf8')).toBe(FOREIGN_GUARD);
+}
+function errorChain(error: unknown): string {
+  const messages: string[] = [];
+  for (let current = error; current instanceof Error; current = current.cause)
+    messages.push(current.message);
+  return messages.join(' / ');
+}
+
+for (const transition of ['activation', 'child', 'checkout', 'settlement', 'quarantine'] as const) {
+  for (const phase of ['before', 'after'] as const) {
+    test.each(['replace', 'remove', 'rewrite'] as const)(
+      `immutable ${transition} ${phase}-link damage: %s`,
+      async (damage) => {
+        const f = await fixture();
+        const reached = deferred(),
+          release = deferred();
+        let damaged = false,
+          dispatchAfterDamage = 0,
+          completed = false,
+          rootEntered = false;
+        const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+        const checkout = await f.resolve(f.prs[0]);
+        const sequence = { activation: 1, child: 2, checkout: 3, settlement: 4, quarantine: 4 }[
+          transition
+        ];
+        const target = join(
+          authorityStore(owner.guardPath),
+          `${String(sequence).padStart(6, '0')}.json`,
+        );
+        const factory = vi.spyOn(addressModule, 'makeReviewAddress').mockImplementation(
+          () => async (input) =>
+            withAddressOwnership(
+              { repoRoot: input.repoRoot, git: f.run, source: input.source, production: true },
+              async (lease) => {
+                await lease.claimCheckout({ ...checkout, head: f.prs[0].headRefOid });
+                return lease.track(async () => {
+                  if (damaged) dispatchAfterDamage++;
+                  return { status: 'needs-human', reason: 'immutable transition fixture' };
+                });
+              },
+            ),
+        );
+        fsFaults.link = async (when, _source, destination) => {
+          if (when === phase && destination === target) {
+            reached.resolve();
+            await release.promise;
+          }
+        };
+        let pending: Promise<unknown> | undefined;
+        try {
+          pending = owner
+            .withLock(async () => {
+              rootEntered = true;
+              await owner.address(
+                {
+                  pr: 7,
+                  head: f.prs[0].headRefOid,
+                  headRepo: 'fixture/base',
+                  headRefName: 'feature/x',
+                },
+                { repoRoot: f.repo.root, source: 'pr:7' },
+              );
+              if (transition === 'quarantine') throw new Error('quarantine fixture failure');
+            })
+            .then(() => {
+              completed = true;
+            });
+          void pending.catch(() => undefined);
+          await reached.promise;
+          await damageGuard(owner.guardPath, damage);
+          damaged = true;
+          release.resolve();
+          await expect(pending).rejects.toThrow(
+            transition === 'quarantine' ? 'quarantine fixture failure' : 'lost owner',
+          );
+          expect(completed).toBe(false);
+          expect(dispatchAfterDamage).toBe(0);
+          if (transition === 'activation') expect(rootEntered).toBe(false);
+          await preservedDamage(owner.guardPath, damage);
+          await expect(async () =>
+            owner.lease().track(async () => {
+              dispatchAfterDamage++;
+            }),
+          ).rejects.toThrow(/inactive|lost owner/);
+          const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+          await expect(
+            contender.withLock(async () => {
+              dispatchAfterDamage++;
+            }),
+          ).rejects.toThrow('attended recovery');
+          expect(dispatchAfterDamage).toBe(0);
+          await preservedDamage(owner.guardPath, damage);
+        } finally {
+          release.resolve();
+          await pending?.catch(() => undefined);
+          fsFaults.link = undefined;
+          factory.mockRestore();
+          await f.repo.cleanup();
+        }
+      },
+    );
+  }
+}
+
+for (const phase of ['before-head', 'after-head'] as const) {
+  test.each(['replace', 'remove'] as const)(
+    `last checkout identity ${phase}: %s`,
+    async (damage) => {
+      const f = await fixture();
+      const checkout = await f.resolve(f.prs[0]);
+      const reached = deferred(),
+        release = deferred();
+      let dispatched = 0;
+      const git: typeof f.run = async (args) => {
+        if (args[1] === checkout.path && args.slice(2).join(' ') === 'rev-parse HEAD') {
+          const result = phase === 'after-head' ? await f.run(args) : undefined;
+          reached.resolve();
+          await release.promise;
+          return result ?? f.run(args);
+        }
+        return f.run(args);
+      };
+      const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git });
+      const factory = vi.spyOn(addressModule, 'makeReviewAddress').mockImplementation(
+        () => async (input) =>
+          withAddressOwnership(
+            { repoRoot: input.repoRoot, git, source: input.source, production: true },
+            async (lease) => {
+              await lease.claimCheckout({ ...checkout, head: f.prs[0].headRefOid });
+              return lease.track(async () => {
+                dispatched++;
+                return { status: 'needs-human', reason: 'identity fixture' };
+              });
+            },
+          ),
+      );
+      const pending = owner.withLock(async () =>
+        owner.address(
+          { pr: 7, head: f.prs[0].headRefOid, headRepo: 'fixture/base', headRefName: 'feature/x' },
+          { repoRoot: f.repo.root, source: 'pr:7' },
+        ),
+      );
+      void pending.catch(() => undefined);
+      try {
+        await reached.promise;
+        await damageGuard(owner.guardPath, damage);
+        release.resolve();
+        await expect(pending).rejects.toThrow('lost owner');
+        expect(dispatched).toBe(0);
+        await preservedDamage(owner.guardPath, damage);
+        await expect(
+          (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+            async () => undefined,
+          ),
+        ).rejects.toThrow('attended recovery');
+      } finally {
+        release.resolve();
+        await pending.catch(() => undefined);
+        factory.mockRestore();
+        await f.repo.cleanup();
+      }
+    },
+  );
+}
+
+test.each(['EXDEV', 'EPERM', 'ENOSYS', 'nofollow', 'fsync'] as const)(
+  'unsupported authority primitive fails closed: %s',
+  async (failure) => {
+    const f = await fixture();
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    let dispatched = false;
+    const unavailable = () => {
+      throw Object.assign(new Error('unsupported fixture'), { code: failure });
+    };
+    if (failure === 'nofollow')
+      fsFaults.open = async (path) => {
+        if (path.startsWith(authorityStore(owner.guardPath))) unavailable();
+      };
+    else if (failure === 'fsync')
+      fsFaults.sync = async (path) => {
+        if (path.startsWith(authorityStore(owner.guardPath))) unavailable();
+      };
+    else
+      fsFaults.link = async (_phase, _source, destination) => {
+        if (destination === owner.guardPath) unavailable();
+      };
+    try {
+      await expect(
+        owner.withLock(async () => {
+          dispatched = true;
+        }),
+      ).rejects.toThrow();
+      fsFaults.link = fsFaults.open = fsFaults.sync = undefined;
+      await expect(
+        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(async () => {
+          dispatched = true;
+        }),
+      ).rejects.toThrow('attended recovery');
+      expect(dispatched).toBe(false);
+      await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      fsFaults.link = fsFaults.open = fsFaults.sync = undefined;
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('bootstrap collision and partial history preserve evidence without repair', async () => {
+  for (const partial of [false, true]) {
+    const f = await fixture();
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    try {
+      if (partial) await mkdir(authorityStore(owner.guardPath));
+      else await writeFile(owner.guardPath, FOREIGN_GUARD);
+      await expect(
+        owner.withLock(async () => {
+          throw new Error('must not enter');
+        }),
+      ).rejects.toThrow('attended recovery');
+      if (partial) await expect(lstat(owner.guardPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      else expect(await readFile(owner.guardPath, 'utf8')).toBe(FOREIGN_GUARD);
+    } finally {
+      await f.repo.cleanup();
+    }
+  }
+});
+
+test('atomic link collision preserves destination and never falls back to rename', async () => {
+  const f = await fixture();
+  const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+  const target = join(authorityStore(owner.guardPath), '000001.json');
+  let calls = 0;
+  fsFaults.link = async (phase, _source, destination) => {
+    if (phase === 'before' && destination === target) {
+      calls++;
+      await writeFile(target, 'foreign slot bytes');
+    }
+  };
+  try {
+    await expect(
+      owner.withLock(async () => {
+        throw new Error('must not enter');
+      }),
+    ).rejects.toThrow('lost owner');
+    expect(calls).toBe(1);
+    expect(await readFile(target, 'utf8')).toBe('foreign slot bytes');
+    fsFaults.link = undefined;
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+        async () => undefined,
+      ),
+    ).rejects.toThrow('attended recovery');
+  } finally {
+    fsFaults.link = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test.each(['store', 'physical-lock'] as const)(
+  'authority publication refuses replaced identity: %s',
+  async (identity) => {
+    const f = await fixture();
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    const path =
+      identity === 'store'
+        ? authorityStore(owner.guardPath)
+        : join(dirname(owner.guardPath), 'cq-review-address-ownership.lock');
+    let replaced = false,
+      dispatched = 0;
+    fsFaults.link = async (phase, _source, destination) => {
+      if (phase === 'before' && destination.endsWith('/000002.json') && !replaced) {
+        replaced = true;
+        await rename(path, `${path}.preserved`);
+        await mkdir(path);
+      }
+    };
+    const factory = vi
+      .spyOn(addressModule, 'makeReviewAddress')
+      .mockImplementation(() => async () => {
+        dispatched++;
+        return { status: 'needs-human', reason: 'identity fixture' };
+      });
+    try {
+      await expect(
+        owner.withLock(async () =>
+          owner.address(
+            {
+              pr: 7,
+              head: f.prs[0].headRefOid,
+              headRepo: 'fixture/base',
+              headRefName: 'feature/x',
+            },
+            { repoRoot: f.repo.root, source: 'pr:7' },
+          ),
+        ),
+      ).rejects.toThrow('lost owner');
+      expect(dispatched).toBe(0);
+      fsFaults.link = undefined;
+      await expect(
+        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+          async () => undefined,
+        ),
+      ).rejects.toThrow('attended recovery');
+    } finally {
+      fsFaults.link = undefined;
+      factory.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('foreign bootstrap collision inside the hard-link window is never overwritten', async () => {
+  const f = await fixture();
+  const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+  fsFaults.link = async (phase, _source, destination) => {
+    if (phase === 'before' && destination === owner.guardPath)
+      await writeFile(owner.guardPath, FOREIGN_GUARD);
+  };
+  try {
+    await expect(
+      owner.withLock(async () => {
+        throw new Error('must not enter');
+      }),
+    ).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await readFile(owner.guardPath, 'utf8')).toBe(FOREIGN_GUARD);
+    fsFaults.link = undefined;
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+        async () => undefined,
+      ),
+    ).rejects.toThrow('attended recovery');
+    expect(await readFile(owner.guardPath, 'utf8')).toBe(FOREIGN_GUARD);
+  } finally {
+    fsFaults.link = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('settlement closes tracked admission before its awaited publication window', async () => {
+  const f = await fixture();
+  const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+  let dispatches = 0;
+  fsFaults.link = async (phase, _source, destination) => {
+    if (phase === 'before' && destination.endsWith('/000002.json')) {
+      await expect(
+        owner.lease().track(async () => {
+          dispatches++;
+        }),
+      ).rejects.toThrow('admissions closed');
+    }
+  };
+  try {
+    await owner.withLock(async () => undefined);
+    expect(dispatches).toBe(0);
+    fsFaults.link = undefined;
+    await (
+      await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+    ).withLock(async () => undefined);
+  } finally {
+    fsFaults.link = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('settlement fsync ambiguity leaves a refusal marker even if settled record is visible', async () => {
+  const f = await fixture();
+  const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+  let linked = false;
+  fsFaults.link = async (phase, _source, destination) => {
+    if (phase === 'after' && destination.endsWith('/000002.json')) linked = true;
+  };
+  fsFaults.sync = async (path) => {
+    if (linked && path === authorityStore(owner.guardPath))
+      throw Object.assign(new Error('fsync fixture'), { code: 'ENOTSUP' });
+  };
+  try {
+    await expect(owner.withLock(async () => undefined)).rejects.toThrow('lost owner');
+    fsFaults.link = fsFaults.sync = undefined;
+    expect((await authorityState(owner.guardPath)).state).toBe('settled');
+    expect(
+      (await readdir(authorityStore(owner.guardPath))).some((name) =>
+        name.startsWith('quarantined-'),
+      ),
+    ).toBe(true);
+    await expect(
+      (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+        async () => undefined,
+      ),
+    ).rejects.toThrow('attended recovery');
+  } finally {
+    fsFaults.link = fsFaults.sync = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test('immutable write loss with detached work refuses again after late settlement', async () => {
+  const f = await fixture();
+  const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+  const entered = deferred(),
+    release = deferred();
+  let actual: Promise<unknown> | undefined;
+  fsFaults.link = async (phase, _source, destination) => {
+    if (phase === 'after' && destination.endsWith('/000002.json'))
+      await damageGuard(owner.guardPath, 'replace');
+  };
+  try {
+    await expect(
+      owner.withLock(async () => {
+        actual = owner.lease().track(async () => {
+          entered.resolve();
+          await release.promise;
+          await f.repo.write('survivor.txt', 'late survivor');
+        });
+        await entered.promise;
+        throw new Error('force error-path quarantine while actual work remains');
+      }),
+    ).rejects.toThrow('force error-path');
+    await preservedDamage(owner.guardPath, 'replace');
+    fsFaults.link = undefined;
+    const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await expect(contender.withLock(async () => undefined)).rejects.toThrow('attended recovery');
+    release.resolve();
+    await actual;
+    await expect(contender.withLock(async () => undefined)).rejects.toThrow('attended recovery');
+    await preservedDamage(owner.guardPath, 'replace');
+  } finally {
+    release.resolve();
+    await actual;
+    fsFaults.link = undefined;
+    await f.repo.cleanup();
+  }
+});
+
+test.each(['records', 'per-record', 'total-bytes', 'resource-count', 'resource-bytes'] as const)(
+  'authority writer bound requires attended compaction: %s',
+  async (bound) => {
+    const f = await fixture();
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    let dispatched = 0,
+      failure: unknown;
+    const factory = vi
+      .spyOn(addressModule, 'makeReviewAddress')
+      .mockImplementation(() => async () => {
+        dispatched++;
+        return { status: 'needs-human', reason: 'bound fixture' };
+      });
+    try {
+      try {
+        await owner.withLock(async () => {
+          for (let index = 0; index < 65; index++) {
+            const unique = bound === 'resource-count' || bound === 'per-record';
+            const length =
+              bound === 'per-record' || bound === 'total-bytes'
+                ? 1900
+                : bound === 'resource-bytes'
+                  ? 2100
+                  : 10;
+            await owner.address(
+              {
+                pr: unique ? index + 1 : 7,
+                head: f.prs[0].headRefOid,
+                headRepo: 'fixture/base',
+                headRefName: `${'x'.repeat(length)}${unique ? index : ''}`,
+              },
+              { repoRoot: f.repo.root, source: `pr:${unique ? index + 1 : 7}` },
+            );
+          }
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(errorChain(failure)).toContain('bound reached; attended compaction required');
+      const names = (await readdir(authorityStore(owner.guardPath)))
+        .filter((name) => /^[0-9]{6}\.json$/.test(name))
+        .sort();
+      const records = await Promise.all(
+        names.map((name) => readFile(join(authorityStore(owner.guardPath), name))),
+      );
+      expect(names.length).toBeLessThanOrEqual(64);
+      expect(records.every((record) => record.length <= 16_384)).toBe(true);
+      expect(records.reduce((sum, record) => sum + record.length, 0)).toBeLessThanOrEqual(131_072);
+      const last = JSON.parse(records.at(-1)!.toString()) as { resources: string[] };
+      expect(last.resources.length).toBeLessThanOrEqual(64);
+      expect(last.resources.every((key) => Buffer.byteLength(key) <= 2048)).toBe(true);
+      if (bound === 'records') expect(names.length).toBe(64);
+      if (bound === 'resource-count') expect(last.resources.length).toBe(64);
+      if (bound === 'resource-bytes') expect(dispatched).toBe(0);
+      if (bound === 'per-record') {
+        expect(last.resources.length).toBe(16);
+        expect(records.reduce((sum, record) => sum + record.length, 0)).toBeLessThan(131_072);
+      }
+      if (bound === 'total-bytes') {
+        const total =
+          records.reduce((sum, record) => sum + record.length, 0) +
+          (await readFile(owner.guardPath)).length;
+        expect(total).toBeLessThanOrEqual(131_072);
+        expect(total + records.at(-1)!.length).toBeGreaterThan(131_072);
+      }
+      expect(dispatched).toBeLessThan(65);
+      await expect(
+        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+          async () => undefined,
+        ),
+      ).rejects.toThrow('attended recovery');
+    } finally {
+      factory.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+  120_000, // Bounded 64-record real-filesystem history; do not leave timed-out work running.
+);
+
+test.each(['anchor-bytes', 'record-bytes', 'total-bytes', 'enumeration'] as const)(
+  'authority reader bounds allocation before parsing: %s',
+  async (bound) => {
+    const f = await fixture();
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    try {
+      await owner.withLock(async () => undefined);
+      if (bound === 'anchor-bytes') await writeFile(owner.guardPath, '!'.repeat(257));
+      else if (bound === 'record-bytes')
+        await writeFile(join(authorityStore(owner.guardPath), '000001.json'), '!'.repeat(16_385));
+      else if (bound === 'total-bytes') {
+        const store = authorityStore(owner.guardPath);
+        const anchor = JSON.parse(await readFile(owner.guardPath, 'utf8')) as { anchor: string };
+        let previous = createHash('sha256')
+          .update(await readFile(join(store, '000002.json')))
+          .digest('hex');
+        const epoch = randomUUID();
+        for (let sequence = 3; sequence <= 63; sequence++) {
+          const bytes = JSON.stringify({
+            version: 2,
+            anchor: anchor.anchor,
+            sequence,
+            previous,
+            epoch,
+            state: 'active',
+            resources: sequence === 3 ? [] : ['x'.repeat(2048)],
+          });
+          const name = `${String(sequence).padStart(6, '0')}.json`;
+          await writeFile(join(store, `pending-${name}`), bytes);
+          await link(join(store, `pending-${name}`), join(store, name));
+          previous = createHash('sha256').update(bytes).digest('hex');
+        }
+      } else
+        for (let sequence = 3; sequence <= 65; sequence++) {
+          const pending = join(
+            authorityStore(owner.guardPath),
+            `pending-${String(sequence).padStart(6, '0')}.json`,
+          );
+          await writeFile(pending, '!');
+          await link(
+            pending,
+            join(authorityStore(owner.guardPath), `${String(sequence).padStart(6, '0')}.json`),
+          );
+        }
+      let failure: unknown;
+      try {
+        await (
+          await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })
+        ).withLock(async () => undefined);
+      } catch (error) {
+        failure = error;
+      }
+      expect(errorChain(failure)).toContain('bound reached; attended compaction required');
+      expect(errorChain(failure)).not.toContain('SyntaxError');
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
 
 test('a dirty stale PR refuses while its sibling resolves without changing caller or foreign worktrees', async () => {
   const f = await fixture();
