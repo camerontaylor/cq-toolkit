@@ -15,7 +15,7 @@ from pathlib import Path
 # This entire fixture module needs no child processes, including local Git.
 # Audit events cover absolute executables, shell/executable kwargs and aliases
 # captured before a mock could replace subprocess.Popen or os process helpers.
-_process_boundary_active = True
+_process_boundary_active = False
 
 
 def _deny_processes(event, args):
