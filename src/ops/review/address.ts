@@ -641,18 +641,42 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // Ownership spans worker edits as well as index mutation, restoration and
       // publication. Linked worktrees share this conservative exclusion domain;
       // UUID journal paths and lexical checkout aliases cannot split it.
-      const withOwnership = (action: (lease: AddressLease) => Promise<ReviewAddressResult>) =>
-        withAddressOwnership(
-          {
-            repoRoot: input.repoRoot,
-            git: rawGit,
-            source: input.source,
-            production: Object.keys(deps).length === 0,
-            controller: ownershipAbort,
-            signal: parent,
-          },
-          action,
-        );
+      const withOwnership = async (
+        action: (lease: AddressLease) => Promise<ReviewAddressResult>,
+      ) => {
+        try {
+          return await withAddressOwnership(
+            {
+              repoRoot: input.repoRoot,
+              git: rawGit,
+              source: input.source,
+              production: Object.keys(deps).length === 0,
+              controller: ownershipAbort,
+              signal: parent,
+            },
+            action,
+          );
+        } catch (cause) {
+          let detail = 'unprintable ownership error';
+          try {
+            detail = String(cause instanceof Error ? cause.message : cause);
+          } catch {
+            // Error formatting cannot reenter effectful finalization.
+          }
+          const error = `address lifetime finalization failed; durability unconfirmed: ${detail}`;
+          const { stop: _stop, ...observed } = report;
+          return {
+            status: 'failed' as const,
+            error,
+            report: {
+              ...observed,
+              reasons: observed.reasons.includes(error)
+                ? [...observed.reasons]
+                : [...observed.reasons, error],
+            },
+          };
+        }
+      };
       return await withOwnership(async (lease) => {
         addressLease = lease;
         try {
