@@ -186,7 +186,39 @@ fail-closed).
 - The crq-side audit stays **detective**. On each tick, crq checks that every `main` advance was
   authorized by a trusted bot success bound to the previous main, and corroborates it against its
   own spool records; anything else raises a loud alert. Only the newest of several promotions
-  within one tick is audited.
+  within one tick is audited. This detector still requires signer evidence for ordinary ranges,
+  even though the promotion gate makes that evidence advisory under #376/#388. Its
+  `UNVERIFIED` verdict is retained when the owner procedurally acknowledges such an alert;
+  acknowledgement does not certify the review, CI, or promotion.
+
+### Exact procedural audit acknowledgement
+
+New unverified-promotion alerts carry the full previous and new main SHAs and the audit
+observation timestamp. After the authorized promotion route has established the qualifying
+exact-head independent PASS and exact green required CI, its operator may acknowledge that
+one recorded observation with:
+
+```sh
+crq.py promotion-ack <full-new-main-sha> "<disposition>" \
+  --audit-from <full-previous-main-sha> --audit-at <recorded-UTC-timestamp>
+```
+
+Both flags are required together. Prefixes, `all`, missing or ambiguous observations, and
+non-`UNVERIFIED` records refuse in this mode. The range, observation, reason, and acknowledgement
+time persist atomically before event/status output or success. An identical retry is a no-op;
+a changed disposition refuses. A rewind followed by another observation of the same range
+needs its own timestamp, so an old receipt cannot acknowledge it. Historical alerts are not
+migrated. Legacy broad `promotion-ack` remains an acknowledgement-only convenience for
+historical audit alerts without full range SHAs and for non-audit alert families.
+Audit history retains the newest 300 record positions plus older records referenced by retained
+alerts, including acknowledged alerts, so exact first acknowledgements and retries remain usable.
+
+This is a procedural record through the existing authorized operator and local queue-store
+boundary, not proof of human identity. It never changes `UNVERIFIED` to verified, posts a
+status, or substitutes for signer approval on privileged ranges, required CI, denylist scans,
+per-PR acceptance, or replay protection. The promotion-route integration is separate work:
+this command must not be deployed as an automated per-promotion route until that integration
+has been reviewed and authorized. It performs no promotion, retry, or deployment itself.
 
 ## Owner override
 

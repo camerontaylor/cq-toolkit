@@ -2655,7 +2655,22 @@ def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
     if dry:
         return [line]
     a["last_main"] = main
-    a["records"] = (a["records"] + [rec])[-300:]
+    # Retain positions needed by any alert, including acknowledged receipt retries.
+    # Do not deduplicate: duplicate exact identities must remain ambiguous.
+    def identity(x):
+        key = tuple(x.get(k) for k in ("from", "to", "at"))
+        if (not all(isinstance(v, str) and v for v in key)
+                or not all(re.fullmatch(r"[0-9a-f]{40}", v) for v in key[:2])):
+            return None
+        try:
+            observed = parse_iso(key[2])
+            return key if observed is not None and iso(observed) == key[2] else None
+        except ValueError:
+            return None
+
+    referenced = {identity(x) for x in a["alerts"]} - {None}
+    records = a["records"] + [rec]
+    a["records"] = [x for x in records[:-300] if identity(x) in referenced] + records[-300:]
     LEDGER.mkdir(parents=True, exist_ok=True)
     with (LEDGER / "promotion-audit.md").open("a") as f:
         f.write(f"- {rec['at']} main {last[:12]} → {main[:12]}: **{rec['verdict']}**"
@@ -2665,8 +2680,9 @@ def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
     if rec["verdict"] == "UNVERIFIED":
         rec["notified"] = notify_owner(f"crq PROMOTION UNVERIFIED: main advanced {last[:10]} → {main[:10]} without a "
                                        f"crq-verified promotion review. {'; '.join(reasons)[:600]} — see "
-                                       f"{STATE / 'status.md'}; ack with `crq.py promotion-ack {main[:10]} \"<reason>\"`.")
-        a["alerts"].append({"to": main, "at": rec["at"], "reasons": reasons, "acked": None})
+                                       f"{STATE / 'status.md'}; procedural ack with `crq.py promotion-ack {main} "
+                                       f"\"<reason>\" --audit-from {last} --audit-at {rec['at']}`.")
+        a["alerts"].append({"from": last, "to": main, "at": rec["at"], "reasons": reasons, "acked": None})
         event("promotion_unverified", **{k: v for k, v in rec.items() if k != "at"})
     else:
         if rec.get("notes"):
@@ -3303,8 +3319,16 @@ def write_status(q: Dict[str, Any]) -> None:
             next_run = f"(schedule inspect failed: {exc})"[:200]
     recent = EVENTS.read_text().splitlines()[-15:] if EVENTS.exists() else []
     alerts = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) if not x.get("acked")]
-    banner = [f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: {'; '.join(x['reasons'])[:300]}. "
-              f"Ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`" for x in alerts]
+    banner = []
+    for x in alerts:
+        if (re.fullmatch(r"[0-9a-f]{40}", x.get("from", ""))
+                and re.fullmatch(r"[0-9a-f]{40}", x["to"])):
+            ack = (f"Procedural ack: `crq.py promotion-ack {x['to']} \"<reason>\" "
+                   f"--audit-from {x['from']} --audit-at {x['at']}`")
+        else:
+            ack = f"Legacy ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`"
+        banner.append(f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: "
+                      f"{'; '.join(x['reasons'])[:300]}. {ack}")
     st_p = q.get("promotion") or {}
     for x in st_p.get("escalations", []):
         if not x.get("acked"):
@@ -3506,14 +3530,59 @@ def with_lock(fn, *a, lock_wait=0, **kw):
         fh.close()
 
 
-def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
+def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
+          audit_from: Optional[str] = None, audit_at: Optional[str] = None) -> None:
     q = load_queue()
+    if action == "promotion-ack" and (audit_from is not None or audit_at is not None):
+        # Procedural disposition only: never changes the audit verdict or promotion authority.
+        sha, _, why = (reason or "").partition(" ")
+        if (not audit_from or not audit_at or not why.strip()
+                or not re.fullmatch(r"[0-9a-f]{40}", audit_from)
+                or not re.fullmatch(r"[0-9a-f]{40}", sha)):
+            sys.exit("exact audit acknowledgement requires full from/to SHAs, --audit-at and a reason")
+        try:
+            observed = parse_iso(audit_at)
+            valid_at = iso(observed) == audit_at and observed <= now()
+        except ValueError:
+            valid_at = False
+        if not valid_at:
+            sys.exit("audit acknowledgement requires a recorded UTC observation timestamp")
+        audit = q.get("promotion_audit") or {}
+        matches = lambda x: x.get("from") == audit_from and x.get("to") == sha and x.get("at") == audit_at
+        records = [x for x in audit.get("records", []) if matches(x)]
+        alerts = [x for x in audit.get("alerts", []) if matches(x)]
+        if len(records) != 1 or len(alerts) != 1 or records[0].get("verdict") != "UNVERIFIED":
+            sys.exit("audit acknowledgement requires one matching UNVERIFIED record and alert")
+        record, alert = records[0], alerts[0]
+        identity = {"from": audit_from, "to": sha, "audit_at": audit_at, "reason": why.strip()}
+        previous = alert.get("acknowledgement")
+        if alert.get("acked") or previous or record.get("acknowledgement"):
+            if (not isinstance(previous, dict) or set(previous) != set(identity) | {"acknowledged_at"}
+                    or any(previous.get(k) != v for k, v in identity.items())
+                    or not previous.get("acknowledged_at") or record.get("acknowledgement") != previous
+                    or alert.get("acked") != f"{previous['acknowledged_at']} {why.strip()}"):
+                sys.exit("audit acknowledgement already has a different or incomplete disposition")
+            write_status(q)  # A prior status/event failure cannot undo the durable disposition.
+            print("promotion-ack already recorded (procedural only)")
+            return
+        acknowledgement = {**identity, "acknowledged_at": iso()}
+        record["acknowledgement"] = alert["acknowledgement"] = acknowledgement
+        alert["acked"] = f"{acknowledgement['acknowledged_at']} {why.strip()}"
+        save_queue(q)  # Commit before any event, status rendering, or success output.
+        event("admin_promotion_audit_ack", **acknowledgement)
+        write_status(q)
+        print("promotion-ack ok (procedural only)")
+        return
     if action in ("pause", "resume"):
         q["paused"] = action == "pause"
         q["pause_reason"] = reason if action == "pause" else None
     elif action == "promotion-ack":
         sha, _, why = (reason or "").partition(" ")
-        hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) + (q.get("promotion") or {}).get("escalations", [])
+        legacy_audit = [x for x in (q.get("promotion_audit") or {}).get("alerts", [])
+                        if not (isinstance(x.get("from"), str) and isinstance(x.get("to"), str)
+                                and re.fullmatch(r"[0-9a-f]{40}", x["from"])
+                                and re.fullmatch(r"[0-9a-f]{40}", x["to"]))]
+        hit = [x for x in legacy_audit + (q.get("promotion") or {}).get("escalations", [])
                + (q.get("promotion") or {}).get("signer_alerts", [])
                + (q.get("promotion") or {}).get("gate_alerts", [])
                if not x.get("acked") and (sha == "all" or x.get("to", x.get("sha", "")).startswith(sha))]
@@ -3690,6 +3759,8 @@ def main() -> int:
     p = sub.add_parser("promotion-ack", help="acknowledge an unverified-promotion alert")
     p.add_argument("sha")
     p.add_argument("reason")
+    p.add_argument("--audit-from", help="exact previous main SHA; requires --audit-at and full target SHA")
+    p.add_argument("--audit-at", help="exact recorded audit observation UTC timestamp; requires --audit-from")
     p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
     p.add_argument("finding", help="finding number, or all")
     p.add_argument("disposition")
@@ -3760,7 +3831,8 @@ def main() -> int:
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "promotion-ack":
-        with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}")
+        with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}",
+                  audit_from=args.audit_from, audit_at=args.audit_at)
     elif args.cmd == "promotion-resolve":
         with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
     elif args.cmd == "author-enroll":
