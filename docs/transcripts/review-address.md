@@ -474,7 +474,7 @@ concurrent sibling publication case returned one verified fix, with fix-2
 refused for unknown/out-of-scope edits. The isolated named rerun passed 19/19.
 Neither output captured an offending path, so the original incident's precise
 path remains unknown. Original captured stdout/provenance was recovered under
-`/home/ctaylor/review-evidence/rev435-6820a145/`; wrapper report JSON paths are
+`~/…`; wrapper report JSON paths are
 intentionally ephemeral (`scripts/test-narrow.mjs` removes its report directory).
 
 Static investigation found that the worker snapshots Git untracked paths before
@@ -489,7 +489,7 @@ command then captures the actual temporary path. On unchanged production source
 it observes `.cq/dev/.cq-review-pr-7-656b93f647df80e2.json.<pid>.0.tmp` and returns
 the same unknown/out-of-scope refusal with one rather than two verified fixes.
 The relative path diagnostic and exact stdout are durably retained locally in
-`/home/ctaylor/review-evidence/pr435-ledger-before2.log`. This proves a causal
+`~/….log`. This proves a causal
 failure mechanism; it does not invent an unrecorded path for the earlier critic
 incident. The first harness attempt timed out because it counted the initial
 snapshot before the fixture knew its worker root; that harness-only scheduling
@@ -568,7 +568,7 @@ test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="21/23" f
 The first checkpoint contains four new provenance failures and one separate
 existing fixture step-budget failure. The second contains the admission race and
 fresh-follow-up false rejection. Durable captured stdout is retained under
-`/home/ctaylor/review-evidence/pr435-{closure,admission-rejection}-before.log`.
+`~/…/{admission-accepted,admission-rejection}-before.log`.
 The wrapper intentionally removes its temporary JSON report; these are stdout
 artifacts, not reconstructed JSON.
 
@@ -697,7 +697,7 @@ required explicit fixture JSON types; no runtime assertions or policy weakened.
 An op-doc check launched during stale-dist rebuilding failed to import the built
 registry. Its verification must run after the wrapper's build settles. No host-load
 cause is asserted for any functional failure. Durable logs are under
-`/home/ctaylor/review-evidence/pr435-reuse-*.log` on triton.
+`~/….log` on triton.
 
 Independent exact-delta review and exact-head CI remain separate gates. The
 complete current-PR aggregate 60000-token feasibility blocker and positive live
