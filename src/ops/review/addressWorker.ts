@@ -1,3 +1,7 @@
+import {
+  recordAddressTerminalAttempt,
+  deferAddressTerminalAttempt,
+} from './internal/addressOwnership.js';
 import { randomUUID } from 'node:crypto';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import { assertAddressDependenciesIsolated } from './internal/addressDependencies.js';
@@ -104,6 +108,8 @@ export interface AddressWorkerDeps {
   /** Restore engine-owned historical metadata before initial unknown-path inspection. */
   prepareBookkeeping?(): Promise<void>;
   parentSignal?: AbortSignal;
+  /** Private engine association; structurally supplied values never authenticate. */
+  terminalBinding?: object;
 }
 
 /** Only engine observations may stop retries or invalidate the shared worker tree. */
@@ -344,7 +350,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     role: ModelSpec,
     editable: boolean,
     prior?: Awaited<ReturnType<typeof addressFailureFeedback>>,
-    onDispatch?: (row: AddressAttempt) => void,
+    onDispatch?: (row: AddressAttempt) => void | Promise<void>,
     sources: readonly { path: string; text: string }[] = [],
     diagnostics: readonly FailureSet[] = [],
   ) => {
@@ -401,7 +407,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       wallMs: 0,
     };
     deps.attempts.push(row);
-    onDispatch?.(row);
+    await onDispatch?.(row);
     const start = Date.now();
     const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
       (signal): signal is AbortSignal => signal !== undefined,
@@ -567,6 +573,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       const unitStart = Date.now();
       unitDeadlines.set(finding.id, unitStart + policy.budgets.unit.wallMs);
       let touched = false;
+      let terminalAttempt: object | undefined;
+      let terminalDeferred = false;
       let editingRow: AddressAttempt | undefined;
       let restoreRefused = false;
       let dispatch:
@@ -576,8 +584,19 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         stop();
         if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
       };
-      const restore = async () =>
-        withMutation(async () => {
+      const restore = async () => {
+        if (terminalDeferred) return;
+        if (
+          touched &&
+          deps.terminalBinding &&
+          terminalAttempt &&
+          deps.parentSignal?.aborted &&
+          deferAddressTerminalAttempt(deps.terminalBinding, terminalAttempt)
+        ) {
+          terminalDeferred = true;
+          return;
+        }
+        return withMutation(async () => {
           if (!touched) return;
           if (restoreRefused)
             throw new Error('prior evidence restore refused; caller bytes retained');
@@ -654,6 +673,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           restoreRefused = true;
           throw error;
         });
+      };
       let workerUsed = 0,
         rescueUsed = 0,
         regression = false;
@@ -727,7 +747,21 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 role,
                 true,
                 prior,
-                (row) => {
+                async (row) => {
+                  if (deps.terminalBinding) {
+                    terminalAttempt = await recordAddressTerminalAttempt(deps.terminalBinding, {
+                      root,
+                      file,
+                      parent: observedHead,
+                      executionHead: observedHead,
+                      runPrefix,
+                      finding: finding.id,
+                      slug: dispatch!.slug,
+                      ordinal: dispatch!.ordinal,
+                      tier,
+                      model: row.model,
+                    });
+                  }
                   touched = true;
                   editingRow = row;
                 },

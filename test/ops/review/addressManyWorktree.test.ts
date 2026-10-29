@@ -1,3 +1,6 @@
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
@@ -27,11 +30,32 @@ import {
   withAddressOwnership,
 } from '../../../src/ops/review/internal/addressOwnership.js';
 
+import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 import * as ownershipModule from '../../../src/ops/review/internal/addressOwnership.js';
 import { OpResultArtifactSchema } from '../../../src/kernel/schema.js';
 import { exitCodeForOpResult } from '../../../src/cli/exit.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
+
+// Only fixed fixture Node programs replace the private terminal spawn. Ordinary
+// Git and the existing offline harness keep their actual implementations.
+const terminalProcessFaults = vi.hoisted(() => ({
+  spawn: undefined as
+    | undefined
+    | ((
+        command: string,
+        args: readonly string[],
+        options: SpawnOptions,
+      ) => ChildProcess | undefined),
+}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (command: string, args: readonly string[], options: SpawnOptions) =>
+      terminalProcessFaults.spawn?.(command, args, options) ?? actual.spawn(command, args, options),
+  };
+});
 
 // Filesystem fault gates are test-only. Every unaffected operation is real.
 const fsFaults = vi.hoisted(() => ({
@@ -718,8 +742,9 @@ test('abandoned inner work quarantines immediately and later settlement cannot r
   }
 });
 
-test('parent abort and replaced ownership guard refuse subsequent tracked mutations', async () => {
-  for (const fault of ['abort', 'guard'] as const) {
+test.each(['abort', 'guard', 'guard-abort'] as const)(
+  'parent abort and replaced ownership guard refuse subsequent tracked mutations: %s',
+  async (fault) => {
     const f = await fixture();
     try {
       const parent = new AbortController();
@@ -737,6 +762,7 @@ test('parent abort and replaced ownership guard refuse subsequent tracked mutati
               owner.guardPath,
               JSON.stringify({ version: 1, epoch: 'foreign', state: 'active', resources: [] }),
             );
+          if (fault === 'guard-abort') parent.abort(new Error('parent fixture cancelled'));
           await owner.lease().track(async () => {
             mutations++;
           });
@@ -745,14 +771,14 @@ test('parent abort and replaced ownership guard refuse subsequent tracked mutati
       expect(mutations).toBe(0);
       const guard = await authorityState(owner.guardPath);
       expect(guard.state).toBe(fault === 'abort' ? 'quarantined' : 'active');
-      if (fault === 'guard') expect(guard.epoch).toBe('foreign');
+      if (fault !== 'abort') expect(guard.epoch).toBe('foreign');
       const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
       await expect(contender.withLock(async () => undefined)).rejects.toThrow('attended recovery');
     } finally {
       await f.repo.cleanup();
     }
-  }
-});
+  },
+);
 
 const FOREIGN_GUARD = '{"version":1,"epoch":"foreign","state":"active","resources":[]}\n';
 async function damageGuard(guardPath: string, damage: 'replace' | 'remove' | 'rewrite') {
@@ -1536,11 +1562,50 @@ test('callback values cannot forge completion and retired lease/proof replay can
   }
 });
 
+test('a genuine active-guard refusal preserves the owner and returns without report IO', async () => {
+  const f = await fixture();
+  const role = { provider: 'mock', model: 'mock' };
+  const journalDir = join(f.root, 'admission-refusal-journal');
+  let dispatches = 0;
+  try {
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await owner.withLock(async () => {
+      const before = await authorityState(owner.guardPath);
+      const result = await addressModule.makeReviewAddress({
+        config: {
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: process.execPath, args: [] } }],
+          roles: { worker: role, reviewer: role },
+          budgets: { run: { maxTokens: 1000 } },
+          review: { reviewers: ['agent'] },
+        },
+        git: f.run,
+        review: async () => {
+          dispatches++;
+          throw new Error('no review expected');
+        },
+      })({ repoRoot: f.repo.root, source: 'local', journalDir, push: true });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') throw new Error('admission was not refused');
+      expect(result.reason).toContain('could not acquire');
+      expect(result.report?.stop).toBeUndefined();
+      expect(dispatches).toBe(0);
+      await expect(lstat(journalDir)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await authorityState(owner.guardPath)).toEqual(before);
+    });
+    expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
 test.each([
   'sync',
   'deferred',
   'unprintable',
   'unprintable-message',
+  'forged-admission',
+  'nested-admission',
   'late-cleanup',
   'late-budget-facts',
 ] as const)('address lifetime catch is pure and preserves observed report: %s', async (mode) => {
@@ -1568,17 +1633,28 @@ test.each([
           },
         }
       : new Error('ownership finalization fixture');
+  if (mode === 'forged-admission')
+    Object.assign(cause, {
+      message: 'could not acquire address ownership: active or quarantined guard',
+      admissionRefusal: true,
+    });
   if (mode === 'unprintable-message')
     Object.defineProperty(cause, 'message', {
       get: () => {
         throw new Error('cannot read message');
       },
     });
-  const late = mode === 'late-cleanup' || mode === 'late-budget-facts';
+  const late =
+    mode === 'late-cleanup' || mode === 'late-budget-facts' || mode === 'nested-admission';
   const facts = mode === 'late-budget-facts';
   const original = ownershipModule.withAddressOwnership;
   const spy = vi.spyOn(ownershipModule, 'withAddressOwnership');
-  if (mode === 'sync' || mode === 'unprintable' || mode === 'unprintable-message')
+  if (
+    mode === 'sync' ||
+    mode === 'unprintable' ||
+    mode === 'unprintable-message' ||
+    mode === 'forged-admission'
+  )
     spy.mockImplementation(() => {
       closed = true;
       throw cause;
@@ -1589,6 +1665,24 @@ test.each([
       closed = true;
       throw cause;
     });
+  else if (mode === 'nested-admission')
+    spy.mockImplementation((opts, action) =>
+      original(opts, async (lease) => {
+        const contender = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+        let refusal: unknown;
+        try {
+          await contender.withLock(async () => undefined);
+        } catch (error) {
+          refusal = error;
+        }
+        expect(ownershipModule.isAddressOwnershipAdmissionRefusal(refusal)).toBe(true);
+        await action(lease);
+        throw refusal;
+      }).catch((error: unknown) => {
+        closed = true;
+        throw error;
+      }),
+    );
   else {
     spy.mockImplementation(original);
     mutexFaults.afterRelease = async () => {
@@ -1935,3 +2029,856 @@ test('a dirty stale PR refuses while its sibling resolves without changing calle
     await f.repo.cleanup();
   }
 });
+
+function terminalReport(path: string): ReviewAddressReport {
+  return {
+    source: 'local',
+    reportPath: path,
+    rounds: [],
+    findings: [],
+    openBlocking: [],
+    fixes: [],
+    attempts: [],
+    failed: [],
+    fixesPerRun: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    wallMs: 0,
+    reasons: [],
+  };
+}
+function terminalInput(repo: TestRepo) {
+  const parent = repo.git('rev-parse', 'HEAD').trim();
+  return {
+    root: repo.root,
+    file: 'src/a.ts',
+    parent,
+    executionHead: parent,
+    runPrefix: 'terminal-fixture',
+    finding: 'terminal-a',
+    slug: 'fixture',
+    ordinal: 1,
+    tier: 'worker' as const,
+    model: { provider: 'mock', model: 'offline' },
+  };
+}
+
+test.each(['success', 'report-failure', 'owner-loss', 'alias', 'alias-caught', 'opaque'] as const)(
+  'cancelled bulk participants drain every actual writer before shared reports: %s',
+  async (mode) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const started = [deferred(), deferred()],
+      arrive = deferred(),
+      releaseWriter = deferred(),
+      aliasDetected = deferred(),
+      firstWriterReady = deferred();
+    const alias = mode === 'alias' || mode === 'alias-caught';
+    const writers: Promise<unknown>[] = [];
+    const reports = [
+      terminalReport(join(f.root, 'terminal-seven.json')),
+      terminalReport(join(f.root, 'terminal-nine.json')),
+    ];
+    if (alias) reports[1]!.reportPath = reports[0]!.reportPath;
+    let owner: Awaited<ReturnType<typeof makeAddressOwnership>>;
+    let reportWrites = 0;
+    let terminalReturns = 0;
+    const reportOrder: string[] = [];
+    const factory = vi
+      .spyOn(addressModule, 'makeReviewAddress')
+      .mockImplementation(() => async (input) => {
+        const index = input.source === 'pr:7' ? 0 : 1;
+        if (index === 1 && (mode === 'report-failure' || alias)) await firstWriterReady.promise;
+        return withAddressOwnership(
+          { repoRoot: f.repo.root, git: f.run, source: input.source, production: true },
+          async (lease) => {
+            try {
+              await ownershipModule.bindAddressTerminalReport(lease, reports[index]!);
+            } catch (error) {
+              aliasDetected.resolve();
+              if (mode === 'alias-caught')
+                return { status: 'needs-human' as const, reason: 'caught alias fixture' };
+              throw error;
+            }
+            writers.push(
+              lease.track(async () => {
+                if (mode === 'opaque' && index === 0)
+                  ownershipModule.noteAddressOpaqueInvocation(lease);
+                started[index]!.resolve();
+                if (index === 0) firstWriterReady.resolve();
+                try {
+                  await releaseWriter.promise;
+                } finally {
+                  await writeFile(
+                    join(f.root, `actual-finally-${index}`),
+                    'writer finally settled',
+                  );
+                }
+              }),
+            );
+            await arrive.promise;
+            return ownershipModule.addressCancelledResult(lease).finally(() => {
+              terminalReturns++;
+            });
+          },
+        );
+      });
+    let pending: Promise<unknown> | undefined;
+    try {
+      owner = await makeAddressOwnership({
+        repoRoot: f.repo.root,
+        git: f.run,
+        signal: parent.signal,
+      });
+      fsFaults.open = async (path, flags) => {
+        if (
+          (path === reports[0]!.reportPath || path === reports[1]!.reportPath) &&
+          typeof flags === 'number' &&
+          flags & constants.O_CREAT
+        ) {
+          reportWrites++;
+          reportOrder.push(path);
+          if (mode === 'report-failure' && path === reports[1]!.reportPath)
+            throw new Error('terminal report persistence fault');
+        }
+      };
+      pending = owner.withLock(async () => {
+        const children = [7, 9].map((pr, index) =>
+          owner.address(
+            {
+              pr,
+              head: f.prs[index]!.headRefOid,
+              headRepo: 'fixture/base',
+              headRefName: `fixture-distinct-${pr}`,
+            },
+            { repoRoot: f.repo.root, source: `pr:${pr}` },
+          ),
+        );
+        // Observe rejection immediately; alias refusal can precede cancellation.
+        const outcomes = Promise.allSettled(children);
+        if (alias) {
+          await aliasDetected.promise;
+          parent.abort();
+          arrive.resolve();
+          return outcomes.then((rows) => {
+            if (mode === 'alias-caught') return;
+            if (rows.some((row) => row.status === 'rejected'))
+              throw new Error('terminal report target alias');
+          });
+        }
+        await Promise.all(started.map((entry) => entry.promise));
+        parent.abort();
+        arrive.resolve();
+        return Promise.all(children);
+      });
+      const observed = pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      if (alias) await aliasDetected.promise;
+      else await Promise.all(started.map((entry) => entry.promise));
+      await arrive.promise;
+      // Child control arrivals alone cannot settle an actual writer/finally.
+      expect(reportWrites).toBe(0);
+      expect(terminalReturns).toBe(0);
+      await expect(lstat(reports[0]!.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await authorityState(owner.guardPath)).state).toBe('active');
+      if (mode === 'owner-loss') await damageGuard(owner.guardPath, 'replace');
+      releaseWriter.resolve();
+      const outcome = await observed;
+      await Promise.allSettled(writers);
+      expect(await readFile(join(f.root, 'actual-finally-0'), 'utf8')).toContain('settled');
+      if (mode === 'success') {
+        expect(outcome).toHaveProperty('value');
+        for (let index = 0; index < 2; index++) {
+          expect(await readFile(join(f.root, `actual-finally-${index}`), 'utf8')).toContain(
+            'settled',
+          );
+          const report = JSON.parse(
+            await readFile(reports[index]!.reportPath, 'utf8'),
+          ) as ReviewAddressReport;
+          expect(report.reasons).toEqual(['parent cancelled']);
+          expect(report.failed).toEqual([]);
+        }
+        expect((await authorityState(owner.guardPath)).state).toBe('quiescent');
+      } else {
+        expect(outcome).toHaveProperty('error');
+        if (mode === 'report-failure') {
+          if ('error' in outcome)
+            expect(String(outcome.error)).toContain('terminal report persistence fault');
+          expect(reportOrder).toEqual(reports.map((report) => report.reportPath));
+          expect(
+            (JSON.parse(await readFile(reports[0]!.reportPath, 'utf8')) as ReviewAddressReport)
+              .reasons,
+          ).toEqual(['parent cancelled']);
+          await expect(lstat(reports[1]!.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+          expect((await authorityState(owner.guardPath)).state).not.toBe('quiescent');
+        } else {
+          expect(reportWrites).toBe(0);
+          expect(reportOrder).toEqual([]);
+          expect((await authorityState(owner.guardPath)).state).not.toBe('quiescent');
+          if (alias && 'error' in outcome) expect(String(outcome.error)).toContain('alias');
+        }
+      }
+    } finally {
+      releaseWriter.resolve();
+      arrive.resolve();
+      firstWriterReady.resolve();
+      await Promise.allSettled([...writers, ...(pending ? [pending] : [])]);
+      fsFaults.open = undefined;
+      factory.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('terminal binding rejects structural, replayed and retired capabilities without dispatch', async () => {
+  const f = await fixture();
+  let binding: object | undefined, attempt: object | undefined;
+  try {
+    expect(() => ownershipModule.recordAddressTerminalAttempt({}, terminalInput(f.repo))).toThrow(
+      'forged worker',
+    );
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+      async (lease) => {
+        binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        expect(() => ownershipModule.deferAddressTerminalAttempt({}, attempt!)).toThrow(
+          'forged worker',
+        );
+        expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(false);
+      },
+    );
+    await expect(
+      ownershipModule.recordAddressTerminalAttempt(binding!, terminalInput(f.repo)),
+    ).rejects.toThrow('after close');
+    expect(() =>
+      ownershipModule.addressTerminalWorkerBinding(
+        {} as Parameters<typeof ownershipModule.addressTerminalWorkerBinding>[0],
+      ),
+    ).toThrow('forged worker lease');
+    expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test.each(['snapshot', 'total', 'receipts', 'report'] as const)(
+  'terminal bounds refuse before retaining excess evidence or writing a report: %s',
+  async (mode) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const report = terminalReport(join(f.root, 'terminal-bound-report.json'));
+    try {
+      if (mode === 'snapshot' || mode === 'total') {
+        await f.repo.write(
+          'src/a.ts',
+          Buffer.alloc(4 * 1024 * 1024 + (mode === 'snapshot' ? 1 : 0), 65),
+        );
+        f.repo.commitAll('bounded raw baseline');
+      }
+      await expect(
+        withAddressOwnership(
+          {
+            repoRoot: f.repo.root,
+            git: f.run,
+            source: 'local',
+            production: false,
+            signal: parent.signal,
+          },
+          async (lease) => {
+            await ownershipModule.bindAddressTerminalReport(lease, report);
+            const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+            if (mode === 'report') {
+              report.reasons.push('x'.repeat(16 * 1024 * 1024 + 1));
+              parent.abort();
+              return ownershipModule.addressCancelledResult(lease);
+            }
+            const count = mode === 'receipts' ? 65 : mode === 'total' ? 9 : 1;
+            for (let index = 0; index < count; index++)
+              await ownershipModule.recordAddressTerminalAttempt(binding, terminalInput(f.repo));
+            throw new Error('bound failed to refuse');
+          },
+        ),
+      ).rejects.toThrow(/bound/);
+      await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test.each([
+  'stdout',
+  'stderr',
+  'post-spawn-error',
+  'spawn-failure',
+  'timeout',
+  'no-close',
+] as const)(
+  'terminal subprocess refusal retains registration until actual close: %s',
+  async (mode) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const report = terminalReport(join(f.root, 'terminal-process-report.json'));
+    const closeHeld = deferred(),
+      releaseClose = deferred();
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    let child: ChildProcess | undefined,
+      used = false,
+      resultSettled = false;
+    const longTimers: Array<() => void> = [];
+    let timerSpy: { mockRestore(): void } | undefined;
+    const actualSetTimeout = globalThis.setTimeout;
+    const baseline = await readFile(join(f.repo.root, 'src/a.ts'));
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(
+            binding,
+            terminalInput(f.repo),
+          );
+          await writeFile(join(f.repo.root, 'src/a.ts'), 'CANCELLED partial bytes\n');
+          if (mode === 'timeout' || mode === 'no-close')
+            timerSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+              handler: (...args: unknown[]) => void,
+              delay?: number,
+              ...args: unknown[]
+            ) => {
+              if (typeof handler === 'function' && delay && delay > 59_000)
+                longTimers.push(() => handler(...args));
+              return actualSetTimeout(handler, delay, ...args);
+            }) as unknown as typeof setTimeout);
+          terminalProcessFaults.spawn = (_command, _args, options) => {
+            if (used) return undefined;
+            used = true;
+            if (mode === 'spawn-failure') {
+              closeHeld.resolve();
+              throw new Error('fixed fixture synchronous spawn failure');
+            }
+            // These constant programs cannot access a provider or network. The
+            // parent test delays observed close, never treats exit as settlement.
+            const script =
+              mode === 'stdout'
+                ? 'process.stdout.write(Buffer.alloc(8*1024*1024+1,65));'
+                : mode === 'stderr'
+                  ? 'process.stderr.write(Buffer.alloc(64*1024+1,66));'
+                  : 'setTimeout(()=>{},10000);';
+            child = actual.spawn(process.execPath, ['-e', script], options);
+            const emit = child.emit;
+            child.emit = function (event: string | symbol, ...args: unknown[]): boolean {
+              if (event === 'close') {
+                closeHeld.resolve();
+                void releaseClose.promise.then(
+                  () => {
+                    Reflect.apply(emit, this, [event, ...args]) as boolean;
+                  },
+                  () => undefined,
+                );
+                return true;
+              }
+              return Reflect.apply(emit, this, [event, ...args]) as boolean;
+            };
+            if (mode === 'timeout' || mode === 'no-close')
+              queueMicrotask(() => longTimers.at(-1)!());
+            if (mode === 'post-spawn-error')
+              child.once('spawn', () => {
+                child!.emit('error', new Error('fixed fixture post-spawn error'));
+                child!.kill('SIGKILL');
+              });
+            return child;
+          };
+          parent.abort();
+          expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      );
+      const outcome = pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      void outcome.then(
+        () => {
+          resultSettled = true;
+        },
+        () => {
+          resultSettled = true;
+        },
+      );
+      await closeHeld.promise;
+      if (mode === 'no-close') {
+        longTimers[0]!(); // Availability failure is not process settlement.
+        expect(await outcome).toHaveProperty('error');
+        const retry = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+        await expect(retry.withLock(async () => undefined)).rejects.toThrow(
+          'active or quarantined',
+        );
+      }
+      if (mode !== 'spawn-failure') {
+        if (mode !== 'no-close') expect(resultSettled).toBe(false);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
+          'CANCELLED partial bytes\n',
+        );
+        await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe(
+          '',
+        );
+      }
+      releaseClose.resolve();
+      const result = await outcome;
+      expect(result).toHaveProperty('error');
+      expect(
+        (await authorityState(join(f.repo.root, '.git', 'cq-review-address-ownership.owner.json')))
+          .state,
+      ).not.toBe('quiescent');
+      expect(await readFile(join(f.repo.root, 'src/a.ts'))).not.toEqual(baseline);
+    } finally {
+      terminalProcessFaults.spawn = undefined;
+      releaseClose.resolve();
+      timerSpy?.mockRestore();
+      child?.kill('SIGKILL');
+      await Promise.allSettled(pending ? [pending] : []);
+      await new Promise<void>((done) => setImmediate(done));
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('pending actual writer exceeds drain bound without terminal IO and late settle cannot reopen authority', async () => {
+  const f = await fixture();
+  const parent = new AbortController(),
+    release = deferred(),
+    entered = deferred();
+  const report = terminalReport(join(f.root, 'pending-terminal-report.json'));
+  let writer: Promise<unknown> | undefined,
+    elapsed = 0;
+  const actualNow = Date.now.bind(Date);
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => actualNow() + elapsed);
+  try {
+    await expect(
+      withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          writer = lease.track(async () => {
+            entered.resolve();
+            await release.promise;
+            await writeFile(join(f.root, 'late-finally'), 'settled');
+          });
+          await entered.promise;
+          parent.abort();
+          const cancelled = ownershipModule.addressCancelledResult(lease);
+          elapsed = 60_001;
+          return cancelled;
+        },
+      ),
+    ).rejects.toThrow('actual writers/control arrivals unresolved');
+    await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const retry = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    await expect(retry.withLock(async () => undefined)).rejects.toThrow('active or quarantined');
+    release.resolve();
+    await writer;
+    await expect(retry.withLock(async () => undefined)).rejects.toThrow('active or quarantined');
+    expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+  } finally {
+    release.resolve();
+    await writer;
+    clock.mockRestore();
+    await f.repo.cleanup();
+  }
+});
+
+test.each([false, true])(
+  'closed participant stays immutable; late receipt cannot be reclaimed: %s',
+  async (late) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const closed = deferred(),
+      entered = deferred(),
+      arrive = deferred(),
+      release = deferred(),
+      secondReady = deferred();
+    const reports = [
+      terminalReport(join(f.root, 'closed-terminal.json')),
+      terminalReport(join(f.root, 'open-terminal.json')),
+    ];
+    reports[0]!.reasons.push('already returned before cancellation');
+    let actual: Promise<unknown> | undefined;
+    const factory = vi
+      .spyOn(addressModule, 'makeReviewAddress')
+      .mockImplementation(() => async (input) => {
+        const index = input.source === 'pr:7' ? 0 : 1;
+        const result = await withAddressOwnership(
+          { repoRoot: f.repo.root, git: f.run, source: input.source, production: true },
+          async (lease) => {
+            await ownershipModule.bindAddressTerminalReport(lease, reports[index]!);
+            if (index === 0) {
+              if (late) {
+                const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+                const attempt = await ownershipModule.recordAddressTerminalAttempt(
+                  binding,
+                  terminalInput(f.repo),
+                );
+                actual = lease.track(async () => {
+                  entered.resolve();
+                  await release.promise;
+                  ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+                });
+                void actual.catch(() => undefined);
+                await entered.promise;
+              }
+              await writeFile(reports[0]!.reportPath, 'immutable closed participant report');
+              return {
+                status: 'needs-human' as const,
+                reason: 'already closed',
+                report: reports[0]!,
+              };
+            }
+            secondReady.resolve();
+            await arrive.promise;
+            return ownershipModule.addressCancelledResult(lease);
+          },
+        );
+        if (index === 0) closed.resolve();
+        return result;
+      });
+    let pending: Promise<unknown> | undefined;
+    try {
+      const owner = await makeAddressOwnership({
+        repoRoot: f.repo.root,
+        git: f.run,
+        signal: parent.signal,
+      });
+      pending = owner.withLock(async () => {
+        const first = owner.address(
+          {
+            pr: 7,
+            head: f.prs[0].headRefOid,
+            headRepo: 'fixture/base',
+            headRefName: 'closed-seven',
+          },
+          { repoRoot: f.repo.root, source: 'pr:7' },
+        );
+        void first.catch(() => undefined);
+        await closed.promise;
+        const second = owner.address(
+          { pr: 9, head: f.prs[1].headRefOid, headRepo: 'fixture/base', headRefName: 'open-nine' },
+          { repoRoot: f.repo.root, source: 'pr:9' },
+        );
+        const outcomes = Promise.allSettled([first, second]);
+        await secondReady.promise;
+        parent.abort();
+        arrive.resolve();
+        release.resolve();
+        const rows = await outcomes;
+        const rejected = rows.find((row) => row.status === 'rejected');
+        if (rejected?.status === 'rejected') throw rejected.reason;
+        return rows;
+      });
+      const outcome = await pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      expect(await readFile(reports[0]!.reportPath, 'utf8')).toBe(
+        'immutable closed participant report',
+      );
+      expect(reports[0]!.reasons).toEqual(['already returned before cancellation']);
+      if (late) {
+        expect(outcome).toHaveProperty('error');
+        await expect(lstat(reports[1]!.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect((await authorityState(owner.guardPath)).state).not.toBe('quiescent');
+      } else {
+        expect(outcome).toHaveProperty('value');
+        expect(
+          (JSON.parse(await readFile(reports[1]!.reportPath, 'utf8')) as ReviewAddressReport)
+            .reasons,
+        ).toEqual(['parent cancelled']);
+      }
+    } finally {
+      arrive.resolve();
+      release.resolve();
+      await Promise.allSettled([...(actual ? [actual] : []), ...(pending ? [pending] : [])]);
+      factory.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test.each([
+  'head',
+  'index',
+  'foreign-file',
+  'path',
+  'mode',
+  'cancel-again',
+  'restore-io',
+  'cleanup-owner-loss',
+] as const)(
+  'terminal evidence guards preserve changed caller state or honest prior ref effects: %s',
+  async (mode) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const report = terminalReport(join(f.root, 'terminal-identity-report.json'));
+    const before = f.repo.git('rev-parse', 'HEAD').trim();
+    let expectedHead = before;
+    try {
+      const pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(
+            binding,
+            terminalInput(f.repo),
+          );
+          await writeFile(join(f.repo.root, 'src/a.ts'), 'RAW CANCELLED PARTIAL\n');
+          if (mode === 'head') expectedHead = f.repo.commitAll('foreign head movement');
+          if (mode === 'index') f.repo.git('add', '--', 'src/a.ts');
+          if (mode === 'foreign-file')
+            await writeFile(join(f.repo.root, 'README.md'), 'foreign bytes retained');
+          if (mode === 'path') {
+            await rename(join(f.repo.root, 'src/a.ts'), join(f.root, 'preserved-original-file'));
+            await writeFile(join(f.repo.root, 'src/a.ts'), 'replacement bytes retained');
+          }
+          if (mode === 'mode') {
+            const actual =
+              await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+            await actual.chmod(join(f.repo.root, 'src/a.ts'), 0o755);
+          }
+          if (mode === 'restore-io')
+            fsFaults.open = async (path, flags) => {
+              if (
+                path === join(f.repo.root, 'src/a.ts') &&
+                typeof flags === 'number' &&
+                flags & constants.O_WRONLY
+              )
+                throw new Error('terminal restore IO fault');
+            };
+          if (mode === 'cleanup-owner-loss')
+            fsFaults.open = async (path, flags) => {
+              if (
+                path === join(f.repo.root, 'src/a.ts') &&
+                typeof flags === 'number' &&
+                flags & constants.O_WRONLY
+              )
+                await damageGuard(
+                  join(f.repo.root, '.git', 'cq-review-address-ownership.owner.json'),
+                  'replace',
+                );
+            };
+          if (mode === 'cancel-again')
+            fsFaults.open = async (path, flags) => {
+              if (
+                path === join(f.repo.root, 'src/a.ts') &&
+                typeof flags === 'number' &&
+                flags & constants.O_WRONLY
+              )
+                parent.abort();
+            };
+          parent.abort();
+          expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      );
+      if (mode === 'cancel-again') {
+        const result = await pending;
+        expect(result.status).toBe('needs-human');
+        expect(report.failed).toHaveLength(1);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
+      } else {
+        await expect(pending).rejects.toThrow(/terminal|owner|authority/);
+        await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
+          mode === 'path' ? 'replacement bytes retained' : 'RAW CANCELLED PARTIAL\n',
+        );
+        if (mode === 'restore-io' || mode === 'cleanup-owner-loss') {
+          expect(report.failed).toHaveLength(1);
+          expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe(
+            'RAW CANCELLED PARTIAL\n',
+          );
+        } else expect(report.failed).toEqual([]);
+      }
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(expectedHead);
+      expect(f.repo.git('ls-remote', '--heads', 'origin', 'terminal-fixture/*')).toBe('');
+    } finally {
+      fsFaults.open = undefined;
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('RAW terminal plumbing never invokes configured clean/smudge filters or hooks', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const report = terminalReport(join(f.root, 'raw-terminal-report.json'));
+  const marker = join(f.root, 'forbidden-helper-marker');
+  const helper = join(f.root, 'fixed-filter.cjs');
+  try {
+    await f.repo.write('.gitattributes', 'src/a.ts filter=terminalfixture\n');
+    f.repo.commitAll('raw attribute fixture');
+    await writeFile(
+      helper,
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)},'helper invoked'); process.stdin.pipe(process.stdout);`,
+    );
+    f.repo.git('config', 'filter.terminalfixture.clean', `${process.execPath} ${helper}`);
+    f.repo.git('config', 'filter.terminalfixture.smudge', `${process.execPath} ${helper}`);
+    const hooks = join(f.root, 'configured-hooks');
+    await mkdir(hooks);
+    const hook = join(hooks, 'post-index-change');
+    await writeFile(
+      hook,
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)},'hook invoked');\n`,
+    );
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    await actualFs.chmod(hook, 0o755);
+    f.repo.git('config', 'core.hooksPath', hooks);
+    const head = f.repo.git('rev-parse', 'HEAD').trim();
+    const result = await withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.run,
+        source: 'local',
+        production: false,
+        signal: parent.signal,
+      },
+      async (lease) => {
+        await ownershipModule.bindAddressTerminalReport(lease, report);
+        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        const attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        await writeFile(join(f.repo.root, 'src/a.ts'), 'RAW retained bytes\n');
+        parent.abort();
+        ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+        return ownershipModule.addressCancelledResult(lease);
+      },
+    );
+    expect(result.status).toBe('needs-human');
+    expect(report.failed).toHaveLength(1);
+    expect(f.repo.git('cat-file', 'blob', `${report.failed[0]!.sha}:src/a.ts`)).toBe(
+      'RAW retained bytes\n',
+    );
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
+    expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(head);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+// Counter-bound fixtures use deterministic streams, not OS-child lifetime
+// evidence. The separate fixed-Node cases above exercise real close/kill.
+function boundedFixtureProcess(output: string, code = 0): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  const input = new PassThrough(),
+    stdout = new PassThrough(),
+    stderr = new PassThrough();
+  Object.assign(child, { stdin: input, stdout, stderr, kill: () => true });
+  input.resume();
+  queueMicrotask(() => {
+    child.emit('spawn');
+    stdout.end(output);
+    stderr.end();
+    child.emit('close', code, null);
+  });
+  return child;
+}
+
+test.each(['commands', 'ref-creations'] as const)(
+  'terminal helper work has a finite per-receipt bound: %s',
+  async (bound) => {
+    const f = await fixture();
+    const parent = new AbortController();
+    const report = terminalReport(join(f.root, 'terminal-command-bound.json'));
+    let updates = 0,
+      shows = 0;
+    try {
+      await expect(
+        withAddressOwnership(
+          {
+            repoRoot: f.repo.root,
+            git: f.run,
+            source: 'local',
+            production: false,
+            signal: parent.signal,
+          },
+          async (lease) => {
+            await ownershipModule.bindAddressTerminalReport(lease, report);
+            const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+            const input = terminalInput(f.repo);
+            const attempt = await ownershipModule.recordAddressTerminalAttempt(binding, input);
+            await writeFile(join(f.repo.root, 'src/a.ts'), 'BOUNDED PARTIAL\n');
+            terminalProcessFaults.spawn = (_command, args) => {
+              if (bound === 'commands') {
+                if (args.includes('for-each-ref')) {
+                  const base = args.at(-1)!;
+                  return boundedFixtureProcess(
+                    Array.from({ length: 600 }, (_, index) => `${base}a${index + 1}`).join('\n'),
+                  );
+                }
+                if (args.includes('show')) {
+                  shows++;
+                  const identity = Buffer.from(
+                    JSON.stringify(['review', input.slug, input.finding]),
+                  ).toString('base64url');
+                  return boundedFixtureProcess(`Cq-Ref-Identity: ${identity}\n`);
+                }
+              } else {
+                if (args.includes('update-ref')) {
+                  updates++;
+                  return boundedFixtureProcess('', 1);
+                }
+                if (args.includes('rev-parse') && args.includes('--verify'))
+                  return boundedFixtureProcess(`${input.parent}\n`);
+              }
+              return undefined;
+            };
+            parent.abort();
+            ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+            return ownershipModule.addressCancelledResult(lease);
+          },
+        ),
+      ).rejects.toThrow(bound === 'commands' ? 'command/time bound' : 'branch collision limit');
+      if (bound === 'commands') {
+        expect(shows).toBeGreaterThan(400);
+        expect(shows).toBeLessThan(512);
+      } else expect(updates).toBe(32);
+      expect(report.failed).toEqual([]);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BOUNDED PARTIAL\n');
+      await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/terminal-fixture/'),
+      ).toBe('');
+    } finally {
+      terminalProcessFaults.spawn = undefined;
+      await f.repo.cleanup();
+    }
+  },
+);
