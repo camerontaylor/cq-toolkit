@@ -1012,9 +1012,9 @@ class OpenCyclePolicyTest(unittest.TestCase):
         info = dict(state="OPEN", isDraft=False, headRefOid=HEAD,
                     baseRefName="merge-queue", headRefName="topic")
         with mock.patch.object(crq, "git", return_value=BASE):
-            self.assertEqual(crq.plan_open(self.item(), info, False)["label"], "cycle 1 (required)")
+            self.assertEqual(crq.plan_open(self.item(), info, False)["label"], "one review of captured range")
             self.assertEqual(crq.plan_open(self.item(cycles=[{}]), info, False)["label"],
-                             "additional cycle (optional)")
+                             "one review of captured range")
 
     def test_existing_one_of_two_migrates_idempotently_without_touching_inflight(self):
         with tempfile.TemporaryDirectory() as td:
