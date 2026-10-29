@@ -53,6 +53,7 @@ import {
   type GateDeps,
   type GateGit,
   type MergedPr,
+  type PromotionClosureEvidence,
   type ReviewerWant,
   type VerdictWant,
   type VerifiedRunEvidence,
@@ -1008,6 +1009,150 @@ const cfg = (over: Partial<GateConfig> = {}): GateConfig => ({
 const dispatches = (calls: string[][]): string[][] => calls.filter((c) => c[2] === 'POST');
 
 describe('runGate', () => {
+  test('closure observer receives a fresh recursively frozen manifest before acceptance or push', async () => {
+    const seen: PromotionClosureEvidence[] = [];
+    let pushes = 0;
+    const h = harness(world(), {
+      onPromotionClosure: (item) => {
+        expect(h.acceptanceInputs).toHaveLength(seen.length * 2);
+        expect(pushes).toBe(seen.length);
+        expect(Object.isFrozen(item)).toBe(true);
+        expect(Object.isFrozen(item.admitted)).toBe(true);
+        expect(item.admitted.every(Object.isFrozen)).toBe(true);
+        expect(Reflect.set(item, 'to', X)).toBe(false);
+        expect(Reflect.set(item.admitted[0]!, 'head', X)).toBe(false);
+        expect(() => (item.admitted as unknown[]).push({})).toThrow();
+        seen.push(item);
+        return Promise.resolve();
+      },
+      git: fakeGit({
+        pushAtomic: () => {
+          pushes++;
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      }),
+    });
+    const config = cfg({ push: true, pushToken: 'fixture' });
+    expect((await runGate(h.deps, config)).verdict).toBe('promoted');
+    expect(seen).toEqual([
+      {
+        schema: 1,
+        repositoryId: REPO_ID,
+        from: MAIN,
+        to: M1,
+        admitted: [{ pr: 7, merge: M1, head: H1 }],
+        phase: 'closure-clean',
+      },
+    ]);
+    expect(h.acceptanceInputs.map(({ pr, subject }) => ({ pr, subject }))).toEqual([
+      { pr: 7, subject: H1 },
+      { pr: 7, subject: H1 },
+    ]);
+    expect(pushes).toBe(1);
+    expect((await runGate(h.deps, config)).verdict).toBe('promoted');
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).not.toBe(seen[0]);
+    expect(seen[1]!.admitted).not.toBe(seen[0]!.admitted);
+    expect(seen[1]!.admitted[0]).not.toBe(seen[0]!.admitted[0]);
+  });
+
+  test('closure observer includes every admitted PR in a stacked range', async () => {
+    const seen: PromotionClosureEvidence[] = [];
+    const w = world(M2);
+    w.prs.set(M1, world().prs.get(M1)!);
+    w.prs.set(M2, [
+      {
+        number: 8,
+        merge_commit_sha: M2,
+        base: { ref: 'merge-queue' },
+        merged_at: '2026-09-01T00:00:00Z',
+        head: { sha: H2, repo: { id: REPO_ID } },
+      },
+    ]);
+    const h = harness(w, {
+      onPromotionClosure: (item) => {
+        seen.push(item);
+        return Promise.resolve();
+      },
+      git: fakeGit({
+        revParse: (_repo, rev) =>
+          Promise.resolve(
+            rev === 'refs/remotes/origin/merge-queue'
+              ? M2
+              : rev === 'refs/remotes/origin/main'
+                ? MAIN
+                : rev,
+          ),
+        isAncestor: (_repo, a, b) =>
+          Promise.resolve(a === b || (a === MAIN && [M1, M2].includes(b))),
+        rangeCommits: () =>
+          Promise.resolve([{ sha: M2, parents: [M1, H2] }, { sha: H2, parents: [M1] }, ...ONE]),
+        firstParentRange: () => Promise.resolve([M2, M1]),
+      }),
+    });
+    expect((await runGate(h.deps, cfg())).verdict).toBe('would-promote');
+    expect(seen).toEqual([
+      {
+        schema: 1,
+        repositoryId: REPO_ID,
+        from: MAIN,
+        to: M2,
+        admitted: [
+          { pr: 8, merge: M2, head: H2 },
+          { pr: 7, merge: M1, head: H1 },
+        ],
+        phase: 'closure-clean',
+      },
+    ]);
+  });
+
+  test.each(['uncovered', 'merge-resolution'] as const)(
+    'closure observer never runs for %s rejection',
+    async (failure) => {
+      let observed = 0;
+      const h = harness(world(M1, MAIN, failure === 'uncovered' ? { prs: new Map() } : {}), {
+        onPromotionClosure: () => {
+          observed++;
+          return Promise.resolve();
+        },
+        git: fakeGit(
+          failure === 'merge-resolution' ? { treeOf: () => Promise.resolve(sha('5')) } : {},
+        ),
+      });
+      expect((await runGate(h.deps, cfg())).verdict).toBe('refused');
+      expect(observed).toBe(0);
+      expect(h.acceptanceInputs).toEqual([]);
+    },
+  );
+
+  test.each(['throw', 'reject'] as const)(
+    'closure observer %s refuses before acceptance and push; absent observer preserves behavior',
+    async (failure) => {
+      let pushes = 0;
+      const h = harness(world(), {
+        onPromotionClosure: () => {
+          if (failure === 'throw') throw new Error('closure observer refusal');
+          return Promise.reject(new Error('closure observer refusal'));
+        },
+        git: fakeGit({
+          pushAtomic: () => {
+            pushes++;
+            return Promise.resolve({ ok: true, output: '' });
+          },
+        }),
+      });
+      const config = cfg({ push: true, pushToken: 'fixture' });
+      const refused = await runGate(h.deps, config);
+      expect(refused.verdict).toBe('refused');
+      expect(refused.report.join('\n')).toContain('closure observer refusal');
+      expect(h.acceptanceInputs).toEqual([]);
+      expect(pushes).toBe(0);
+      delete h.deps.onPromotionClosure;
+      expect((await runGate(h.deps, config)).verdict).toBe('promoted');
+      expect(pushes).toBe(1);
+    },
+  );
+
   test('final CI observer receives copied frozen same-range metadata after both acceptance passes', async () => {
     const w = world();
     const seen: VerifiedRunEvidence[] = [];

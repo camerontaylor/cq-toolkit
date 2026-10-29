@@ -809,6 +809,16 @@ export const realGateGit: GateGit = {
   pushAtomic: gitPushAtomic,
 };
 
+/** Existing closure and clean-merge checks only; supplies no acceptance or CI verdict. */
+export interface PromotionClosureEvidence {
+  readonly schema: 1;
+  readonly repositoryId: number;
+  readonly from: string;
+  readonly to: string;
+  readonly admitted: readonly Readonly<AdmittedPr>[];
+  readonly phase: 'closure-clean';
+}
+
 /** Already validated CI from the final acceptance/CI recheck, never a poll verdict. */
 export interface VerifiedRunEvidence {
   readonly repositoryId: number;
@@ -831,6 +841,8 @@ export interface GateDeps {
   policyDiff(input: PolicyDiffInput): Promise<OpResult<PolicyDiffOutcome>>;
   sleep(ms: number): Promise<void>;
   nowMs(): number;
+  /** Observe immutable copies only; throwing refuses before admission or push. Supplies no verdict. */
+  onPromotionClosure?(evidence: PromotionClosureEvidence): Promise<void>;
   /** Observe immutable copies only; throwing refuses before any push. Supplies no verdict. */
   onVerifiedRun?(evidence: VerifiedRunEvidence): Promise<void>;
 }
@@ -1172,6 +1184,18 @@ async function gateBody(
   const closure = await queueClosure(deps, cfg, main, subject, report);
   if ('refusal' in closure) refuse(closure.refusal);
   const { bySha } = closure;
+  await deps.onPromotionClosure?.(
+    Object.freeze({
+      schema: 1,
+      repositoryId: cfg.repositoryId,
+      from: main,
+      to: subject,
+      admitted: Object.freeze(
+        closure.admitted.map(({ pr, merge, head }) => Object.freeze({ pr, merge, head })),
+      ),
+      phase: 'closure-clean',
+    }),
+  );
 
   // 5. I2 evidence (not settle — see the header) per admitted PR, at its
   //    merged head. Re-judged in step 10a after the waits (a dismissal, new
