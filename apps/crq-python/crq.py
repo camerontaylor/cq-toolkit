@@ -3576,7 +3576,11 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
         q["pause_reason"] = reason if action == "pause" else None
     elif action == "promotion-ack":
         sha, _, why = (reason or "").partition(" ")
-        hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) + (q.get("promotion") or {}).get("escalations", [])
+        legacy_audit = [x for x in (q.get("promotion_audit") or {}).get("alerts", [])
+                        if not (isinstance(x.get("from"), str) and isinstance(x.get("to"), str)
+                                and re.fullmatch(r"[0-9a-f]{40}", x["from"])
+                                and re.fullmatch(r"[0-9a-f]{40}", x["to"]))]
+        hit = [x for x in legacy_audit + (q.get("promotion") or {}).get("escalations", [])
                + (q.get("promotion") or {}).get("signer_alerts", [])
                + (q.get("promotion") or {}).get("gate_alerts", [])
                if not x.get("acked") and (sha == "all" or x.get("to", x.get("sha", "")).startswith(sha))]

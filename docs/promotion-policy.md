@@ -208,7 +208,8 @@ non-`UNVERIFIED` records refuse in this mode. The range, observation, reason, an
 time persist atomically before event/status output or success. An identical retry is a no-op;
 a changed disposition refuses. A rewind followed by another observation of the same range
 needs its own timestamp, so an old receipt cannot acknowledge it. Historical alerts are not
-migrated. Legacy broad `promotion-ack` remains an acknowledgement-only convenience.
+migrated. Legacy broad `promotion-ack` remains an acknowledgement-only convenience for
+historical audit alerts without full range SHAs and for non-audit alert families.
 Audit history retains the newest 300 record positions plus older records referenced by retained
 alerts, including acknowledged alerts, so exact first acknowledgements and retries remain usable.
 

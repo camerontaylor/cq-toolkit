@@ -148,6 +148,68 @@ class PromotionAuditAckTest(unittest.TestCase):
         crq.admin("promotion-ack", None, f"{sha} {why}",
                   **({"audit_from": BASE, "audit_at": self.AT} | kwargs))
 
+    def test_flagless_full_prefix_or_all_cannot_ack_complete_audit_alert(self):
+        q = self.load()
+        q["promotion"] = {}
+        self.persist(q)
+        before = self.queue.read_bytes()
+        for target in (TIP, TIP[:10], "all"):
+            with self.subTest(target=target), self.assertRaises(SystemExit):
+                crq.admin("promotion-ack", None, f"{target} legacy disposition")
+            self.assertEqual(self.queue.read_bytes(), before)
+        for effect in self.effects.values():
+            effect.assert_not_called()
+
+    def test_flagless_all_preserves_complete_audit_but_acks_historical_and_other_families(self):
+        q = self.load()
+        audit = q["promotion_audit"]
+        audit["alerts"].extend([
+            {"to": TIP, "at": self.AT, "acked": None},
+            {"from": BASE[:10], "to": TIP, "at": self.AT, "acked": None},
+        ])
+        for family in q["promotion"].values():
+            family[0].update({"from": BASE, "to": TIP, "at": self.AT})
+        original = json.loads(json.dumps(audit["alerts"][0]))
+        self.persist(q)
+        crq.admin("promotion-ack", None, "all legacy disposition")
+        saved = self.load()
+        self.assertEqual(saved["promotion_audit"]["alerts"][0], original)
+        self.assertEqual(saved["promotion_audit"]["records"], audit["records"])
+        for alert in saved["promotion_audit"]["alerts"][1:]:
+            self.assertTrue(alert["acked"].endswith(" legacy disposition"))
+            self.assertNotIn("acknowledgement", alert)
+        for family in saved["promotion"].values():
+            self.assertTrue(family[0]["acked"].endswith(" legacy disposition"))
+        acknowledged_promotion = saved["promotion"]
+        self.ack()
+        saved = self.load()
+        self.assertEqual(saved["promotion_audit"]["records"][0]["verdict"], "UNVERIFIED")
+        self.assertEqual(saved["promotion_audit"]["records"][0]["acknowledgement"],
+                         saved["promotion_audit"]["alerts"][0]["acknowledgement"])
+        self.assertEqual(saved["promotion"], acknowledged_promotion)
+        self.effects["run"].assert_not_called()
+        self.effects["notify_owner"].assert_not_called()
+
+    def test_missing_or_malformed_at_does_not_reopen_legacy_full_range_ack(self):
+        for timestamp in (None, "", "not-a-time"):
+            with self.subTest(timestamp=timestamp):
+                q = json.loads(json.dumps(self.q))
+                q["promotion"] = {}
+                alert = q["promotion_audit"]["alerts"][0]
+                if timestamp is None:
+                    alert.pop("at")
+                else:
+                    alert["at"] = timestamp
+                self.persist(q)
+                before = self.queue.read_bytes()
+                with self.assertRaises(SystemExit):
+                    crq.admin("promotion-ack", None, "all legacy disposition")
+                with self.assertRaises(SystemExit):
+                    self.ack()
+                self.assertEqual(self.queue.read_bytes(), before)
+        for effect in self.effects.values():
+            effect.assert_not_called()
+
     def test_exact_ack_persists_before_event_and_preserves_verdict_and_other_alerts(self):
         def observed_event(kind, **receipt):
             saved = self.load()
