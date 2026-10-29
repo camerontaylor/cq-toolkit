@@ -234,10 +234,29 @@ describe('judgeAcceptance', () => {
     });
     expect((await judge(makeForge(spec))).verdict).toBe('fail');
     const policy = resolveAcceptanceTrust({ [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]: 'true' }).policy;
-    expect(await judge(makeForge(spec), {}, policy)).toMatchObject({
+    const forge = makeForge(spec);
+    const result = await judge(forge, {}, policy);
+    expect(result).toMatchObject({
       verdict: 'pass',
       acceptedBy: ['user:alice'],
+      authenticatedR4: {
+        actorKey: 'user:alice',
+        reviewNodeId: 'R_0',
+        reviewCommitOid: SHA_B,
+        submittedAt: '2026-09-24T12:00:00Z',
+        attestation: {
+          version: 1,
+          reviewerAgentId: 'reviewer-agent',
+          authorAgentId: 'author-agent',
+          headSha: SHA_B,
+          verdict: 'PASS',
+          independent: true,
+        },
+      },
     });
+    expect(Object.isFrozen(result.authenticatedR4)).toBe(true);
+    expect(Object.isFrozen(result.authenticatedR4?.attestation)).toBe(true);
+    expect(forge.log).toEqual(['graphql', 'rest:reviews', 'rest:comments']);
     const retracted = makeForge(
       prSpec({
         author: 'alice',
@@ -288,6 +307,49 @@ describe('judgeAcceptance', () => {
     expect(result.verdict).toBe('fail');
     expect(result.acceptedBy).toEqual([]);
     expect(failLine(result.report)).toMatch(/^fail \(acceptance\): no_head_bound_acceptance: /);
+  });
+
+  test.each([
+    ['objection', { reviews: [review({ state: 'CHANGES_REQUESTED' })] }],
+    ['truncated', { reviewsHasNext: true }],
+    ['REST lag', { restExtraReviews: [{ node_id: 'R_missing', state: 'APPROVED' }] }],
+    ['draft', { isDraft: true }],
+    ['head moved', { head: SHA_A }],
+  ] satisfies [string, Partial<PrSpec>][])(
+    '%s cannot leak marker evidence',
+    async (_, over: Partial<PrSpec>) => {
+      const marker = review({
+        login: 'alice',
+        association: 'OWNER',
+        state: 'COMMENTED',
+        body: `<!-- cq-agent-review: ${JSON.stringify({
+          version: 1,
+          reviewerAgentId: 'reviewer-agent',
+          authorAgentId: 'author-agent',
+          headSha: SHA_B,
+          verdict: 'PASS',
+          independent: true,
+        })} -->`,
+      });
+      const forge = makeForge(prSpec({ ...over, reviews: [marker, ...(over.reviews ?? [])] }));
+      const policy = resolveAcceptanceTrust({
+        [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]: 'true',
+      }).policy;
+      const result = await judge(forge, {}, policy);
+      expect(result.verdict).toBe('fail');
+      expect(result.acceptedBy).toEqual([]);
+      expect(Object.hasOwn(result, 'authenticatedR4')).toBe(false);
+      expect(
+        forge.log.every((entry) => ['graphql', 'rest:reviews', 'rest:comments'].includes(entry)),
+      ).toBe(true);
+    },
+  );
+
+  test('an ordinary approval passes without an authenticated marker property', async () => {
+    const result = await judge(makeForge(prSpec({ reviews: [review()] })));
+    expect(result.verdict).toBe('pass');
+    expect(result.acceptedBy).toEqual(['user:carol']);
+    expect(Object.hasOwn(result, 'authenticatedR4')).toBe(false);
   });
 
   test('an outstanding trusted objection fails, even beside an approval at head', async () => {

@@ -707,7 +707,10 @@ describe('judgeAtHead', () => {
       allowSameAccountAgentReview: true,
       automationLogin: 'alice',
     });
-    expect(judgeAtHead(atHead, SHA_B, enabled)).toEqual({ accepted: true, by: ['user:alice'] });
+    expect(judgeAtHead(atHead, SHA_B, enabled)).toMatchObject({
+      accepted: true,
+      by: ['user:alice'],
+    });
     const laterNonUser = await snapshotOf(
       prSpec({
         author: 'alice',
@@ -760,6 +763,127 @@ describe('judgeAtHead', () => {
       }),
     );
     expect(judgeAtHead(retracted, SHA_B, enabled)).toMatchObject({ accepted: false });
+  });
+
+  test('marker evidence is a fresh frozen copy bound to the selected review', async () => {
+    const snapshot = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review({
+            login: 'alice',
+            association: 'OWNER',
+            state: 'COMMENTED',
+            body: agentMarker('PASS'),
+          }),
+        ],
+      }),
+    );
+    const policy = trustPolicyFromConfig({ allowSameAccountAgentReview: true });
+    const result = judgeAtHead(snapshot, SHA_B, policy);
+    const repeated = judgeAtHead(snapshot, SHA_B, policy);
+    if (!result.accepted || !repeated.accepted)
+      throw new Error('expected existing marker acceptance');
+    const evidence = result.authenticatedR4;
+    expect(evidence).toEqual({
+      actorKey: 'user:alice',
+      reviewNodeId: 'R_0',
+      reviewCommitOid: SHA_B,
+      submittedAt: '2026-09-24T10:00:00Z',
+      attestation: {
+        version: 1,
+        reviewerAgentId: 'reviewer-agent',
+        authorAgentId: 'author-agent',
+        headSha: SHA_B,
+        verdict: 'PASS',
+        independent: true,
+      },
+    });
+    if (evidence === undefined) throw new Error('expected marker evidence');
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(Object.isFrozen(evidence.attestation)).toBe(true);
+    expect(evidence).not.toBe(repeated.authenticatedR4);
+    expect(evidence.attestation).not.toBe(repeated.authenticatedR4?.attestation);
+    expect(Reflect.set(evidence, 'actorKey', 'user:mallory')).toBe(false);
+    expect(Reflect.set(evidence.attestation, 'verdict', 'HOLD')).toBe(false);
+    const selected = snapshot.reviews[0];
+    if (selected === undefined) throw new Error('expected source review');
+    selected.nodeId = null;
+    selected.commitOid = SHA_A;
+    selected.body = agentMarker('HOLD');
+    expect(evidence.reviewNodeId).toBe('R_0');
+    expect(evidence.reviewCommitOid).toBe(SHA_B);
+    expect(evidence.attestation.verdict).toBe('PASS');
+    // Missing node identity was never an acceptance predicate.
+    selected.commitOid = SHA_B;
+    selected.body = agentMarker('PASS');
+    expect(judgeAtHead(snapshot, SHA_B, policy)).toMatchObject({
+      accepted: true,
+      by: ['user:alice'],
+      authenticatedR4: { reviewNodeId: null },
+    });
+  });
+
+  test.each([
+    ['HOLD', { body: agentMarker('HOLD') }],
+    ['RETRACT', { body: agentMarker('RETRACT') }],
+    ['dismissed', { state: 'DISMISSED' }],
+    ['malformed', { body: '<!-- cq-agent-review: {} -->' }],
+    ['duplicate', { body: `${agentMarker('PASS')} ${agentMarker('PASS')}` }],
+    ['wrong marker head', { body: agentMarker('PASS', SHA_A) }],
+    ['wrong review head', { oid: SHA_A }],
+    ['untrusted association', { association: 'NONE' }],
+    ['non-user actor', { typename: 'Bot' }],
+    ['invalid submission time', { submittedAt: 'invalid' }],
+    ['same agent', { body: agentMarker('PASS').replace('reviewer-agent', 'author-agent') }],
+  ] satisfies [string, Partial<ReviewSpec>][])(
+    '%s marker does not turn generic approval into R4',
+    async (_, over) => {
+      const snapshot = await snapshotOf(
+        prSpec({
+          author: 'alice',
+          reviews: [
+            review(),
+            review({
+              login: 'alice',
+              association: 'OWNER',
+              state: 'COMMENTED',
+              body: agentMarker('PASS'),
+              submittedAt: '2026-09-24T11:00:00Z',
+            }),
+            review({
+              login: 'alice',
+              association: 'OWNER',
+              state: 'COMMENTED',
+              body: agentMarker('PASS'),
+              submittedAt: '2026-09-24T12:00:00Z',
+              ...over,
+            }),
+          ],
+        }),
+      );
+      expect(
+        judgeAtHead(snapshot, SHA_B, trustPolicyFromConfig({ allowSameAccountAgentReview: true })),
+      ).toEqual({ accepted: true, by: ['user:carol'] });
+    },
+  );
+
+  test('disabled opt-in and exclusions omit evidence without changing generic acceptance', async () => {
+    const snapshot = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review(),
+          review({ login: 'alice', state: 'COMMENTED', body: agentMarker('PASS') }),
+        ],
+      }),
+    );
+    for (const policy of [
+      CONSERVATIVE_TRUST_POLICY,
+      trustPolicyFromConfig({ allowSameAccountAgentReview: true, excludedLogins: ['alice'] }),
+    ]) {
+      expect(judgeAtHead(snapshot, SHA_B, policy)).toEqual({ accepted: true, by: ['user:carol'] });
+    }
   });
 
   test('an approval whose commit.oid ≠ headRefOid at merge time is not acceptance', async () => {
