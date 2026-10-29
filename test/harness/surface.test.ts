@@ -11,7 +11,8 @@
 //   - EXECUTION: createHarnessSurface refuses a manifest naming a tool the
 //     config does not provide; tools come back in manifest order with strict
 //     JSON Schemas (additionalProperties false, no $schema); calls are
-//     serialized in arrival order; an unserved name rejects.
+//     serialized in arrival order; an unserved name rejects; the legacy
+//     `run` alias reaches the bash executor and `has` never narrows it away.
 //   - CLASSIFICATION: every REAL denial buildTools produces satisfies
 //     isHarnessDenial (tested against actual denials, not the prefix list).
 //   - THE INIT-SURFACE COMPARATOR: exact on servers and tools, fail closed on
@@ -29,7 +30,7 @@ import {
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, onTestFinished, test } from 'vitest';
+import { describe, expect, expectTypeOf, onTestFinished, test } from 'vitest';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import {
@@ -46,10 +47,10 @@ import {
   selectToolNames,
   toCallToolResult,
 } from '../../src/harness/surface.js';
-import type { HarnessManifest } from '../../src/harness/surface.js';
+import type { HarnessManifest, HarnessSurface } from '../../src/harness/surface.js';
 import { buildTools } from '../../src/harness/tools.js';
 import { harnessRunGate } from '../../src/sandbox/index.js';
-import type { ToolkitToolResult } from '../../src/harness/tools.js';
+import type { LegacyToolName, ToolkitToolResult } from '../../src/harness/tools.js';
 
 /** A realpath'd scratch workspace (macOS /var → /private/var), removed after the test. */
 function scratch(): string {
@@ -339,6 +340,37 @@ describe('createHarnessSurface', () => {
     expect(read?.inputJsonSchema).toHaveProperty('properties.file_path');
     expect(read?.inputJsonSchema).not.toHaveProperty('properties.path');
     expect(read?.inputJsonSchema['required']).toEqual(['file_path']);
+  });
+
+  test('the legacy run alias reaches the bash executor through call (#488)', async () => {
+    const surface = createHarnessSurface(manifest(scratch(), { tools: ['run', 'read'] }));
+    // A command outside the allowlist: the bash executor refuses it before
+    // spawning anything, so the denial proves the routing without a shell.
+    const viaAlias = await surface.call('run', { command: 'rm -rf x' });
+    const viaCanonical = await surface.call('bash', { command: 'rm -rf x' });
+    expect(viaAlias.outcome.ok).toBe(false);
+    if (!viaAlias.outcome.ok) {
+      expect(viaAlias.outcome.denial.tool).toBe('bash');
+      expect(viaAlias.outcome.denial.reason).toBe(
+        "CMD_DENIED: command not allowed by harness config allowlist: 'rm -rf x'",
+      );
+    }
+    expect(viaAlias).toEqual(viaCanonical);
+  });
+
+  test('has does not narrow away the legacy run alias (#488, compile-time)', () => {
+    const surface = createHarnessSurface(manifest(scratch(), { tools: ['run'] }));
+    const name: string = 'run';
+    expect(surface.has(name)).toBe(true);
+    if (surface.has(name)) {
+      // A `name is ToolkitToolName` predicate would narrow `name` here and
+      // exclude the 'run' spelling it accepts; typecheck fails if it returns.
+      expectTypeOf(name).toEqualTypeOf<string>();
+    }
+    expectTypeOf<HarnessSurface['has']>().returns.toEqualTypeOf<boolean>();
+    // `call` takes the legacy spelling without a cast for the alias window.
+    // Remove with the `run` alias (src/harness/tools.ts LegacyToolName).
+    expectTypeOf<LegacyToolName>().toExtend<Parameters<HarnessSurface['call']>[0]>();
   });
 
   test('call on an unserved name rejects (even one the config provides)', async () => {
