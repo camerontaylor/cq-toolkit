@@ -209,6 +209,8 @@ time persist atomically before event/status output or success. An identical retr
 a changed disposition refuses. A rewind followed by another observation of the same range
 needs its own timestamp, so an old receipt cannot acknowledge it. Historical alerts are not
 migrated. Legacy broad `promotion-ack` remains an acknowledgement-only convenience.
+Audit history retains the newest 300 record positions plus older records referenced by retained
+alerts, including acknowledged alerts, so exact first acknowledgements and retries remain usable.
 
 This is a procedural record through the existing authorized operator and local queue-store
 boundary, not proof of human identity. It never changes `UNVERIFIED` to verified, posts a

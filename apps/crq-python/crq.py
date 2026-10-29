@@ -2653,7 +2653,15 @@ def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
     if dry:
         return [line]
     a["last_main"] = main
-    a["records"] = (a["records"] + [rec])[-300:]
+    # Retain positions needed by any alert, including acknowledged receipt retries.
+    # Do not deduplicate: duplicate exact identities must remain ambiguous.
+    identity = lambda x: tuple(x.get(k) for k in ("from", "to", "at"))
+    referenced = {identity(x) for x in a["alerts"]
+                  if all(isinstance(v, str) and v for v in identity(x))}
+    records = a["records"] + [rec]
+    a["records"] = [x for x in records[:-300]
+                    if all(isinstance(v, str) and v for v in identity(x))
+                    and identity(x) in referenced] + records[-300:]
     LEDGER.mkdir(parents=True, exist_ok=True)
     with (LEDGER / "promotion-audit.md").open("a") as f:
         f.write(f"- {rec['at']} main {last[:12]} → {main[:12]}: **{rec['verdict']}**"

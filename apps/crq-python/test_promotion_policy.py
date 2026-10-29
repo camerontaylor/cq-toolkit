@@ -282,6 +282,112 @@ class PromotionAuditAckTest(unittest.TestCase):
         lock.assert_called_once_with(crq.admin, "promotion-ack", None, f"{TIP} O3 disposition",
                                      audit_from=BASE, audit_at=self.AT)
 
+    def recent_audits(self):
+        return [{"from": f"{n:040x}", "to": f"{n + 1:040x}", "at": self.AT,
+                 "verdict": "verified"} for n in range(300)]
+
+    def advance_audit(self, q, *, dry=False, unchanged=False):
+        main = q["promotion_audit"]["last_main"] if unchanged else "f" * 40
+        self.effects["run"].return_value = mock.Mock(returncode=0)
+        with mock.patch.object(crq, "main_sha", return_value=main), \
+             mock.patch.object(crq, "policy_at", return_value=True), \
+             mock.patch.object(crq, "promotion_mode_at", return_value="signer"), \
+             mock.patch.object(crq, "audit_signer_advance", return_value=([], [])):
+            crq.promotion_audit(q, dry)
+
+    def test_retained_alert_survives_rollover_for_first_ack_and_identical_retry(self):
+        q = self.load()
+        original = q["promotion_audit"]["records"][0]
+        q["promotion_audit"]["records"].extend(self.recent_audits())
+        self.advance_audit(q)
+        self.assertEqual(len(q["promotion_audit"]["records"]), 301)
+        self.assertIs(q["promotion_audit"]["records"][0], original)
+        self.persist(q)
+        self.ack()
+        q = self.load()
+        acknowledged = json.loads(json.dumps(q["promotion_audit"]["records"][0]))
+        q["promotion_audit"]["records"].extend(self.recent_audits())
+        q["promotion_audit"]["last_main"] = TIP
+        self.advance_audit(q)
+        self.assertEqual(len(q["promotion_audit"]["records"]), 301)
+        self.assertEqual(q["promotion_audit"]["records"][0], acknowledged)
+        self.persist(q)
+        before = self.queue.read_bytes()
+        self.effects["event"].reset_mock()
+        with mock.patch.object(crq, "save_queue") as save:
+            self.ack()
+        save.assert_not_called()
+        self.effects["event"].assert_not_called()
+        self.assertEqual(self.queue.read_bytes(), before)
+        self.assertEqual(acknowledged["verdict"], "UNVERIFIED")
+        self.assertEqual(acknowledged["reasons"], ["no trusted bot"])
+        self.effects["notify_owner"].assert_not_called()
+
+    def test_retention_keeps_exact_positions_and_evicts_unreferenced_history(self):
+        q = self.load()
+        audit = q["promotion_audit"]
+        original = audit["records"][0]
+        other_at = dict(original, at="2026-10-29T00:01:00Z")
+        historical = {"to": TIP, "at": self.AT, "verdict": "UNVERIFIED"}
+        malformed = [dict(original, **{field: value})
+                     for field, value in (("from", ""), ("to", None), ("at", []))]
+        audit["alerts"].extend(dict(x, acked=None) for x in [historical, *malformed])
+        recent = self.recent_audits()
+        recent[20] = recent[19]  # Equal tail positions must not be deduplicated either.
+        audit["records"] = [other_at, historical, *malformed, original, *recent]
+        alerts = json.loads(json.dumps(audit["alerts"]))
+        self.advance_audit(q)
+        retained = audit["records"]
+        self.assertEqual(len(retained), 301)
+        self.assertIs(retained[0], original)
+        self.assertEqual(retained[1:-1], recent[1:])
+        self.assertEqual(retained[-1]["to"], "f" * 40)
+        self.assertEqual(audit["alerts"], alerts)
+
+    def test_retention_preserves_duplicate_exact_identities_and_ack_refusal(self):
+        q = self.load()
+        original = q["promotion_audit"]["records"][0]
+        duplicate = dict(original)
+        q["promotion_audit"]["records"] = [original, duplicate, *self.recent_audits()]
+        self.advance_audit(q)
+        retained = q["promotion_audit"]["records"]
+        self.assertEqual(len(retained), 302)
+        self.assertIs(retained[0], original)
+        self.assertIs(retained[1], duplicate)
+        self.persist(q)
+        before = self.queue.read_bytes()
+        with self.assertRaises(SystemExit):
+            self.ack()
+        self.assertEqual(self.queue.read_bytes(), before)
+
+    def test_retention_dry_run_or_unchanged_main_does_not_trim(self):
+        for flags in ({"dry": True}, {"unchanged": True}):
+            q = self.load()
+            q["promotion_audit"]["records"].extend(self.recent_audits())
+            before = json.dumps(q, sort_keys=True)
+            with self.subTest(flags=flags):
+                self.advance_audit(q, **flags)
+                self.assertEqual(json.dumps(q, sort_keys=True), before)
+                self.effects["event"].assert_not_called()
+
+    def test_retention_does_not_reconstruct_missing_record_or_migrate_legacy_ack(self):
+        for missing in (True, False):
+            q = self.load()
+            audit = q["promotion_audit"]
+            if missing:
+                audit["records"] = []
+            else:
+                audit["alerts"][0]["acked"] = "historical acknowledgement"
+            audit["records"].extend(self.recent_audits())
+            self.advance_audit(q)
+            self.persist(q)
+            before = self.queue.read_bytes()
+            with self.subTest(missing=missing), self.assertRaises(SystemExit):
+                self.ack()
+            self.assertEqual(self.queue.read_bytes(), before)
+            self.assertEqual(audit["alerts"][0].get("acked"),
+                             None if missing else "historical acknowledgement")
+
     def test_status_guidance_uses_exact_identity_and_preserves_historical_commands(self):
         q = json.loads(json.dumps(self.q))
         q["promotion"] = {}
