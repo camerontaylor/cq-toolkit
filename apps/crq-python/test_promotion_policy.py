@@ -131,6 +131,7 @@ class PromotionAuditAckTest(unittest.TestCase):
             patch = mock.patch.object(crq, name, value)
             patch.start()
             self.addCleanup(patch.stop)
+        self.status_renderer = crq.write_status
         self.effects = {}
         for name in ("event", "write_status", "notify_owner", "run"):
             patch = mock.patch.object(crq, name)
@@ -280,3 +281,34 @@ class PromotionAuditAckTest(unittest.TestCase):
             crq.main()
         lock.assert_called_once_with(crq.admin, "promotion-ack", None, f"{TIP} O3 disposition",
                                      audit_from=BASE, audit_at=self.AT)
+
+    def test_status_guidance_uses_exact_identity_and_preserves_historical_commands(self):
+        q = json.loads(json.dumps(self.q))
+        q["promotion"] = {}
+        alerts = q["promotion_audit"]["alerts"]
+        alerts.extend([
+            {"to": "c" * 40, "at": self.AT, "reasons": ["historical alert"], "acked": None},
+            {"from": BASE[:10], "to": "d" * 40, "at": self.AT,
+             "reasons": ["historical partial range"], "acked": None},
+        ])
+        before = json.dumps(q, sort_keys=True)
+        with mock.patch.object(crq, "STATE", self.root), \
+             mock.patch.object(crq, "EVENTS", self.root / "events.jsonl"), \
+             mock.patch.dict(crq.CONFIG, {"schedule_id": None}), \
+             mock.patch.object(crq, "promotion_mode", return_value="signer"), \
+             mock.patch.object(crq.repair_tick, "digest", return_value={}), \
+             mock.patch.object(crq.coverage, "utilization_digest", return_value={}), \
+             mock.patch.object(crq.status_summary, "publish"):
+            self.status_renderer(q)
+        banners = [line for line in (self.root / "status.md").read_text().splitlines()
+                   if "ALERT — PROMOTION UNVERIFIED" in line]
+        self.assertEqual(len(banners), 3)
+        self.assertIn(f'Procedural ack: `crq.py promotion-ack {TIP} "<reason>" '
+                      f'--audit-from {BASE} --audit-at {self.AT}`', banners[0])
+        self.assertNotIn(f'promotion-ack {TIP[:10]} "', banners[0])
+        for banner, alert in zip(banners[1:], alerts[1:]):
+            self.assertIn(f'Legacy ack: `crq.py promotion-ack {alert["to"][:10]} "<reason>"`', banner)
+            self.assertNotIn("--audit-", banner)
+        self.assertEqual(json.dumps(q, sort_keys=True), before)
+        self.effects["run"].assert_not_called()
+        self.effects["notify_owner"].assert_not_called()

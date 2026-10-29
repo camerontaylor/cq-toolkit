@@ -3302,8 +3302,16 @@ def write_status(q: Dict[str, Any]) -> None:
             next_run = f"(schedule inspect failed: {exc})"[:200]
     recent = EVENTS.read_text().splitlines()[-15:] if EVENTS.exists() else []
     alerts = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) if not x.get("acked")]
-    banner = [f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: {'; '.join(x['reasons'])[:300]}. "
-              f"Ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`" for x in alerts]
+    banner = []
+    for x in alerts:
+        if (re.fullmatch(r"[0-9a-f]{40}", x.get("from", ""))
+                and re.fullmatch(r"[0-9a-f]{40}", x["to"])):
+            ack = (f"Procedural ack: `crq.py promotion-ack {x['to']} \"<reason>\" "
+                   f"--audit-from {x['from']} --audit-at {x['at']}`")
+        else:
+            ack = f"Legacy ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`"
+        banner.append(f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: "
+                      f"{'; '.join(x['reasons'])[:300]}. {ack}")
     st_p = q.get("promotion") or {}
     for x in st_p.get("escalations", []):
         if not x.get("acked"):
