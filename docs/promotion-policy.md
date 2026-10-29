@@ -217,6 +217,63 @@ per-PR acceptance, or replay protection. The promotion-route integration is sepa
 this command must not be deployed as an automated per-promotion route until that integration
 has been reviewed and authorized. It performs no promotion, retry, or deployment itself.
 
+### Versioned per-promotion controller (installation remains gated)
+
+`scripts/chancellor-promote.mjs` is the versioned entrypoint to the built
+`promotion-controller` module. It runs from an owner-qualified previous-main trust checkout,
+using the existing promotion gate, acceptance parser and policy validator. Its local acceptance
+policy permits trusted human approvals or the existing explicitly enabled, exact-head independent
+agent marker; ordinary COMMENTED text and allowlisted bot reviews do not qualify. All gate
+requirements, required job lists, latest failure/rerun handling, privileged signer trust,
+range closure, per-PR acceptance and atomic leased refspecs remain in force.
+
+The controller takes the gate's existing flags plus `--journal=<owner-owned-directory>`,
+`--artifactSha256=<installed-controller-module-digest>` and `--crqCommand=<JSON-argv-array>`.
+The command prefix is an owner-qualified transport to the installed crq command, never PR data.
+It must preserve argv and checked exit status, run only that reviewed installation, and provide
+authenticated access to its queue store. No credential source or fleet configuration is added.
+The entrypoint checks the artifact digest, checkout HEAD/trust ref and repository numeric ID;
+installation must independently establish the complete source/build artifact provenance. These
+checks do not qualify an arbitrary checkout supplied by an untrusted caller.
+
+Before forwarding the gate's unchanged leased push, the controller durably records exact
+from/to, source commit/tree/artifact digest, typed per-PR acceptance and immutable CI run IDs,
+attempts and required jobs from the gate's final successful acceptance/CI recheck. The journal
+uses atomic replacement with file and directory fsync and an exclusive local lease. A checked
+push success and fresh exact main/replay-marker readback are required for PUSH_CONFIRMED.
+PREPARED after a crash or any uncertain delivery becomes UNKNOWN; remote equality alone cannot
+prove a push succeeded. UNKNOWN never automatically repushes or acknowledges.
+
+Only a PUSH_CONFIRMED operation may read `promotion-audit-observe --audit-from <from>
+--to <to> --after <UTC-seconds>`. This new read-only command exposes one unique existing audit
+record after the operation boundary and its exact alert, without saving, normalizing or
+reclassifying queue state. The lower bound rounds up to the next UTC second; an audit in the
+fractional preparation second conservatively remains unresolved. Missing, ambiguous, foreign,
+old, future, UNKNOWN, override and verified-uncorroborated observations cannot complete an
+operation. No historical banner or target-only pending-ack journal is imported.
+
+An exact UNVERIFIED observation receives the range-bound procedural ack, followed by exact
+durable receipt readback, reaching ACK_CONFIRMED while retaining UNVERIFIED. Lost responses
+retry only that identical operation, timestamp and reason. An existing literal verified record
+with no matching alert, plus fresh unchanged main/replay-marker refs, reaches AUDIT_VERIFIED
+without any ack call or new verification judgment. Both terminals are durable. While an
+operation awaits audit/ack, later scheduled invocations resume it instead of promoting another
+range; this preserves crq's latest-main-movement audit coverage. No new watcher, timer or forced
+tick is introduced. A dry run cannot resume an acknowledgement.
+
+Retain the same qualified checkout and built artifact until its outstanding operation reaches
+a terminal receipt. Only then prepare an independently qualified checkout at the new main for
+the next promotion. Replacing the artifact while an operation is outstanding fails closed.
+
+Cutover requires separate owner authorization after independent exact-head review and required
+green CI: retain the unversioned route and its hash, disable its invocation ownership, install
+the pinned reviewed source/build artifact and authenticated argv-preserving transport, then
+qualify the new journal/receipt path before enabling it. This source change performs none of
+those actions. Rollback disables the successor and preserves its receipts; it never silently
+re-enables the old unsafe push/ack route. A stale lease or UNKNOWN operation requires bounded
+owner reconciliation before any further promotion. Signer installation, credentials, denylist
+policy and historical acknowledgements remain outside this change.
+
 ## Owner override
 
 The owner runs the `crq-override` tool — installed beside the signer in root-owned

@@ -3513,6 +3513,42 @@ def with_lock(fn, *a, lock_wait=0, **kw):
         fh.close()
 
 
+def promotion_audit_observe(audit_from: str, target: str, after: str) -> Dict[str, Any]:
+    """Read existing audit facts only. Never normalize/save the queue or infer a verdict."""
+    if not all(re.fullmatch(r"[0-9a-f]{40}", s) for s in (audit_from, target)):
+        raise ValueError("audit observation requires exact full from/to SHAs")
+    lower = parse_iso(after)
+    if lower is None or iso(lower) != after or lower > now():
+        raise ValueError("audit observation requires a canonical nonfuture UTC lower bound")
+    audit = json.loads(QUEUE.read_text()).get("promotion_audit") or {}
+    result = {"schema": 1, "from": audit_from, "to": target, "after": after}
+    pair = lambda x: x.get("from") == audit_from and x.get("to") == target
+    records = []
+    for record in audit.get("records", []):
+        if not pair(record):
+            continue
+        at = parse_iso(record.get("at"))
+        if at is None or iso(at) != record.get("at") or at > now():
+            return {**result, "status": "unknown"}
+        if at >= lower:
+            records.append(record)
+    if not records:
+        return {**result, "status": "absent"}
+    if len(records) != 1:
+        return {**result, "status": "ambiguous"}
+    record = records[0]
+    alerts = [a for a in audit.get("alerts", []) if pair(a) and a.get("at") == record["at"]]
+    fields = ("from", "to", "at", "verdict", "acknowledgement")
+    observed = {k: record[k] for k in fields if k in record}
+    if record.get("verdict") == "verified" and not alerts:
+        return {**result, "status": "verified", "record": observed}
+    if record.get("verdict") == "UNVERIFIED" and len(alerts) == 1:
+        alert = {k: alerts[0][k] for k in ("from", "to", "at", "acked", "acknowledgement")
+                 if k in alerts[0]}
+        return {**result, "status": "unverified", "record": observed, "alert": alert}
+    return {**result, "status": "unknown"}
+
+
 def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
           audit_from: Optional[str] = None, audit_at: Optional[str] = None) -> None:
     q = load_queue()
@@ -3740,6 +3776,10 @@ def main() -> int:
     p.add_argument("reason")
     p.add_argument("--audit-from", help="exact previous main SHA; requires --audit-at and full target SHA")
     p.add_argument("--audit-at", help="exact recorded audit observation UTC timestamp; requires --audit-from")
+    p = sub.add_parser("promotion-audit-observe", help="read exact post-operation audit facts; no writes")
+    p.add_argument("--audit-from", required=True)
+    p.add_argument("--to", required=True)
+    p.add_argument("--after", required=True)
     p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
     p.add_argument("finding", help="finding number, or all")
     p.add_argument("disposition")
@@ -3752,6 +3792,13 @@ def main() -> int:
     p.add_argument("run_id")
     args = ap.parse_args()
 
+    if args.cmd == "promotion-audit-observe":
+        try:
+            print(json.dumps(promotion_audit_observe(args.audit_from, args.to, args.after), sort_keys=True))
+            return 0
+        except (ValueError, OSError, TypeError, AttributeError) as exc:
+            print(f"promotion-audit-observe refused: {exc}", file=sys.stderr)
+            return 3
     if args.cmd in ("enqueue-merged", "report"):
         try:
             if args.cmd == "enqueue-merged":

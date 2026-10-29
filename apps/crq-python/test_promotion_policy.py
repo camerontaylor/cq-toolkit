@@ -312,3 +312,83 @@ class PromotionAuditAckTest(unittest.TestCase):
         self.assertEqual(json.dumps(q, sort_keys=True), before)
         self.effects["run"].assert_not_called()
         self.effects["notify_owner"].assert_not_called()
+
+
+class PromotionAuditObserveTest(unittest.TestCase):
+    AT = "2026-10-29T00:01:00Z"
+    AFTER = "2026-10-29T00:00:00Z"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "queue.json"
+        self.record = {"from": BASE, "to": TIP, "at": self.AT, "verdict": "verified"}
+        self.alert = {"from": BASE, "to": TIP, "at": self.AT, "acked": None}
+        patch = mock.patch.object(crq, "QUEUE", self.path)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def observe(self, records=None, alerts=None):
+        self.path.write_text(json.dumps({"items": [{"boost": True}], "promotion_audit": {
+            "records": records if records is not None else [self.record],
+            "alerts": alerts if alerts is not None else []}}))
+        before = self.path.read_bytes()
+        with mock.patch.object(crq, "save_queue") as save, \
+             mock.patch.object(crq, "event") as event, \
+             mock.patch.object(crq, "admin") as admin, \
+             mock.patch.object(crq, "load_queue") as load:
+            result = crq.promotion_audit_observe(BASE, TIP, self.AFTER)
+        for effect in (save, event, admin, load):
+            effect.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        return result
+
+    def test_existing_literal_verified_without_alert_is_exposed_unchanged(self):
+        result = self.observe()
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["record"], self.record)
+        self.assertNotIn("alert", result)
+
+    def test_unverified_requires_exact_alert_and_exposes_ack_for_readback(self):
+        self.record["verdict"] = "UNVERIFIED"
+        acknowledgement = {"from": BASE, "to": TIP, "audit_at": self.AT,
+                           "reason": "fixture", "acknowledged_at": self.AT}
+        self.record["acknowledgement"] = self.alert["acknowledgement"] = acknowledgement
+        self.alert["acked"] = f"{self.AT} fixture"
+        result = self.observe(alerts=[self.alert])
+        self.assertEqual(result["status"], "unverified")
+        self.assertEqual(result["record"]["acknowledgement"], acknowledgement)
+        self.assertEqual(result["alert"]["acknowledgement"], acknowledgement)
+        self.assertEqual(self.observe()["status"], "unknown")
+
+    def test_missing_old_foreign_and_ambiguous_records_never_verify(self):
+        for records, expected in (([], "absent"),
+                                  ([{**self.record, "at": "2026-10-28T00:00:00Z"}], "absent"),
+                                  ([{**self.record, "from": "c" * 40}], "absent"),
+                                  ([self.record, self.record], "ambiguous")):
+            with self.subTest(expected=expected, records=records):
+                self.assertEqual(self.observe(records)["status"], expected)
+
+    def test_nonliteral_verdicts_future_bad_timestamps_and_conflicting_alert_hold(self):
+        for verdict in ("UNVERIFIED", "verified-uncorroborated", "override", "pre-policy", "UNKNOWN"):
+            with self.subTest(verdict=verdict):
+                self.assertEqual(self.observe([{**self.record, "verdict": verdict}])["status"], "unknown")
+        for at in ("2099-01-01T00:00:00Z", self.AT + "junk"):
+            self.assertEqual(self.observe([{**self.record, "at": at}])["status"], "unknown")
+        self.assertEqual(self.observe(alerts=[self.alert])["status"], "unknown")
+
+    def test_parser_dispatch_is_readonly_and_bad_exact_identity_refuses(self):
+        self.observe()
+        with mock.patch.object(crq.sys, "argv", ["crq", "promotion-audit-observe", "--audit-from", BASE,
+                                               "--to", TIP, "--after", self.AFTER]), \
+             mock.patch.object(crq, "admin") as admin, \
+             mock.patch.object(crq, "save_queue") as save, \
+             mock.patch("builtins.print") as output:
+            self.assertEqual(crq.main(), 0)
+        self.assertEqual(json.loads(output.call_args.args[0])["status"], "verified")
+        admin.assert_not_called()
+        save.assert_not_called()
+        for source, target, after in ((BASE[:10], TIP, self.AFTER), (BASE, TIP, self.AFTER + "junk"),
+                                      (BASE, TIP, "2099-01-01T00:00:00Z")):
+            with self.assertRaises(ValueError):
+                crq.promotion_audit_observe(source, target, after)

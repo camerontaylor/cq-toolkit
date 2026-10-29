@@ -55,6 +55,7 @@ import {
   type MergedPr,
   type ReviewerWant,
   type VerdictWant,
+  type VerifiedRunEvidence,
 } from '../../src/selfhost/promote-gate.js';
 import { verifyWithAuthorization } from '../../src/selfhost/verify-ratchet.js';
 import type { VerifyRatchetInput } from '../../src/ops/ratchet/verifyRatchet.js';
@@ -1007,6 +1008,116 @@ const cfg = (over: Partial<GateConfig> = {}): GateConfig => ({
 const dispatches = (calls: string[][]): string[][] => calls.filter((c) => c[2] === 'POST');
 
 describe('runGate', () => {
+  test('final CI observer receives copied frozen same-range metadata after both acceptance passes', async () => {
+    const w = world();
+    const seen: VerifiedRunEvidence[] = [];
+    let passes = 0;
+    let pushes = 0;
+    const jobs = { 'ci.yml': ['j', 'crq-python'], 'denylist.yml': ['j'] };
+    const h = harness(w, {
+      acceptance: (input) => {
+        passes++;
+        return passAcceptance(input);
+      },
+      policyDiff: () => Promise.resolve(policyOutcome('pass', jobs)),
+      onVerifiedRun: (item) => {
+        expect(passes).toBe(2);
+        expect(pushes).toBe(0);
+        expect(Object.isFrozen(item)).toBe(true);
+        expect(Object.isFrozen(item.requiredJobs)).toBe(true);
+        expect(Reflect.set(item, 'subject', X)).toBe(false);
+        expect(() => (item.requiredJobs as string[]).push('forged')).toThrow();
+        expect(item.requiredJobs).not.toBe(jobs[item.workflow as keyof typeof jobs]);
+        seen.push(item);
+        return Promise.resolve();
+      },
+      git: fakeGit({
+        pushAtomic: () => {
+          pushes++;
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      }),
+    });
+    expect((await runGate(h.deps, cfg({ push: true, pushToken: 'fixture' }))).verdict).toBe(
+      'promoted',
+    );
+    expect(seen).toEqual(
+      ['ci.yml', 'denylist.yml'].map((workflow) => ({
+        repositoryId: REPO_ID,
+        from: MAIN,
+        subject: M1,
+        workflow,
+        runId: 100,
+        runAttempt: 1,
+        requiredJobs: jobs[workflow as keyof typeof jobs],
+        phase: 'final-recheck',
+      })),
+    );
+    expect(pushes).toBe(1);
+  });
+
+  test.each(['missing', 'pending', 'failure', 'rerun'] as const)(
+    'CI observer is never called for %s evidence',
+    async (mode) => {
+      const w = world();
+      if (mode === 'missing') w.verifiedRuns.set('ci.yml', []);
+      if (mode === 'pending')
+        w.verifiedRuns.set('ci.yml', [
+          greenRun('ci.yml', M1),
+          {
+            ...greenRun('ci.yml', M1),
+            id: 101,
+            created_at: '2026-09-02T00:00:00Z',
+            status: 'in_progress',
+          },
+        ]);
+      if (mode === 'failure') w.jobs = [{ ...greenJob, conclusion: 'failure' }];
+      let observed = 0;
+      const h = harness(w, {
+        onVerifiedRun: () => {
+          observed++;
+          return Promise.resolve();
+        },
+      });
+      if (mode === 'rerun') {
+        const gh = h.deps.gh;
+        let reads = 0;
+        h.deps.gh = async (args) => {
+          const r = await gh(args);
+          if ((args[1] ?? '').includes('/workflows/ci.yml/runs') && ++reads % 2 === 0) {
+            return ok([{ workflow_runs: [{ ...greenRun('ci.yml', M1), run_attempt: 2 }] }]);
+          }
+          return r;
+        };
+      }
+      expect((await runGate(h.deps, cfg({ timeoutMin: 0 }))).verdict).toBe('refused');
+      expect(observed).toBe(0);
+    },
+  );
+
+  test('observer rejection refuses before push; absent observer leaves ordinary behavior unchanged', async () => {
+    let pushes = 0;
+    const git = fakeGit({
+      pushAtomic: () => {
+        pushes++;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    const h = harness(world(), {
+      git,
+      onVerifiedRun: () => Promise.reject(new Error('receipt refused')),
+    });
+    expect((await runGate(h.deps, cfg({ push: true, pushToken: 'fixture' }))).verdict).toBe(
+      'refused',
+    );
+    expect(pushes).toBe(0);
+    delete h.deps.onVerifiedRun;
+    expect((await runGate(h.deps, cfg({ push: true, pushToken: 'fixture' }))).verdict).toBe(
+      'promoted',
+    );
+    expect(pushes).toBe(1);
+  });
+
   test('dry run: every check passes → would-promote, nothing pushed', async () => {
     const h = harness(world());
     let pushed = false;

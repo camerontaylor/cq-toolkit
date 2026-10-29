@@ -809,6 +809,18 @@ export const realGateGit: GateGit = {
   pushAtomic: gitPushAtomic,
 };
 
+/** Already validated CI from the final acceptance/CI recheck, never a poll verdict. */
+export interface VerifiedRunEvidence {
+  readonly repositoryId: number;
+  readonly from: string;
+  readonly subject: string;
+  readonly workflow: string;
+  readonly runId: number;
+  readonly runAttempt: number;
+  readonly requiredJobs: readonly string[];
+  readonly phase: 'final-recheck';
+}
+
 export interface GateDeps {
   /** Read-only transport (the job's GITHUB_TOKEN); the one write is the cq-verify dispatch. */
   gh: GhFn;
@@ -819,6 +831,8 @@ export interface GateDeps {
   policyDiff(input: PolicyDiffInput): Promise<OpResult<PolicyDiffOutcome>>;
   sleep(ms: number): Promise<void>;
   nowMs(): number;
+  /** Observe immutable copies only; throwing refuses before any push. Supplies no verdict. */
+  onVerifiedRun?(evidence: VerifiedRunEvidence): Promise<void>;
 }
 
 export interface GateConfig {
@@ -1641,6 +1655,7 @@ async function awaitVerdicts(
 
     // 9. Verified head-defined runs.
     let allGreen = verdict.state === 'success';
+    const evidence: VerifiedRunEvidence[] = [];
     for (const file of cfg.verifiedWorkflows) {
       const runsPath = `${repoPath}/actions/workflows/${file}/runs?head_sha=${subject}&event=push&branch=${QUEUE_BRANCH}&per_page=100`;
       const runs = pagesOf(await getSlurp(runsPath), 'workflow_runs', runsPath).map(asRecord);
@@ -1679,6 +1694,22 @@ async function awaitVerdicts(
               state: 'pending',
               reason: `run ${String(id)}: the run changed while its jobs were read (rerun?)`,
             };
+          } else if (recheck && deps.onVerifiedRun !== undefined) {
+            const attempt = asInt(newest['run_attempt']);
+            if (id === null || id < 1 || attempt === null || attempt < 1)
+              refuse('verified run: evidence identity unavailable');
+            evidence.push(
+              Object.freeze({
+                repositoryId: cfg.repositoryId,
+                from: main,
+                subject,
+                workflow: file,
+                runId: id,
+                runAttempt: attempt,
+                requiredJobs: Object.freeze([...(requiredJobs[file] ?? [])]),
+                phase: 'final-recheck' as const,
+              }),
+            );
           }
         }
       }
@@ -1691,6 +1722,7 @@ async function awaitVerdicts(
     }
 
     if (allGreen) {
+      for (const item of evidence) await deps.onVerifiedRun?.(item);
       report.push(...lines);
       if (!recheck) report.push(`waited: ${String(polls)} poll(s)`);
       return;
