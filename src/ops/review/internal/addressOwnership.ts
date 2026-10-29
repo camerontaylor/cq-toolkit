@@ -2,11 +2,18 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, opendir, realpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import type { GhFn } from '../../../adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, reviewBranchFor } from '../../../adapters/git/prWorktree.js';
 import { makeGitMutex } from '../../../shared/gitMutex.js';
-import type { ReviewAddressInput, ReviewAddressResult } from '../address.js';
+import type { ReviewAddressInput, ReviewAddressResult, ReviewAddressReport } from '../address.js';
+import {
+  recordAddressTerminalEvidence,
+  settleAddressTerminalEvidence,
+  persistAddressTerminalReport,
+  type AddressTerminalAttempt,
+  type AddressTerminalAttemptInput,
+} from './addressEvidence.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../../plans/review-loop.js';
 
 /** No capability is serialized or accepted from an op input or dependency object. */
@@ -67,6 +74,49 @@ interface Completion {
 // Only this module can mint a proof. Callback results, leases and structural
 // objects cannot authorize publication; consumption precedes the first await.
 const completionProofs = new WeakMap<object, Completion>();
+interface TerminalInternals {
+  participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T>;
+  bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void>;
+  workerBinding(lease: AddressLease): object;
+  opaque(lease: AddressLease): void;
+  cancelledResult(lease: AddressLease): Promise<ReviewAddressResult>;
+  validate(): Promise<{ commonDir: string; terminal: boolean }>;
+  track(promise: Promise<void>): void;
+  record(participant: Participant, input: AddressTerminalAttemptInput): Promise<object>;
+  defer(participant: Participant, attempt: object): boolean;
+}
+const terminalInternals = new WeakMap<AddressOwnership, TerminalInternals>();
+const terminalAuthorities = new WeakMap<object, AddressOwnership>();
+const terminalWorkers = new WeakMap<
+  object,
+  { owner: AddressOwnership; participant: Participant }
+>();
+const participantLeases = new WeakMap<AddressLease, Participant>();
+interface Participant {
+  lease: AddressLease;
+  closed: boolean;
+  arrived: boolean;
+  report?: ReviewAddressReport;
+  reportTarget?: string;
+  reportDirectory?: Identity;
+  reportAncestor?: { path: string; identity: Identity };
+  started: number;
+  attempts: AddressTerminalAttempt[];
+  opaqueDispatched: boolean;
+}
+
+// Only validated pre-entry guard barriers can mint this classification.
+const admissionRefusals = new WeakSet<object>();
+function admissionRefusal(): Error {
+  const error = new Error(
+    'could not acquire address ownership: active or quarantined guard; attended recovery required',
+  );
+  admissionRefusals.add(error);
+  return error;
+}
+export function isAddressOwnershipAdmissionRefusal(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && admissionRefusals.has(value);
+}
 
 function resourcesValid(value: unknown): value is string[] {
   return (
@@ -223,6 +273,16 @@ export class AddressOwnership {
   private readonly children = new Set<Promise<unknown>>();
   private readonly tasks = new Set<Promise<unknown>>();
   private readonly recorded = new Set<string>();
+  private readonly terminalToken = Object.freeze({});
+  private readonly participants = new Set<Participant>();
+  private readonly terminalProcesses = new Set<Promise<void>>();
+  private readonly terminalOperations = new Set<Promise<void>>();
+  private stopping = false;
+  // Refusal blocks terminal IO, but cannot substitute for the actual-task drain.
+  private terminalAdmissionRefusal?: Error;
+  private terminalFailure?: unknown;
+  private terminalRun?: Promise<void>;
+
   private active = false;
   private used = false;
   private admitting = false;
@@ -240,6 +300,17 @@ export class AddressOwnership {
       : this.controller.signal;
     this.guardPath = resolve(commonDir, 'cq-review-address-ownership.owner.json');
     this.registry = fileWorktreeRegistry(resolve(commonDir, 'cq-review-address-worktrees.json'));
+    terminalInternals.set(this, {
+      participant: (lease, action) => this.participant(lease, action),
+      bindReport: (lease, report) => this.bindReport(lease, report),
+      workerBinding: (lease) => this.workerBinding(lease),
+      opaque: (lease) => this.noteOpaqueInvocation(lease),
+      cancelledResult: (lease) => this.cancelledResult(lease),
+      validate: () => this.validateTerminal(),
+      track: (promise) => this.registerTerminalProcess(promise),
+      record: (participant, input) => this.recordAttempt(participant, input),
+      defer: (participant, attempt) => this.deferAttempt(participant, attempt),
+    });
   }
 
   private get storePath(): string {
@@ -486,7 +557,16 @@ export class AddressOwnership {
     if (!staging.bytes.equals(prepared.bytes)) throw new Error('completion staging changed');
     await this.identityNow().catch((error: unknown) => this.lose(error));
     this.controller.signal.throwIfAborted();
-    if (this.children.size || this.tasks.size || this.admitting || this.compromised)
+    if (
+      this.children.size ||
+      this.tasks.size ||
+      this.terminalProcesses.size ||
+      this.terminalOperations.size ||
+      this.terminalAdmissionRefusal ||
+      this.terminalFailure ||
+      this.admitting ||
+      this.compromised
+    )
       throw new Error('address ownership: completion not quiescent');
     return { owner: this, predecessor, ...prepared, stagingIdentity: staging.identity };
   }
@@ -594,6 +674,294 @@ export class AddressOwnership {
     }
   }
 
+  private stopAdmissions = () => {
+    this.stopping = true;
+    this.admitting = false;
+  };
+
+  private async validateTerminal(): Promise<{ commonDir: string; terminal: boolean }> {
+    if (!this.active || this.compromised || this.terminalFailure)
+      throw new Error('address terminal: owner inactive/compromised');
+    this.controller.signal.throwIfAborted();
+    await this.assertIdentity();
+    this.controller.signal.throwIfAborted();
+    return { commonDir: this.commonDir, terminal: this.stopping };
+  }
+
+  private registerTerminalProcess(promise: Promise<void>): void {
+    if (!this.active || this.compromised || this.terminalFailure)
+      throw new Error('address terminal: process after retirement');
+    const set = this.stopping ? this.terminalProcesses : this.tasks;
+    set.add(promise);
+    void promise.then(
+      () => set.delete(promise),
+      () => set.delete(promise),
+    );
+  }
+
+  private async participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
+    if (liveLeases.get(lease) !== this || participantLeases.has(lease))
+      throw new Error('address terminal: forged/reused participant');
+    const participant: Participant = {
+      lease,
+      closed: false,
+      arrived: false,
+      started: Date.now(),
+      attempts: [],
+      opaqueDispatched: false,
+    };
+    participantLeases.set(lease, participant);
+    this.participants.add(participant);
+    try {
+      const result = await action();
+      if (this.stopping) await this.arrive(participant);
+      return result;
+    } finally {
+      participant.arrived = true;
+      participant.closed = true;
+    }
+  }
+
+  private async bindReport(lease: AddressLease, report: ReviewAddressReport): Promise<void> {
+    const participant = participantLeases.get(lease);
+    if (
+      !participant ||
+      participant.closed ||
+      participant.report ||
+      !this.participants.has(participant)
+    )
+      throw new Error('address terminal: report binding refused');
+    // Resolve aliases without creating a missing journal directory. Remember
+    // the existing ancestor inode, so a later replacement is not adopted.
+    let ancestor = dirname(resolve(report.reportPath));
+    const tail = [basename(report.reportPath)];
+    let canonical: string;
+    for (;;) {
+      try {
+        canonical = await realpath(ancestor);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(ancestor) === ancestor)
+          throw error;
+        tail.unshift(basename(ancestor));
+        ancestor = dirname(ancestor);
+      }
+    }
+    const identity = await lstat(canonical);
+    if (!identity.isDirectory()) throw new Error('address terminal: report ancestor refused');
+    const target = resolve(canonical, ...tail);
+    await this.assertOwned();
+    if (participant.closed || participant.report)
+      throw new Error('address terminal: report target alias/rebinding');
+    if (
+      [...this.participants].some((entry) => entry !== participant && entry.reportTarget === target)
+    ) {
+      this.terminalAdmissionRefusal ??= new Error(
+        'address terminal: report target alias/rebinding',
+      );
+      this.admitting = false;
+      throw this.terminalAdmissionRefusal;
+    }
+    participant.reportTarget = target;
+    participant.reportAncestor = { path: canonical, identity };
+    participant.report = report;
+  }
+
+  private noteOpaqueInvocation(lease: AddressLease): void {
+    const participant = participantLeases.get(lease);
+    if (
+      !this.active ||
+      !this.admitting ||
+      this.compromised ||
+      this.signal.aborted ||
+      !participant ||
+      participant.closed ||
+      !this.participants.has(participant)
+    )
+      throw new Error('address terminal: opaque invocation after admission');
+    participant.opaqueDispatched = true;
+  }
+
+  private workerBinding(lease: AddressLease): object {
+    const participant = participantLeases.get(lease);
+    if (!participant || participant.closed || !this.participants.has(participant))
+      throw new Error('address terminal: worker association refused');
+    const binding = Object.freeze({});
+    terminalWorkers.set(binding, { owner: this, participant });
+    return binding;
+  }
+
+  private async recordAttempt(
+    participant: Participant,
+    input: AddressTerminalAttemptInput,
+  ): Promise<object> {
+    if (participant.closed || this.stopping)
+      throw new Error('address terminal: attempt after close');
+    await this.assertOwned();
+    const attempt = await recordAddressTerminalEvidence(this.terminalToken, input);
+    await this.assertOwned();
+    if (participant.closed) {
+      this.terminalFailure = new Error('address terminal: late attempt on closed participant');
+      throw this.terminalFailure;
+    }
+    participant.attempts.push(attempt);
+    return attempt;
+  }
+
+  private deferAttempt(participant: Participant, value: object): boolean {
+    if (!this.signal.aborted || this.controller.signal.aborted || this.compromised) return false;
+    if (participant.closed) {
+      this.terminalFailure = new Error('address terminal: closed participant attempted cleanup');
+      throw this.terminalFailure;
+    }
+    if (!participant.attempts.includes(value as AddressTerminalAttempt))
+      throw new Error('address terminal: forged/stale attempt');
+    this.stopAdmissions();
+    (value as AddressTerminalAttempt).cancelled = true;
+    return true;
+  }
+
+  private async arrive(participant: Participant): Promise<void> {
+    if (!this.signal.aborted || this.controller.signal.aborted)
+      throw new Error('address terminal: not an intact parent-cancelled lifetime');
+    if (!this.participants.has(participant) || participant.closed)
+      throw new Error('address terminal: invalid control arrival');
+    this.stopAdmissions();
+    participant.arrived = true;
+    this.terminalRun ??= this.runTerminal();
+    return this.terminalRun;
+  }
+
+  private async runTerminal(): Promise<void> {
+    const drainDeadline = Date.now() + 60_000;
+    try {
+      // These control frames were never put in tasks. No actual tracked promise
+      // is subtracted, including outer worker/review/registry-op registrations.
+      while (
+        this.tasks.size ||
+        [...this.participants].some((entry) => !entry.closed && !entry.arrived)
+      ) {
+        await this.validateTerminal();
+        if (Date.now() >= drainDeadline)
+          throw new Error('address terminal: actual writers/control arrivals unresolved');
+        await new Promise<void>((done) => setTimeout(done, 5));
+      }
+      await this.validateTerminal();
+      if (this.terminalAdmissionRefusal) throw this.terminalAdmissionRefusal;
+      // An opaque invocation gives no complete write-set/receipt coverage.
+      // Drain it and every sibling, then refuse the shared terminal admission
+      // before any evidence, restoration or report IO. Closed facts stay closed.
+      if ([...this.participants].some((entry) => entry.opaqueDispatched))
+        throw new Error(
+          'address terminal: opaque invocation write-set unconfirmed; caller bytes retained',
+        );
+      const open = [...this.participants].filter((entry) => !entry.closed);
+      const targets = new Set<string>();
+      for (const participant of open)
+        if (participant.report) {
+          const target = resolve(
+            await realpath(dirname(participant.report.reportPath)),
+            basename(participant.report.reportPath),
+          );
+          const ancestor = participant.reportAncestor;
+          if (
+            !ancestor ||
+            !same(await lstat(ancestor.path), ancestor.identity) ||
+            (await realpath(ancestor.path)) !== ancestor.path ||
+            target !== participant.reportTarget
+          )
+            throw new Error('address terminal: report target identity changed');
+          if (targets.has(target)) throw new Error('address terminal: canonical report alias');
+          participant.reportDirectory = await lstat(dirname(target));
+          targets.add(target);
+        }
+      const attempts = open.flatMap((entry) =>
+        entry.attempts.filter((attempt) => attempt.cancelled),
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const work = (async () => {
+          try {
+            await settleAddressTerminalEvidence(this.terminalToken, attempts);
+          } finally {
+            // Real local ref effects survive a later restore/report failure.
+            for (const participant of open)
+              for (const attempt of participant.attempts) {
+                if (
+                  attempt.retained &&
+                  participant.report &&
+                  !participant.report.failed.includes(attempt.retained)
+                ) {
+                  participant.report.failed.push(attempt.retained);
+                  const row = participant.report.attempts.findLast(
+                    (row) => row.finding === attempt.finding && row.invocation === 'edit',
+                  );
+                  if (row) row.failedAttempt = attempt.retained;
+                }
+              }
+          }
+          for (const participant of open)
+            if (participant.report) {
+              const report = participant.report;
+              delete report.stop;
+              if (!report.reasons.includes('parent cancelled'))
+                report.reasons.push('parent cancelled');
+              report.findings = report.findings.map((finding) => {
+                const failed = report.failed.findLast((row) => row.finding === finding.id);
+                return failed && (finding.status === 'open' || finding.status === 'deferred')
+                  ? { ...finding, evidence: JSON.stringify(failed) }
+                  : finding;
+              });
+              report.wallMs = Date.now() - participant.started;
+              report.fixesPerRun = new Set(
+                report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
+              ).size;
+              await persistAddressTerminalReport(
+                this.terminalToken,
+                participant.reportTarget!,
+                report,
+                participant.reportDirectory!,
+              );
+            }
+          if (this.terminalProcesses.size)
+            throw new Error('address terminal: subprocess close unobserved');
+        })();
+        this.terminalOperations.add(work);
+        void work.then(
+          () => this.terminalOperations.delete(work),
+          () => this.terminalOperations.delete(work),
+        );
+        await Promise.race([
+          work,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('address terminal: cleanup lifetime unresolved')),
+              60_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      await this.validateTerminal();
+    } catch (error) {
+      this.terminalFailure = error;
+      throw error;
+    }
+  }
+
+  private async cancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
+    const participant = participantLeases.get(lease);
+    if (!participant?.report || !this.participants.has(participant))
+      throw new Error('address terminal: missing report association');
+    await this.arrive(participant);
+    return {
+      status: 'needs-human',
+      reason: `parent cancelled; report: ${participant.report.reportPath}`,
+      report: participant.report,
+    };
+  }
+
   async assertOwned(): Promise<void> {
     if (!this.active || this.compromised) throw new Error('address ownership: owner inactive');
     this.signal.throwIfAborted();
@@ -604,17 +972,13 @@ export class AddressOwnership {
   async withLock<T>(fn: (owner: AddressOwnership) => Promise<T>): Promise<T> {
     if (this.used) throw new Error('address ownership: owner lifetime already consumed');
     const before = await this.readSnapshot();
-    if (before?.guard && before.guard.state !== 'quiescent')
-      throw new Error('address ownership: active or quarantined guard; attended recovery required');
+    if (before?.guard && before.guard.state !== 'quiescent') throw admissionRefusal();
     const completed = await makeGitMutex({
       lockPath: resolve(this.commonDir, 'cq-review-address-ownership'),
       failFast: true,
     }).withLock(async () => {
       const previous = await this.readSnapshot();
-      if (previous?.guard && previous.guard.state !== 'quiescent')
-        throw new Error(
-          'address ownership: active or quarantined guard; attended recovery required',
-        );
+      if (previous?.guard && previous.guard.state !== 'quiescent') throw admissionRefusal();
       this.signal.throwIfAborted();
       if (this.used) throw new Error('address ownership: owner lifetime already consumed');
       this.used = true;
@@ -625,10 +989,14 @@ export class AddressOwnership {
       await this.persist('active');
       this.signal.throwIfAborted();
       this.active = this.admitting = true;
+      terminalAuthorities.set(this.terminalToken, this);
+      this.signal.addEventListener('abort', this.stopAdmissions, { once: true });
+      if (this.signal.aborted) this.stopAdmissions();
       let checking: Promise<void> | undefined;
       const timer = setInterval(() => {
         if (checking) return;
-        checking = this.assertOwned()
+        checking = (this.stopping ? this.validateTerminal() : this.assertOwned())
+          .then(() => undefined)
           .catch(() => undefined)
           .finally(() => {
             checking = undefined;
@@ -638,7 +1006,14 @@ export class AddressOwnership {
       try {
         const result = await fn(this);
         this.admitting = false;
-        if (this.children.size || this.tasks.size)
+        if (this.terminalAdmissionRefusal) throw this.terminalAdmissionRefusal;
+        if (this.terminalFailure) throw this.terminalFailure;
+        if (
+          this.children.size ||
+          this.tasks.size ||
+          this.terminalProcesses.size ||
+          this.terminalOperations.size
+        )
           throw new Error('address ownership: detached work requires quarantine');
         clearInterval(timer);
         await checking;
@@ -656,6 +1031,7 @@ export class AddressOwnership {
         throw error;
       } finally {
         clearInterval(timer);
+        this.signal.removeEventListener('abort', this.stopAdmissions);
         this.active = false; // Retired forever, including the cleanup interval.
       }
     }, this.signal);
@@ -738,7 +1114,13 @@ export class AddressOwnership {
       },
       track: (action) => {
         if (!this.admitting)
-          return Promise.reject(new Error('address ownership: admissions closed'));
+          return Promise.reject(
+            this.controller.signal.aborted
+              ? (this.controller.signal.reason as unknown)
+              : this.signal.aborted
+                ? (this.signal.reason as unknown)
+                : new Error('address ownership: admissions closed'),
+          );
         // Register synchronously, before asynchronous ownership checks: an
         // unawaited caller cannot finish the owner during this admission gap.
         const task = (async () => {
@@ -860,8 +1242,62 @@ export async function withAddressOwnership<T>(
     if ((await commonDirectory(opts)) !== child.owner.commonDir)
       throw new Error('address ownership: invalid production child identity');
     await child.owner.assertOwned();
-    return fn(child.owner.lease(child));
+    const lease = child.owner.lease(child);
+    return terminalInternals.get(child.owner)!.participant(lease, () => fn(lease));
   }
   const owner = await makeAddressOwnership(opts);
-  return owner.withLock(async () => fn(owner.lease()));
+  return owner.withLock(async () => {
+    const lease = owner.lease();
+    return terminalInternals.get(owner)!.participant(lease, () => fn(lease));
+  });
+}
+
+export async function validateAddressTerminalAuthority(
+  token: object,
+): Promise<{ commonDir: string; terminal: boolean }> {
+  const owner = terminalAuthorities.get(token);
+  if (!owner) throw new Error('address terminal: forged authority');
+  return terminalInternals.get(owner)!.validate();
+}
+export function trackAddressTerminalProcess(token: object, promise: Promise<void>): void {
+  const owner = terminalAuthorities.get(token);
+  if (!owner) throw new Error('address terminal: forged process authority');
+  terminalInternals.get(owner)!.track(promise);
+}
+export async function bindAddressTerminalReport(
+  lease: AddressLease,
+  report: ReviewAddressReport,
+): Promise<void> {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: forged report lease');
+  await terminalInternals.get(owner)!.bindReport(lease, report);
+}
+export function addressTerminalWorkerBinding(lease: AddressLease): object {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: forged worker lease');
+  return terminalInternals.get(owner)!.workerBinding(lease);
+}
+export function recordAddressTerminalAttempt(
+  binding: object,
+  input: AddressTerminalAttemptInput,
+): Promise<object> {
+  const association = terminalWorkers.get(binding);
+  if (!association) throw new Error('address terminal: forged worker association');
+  return terminalInternals.get(association.owner)!.record(association.participant, input);
+}
+export function deferAddressTerminalAttempt(binding: object, attempt: object): boolean {
+  const association = terminalWorkers.get(binding);
+  if (!association) throw new Error('address terminal: forged worker association');
+  return terminalInternals.get(association.owner)!.defer(association.participant, attempt);
+}
+export function addressCancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: forged cancellation lease');
+  return terminalInternals.get(owner)!.cancelledResult(lease);
+}
+
+export function noteAddressOpaqueInvocation(lease: AddressLease): void {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: forged opaque invocation lease');
+  terminalInternals.get(owner)!.opaque(lease);
 }

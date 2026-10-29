@@ -70,6 +70,11 @@ import {
 import { readWorkState } from '../dev/internal/workState.js';
 import {
   addressChildSignal,
+  addressCancelledResult,
+  noteAddressOpaqueInvocation,
+  bindAddressTerminalReport,
+  addressTerminalWorkerBinding,
+  isAddressOwnershipAdmissionRefusal,
   runAddressReviewLoop,
   withAddressOwnership,
   type AddressLease,
@@ -352,6 +357,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       reason = '',
       structuredStop?: 'round-cap' | 'rereview-blocked' | 'budget',
     ): Promise<ReviewAddressResult> => {
+      if (parent?.aborted) {
+        delete report.stop;
+        if (!report.reasons.includes('parent cancelled')) report.reasons.push('parent cancelled');
+        if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
+        if (worker) report.escalation = worker.escalation();
+        return addressCancelledResult(addressLease);
+      }
       if (reason) report.reasons.push(reason);
       let publicationFailed = false;
       if (publishOnExit && !parent?.aborted) {
@@ -504,7 +516,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       const preconditions = worker?.preconditions?.();
       if (preconditions?.length) report.preconditions = [...preconditions];
       try {
+        if (parent?.aborted) return finish('needs-human', 'parent cancelled');
+        if (addressLease) await addressLease.assertOwned();
         await mkdir(journalDir, { recursive: true });
+        if (parent?.aborted) return finish('needs-human', 'parent cancelled');
+        if (addressLease) await addressLease.assertOwned();
         await writeFile(report.reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
       } catch (error) {
         return {
@@ -513,6 +529,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           report,
         };
       }
+      if (parent?.aborted) return finish('needs-human', 'parent cancelled');
       if (status === 'ok') return { status, value: report };
       const detail = `${reason || report.reasons.join('; ') || 'open blocking findings or incomplete review'}; report: ${report.reportPath}`;
       return status === 'failed'
@@ -646,7 +663,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         });
       const reviewImplementation: typeof rawReviewImplementation = (input) => {
         if (!addressLease) throw new Error('address ownership: review before acquisition');
-        return addressLease.track(() => rawReviewImplementation(input));
+        return addressLease.track(() => {
+          if (deps.review) noteAddressOpaqueInvocation(addressLease!);
+          return rawReviewImplementation(input);
+        });
       };
       const rawGit =
         deps.git ??
@@ -672,6 +692,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       const withOwnership = async (
         action: (lease: AddressLease) => Promise<ReviewAddressResult>,
       ) => {
+        let entered = false;
         try {
           return await withAddressOwnership(
             {
@@ -682,7 +703,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               controller: ownershipAbort,
               signal: parent,
             },
-            action,
+            (lease) => {
+              entered = true;
+              return action(lease);
+            },
           );
         } catch (cause) {
           let detail = 'unprintable ownership error';
@@ -690,6 +714,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             detail = String(cause instanceof Error ? cause.message : cause);
           } catch {
             // Error formatting cannot reenter effectful finalization.
+          }
+          if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
+            const { stop: _stop, ...observed } = report;
+            return {
+              status: 'needs-human' as const,
+              reason: detail,
+              report: {
+                ...observed,
+                reasons: observed.reasons.includes(detail)
+                  ? [...observed.reasons]
+                  : [...observed.reasons, detail],
+              },
+            };
           }
           const error = `address lifetime finalization failed; durability unconfirmed: ${detail}`;
           const { stop: _stop, ...observed } = report;
@@ -708,7 +745,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       const runOwned = () => withOwnership(async (lease) => {
         addressLease = lease;
 
+        await bindAddressTerminalReport(lease, report);
         try {
+          await lease.assertOwned();
           await mkdir(journalDir, { recursive: true });
           const bookkeepingKey = async (root: string, path: string) =>
             resolve(await realpath(root), path);
@@ -925,7 +964,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           };
           const bindWorker = (root: string): AddressWorker => {
             if (worker) return worker;
-            const implementation = (deps.workerFactory ?? makeAddressWorker)({
+            const workerDeps: Parameters<typeof makeAddressWorker>[0] = {
               repoRoot: root,
               dependencyRoot:
                 input.dependencyRoot === undefined
@@ -964,14 +1003,27 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               remainingWallMs,
               account,
               ...(parent ? { parentSignal: parent } : {}),
-            });
+            };
+            const implementation = deps.workerFactory
+              ? deps.workerFactory(workerDeps)
+              : makeAddressWorker({
+                  ...workerDeps,
+                  terminalBinding: addressTerminalWorkerBinding(lease),
+                });
             worker = {
-              fix: (finding, round) => lease.track(() => implementation.fix(finding, round)),
+              fix: (finding, round) =>
+                lease.track(() => {
+                  if (deps.workerFactory) noteAddressOpaqueInvocation(lease);
+                  return implementation.fix(finding, round);
+                }),
               escalation: () => implementation.escalation(),
               ...(implementation.withVerifiedHead
                 ? {
                     withVerifiedHead: <T>(action: (head: string) => Promise<T>) =>
-                      lease.track(() => implementation.withVerifiedHead!(action)),
+                      lease.track(() => {
+                        if (deps.workerFactory) noteAddressOpaqueInvocation(lease);
+                        return implementation.withVerifiedHead!(action);
+                      }),
                   }
                 : {}),
             };
@@ -1446,6 +1498,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   allowAdvisoryProvenance: 'product',
                 },
               );
+              if (parent?.aborted) {
+                noteRound(round, record, run);
+                return;
+              }
               for (const row of run.jobs) {
                 if (row.result.status !== 'ok') {
                   report.reasons.push(`finding job ${row.jobId}: ${issue(row.result)}`);
@@ -1703,6 +1759,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
+                  if (parent?.aborted)
+                    return {
+                      status: 'needs-human',
+                      reason: 'parent cancelled; disposition withheld',
+                    };
                   await verifyFix(root, fix);
                   if (fix.finding.status === 'open') {
                     fixesById.set(finding.id, fix);
