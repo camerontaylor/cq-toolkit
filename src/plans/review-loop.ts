@@ -74,6 +74,10 @@
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
 import { posix } from 'node:path';
+import {
+  withReviewLoopOwnership,
+  type AddressLease,
+} from '../ops/review/internal/addressOwnership.js';
 import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import type { HarnessConfig } from '../harness/config.js';
@@ -372,6 +376,10 @@ export interface ReviewLoopOpts {
   pr: number;
   /** The PR's head branch name (origin truth, from the fetch upstream). */
   headRefName: string;
+  /** Optional coordinator freshness fence and lifetime identity checks. */
+  expectedHead?: string;
+  beforeWorktreeResolve?: () => Promise<void>;
+  onWorktreeResolved?: (info: { path: string; branch: string }) => Promise<void>;
   /**
    * The PR head repository as "owner/name" — REQUIRED for FORK PRs (the
    * PR head lives in the fork; the worktree's 'origin' remote is the BASE
@@ -917,6 +925,27 @@ const attributionMatches = (message: string, itemId: string): boolean => {
  * {@link replySignature}.
  */
 export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> {
+  return withReviewLoopOwnership(opts, async (lease) => {
+    const guard =
+      (run: GhFn): GhFn =>
+      (args) =>
+        lease.track(() => run(args));
+    return runOwnedReviewLoop(
+      {
+        ...opts,
+        signal: opts.signal ? AbortSignal.any([opts.signal, lease.signal]) : lease.signal,
+        git: guard(opts.git),
+        gh: guard(opts.gh),
+      },
+      lease,
+    );
+  });
+}
+
+async function runOwnedReviewLoop(
+  opts: ReviewLoopOpts,
+  lease: AddressLease,
+): Promise<ReviewLoopOutcome> {
   const reasons: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
   // The push target: 'origin' for same-repo PRs; the head repository URL
@@ -925,6 +954,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     opts.headRepo === undefined ? 'origin' : `https://github.com/${opts.headRepo}.git`;
 
   // (1) THE per-PR worktree — origin head is truth, re-verified inside.
+  await opts.beforeWorktreeResolve?.();
   const worktree = await resolvePrWorktree({
     repoRoot: opts.repoRoot,
     pr: opts.pr,
@@ -932,10 +962,12 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     run: opts.git,
     registry: opts.registry,
     nowMs: opts.nowMs,
+    ...(opts.expectedHead !== undefined ? { expectedHead: opts.expectedHead } : {}),
     ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
     ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
     ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
   });
+  await opts.onWorktreeResolved?.(worktree);
 
   // (2) Baseline snapshot, then the pure pipeline. The truncation refusal is
   // a fail-closed ENVIRONMENT condition (fresh threads are missing from the
@@ -1123,75 +1155,76 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
         ...entry,
         importer: async (...args) => {
           const op = await entry.importer(...args);
-          return async (raw) => {
-            const input = raw as FixReviewItemInput;
-            let release = () => {};
-            let settled: Promise<void> | undefined;
-            let file: string | undefined;
-            let waits: Promise<void>[] = [];
-            if (opts.engineOwnedConcurrency !== undefined) {
-              file = input.item.path ? posix.normalize(input.item.path) : undefined;
-              waits = file ? [barrier, priorByFile.get(file) ?? Promise.resolve()] : [...pending];
-              settled = new Promise<void>((resolve) => {
-                release = resolve;
-              });
-              pending.add(settled);
-              if (file) priorByFile.set(file, settled);
-              else barrier = settled;
-            }
-            try {
-              await Promise.all(waits);
-              const observed = await opts.git([
-                '-C',
-                worktree.path,
-                'rev-parse',
-                '--verify',
-                'HEAD^{commit}',
-              ]);
-              executionHeads.set(
-                input.item.id,
-                observed.code === 0 && COMMIT_SHA_RE.test(observed.stdout.trim())
-                  ? observed.stdout.trim()
-                  : null,
-              );
-              const result = await op(raw);
-              if (opts.engineOwnedConcurrency !== undefined && result.status === 'ok') {
-                const actual = (result.value as FixReviewItemResult).observedHead;
-                if (actual !== undefined) {
-                  const early = executionHeads.get(input.item.id);
-                  if (!COMMIT_SHA_RE.test(actual) || !early)
-                    return { status: 'needs-human', reason: 'engine execution head unavailable' };
-                  // An admission wait may cross verified sibling commits. The
-                  // actual identity must remain inside the observed ancestry;
-                  // it cannot borrow an unrelated tree for a rejection citation.
-                  for (const [parent, child] of [
-                    [early, actual],
-                    [actual, 'HEAD'],
-                  ]) {
-                    const proof = await opts.git([
-                      '-C',
-                      worktree.path,
-                      'merge-base',
-                      '--is-ancestor',
-                      parent!,
-                      child!,
-                    ]);
-                    if (proof.code !== 0)
-                      return {
-                        status: 'needs-human',
-                        reason: 'engine execution head ancestry changed',
-                      };
-                  }
-                  executionHeads.set(input.item.id, actual);
-                }
+          return (raw) =>
+            lease.track(async () => {
+              const input = raw as FixReviewItemInput;
+              let release = () => {};
+              let settled: Promise<void> | undefined;
+              let file: string | undefined;
+              let waits: Promise<void>[] = [];
+              if (opts.engineOwnedConcurrency !== undefined) {
+                file = input.item.path ? posix.normalize(input.item.path) : undefined;
+                waits = file ? [barrier, priorByFile.get(file) ?? Promise.resolve()] : [...pending];
+                settled = new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+                pending.add(settled);
+                if (file) priorByFile.set(file, settled);
+                else barrier = settled;
               }
-              return result;
-            } finally {
-              release();
-              if (settled) pending.delete(settled);
-              if (file && priorByFile.get(file) === settled) priorByFile.delete(file);
-            }
-          };
+              try {
+                await Promise.all(waits);
+                const observed = await opts.git([
+                  '-C',
+                  worktree.path,
+                  'rev-parse',
+                  '--verify',
+                  'HEAD^{commit}',
+                ]);
+                executionHeads.set(
+                  input.item.id,
+                  observed.code === 0 && COMMIT_SHA_RE.test(observed.stdout.trim())
+                    ? observed.stdout.trim()
+                    : null,
+                );
+                const result = await op(raw);
+                if (opts.engineOwnedConcurrency !== undefined && result.status === 'ok') {
+                  const actual = (result.value as FixReviewItemResult).observedHead;
+                  if (actual !== undefined) {
+                    const early = executionHeads.get(input.item.id);
+                    if (!COMMIT_SHA_RE.test(actual) || !early)
+                      return { status: 'needs-human', reason: 'engine execution head unavailable' };
+                    // An admission wait may cross verified sibling commits. The
+                    // actual identity must remain inside the observed ancestry;
+                    // it cannot borrow an unrelated tree for a rejection citation.
+                    for (const [parent, child] of [
+                      [early, actual],
+                      [actual, 'HEAD'],
+                    ]) {
+                      const proof = await opts.git([
+                        '-C',
+                        worktree.path,
+                        'merge-base',
+                        '--is-ancestor',
+                        parent!,
+                        child!,
+                      ]);
+                      if (proof.code !== 0)
+                        return {
+                          status: 'needs-human',
+                          reason: 'engine execution head ancestry changed',
+                        };
+                    }
+                    executionHeads.set(input.item.id, actual);
+                  }
+                }
+                return result;
+              } finally {
+                release();
+                if (settled) pending.delete(settled);
+                if (file && priorByFile.get(file) === settled) priorByFile.delete(file);
+              }
+            });
         },
       };
     },
@@ -1246,6 +1279,21 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     }
   })();
   opts.onFixRunSettled?.(fixReport);
+  const cancelledOutcome = (): ReviewLoopOutcome => {
+    if (!reasons.some((reason) => reason.includes('parent cancelled')))
+      reasons.push('parent cancelled; publication and replies withheld');
+    return {
+      status: 'needs-human',
+      reasons,
+      worktree: { path: worktree.path, branch: worktree.branch, reused: worktree.reused },
+      batches,
+      skipped,
+      plan,
+      fixReport,
+      actionsPosted: 0,
+    };
+  };
+  if (opts.signal?.aborted) return cancelledOutcome();
   const headAfter = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const headMoved =
     headBefore.code === 0 &&
@@ -1485,6 +1533,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       );
     }
   }
+  if (opts.signal?.aborted) return cancelledOutcome();
   const fixJobsRan = plan.jobs.length > 0;
   let verify: VerifyOutcome | undefined;
   if (fixJobsRan) {
