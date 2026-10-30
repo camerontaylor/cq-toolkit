@@ -322,6 +322,7 @@ export async function runReviewSession(
   if (retry) {
     signal.throwIfAborted();
     evidence.deliveries = [];
+    delete evidence.contextSha256;
     evidence.attempts = 2;
     if (result.errorClass === 'rate-limit')
       input.onAdvisories?.([`session ${plan.id}: rate-limit retry 1 dispatched`]);

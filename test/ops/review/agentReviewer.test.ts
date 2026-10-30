@@ -96,6 +96,40 @@ function fakeDrivers(options: FakeDriverOptions = {}) {
 }
 
 describe('runAgentReviewer v3 session engine', () => {
+  it('requires fresh cross-area prompt delivery after a transient retry', async () => {
+    let crossAttempts = 0;
+    const fake = fakeDrivers({
+      skipHook: true,
+      run: async (invocation) => {
+        const cross = invocation.prompt.includes('Review cross-area contracts');
+        if (!cross || crossAttempts++ === 0) {
+          await fake.requests
+            .at(-1)!
+            .beforeRequest?.(
+              JSON.stringify({ prompt: [{ role: 'user', content: invocation.prompt }] }),
+              [{ text: invocation.prompt }],
+              { kind: 'model-request' },
+            );
+        }
+        return cross && crossAttempts === 1
+          ? workerResult({ stopReason: 'error', errorClass: 'transient' })
+          : workerResult();
+      },
+    });
+    const result = await runAgentReviewer(
+      fake.drivers,
+      reviewerInput({
+        areas: true,
+        components: [{ component: 'diff:a', path: 'a.ts', text: 'export const a = 1;' }],
+      }),
+    );
+    expect(result.status).not.toBe('ok');
+    const cross = result.report?.coverage.sessions.find((session) => session.id === 'cross-area');
+    expect(cross?.attempts).toBe(2);
+    expect(cross?.status).toBe('error');
+    expect(cross?.contextSha256).toBeUndefined();
+  });
+
   it('executes opt-in areas and a scanned cross-area pass without double-counting bytes', async () => {
     const fake = fakeDrivers();
     const components = [
