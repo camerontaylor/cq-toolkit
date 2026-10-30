@@ -506,7 +506,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       });
       // Cancellation is classified only after the actual child has settled.
       stop();
-      if (result.status !== 'ok') throw new Error(`configured check was ${result.status}`);
+      if (result.status !== 'ok') {
+        let detail: string = result.status;
+        if (result.status === 'indeterminate') detail = result.detail;
+        else if (result.status === 'failed') detail = result.error;
+        throw new Error(`configured check was ${result.status} (${check.adapter}): ${detail}`);
+      }
       results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
     }
     return results;
