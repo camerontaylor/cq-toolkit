@@ -816,6 +816,41 @@ function runStartInstant(deps: SelfReviewLoopDeps): number {
   return value;
 }
 
+// Q47: only completed-sweep warning and PR diagnostic transport is best-effort.
+// Each already-constructed message owns one serial write and its error listener.
+async function writeSweepDiagnostic(message: string): Promise<void> {
+  const stderr = process.stderr;
+  await new Promise<void>((resolve) => {
+    let finishing = false;
+    const cleanup = (): void => {
+      stderr.removeListener('error', onError);
+      resolve();
+    };
+    const onError = (): void => {
+      if (!finishing) {
+        finishing = true;
+        // Node may emit the write error after invoking its callback.
+        setImmediate(cleanup);
+      }
+    };
+    stderr.on('error', onError);
+    try {
+      stderr.write(message, (error) => {
+        if (error !== null && error !== undefined) onError();
+        else if (!finishing) {
+          finishing = true;
+          cleanup();
+        }
+      });
+    } catch {
+      if (!finishing) {
+        finishing = true;
+        cleanup();
+      }
+    }
+  });
+}
+
 /**
  * The CLI entry: parse args, resolve the repository (the --repo flag wins
  * over the GH_REPOSITORY env; absent from both → throw before running),
@@ -953,19 +988,15 @@ export async function main(
     } catch (error) {
       // Q34 newly classifies only this post-sweep transport failure as
       // best-effort; oneLine bounds the warning detail to 500 characters.
-      try {
-        process.stderr.write(
-          `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
-        );
-      } catch {
-        // Continue the remaining reports even when stderr is unavailable too.
-      }
+      const warning = `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`;
+      await writeSweepDiagnostic(warning);
     }
     appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
-      process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+      const diagnostic = `pr ${String(failure.pr)}: ${failure.error}\n`;
+      await writeSweepDiagnostic(diagnostic);
     }
   } catch (error) {
     runError = oneLine(error instanceof Error ? error.message : String(error));

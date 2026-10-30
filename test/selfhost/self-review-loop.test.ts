@@ -1072,8 +1072,9 @@ describe('main — usage reporting', () => {
     const { out, stepSummary } = setup();
     const message =
       mode === 'callback with long message' ? `${'x'.repeat(600)}\nsecond line` : 'stdout failed';
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((_message, callback) => {
       if (mode === 'callback with broken stderr') throw new Error('stderr failed');
+      if (typeof callback === 'function') callback();
       return true;
     });
     let finishWrite: ((error?: Error | null) => void) | undefined;
@@ -1111,6 +1112,7 @@ describe('main — usage reporting', () => {
     const warningDetail = mode === 'callback with long message' ? 'x'.repeat(500) : 'stdout failed';
     expect(stderr).toHaveBeenCalledExactlyOnceWith(
       `sweep-usage: could not write stdout: ${warningDetail}\n`,
+      expect.any(Function),
     );
     const usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
     expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({
@@ -1207,7 +1209,10 @@ describe('main — usage reporting', () => {
         return false;
       },
     );
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((_message, callback) => {
+      if (typeof callback === 'function') callback();
+      return true;
+    });
     const pending = main(
       baseDeps(
         fakeGh([pullRow(7), pullRow(8)]),
@@ -1243,8 +1248,8 @@ describe('main — usage reporting', () => {
       exhausted: false,
     };
     expect(stderr.mock.calls).toEqual([
-      ['sweep-usage: could not write stdout: stdout failed\n'],
-      [`pr 7: ${failure}\n`],
+      ['sweep-usage: could not write stdout: stdout failed\n', expect.any(Function)],
+      [`pr 7: ${failure}\n`, expect.any(Function)],
     ]);
     expect(
       stdoutText
@@ -1261,6 +1266,126 @@ describe('main — usage reporting', () => {
     ]);
     expect(readFileSync(stepSummary, 'utf8')).toBe(sweepUsageMarkdown(usage));
     expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({ sweepUsage: usage });
+  });
+
+  test.each([
+    'async warning, sync diagnostic',
+    'sync warning, sync diagnostic',
+    'async diagnostic',
+  ])('Q47 %s preserves completed-sweep usage and settles owned writes', async (mode) => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const listeners = process.stderr.listenerCount('error');
+    const { out, stepSummary } = setup();
+    const calls: RecordedCall[] = [];
+    process.argv = [
+      'node',
+      'self-review-loop.js',
+      '--repo',
+      REPO_PATH,
+      '--journal-root',
+      tempJournalRoot(),
+    ];
+    vi.stubEnv('CQ_SELFHOST_NOW_MS', '1700000000000');
+    vi.stubEnv('ZAI_API_KEY', 'fixture-key');
+    vi.spyOn(process.stdout, 'write').mockImplementation((_chunk, callback) => {
+      if (typeof callback === 'function')
+        callback(mode === 'async diagnostic' ? undefined : new Error('stdout failed'));
+      return true;
+    });
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk, callback) => {
+      const warning = String(chunk).startsWith('sweep-usage:');
+      if (
+        (warning && mode === 'sync warning, sync diagnostic') ||
+        (!warning && mode !== 'async diagnostic')
+      ) {
+        throw new Error('stderr failed');
+      }
+      const error = new Error('EPIPE');
+      queueMicrotask(() => {
+        if (typeof callback === 'function') callback(error);
+        process.stderr.emit('error', error);
+      });
+      return false;
+    });
+    await expect(
+      main(
+        baseDeps(
+          fakeGh([pullRow(7), pullRow(8)]),
+          fakeLoop(calls, async (pr, opts) => {
+            if (pr === 7) {
+              opts.onSpend?.(0, 300);
+              throw new Error('injected loop boom after token spend');
+            }
+            return outcomeWithFixTokens(pr, 125);
+          }),
+        ),
+      ),
+    ).resolves.toBeUndefined();
+    const failure =
+      'injected loop boom after token spend — accounted spend 0 and 300 tokens deducted from the sweep budget';
+    const expected =
+      mode === 'async diagnostic'
+        ? [[`pr 7: ${failure}\n`, expect.any(Function)]]
+        : [
+            ['sweep-usage: could not write stdout: stdout failed\n', expect.any(Function)],
+            [`pr 7: ${failure}\n`, expect.any(Function)],
+          ];
+    expect(stderr.mock.calls).toEqual(expected);
+    const artifact = JSON.parse(readFileSync(out, 'utf8')) as {
+      sweepUsage: { totalTokensUsed: number; perPrTokens: unknown[] };
+    };
+    expect(artifact.sweepUsage.totalTokensUsed).toBe(425);
+    expect(artifact.sweepUsage.perPrTokens).toEqual([
+      { pr: 7, tokens: 300 },
+      { pr: 8, tokens: 125 },
+    ]);
+    expect(readFileSync(stepSummary, 'utf8')).toBe(
+      sweepUsageMarkdown(artifact.sweepUsage as ReturnType<typeof buildSweepUsage>),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(process.stderr.listenerCount('error')).toBe(listeners);
+  });
+
+  test('Q47 waits for each diagnostic before attempting the next', async () => {
+    const { out } = setup();
+    process.argv = [
+      'node',
+      'self-review-loop.js',
+      '--repo',
+      REPO_PATH,
+      '--journal-root',
+      tempJournalRoot(),
+    ];
+    vi.stubEnv('CQ_SELFHOST_NOW_MS', '1700000000000');
+    vi.stubEnv('ZAI_API_KEY', 'fixture-key');
+    vi.spyOn(process.stdout, 'write').mockImplementation((_chunk, callback) => {
+      if (typeof callback === 'function') callback();
+      return true;
+    });
+    const completions: Array<(error?: Error | null) => void> = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((_chunk, callback) => {
+      if (typeof callback === 'function') completions.push(callback);
+      return false;
+    });
+    const pending = main(
+      baseDeps(
+        fakeGh([pullRow(7), pullRow(8)]),
+        fakeLoop([], async (pr, opts) => {
+          opts.onSpend?.(0, pr === 7 ? 300 : 125);
+          throw new Error(`failure ${String(pr)}`);
+        }),
+      ),
+    );
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(existsSync(out)).toBe(false);
+    completions[0]?.();
+    await vi.waitFor(() => expect(completions).toHaveLength(2));
+    expect(stderr).toHaveBeenCalledTimes(2);
+    expect(existsSync(out)).toBe(false);
+    completions[1]?.();
+    await expect(pending).resolves.toBeUndefined();
+    expect(JSON.parse(readFileSync(out, 'utf8')).sweepUsage.totalTokensUsed).toBe(425);
   });
 });
 
