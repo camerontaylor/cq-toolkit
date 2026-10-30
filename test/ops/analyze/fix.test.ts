@@ -5,13 +5,22 @@
 // three paths (cluster rule, rule over files, agent patch), and every
 // refusal's taxonomy.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import type { CheckCommand, RunCheck } from '../../../src/ops/gates/checkRunner.js';
+import { makeAttendedApprovalAuthority } from '../../../src/ops/analyze/attended.js';
 import { makeAnalyzeFix, patchTargets } from '../../../src/ops/analyze/fix.js';
 import { AnalyzeFixInputSchema } from '../../../src/ops/analyze/registry.js';
 import { makeAnalyzeRun } from '../../../src/ops/analyze/run.js';
@@ -102,6 +111,26 @@ afterEach(() => {
 const source = (dir: string) => readFileSync(join(dir, 'src', 'index.ts'), 'utf8');
 
 describe('analyze.fix — selection', () => {
+  test('newest-sidecar discovery skips a dangling matching entry', async () => {
+    const { dir, clusterId } = await fixture();
+    symlinkSync('missing.json', join(dir, '.cq/analysis/analysis-ffffffffffffffff.sidecar.json'));
+    const result = await makeAnalyzeFix({ run: scriptedRunner() })({ dir, clusterId, rule: RULE });
+    expect(result.status).toBe('ok');
+  });
+
+  test('only dangling sidecars produce a structured missing-sidecar refusal', async () => {
+    const { dir } = await fixture();
+    mkdirSync(join(dir, 'empty-reports'));
+    symlinkSync('missing.json', join(dir, 'empty-reports/analysis-ffffffffffffffff.sidecar.json'));
+    const result = await makeAnalyzeFix({ run: scriptedRunner() })({
+      dir,
+      out: 'empty-reports',
+      clusterId: 'deadbeef',
+      rule: RULE,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('no analysis sidecar');
+  });
   test('both selections, neither, and an empty file list are failed', async () => {
     const { dir, clusterId } = await fixture();
     const fix = makeAnalyzeFix({ run: scriptedRunner() });
@@ -285,6 +314,48 @@ describe('analyze.fix — a custom report directory', () => {
 });
 
 describe('analyze.fix — rule over files', () => {
+  test('same-target edits committed after preview do not authorize a different plan', async () => {
+    const { dir, git } = await fixture();
+    const changed = BAD.replace('export { n };', 'const m = "forty-two";\nexport { n, m };');
+    const run = scriptedRunner({
+      onTsc: () => {
+        writeFileSync(join(dir, 'src/index.ts'), changed);
+        git(['add', 'src/index.ts']);
+        git(['commit', '-q', '-m', 'concurrent change']);
+      },
+    });
+    const result = await makeAnalyzeFix({ run })({
+      dir,
+      rule: RULE,
+      files: ['src/index.ts'],
+      apply: true,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('plan changed since preview');
+    expect(source(dir)).toBe(changed);
+  });
+
+  test('source drift after admission is checked under the lock before writing', async () => {
+    const { dir } = await fixture();
+    const changed = BAD + '// concurrent change\n';
+    const result = await makeAnalyzeFix({
+      run: scriptedRunner(),
+      attended: (config) => {
+        const authority = makeAttendedApprovalAuthority(config);
+        const admit = authority.admit.bind(authority);
+        authority.admit = async (subject) => {
+          const admitted = await admit(subject);
+          writeFileSync(join(dir, 'src/index.ts'), changed);
+          return admitted;
+        };
+        return authority;
+      },
+    })({ dir, rule: RULE, files: ['src/index.ts'], apply: true });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('preview source changed');
+    expect(source(dir)).toBe(changed);
+  });
   test('preview then apply; recheck counts go down', async () => {
     const { dir } = await fixture();
     const fix = makeAnalyzeFix({ run: scriptedRunner() });
@@ -537,6 +608,14 @@ describe('patchTargets', () => {
     ['--- a/.cq/analysis/r.json\n+++ b/.cq/analysis/r.json\n', 'report area'],
     ['diff --git a/x b/x\nGIT binary patch\n', 'binary'],
     ['diff --git a/l b/l\nnew file mode 120000\n', 'symlink'],
+    [
+      'diff --git a/l b/l\nindex abc123..def456 120000\n--- a/l\n+++ b/l\n@@ -1 +1 @@\n-old\n+new\n',
+      'symlink',
+    ],
+    [
+      'diff --git a/sub b/sub\nindex abc123..def456 160000\n--- a/sub\n+++ b/sub\n@@ -1 +1 @@\n-Subproject commit abc123\n+Subproject commit def456\n',
+      'submodule',
+    ],
     ['--- "a/sp ace"\n+++ "b/sp ace"\n', 'quoted'],
     ['hello\n', 'names no files'],
   ])('refuses %j', (patch, reason) => {

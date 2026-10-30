@@ -709,6 +709,8 @@ export function makeAstGrepCodemod(
    * serializable, so plan JSON cannot carry one.
    */
   inherited?: ExercisedScope,
+  /** Attended composition: bind the dry-run file rows to the applied plan. */
+  expectedPreviewDigest?: string,
 ): Op<AstGrepCodemodInput, CodemodReport> {
   return async (input) => {
     // The approval gate is FIRST — before the store resolves, before any
@@ -1000,6 +1002,7 @@ export function makeAstGrepCodemod(
         files: input.files,
         dryRun: input.dryRun,
         timeoutMs: input.timeoutMs,
+        ...(expectedPreviewDigest === undefined ? {} : { expectedPreviewDigest }),
       }),
     };
     // Whether the approved WRITE was entered — the callback runs only after
@@ -1008,10 +1011,35 @@ export function makeAstGrepCodemod(
     let writeEntered = false;
     let written: ApprovedMutation<CodemodFileApplied[]>;
     try {
-      written = await withApprovedMutation(approval, subject, () => {
-        writeEntered = true;
-        return writePhase();
-      });
+      written = await withApprovedMutation(
+        approval,
+        subject,
+        () => {
+          writeEntered = true;
+          return writePhase();
+        },
+        expectedPreviewDigest === undefined
+          ? undefined
+          : async () => {
+              // The plan was rescanned after preview. Check its rendered edits
+              // AND exact source freshness under the same lock as the write.
+              const rows = files.map((file) => ({
+                file,
+                edits: plannedEdits.filter((edit) => edit.file === file).length,
+                diff: renderUnifiedDiff(file, current.get(file) as Uint8Array, plannedEdits),
+              }));
+              if (approvalInputDigest(rows) !== expectedPreviewDigest) {
+                return { ok: false, reason: 'the codemod plan changed since preview' };
+              }
+              for (const file of files) {
+                const fresh = await store.readBytes(file);
+                if (!Buffer.from(fresh).equals(Buffer.from(current.get(file) as Uint8Array))) {
+                  return { ok: false, reason: `the preview source changed: '${file}'` };
+                }
+              }
+              return { ok: true };
+            },
+      );
     } catch (err) {
       if (err instanceof CodemodWriteFault) return { status: 'failed', error: err.message };
       // A LOCK FAULT is a RESULT, not an escape (the applyRemediation rule):
