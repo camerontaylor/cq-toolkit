@@ -90,7 +90,7 @@ import type { IndependentReviewAttestation } from '../shared/independent-review.
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 
 /**
- * The ONE GraphQL document the recheck reads, paged by three independent
+ * The ONE GraphQL document the recheck reads, paged by independent
  * cursors. Variable names are load-bearing (the I11 collision rule, see
  * fetchReviewState): the document rides gh's `-f query=` slot, so no
  * GraphQL variable may be named `query` — the cursors are reviewsAfter,
@@ -101,13 +101,18 @@ import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
  * its ROOT `databaseId` (REST comment id) plus each review's node `id` are
  * the join keys of the I11 REST lag cross-check (see checkReviewDataLag).
  */
-export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $reviewsAfter: String, $threadsAfter: String, $timelineAfter: String) {
+export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $reviewsAfter: String, $threadsAfter: String, $timelineAfter: String, $commentsAfter: String, $allClear: Boolean! = false) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
       state
       isDraft
       author { login __typename }
       headRefOid
+      commits(last: 1) @include(if: $allClear) { nodes { commit { oid committedDate } } }
+      comments(first: 100, after: $commentsAfter) @include(if: $allClear) {
+        pageInfo { hasNextPage endCursor }
+        nodes { author { login __typename } authorAssociation body createdAt }
+      }
       baseRefOid
       baseRefName
       reviewThreads(first: 100, after: $threadsAfter) {
@@ -185,6 +190,8 @@ export interface PrSnapshot {
   forcePushEpoch: number;
   /** Every review across the pages read (all of them, when untruncated). */
   reviews: BoundReview[];
+  /** Optional pre-clock evidence; incomplete conversation never grants a bypass. */
+  allClear?: { committedAt: string | null; comments: BoundReview[]; complete: boolean };
   /** Every review thread across the pages read (all, when untruncated). */
   threads: SnapshotThread[];
   /**
@@ -529,7 +536,11 @@ interface PagedConnection {
  * baseRefOid or baseRefName (the PR or its base moved mid-read); oids are
  * accepted only as 40-hex (else null).
  */
-export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSnapshot> {
+export async function fetchPrSnapshot(
+  deps: ForgeDeps,
+  pr: number,
+  includeAllClear = false,
+): Promise<PrSnapshot> {
   const { gh, owner, repo } = deps;
   if (!ghNameOk(owner) || !ghNameOk(repo)) {
     throw new Error(
@@ -541,6 +552,12 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
   }
   const reviews: BoundReview[] = [];
   const threads: SnapshotThread[] = [];
+  const allClear = {
+    committedAt: null as string | null,
+    comments: [] as BoundReview[],
+    complete: true,
+  };
+  const commentsPaging: PagedConnection = { cursor: null, done: !includeAllClear };
   let forcePushEpoch = 0;
   let truncated = false;
   let first: Record<string, unknown> | null = null;
@@ -554,11 +571,14 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
     connection: unknown,
     page: number,
     take: (nodes: unknown[]) => void,
+    incomplete = () => {
+      truncated = true;
+    },
   ): void => {
     if (paging.done) return;
     const read = readPage(connection);
     if (read === null) {
-      truncated = true;
+      incomplete();
       paging.done = true;
       return;
     }
@@ -569,7 +589,7 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
       paging.cursor = read.cursor;
     } else {
       // Past the cap, or more pages with no cursor to reach them.
-      truncated = true;
+      incomplete();
       paging.done = true;
     }
   };
@@ -582,7 +602,7 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
     ]);
   for (
     let page = 1;
-    !reviewsPaging.done || !threadsPaging.done || !timelinePaging.done;
+    !reviewsPaging.done || !threadsPaging.done || !timelinePaging.done || !commentsPaging.done;
     page += 1
   ) {
     const args = [
@@ -597,6 +617,8 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
       '-F',
       `pr=${String(pr)}`,
     ];
+    if (includeAllClear) args.push('-F', 'allClear=true');
+    if (commentsPaging.cursor !== null) args.push('-f', `commentsAfter=${commentsPaging.cursor}`);
     if (reviewsPaging.cursor !== null) args.push('-f', `reviewsAfter=${reviewsPaging.cursor}`);
     if (threadsPaging.cursor !== null) args.push('-f', `threadsAfter=${threadsPaging.cursor}`);
     if (timelinePaging.cursor !== null) args.push('-f', `timelineAfter=${timelinePaging.cursor}`);
@@ -622,6 +644,39 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
       // describe different code or a different merge target.
       truncated = true;
       break;
+    }
+    if (includeAllClear) {
+      const commits = asRecord(pull['commits'])['nodes'];
+      const commit = asRecord(asRecord(Array.isArray(commits) ? commits[0] : null)['commit']);
+      const committedAt = asString(commit['committedDate']) || null;
+      if (
+        asOid(commit['oid']) !== asOid(pull['headRefOid']) ||
+        committedAt === null ||
+        !Number.isFinite(Date.parse(committedAt)) ||
+        (page > 1 && committedAt !== allClear.committedAt)
+      )
+        allClear.complete = false;
+      if (page === 1) allClear.committedAt = committedAt;
+      advance(
+        commentsPaging,
+        pull['comments'],
+        page,
+        (nodes) => {
+          allClear.comments.push(
+            ...nodes.map((node) => {
+              const comment = asRecord(node);
+              return toBoundReview({
+                ...comment,
+                state: 'COMMENTED',
+                submittedAt: comment['createdAt'],
+              });
+            }),
+          );
+        },
+        () => {
+          allClear.complete = false;
+        },
+      );
     }
     advance(reviewsPaging, pull['reviews'], page, (nodes) => {
       reviews.push(...nodes.map(toBoundReview));
@@ -655,6 +710,7 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
     baseRefName: asString(pull['baseRefName']) || null,
     forcePushEpoch,
     reviews,
+    ...(includeAllClear ? { allClear } : {}),
     threads,
     truncated,
   };
@@ -971,103 +1027,35 @@ export function judgeAtHead(
 
 // -- the recheck --------------------------------------------------------------
 
-/** Read the pinned commit and top-level conversation, independently paginated. */
-const ALL_CLEAR_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $commentsAfter: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      headRefOid
-      commits(last: 1) { nodes { commit { oid committedDate } } }
-      comments(first: 100, after: $commentsAfter) {
-        pageInfo { hasNextPage endCursor }
-        nodes { author { login __typename } authorAssociation body createdAt }
-      }
-    }
-  }
-}`;
-
 /** All-clear can replace only the wait, never exact-head acceptance or trust. */
-const fetchAllClear = async (
-  deps: RecheckDeps,
-  snapshot: PrSnapshot,
-  nowMs: number,
-): Promise<boolean> => {
-  const comments: BoundReview[] = [];
-  let cursor: string | null = null;
-  let commitMs = Number.NaN;
-  for (let page = 1; page <= SNAPSHOT_PAGE_CAP; page += 1) {
-    const args = [
-      'api',
-      'graphql',
-      '-f',
-      `query=${ALL_CLEAR_QUERY}`,
-      '-f',
-      `owner=${deps.owner}`,
-      '-f',
-      `name=${deps.repo}`,
-      '-F',
-      `pr=${String(snapshot.pr)}`,
-    ];
-    if (cursor !== null) args.push('-f', `commentsAfter=${cursor}`);
-    const payload = asRecord(await ghJson<unknown>(deps.gh, args));
-    if (Array.isArray(payload['errors']) && payload['errors'].length > 0) {
-      throw new Error('all-clear GraphQL errors');
-    }
-    const pull = asRecord(asRecord(asRecord(payload['data'])['repository'])['pullRequest']);
-    const nodes = asRecord(pull['commits'])['nodes'];
-    const commit = asRecord(asRecord(Array.isArray(nodes) ? nodes[0] : null)['commit']);
-    const date = Date.parse(asString(commit['committedDate']));
-    if (
-      asOid(pull['headRefOid']) !== snapshot.headRefOid ||
-      asOid(commit['oid']) !== snapshot.headRefOid ||
-      !Number.isFinite(date) ||
-      date > nowMs ||
-      (page > 1 && date !== commitMs)
-    )
-      return false;
-    commitMs = date;
-    const connection = readPage(pull['comments']);
-    if (connection === null) return false;
-    comments.push(
-      ...connection.nodes.map((node) => {
-        const comment = asRecord(node);
-        return toBoundReview({
-          ...comment,
-          state: 'COMMENTED',
-          submittedAt: comment['createdAt'],
-          commit: { oid: snapshot.headRefOid },
-        });
-      }),
+const hasAllClear = (snapshot: PrSnapshot, policy: TrustPolicy, nowMs: number): boolean => {
+  const evidence = snapshot.allClear;
+  if (evidence === undefined || !evidence.complete) return false;
+  const commitMs = Date.parse(evidence.committedAt ?? '');
+  if (!Number.isFinite(commitMs) || commitMs > nowMs) return false;
+  const acceptStates: ReadonlySet<string> = policy.acceptStates;
+  const relevant = new Set<string>([...acceptStates, 'CHANGES_REQUESTED', 'DISMISSED']);
+  const reviews = [
+    ...foldLatestOpinionated(
+      snapshot.reviews.filter((review) => isTrusted(review, snapshot.authorLogin, policy)),
+      relevant,
+    ).values(),
+  ].filter(
+    (review) =>
+      review.commitOid === snapshot.headRefOid &&
+      review.state !== null &&
+      acceptStates.has(review.state),
+  );
+  return [...reviews, ...evidence.comments].some((evidence) => {
+    const at = Date.parse(evidence.submittedAt ?? '');
+    return (
+      isTrusted(evidence, snapshot.authorLogin, policy) &&
+      Number.isFinite(at) &&
+      at > commitMs &&
+      at <= nowMs &&
+      defaultClassifyPrConfig.allClearPattern.test(evidence.body)
     );
-    if (!connection.more) {
-      const acceptStates: ReadonlySet<string> = deps.policy.acceptStates;
-      const relevant = new Set<string>([...acceptStates, 'CHANGES_REQUESTED', 'DISMISSED']);
-      const reviews = [
-        ...foldLatestOpinionated(
-          snapshot.reviews.filter((review) => isTrusted(review, snapshot.authorLogin, deps.policy)),
-          relevant,
-        ).values(),
-      ].filter(
-        (review) =>
-          review.commitOid === snapshot.headRefOid &&
-          review.state !== null &&
-          acceptStates.has(review.state),
-      );
-      return [...reviews, ...comments].some((evidence) => {
-        const at = Date.parse(evidence.submittedAt ?? '');
-        return (
-          isTrusted(evidence, snapshot.authorLogin, deps.policy) &&
-          Number.isFinite(at) &&
-          at > commitMs &&
-          at <= nowMs &&
-          defaultClassifyPrConfig.allClearPattern.test(evidence.body)
-        );
-      });
-    }
-    if (connection.cursor === null) return false;
-    cursor = connection.cursor;
-  }
-  // Never grant a bypass from a truncated conversation.
-  return false;
+  });
 };
 
 /** recheckBeforeMerge's injected seams. */
@@ -1118,7 +1106,7 @@ const recheckOrThrow = async (
   // (b) The immediate re-fetch.
   let snapshot: PrSnapshot;
   try {
-    snapshot = await fetchPrSnapshot(deps, pr);
+    snapshot = await fetchPrSnapshot(deps, pr, true);
   } catch (error) {
     return refuse(`recheck fetch failed: ${describeError(error)}`);
   }
@@ -1211,11 +1199,7 @@ const recheckOrThrow = async (
   if (!settle.settled) {
     let allClear = false;
     if (settle.reason === 'single_observation' || settle.reason === 'settle_pending') {
-      try {
-        allClear = await fetchAllClear(deps, snapshot, nowMs);
-      } catch (error) {
-        return refuseAfterObserving(`all-clear fetch failed: ${describeError(error)}`);
-      }
+      allClear = hasAllClear(snapshot, deps.policy, nowMs);
     }
     if (!allClear) return refuseAfterObserving(`settle: ${settle.reason}`);
   }

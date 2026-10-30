@@ -221,7 +221,8 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
   const reviewsFrom = Number(flagValue(args, 'reviewsAfter') || '0');
   const timelineFrom = Number(flagValue(args, 'timelineAfter') || '0');
   const threadsFrom = Number(flagValue(args, 'threadsAfter') || '0');
-  const laterPage = reviewsFrom > 0 || timelineFrom > 0 || threadsFrom > 0;
+  const commentsFrom = Number(flagValue(args, 'commentsAfter') || '0');
+  const laterPage = reviewsFrom > 0 || timelineFrom > 0 || threadsFrom > 0 || commentsFrom > 0;
   const reviewsMore = reviewsFrom + PAGE < spec.reviews.length;
   const threadsMore = threadsFrom + PAGE < spec.threads.length;
   const timelineMore = timelineFrom + PAGE < spec.forcePushes;
@@ -229,6 +230,17 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
     data: {
       repository: {
         pullRequest: {
+          commits: { nodes: [{ commit: { oid: spec.head, committedDate: spec.committedDate } }] },
+          comments: {
+            nodes: spec.issueComments.slice(commentsFrom, commentsFrom + PAGE),
+            pageInfo: {
+              hasNextPage: commentsFrom + PAGE < spec.issueComments.length,
+              endCursor:
+                commentsFrom + PAGE < spec.issueComments.length
+                  ? String(commentsFrom + PAGE)
+                  : null,
+            },
+          },
           state: spec.state,
           isDraft: spec.isDraft,
           author: spec.author === null ? null : { login: spec.author, __typename: 'User' },
@@ -366,26 +378,6 @@ const makeForge = (prs: Record<number, PrSpec>): Forge => {
       const pr = Number(flagValue(args, 'pr'));
       forge.log.push(`graphql:${String(pr)}`);
       const spec = forge.prs.get(pr);
-      if (spec !== undefined && flagValue(args, 'query').includes('commentsAfter')) {
-        const from = Number(flagValue(args, 'commentsAfter') || '0');
-        const more = from + PAGE < spec.issueComments.length;
-        return okRes({
-          data: {
-            repository: {
-              pullRequest: {
-                headRefOid: from > 0 ? (spec.headOnLaterPages ?? spec.head) : spec.head,
-                commits: {
-                  nodes: [{ commit: { oid: spec.head, committedDate: spec.committedDate } }],
-                },
-                comments: {
-                  nodes: spec.issueComments.slice(from, from + PAGE),
-                  pageInfo: { hasNextPage: more, endCursor: more ? String(from + PAGE) : null },
-                },
-              },
-            },
-          },
-        });
-      }
       return spec === undefined
         ? okRes({ data: { repository: { pullRequest: null } } })
         : okRes(payloadFor(spec, args));
