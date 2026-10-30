@@ -133,8 +133,16 @@ python3 apps/crq-python/crq.py reconcile-merged --after=2026-10-01T00:00:00Z --b
 ```
 
 Remove `--dry-run` to persist and enroll; repeat the same flags to resume.
-Bounds mean `(after, before]`; `before` must precede scan startup. Natural
-discovery freezes its upper bound one second behind the tick clock. The command prints one JSON discovery summary,
+Bounds mean `(after, before]`; `before` must precede scan startup. Automatic discovery is off by default. An operator may set
+`merged_discovery` in the host config to
+`{"enabled": true, "after": "2026-10-27T00:00:00Z", "before": "2026-10-30T00:00:00Z"}`.
+Only literal `true` and valid frozen bounds enable it. Every tick stays within
+that interval, including after completion or a change of configuration; existing
+unbounded discovery state cannot expand it. Missing or malformed bounds leave
+automatic discovery disabled. Keep this off for historical backfill: the sanctioned
+backfill controller owns historical selection and quota admission. Manual dry
+inventory and attended `reconcile-merged` remain available for an approved outage.
+The command prints one JSON discovery summary,
 holds the existing tick lock, and never dispatches a provider or repair. An
 incomplete result retains its cursor and enrolls nothing. A completed inventory
 enrolls supported sources through the Q1 API, deduplicating exact source bindings
@@ -158,9 +166,8 @@ Source identity, frozen bounds, page cursor and inventory are atomically persist
 under `state/reconcile/<interval-digest>.json` before the next read. The wrapper
 binds source and checkpoint with a corruption-detection digest; this is trusted
 local state, not an authorization signature. On complete discovery, enrollment
-is atomically saved before advancing the natural watermark. The natural
-non-dry, nonselective tick uses the same adapter and replays five minutes before
-its last independently complete watermark. A crash after page completion or
+is atomically saved before advancing the natural watermark. The configured non-dry, nonselective tick uses the same adapter within its
+frozen bounds; it never expands the interval from a watermark or creation date. A crash after page completion or
 enrollment replays idempotently. Source-head loss stays explicit unsupported debt.
 
 Discovery and deferred refresh share at most 24 requests / 30 seconds under the

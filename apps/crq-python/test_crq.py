@@ -1430,25 +1430,37 @@ class CurrentTest(unittest.TestCase):
         self.assertTrue(result["complete"])
 
 
-    def test_natural_discovery_overlap_watermark_and_dry_selective_gating(self):
+    def test_natural_discovery_requires_explicit_frozen_interval(self):
         actual = self.forge_inventory()
         self.q["created_at"] = "2026-10-01T00:00:00Z"
         crq.save_queue(self.q)
-        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": False}}), \
+             mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+            self.tick(discovery=True)
+            forge.assert_not_called()
+        for config in ({}, {"enabled": "true"}, {"enabled": True},
+                       {"enabled": True, "after": "2099-01-01T00:00:00Z", "before": "2099-01-02T00:00:00Z"},
+                       {"enabled": True, "after": "bad", "before": "bad"}):
+            with mock.patch.dict(crq.CONFIG, {"merged_discovery": config}), \
+                 mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+                self.tick(discovery=True)
+                forge.assert_not_called()
+        interval = {"after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}
+        self.q["merged_discovery"] = {"after": "2020-01-01T00:00:00Z",
+                                      "before": "2026-10-29T00:00:00Z", "complete": False}
+        crq.save_queue(self.q)
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True, **interval}}), \
+             mock.patch.object(crq, "gh_json", side_effect=actual), \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(dry=True, discovery=True)
             self.tick(only="selection", discovery=True)
             self.assertNotIn("merged_watermark", crq.load_queue())
             self.tick(discovery=True)
-        q = crq.load_queue()
-        watermark = q["merged_watermark"]
-        self.assertEqual(q["merged_reconcile"]["represented"], 125)
-        self.assertEqual(q["merged_discovery"]["before"], watermark)
-        # Advancing an interval replays 5 minutes; request bindings dedupe.
-        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
-        self.assertEqual(q["merged_reconcile"]["after"],
-                         crq.iso(crq.parse_iso(watermark) - crq.dt.timedelta(minutes=5)))
+        self.assertEqual(q["merged_reconcile"]["represented"], 125)
+        self.assertEqual(q["merged_reconcile"]["after"], interval["after"])
+        self.assertEqual(q["merged_reconcile"]["before"], interval["before"])
         self.assertEqual(len(q["items"]), 125)
 
 
