@@ -94,13 +94,15 @@ describe('review.run', () => {
       expect(prompts.some((prompt) => prompt.includes('Review cross-area contracts'))).toBe(true);
       const record = result.status === 'ok' ? result.value : result.report;
       const coverage = record?.sources.find((source) => source.kind === 'agent')?.coverage;
-      expect(coverage?.modeReason).toContain('area review:');
-      if (coverage?.version === 2)
+      expect(coverage && 'version' in coverage).toBe(true);
+      if (coverage && 'version' in coverage && coverage.version === 2) {
+        expect(coverage.modeReason).toContain('area review:');
         expect(coverage.sessions.find((session) => session.id === 'cross-area')).toMatchObject({
           id: 'cross-area',
           status: 'complete',
           deliveries: [],
         });
+      }
     } finally {
       await repo.cleanup();
     }
