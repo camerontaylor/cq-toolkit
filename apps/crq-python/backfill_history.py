@@ -98,7 +98,8 @@ def adapted_terminal_scope(repo, raw, item, meta, proof):
     names = terminal.get("reviewedFiles")
     if not isinstance(names, list) or not names or any(not isinstance(n, str) for n in names) or len(names) != len(set(names)):
         raise ledger.IntegrityError("unknown reviewedFiles format")
-    if set(names) - {row["path"] for row in submitted}:
+    submitted_paths = {name.decode("utf-8") for name in repo.git("diff", "--name-only", "--no-renames", "-z", item["base"], item["head"]).split(b"\0") if name}
+    if set(names) - submitted_paths:
         raise ledger.IntegrityError("vendor listed unsubmitted path")
     return [row for row in submitted if row["path"] in names]
 

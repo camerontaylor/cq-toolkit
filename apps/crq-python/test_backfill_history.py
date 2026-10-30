@@ -30,8 +30,8 @@ class HistoryTest(unittest.TestCase):
                                  "reviewedFiles": files if files is not None else self.value["payload"]["input_scope"]})
 
     def test_names_adapter_credits_only_confirmed_submitted_hunks(self):
-        base = self.f.commit({"a": b"before\n", "b": b"before\n"})
-        head = self.f.commit({"a": b"after\n", "b": b"after\n"})
+        base = self.f.commit({"a": b"before\n", "b": b"before\n", "deleted": b"old\n"})
+        head = self.f.commit({"a": b"after\n", "b": b"after\n", "deleted": None})
         item = {"head": head, "base": base, "attempt_id": "attempt"}
         meta = {"head": head, "base": base, "run_id": "run"}
         proof = {"cli_version": "0.8.2", "format": "coderabbit-agent-0.8.2", **item,
@@ -40,7 +40,7 @@ class HistoryTest(unittest.TestCase):
             return (json.dumps({"type": "review_context", "baseCommit": base}) + "\n" + json.dumps({
                 "type": "complete", "status": "review_completed", "outcome": "completed",
                 "reviewedFiles": names, **changes})).encode()
-        rows = history.adapted_terminal_scope(self.f.repo, stream(["a"]), item, meta, proof)
+        rows = history.adapted_terminal_scope(self.f.repo, stream(["a", "deleted"]), item, meta, proof)
         self.assertEqual([r["path"] for r in rows], ["a"])
         self.assertEqual(rows[0]["intervals"], [[1, 1]])
         for raw, evidence in ((stream(["unexpected"]), proof), (stream(["a", "a"]), proof),
