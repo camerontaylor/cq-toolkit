@@ -929,10 +929,26 @@ export async function main(
     const stdoutPayload = `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`;
     try {
       await new Promise<void>((resolve, reject) => {
-        process.stdout.write(stdoutPayload, (error) => {
-          if (error !== null && error !== undefined) reject(error);
-          else resolve();
-        });
+        const stdout = process.stdout;
+        const onError = (error: Error): void => {
+          reject(error);
+          // A failed write can call its callback before emitting its error.
+          // Keep the listener through that event turn, then remove it.
+          setImmediate(() => stdout.removeListener('error', onError));
+        };
+        stdout.on('error', onError);
+        try {
+          stdout.write(stdoutPayload, (error) => {
+            if (error !== null && error !== undefined) onError(error);
+            else {
+              stdout.removeListener('error', onError);
+              resolve();
+            }
+          });
+        } catch (error) {
+          stdout.removeListener('error', onError);
+          reject(error);
+        }
       });
     } catch (error) {
       // Q34 newly classifies only this post-sweep transport failure as

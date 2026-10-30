@@ -1060,54 +1060,66 @@ describe('main — usage reporting', () => {
 
   // Q34 explicitly replaces the former stdout-rejection/error-field oracle
   // with a new, scoped best-effort transport policy after a completed sweep.
-  test.each(['callback', 'throw', 'callback with broken stderr', 'callback with long message'])(
-    'a stdout %s error preserves the completed sweep and remaining reports',
-    async (mode) => {
-      const { out, stepSummary } = setup();
-      const message =
-        mode === 'callback with long message' ? `${'x'.repeat(600)}\nsecond line` : 'stdout failed';
-      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => {
-        if (mode === 'callback with broken stderr') throw new Error('stderr failed');
-        return true;
-      });
-      let finishWrite: ((error?: Error | null) => void) | undefined;
-      vi.spyOn(process.stdout, 'write').mockImplementation(
-        (
-          _chunk: string | Uint8Array,
-          encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
-          callback?: (error?: Error | null) => void,
-        ) => {
-          if (mode === 'throw') throw new Error(message);
-          const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
-          finishWrite = done;
-          return false;
-        },
-      );
-      const pending = main(
-        baseDeps(
-          fakeGh([]),
-          fakeLoop([], async () => fakeOutcome(1)),
-        ),
-      );
-      if (mode !== 'throw') {
-        await vi.waitFor(() => expect(finishWrite).toBeTypeOf('function'));
-        expect(existsSync(stepSummary)).toBe(false);
-        expect(existsSync(out)).toBe(false);
-        finishWrite?.(new Error(message));
+  test.each([
+    'callback',
+    'callback and event',
+    'throw',
+    'callback with broken stderr',
+    'callback with long message',
+  ])('a stdout %s error preserves the completed sweep and remaining reports', async (mode) => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const originalErrorListeners = process.stdout.listenerCount('error');
+    const { out, stepSummary } = setup();
+    const message =
+      mode === 'callback with long message' ? `${'x'.repeat(600)}\nsecond line` : 'stdout failed';
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+      if (mode === 'callback with broken stderr') throw new Error('stderr failed');
+      return true;
+    });
+    let finishWrite: ((error?: Error | null) => void) | undefined;
+    vi.spyOn(process.stdout, 'write').mockImplementation(
+      (
+        _chunk: string | Uint8Array,
+        encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+        callback?: (error?: Error | null) => void,
+      ) => {
+        if (mode === 'throw') throw new Error(message);
+        const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+        finishWrite = done;
+        return false;
+      },
+    );
+    const pending = main(
+      baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+    );
+    if (mode !== 'throw') {
+      await vi.waitFor(() => expect(finishWrite).toBeTypeOf('function'));
+      expect(existsSync(stepSummary)).toBe(false);
+      expect(existsSync(out)).toBe(false);
+      const error = new Error(message);
+      finishWrite?.(error);
+      if (mode === 'callback and event') {
+        await Promise.resolve();
+        expect(process.stdout.listenerCount('error')).toBe(originalErrorListeners + 1);
+        expect(process.stdout.emit('error', error)).toBe(true);
       }
-      await expect(pending).resolves.toBeUndefined();
-      const warningDetail =
-        mode === 'callback with long message' ? 'x'.repeat(500) : 'stdout failed';
-      expect(stderr).toHaveBeenCalledExactlyOnceWith(
-        `sweep-usage: could not write stdout: ${warningDetail}\n`,
-      );
-      const usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
-      expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({
-        sweepUsage: usage,
-      });
-      expect(readFileSync(stepSummary, 'utf8')).toBe(sweepUsageMarkdown(usage));
-    },
-  );
+    }
+    await expect(pending).resolves.toBeUndefined();
+    const warningDetail = mode === 'callback with long message' ? 'x'.repeat(500) : 'stdout failed';
+    expect(stderr).toHaveBeenCalledExactlyOnceWith(
+      `sweep-usage: could not write stdout: ${warningDetail}\n`,
+    );
+    const usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({
+      sweepUsage: usage,
+    });
+    expect(readFileSync(stepSummary, 'utf8')).toBe(sweepUsageMarkdown(usage));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(process.stdout.listenerCount('error')).toBe(originalErrorListeners);
+  });
 
   test('Q34 retains payload serialization failure as a whole-run error before stdout', async () => {
     const { out, stepSummary } = setup();
