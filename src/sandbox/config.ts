@@ -118,7 +118,7 @@ function parsePassthrough(raw: string | undefined): readonly string[] {
     if (!ENV_NAMES.test(name)) {
       throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH contains invalid env name '${name}'`);
     }
-    if (SANDBOX_POLICY_ENV_NAMES.has(name)) {
+    if (SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
       throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH may not expose policy env '${name}'`);
     }
   }
