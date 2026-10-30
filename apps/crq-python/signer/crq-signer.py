@@ -759,14 +759,14 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
     markers), `preamble` (the row body is reviewer-prompt boilerplate, #529),
     or `out_of_scope` (a located path outside the captured run_base..HEAD diff,
     so the row does not describe this comparison). None for a substantive
-    finding. Classification is structural: no exact-utterance blacklist —
+    finding. Classification removes known prompt framing;
     preamble markers inside a body that also carries real defect text stay
     findings."""
     body = str(e.get("codegenInstructions") or e.get("comment") or "").strip()
     title = str(e.get("title") or "").strip()
     if not body and not title:
         return "invalid"
-    lowered = body.lower()
+    lowered = (body or title).lower()
     # A category label is not independent defect evidence. Keep descriptive
     # titles, but do not let "Major finding" promote a pure prompt echo.
     generic_title = re.fullmatch(
@@ -785,7 +785,8 @@ def finding_fault(e: Dict[str, Any], diff_files: Optional[set]) -> Optional[str]
         # inside "The text ... is rendered without escaping" leaves its
         # independent description intact, however short it is.
         residue = re.sub(r"\breview data\b", " ", residue).strip()
-        prompt_only = (not residue or "verify each".startswith(residue))
+        continuation = "verify each finding against the current code and only fix it if needed"
+        prompt_only = not residue or continuation.startswith(residue)
         if prompt_only and not title_text:
             return "preamble"
     if not _has_defect_text(lowered) and not _has_defect_text(title.lower()):
@@ -828,9 +829,11 @@ def blocking_findings(ndjson: Path,
         if fault is not None:
             faults.append({"code": fault, "severity": e["severity"],
                            "stream_row": stream_row, "stream_sha256": stream_sha256,
-                           "file": e.get("fileName") if isinstance(e.get("fileName"), str) else None,
-                           "desc": cap(str(e.get("title") or e.get("codegenInstructions")
-                                           or e.get("comment") or ""), 80)})
+                           "file": cap(re.sub(r"[\x00-\x1f\x7f]", " ", e["fileName"]), 200)
+                           if isinstance(e.get("fileName"), str) else None,
+                           "desc": cap(re.sub(r"[\x00-\x1f\x7f]", " ",
+                                             str(e.get("title") or e.get("codegenInstructions")
+                                                 or e.get("comment") or "")), 80)})
             continue
         text = e.get("codegenInstructions") or e.get("comment") or ""
         m = re.search(r" at line (\d+)", text)

@@ -138,10 +138,11 @@ Written exactly once by the signer (mode 0644, atomic):
  "blocking":{"critical":N,"major":N},                    // when a completed run had findings
  "findings":[{"n","severity","file","line","title"}],    // completed runs; critical/major only;
                                                          // title ≤120 chars, control chars stripped
- "reviewer_faults":[{"code","severity","file","desc"}],  // completed runs whose blocking rows carried
+ "reviewer_faults":[{"code","severity","file","desc","stream_row","stream_sha256"}],  // completed runs whose blocking rows carried
                                                          // no reviewable defect (#529); fault codes:
                                                          // invalid | preamble | out_of_scope; desc is
-                                                         // the row's own title/body, capped at 80
+                                                         // file ≤200 chars, desc ≤80; controls stripped;
+                                                         // physical LF row + exact stream SHA-256
  "severity_counts":{...all six levels...},
  "started_at", "ended_at",
  "wait_minutes":N,                                        // rate_limited only
