@@ -750,6 +750,26 @@ describe('the mutation lock is held THROUGH the write', () => {
 });
 
 describe('the durable operator ledger (ADR-0003 §5)', () => {
+  test('an append-lock failure identifies the artifact and retains its filesystem cause', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-ledger-lock-error-'));
+    // The ledger name fits a normal filesystem component; adding the lock
+    // suffix exceeds it and produces an immediate non-EEXIST mkdir failure.
+    const ledgerPath = join(dir, 'a'.repeat(250));
+    const artifact = `${ledgerPath}.append.lock`;
+    const failure: unknown = await makeFileNonceLedger(ledgerPath)
+      .consume('a'.repeat(32))
+      .catch((err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({
+      message: expect.stringContaining(artifact) as unknown,
+      cause: expect.objectContaining({ code: 'ENAMETOOLONG' }) as unknown,
+    });
+    expect((failure as Error).message).toContain('ENAMETOOLONG');
+    expect((failure as Error).message).toContain('never reclaim by age');
+    expect(existsSync(ledgerPath)).toBe(false);
+  });
+
   test('a token spent in one run is refused in a LATER run against the same ledger', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cq-ledger-'));
     const ledgerPath = join(dir, 'approvals.ndjson');

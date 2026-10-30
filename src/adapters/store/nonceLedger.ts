@@ -273,9 +273,10 @@ function makeAppendLock(artifact: string): {
           break;
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt >= 9) {
-            throw new Error('approval ledger: append lock unavailable; never reclaim by age', {
-              cause: err,
-            });
+            throw new Error(
+              `approval ledger: append lock '${artifact}' unavailable (${err instanceof Error ? err.message : String(err)}); never reclaim by age; confirm all ledger users are stopped before removing it`,
+              { cause: err },
+            );
           }
           await delay(100 * 2 ** attempt);
         }
