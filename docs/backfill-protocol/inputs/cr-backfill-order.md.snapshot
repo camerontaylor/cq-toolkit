@@ -1,0 +1,166 @@
+# CodeRabbit backfill order — cq-toolkit merged PRs with no CodeRabbit review
+
+Generated 2026-10-30 from the read-only audit (data: `data/cr-backfill-order.json`, script `data/order.py`;
+main at `d9f4444c`). It covers 128 merged PRs that change code (docs/plans/test-only PRs are excluded) in
+the classes NONE, SKIPPED, RATE_LIMITED and WALKTHROUGH_ONLY. Not included: the 91 REVIEWED_STALE PRs (CodeRabbit reviewed an earlier commit). They are a separate, later pass over the post-review commits only.
+
+**Order:** tier, then PRs whose files mostly still exist on main, then code lines changed (largest first).
+- **"Prot" files:** match `policy/protected-paths.json`.
+- **"Priv" files:** under `apps/crq-python/`, `src/selfhost/`, `src/adapters/{git,forge-github}/`, `.github/workflows/`, `src/sandbox/`, `src/ops/{merge,ratchet,fix}/` or `scripts/`.
+
+**WALKTHROUGH_ONLY:** CodeRabbit posted a summary but no review object, which may mean a clean review rather than a skipped one. Check the walkthrough for "No actionable comments" before spending a review run on it.
+
+**How to review a merged PR:** CodeRabbit generally does not re-review closed PRs. Use the CodeRabbit CLI on triton:
+1. Create a worktree at the PR's merge commit.
+2. Run `coderabbit review --base-commit <merge>^1`.
+3. Re-check every finding against current main (most files are still live).
+4. Route confirmed findings through the same triage → fixer pipeline as `plan.md` Phase C.
+5. Batch duplicates and stacked PRs as noted.
+
+### Tier 1 — touches protected paths (policy/protected-paths.json) (12 PRs)
+
+| # | PR | CR status | Base | Merged | Code lines | Prot/priv files | Live on main | Title | Note |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | #105 | RATE_LIMITED | merge-queue | 2026-09-15 | 1450 | 1/8 | 73% | feat(ratchet): self-host swap + template drills (H4) |  |
+| 2 | #269 | NONE | merge-queue | 2026-10-04 | 731 | 1/3 | 71% | feat(ci): batch promotion to main behind a CodeRabbit promot |  |
+| 3 | #294 | NONE | merge-queue | 2026-10-10 | 673 | 1/3 | 60% | promote-gate learns the promotion review (C2 prerequisite) |  |
+| 4 | #310 | WALKTHROUGH_ONLY | merge-queue | 2026-10-11 | 650 | 2/4 | 78% | feat(gate): arm cq-gate and retire merge-queue-gate (C2 step |  |
+| 5 | #322 | NONE | merge-queue | 2026-10-17 | 534 | 1/3 | 100% | feat(gates): decisive D11 authorization for push subjects (C |  |
+| 6 | #333 | WALKTHROUGH_ONLY | merge-queue | 2026-10-17 | 432 | 1/8 | 100% | [protected] fix(policy): run every trusted verdict job throu |  |
+| 7 | #237 | WALKTHROUGH_ONLY | merge-queue | 2026-09-28 | 380 | 1/10 | 100% | fix(merge): accept independent agent reviews from a shared a |  |
+| 8 | #276 | RATE_LIMITED | merge-queue | 2026-10-04 | 187 | 1/1 | 100% | fix(denylist-scan): validate every required pair in a multi- |  |
+| 9 | #368 | SKIPPED | merge-queue | 2026-10-19 | 183 | 1/5 | 100% | refactor(shared): Extract common error message coercion |  |
+| 10 | #195 | RATE_LIMITED | merge-queue | 2026-09-20 | 115 | 2/1 | 100% | fix(denylist): reject Windows-plain-name probe_path segments |  |
+| 11 | #340 | SKIPPED | merge-queue | 2026-10-18 | 105 | 1/1 | 100% | fix(protected): C3 never honours a pre-attestation cq-overri |  |
+| 12 | #360 | WALKTHROUGH_ONLY | merge-queue | 2026-10-19 | 91 | 2/5 | 100% | refactor(policy): Move settle schema to policy/queue |  |
+
+### Tier 2 — privileged-path code, ≥300 code lines (21 PRs)
+
+| # | PR | CR status | Base | Merged | Code lines | Prot/priv files | Live on main | Title | Note |
+|---|---|---|---|---|---|---|---|---|---|
+| 13 | #262 | RATE_LIMITED | merge-queue | 2026-10-03 | 8786 | 0/23 | 95% | build: migrate from npm to pnpm with the global virtual stor |  |
+| 14 | #263 | NONE | main | 2026-10-03 | 8786 | 0/23 | 95% | build: migrate from npm to pnpm with the global virtual stor | same diff as #262 — review once as #262/#263 |
+| 15 | #132 | RATE_LIMITED | merge-queue | 2026-09-16 | 6872 | 0/23 | 81% | build!: Implement agent mechanical tooling |  |
+| 16 | #649 | RATE_LIMITED | merge-queue | 2026-10-28 | 3905 | 0/4 | 100% | fix(review): persist verified queue receipt ownership before | stacked — see #641 |
+| 17 | #653 | RATE_LIMITED | merge-queue | 2026-10-28 | 3905 | 0/4 | 100% | test(review): Cover offline queue transport boundaries | stacked on #641/#649 — review the #641→#653 union once |
+| 18 | #641 | RATE_LIMITED | merge-queue | 2026-10-28 | 3788 | 0/4 | 100% | fix(review): bind authenticated same-item receipt aliases | review #641+#649+#653 as one union diff |
+| 19 | #324 | NONE | merge-queue | 2026-10-16 | 1492 | 0/2 | 100% | refactor(sandbox): Move host launchers to experimental [prot |  |
+| 20 | #544 | RATE_LIMITED | merge-queue | 2026-10-28 | 1045 | 0/2 | 100% | feat(review): Add authorized queue operations and verified e |  |
+| 21 | #133 | NONE | merge-queue | 2026-09-16 | 1022 | 0/5 | 80% | feat(merge): executeMerges effects seam + diagnoseMergeFailu |  |
+| 22 | #74 | RATE_LIMITED | merge-queue | 2026-09-15 | 841 | 0/3 | 100% | feat(ratchet): checkRatchet + monotonic guard (H2) |  |
+| 23 | #440 | SKIPPED | merge-queue | 2026-10-24 | 679 | 0/2 | 100% | fix(sweep): Pin failed task attempts as commits |  |
+| 24 | #125 | NONE | merge-queue | 2026-09-16 | 593 | 0/3 | 100% | feat(merge): classifyPrs — the I2 acceptance decision table  |  |
+| 25 | #316 | WALKTHROUGH_ONLY | merge-queue | 2026-10-14 | 588 | 0/5 | 100% | fix(policy): per-run App mint for the last PAT consumers (C3 |  |
+| 26 | #267 | RATE_LIMITED | merge-queue | 2026-10-04 | 542 | 0/4 | 75% | fix(ci): failed runs mean a human must act (verdicts in chec |  |
+| 27 | #543 | RATE_LIMITED | merge-queue | 2026-10-27 | 483 | 0/2 | 100% | feat(crq): Review merged PR affected code at a pinned curren |  |
+| 28 | #571 | RATE_LIMITED | merge-queue | 2026-10-28 | 449 | 0/4 | 100% | fix(fix-run): account for all planned residue |  |
+| 29 | #330 | SKIPPED | merge-queue | 2026-10-17 | 420 | 0/3 | 100% | feat(crq): Port author lease and timed agent fallback |  |
+| 30 | #540 | SKIPPED | merge-queue | 2026-10-27 | 392 | 0/6 | 100% | fix(review): Verify typed lint and bounded related tests |  |
+| 31 | #131 | WALKTHROUGH_ONLY | merge-queue | 2026-09-16 | 379 | 0/2 | 100% | feat(merge): planMergeOrder — topological stacked ordering ( |  |
+| 32 | #336 | SKIPPED | merge-queue | 2026-10-18 | 348 | 0/2 | 100% | [protected] fix(ratchet): never propose a baseline stricter  |  |
+| 33 | #109 | RATE_LIMITED | main | 2026-09-15 | 320 | 0/2 | 100% | fix(ratchet): close review-debt #66 and #68 — family barrel  |  |
+
+### Tier 3 — other code, ≥300 code lines (8 PRs)
+
+| # | PR | CR status | Base | Merged | Code lines | Prot/priv files | Live on main | Title | Note |
+|---|---|---|---|---|---|---|---|---|---|
+| 34 | #156 | WALKTHROUGH_ONLY | merge-queue | 2026-09-17 | 1543 | 0/0 | 75% | feat(sweep): salvage classifier + age-based cleanup (D2) |  |
+| 35 | #318 | SKIPPED | merge-queue | 2026-10-14 | 1252 | 0/0 | 83% | feat(driver): add strict pre-request token reservation ceili |  |
+| 36 | #63 | RATE_LIMITED | merge-queue | 2026-09-15 | 903 | 0/0 | 50% | feat(review): fetchReviewState + shared thread vocabulary +  |  |
+| 37 | #62 | RATE_LIMITED | merge-queue | 2026-09-15 | 590 | 0/0 | 100% | feat(gates): CheckRunner contract + vitest/eslint/tsc adapte |  |
+| 38 | #572 | RATE_LIMITED | merge-queue | 2026-10-28 | 585 | 0/0 | 100% | feat(review): Add standalone closure evidence verifier |  |
+| 39 | #636 | RATE_LIMITED | merge-queue | 2026-10-28 | 482 | 0/0 | 100% | fix(harness): bound grep include matching and expansion |  |
+| 40 | #585 | RATE_LIMITED | merge-queue | 2026-10-28 | 475 | 0/0 | 100% | fix(harness): stream grep include enumeration within budgets |  |
+| 41 | #31 | RATE_LIMITED | merge-queue | 2026-09-14 | 342 | 0/0 | 100% | fix(kernel): runner resume-safety and journal integrity (rev |  |
+
+### Tier 4 — small changes (<300 code lines) (87 PRs)
+
+| # | PR | CR status | Base | Merged | Code lines | Prot/priv files | Live on main | Title | Note |
+|---|---|---|---|---|---|---|---|---|---|
+| 42 | #207 | RATE_LIMITED | merge-queue | 2026-09-21 | 242 | 0/1 | 75% | fix(driver): surface driver failure causes; decouple ai-sdk  |  |
+| 43 | #279 | NONE | merge-queue | 2026-10-08 | 229 | 0/6 | 100% | fix: address crq post-merge majors (ensureDist timeout, DATA |  |
+| 44 | #270 | WALKTHROUGH_ONLY | merge-queue | 2026-10-04 | 221 | 0/0 | 100% | fix(gates): count local actions a required-check producer ru |  |
+| 45 | #531 | NONE | merge-queue | 2026-10-27 | 220 | 0/3 | 100% | fix(promotion): Honor trusted advisory ratchet posture |  |
+| 46 | #583 | RATE_LIMITED | merge-queue | 2026-10-27 | 210 | 0/0 | 100% | test(dev): Prove explicit configured agent fallback |  |
+| 47 | #623 | RATE_LIMITED | merge-queue | 2026-10-28 | 192 | 0/0 | 100% | feat(review): Add blind rejection shadow protocol |  |
+| 48 | #268 | RATE_LIMITED | merge-queue | 2026-10-04 | 186 | 0/3 | 100% | ci: share the static gate steps through one composite action |  |
+| 49 | #118 | RATE_LIMITED | main | 2026-09-15 | 175 | 0/3 | 80% | fix(ratchet): close the PR #108/#109/#110 follow-ups — key-p |  |
+| 50 | #525 | WALKTHROUGH_ONLY | merge-queue | 2026-10-27 | 172 | 0/0 | 100% | fix(review): Preserve session evidence and bound diff anchor |  |
+| 51 | #576 | RATE_LIMITED | merge-queue | 2026-10-27 | 169 | 0/0 | 100% | fix(review): Retry recoverable rate limits within review bud |  |
+| 52 | #253 | WALKTHROUGH_ONLY | merge-queue | 2026-10-08 | 167 | 0/3 | 75% | feat(scripts): advisory affected-test selector (slice 2 / T2 |  |
+| 53 | #284 | RATE_LIMITED | merge-queue | 2026-10-08 | 164 | 0/0 | 100% | fix(analyze): run playbook preflight inside the approval loc |  |
+| 54 | #287 | RATE_LIMITED | merge-queue | 2026-10-08 | 159 | 0/0 | 100% | fix(analyze): keep rendered reports out of the approval work |  |
+| 55 | #214 | NONE | merge-queue | 2026-09-24 | 154 | 0/5 | 89% | fix(safety): harden self-host automation and worker environm |  |
+| 56 | #107 | RATE_LIMITED | main | 2026-09-15 | 131 | 0/3 | 100% | fix(ratchet): close review-debt #72 and #69 — guarded direct |  |
+| 57 | #249 | WALKTHROUGH_ONLY | merge-queue | 2026-10-04 | 118 | 0/0 | 100% | feat(test): suite classification + vitest projects + two-tie |  |
+| 58 | #597 | RATE_LIMITED | merge-queue | 2026-10-27 | 113 | 0/2 | 100% | fix(crq): one required CodeRabbit cycle per PR; operator pri |  |
+| 59 | #637 | RATE_LIMITED | merge-queue | 2026-10-28 | 102 | 0/1 | 100% | fix(fix): scope PR residue to its unit branch |  |
+| 60 | #312 | SKIPPED | merge-queue | 2026-10-11 | 100 | 0/0 | 50% | fix(config,docs): _URL is not a secret suffix for resolution |  |
+| 61 | #629 | RATE_LIMITED | merge-queue | 2026-10-28 | 100 | 0/2 | 100% | fix(fix): preserve final residue rows and task identities |  |
+| 62 | #282 | SKIPPED | merge-queue | 2026-10-08 | 94 | 0/1 | 100% | feat(sandbox): default to a digest-pinned container image (o |  |
+| 63 | #545 | RATE_LIMITED | merge-queue | 2026-10-27 | 88 | 0/0 | 100% | feat(review): Give partition fallback bounded read-only refe |  |
+| 64 | #325 | WALKTHROUGH_ONLY | merge-queue | 2026-10-18 | 87 | 0/1 | 80% | [protected] Phase 0 E: load fixer prompt from canonical Mark |  |
+| 65 | #103 | RATE_LIMITED | main | 2026-09-15 | 85 | 0/0 | 75% | fix(kernel,cli,review): lossless walks see ALL own keys; fet |  |
+| 66 | #662 | WALKTHROUGH_ONLY | merge-queue | 2026-10-28 | 85 | 0/0 | 100% | fix(review): refuse reuse across an intervening genuine revi |  |
+| 67 | #112 | RATE_LIMITED | main | 2026-09-15 | 81 | 0/0 | 100% | fix(registry): close review-debt #82 — the strictness gate u |  |
+| 68 | #339 | SKIPPED | merge-queue | 2026-10-18 | 81 | 0/0 | 100% | fix(sandbox): resolve host-side tools from PATH on non-FHS h |  |
+| 69 | #570 | RATE_LIMITED | merge-queue | 2026-10-27 | 75 | 0/0 | 100% | fix(tasks): preserve raw identity in failed-task refs |  |
+| 70 | #97 | RATE_LIMITED | main | 2026-09-15 | 72 | 0/0 | 100% | fix(acp): close the PR #37 review cluster — token-count vali |  |
+| 71 | #113 | RATE_LIMITED | main | 2026-09-15 | 72 | 0/0 | 50% | fix(kernel): close review-debt #17 non-frozen items — mirror |  |
+| 72 | #123 | RATE_LIMITED | main | 2026-09-15 | 71 | 0/2 | 100% | fix: close the PR #114/#118/#119 follow-ups — index bounds,  |  |
+| 73 | #106 | RATE_LIMITED | main | 2026-09-15 | 67 | 0/0 | 100% | fix(cli): close the PR #64 review-debt cluster — bin mapping |  |
+| 74 | #537 | WALKTHROUGH_ONLY | merge-queue | 2026-10-27 | 67 | 0/0 | 100% | fix(cli): Keep JSON output to one artifact |  |
+| 75 | #315 | WALKTHROUGH_ONLY | merge-queue | 2026-10-14 | 62 | 0/1 | 100% | fix: pin heavy-lock initialization directory identity |  |
+| 76 | #124 | RATE_LIMITED | main | 2026-09-15 | 60 | 0/5 | 80% | fix(ratchet,ops): close review-debt #120 — exact normalizati |  |
+| 77 | #664 | WALKTHROUGH_ONLY | merge-queue | 2026-10-28 | 59 | 0/0 | 100% | fix(review): accept producer no-content receipt rows beside  |  |
+| 78 | #682 | WALKTHROUGH_ONLY | merge-queue | 2026-10-29 | 57 | 0/2 | 100% | feat(selfhost): Expose authenticated R4 acceptance evidence |  |
+| 79 | #119 | RATE_LIMITED | main | 2026-09-15 | 55 | 0/0 | 100% | fix: last two regrowth findings — quoted cmd.exe argv elemen |  |
+| 80 | #303 | RATE_LIMITED | merge-queue | 2026-10-10 | 54 | 0/1 | 100% | docs(policy): recommend the cq-automation App identity for t |  |
+| 81 | #516 | RATE_LIMITED | merge-queue | 2026-10-27 | 54 | 0/0 | 100% | fix(review): Record address batches within one entry per rou |  |
+| 82 | #115 | RATE_LIMITED | main | 2026-09-15 | 53 | 0/0 | 100% | fix(acp): close the two PR #97 follow-ups — malformed report |  |
+| 83 | #650 | RATE_LIMITED | merge-queue | 2026-10-28 | 47 | 0/0 | 100% | fix(harness): accept negated includes and charge matcher wor |  |
+| 84 | #665 | WALKTHROUGH_ONLY | merge-queue | 2026-10-28 | 45 | 0/0 | 100% | fix(review): resolve no-fresh reuse against its referenced r |  |
+| 85 | #110 | RATE_LIMITED | main | 2026-09-15 | 42 | 0/1 | 100% | fix(ratchet): close review-debt #87 — authoritative proposal |  |
+| 86 | #630 | RATE_LIMITED | merge-queue | 2026-10-28 | 40 | 0/0 | 100% | fix(review): State the wait and cause when a rate-limit retr |  |
+| 87 | #657 | WALKTHROUGH_ONLY | merge-queue | 2026-10-28 | 40 | 0/0 | 100% | fix(harness): Match ordinary unanchored includes by basename |  |
+| 88 | #101 | RATE_LIMITED | main | 2026-09-15 | 39 | 0/2 | 100% | fix(eval-infra): abort verdict gates the spike exit status;  |  |
+| 89 | #616 | RATE_LIMITED | merge-queue | 2026-10-28 | 36 | 0/0 | 100% | fix(review): report repair accounting and partial use |  |
+| 90 | #111 | RATE_LIMITED | main | 2026-09-15 | 34 | 0/0 | 100% | fix(acp): close review-debt #54/#55 — resolved .cmd/.bat shi |  |
+| 91 | #635 | RATE_LIMITED | merge-queue | 2026-10-28 | 32 | 0/0 | 100% | fix(review.address): Report recorded outcomes on dispatched  |  |
+| 92 | #162 | SKIPPED | merge-queue | 2026-09-17 | 30 | 0/2 | 100% | fix(merge): VB3F batch-gate remediation — propagation-aware  |  |
+| 93 | #297 | WALKTHROUGH_ONLY | merge-queue | 2026-10-10 | 30 | 0/1 | 100% | fix(policy): paginate cq-accept commit-to-PR lookup (#280) |  |
+| 94 | #619 | RATE_LIMITED | merge-queue | 2026-10-28 | 28 | 0/2 | 100% | fix(pack): harden packed-smoke timeout, temp, and summary |  |
+| 95 | #264 | RATE_LIMITED | merge-queue | 2026-10-04 | 24 | 0/1 | 100% | fix(ci): resolve pnpm lockfile config mismatch in install-ma |  |
+| 96 | #414 | WALKTHROUGH_ONLY | merge-queue | 2026-10-24 | 24 | 0/2 | 100% | fix(ci): never supersede merge-queue subject measurements |  |
+| 97 | #647 | RATE_LIMITED | merge-queue | 2026-10-28 | 23 | 0/0 | 100% | fix(review.address): Re-derive openBlocking from the overlai |  |
+| 98 | #128 | RATE_LIMITED | main | 2026-09-16 | 22 | 0/1 | 100% | fix: close the PR #124/#126/#127 follow-ups — template-first |  |
+| 99 | #58 | RATE_LIMITED | merge-queue | 2026-09-15 | 21 | 0/0 | 100% | fix(live): the deepseek leg requests the served id — costUSD |  |
+| 100 | #200 | RATE_LIMITED | merge-queue | 2026-09-20 | 21 | 0/1 | 75% | release: v1.0.0 |  |
+| 101 | #306 | WALKTHROUGH_ONLY | merge-queue | 2026-10-10 | 21 | 0/1 | 100% | fix(sandbox): Pin seatbelt PATH and close live certification |  |
+| 102 | #314 | WALKTHROUGH_ONLY | merge-queue | 2026-10-11 | 20 | 0/1 | 100% | adversarial-suite: drop invalid permission-* inputs from the |  |
+| 103 | #666 | WALKTHROUGH_ONLY | merge-queue | 2026-10-28 | 20 | 0/1 | 100% | fix(crq): stop search noise and parked rows from stalling qu |  |
+| 104 | #206 | WALKTHROUGH_ONLY | merge-queue | 2026-09-21 | 19 | 0/0 | 100% | feat(driver): WorkerResult.error cause channel (post-freeze  |  |
+| 105 | #255 | WALKTHROUGH_ONLY | merge-queue | 2026-10-04 | 15 | 0/2 | 100% | feat(scripts): leaf-scoped fix and build-once ratchet engine |  |
+| 106 | #272 | RATE_LIMITED | merge-queue | 2026-10-04 | 15 | 0/0 | 100% | test(sweep): worktreeEffects seam, seeded git template, in-p |  |
+| 107 | #654 | RATE_LIMITED | merge-queue | 2026-10-28 | 15 | 0/0 | 100% | fix(review): Report one-step partition tool limitation |  |
+| 108 | #178 | WALKTHROUGH_ONLY | merge-queue | 2026-09-17 | 12 | 0/0 | 100% | feat(plans): export merge-prs and analyze plan builders thro |  |
+| 109 | #126 | WALKTHROUGH_ONLY | main | 2026-09-15 | 11 | 0/1 | 100% | fix(ratchet): land the property-position key anchors for rea |  |
+| 110 | #658 | WALKTHROUGH_ONLY | merge-queue | 2026-10-28 | 11 | 0/0 | 100% | fix(review): Classify a malformed queue SSH alias as failed  |  |
+| 111 | #215 | NONE | merge-queue | 2026-09-24 | 9 | 0/1 | 100% | test: Split unit and e2e workflows |  |
+| 112 | #672 | WALKTHROUGH_ONLY | merge-queue | 2026-10-29 | 9 | 0/1 | 100% | fix(crq): Limit minute collection hints to detached runs |  |
+| 113 | #677 | WALKTHROUGH_ONLY | merge-queue | 2026-10-29 | 9 | 0/1 | 100% | fix(queue): Preserve merged state on PR-only bind replay |  |
+| 114 | #59 | RATE_LIMITED | merge-queue | 2026-09-15 | 8 | 0/1 | 100% | fix(live): the deepseek eval cell requests the served id (co |  |
+| 115 | #271 | RATE_LIMITED | merge-queue | 2026-10-04 | 8 | 0/1 | 100% | test: build dist once per Vitest run; mandatory demo spawn t |  |
+| 116 | #127 | RATE_LIMITED | main | 2026-09-16 | 5 | 0/0 | 100% | fix(coverage): broaden the coverage ratchet basis — all src/ |  |
+| 117 | #301 | WALKTHROUGH_ONLY | merge-queue | 2026-10-10 | 5 | 0/0 | 100% | fix(driver): bound retryAfterMs to nonnegative in ProviderSi |  |
+| 118 | #617 | RATE_LIMITED | merge-queue | 2026-10-28 | 5 | 0/0 | 100% | fix(review): Reject nonexistent terminal EOF anchor lines |  |
+| 119 | #57 | RATE_LIMITED | merge-queue | 2026-09-15 | 4 | 0/0 | 100% | fix(live): the deepseek leg requests the served id — costUSD |  |
+| 120 | #198 | RATE_LIMITED | merge-queue | 2026-09-20 | 4 | 0/0 | 100% | chore(ratchet): tighten baselines (1 metric) |  |
+| 121 | #337 | SKIPPED | merge-queue | 2026-10-18 | 4 | 0/0 | 100% | chore(ratchet): tighten baselines (1 metric) |  |
+| 122 | #375 | SKIPPED | merge-queue | 2026-10-26 | 4 | 0/0 | 100% | chore(ratchet): tighten baselines (1 metric) |  |
+| 123 | #678 | WALKTHROUGH_ONLY | merge-queue | 2026-10-29 | 4 | 0/1 | 100% | fix(crq): Bound generic promotion error retries |  |
+| 124 | #309 | WALKTHROUGH_ONLY | merge-queue | 2026-10-11 | 3 | 0/0 | 100% | chore(gitignore): ignore .vitest/ test runtime state |  |
+| 125 | #213 | RATE_LIMITED | merge-queue | 2026-09-21 | 88 | 0/0 | 0% | fix(driver): populate WorkerResult.error on the subprocess e | mostly gone from main — review only surviving files |
+| 126 | #95 | RATE_LIMITED | main | 2026-09-15 | 66 | 0/0 | 0% | fix(ledger): PR #93 review follow-ups — ancestor walk for ne | mostly gone from main — review only surviving files |
+| 127 | #180 | SKIPPED | merge-queue | 2026-09-18 | 65 | 0/2 | 33% | fix(merge): scope the realMergeEffects gh spawn to repoRoot, | mostly gone from main — review only surviving files |
+| 128 | #281 | WALKTHROUGH_ONLY | merge-queue | 2026-10-08 | 42 | 0/0 | 0% | fix(pricing): address post-merge #248 review findings | mostly gone from main — review only surviving files |

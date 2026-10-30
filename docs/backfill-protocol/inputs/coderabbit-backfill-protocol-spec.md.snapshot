@@ -1,0 +1,286 @@
+# Deep Interview Spec: CodeRabbit backfill protocol
+
+> Status: **approved** by the owner on 2026-10-30, including the protocol-review revisions below. Implementation may proceed under the stated constraints.
+
+## Metadata
+- Rounds: 14 plus the restate gate · Final ambiguity: 8% · Threshold: 10%
+- Type: brownfield · Generated: 2026-10-30
+- Result: interview PASSED; revised after protocol review on 2026-10-30. Interview scores below are historical, not validation of the revised protocol.
+- Trace: [`specs/coderabbit-backfill-protocol-trace.md`](coderabbit-backfill-protocol-trace.md)
+- Required list: [`plans/review-debt-20261030/cr-backfill-order.md`](../plans/review-debt-20261030/cr-backfill-order.md). Only its PR list, row order and explicit stack/duplicate annotations are used; its old tiers are superseded by the path map below. Its "How to review" method is superseded; see Constraints.
+
+## Clarity Breakdown
+| Dimension | Score | Weight | Weighted |
+|---|---|---|---|
+| Goal | 0.93 | 0.35 | 0.326 |
+| Constraints | 0.92 | 0.25 | 0.230 |
+| Success Criteria | 0.90 | 0.25 | 0.225 |
+| Context | 0.92 | 0.15 | 0.138 |
+| **Total Clarity / Ambiguity** | | | **0.92 / 0.08** |
+
+## Topology
+| Component | Status | Description | Coverage note |
+|---|---|---|---|
+| Coverage accounting | active | Explicit reviewed-line evidence, carried forward conservatively with blame | Credit sources, unit, scope and history import are settled |
+| Importance scoring & selection | active | One path tier map; required-list preference within each tier | Tier map and formula are settled |
+| Review-subject construction | active | Tier A: PR live files at T. Tier B: path-cluster projection | Method and stack unions are settled; unions were agent-decided |
+| Queue admission & dispatch | active | Rank-4 backfill intent, quota reserve, pinning, failure release | Reserve, in-flight cap and failure rules are settled |
+| Operating form | active | Deterministic timer on ceres; findings go to the repair pipeline | Settled |
+| Review record in git | active | Append-only `cq/review-ledger` branch, writable only by the App | Location, schema and authority are settled |
+
+No component is deferred. Repos other than cq-toolkit are a **later phase**. That is a scope boundary inside accounting, not a deferred component.
+
+## Goal
+
+A deterministic timer on ceres computes per-line review coverage of current cq-toolkit code from explicit reviewed scope, using blame only to carry evidence forward. Coverage credit comes from crq runs and GitHub-app reviews. The credit is recorded in an append-only `cq/review-ledger` branch that only the runner App can write. The ledger holds review status and normalized findings, and it is seeded with imported history. The timer ranks uncovered code using a checked-in importance tier map, preferring the PRs in cr-backfill-order.md within each importance tier. It enqueues rank-4 backfill items, which crq reviews from spare quota under these rules: a 1-slot reserve, at most 2 in flight, a pinned target T, and release of blocked items after 3 failures. Each item is one of two kinds:
+- an unreviewed PR's live files as they are now, with stacked PRs combined into one item;
+- a path-cluster projection.
+
+The stage-1 bar has two parts: the mechanism passes the acceptance checks, and baseline T1 debt is burned down. Zero surviving baseline T1 uncovered lines within 14 days is a capacity-dependent operational target, not an unconditional scheduler guarantee. New debt and unresolved exclusions remain separately visible.
+
+### Protocol (operational form)
+
+1. **Pin.** Fetch promoted `origin/main` and record its SHA and tree as **T**. Capture the complete inventory manifest described below before computing candidates.
+2. **Account.** Credit requires a completed, authenticated review with an explicit scope manifest: reviewed target commit, path, blob ID, and 1-based inclusive target-line intervals. Commit membership in `(base, head]` alone never grants credit.
+   - For a diff review, only added/changed head-side intervals actually included in the review earn credit. Context lines, deleted lines, excluded files, skipped partitions and unverified/truncated scope do not. If complete scope cannot be established, leave the uncertain portion uncovered.
+   - For a whole-file projection, a verified full-file review earns `[1, line_count]` credit for each included blob. A run completing is not, by itself, evidence that every requested file was reviewed.
+   - Synthetic base/head commits describe reviewer input, not original line provenance. Map reviewed head-side intervals to identical path/blob/line coordinates at T and retain both the input and mapped scope. Reject a mapping unless the head blob equals the target blob.
+   - Carry evidence from T′ to T only for uniquely mapped, unchanged lines on evidenced path lineage. Use fixed blame options without `-M`, `-C` or whitespace ignoring; compare original path/line/commit and content, not just commit membership. Renames require unambiguous lineage; copies, moves, reformatting, delete/recreate and uncertain mappings receive no inherited credit. A non-ancestor/squash relationship needs an explicit verified mapping; otherwise it remains uncovered.
+   - Every tracked regular text line is either covered or uncovered. Inventory binary, non-regular, oversized, ambiguous and unreadable objects separately with reasons; never silently remove them from reports or call them covered. Empty files have zero lines and an explicit disposition.
+3. **Score.** Every path uses the single checked-in map `policy/review-tiers.json`:
+   - **T1:** protected paths, signer, promotion gate and crq paths.
+   - **T2:** the privileged set documented in cr-backfill-order.md, plus `src/kernel`, `src/ops` and `src/driver`.
+   - **T3:** remaining `src/` paths.
+   - **T4:** tests, docs and all remaining tracked paths.
+
+   Highest importance wins overlapping matches, including tests/docs inside protected or privileged trees. Exact globs and the protected-path policy digest must be committed before go-live. For each file, `score = uncovered_lines × (1 + recent_churn + past_findings)`. `recent_churn` is the count of first-parent commits reachable from T that change that path in the 30 days ending at the manifest's evaluation time; count a merge once by its first-parent diff. `past_findings` counts distinct confirmed finding identities for that path in the pinned ledger, including fixed findings but excluding dismissed or untriaged findings. No floating-point values are needed.
+4. **Select.** A and B describe subject kinds, not importance tiers.
+   - **A, required-list subjects:** PRs with uncovered live lines. Combine only explicit stack/duplicate groups, including #641+#649+#653 and #262/#263. Free-text notes such as “mostly gone” do not imply a union. A union takes its earliest member's row order.
+   - **B, path clusters:** group remaining eligible files by directory and importance tier. Sort files by descending score then bytewise path; greedily form bounded clusters in that order. Cluster score is the sum of member scores.
+   - A subject's importance is the highest importance of its uncovered included paths. Sort first by importance, then retry placement (fresh work before retry generations), then A before B. A sorts by required-list row; B sorts by descending cluster score; final ties use bytewise canonical subject identity. Thus B at T1 precedes A at T2. Recompute priority after splitting or coverage changes.
+   - Exclude scope already owned by a live job or publication-pending completion. Do not enqueue a duplicate B projection for lines already assigned to A. Recompute eligibility before dispatch against newly published coverage without moving a job's pinned T.
+   - `WALKTHROUGH_ONLY` receives credit only under the import evidence contract below. “No actionable comments” alone is insufficient. `REVIEWED_STALE` is handled by line accounting; post-review edits remain uncovered.
+5. **Construct.**
+   - **A** uses a modified `build_synthetic` with explicit T. Its synthetic head tree equals T. For each live path, restore the earliest applicable member's pre-merge version into the synthetic base, following verified rename lineage. Order stack members by ancestry, with SHA as a deterministic tie-breaker; conflicting/nonlinear baselines fall back to a whole-file projection. Record per-path baseline provenance. The current builder must be changed: it reads `origin/merge-queue` and writes mutable per-PR refs.
+   - If the resulting diff is empty, or leaves selected uncovered lines outside its head-side changed intervals, project those residual files in full. A source PR is not complete merely because its synthetic diff completed.
+   - **B** uses `build_current_projection(T, paths)`. Both kinds obey the same scope validation, secret scanning and reviewer completion checks.
+   - Bound each partition by 8 files, 256 KiB per file and 2 MiB total current content, and by the verified deployed reviewer's file/diff-byte limits, whichever is stricter. Version these limits in policy. Split oversized unions deterministically by importance then bytewise path. Do not truncate. A single file exceeding a limit becomes explicit unsupported debt; unsupported/ambiguous paths do not block review of the other paths.
+   - Pin refs under immutable subject/generation/partition identities. Include PR titles and bodies as untrusted reviewer context; their contents never control commands or scope. Retain all pinned Git objects needed to reproduce credited scope.
+6. **Enqueue.** Use separate identities:
+   - `subject_id`: hash of repo, kind, sorted PR/path set, T, scope digest, construction-policy digest and partition identity.
+   - `job_id`: `(subject_id, generation)`; `attempt_id`: `(job_id, attempt_number)`.
+   - One live job per equivalent scope. A completed review suppresses only scope it actually credits. A blocked/error ledger event does not permanently suppress a new generation. Repeated enqueue requests for the same generation are idempotent.
+   - Persist a retry-family key based on repo and source PR union, or canonical path lineage for B. Failure history survives target changes and partition changes; children inherit family failures. Changing T must not reset the budget.
+7. **Dispatch.** Enforce these rules in the same scheduler transaction/lock as ordinary admission:
+   - Ranks 0–3 win at each admission decision when eligible. Backfill does not preempt running work, and later arrivals may wait for running backfill. This is admission priority, not a zero-delay guarantee.
+   - Require a successful vendor usage observation no older than 60 seconds. Compute effective remaining as observed remaining minus local reservations not proven reflected in that observation. Unknown or stale usage admits no backfill. Atomically reserve one quota unit only if effective remaining is at least 2; reconcile reservations conservatively after launch and restart. A timed-out launch with unknown vendor outcome retains ownership until reconciled, rather than starting a duplicate review.
+   - At most 2 backfill runs are in flight. Existing coverage work must share the rank-4 quota reserve and in-flight limit; it cannot bypass the new accounting or duplicate its scope.
+   - Keep each job's T pinned. For retryable vendor errors, wait at least the vendor retry-after or exponential cooldown `min(24 h, 1 h × 2^(family_failures−1))`, whichever is longer. No randomized jitter enters ranked inventory output.
+   - After 3 failed attempts a job becomes `blocked`, releasing its execution slot once no live/unknown vendor run remains. Blocked/failed coverage and backfill items never count as active. On the next eligible inventory, create a new generation, even at unchanged T, behind fresh work in its tier.
+   - After 6 consecutive family failures, quarantine the family until an operator records a reasoned release. Authentication, integrity or permanent unsupported-scope failures quarantine immediately. Successful review resets only the failure streak for the scope it covers; success in a sibling partition cannot reset failing scope. Quarantine and cooldown are persisted across restart and target moves.
+8. **Record.** Use the durable publication protocol below. Only published, validated evidence contributes coverage; a publication-pending job retains scope ownership without consuming an execution slot after its vendor run ends.
+9. **Route findings.** Use the durable findings delivery contract below. Each later triage, delivery or disposition change is an append-only event; none grants additional coverage.
+10. **Report.** Each timer run reports manifest identity, coverage and exclusions by tier, required-list progress, enqueue/attempt/publication/quarantine status, spare-quota use (`idle_with_coverage_candidate`), and finding delivery backlog. Publish fixed-baseline debt and current-tip/new debt separately.
+
+### Reproducible inventory inputs
+
+Run the timer every 6 hours, with a single-instance lock. Capture repo/T/tree, ledger head, evaluation time, queue snapshot digest (including ownership, cooldown and retry generations), required-list content digest, tier/protected-path policy digests, construction/limits/scoring policy versions, inventory version and Git/blame version/options. Retain the snapshots addressed by these digests. The ranked output is a pure function of this manifest; wall-clock time, live API responses and filesystem enumeration order cannot alter it. Reports may add a generated-at time outside the canonical ranked payload. Dispatch refreshes live eligibility and quota independently.
+
+### History import and credit evidence
+
+Inventory all crq counted cycles, merged-current receipts, promotion ranges and GitHub-app reviews of merged cq-toolkit PRs. Every source gets an import result: credited, duplicate, unverified or rejected, with reason. “All sources imported” means all were accounted for, not that all receive credit.
+
+For each credit, retain authenticated producer identity, repository, stable source ID, exact reviewed base/head, reviewed path/blob/interval scope, terminal non-skipped completion evidence and source artifact digests. Reject author CLI cycles. Incremental GitHub reviews credit only their evidenced incremental scope. A walkthrough comment must independently bind to the exact reviewed head and complete scope; a mutable comment or the words “No actionable comments” alone cannot establish either. Preserve fetched source bytes and their digest. Unknown scope remains uncredited; findings may still be retained as unverified evidence for triage.
+
+Historical receipts or synthetic runs with only path-level credit are not automatically full-file evidence. Reconstruct and validate scope from retained inputs/artifacts where possible; otherwise record the import gap. Deduplicate receipts and cycles referring to the same vendor run, and repeated imports of the same GitHub source. Squashed/rebased source heads require a verified line mapping to current ancestry; never infer credit from PR membership alone.
+
+### Ledger schema and durable publication (v1)
+
+`cq.review-ledger/v1` is a discriminated event schema, not one mutable review object. Implement a checked-in JSON Schema before enabling publication. Common fields are `schema`, `event_type`, `id`, `source_key`, `occurred_at` and `payload`.
+
+| Event type | Required payload |
+|---|---|
+| `review` | repo, subject/job/attempt IDs, source producer/type/ID, base/head/head_tree, target/tree, policy and scope digests, per-path disposition/reason/blob/mode/baseline provenance, requested scope, verified reviewed intervals, completion classification, outcome, artifact references/digests, normalized findings |
+| `import-result` | source identity/digest, credited review ID or duplicate ID, or unverified/rejected reason |
+| `job-state` | retry family, subject/job IDs, generation, attempt, state, failures, next eligible time, reason; operator identity/reason for quarantine release |
+| `finding-event` | finding ID, original review ID, previous event ID, action, evidence, actor and delivery/repair acknowledgement where applicable |
+
+Only validated `review` events with `outcome: completed` and verified scoped completion earn credit. `blocked`, `error`, `skipped` and uncertain completion do not. Finding and job events never earn credit. Findings retain vendor severity, source finding ID where available, target path/blob, 1-based inclusive line intervals, title/body and an initial untriaged status.
+
+- Canonical IDs are SHA-256 of RFC 8785 canonical JSON with the top-level `id` omitted. Fields in hashed events are fixed when durably created; replay must not regenerate timestamps. Reject duplicate JSON keys and unsupported schema versions. Review source keys are namespaced by repo, producer and stable vendor run/review identity; changed evidence for an existing review source is a conflict requiring reconciliation, not a second credited run. Other event types use their own stable event/transition identity in the source key so repeated job and finding transitions do not collide with the original review.
+- Store one immutable file per event under `records/YYYY/MM/<id>.json`, using the UTC event date. Disposition events reference the original review and the preceding event for that finding. Serialize updates per finding; reject forks/stale predecessors for reconciliation. Arrival timestamps do not decide which disposition wins.
+- Before marking a vendor run complete locally, durably spool its terminal artifact bytes, hashes and publication event in an outbox (atomic writes and fsync). Recover interrupted runs by vendor/run identity; never spend another review merely because publication failed.
+- Append through a single publisher. Fetch and validate the ledger head, add new event files, then perform a normal fast-forward push against the observed head. On a concurrent push, refetch, deduplicate by source/event identity and rebuild the append. Never force-push or overwrite existing files.
+- A timeout after push is reconciled by reading the remote ledger. If already present, acknowledge the outbox without another review. Update the coverage cache and release publication ownership only after remote acknowledgement. Rebuild coverage from the ledger after cache loss; reconstruct pending work from the durable job/outbox journal. The ledger is coverage authority, not a substitute for the live operational journal.
+- Writer and reader validation must check that every ledger commit only adds valid new records: ordinary forward commits may not modify/delete old records. Rulesets blocking force-push/deletion and restricting the writer do not alone enforce this content invariant. Halt credit advancement on invalid history and alert the operator.
+- Retain raw vendor/import artifacts in durable content-addressed storage for as long as the ledger references them; local `runs/` paths alone are insufficient. Record locations and hashes and verify them during import/recovery. Retain referenced Git objects and scope manifests too. Missing evidence is reported and cannot create new credit or justify duplicate vendor execution.
+
+### Finding delivery and path dispositions
+
+The existing review-debt plan is a **draft** workflow for GitHub threads, not a ready adapter for CLI findings. This protocol must implement a durable inbox/outbox adapter to the repair op; it does not authorize executing that draft's posting or fixer actions.
+
+- A finding occurrence ID hashes producer/run identity plus vendor finding ID, or producer/run identity plus canonical original path/blob/interval/title/body when no vendor ID exists. Preserve all occurrences. Triage may link duplicates under a canonical issue ID with evidence; matching path/title alone must not silently discard findings.
+- Queue every finding for triage. Revalidate against a newly pinned promoted tip, mapping its anchor or recording that mapping failed. Record confirmed, already fixed, superseded, dismissed-with-reason or needs-human. Only confirmed current findings enter the repair inbox; ambiguous mappings remain visible for human triage.
+- Deliver with a stable canonical finding ID as idempotency key. Persist receipt acknowledgement and repair task/PR ID. Retry transport after crashes without creating another repair task. Repair completion requires fixing commit/evidence and a new disposition event; delivery acknowledgement does not mean fixed. Findings without GitHub threads must not invent thread IDs or resolution actions.
+
+| Path disposition | Required handling |
+|---|---|
+| included / renamed | Credit only verified reviewed intervals; retain residual uncovered lines for later review |
+| deleted | Record source path and deletion evidence at T; zero current lines, re-inventory if it returns |
+| empty | Record empty blob at T and zero lines; future nonempty content is new debt |
+| unsupported | Record exact reason/limit and any countable uncovered lines; otherwise report unmeasurable debt. Never call it covered |
+| ambiguous | Retain alternatives/evidence, send to operator resolution and report unresolved debt; no credit |
+
+Required-list progress is per live path, including partitions and residuals. A PR/union is `covered` only when all eligible live lines have evidence, `no-current-code` only when every path is deleted/empty, and `accounted-with-exceptions` when unsupported/ambiguous paths remain. The latter is an explicit unresolved outcome, not clean coverage. Verified imported coverage or coverage from another subject can satisfy a path, with links to its evidence; no redundant review is required.
+
+## Constraints
+- v1 covers only `camerontaylor/cq-toolkit`. The agents, libris, hart, infra and toolkit-research repos are a later phase.
+- **Credit** comes from crq counted runs and `coderabbitai[bot]` GitHub-app reviews, each at the head it reviewed. Author CLI cycles never earn credit.
+- The ledger is the coverage authority; the coverage index is a rebuildable cache, while live jobs and publication/delivery outboxes retain their own durable operational journal. A ruleset on `cq/review-ledger` blocks force-push and deletion and lets only the crq runner App identity push. Creating that ruleset is an **owner action**.
+- The method in cr-backfill-order.md's "How to review" section (`--base-commit <merge>^1` at the merge commit) is **superseded**. All review happens on current code at T, consistent with owner decision DEC2.
+- Rank 4 is the spare-quota tier. Eligible ordinary review (ranks 0–3) always wins at the next admission decision; running backfill is not preempted.
+- Nothing runs on an LLM launcher. The inventory is a deterministic script on a systemd timer on ceres. Models only repair.
+- crq changes touch privileged paths (`apps/crq-python/`). They follow the normal privileged-PR flow and reach production only through the ceres deploy runbook switch. Building and testing follow the repo's test policy, with `test:narrow` on triton only.
+
+## Non-Goals
+- Historical replay review of merged patches (merge^1..merge).
+- Repos other than cq-toolkit in v1.
+- Credit for author CLI cycles.
+- Selecting already-covered code as new debt. Full-file projections may incidentally include covered lines when needed to review residual debt.
+- Paid or on-demand CodeRabbit capacity. Backfill uses only spare included quota.
+- Auto-fixing findings from inside this protocol. Fixing is done by the existing repair pipeline.
+
+## Acceptance Criteria
+
+### Stage 1
+- [ ] **Deadlock fix:** blocked and failed coverage/backfill jobs with no live or unknown vendor execution no longer count as active in `coverage_candidate`. Reproduce the 10-14 blocked-item/no-cycle state and prove another candidate is produced. Unknown launch ownership remains separately reserved until reconciliation.
+- [ ] **Stale item cleared:** an operator command releases `coverage-ab612ba1a041484d`, recording its reason after checking there is no live run.
+- [ ] **Ledger and import:** owner creates the branch/ruleset; checked-in event schemas and append validation pass. Account for all four historical source classes with credited/duplicate/unverified/rejected outcomes and retained evidence. Re-import is idempotent. Tests reject walkthrough-text-only credit, wrong-head evidence, author cycles and unsupported full-file inference from path receipts.
+- [ ] **Reproducibility:** two runs with the same complete input manifest produce byte-identical ranked payloads. Fixtures cover wall-clock changes, tie ordering, policy versions, retry placement, mixed-tier unions and overlapping globs. Every tracked path has a tier or an explicit inventory error.
+- [ ] **Line accounting:** fixture repositories prove positive and negative cases: synthetic head intervals mapped to T; full-file projection; edits after review; excluded files in the same commit; partial/skipped partitions; changes reverted within a reviewed range; rename/copy ambiguity; delete/recreate; moved/reformatted code; and squash/non-ancestor history. Only verified scope earns credit. Empty synthetic diffs and unchanged uncovered lines produce residual projections rather than false completion.
+- [ ] **Subject bounds and pins:** oversized unions split deterministically, no partition exceeds verified limits, single oversized files remain visible debt, nonlinear stack baselines fall back safely, and immutable refs survive tip moves and garbage collection. Per-partition completion does not complete an unfinished union.
+- [ ] **Retry lifecycle:** enqueue is idempotent per generation; after 3 failures execution ownership is released when safe; a later generation can run at unchanged T; target and partition changes do not reset family failures; cooldown survives restart; 6 failures quarantine; operator release is audited. Blocked/error ledger records do not permanently suppress retry.
+- [ ] **Admission:** concurrent admissions from effective remaining=2 launch at most one quota-consuming backfill and preserve the reserve. Unknown/stale quota admits none; uncertain launches are reconciled. Ranks 0–3 win at each eligible admission decision; at most 2 backfill/legacy coverage runs are in flight together. Test ordinary work arriving both before and after a backfill start, without claiming preemption or zero waiting time.
+- [ ] **Publication recovery:** crash fixtures cover vendor completion before spool, after durable spool, failed push, concurrent append, successful push before local acknowledgement, and lost coverage cache. Recovery reconciles source identity without a second vendor review. A forward commit modifying/deleting a record is rejected. Hashes, source dedupe, disposition predecessor conflicts and retained artifact verification are exercised.
+- [ ] **Finding delivery:** test CLI findings without threads, duplicate occurrences, stale-tip anchors, needs-human triage, transport retry and crash after acknowledgement. One canonical finding creates at most one repair task; confirmed fixing evidence is required for a fixed disposition.
+- [ ] **Live:** spare-quota reviews complete on ceres and publish verifiable evidence. Admission logs include ordinary eligibility, quota observation, local reservations and the admission decision. All delays and publication/delivery backlogs are visible; no log claims zero delay merely because backfill was admitted legally.
+- [ ] **Required list:** every PR/union has an evidence-linked per-path accounting outcome: covered, no-current-code, accounted-with-exceptions, or still pending/blocked. Required-list closure requires no pending/blocked work and explicit reporting of every exception; exceptions do not count as clean coverage or satisfy zero T1 debt.
+- [ ] **Baseline and capacity:** at go-live pin baseline T0, policy and ledger head, and report baseline T1 uncovered lines, unmeasurable objects and estimated bounded review partitions. Record available spare admissions and completed partitions daily. Target zero surviving baseline T1 debt within 14 days, conditional on sufficient spare capacity and no unresolved exclusions. If missed, report remaining debt, capacity shortfall/failures and an updated estimate; do not mark the target achieved or buy capacity.
+- [ ] **Current-tip reporting:** each summary separately reports surviving baseline debt, baseline lines removed/superseded, newly introduced debt, total current T1/T2 uncovered lines and unsupported/ambiguous/unmeasurable objects. Removed baseline lines are not called reviewed. Strict T1 zero requires zero uncovered lines and zero unresolved T1 objects at the reported tip.
+
+### Stage 2
+- [ ] The inventory moves into crq's own coverage tier, retiring the separate timer. The ledger stays the authority.
+
+## Assumptions Exposed & Resolved
+| Assumption | Challenge | Resolution |
+|---|---|---|
+| The queue being empty means there is no review work | Trace lane 3 | False. The coverage tier has been deadlocked since 10-14 by one blocked item |
+| The coverage tier already covers the codebase | Trace lane 1 | Its pool is only paths touched by `kind=merged` items. 156 files had never been credited |
+| A PR is the right anchor for review | Round 5, contrarian | Both kinds are used: PR-anchored (Tier A) and path-cluster (Tier B) |
+| Review a skipped PR at its merge commit | Round 10 | Superseded. Review current files at T |
+| Stacked or duplicate PRs are reviewed one by one | Agent-decided, capped at 0.85 | They are reviewed as one union subject over the combined live paths |
+| WALKTHROUGH_ONLY proves a clean review | Protocol review correction | Text alone grants no credit; authenticated exact-head and scope evidence is required |
+| Forward-only ledger is enough | Round 7, simplifier | No. History is imported in stage 1, to avoid re-reviewing code that is already covered |
+| Blame/commit-range membership proves review coverage | Protocol review correction | Explicit reviewed intervals grant credit; conservative blame and path lineage only carry it forward. No optional `-M -C` behavior in v1 |
+
+## Technical Context
+All references are from the trace. Source is cq-toolkit `origin/main` `d9f4444c`; the runner on ceres is at `9be8c5c0`.
+
+| Topic | References |
+|---|---|
+| Coverage tier | `coverage.py:73-155`, with the active guard at `:100-104`. `coverage_fallback` at `crq.py:2973-3018`. Start for/else at `crq.py:3149-3152` |
+| Rank table | `crq.py:2853-2873` |
+| Admission and usage slots | `crq.py:3110-3135` and `usage_slots.py:36-40` |
+| Tip-moved re-cut | `crq.py:2977-2981` |
+| Subject builders | `build_current_projection` at `crq.py:835-889`; `build_synthetic` at `crq.py:716-748`; `current_paths` at `crq.py:751-833` |
+| Path ledger | `coverage.py:44-70`, the current cache shape |
+| Operator commands | `admin prioritize` at `crq.py:3700-3706`; `new_item` dedupe at `crq.py:2903-2916` |
+| Live state | `ceres:~/repos/crq-deploy/apps/crq-python/state/` |
+| Vendor usage | Limit 8 per rolling hour |
+
+## Ontology (Key Entities)
+| Entity | Type | Fields | Relationships |
+|---|---|---|---|
+| Target (T) | core | sha, tree | pins Accounting, Subject, BackfillItem |
+| CoveredLine | core | target, path, blob, interval, provenance, covered_by | derived from verified reviewed scope and conservative lineage mapping |
+| ReviewRecord | core | schema, event_type, id, source_key, occurred_at, payload | immutable ledger event; only verified completed review scope grants credit |
+| ReviewLedger | core | branch `cq/review-ledger`, ruleset, append validator | coverage authority; coverage index caches it, operational journals remain durable |
+| CreditSource | supporting | crq-run, github-review, import | populates ReviewRecord.source |
+| ImportanceTier | supporting | T1–T4, path globs (`policy/review-tiers.json`) | weights Candidate |
+| Candidate | core | tier, score, paths or PRs | selected from uncovered CoveredLines; Tier A comes from the RequiredList |
+| RequiredList | external | cr-backfill-order.md rows | seeds Tier A candidates |
+| ReviewSubject | core | kind (pr-current, path-projection), base, head, paths and dispositions | built from Candidate at T |
+| BackfillItem | core | rank 4, subject/job/attempt IDs, retry family, pin T, generation, state | durable job with separately reconciled vendor/publication ownership |
+| Finding | supporting | occurrence ID, canonical ID, anchor, severity, triage/disposition event chain | durable delivery to repair inbox after current-tip confirmation |
+
+## Ontology Convergence (historical interview)
+| Round | Entities | New | Changed | Stable | Stability |
+|---|---|---|---|---|---|
+| 1 | 5 | 5 | 0 | 0 | N/A |
+| 2 | 6 | 1 | 0 | 5 | 0.83 |
+| 4 | 7 | 1 (ImportanceTier) | 0 | 6 | 0.86 |
+| 6 | 9 | 2 (ReviewRecord, ReviewLedger) | 0 | 7 | 0.78 |
+| 9 | 10 | 1 (RequiredList) | 0 | 9 | 0.90 |
+| 14 | 11 | 1 (Target) | 1 (BackfillItem→Candidate split) | 9 | 0.91 |
+
+## Coverage
+
+The interview assessments below describe requirements clarity, not implemented or tested behavior. The revised acceptance checklist is the validation authority.
+| Category | Status |
+|---|---|
+| Functional Scope & Behavior | Clear |
+| Domain & Data Model | Clear |
+| Interaction & UX Flow | Clear (operator-facing report only) |
+| Non-Functional Quality | Clear (quota reserve, integrity) |
+| Integration & External Dependencies | Clear (GitHub reviews API, vendor usage) |
+| Edge Cases & Failure Handling | Clear |
+| Constraints & Tradeoffs | Clear |
+| Terminology | Clear: "backfill" means the rank-4 item from this protocol; "coverage" means line coverage from the ledger |
+| Completion Signals | Clear |
+| Implementation prerequisites | Exact tier globs, deployed reviewer limits and checked-in schemas must be validated before go-live; timer and scoring defaults are specified above |
+
+## Clarifications
+### Session 2026-10-30 (historical)
+
+These answers preserve the interview record. The revised operational protocol and acceptance criteria above supersede shorthand about blame ranges, walkthrough credit, retry identity and unconditional burn-down.
+- Q: Which reviews count as credit? → A: crq counted runs and GitHub-app reviews. Author cycles do not count.
+- Q: What is the unit of coverage? → A: Line, via blame, against credited (base, head] ranges.
+- Q: What is the repo scope? → A: cq-toolkit now, including pre-queue history. Other repos come later.
+- Q: How is importance defined? → A: A checked-in tier map, ranked within each tier by uncovered lines × (1 + churn + findings).
+- Q: What shape are review subjects? → A: Both, as tiers: PR-current (A) and path-cluster projection (B).
+- User added: a formal git structure for review status and findings.
+- Q: Where does the ledger live? → A: An append-only orphan branch, which is the coverage authority.
+- Q: How is the work staged? → A: Stage 1 = deadlock fix, inventory script, backfill intent, ledger records and history import. Stage 2 = move the inventory into crq.
+- Q: What is the quota policy? → A: A 1-slot reserve and at most 2 in flight.
+- Q: What counts as success? → A: The mechanism works and T1 is burned down, with plans/review-debt-20261030/cr-backfill-order.md as the required list.
+- Q: Which review method applies to the required list? → A: Take only the PR list; the method is current files at T.
+- Q: What does a ledger record contain? → A: Status plus normalized findings with dispositions.
+- Q: How does it run? → A: A deterministic timer on ceres. Findings go to the repair pipeline.
+- Q: How are failures and a moving target handled? → A: Keep the pin, retry with cooldown, and release as blocked after 3 failures.
+- Q: Who may write to the ledger? → A: Only the runner App, enforced by a ruleset (owner action).
+
+## Review revisions — 2026-10-30
+
+Owner requested incorporation of all review findings. This revision adds explicit scoped credit and synthetic mapping; conservative imports; generation/family retry state; durable ledger publication and append validation; one tier system; pinned inventory inputs; admission-priority guarantees and capacity-based burn-down; bounded partitions and complete path dispositions; a durable findings adapter; and failure/negative acceptance fixtures. The owner approved the revised plan on 2026-10-30. The original trace and interview transcript remain historical evidence.
+
+## Interview Transcript
+<details><summary>Full Q&A (14 rounds)</summary>
+
+| Round | Answer | Ambiguity |
+|---|---|---|
+| 1 | crq + GitHub app | 71% |
+| 2 | Line via blame | 63% |
+| 3 | cq-toolkit now, others later | 57% |
+| 4 | Tiered + uncovered | 54% |
+| 5 | Both as tiers, plus the user's new git-record requirement (trigger D) | 56% |
+| 6 | Orphan ledger branch | 51% |
+| 7 | Import history in stage 1 | 46% |
+| 8 | Reserve 1, max 2 in flight | 42% |
+| 9 | Mechanism + T1 burn-down, with cr-backfill-order.md as the required list | 28% |
+| 10 | "Just grab the PR list. Use your strategy." | 24% |
+| 11 | Status + normalized findings | 19% |
+| 12 | Deterministic timer on ceres | 14% |
+| 13 | Keep pin, demote on error | 11% |
+| 14 | Runner App only, ruleset | 8% |
+| Restate | Yes, crystallize | 8% |
+</details>

@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["schema", "event_type", "id", "source_key", "occurred_at", "payload"],
+      "properties": {
+        "schema": {
+          "const": "cq.review-ledger/v1"
+        },
+        "event_type": {
+          "const": "review"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "repo",
+            "subject_id",
+            "job_id",
+            "attempt_id",
+            "source",
+            "base",
+            "head",
+            "head_tree",
+            "target",
+            "target_tree",
+            "policy_digest",
+            "scope_digest",
+            "paths",
+            "requested_scope",
+            "input_scope",
+            "reviewed_scope",
+            "completion",
+            "outcome",
+            "artifacts",
+            "findings"
+          ],
+          "properties": {
+            "repo": {
+              "const": "camerontaylor/cq-toolkit"
+            },
+            "subject_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "job_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source": {
+              "type": "object",
+              "required": ["repo", "producer", "type", "id", "authenticated"],
+              "properties": {
+                "repo": {
+                  "const": "camerontaylor/cq-toolkit"
+                },
+                "producer": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "type": {
+                  "enum": ["crq-run", "github-review", "author-cli"]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "authenticated": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "base": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "head_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "target": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "target_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "policy_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "scope_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "blob", "mode", "disposition", "reason", "baseline"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "blob": {
+                    "type": ["string", "null"]
+                  },
+                  "mode": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "disposition": {
+                    "enum": ["included", "renamed", "deleted", "empty", "unsupported", "ambiguous"]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "baseline": {
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "requested_scope": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "blob", "intervals"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "blob": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40,64}$"
+                  },
+                  "intervals": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "input_scope": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "blob", "intervals"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "blob": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40,64}$"
+                  },
+                  "intervals": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "reviewed_scope": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "blob", "intervals"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "blob": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40,64}$"
+                  },
+                  "intervals": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "completion": {
+              "type": "object",
+              "required": ["terminal", "skipped", "scope_verified", "exit_code", "errors"],
+              "properties": {
+                "terminal": {
+                  "type": "boolean"
+                },
+                "skipped": {
+                  "type": "boolean"
+                },
+                "scope_verified": {
+                  "type": "boolean"
+                },
+                "exit_code": {
+                  "type": "integer"
+                },
+                "errors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "outcome": {
+              "enum": ["completed", "blocked", "error", "skipped", "unverified"]
+            },
+            "artifacts": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["sha256", "location"],
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "location": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "severity",
+                  "source_id",
+                  "path",
+                  "blob",
+                  "intervals",
+                  "title",
+                  "body",
+                  "status"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "severity": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "source_id": {
+                    "type": ["string", "null"]
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "blob": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40,64}$"
+                  },
+                  "intervals": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 2,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "body": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "status": {
+                    "const": "untriaged"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["schema", "event_type", "id", "source_key", "occurred_at", "payload"],
+      "properties": {
+        "schema": {
+          "const": "cq.review-ledger/v1"
+        },
+        "event_type": {
+          "const": "import-result"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "payload": {
+          "type": "object",
+          "required": ["source", "source_digest", "result", "reason", "review_id", "duplicate_id"],
+          "properties": {
+            "source": {
+              "type": "object",
+              "required": ["repo", "producer", "type", "id", "authenticated"],
+              "properties": {
+                "repo": {
+                  "const": "camerontaylor/cq-toolkit"
+                },
+                "producer": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "type": {
+                  "enum": ["crq-run", "github-review", "author-cli"]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "authenticated": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "source_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "result": {
+              "enum": ["credited", "duplicate", "unverified", "rejected"]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "review_id": {
+              "type": ["string", "null"]
+            },
+            "duplicate_id": {
+              "type": ["string", "null"]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["schema", "event_type", "id", "source_key", "occurred_at", "payload"],
+      "properties": {
+        "schema": {
+          "const": "cq.review-ledger/v1"
+        },
+        "event_type": {
+          "const": "job-state"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "family",
+            "subject_id",
+            "job_id",
+            "generation",
+            "attempt",
+            "state",
+            "failures",
+            "next_eligible_at",
+            "reason"
+          ],
+          "properties": {
+            "family": {
+              "type": "string",
+              "minLength": 1
+            },
+            "subject_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "job_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "state": {
+              "type": "string",
+              "minLength": 1
+            },
+            "failures": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "next_eligible_at": {
+              "type": ["string", "null"]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operator": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["schema", "event_type", "id", "source_key", "occurred_at", "payload"],
+      "properties": {
+        "schema": {
+          "const": "cq.review-ledger/v1"
+        },
+        "event_type": {
+          "const": "finding-event"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "finding_id",
+            "review_id",
+            "previous_event_id",
+            "action",
+            "evidence",
+            "actor"
+          ],
+          "properties": {
+            "finding_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "review_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "previous_event_id": {
+              "type": ["string", "null"]
+            },
+            "action": {
+              "enum": [
+                "confirmed",
+                "already-fixed",
+                "superseded",
+                "dismissed",
+                "needs-human",
+                "duplicate",
+                "delivered",
+                "fixed"
+              ]
+            },
+            "evidence": {
+              "type": "object"
+            },
+            "actor": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}
