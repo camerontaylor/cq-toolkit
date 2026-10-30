@@ -1528,7 +1528,9 @@ class CurrentTest(unittest.TestCase):
             self.assertLessEqual(kwargs["timeout"], 10)
             value = actual_forge(argv[1:]) if argv[2] == "graphql" else self.forge_data()
             return SimpleNamespace(stdout=json.dumps(value), returncode=0)
-        with mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True,
+                "after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}}), \
+             mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
         self.assertEqual(len(calls), 5)  # ceiling + 3 numeric pages + 1 deferred read
@@ -1806,7 +1808,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                             crq.tick()
                                         for effect in effects.values():
                                             effect.assert_not_called()
-                                        self.assertEqual(len(events), 1)
+                                        self.assertEqual([event[1] for event in events],
+                                                         ["bounds-save", "refusal-debt-save"])
                             # Shared parser restored before persisted reloads or digest checks.
                             self.assertIs(json.loads, original_loads)
                             self.assertEqual(len(encounters), attempt + 1)
