@@ -512,3 +512,74 @@ class PromotionAuditAckTest(unittest.TestCase):
         self.assertEqual(json.dumps(q, sort_keys=True), before)
         self.effects["run"].assert_not_called()
         self.effects["notify_owner"].assert_not_called()
+
+
+class OrdinaryGateAuditTest(unittest.TestCase):
+    def evidence(self, *, signer="advisory-missing", verdict="promoted", subject=TIP,
+                 head=BASE, conclusion="success", event="workflow_dispatch", review=True, duplicate=False, marker=True, expired=False):
+        candidate = {"id": 123, "head_sha": head, "head_branch": "main",
+                     "path": ".github/workflows/gate.yml", "event": event,
+                     "status": "completed", "conclusion": conclusion}
+        result = {"status": "ok", "value": {"verdict": verdict, "main": BASE,
+                  "subject": subject, "signer": signer}}
+        if not review:
+            result["value"]["verdict"] = "refused"
+        responses = [json.dumps({"workflow_runs": [candidate]}),
+                     json.dumps({"jobs": [{"id": 456, "name": "decide", "conclusion": "success"}]}),
+                     "2026-10-31T00:00:00.000Z cq-promotion-result-v1 " + json.dumps(result)]
+        if not marker:
+            responses[-1] = responses[-1].replace("cq-promotion-result-v1 ", "")
+        if duplicate:
+            responses[-1] += "\n" + responses[-1]
+        replies = [mock.Mock(stdout=x) for x in responses]
+        if expired:
+            replies[-1] = RuntimeError("gh api exit 1: HTTP 410 Gone")
+        return mock.patch.object(crq, "run", side_effect=replies)
+
+    def test_ordinary_pass_without_signer(self):
+        for signer in ("present", "advisory-missing", "advisory-failed"):
+            with self.subTest(signer=signer), self.evidence(signer=signer), \
+                 mock.patch.object(crq, "is_ancestor", return_value=True), \
+                 mock.patch.object(crq, "promotion_statuses") as statuses:
+                rec = {}
+                self.assertEqual(crq.audit_signer_advance({"items": []}, BASE, TIP, rec), ([], []))
+                self.assertEqual(rec["ordinary_gate"]["run_id"], 123)
+                statuses.assert_not_called()
+
+    def test_workflow_run_promotion_qualifies(self):
+        with self.evidence(event="workflow_run") as api:
+            self.assertIsNotNone(crq.ordinary_gate_evidence(BASE, TIP))
+        self.assertIn(f"head_sha={BASE}&status=success", api.call_args_list[0].args[0][-1])
+
+    def test_expired_logs_remain_unverified_without_error_loop(self):
+        with self.evidence(expired=True), \
+             mock.patch.object(crq, "is_ancestor", return_value=True), \
+             mock.patch.object(crq, "promotion_statuses", return_value=[]), \
+             mock.patch.object(crq, "reviewer_identity", return_value=None):
+            reasons, _ = crq.audit_signer_advance({"items": []}, BASE, TIP, {})
+            self.assertTrue(reasons)
+
+    def test_privileged_or_missing_review_does_not_replace_signer(self):
+        for args in ({"signer": "required"}, {"review": False}):
+            with self.subTest(args=args), self.evidence(**args), \
+                 mock.patch.object(crq, "is_ancestor", return_value=True), \
+                 mock.patch.object(crq, "promotion_statuses", return_value=[]), \
+                 mock.patch.object(crq, "reviewer_identity", return_value=("reviewer[bot]", 1)):
+                reasons, _ = crq.audit_signer_advance({"items": []}, BASE, TIP, {})
+                self.assertIn("no trusted reviewer-bot success", reasons[0])
+
+    def test_wrong_head_subject_event_or_unsuccessful_run_refuses(self):
+        for args in ({"head": TIP}, {"subject": BASE}, {"conclusion": "failure"},
+                     {"event": "pull_request"}, {"verdict": "would-promote"}, {"verdict": "noop"},
+                     {"duplicate": True}, {"marker": False}):
+            with self.subTest(args=args), self.evidence(**args):
+                self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+
+    def test_unavailable_evidence_retains_signer_requirement(self):
+        with mock.patch.object(crq, "ordinary_gate_evidence", side_effect=RuntimeError("gh api exit 1: HTTP 404")), \
+             mock.patch.object(crq, "is_ancestor", return_value=True), \
+             mock.patch.object(crq, "promotion_statuses", return_value=[]), \
+             mock.patch.object(crq, "reviewer_identity", return_value=None):
+            reasons, notes = crq.audit_signer_advance({"items": []}, BASE, TIP, {})
+            self.assertTrue(reasons)
+            self.assertIn("unavailable", notes[0])

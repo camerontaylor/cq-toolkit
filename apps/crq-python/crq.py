@@ -2656,14 +2656,77 @@ def notify_owner(text: str) -> Dict[str, Any]:
     return res
 
 
+def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
+    """Read the trusted gate's own result, not PR comments or subject code.
+
+    A successful decide job built at the previous main already checked closure,
+    independent exact-head acceptance, policy and exact-subject CI. Its result
+    also uses the canonical privileged-path predicate. Keep this bounded; a
+    missing/expired log remains unverified, never inferred from green alone.
+    """
+    prefix = f"repos/{REPO}/actions"
+    runs = json.loads(run(["gh", "api", f"{prefix}/workflows/gate.yml/runs?per_page=30&head_sha={last}&status=success"],
+                          timeout=120).stdout)["workflow_runs"]
+    for candidate in runs:
+        if (candidate.get("head_sha") != last or candidate.get("head_branch") != "main"
+                or candidate.get("path") != ".github/workflows/gate.yml"
+                or candidate.get("event") not in ("schedule", "workflow_dispatch", "workflow_run", "push")
+                or candidate.get("status") != "completed" or candidate.get("conclusion") != "success"):
+            continue
+        try:
+            jobs = json.loads(run(["gh", "api", f"{prefix}/runs/{candidate['id']}/jobs?per_page=100"],
+                                  timeout=120).stdout)["jobs"]
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            continue
+        for job in jobs:
+            if job.get("name") != "decide" or job.get("conclusion") != "success":
+                continue
+            try:
+                log = run(["gh", "api", "--allow-escape-sequences", f"{prefix}/jobs/{job['id']}/logs"],
+                          timeout=120).stdout
+            except (subprocess.SubprocessError, OSError, RuntimeError):
+                continue
+            # Any duplicate marker is ambiguous, including malformed records.
+            records = [line for line in log.splitlines() if re.match(
+                r"^[0-9T:.Z-]+ cq-promotion-result-v1(?: |$)", line)]
+            if len(records) != 1:
+                continue
+            match = re.fullmatch(r"[0-9T:.Z-]+ cq-promotion-result-v1 (\{.*\})", records[0])
+            if not match:
+                continue
+            try:
+                result = json.loads(match.group(1))
+            except ValueError:
+                continue
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                continue
+            value = result.get("value")
+            if not isinstance(value, dict):
+                continue
+            if (value.get("verdict") == "promoted" and value.get("main") == last
+                    and value.get("subject") == main
+                    and value.get("signer") in ("present", "advisory-missing", "advisory-failed")):
+                return {"run_id": candidate["id"], "job_id": job["id"], "signer": value["signer"]}
+    return None
+
+
 def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """PRIMARY (P1 / admin-bypass detector): main advanced only with a trusted bot
-    success (login, Bot, numeric id) whose main=<base> is contained in the
-    previous main. Corroboration against crq's own requests is informational."""
+    """Verify ordinary gate evidence, or require the pinned signer success.
+    Privileged ranges never qualify for the ordinary gate evidence path.
+    Corroboration against crq's own requests is informational."""
     reasons: List[str] = []
     notes: List[str] = []
     if not is_ancestor(last, main):
         reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
+    if not reasons:
+        try:
+            evidence = ordinary_gate_evidence(last, main)
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            evidence = None
+            notes.append(f"ordinary gate evidence unavailable ({type(exc).__name__})")
+        if evidence:
+            rec["ordinary_gate"] = evidence
+            return reasons, notes
     sts = promotion_statuses(main)
     ident = reviewer_identity()  # None → nothing is trusted (fail closed)
     bot = [x for x in sts if ident and x["type"] == "Bot" and x["login"] == ident[0] and x.get("creator_id") == ident[1]]
