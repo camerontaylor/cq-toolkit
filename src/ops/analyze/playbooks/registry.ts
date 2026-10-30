@@ -102,6 +102,7 @@
 // has no payload slot. The full `trace` query op and a durable dispatch
 // journal are post-v1 (recorded in the family NOTES.md).
 import type { Op, OpResult } from '../../../kernel/types.js';
+import { realpathOrSelf } from '../../../adapters/store/nonceLedger.js';
 import { messageOf } from '../../../shared/messageOf.js';
 import type { RunCheck } from '../../gates/checkRunner.js';
 import type { ApprovalAuthority, ApprovedMutation } from '../approval.js';
@@ -127,6 +128,33 @@ import { makePlaybookVerifier } from './verifier.js';
  * boundary-vs-library distinction).
  */
 const DISPATCH_VERIFIER_TIMEOUT_MS = 600_000;
+
+// Workspace safety is separate from playbook quality: an unobservable
+// verifier never quarantines a playbook, but a stranded rollback must stop
+// further mutations. Share holds across op factories for the same registry,
+// with the same process lifetime as the registry and quarantine ledger.
+const workspaceHolds = new WeakMap<PlaybookRegistry, Map<string, Map<string, string>>>();
+
+function holdWorkspace(
+  playbooks: PlaybookRegistry,
+  dir: string,
+  files: readonly string[],
+  preApply: ReadonlyMap<string, Uint8Array>,
+): void {
+  if (files.length === 0) return;
+  let workspaces = workspaceHolds.get(playbooks);
+  if (workspaces === undefined) {
+    workspaces = new Map();
+    workspaceHolds.set(playbooks, workspaces);
+  }
+  const workspace = realpathOrSelf(dir);
+  const held = new Map(workspaces.get(workspace));
+  for (const file of files) {
+    const before = preApply.get(file);
+    if (before !== undefined && !held.has(file)) held.set(file, contentFingerprint(before));
+  }
+  workspaces.set(workspace, held);
+}
 
 /**
  * The playbook registry: register (REFUSES a duplicate id — the global
@@ -501,6 +529,27 @@ export function makePlaybookDispatchOp(
         error: `playbook dispatch: ${messageOf(err)}`,
       };
     }
+    const workspace = realpathOrSelf(input.dir);
+    const workspaces = workspaceHolds.get(deps.playbooks);
+    const held = workspaces?.get(workspace);
+    if (held !== undefined) {
+      try {
+        for (const [file, expected] of held) {
+          if (contentFingerprint(await store.readBytes(file)) !== expected) {
+            return {
+              status: 'needs-human',
+              reason: `workspace is held after a stranded rollback; repair '${file}' to its pre-dispatch bytes before dispatching any playbook`,
+            };
+          }
+        }
+      } catch (err) {
+        return {
+          status: 'needs-human',
+          reason: `workspace is held after a stranded rollback; reconciliation could not be verified (${messageOf(err)})`,
+        };
+      }
+      if (workspaces?.get(workspace) === held) workspaces.delete(workspace);
+    }
     const targets = [...new Set(input.targets)].sort();
     // ---- 3a. PRE-APPLY CAPTURE (W4.3, step 5's precondition). The bytes
     // every target holds RIGHT NOW, before the engine can touch anything.
@@ -658,6 +707,7 @@ export function makePlaybookDispatchOp(
         },
       );
     } catch (err) {
+      if (writeEntered) holdWorkspace(deps.playbooks, input.dir, targets, preApply);
       // A post-apply read fault lands here: the apply DID happen, and the
       // one thing we can no longer prove is what the file holds, so no
       // rollback is attempted. Saying so beats restoring blind.
@@ -701,12 +751,11 @@ export function makePlaybookDispatchOp(
     const engineResult: OpResult<CodemodReport> = approved.value.engine;
     const postApply: Map<string, string> = approved.value.applied;
     if (engineResult.status !== 'ok') {
-      // Unreachable by construction (approved: true, dryRun: false — and the
-      // engine never returns budget-exhausted/indeterminate), but the frozen
-      // taxonomy allows them, so they pass through honestly rather than
-      // being collapsed into a fabricated verdict. The token is spent by
-      // now: ADR-0003 §4c's crash analysis makes a burn safe, a replay
-      // unsafe.
+      // An engine failure can leave partial writes when its own rollback
+      // fails. Preserve its result, but require reconciliation of all targets
+      // before another dispatch; a clean engine rollback clears on the next
+      // byte check without punishing the playbook.
+      holdWorkspace(deps.playbooks, input.dir, targets, preApply);
       return engineResult;
     }
     const applied = engineResult.value;
@@ -791,6 +840,12 @@ export function makePlaybookDispatchOp(
         files.map((file) => file.file),
         postApply,
       );
+      holdWorkspace(
+        deps.playbooks,
+        input.dir,
+        restore.stranded.map(({ file }) => file),
+        preApply,
+      );
       const record: PlaybookDispatchRecord = {
         kind: 'playbook-dispatch',
         playbookId: playbook.id,
@@ -837,6 +892,12 @@ export function makePlaybookDispatchOp(
       preApply,
       files.map((file) => file.file),
       postApply,
+    );
+    holdWorkspace(
+      deps.playbooks,
+      input.dir,
+      restore.stranded.map(({ file }) => file),
+      preApply,
     );
     const record: PlaybookDispatchRecord = {
       kind: 'playbook-dispatch',
