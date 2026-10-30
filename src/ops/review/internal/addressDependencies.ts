@@ -1,4 +1,4 @@
-import { lstat, readdir, realpath } from 'node:fs/promises';
+import { cp, lstat, readdir, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 const within = (root: string, path: string) => {
@@ -62,4 +62,25 @@ export async function assertAddressDependenciesIsolated(
     for (const name of children) await walk(resolve(target, name));
   };
   await walk(installed);
+}
+
+/** Keep candidate package-manager metadata private while reusing installed package targets. */
+export async function snapshotAddressDependencies(
+  installed: string,
+  destination: string,
+  admit: () => void,
+): Promise<void> {
+  admit();
+  await cp(installed, destination, {
+    recursive: true,
+    dereference: false,
+    verbatimSymlinks: false,
+    errorOnExist: true,
+    force: false,
+    filter: () => {
+      admit();
+      return true;
+    },
+  });
+  admit();
 }
