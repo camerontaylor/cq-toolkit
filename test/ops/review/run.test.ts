@@ -34,8 +34,11 @@ async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>
   repo.commitAll('fixture agent review setup');
 }
 
-function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailures = 0,
-  findings?: () => unknown[]) {
+function scriptedDrivers(
+  onRun?: (input: { prompt: string }) => void,
+  toolFailures = 0,
+  findings?: () => unknown[],
+) {
   return {
     resolve: vi.fn(
       (request: {
@@ -77,29 +80,61 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
 }
 
 describe('review.run', () => {
-  it.each(['valid', 'repaired', 'invalid'] as const)('prepares %s anchored evidence through review.run', async (mode) => {
-    const repo = await makeTestRepo();
-    try {
-      await configureAgentRepo(repo);
-      await repo.write('src/evidence.ts', 'export const value = 1;\n');
-      repo.commitAll('evidence fixture');
-      let requests = 0;
-      const result = await makeReviewRun({
-        drivers: scriptedDrivers(() => { requests++; }, 0, () => [{
-          file: 'src/evidence.ts', line: 1, severity: 'high', text: 'seeded',
-          evidenceV1: { version: 1, failureScenario: 'seeded scenario',
-            primary: { file: 'src/evidence.ts', side: 'head', start: 1, end: 1,
-              quote: mode === 'valid' || (mode === 'repaired' && requests > 1) ? 'export const value = 1;' : 'wrong quote' }, supporting: [] },
-        }]),
-        effectsFactory: () => repoEffects(repo),
-      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
-      expect(requests).toBe(mode === 'valid' ? 1 : mode === 'repaired' ? 2 : 3);
-      expect(result.status).toBe(mode === 'invalid' ? 'needs-human' : 'ok');
-      const report = result.status === 'ok' ? result.value : result.report;
-      expect(report?.findings[0]?.evidenceV1?.primary.quote).toBe(mode === 'invalid' ? 'wrong quote' : 'export const value = 1;');
-      expect(report?.findings[0]?.evidenceV1?.validation?.status).toBe(mode === 'invalid' ? 'invalid' : undefined);
-    } finally { await repo.cleanup(); }
-  });
+  it.each(['valid', 'repaired', 'invalid'] as const)(
+    'prepares %s anchored evidence through review.run',
+    async (mode) => {
+      const repo = await makeTestRepo();
+      try {
+        await configureAgentRepo(repo);
+        await repo.write('src/evidence.ts', 'export const value = 1;\n');
+        repo.commitAll('evidence fixture');
+        let requests = 0;
+        const result = await makeReviewRun({
+          drivers: scriptedDrivers(
+            () => {
+              requests++;
+            },
+            0,
+            () => [
+              {
+                file: 'src/evidence.ts',
+                line: 1,
+                severity: 'high',
+                text: 'seeded',
+                evidenceV1: {
+                  version: 1,
+                  failureScenario: 'seeded scenario',
+                  primary: {
+                    file: 'src/evidence.ts',
+                    side: 'head',
+                    start: 1,
+                    end: 1,
+                    quote:
+                      mode === 'valid' || (mode === 'repaired' && requests > 1)
+                        ? 'export const value = 1;'
+                        : 'wrong quote',
+                  },
+                  supporting: [],
+                },
+              },
+            ],
+          ),
+          effectsFactory: () => repoEffects(repo),
+        })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+        expect(requests).toBe(mode === 'valid' ? 1 : mode === 'repaired' ? 2 : 3);
+        expect(result.status).toBe(mode === 'invalid' ? 'needs-human' : 'ok');
+        const report = result.status === 'ok' ? result.value : result.report;
+        expect(report?.findings[0]?.evidenceV1?.primary.quote).toBe(
+          mode === 'invalid' ? 'wrong quote' : 'export const value = 1;',
+        );
+        expect(report?.findings[0]?.evidenceV1?.validation?.status).toBe(
+          mode === 'invalid' ? 'invalid' : undefined,
+        );
+      } finally {
+        await repo.cleanup();
+      }
+    },
+  );
 
   it('opt-in evidence preparation invokes repair on the operation path and blocks missing evidence', async () => {
     const repo = await makeTestRepo();
