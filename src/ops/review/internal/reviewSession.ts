@@ -410,7 +410,15 @@ export async function runReviewSession(
         }
         const repaired = await runDriver(input.maxTokens - spent);
         settle(repaired);
-        if (repaired.stopReason !== 'complete') break;
+        if (repaired.stopReason !== 'complete') {
+          evidence.status = repaired.stopReason;
+          if (repaired.stopReason === 'budget') return { status: 'budget-exhausted' };
+          return {
+            status: 'needs-human',
+            reason: `agent evidence repair did not complete (${repaired.stopReason})${repaired.error === undefined ? '' : ': ' + boundedErrorText(repaired.error)}`,
+            ...(repaired.errorClass === undefined ? {} : { errorClass: repaired.errorClass }),
+          };
+        }
         const output = OutputSchema.safeParse(repaired.structuredOutput);
         const replacement =
           output.success && output.data.findings.length === 1 ? output.data.findings[0] : undefined;
@@ -434,11 +442,13 @@ export async function runReviewSession(
         input.onAdvisories?.(['evidence preparation: ' + JSON.stringify(prepared)]);
         item.evidenceV1 =
           prepared.status === 'valid'
-            ? prepared.evidence
+            ? { ...prepared.evidence }
             : {
                 ...prepared.candidates[prepared.candidates.length - 1]!.evidence,
                 validation: { status: 'invalid', reasons: [...prepared.reasons] },
               };
+        if (prepared.status === 'valid' && item.evidenceV1 !== undefined)
+          delete item.evidenceV1.validation;
       } else input.onAdvisories?.(['evidence preparation: missing evidence after bounded repairs']);
       input.onFindings?.(normalized());
     }
