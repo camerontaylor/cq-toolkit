@@ -977,7 +977,7 @@ def _read_reconcile_wrapper(path, interval, page_budget):
         raise DiscoveryStorageFailed("merged discovery storage failure: wrapper-read; tick aborted") from None
     try:
         wrapper = json.loads(text)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         raise merged_reconcile.ReconcileRefused("wrapper-decode: invalid JSON") from None
     if (not isinstance(wrapper, dict) or set(wrapper) != {"source", "checkpoint", "digest"} or
             not isinstance(wrapper["source"], dict)):

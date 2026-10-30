@@ -1730,6 +1730,96 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                     enroll.assert_not_called()
                 self.forge.assert_not_called()
 
+    def test_wrapper_parser_failures_preserve_debt_and_storage_boundary(self):
+        original_loads = json.loads
+        reason = "wrapper-decode: invalid JSON"
+        for error in (ValueError, RecursionError):
+            for mode in ("manual", "discovery", "tick", "save-before", "save-after"):
+                with self.subTest(error=error.__name__, mode=mode):
+                    self.reset_case()
+                    self.q["items"] = [{"id": "older-review", "kind": "open", "state": "reviewing",
+                        "cycles": [{"run_id": "retained"}], "repair_runs": {"older-repair": {}}}]
+                    self.q["merged_current_requests"] = {"retained": {"receiptId": "prior-receipt"}}
+                    crq.save_queue(self.q)
+                    baseline = copy.deepcopy(self.q)
+                    retained_digest = review_receipt.digest(baseline)
+                    sentinel = json.dumps({"fixture_parser_boundary": str(self.path),
+                                           "error": error.__name__, "mode": mode})
+                    self.path.write_text(sentinel)
+                    encounters = []
+                    order = []
+                    save = crq._save_discovery_queue
+
+                    def dispatch(*args, **kwargs):
+                        text = args[0] if args else kwargs.get("s")
+                        if text == sentinel:
+                            encounters.append("wrapper-parse")
+                            raise error("fixture parser fault")
+                        return original_loads(*args, **kwargs)
+
+                    def record(q, stage):
+                        result = save(q, stage)
+                        order.append(stage)
+                        return result
+
+                    rounds = 2 if mode == "discovery" else 1
+                    with mock.patch.object(crq.review_receipt, "enroll") as enroll:
+                        for attempt in range(rounds):
+                            with mock.patch.object(crq.json, "loads", side_effect=dispatch):
+                                if mode == "manual":
+                                    with self.assertRaisesRegex(crq.merged_reconcile.ReconcileRefused,
+                                                               "^" + reason + "$"):
+                                        self.manual()
+                                elif mode == "discovery":
+                                    self.assertEqual(self.discover(), [
+                                        "merged discovery incomplete; cursor/debt retained: " + reason])
+                                elif mode == "tick":
+                                    with self.tick_effects() as effects, mock.patch.object(
+                                            crq, "_save_discovery_queue", side_effect=record):
+                                        effects["refresh_deferred"].side_effect = (
+                                            lambda *a, **k: order.append("refresh") or [])
+                                        crq.tick()
+                                        self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+                                        for name in ("harvest_review", "harvest", "enroll", "promotion_audit",
+                                                     "promotion_tick", "read_slot_usage", "admit_available",
+                                                     "write_status", "write_heartbeat"):
+                                            effects[name].assert_called_once()
+                                else:
+                                    with self.tick_effects() as effects, self.fault(
+                                            stage="refusal-debt-save", post=mode == "save-after") as events:
+                                        with self.assertRaisesRegex(crq.DiscoveryStorageFailed,
+                                                                   "refusal-debt-save"):
+                                            crq.tick()
+                                        for effect in effects.values():
+                                            effect.assert_not_called()
+                                        self.assertEqual(len(events), 1)
+                            # Shared parser restored before persisted reloads or digest checks.
+                            self.assertIs(json.loads, original_loads)
+                            self.assertEqual(len(encounters), attempt + 1)
+                            disk = crq.load_queue()
+                            self.assertEqual(self.path.read_text(), sentinel)
+                            for value in (self.q, disk):
+                                for field in ("items", "merged_current_requests", "merged_watermark"):
+                                    self.assertEqual(value[field], baseline[field])
+                                for field in ("after", "before", "complete"):
+                                    self.assertEqual(value["merged_discovery"][field],
+                                                     baseline["merged_discovery"][field])
+                            if mode == "manual" or mode.startswith("save-"):
+                                self.assertEqual(self.q, baseline)
+                                self.assertEqual(review_receipt.digest(self.q), retained_digest)
+                            if mode in ("manual", "save-before"):
+                                self.assertEqual(disk, baseline)
+                            else:
+                                self.assertEqual(disk["merged_discovery"]["error"], reason)
+                            if mode.startswith("save-"):
+                                self.assertEqual(disk, events[-1][2] if mode == "save-after" else baseline)
+                            if mode == "discovery":
+                                # Resume only from actual persisted debt, after parser restoration.
+                                self.assertEqual(self.q, disk)
+                                self.q = disk
+                        enroll.assert_not_called()
+                    self.forge.assert_not_called()
+
     def test_valid_complete_wrapper_validates_and_enrolls_once(self):
         first = self.manual()
         self.assertTrue(first["complete"])
