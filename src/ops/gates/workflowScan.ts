@@ -73,7 +73,7 @@ export interface WorkflowJob {
   privileged: boolean;
   /** Human-readable privilege signals, e.g. `permission contents: write`, `secret DEPLOY_KEY`. */
   privilegeReasons: string[];
-  /** `uses: ./path` targets (no leading `./`, no trailing `/`; the repo root is `.`). */
+  /** `uses: ./path` or `uses: $/path` targets (no prefix/trailing `/`; repo root is `.`). */
   localUses: string[];
   /** The job has a `run:` step. */
   hasRunSteps: boolean;
@@ -974,7 +974,9 @@ function readJob(
   const addLocal = (span: Span | undefined): void => {
     const target = literalOf(lines, span, true);
     if (span !== undefined && target === null) nonLiteralUses = true;
-    if (target?.startsWith('./')) localUses.add(target.slice(2).replace(/\/+$/, '') || '.');
+    if (target?.startsWith('./') || target?.startsWith('$/')) {
+      localUses.add(target.slice(2).replace(/\/+$/, '') || '.');
+    }
   };
   addLocal(children.get('uses'));
   for (const step of steps) addLocal(step.keys.get('uses'));
