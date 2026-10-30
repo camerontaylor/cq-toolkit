@@ -1561,6 +1561,18 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     if item["kind"] == backfill_jobs.KIND:
         return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
+    if item["kind"] == "coverage":
+        try:
+            coverage._legacy_origins(q, item)
+        except ValueError as exc:
+            item.update(state="blocked", vendor_state="terminal", run=None,
+                        last_error="legacy coverage lineage unresolved: " + str(exc))
+            if item.get("attempt_id"):
+                q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
+            if cls["outcome"] in ("auth", "action_required"):
+                q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+            save_queue(q)
+            return item["last_error"]
     if item["kind"] == "coverage" and item.get("attempt_id"):
         item["vendor_state"] = "terminal"
         q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
@@ -1615,6 +1627,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         return f"{item['id']}: completed ({cls['findings']} findings)"
     if o == "rate_limited":
         set_rate_cooldown(q, cls, rdir)
+        attempt["deadline"] = q["cooldown_until"]
         q["rl_backoff_min"] = min(240, (q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]) * 2)
         item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
         if item["kind"] == author_quota.AUTHOR_KIND:
@@ -3182,7 +3195,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
                                       f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
         break
     else:
-        q["backfill_ordinary_exhausted"] = True
+        q["backfill_ordinary_exhausted"] = not bool(only)
         started, has_coverage = coverage_fallback(q, log, dry, only)
         if not started:
             log.append("no eligible item this tick")

@@ -450,7 +450,9 @@ class GitLedger:
                         outbox.artifacts.verify(reference)
                     if creditable(value):
                         from backfill_accounting import Repository
-                        Repository(self.repo).verify_review(value)
+                        repository = Repository(self.repo)
+                        repository.restore(value["payload"].get("artifacts", []), outbox.artifacts)
+                        repository.verify_review(value)
                     validate_sequence(values + [value])
                     with tempfile.TemporaryDirectory() as directory:
                         env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"),

@@ -2405,6 +2405,16 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         build.assert_not_called()
         self.assertIn("cooldown unresolved", item["wait_reason"])
 
+    def test_selective_backfill_preserves_ordinary_priority(self):
+        queue = {"items": [{"id": "ordinary", "kind": "open", "state": "pending", "pr": 1}]}
+        observed = []
+        def fallback(q, log, dry, only):
+            observed.append(crq.ordinary_review_eligible(q))
+            return None, False
+        with mock.patch.object(crq, "coverage_fallback", side_effect=fallback):
+            crq.start_one(queue, [], False, "backfill-only", False)
+        self.assertEqual(observed, [True])
+
     def test_measure_skips_repair_only_merged_item(self):
         repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}
         queue = {"items": [repair]}

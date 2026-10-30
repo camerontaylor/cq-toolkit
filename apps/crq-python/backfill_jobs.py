@@ -89,7 +89,7 @@ def defer_terminal_quota(queue, item, at, retry_seconds):
     for value in deadlines:
         if value:
             ledger.timestamp(value)
-    deadline = max(value for value in deadlines if value)
+    deadline = max((value for value in deadlines if value), key=ledger.timestamp)
     hold = queue.get("backfill_reservations", {}).get(item.get("attempt_id"))
     if not hold:
         raise ledger.IntegrityError("quota refusal requires retained reservation")
@@ -162,7 +162,10 @@ def reconcile_absent(queue, item, at, operator, reason, evidence):
         raise ledger.IntegrityError("unknown launch requires exact authenticated vendor absence evidence")
     item["vendor_state"] = "terminal"
     cancel_before_vendor(queue, item)
-    terminal(queue, item, at, "error", vendor_terminal=True, reason=reason)
+    if item.get("kind") == "coverage":
+        item.update(state="pending", run=None, last_error=reason)
+    else:
+        terminal(queue, item, at, "error", vendor_terminal=True, reason=reason)
     queue.setdefault("backfill_operator_events", []).append({"at": at, "item": item["id"], "operator": operator,
                                                               "reason": reason, "reconciliation": evidence})
 
@@ -180,6 +183,7 @@ def terminal(queue, item, at, outcome, *, vendor_terminal, retry_after=0, reason
         # No success reset until validated remote coverage is acknowledged.
         item["state"] = "publication-pending"
         return
+    item["retry"] = True
     item["failures"] = item.get("failures", 0) + 1
     histories = history(queue, item)
     immediate = outcome in ("auth", "integrity", "unsupported", "secret-scan")
@@ -208,7 +212,10 @@ def published(queue, item, credited_scope, remote_event_id):
     # A sibling's completion cannot reset another unit's failure history.
     if all(lines <= credited.get(key, set()) for key, lines in requested.items()):
         siblings = [j for j in queue["items"] if j.get("family") == item["family"] and j is not item
-                    and j.get("state") not in ("done", "skipped")]
+                    and j.get("state") not in ("done", "skipped")
+                    and not (j.get("state") in ("blocked", "failed") and not is_execution_owner(j)
+                             and j.get("scope_digest") == item.get("scope_digest")
+                             and j.get("generation", 0) < item.get("generation", 0))]
         if not siblings:
             queue["backfill_families"].pop(item["family"], None)
         item["state"] = "done"

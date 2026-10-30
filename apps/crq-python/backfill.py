@@ -72,7 +72,10 @@ def execute(c, args):
                 pr = int(parts[1])
                 if pr <= 0 or str(pr) != parts[1] or len(parts) != 3:
                     raise ValueError("invalid legacy family")
-                coverage_policy.release_legacy_quarantine(queue, pr, parts[2], c.iso(), args.operator, args.reason, evidence)
+                restored = coverage_policy.restore_legacy_quota_deadlines(queue, pr, parts[2], c.iso(), args.operator, args.reason, evidence)
+                view = coverage_policy.legacy_retry_view(queue, pr, parts[2], c.iso())
+                if not restored or view["reasons"]:
+                    coverage_policy.release_legacy_quarantine(queue, pr, parts[2], c.iso(), args.operator, args.reason, evidence)
             except (ValueError, IndexError) as exc:
                 raise ledger.IntegrityError(str(exc)) from exc
         else:

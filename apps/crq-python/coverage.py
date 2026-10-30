@@ -109,6 +109,10 @@ def legacy_retry_view(queue, pr, original_path, at):
     family = _legacy_family(pr, original_path)
     histories = [queue.get("backfill_families", {}).get(family, {}), queue.get("backfill_scope_failures", {}).get(family, {})]
     reasons, runs, deadlines, resets = [], {}, [], []
+    quota_releases = {}
+    for release in queue.get("legacy_coverage_quota_releases", []):
+        if release.get("family") == family:
+            quota_releases.update(release["deadlines"])
     if queue.get("cooldown_until"):
         try:
             deadlines.append(_time(queue["cooldown_until"]))
@@ -145,8 +149,7 @@ def legacy_retry_view(queue, pr, original_path, at):
         for attempt in item.get("attempts", []):
             if attempt.get("outcome") == "rate_limited":
                 try:
-                    if _time(queue["cooldown_until"]) <= _time(attempt["at"]):
-                        raise ValueError("deadline predates refusal")
+                    deadlines.append(_time(attempt.get("deadline") or quota_releases[attempt["run_id"]]))
                 except (KeyError, TypeError, ValueError):
                     reasons.append("historical vendor deadline unavailable")
         failures = [a for a in item.get("attempts", []) if a.get("outcome") in ("error", "interrupted", "skipped", "too_large", "malformed")]
@@ -280,6 +283,47 @@ def legacy_retry_view(queue, pr, original_path, at):
             "runs": sorted(runs), "run_proofs": {key: list(value[:2]) + [_iso(value[2])] for key, value in runs.items()}}
 
 
+def restore_legacy_quota_deadlines(queue, pr, original_path, at, operator, reason, evidence):
+    """Restore missing historical deadlines from an audited operator evidence record."""
+    supplied = evidence.get("quota_deadlines")
+    if not supplied:
+        return False
+    if not operator or not reason:
+        raise ValueError("quota deadline recovery requires operator and reason")
+    missing = set()
+    previous = {}
+    for release in queue.get("legacy_coverage_quota_releases", []):
+        if release.get("family") == _legacy_family(pr, original_path):
+            previous.update(release["deadlines"])
+    for run_id, deadline in supplied.items():
+        if run_id in previous and previous[run_id] != deadline:
+            raise ValueError("historical quota deadline is immutable")
+    for item in queue.get("items", []):
+        if item.get("kind") != "coverage":
+            continue
+        try:
+            source, origins = _legacy_origins(queue, item)
+        except ValueError:
+            if item.get("pr") in (None, pr):
+                raise ValueError("unresolved legacy source or lineage") from None
+            continue
+        if source.get("pr") != pr or original_path not in origins:
+            continue
+        if is_execution_owner(item):
+            raise ValueError("quota deadline recovery has live or unknown ownership")
+        for attempt in item.get("attempts", []):
+            if attempt.get("outcome") == "rate_limited" and not attempt.get("deadline"):
+                missing.add(attempt["run_id"])
+    if set(supplied) != missing:
+        raise ValueError("quota deadline evidence must bind every missing scoped run")
+    for value in supplied.values():
+        _time(value)
+    queue.setdefault("legacy_coverage_quota_releases", []).append({
+        "family": _legacy_family(pr, original_path), "at": _iso(at), "operator": operator,
+        "reason": reason, "deadlines": dict(supplied), "evidence": evidence})
+    return True
+
+
 def release_legacy_quarantine(queue, pr, original_path, at, operator, reason, evidence):
     """Record a scope-bound release without rewriting retained failure history."""
     family = _legacy_family(pr, original_path)
@@ -377,14 +421,14 @@ def coverage_candidate(queue, ledger, *, merge_queue_sha, ordinary_eligible,
         for file in measure.get("files", []):
             if not file.get("now") or not file.get("synthetic_added"):
                 continue
-            if not _legacy_retry_allowed(queue, item["pr"], file["path"], at):
-                continue
             path = _path(file["now"])
             if path in excluded or _path(file["path"]) in excluded:
                 continue
             entry = ledger["paths"].get(path, {})
             last = entry.get("last_reviewed_at")
             if last and (at - _time(last)).total_seconds() < min_age_hours * 3600:
+                continue
+            if not _legacy_retry_allowed(queue, item["pr"], file["path"], at):
                 continue
             score = (0 if last is None else 1,
                      _time(last).timestamp() if last else 0,

@@ -42,6 +42,21 @@ def candidate(q, credit=None, **overrides):
 
 
 class CoverageRepairDebtTest(unittest.TestCase):
+    def test_historical_quota_deadline_recovery_is_scoped_and_immutable(self):
+        q = queue("pending")
+        old = q["items"][1]
+        old.update(coverage_source="source", pr=1, cycles=[], failures=0,
+                   attempts=[{"run_id": "quota", "outcome": "rate_limited", "at": policy._iso(NOW)}])
+        deadline = "2026-10-11T23:00:00Z"  # A delayed harvest happens after expiry.
+        evidence = {"quota_deadlines": {"quota": deadline}}
+        self.assertIn("historical vendor deadline unavailable", policy.legacy_retry_view(q, 1, AFFECTED, NOW)["reasons"])
+        policy.restore_legacy_quota_deadlines(q, 1, AFFECTED, NOW, "operator", "verified retained exit", evidence)
+        self.assertTrue(policy.legacy_retry_view(q, 1, AFFECTED, NOW)["allowed"])
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            policy.restore_legacy_quota_deadlines(q, 1, AFFECTED, NOW, "operator", "shorten", {
+                "quota_deadlines": {"quota": "2026-10-10T00:00:00Z"}})
+        self.assertNotIn("deadline", old["attempts"][0])
+
     def test_legacy_unexplained_aggregate_and_missing_terminal_fields_hold(self):
         q = queue("blocked")
         old = q["items"][1]

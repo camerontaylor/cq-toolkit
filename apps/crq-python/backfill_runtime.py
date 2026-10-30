@@ -249,6 +249,9 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_v
         causes = (classification.get("failure_provenance") or {}).get("causes") or []
         if (any(cause.get("category") == "vendor-rate-limited" for cause in causes)
                 and any(cause.get("source") != "vendor" for cause in causes)):
+            if outcome in ("auth", "action_required"):
+                queue.update(paused=True, pause_reason="backfill vendor authentication/action required; operator ruling needed")
+                c.save_queue(queue)
             return "backfill mixed quota and hard causes; retain run ownership"
         if outcome == "rate_limited":
             # Reclassify retained bytes and require exact bound terminal ownership;
@@ -335,7 +338,8 @@ def collect_required(repo, target, required, store):
             if mapped:
                 source_paths.append({"path": mapped, "source_path": name, "source_evidence": reference})
                 member_paths.append({"path": mapped, "source_path": name, "lineage_verified": True})
-            elif repo.proven_deleted(merge, target, name):
+            elif repo.proven_deleted(merge, target, name) or (
+                    name not in repo.entries(merge) and repo.proven_deleted(parent, target, name)):
                 source_paths.append({"path": name, "disposition": "deleted", "deletion_evidence": {"target": target, "merge": merge, "source": reference}})
             else:
                 source_paths.append({"path": name, "disposition": "ambiguous", "source_evidence": reference})

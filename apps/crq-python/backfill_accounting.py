@@ -237,7 +237,7 @@ class Repository:
             return False
         if (b"D", name.encode("utf-8")) not in zip(changes[0:-1:2], changes[1:-1:2]):
             return False
-        renamed = self.git("diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--name-status", "-z", old, new).split(b"\0")
+        renamed = self.git("diff", "--no-ext-diff", "--no-textconv", "--find-renames", "-l0", "--name-status", "-z", old, new).split(b"\0")
         for index, part in enumerate(renamed[:-1]):
             if part.startswith((b"R", b"C")) and index + 1 < len(renamed) and renamed[index + 1] == name.encode("utf-8"):
                 return False

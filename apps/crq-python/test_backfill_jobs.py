@@ -21,6 +21,40 @@ def partition(number=0, generation=0, target="a" * 40, path="a"):
 
 
 class JobsTest(unittest.TestCase):
+    def test_failure_reclassifies_as_retry(self):
+        q = {"items": []}
+        item = jobs.enqueue(q, {**partition(), "retry": False}, AT)
+        jobs.terminal(q, item, AT, "error", vendor_terminal=True)
+        self.assertTrue(item["retry"])
+
+    def test_success_supersedes_blocked_same_scope_generation(self):
+        q = {"items": []}
+        old = jobs.enqueue(q, partition(), AT)
+        old.update(state="blocked", vendor_state="terminal")
+        new = jobs.enqueue(q, partition(generation=1), AT)
+        new.update(state="publication-pending", vendor_state="terminal")
+        jobs.published(q, new, new["scope"], "event")
+        self.assertNotIn("family", q["backfill_families"])
+        self.assertEqual(old["state"], "blocked")
+
+    def test_other_scope_blocked_sibling_retains_family_failure(self):
+        q = {"items": []}
+        old = jobs.enqueue(q, partition(path="other"), AT)
+        old.update(state="blocked", vendor_state="terminal")
+        new = jobs.enqueue(q, partition(1, generation=1), AT)
+        new.update(state="publication-pending", vendor_state="terminal")
+        jobs.published(q, new, new["scope"], "event")
+        self.assertIn("family", q["backfill_families"])
+
+    def test_legacy_absent_launch_recovers_without_backfill_family(self):
+        item = {"id": "legacy", "kind": "coverage", "state": "launch-unknown", "vendor_state": "unknown", "attempt_id": "attempt"}
+        q = {"items": [item], "backfill_reservations": {"attempt": {"quota_state": "reserved"}}}
+        jobs.reconcile_absent(q, item, AT, "operator", "vendor confirms absence", {
+            "attempt_id": "attempt", "verdict": "vendor-confirmed-not-started", "vendor_query": "retained"})
+        self.assertEqual(item["state"], "pending")
+        self.assertFalse(jobs.is_execution_owner(item))
+        self.assertEqual(q["backfill_reservations"]["attempt"]["quota_state"], "released")
+
     def test_quota_deadline_survives_new_generation_and_target(self):
         q = {"items": []}
         old = jobs.enqueue(q, partition(), AT)

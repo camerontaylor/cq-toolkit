@@ -29,6 +29,18 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(paths["7"][0]["disposition"], "ambiguous")
         self.assertNotIn("deletion_evidence", paths["7"][0])
 
+    def test_required_collector_proves_deletion_in_required_pr(self):
+        self.f.commit({"old": b"unique\n", "unrelated": b"before\n"})
+        merge = self.f.commit({"old": None})
+        target = self.f.commit({"unrelated": b"after\n"})
+        original = subprocess.run
+        response = ledger.canonical({"number": 7, "merged": True, "merge_commit_sha": merge})
+        def offline(command, *args, **kwargs):
+            return SimpleNamespace(stdout=response) if command[0] == "gh" else original(command, *args, **kwargs)
+        with mock.patch.object(runtime.subprocess, "run", side_effect=offline):
+            paths, _ = runtime.collect_required(self.f.repo, target, {"rows": [{"pr": 7}]}, self.f.store)
+        self.assertEqual(paths["7"][0]["disposition"], "deleted")
+
     def test_required_collector_proves_deletion_with_unrelated_edit(self):
         self.f.commit({"unrelated": b"before\n"})
         merge = self.f.commit({"old": b"unique\n"})
