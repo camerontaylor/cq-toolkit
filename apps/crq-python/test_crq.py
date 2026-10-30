@@ -2219,6 +2219,18 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
 
 
 class CoverageFallbackTargetTest(unittest.TestCase):
+    def test_measure_skips_repair_only_merged_item(self):
+        repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}
+        queue = {"items": [repair]}
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(crq, 'STATE', Path(td)), \
+             mock.patch.object(crq, 'load_queue', return_value=queue), mock.patch.object(crq, 'fetch'), \
+             mock.patch.object(crq, 'apply_measure') as measure, mock.patch.object(crq, 'save_queue') as save, \
+             mock.patch.object(crq, 'write_status'):
+            crq.cmd_measure()
+        measure.assert_not_called()
+        save.assert_called_once_with(queue)
+        self.assertNotIn('measure', repair)
+
     def test_measurement_uses_supplied_immutable_target(self):
         target = 'a' * 40
         item = {'merge_commit': 'b' * 40}

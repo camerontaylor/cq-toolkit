@@ -3569,7 +3569,9 @@ def cmd_measure() -> None:
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
-    merged = [i for i in q["items"] if i["kind"] == "merged"]
+    # Repair-only backfill items share the merged kind but have no PR merge.
+    merged = [i for i in q["items"] if i["kind"] == "merged"
+              and not (i.get("pr") == 0 and i.get("repair_runs") and not i.get("merge_commit"))]
     for i in merged:
         if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
             continue  # merged head already reviewed; not a supersession decision

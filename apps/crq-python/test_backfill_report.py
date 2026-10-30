@@ -9,6 +9,17 @@ from test_backfill_accounting import Fixture
 
 
 class ReportTest(unittest.TestCase):
+    def test_capacity_requires_observations_including_zero_days(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Fixture(Path(td) / "repo")
+            target = f.commit({"a": b"one\n"})
+            ranked = {"target": target, "manifest_id": "m", "candidates": [{"tier": "T1"}], "required": [], "evidence_gaps": [], "paths": [], "evaluated_at": "2026-10-14T00:00:00Z"}
+            original = reporting.baseline(f.repo, ranked, "p", "l", "2026-10-01T00:00:00Z")
+            days = {f"2026-10-{day:02d}": {"completed_partitions": int(day == 1)} for day in range(1, 15)}
+            incomplete = dict(days); del incomplete["2026-10-02"]
+            self.assertIsNone(reporting.summary(f.repo, ranked, {"items": [], "backfill_daily_capacity": incomplete}, original)["baseline"]["estimated_days_at_observed_capacity"])
+            self.assertEqual(reporting.summary(f.repo, ranked, {"items": [], "backfill_daily_capacity": days}, original)["baseline"]["estimated_days_at_observed_capacity"], 14)
+
     def test_removed_lines_are_not_reviewed_and_new_lines_remain_debt(self):
         with tempfile.TemporaryDirectory() as td:
             f = Fixture(Path(td) / "repo")

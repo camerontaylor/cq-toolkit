@@ -53,11 +53,15 @@ def summary(repo, ranked, queue, original=None):
             if row["tier"] == "T1":
                 baseline_result["new_T1_debt"] += len(ledger.intervals(row["uncovered"]) - surviving_all[name])
         daily = queue.get("backfill_daily_capacity", {})
-        completed = sum(day.get("completed_partitions", 0) for day in daily.values())
+        start = ledger.timestamp(original["pinned_at"]).date()
+        end = ledger.timestamp(ranked.get("evaluated_at", original["pinned_at"])).date()
+        observed_days = max(1, (end - start).days + 1)
+        observed = {date: day for date, day in daily.items() if start.isoformat() <= date <= end.isoformat()}
+        completed = sum(day.get("completed_partitions", 0) for day in observed.values())
         remaining_partitions = sum(c["tier"] == "T1" for c in ranked.get("candidates", []))
         baseline_result["remaining_eligible_T1_partitions"] = remaining_partitions
-        baseline_result["estimated_days_at_observed_capacity"] = ((remaining_partitions * len(daily) + completed - 1) // completed) if completed else None
-        baseline_result["capacity_estimate_limit"] = "eligible partitions only; held work and unresolved objects remain separately visible"
+        baseline_result["estimated_days_at_observed_capacity"] = ((remaining_partitions * observed_days + completed - 1) // completed) if completed and len(observed) == observed_days else None
+        baseline_result["capacity_estimate_limit"] = "eligible partitions only; missing daily observations prevent an estimate; held work and unresolved objects remain separately visible"
         age = (ledger.timestamp(ranked.get("evaluated_at", original["pinned_at"])) - ledger.timestamp(original["pinned_at"])).days
         pending = baseline_result["surviving_T1_debt"] or baseline_result["unresolved_baseline_objects"]
         baseline_result["target_status"] = "missed-capacity-or-exclusions" if age >= 14 and pending else "pending" if pending else "baseline-zero"

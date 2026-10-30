@@ -73,7 +73,9 @@ def execute(c, args):
         for row in catalog_doc["sources"] if isinstance(catalog_doc, dict) else catalog_doc:
             store.verify(row["raw_artifact"])
             catalog.append({"class": row["class"], "id": row["id"], "raw": Path(row["raw_artifact"]["location"]).read_bytes(), "envelope": row["envelope"]})
-        events, report = import_catalog(repo, store, catalog, c.iso(), existing)
+        # Include unpublished and acknowledged local records so retries retain
+        # the original source disposition even before the next publication.
+        events, report = import_catalog(repo, store, catalog, c.iso(), existing + outbox.retained())
         for value in events:
             outbox.spool(value)
         return {"previous_ledger_head": head, "imports": report, "publication_pending": len(events)}

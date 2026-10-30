@@ -3,14 +3,37 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import backfill
+import backfill_history as history
 import review_ledger as ledger
+from test_backfill_accounting import Fixture
 
 AT = "2026-10-30T00:00:00Z"
 
 
 class OperatorTest(unittest.TestCase):
+    def test_history_retry_reuses_unpublished_outbox_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture = Fixture(root / "repo")
+            outbox = ledger.Outbox(root / "outbox", fixture.store)
+            catalog = root / "catalog.json"
+            catalog.write_bytes(ledger.canonical({"sources": [{"class": history.CLASSES[0], "id": "source-1", "raw_artifact": fixture.store.put(b"{}"), "envelope": {}}]}))
+            times = iter([AT, "2026-10-31T00:00:00Z"])
+            c = SimpleNamespace(STATE=root, load_queue=lambda: {"items": []}, iso=lambda: next(times))
+            publisher = SimpleNamespace(fetch=lambda: ("head", []))
+            args = SimpleNamespace(command="import-history", catalog=str(catalog))
+            with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), mock.patch.object(backfill.runtime, "services", return_value=(fixture.repo, fixture.store, outbox, publisher)):
+                first = backfill.execute(c, args)
+                saved = ledger.canonical(outbox.retained())
+                second = backfill.execute(c, args)
+            self.assertEqual(first["publication_pending"], 1)
+            self.assertEqual(second["publication_pending"], 0)
+            self.assertEqual(ledger.canonical(outbox.retained()), saved)
+            self.assertEqual(len(outbox.pending()), 1)
+
     def test_stale_release_fresh_exact_queue_no_live_evidence_and_reason(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); queue = {"items": [{"id": "coverage-ab612ba1a041484d", "kind": "coverage", "state": "blocked", "run": None}]}
