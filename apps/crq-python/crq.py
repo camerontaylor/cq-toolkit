@@ -2680,21 +2680,23 @@ def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
                 continue
             log = run(["gh", "api", "--allow-escape-sequences", f"{prefix}/jobs/{job['id']}/logs"],
                       timeout=120).stdout
-            results = []
-            for line in log.splitlines():
-                # Actions log records: timestamp, then the single JSON result.
-                match = re.fullmatch(r"[0-9T:.Z-]+ cq-promotion-result-v1 (\{.*\})", line)
-                if not match:
-                    continue
-                try:
-                    result = json.loads(match.group(1))
-                except ValueError:
-                    continue
-                if isinstance(result, dict) and result.get("status") == "ok":
-                    results.append(result.get("value"))
-            if len(results) != 1 or not isinstance(results[0], dict):
+            # Any duplicate marker is ambiguous, including malformed records.
+            records = [line for line in log.splitlines() if re.match(
+                r"^[0-9T:.Z-]+ cq-promotion-result-v1(?: |$)", line)]
+            if len(records) != 1:
                 continue
-            value = results[0]
+            match = re.fullmatch(r"[0-9T:.Z-]+ cq-promotion-result-v1 (\{.*\})", records[0])
+            if not match:
+                continue
+            try:
+                result = json.loads(match.group(1))
+            except ValueError:
+                continue
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                continue
+            value = result.get("value")
+            if not isinstance(value, dict):
+                continue
             if (value.get("verdict") == "promoted" and value.get("main") == last
                     and value.get("subject") == main
                     and value.get("signer") in ("present", "advisory-missing", "advisory-failed")):
