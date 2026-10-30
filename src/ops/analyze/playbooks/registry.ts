@@ -102,6 +102,8 @@
 // has no payload slot. The full `trace` query op and a durable dispatch
 // journal are post-v1 (recorded in the family NOTES.md).
 import type { Op, OpResult } from '../../../kernel/types.js';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import { realpathOrSelf } from '../../../adapters/store/nonceLedger.js';
 import { messageOf } from '../../../shared/messageOf.js';
 import type { RunCheck } from '../../gates/checkRunner.js';
@@ -133,13 +135,59 @@ const DISPATCH_VERIFIER_TIMEOUT_MS = 600_000;
 // verifier never quarantines a playbook, but a stranded rollback must stop
 // further mutations. Share holds across op factories for the same registry,
 // with the same process lifetime as the registry and quarantine ledger.
-const workspaceHolds = new WeakMap<PlaybookRegistry, Map<string, Map<string, string>>>();
+interface HeldFile {
+  fingerprint: string;
+  file: string;
+  store: AnalyzeFileStore;
+}
+const workspaceHolds = new WeakMap<PlaybookRegistry, Map<string, Map<string, HeldFile>>>();
+
+// Match O-5's outermost worktree domain. Outside git, overlapping
+// containment roots still share obligations over the same canonical files.
+function holdDomain(dir: string): string {
+  const canonical = realpathOrSelf(dir);
+  let root = canonical;
+  for (let current = canonical; ; current = dirname(current)) {
+    if (existsSync(join(current, '.git'))) root = current;
+    if (dirname(current) === current) return root;
+  }
+}
+
+function overlappingRoots(a: string, b: string): boolean {
+  const prefix = (root: string): string => (root.endsWith(sep) ? root : root + sep);
+  return a === b || a.startsWith(prefix(b)) || b.startsWith(prefix(a));
+}
+
+// Only mutation/admission and rollback publication are queued, never the
+// verifier. Keep the hold update inside this process-scoped boundary even
+// when the underlying approval lock faults on release. The authority's own
+// lock and verified approval are still required for every actual mutation.
+const mutationBoundaries = new WeakMap<PlaybookRegistry, Promise<void>>();
+async function withHoldBoundary<T>(
+  playbooks: PlaybookRegistry,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = mutationBoundaries.get(playbooks) ?? Promise.resolve();
+  let release = (): void => {};
+  const current = new Promise<void>((resolveBoundary) => {
+    release = resolveBoundary;
+  });
+  mutationBoundaries.set(playbooks, current);
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (mutationBoundaries.get(playbooks) === current) mutationBoundaries.delete(playbooks);
+  }
+}
 
 function holdWorkspace(
   playbooks: PlaybookRegistry,
   dir: string,
   files: readonly string[],
   preApply: ReadonlyMap<string, Uint8Array>,
+  store: AnalyzeFileStore,
 ): void {
   if (files.length === 0) return;
   let workspaces = workspaceHolds.get(playbooks);
@@ -147,13 +195,50 @@ function holdWorkspace(
     workspaces = new Map();
     workspaceHolds.set(playbooks, workspaces);
   }
-  const workspace = realpathOrSelf(dir);
+  const workspace = holdDomain(dir);
   const held = new Map(workspaces.get(workspace));
   for (const file of files) {
     const before = preApply.get(file);
-    if (before !== undefined && !held.has(file)) held.set(file, contentFingerprint(before));
+    const canonicalFile = realpathOrSelf(resolve(dir, file));
+    if (before !== undefined && !held.has(canonicalFile)) {
+      held.set(canonicalFile, { fingerprint: contentFingerprint(before), file, store });
+    }
   }
   workspaces.set(workspace, held);
+}
+
+async function reconcileWorkspace(
+  playbooks: PlaybookRegistry,
+  dir: string,
+): Promise<string | undefined> {
+  const workspaces = workspaceHolds.get(playbooks);
+  if (workspaces === undefined) return undefined;
+  const domain = holdDomain(dir);
+  const relevant = (): [string, Map<string, HeldFile>][] =>
+    [...workspaces].filter(([root]) => overlappingRoots(root, domain));
+  const snapshot = relevant();
+  try {
+    for (const [, held] of snapshot) {
+      for (const [canonicalFile, { fingerprint, file, store }] of held) {
+        if (contentFingerprint(await store.readBytes(file)) !== fingerprint) {
+          return `workspace is held after a stranded rollback; repair '${canonicalFile}' to its pre-dispatch bytes before dispatching any playbook`;
+        }
+      }
+    }
+  } catch (err) {
+    return `workspace is held after a stranded rollback; reconciliation could not be verified (${messageOf(err)})`;
+  }
+  const current = relevant();
+  if (
+    current.length !== snapshot.length ||
+    current.some(
+      ([root, held], index) => root !== snapshot[index]?.[0] || held !== snapshot[index]?.[1],
+    )
+  ) {
+    return 'workspace hold changed during reconciliation after a stranded rollback; retry against the current hold before dispatching';
+  }
+  for (const [root] of snapshot) workspaces.delete(root);
+  return undefined;
 }
 
 /**
@@ -529,26 +614,9 @@ export function makePlaybookDispatchOp(
         error: `playbook dispatch: ${messageOf(err)}`,
       };
     }
-    const workspace = realpathOrSelf(input.dir);
-    const workspaces = workspaceHolds.get(deps.playbooks);
-    const held = workspaces?.get(workspace);
-    if (held !== undefined) {
-      try {
-        for (const [file, expected] of held) {
-          if (contentFingerprint(await store.readBytes(file)) !== expected) {
-            return {
-              status: 'needs-human',
-              reason: `workspace is held after a stranded rollback; repair '${file}' to its pre-dispatch bytes before dispatching any playbook`,
-            };
-          }
-        }
-      } catch (err) {
-        return {
-          status: 'needs-human',
-          reason: `workspace is held after a stranded rollback; reconciliation could not be verified (${messageOf(err)})`,
-        };
-      }
-      if (workspaces?.get(workspace) === held) workspaces.delete(workspace);
+    const initialHoldRefusal = await reconcileWorkspace(deps.playbooks, input.dir);
+    if (initialHoldRefusal !== undefined) {
+      return { status: 'needs-human', reason: initialHoldRefusal };
     }
     const targets = [...new Set(input.targets)].sort();
     // ---- 3a. PRE-APPLY CAPTURE (W4.3, step 5's precondition). The bytes
@@ -591,6 +659,7 @@ export function makePlaybookDispatchOp(
     // then the engine-fault shape (`failed` — the playbook did not fail its
     // verifier), never an approval refusal, and the nonce is UNSPENT.
     let preflightRefusal: string | undefined;
+    let holdRefusal: string | undefined;
     const subject = {
       op: 'analyze.playbookDispatch',
       workspace: input.dir,
@@ -620,8 +689,8 @@ export function makePlaybookDispatchOp(
       engine: OpResult<CodemodReport>;
       applied: Map<string, string>;
     }>;
-    try {
-      approved = await withApprovedMutation(
+    const apply = async (): Promise<typeof approved> => {
+      return withApprovedMutation(
         deps.approval ?? DENY_ALL_APPROVALS,
         subject,
         async (
@@ -680,6 +749,8 @@ export function makePlaybookDispatchOp(
         // scope asserts an approval already consumed, which is false at
         // preflight time, and a dry-run writes nothing.
         async () => {
+          holdRefusal = await reconcileWorkspace(deps.playbooks, input.dir);
+          if (holdRefusal !== undefined) return { ok: false as const, reason: holdRefusal };
           const plan = await makeAstGrepCodemod(
             deps.run,
             () => store,
@@ -706,8 +777,21 @@ export function makePlaybookDispatchOp(
           return { ok: false as const, reason: preflightRefusal };
         },
       );
+    };
+    try {
+      approved = await withHoldBoundary(deps.playbooks, async () => {
+        try {
+          const result = await apply();
+          if (result.status === 'ok' && result.value.engine.status !== 'ok') {
+            holdWorkspace(deps.playbooks, input.dir, targets, preApply, store);
+          }
+          return result;
+        } catch (err) {
+          if (writeEntered) holdWorkspace(deps.playbooks, input.dir, targets, preApply, store);
+          throw err;
+        }
+      });
     } catch (err) {
-      if (writeEntered) holdWorkspace(deps.playbooks, input.dir, targets, preApply);
       // A post-apply read fault lands here: the apply DID happen, and the
       // one thing we can no longer prove is what the file holds, so no
       // rollback is attempted. Saying so beats restoring blind.
@@ -731,6 +815,7 @@ export function makePlaybookDispatchOp(
       };
     }
     if (approved.status === 'needs-human') {
+      if (holdRefusal !== undefined) return { status: 'needs-human', reason: approved.reason };
       // A PREFLIGHT REFUSAL rode the needs-human shape out of the approved
       // mutation (that is its contract), but at this op boundary it is an
       // ENGINE fault, not an approval refusal: the playbook did not fail
@@ -755,7 +840,6 @@ export function makePlaybookDispatchOp(
       // fails. Preserve its result, but require reconciliation of all targets
       // before another dispatch; a clean engine rollback clears on the next
       // byte check without punishing the playbook.
-      holdWorkspace(deps.playbooks, input.dir, targets, preApply);
       return engineResult;
     }
     const applied = engineResult.value;
@@ -832,20 +916,24 @@ export function makePlaybookDispatchOp(
       // restore is CONDITIONAL and LOCKED: see `restoreTargets`. It spends
       // no nonce — the one write here that does not — and is bounded by a
       // content-fingerprint guard instead (STRANDED when bytes moved).
-      const restore = await restoreTargets(
-        deps.approval ?? DENY_ALL_APPROVALS,
-        store,
-        input.dir,
-        preApply,
-        files.map((file) => file.file),
-        postApply,
-      );
-      holdWorkspace(
-        deps.playbooks,
-        input.dir,
-        restore.stranded.map(({ file }) => file),
-        preApply,
-      );
+      const restore = await withHoldBoundary(deps.playbooks, async () => {
+        const restored = await restoreTargets(
+          deps.approval ?? DENY_ALL_APPROVALS,
+          store,
+          input.dir,
+          preApply,
+          files.map((file) => file.file),
+          postApply,
+        );
+        holdWorkspace(
+          deps.playbooks,
+          input.dir,
+          restored.stranded.map(({ file }) => file),
+          preApply,
+          store,
+        );
+        return restored;
+      });
       const record: PlaybookDispatchRecord = {
         kind: 'playbook-dispatch',
         playbookId: playbook.id,
@@ -885,20 +973,24 @@ export function makePlaybookDispatchOp(
     // forced the old "do NOT blindly re-run" warning. The frozen OpResult
     // taxonomy gives this status no value slot, so the trace record rides
     // `detail` as serialized JSON ({@link PlaybookDispatchRecord}).
-    const restore = await restoreTargets(
-      deps.approval ?? DENY_ALL_APPROVALS,
-      store,
-      input.dir,
-      preApply,
-      files.map((file) => file.file),
-      postApply,
-    );
-    holdWorkspace(
-      deps.playbooks,
-      input.dir,
-      restore.stranded.map(({ file }) => file),
-      preApply,
-    );
+    const restore = await withHoldBoundary(deps.playbooks, async () => {
+      const restored = await restoreTargets(
+        deps.approval ?? DENY_ALL_APPROVALS,
+        store,
+        input.dir,
+        preApply,
+        files.map((file) => file.file),
+        postApply,
+      );
+      holdWorkspace(
+        deps.playbooks,
+        input.dir,
+        restored.stranded.map(({ file }) => file),
+        preApply,
+        store,
+      );
+      return restored;
+    });
     const record: PlaybookDispatchRecord = {
       kind: 'playbook-dispatch',
       playbookId: playbook.id,
