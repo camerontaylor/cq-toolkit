@@ -242,6 +242,67 @@ describe('regressionGate decision table', () => {
     expect(reduced.value.preExistingCount).toBe(1);
   });
 
+  test.each([false, true])(
+    'an added earlier duplicate reports the new occurrence (reversed=%s)',
+    async (reversed) => {
+      const existing = failureOf({ line: 306, ruleId: null, message: 'suite > repeated test' });
+      const added = { ...existing, line: 205 };
+      const final = reversed ? [existing, added] : [added, existing];
+      const result = await regressionGate({
+        base: { tool: 'vitest', failures: [existing], exitCode: 1 },
+        final: { tool: 'vitest', failures: final, exitCode: 1 },
+      });
+      expect(result).toEqual({
+        status: 'ok',
+        value: {
+          verdict: 'regression',
+          novelFailures: [added],
+          fixedFailures: [],
+          preExistingCount: 1,
+        },
+      });
+      const removed = await regressionGate({
+        base: { tool: 'vitest', failures: final, exitCode: 1 },
+        final: { tool: 'vitest', failures: [existing], exitCode: 1 },
+      });
+      expect(removed).toEqual({
+        status: 'ok',
+        value: {
+          verdict: 'no-regression',
+          novelFailures: [],
+          fixedFailures: [added],
+          preExistingCount: 1,
+        },
+      });
+    },
+  );
+
+  test.each([false, true])(
+    'drifted duplicates retain deterministic pairing (reversed baseline=%s)',
+    async (reversed) => {
+      const first = failureOf({ line: 205, ruleId: null, message: 'suite > repeated test' });
+      const second = { ...first, line: 306 };
+      const moved = { ...first, line: 400 };
+      const result = await regressionGate({
+        base: {
+          tool: 'vitest',
+          failures: reversed ? [second, first] : [first, second],
+          exitCode: 1,
+        },
+        final: { tool: 'vitest', failures: [moved], exitCode: 1 },
+      });
+      expect(result).toEqual({
+        status: 'ok',
+        value: {
+          verdict: 'no-regression',
+          novelFailures: [],
+          fixedFailures: [second],
+          preExistingCount: 1,
+        },
+      });
+    },
+  );
+
   test('a warning baseline escalating to error at the same spot is a regression', async () => {
     const result = await regressionGate({
       base: setOf([failureOf({ line: 30, severity: 'warning' })]),

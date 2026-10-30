@@ -139,11 +139,14 @@ export function legacyFingerprintFailure(f: CheckFailure, cfg?: FingerprintConfi
  * The composite is collision-free: the canonical key is JSON array text that
  * always ends in `]` (components may themselves contain `#`), and the
  * appended ordinal is decimal digits, so the LAST `#` is always the separator
- * and `(identity, ordinal)` is recoverable.
+ * and `(identity, ordinal)` is recoverable. When a baseline is supplied, exact
+ * occurrences retain its ordinals first, then drifted equivalents consume the
+ * remaining ordinals; only excess final occurrences receive new ordinals.
  */
 export function fingerprintPairs(
   s: FailureSet,
   cfg?: FingerprintConfig,
+  baseline?: FailureSet,
 ): Array<{ failure: CheckFailure; key: string }> {
   const effective = { ...cfg, tool: s.tool };
   const identities = s.failures.map((failure) => fingerprintKey(failure, effective));
@@ -158,9 +161,39 @@ export function fingerprintPairs(
         a - b,
     );
   const keys: string[] = new Array<string>(s.failures.length);
+  const available = new Map<string, Array<{ failure: CheckFailure; key: string }>>();
   const occurrences = new Map<string, number>();
+  if (baseline !== undefined) {
+    for (const pair of fingerprintPairs(baseline, cfg)) {
+      const identity = fingerprintKey(pair.failure, { ...cfg, tool: baseline.tool });
+      const group = available.get(identity) ?? [];
+      group.push(pair);
+      available.set(identity, group);
+      occurrences.set(identity, group.length);
+    }
+  }
+  for (const group of available.values()) {
+    group.sort((a, b) => compareFailures(a.failure, b.failure));
+  }
+  // Preserve exact occurrences before tolerating drift. A new earlier duplicate
+  // must not steal the baseline ordinal of an unchanged later occurrence.
   for (const index of order) {
+    const group = available.get(identities[index] ?? '');
+    const match = group?.findIndex(
+      (pair) => compareFailures(pair.failure, s.failures[index]) === 0,
+    );
+    if (group !== undefined && match !== undefined && match >= 0) {
+      keys[index] = group.splice(match, 1)[0]?.key ?? '';
+    }
+  }
+  for (const index of order) {
+    if (keys[index] !== undefined) continue;
     const identity = identities[index] ?? '';
+    const matched = available.get(identity)?.shift();
+    if (matched !== undefined) {
+      keys[index] = matched.key;
+      continue;
+    }
     const occurrence = occurrences.get(identity) ?? 0;
     occurrences.set(identity, occurrence + 1);
     keys[index] = `${identity}#${occurrence}`;
