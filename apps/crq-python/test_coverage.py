@@ -54,10 +54,23 @@ class CoverageRepairDebtTest(unittest.TestCase):
         q["items"][0]["measure"]["files"] = q["items"][0]["measure"]["files"][:1]
         self.assertIsNone(candidate(q, min_age_hours=0))
 
-    def test_pending_active_deferred_blocked_and_unknown_states_hold_slot(self):
-        for state in ("pending", "reviewing", "deferred", "blocked", "unknown"):
+    def test_pending_active_deferred_and_unknown_states_hold_slot(self):
+        for state in ("pending", "reviewing", "deferred", "unknown"):
             with self.subTest(state=state):
                 self.assertIsNone(candidate(queue(state)))
+
+    def test_approved_backfill_spec_releases_terminal_blocked_failed_capacity(self):
+        # Approved revised protocol §7 and Stage1 deadlock acceptance supersede
+        # the old global blocked-item guard; independent oracle acceptance is
+        # required on the final head before merge (Q32).
+        for state in ("blocked", "failed", "quarantined"):
+            q = queue(state)
+            q["items"][1].update(cycles=[], attempts=[{"outcome": "error"}] * 3)
+            self.assertIsNotNone(candidate(q, policy.new_ledger()))
+            for ownership in ({"vendor_state": "unknown"}, {"run": {"run_id": "unreconciled"}}):
+                held = copy.deepcopy(q)
+                held["items"][1].update(ownership)
+                self.assertIsNone(candidate(held, policy.new_ledger()))
 
     def test_repair_path_cannot_reenter_as_a_synthetic_rename_alias(self):
         q = queue()

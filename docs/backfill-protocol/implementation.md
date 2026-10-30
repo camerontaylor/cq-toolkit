@@ -40,6 +40,17 @@ coverage. The superseded trace's commit-membership probe is not implemented.
 
 ## Validation record
 
+Named mechanism runs: accounting 7/7 (load=0.3, uptime=1057128s),
+inventory 6/6 (load=0.4, uptime=1057153s), jobs plus coverage 18/18
+(load=0.5, uptime=1057329s), subjects 5/5 (load=0.7, uptime=1057358s).
+All returned `test:narrow result="pass" exit=0` with nice=5.
+
+Oracle change requiring final independent acceptance: `test_coverage.py` no
+longer asserts that a blocked item always holds the global slot. Revised spec
+§7 and Stage 1's deadlock acceptance explicitly require the opposite when no
+live or unknown vendor execution remains. New negative cases retain capacity
+for unknown vendor state or a persisted run. Q32 acceptance remains pending.
+
 `pnpm test:narrow apps/crq-python/test_review_ledger.py` passed: 6/6 tests,
 `test:narrow result="pass" exit=0 files=1 projects="python" tests="6/6"`.
 The run used nice=5, load=1.0, uptime=1056943s. Local tests use only named
