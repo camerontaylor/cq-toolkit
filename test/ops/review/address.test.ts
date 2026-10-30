@@ -145,6 +145,8 @@ describe('review.address composition', () => {
             escalation: createEscalationState,
             fix: async (item) => {
               const observedHead = f.record().head;
+              await f.repo.write('sibling.txt', 'concurrent sibling\n');
+              const validatedParent = f.repo.commitAll('sibling fix');
               await f.repo.write('src/a.ts', 'export const fixedA = 2;\n');
               committed = f.repo.commitAll('fix a');
               // The packet must read the committed snapshot, never this live file.
@@ -153,6 +155,7 @@ describe('review.address composition', () => {
                 finding: { ...item, status: 'fixed' },
                 observedHead,
                 commit: committed,
+                validatedParent,
                 reason: 'fixed',
                 validation: [],
               };
@@ -169,6 +172,9 @@ describe('review.address composition', () => {
           expect(evidence?.packet.before).toBe(before);
           expect(evidence?.packet.after).toBe('export const fixedA = 2;\n');
           expect(evidence?.packet.metadata.revision.head).toBe(committed);
+          expect(evidence?.packet.metadata.revision.parent).toBe(
+            f.repo.git('rev-parse', `${committed}^`).trim(),
+          );
           expect(evidence?.packet.patch).toContain('+export const fixedA = 2;');
           expect(evidence?.packet.relevantDependenciesComplete).toBe(false);
           expect(evidence?.verification.verdict).toBe('uncertain');

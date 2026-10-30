@@ -1212,6 +1212,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let closureRefused: string | undefined;
           const verifyFix = async (root: string, fix: AddressFix) => {
             if (!input.verifyClosure || fix.finding.status !== 'fixed') return;
+            const validatedParent = fix.validatedParent ?? fix.observedHead;
             const packet: ClosurePacket = {
               finding: { ...fix.finding },
               task: fix.finding.text,
@@ -1221,7 +1222,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               dependencies: [],
               // Neither a fixer claim nor a file list proves dependency completeness.
               relevantDependenciesComplete: false,
-              metadata: { revision: { head: fix.commit ?? '', parent: fix.observedHead } },
+              metadata: { revision: { head: fix.commit ?? '', parent: validatedParent } },
             };
             let unavailable: string | undefined;
             const read = async (args: string[]) => {
@@ -1233,20 +1234,20 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (
                 !fix.commit ||
                 !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(fix.commit) ||
-                !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(fix.observedHead) ||
+                !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(validatedParent) ||
                 !fix.finding.file
               )
                 throw new Error('pinned closure identity or file unavailable');
-              if ((await read(['rev-parse', `${fix.commit}^`])).trim() !== fix.observedHead)
-                throw new Error('closure parent differs from admitted head');
-              packet.before = await read(['show', `${fix.observedHead}:${fix.finding.file}`]);
+              if ((await read(['rev-parse', `${fix.commit}^`])).trim() !== validatedParent)
+                throw new Error('closure parent differs from validated parent');
+              packet.before = await read(['show', `${validatedParent}:${fix.finding.file}`]);
               packet.after = await read(['show', `${fix.commit}:${fix.finding.file}`]);
               packet.patch = await read([
                 'diff',
                 '--no-ext-diff',
                 '--no-textconv',
                 '--no-color',
-                fix.observedHead,
+                validatedParent,
                 fix.commit,
                 '--',
                 `:(literal)${fix.finding.file}`,

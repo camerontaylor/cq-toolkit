@@ -7,8 +7,11 @@ before a fixed disposition or PR-thread resolution. Only `resolved` may close;
 `unresolved` and `uncertain` keep the finding open and return `needs-human`.
 
 The operation assembles the finding text, exact single-file patch and full
-before/after snapshots using the admitted parent and fix commit, never live
-working-tree content. It records packets and verdicts in the report's
+before/after snapshots using the worker-validated parent and fix commit, never live
+working-tree content. Concurrent siblings may advance HEAD after the initial
+worker observation; the packet uses `validatedParent`, not that earlier
+observation. Custom legacy workers without it fall back to `observedHead` and
+refuse if the actual commit parent differs. It records packets and verdicts in the report's
 `closureVerifications` array. Missing objects, unsupported patches, cancellation
 and budget refusal cannot close a finding. Dependency completeness is currently
 **unattested**: the assembler supplies no dependencies and sets
