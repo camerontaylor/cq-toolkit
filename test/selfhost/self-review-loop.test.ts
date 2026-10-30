@@ -1234,7 +1234,7 @@ describe('main — usage reporting', () => {
       [`pr 7: ${failure}\n`],
     ]);
     expect(
-      stdoutText.trim().split('\n').map((line) => JSON.parse(line)),
+      stdoutText.trim().split('\n').map((line): unknown => JSON.parse(line)),
     ).toEqual([
       {
         results: [{ pr: 8, status: 'ok', actionsPosted: 0, reasons: [] }],
