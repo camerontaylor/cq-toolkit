@@ -175,7 +175,22 @@ export function makeReviewAddressMany(
         outcomes,
       });
       if (!rolled.ok) return { status: 'failed', error: JSON.stringify(rolled.refusal) };
-      const report = rolled.aggregate;
+      const report = {
+        ...rolled.aggregate,
+        reasons: [
+          ...rolled.aggregate.reasons,
+          ...rolled.aggregate.rows
+            .filter((row) => row.status !== 'settled-ok')
+            .map((row) => {
+              const leg = row.result;
+              let detail = row.reason ?? row.status;
+              if (leg?.status === 'needs-human') detail = leg.reason;
+              else if (leg?.status === 'failed') detail = leg.error;
+              else if (leg?.status === 'indeterminate') detail = leg.detail;
+              return `PR #${row.scope.number}: ${detail}`;
+            }),
+        ],
+      };
       if (report.status === 'ok') return { status: 'ok', value: report };
       if (report.status === 'failed')
         return { status: 'failed', error: report.reasons.join('; '), report };

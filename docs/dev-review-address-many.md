@@ -4,8 +4,8 @@ The first runtime slice exposes `makeReviewAddressMany` through the SDK and
 `review.addressMany` through the registry-driven CLI:
 
 ```sh
-cq review.addressMany --repoRoot . --repo owner/repo --owner owner \
-  --pulls '[123,124]' --maxTokens 200000 --tokensPerPr 100000 --push --json
+cq review.addressMany --repoRoot=. --repo=owner/repo --owner=owner \
+  '--pulls=[123,124]' --maxTokens=200000 --tokensPerPr=100000 --push=true --json
 ```
 
 The explicit list is frozen before work starts. Only open, non-draft PRs by
