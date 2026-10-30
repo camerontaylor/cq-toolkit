@@ -1,4 +1,5 @@
-import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { DriverFactory, DriverRequest, ResolvedDriver } from '../../../src/driver/factory.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
@@ -6,6 +7,9 @@ import type { AgentReviewerInput } from '../../../src/ops/review/agentReviewer.j
 import type { Driver, OpInvocation, RunOptions, WorkerResult } from '../../../src/driver/types.js';
 import { runLadder } from '../../../src/kernel/governor.js';
 import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
+import { FindingsRecordSchema } from '../../../src/ops/review/findings.js';
+import { makeReviewRun } from '../../../src/ops/review/run.js';
+import { makeTestRepo, repoEffects } from '../dev/repo.js';
 
 const usage = { input: 2, output: 3, cacheRead: 1, cacheWrite: 0 } as const;
 const cleanScan: DiffSecretScanner = (components) =>
@@ -92,6 +96,63 @@ function fakeDrivers(options: FakeDriverOptions = {}) {
 }
 
 describe('runAgentReviewer v3 session engine', () => {
+  it('persists an error-stop driver detail through review.run into the record, ledger and log', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
+      repo.commitAll('configure error-stop persistence fixture');
+      const detail = 'distinctive error-stop persistence failure: fixture-486';
+      const fake = fakeDrivers({
+        result: workerResult({ stopReason: 'error', error: detail }),
+      });
+      const effects = repoEffects(repo);
+      const result = await makeReviewRun({
+        drivers: fake.drivers,
+        effectsFactory: () => effects,
+        scannerFactory: () => cleanScan,
+      })({ repoRoot: repo.root });
+
+      expect(result.status).toBe('needs-human');
+      expect(fake.run).toHaveBeenCalledTimes(1);
+      const stored = FindingsRecordSchema.parse(
+        JSON.parse(await readFile(join(repo.root, '.cq/review/feature%2Fx/1.json'), 'utf8')),
+      );
+      expect(stored.sources).toHaveLength(1);
+      expect(stored.sources[0]).toMatchObject({
+        kind: 'agent',
+        status: 'blocked',
+        reason: expect.stringContaining(detail) as unknown,
+      });
+      const cycle = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle');
+      expect(cycle).toMatchObject({
+        kind: 'cycle',
+        cycleId: stored.sources[0]?.cycleId,
+        reviewer: 'agent:reviewer',
+        completion: {
+          kind: 'blocked',
+          reason: expect.stringContaining(detail) as unknown,
+        },
+      });
+      expect(effects.logs).toHaveLength(1);
+      expect(effects.logs[0]).toContain(detail);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('runs one read-only, tool-aware session with prompt-hook delivery evidence and v3 output', async () => {
     const fake = fakeDrivers();
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
