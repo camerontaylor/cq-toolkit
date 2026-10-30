@@ -199,6 +199,15 @@ class RuntimeTest(unittest.TestCase):
         self.assertIn("mixed quota", result)
         self.assertTrue(jobs.is_execution_owner(self.item))
         self.assertEqual(self.item["failures"], 0)
+        refused = runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "wrong-run"},
+                                  crq.classify(rdir / "review.ndjson", 1), 1, terminal_verified=True)
+        self.assertIn("retain run ownership", refused)
+        self.assertTrue(jobs.is_execution_owner(self.item))
+        runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "run-mixed"},
+                        crq.classify(rdir / "review.ndjson", 1), 1, terminal_verified=True)
+        self.assertFalse(jobs.is_execution_owner(self.item))
+        self.assertEqual(self.item["state"], "quarantined")
+        self.assertEqual(self.item["failures"], 1)
 
     def test_select_harvest_crash_replay_publish_and_lost_coverage_cache(self):
         runtime.usage_context(self.c, self.q, {"remaining": 2}, [])

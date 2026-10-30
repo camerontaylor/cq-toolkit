@@ -25,16 +25,18 @@ and M2 holds. Spare included quota only; no paid retry and no LLM launcher.
    ruleset IDs, fetched final payloads and digests. Test an unauthorized writer
    refusal separately. Rulesets do not enforce add-only content; readers and
    publishers validate every ledger commit and halt on modify/delete/tamper.
-4. Verify the deployed reviewer's actual file/diff-byte limits and scope evidence
-   format. Commit exact limits, evidence location/digest and reviewer version in
-   `policy/review-limits.json`. Its checked-in `verified: false` is intentional.
-   The adapter requires a successful terminal `review_completed` event that binds
-   `head` and explicit `reviewedFiles` entries `{path, blob, intervals}`. If the
-   deployed reviewer only emits path names, **do not activate**: path names
-   cannot establish line credit or whole-file completion. Supply a verified
-   reviewer scope adapter under a separately reviewed change; never synthesize
-   vendor scope from requested files. Confirm untrusted PR context is included
-   in the reviewer input adapter; context cannot affect argv or scope.
+4. The reviewed `submitted-hunks-v1` adapter supports CLI 0.8.2 names-only
+   confirmation. The child records its actual CLI version and clean submitted
+   base/head, attempt, run and head-side hunk manifest before spawning. Harvest
+   verifies those identities, recomputes hunks, binds the vendor base context and
+   requires successful non-skipped terminal completion. Credit is limited to
+   submitted hunks in vendor-confirmed files. Unlisted files remain debt;
+   unsubmitted vendor paths, unknown versions or output formats refuse credit.
+   Deleted or otherwise interval-free submitted paths earn no line credit.
+   The observed real-vendor bounds and raw evidence digest are recorded in
+   `reviewer-verification-20261031.json`; `policy/review-limits.json` selects
+   conservative limits below that observed successful submission. Historical
+   names-only receipts without bound submission evidence remain uncredited.
 5. Provision a private durable artifact volume with retention at least as long
    as every referencing ledger record. Keep it separate from transient `runs/`.
    Back up the operational queue, publication and findings outboxes. Git bundles

@@ -254,12 +254,27 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_v
     else:
         outcome = classification["outcome"]
         causes = (classification.get("failure_provenance") or {}).get("causes") or []
+        run = item.get("run") or {}
+        hold = queue.get("backfill_reservations", {}).get(item.get("attempt_id")) or {}
+        known_terminal = (terminal_verified is True and terminal.get("exit") == exit_code
+                          and run.get("run_id") == meta.get("run_id")
+                          and hold.get("item") == item.get("id")
+                          and hold.get("vendor_run_id") == meta.get("run_id"))
         if (any(cause.get("category") == "vendor-rate-limited" for cause in causes)
                 and any(cause.get("source") != "vendor" for cause in causes)):
             if outcome in ("auth", "action_required"):
                 queue.update(paused=True, pause_reason="backfill vendor authentication/action required; operator ruling needed")
                 c.save_queue(queue)
-            return "backfill mixed quota and hard causes; retain run ownership"
+            if not known_terminal:
+                return "backfill mixed quota and hard causes; retain run ownership"
+            outcome = "auth" if outcome in ("auth", "action_required") else "integrity"
+        if outcome == "rate_limited" and known_terminal:
+            verified = c.classify(rdir / "review.ndjson", exit_code)
+            provenance = verified.get("failure_provenance") or {}
+            causes = provenance.get("causes") or []
+            if (verified.get("outcome") != "rate_limited" or provenance.get("complete") is not True
+                    or not causes or any(cause.get("source") != "vendor" or cause.get("category") != "vendor-rate-limited" for cause in causes)):
+                outcome = "integrity"
         if outcome == "rate_limited":
             # Reclassify retained bytes and require exact bound terminal ownership;
             # an outcome label alone is not evidence for the Q49 exception.
