@@ -131,6 +131,23 @@ describe('analyze.fix — selection', () => {
     expect(result.status).toBe('failed');
     if (result.status === 'failed') expect(result.error).toContain('no analysis sidecar');
   });
+  test('a non-missing metadata failure refuses instead of selecting an older sidecar', async () => {
+    const { dir, clusterId } = await fixture();
+    const name = 'analysis-ffffffffffffffff.sidecar.json';
+    // The valid fixture sorts first. This candidate cannot be ranked: its
+    // self-referential link fails stat with ELOOP, not confirmed absence.
+    symlinkSync(name, join(dir, '.cq/analysis', name));
+    const run = scriptedRunner();
+    const result = await makeAnalyzeFix({ run })({ dir, clusterId, rule: RULE, apply: true });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('could not select the newest analysis sidecar');
+      expect(result.error).toContain('ELOOP');
+    }
+    expect(run.calls).toEqual([]);
+    expect(source(dir)).toBe(BAD);
+  });
+
   test('both selections, neither, and an empty file list are failed', async () => {
     const { dir, clusterId } = await fixture();
     const fix = makeAnalyzeFix({ run: scriptedRunner() });

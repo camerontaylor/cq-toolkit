@@ -215,7 +215,7 @@ interface SelectedCluster {
 const SIDECAR_NAME = /^analysis-[0-9a-f]{16}\.sidecar\.json$/;
 const PROPOSAL_PREFIX = 'proposal-';
 
-/** The newest analysis sidecar in `out`, or undefined. */
+/** The newest analysis sidecar, or undefined; non-missing metadata faults throw. */
 function newestSidecar(out: string): string | undefined {
   let names: string[];
   try {
@@ -229,9 +229,12 @@ function newestSidecar(out: string): string | undefined {
     let mtime: number;
     try {
       mtime = statSync(path).mtimeMs;
-    } catch {
-      // Discovery races with deletion; a dangling entry is not a candidate.
-      continue;
+    } catch (err) {
+      // Only a confirmed missing entry is safe to omit from newest selection.
+      if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') {
+        continue;
+      }
+      throw err;
     }
     if (best === undefined || mtime >= best.mtime) best = { path, mtime };
   }
@@ -250,8 +253,16 @@ function selectCluster(
   out: string,
   input: AnalyzeFixInput,
 ): { ok: true; selected: SelectedCluster } | { ok: false; error: string } {
-  const sidecarPath =
-    input.sidecarPath === undefined ? newestSidecar(out) : resolve(dir, input.sidecarPath);
+  let sidecarPath: string | undefined;
+  try {
+    sidecarPath =
+      input.sidecarPath === undefined ? newestSidecar(out) : resolve(dir, input.sidecarPath);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `analyze.fix: could not select the newest analysis sidecar in '${out}' — ${messageOf(err)}; nothing was written`,
+    };
+  }
   if (sidecarPath === undefined) {
     return {
       ok: false,
