@@ -1070,12 +1070,14 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     return summary
 
 
-def discover_merged(q, budget):
-    """Natural nonselective tick, same bounded inventory and overlap replay."""
+def discover_merged(q, budget, *, interval=None):
+    """Natural tick adapter; configured bounds take priority over retained state."""
     caller = q
     q = json.loads(json.dumps(q))
     active = q.get("merged_discovery") or {}
-    if active and not active.get("complete"):
+    if interval is not None:
+        after, before = interval["after"], interval["before"]
+    elif active and not active.get("complete"):
         after, before = active["after"], active["before"]
     else:
         watermark = q.get("merged_watermark") or q["created_at"]
@@ -1085,7 +1087,7 @@ def discover_merged(q, budget):
         return []
     # Record the frozen bounds in queue too: a crash after source pinning but
     # before page one must not cause the next tick to choose a different upper.
-    if not active or active.get("complete"):
+    if interval is not None or not active or active.get("complete"):
         q["merged_discovery"] = {"after": after, "before": before, "complete": False}
         _save_discovery_queue(q, "bounds-save")
     try:
@@ -3348,7 +3350,16 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     fetch()
     if not dry and only is None:
         budget = ForgeBudget()
-        log += discover_merged(q, budget)
+        discovery = CONFIG.get("merged_discovery")
+        if isinstance(discovery, dict) and discovery.get("enabled") is True:
+            try:
+                interval = merged_reconcile.normalize_interval(discovery.get("after"), discovery.get("before"))
+                if interval["before"] >= iso():
+                    raise ValueError("interval must end before startup")
+            except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
+                log.append("merged discovery disabled: invalid configured interval")
+            else:
+                log += discover_merged(q, budget, interval=interval)
         with forge_window(budget):
             refreshed = deferred_refresh.refresh_deferred(q,
                 verify_source=verify_deferred_source, find_source=find_deferred_source,

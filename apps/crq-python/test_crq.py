@@ -1430,25 +1430,37 @@ class CurrentTest(unittest.TestCase):
         self.assertTrue(result["complete"])
 
 
-    def test_natural_discovery_overlap_watermark_and_dry_selective_gating(self):
+    def test_natural_discovery_requires_explicit_frozen_interval(self):
         actual = self.forge_inventory()
         self.q["created_at"] = "2026-10-01T00:00:00Z"
         crq.save_queue(self.q)
-        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": False}}), \
+             mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+            self.tick(discovery=True)
+            forge.assert_not_called()
+        for config in ({}, {"enabled": "true"}, {"enabled": True},
+                       {"enabled": True, "after": "2099-01-01T00:00:00Z", "before": "2099-01-02T00:00:00Z"},
+                       {"enabled": True, "after": "bad", "before": "bad"}):
+            with mock.patch.dict(crq.CONFIG, {"merged_discovery": config}), \
+                 mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+                self.tick(discovery=True)
+                forge.assert_not_called()
+        interval = {"after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}
+        self.q["merged_discovery"] = {"after": "2020-01-01T00:00:00Z",
+                                      "before": "2026-10-29T00:00:00Z", "complete": False}
+        crq.save_queue(self.q)
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True, **interval}}), \
+             mock.patch.object(crq, "gh_json", side_effect=actual), \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(dry=True, discovery=True)
             self.tick(only="selection", discovery=True)
             self.assertNotIn("merged_watermark", crq.load_queue())
             self.tick(discovery=True)
-        q = crq.load_queue()
-        watermark = q["merged_watermark"]
-        self.assertEqual(q["merged_reconcile"]["represented"], 125)
-        self.assertEqual(q["merged_discovery"]["before"], watermark)
-        # Advancing an interval replays 5 minutes; request bindings dedupe.
-        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
-        self.assertEqual(q["merged_reconcile"]["after"],
-                         crq.iso(crq.parse_iso(watermark) - crq.dt.timedelta(minutes=5)))
+        self.assertEqual(q["merged_reconcile"]["represented"], 125)
+        self.assertEqual(q["merged_reconcile"]["after"], interval["after"])
+        self.assertEqual(q["merged_reconcile"]["before"], interval["before"])
         self.assertEqual(len(q["items"]), 125)
 
 
@@ -1516,7 +1528,9 @@ class CurrentTest(unittest.TestCase):
             self.assertLessEqual(kwargs["timeout"], 10)
             value = actual_forge(argv[1:]) if argv[2] == "graphql" else self.forge_data()
             return SimpleNamespace(stdout=json.dumps(value), returncode=0)
-        with mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True,
+                "after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}}), \
+             mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
         self.assertEqual(len(calls), 5)  # ceiling + 3 numeric pages + 1 deferred read
@@ -1603,6 +1617,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.patch(crq, "STATE", new=self.root)
         self.patch(crq, "QUEUE", new=self.root / "queue.json")
         self.patch(crq, "now", return_value=crq.parse_iso("2026-10-03T00:00:01Z"))
+        self.patch(crq, "CONFIG", new={**crq.CONFIG, "merged_discovery": {
+            "enabled": True, "after": self.AFTER, "before": self.BEFORE}})
         self.forge = self.patch(crq, "gh_json", side_effect=self.forge_response)
         self.reset_case()
 
@@ -1779,7 +1795,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                         effects["refresh_deferred"].side_effect = (
                                             lambda *a, **k: order.append("refresh") or [])
                                         crq.tick()
-                                        self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+                                        self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
                                         for name in ("harvest_review", "harvest", "enroll", "promotion_audit",
                                                      "promotion_tick", "read_slot_usage", "admit_available",
                                                      "write_status", "write_heartbeat"):
@@ -1792,7 +1808,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                             crq.tick()
                                         for effect in effects.values():
                                             effect.assert_not_called()
-                                        self.assertEqual(len(events), 1)
+                                        self.assertEqual([event[1] for event in events],
+                                                         ["bounds-save", "refusal-debt-save"])
                             # Shared parser restored before persisted reloads or digest checks.
                             self.assertIs(json.loads, original_loads)
                             self.assertEqual(len(encounters), attempt + 1)
@@ -1959,7 +1976,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                 mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
             effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
             crq.tick()
-            self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+            self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
             for name in ("harvest_review", "harvest", "enroll", "promotion_audit", "promotion_tick",
                          "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
                 effects[name].assert_called_once()
