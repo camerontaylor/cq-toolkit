@@ -133,6 +133,7 @@ export async function runReviewSession(
     scanSecrets: DiffSecretScanner;
     components: readonly ScanComponentInput[];
     evidenceContext?: EvidencePreparationContext;
+    loadEvidencePaths?: (paths: readonly string[]) => Promise<void>;
     plan: PlannedReviewSession;
     evidence: ReviewCoverageV2['sessions'][number];
     onUsage: (usage: Usage) => void;
@@ -364,7 +365,15 @@ export async function runReviewSession(
   }
   if (input.evidenceContext !== undefined) {
     for (const item of parsed.data.findings) {
+      const load = async (candidate: FindingEvidenceV1 | undefined) => {
+        if (candidate !== undefined)
+          await input.loadEvidencePaths?.([
+            candidate.primary.file,
+            ...candidate.supporting.map((anchor) => anchor.file),
+          ]);
+      };
       const original = item.evidenceV1;
+      await load(original);
       const repairs: FindingEvidenceV1[] = [];
       let candidate = original;
       let prepared =
@@ -400,6 +409,7 @@ export async function runReviewSession(
           replacement.evidenceV1 === undefined
         )
           continue;
+        await load(replacement.evidenceV1);
         if (candidate === undefined) candidate = replacement.evidenceV1;
         else repairs.push(replacement.evidenceV1);
         prepared = prepareFindingEvidence({ candidate, repairs, context: input.evidenceContext });

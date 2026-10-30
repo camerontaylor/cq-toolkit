@@ -80,14 +80,21 @@ function scriptedDrivers(
 }
 
 describe('review.run', () => {
-  it.each(['valid', 'repaired', 'invalid'] as const)(
+  it.each(['valid', 'repaired', 'invalid', 'dirty', 'untracked', 'supporting'] as const)(
     'prepares %s anchored evidence through review.run',
     async (mode) => {
       const repo = await makeTestRepo();
       try {
         await configureAgentRepo(repo);
+        await repo.write('src/dependency.ts', 'export const dependency = 1;\n');
+        repo.commitAll('dependency baseline');
+        const base = repo.git('rev-parse', 'HEAD').trim();
+        if (mode === 'dirty') {
+          await repo.write('src/evidence.ts', 'export const value = 0;\n');
+          repo.commitAll('old evidence value');
+        }
         await repo.write('src/evidence.ts', 'export const value = 1;\n');
-        repo.commitAll('evidence fixture');
+        if (mode !== 'untracked' && mode !== 'dirty') repo.commitAll('evidence fixture');
         let requests = 0;
         const result = await makeReviewRun({
           drivers: scriptedDrivers(
@@ -110,18 +117,33 @@ describe('review.run', () => {
                     start: 1,
                     end: 1,
                     quote:
-                      mode === 'valid' || (mode === 'repaired' && requests > 1)
+                      !['repaired', 'invalid'].includes(mode) ||
+                      (mode === 'repaired' && requests > 1)
                         ? 'export const value = 1;'
                         : 'wrong quote',
                   },
-                  supporting: [],
+                  supporting:
+                    mode === 'supporting'
+                      ? [
+                          {
+                            file: 'src/dependency.ts',
+                            side: 'head',
+                            start: 1,
+                            end: 1,
+                            quote: 'export const dependency = 1;',
+                            relevance: 'caller dependency',
+                          },
+                        ]
+                      : [],
                 },
               },
             ],
           ),
           effectsFactory: () => repoEffects(repo),
-        })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
-        expect(requests).toBe(mode === 'valid' ? 1 : mode === 'repaired' ? 2 : 3);
+          scannerFactory: () => async (components) =>
+            components.map((component) => ({ component: component.component, hits: [] })),
+        })({ repoRoot: repo.root, base, prepareEvidence: true, maxTokens: 5000 });
+        expect(requests).toBe(mode === 'invalid' ? 3 : mode === 'repaired' ? 2 : 1);
         expect(result.status).toBe(mode === 'invalid' ? 'needs-human' : 'ok');
         const report = result.status === 'ok' ? result.value : result.report;
         expect(report?.findings[0]?.evidenceV1?.primary.quote).toBe(
@@ -146,6 +168,8 @@ describe('review.run', () => {
       const result = await makeReviewRun({
         drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
         effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
       expect(result.status).toBe('needs-human');
       expect(prompts).toHaveLength(3);

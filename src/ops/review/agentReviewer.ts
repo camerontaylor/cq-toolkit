@@ -24,6 +24,7 @@ import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 export interface AgentReviewerInput {
   evidenceContext?: EvidencePreparationContext;
+  loadEvidencePaths?: (paths: readonly string[]) => Promise<void>;
   repoRoot: string;
   head: string;
   branch: string;
@@ -346,6 +347,9 @@ export async function runAgentReviewer(
             ...(input.evidenceContext === undefined
               ? {}
               : { evidenceContext: input.evidenceContext }),
+            ...(input.loadEvidencePaths === undefined
+              ? {}
+              : { loadEvidencePaths: input.loadEvidencePaths }),
             evidence,
             logToolFailures: input.logToolFailures ?? false,
             onUsage: (usage) => {
