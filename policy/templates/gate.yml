@@ -40,14 +40,17 @@
 # PROMOTES — one promoter at a time: cq-gate is the SOLE promoter and
 # runs WITH `--push` (CQ_GATE_PROMOTES below is 'true'). The old
 # merge-queue-gate.yml is retired at the C2 cutover (2026-10-11): its
-# instance entry is deleted and its template is kept adopter-only (see
-# docs/promotion-policy.md). The switch flip was delivered by the C2
+# instance entry and rendered workflow are deleted, and its template was
+# deleted in Phase 0.2 (see docs/promotion-policy.md). The switch flip was delivered by the C2
 # flip+delete PR while this workflow was disabled on GitHub (drained from
 # step 0 until the enable step), so the flip could not arm a second active
-# promoter — the two gates never both push. The CLI promotes the reviewed
-# SUBJECT by a single main-refspec
-# fast-forward leased at the main it read — the queue is never written, so
-# a tip ahead of the reviewed sha simply waits for its own review. Green
+# promoter — the two gates never both push. After subject selection and
+# all admission checks, the CLI uses one atomic leased push with three
+# refspecs: <subject>:refs/heads/main, <subject>:refs/heads/cq/promoted,
+# and <tip>:refs/heads/merge-queue. Main advances only by fast-forward;
+# the queue ref retains the observed tip. Each ref must still equal its
+# leased value; rejection prevents every update. A newer queue tip can
+# wait while an eligible earlier SUBJECT promotes. Green
 # verdicts: `promoted`, `noop` (the queue holds nothing beyond main),
 # `awaiting` (no reviewed commit yet — the normal state between batches),
 # `would-promote` (a dry run). A `refused` verdict is a RED run (the gate
