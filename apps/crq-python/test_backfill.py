@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import backfill
+import coverage as coverage_policy
 import backfill_history as history
 import review_ledger as ledger
 from test_backfill_accounting import Fixture
@@ -14,6 +15,63 @@ AT = "2026-10-30T00:00:00Z"
 
 
 class OperatorTest(unittest.TestCase):
+    def test_legacy_quarantine_release_binds_scope_history_and_ownership(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = {"id": "source", "pr": 7, "kind": "merged", "measure": {"files": [
+                {"path": "a.py", "now": "a.py"}, {"path": "b.py", "now": "b.py"}]}}
+            item = {"id": "legacy", "kind": "coverage", "state": "blocked", "pr": 7,
+                    "coverage_source": "source", "coverage_paths": ["a.py"], "attempts": [], "failures": 6}
+            q = {"items": [source, item]}
+            for index in range(6):
+                stamp = f"2026-10-{20 + index:02d}T00:00:00Z"
+                run = f"run-{index}"
+                item["attempts"].append({"run_id": run, "outcome": "error", "counted": False,
+                                         "at": stamp, "head": "a" * 40, "base": "b" * 40})
+                coverage_policy.record_legacy_failure(q, item, stamp, "error", run)
+            sibling = coverage_policy._legacy_family(7, "b.py")
+            q["backfill_families"][sibling] = {"failures": 4, "quarantined": False, "next_eligible_at": None}
+            family = coverage_policy._legacy_family(7, "a.py")
+            before_attempts = ledger.canonical(item["attempts"])
+            before_family = ledger.canonical(q["backfill_families"][family])
+            q["backfill_operator_events"] = [{"family": family, "operator": "someone", "reason": "unmatched"}]
+            self.assertFalse(coverage_policy.legacy_retry_view(q, 7, "a.py", AT)["allowed"])
+            evidence = {"family": family, "queue_digest": backfill.queue_digest_v1(q), "checked_at": AT,
+                        "exact_no_live_run": True, "checked_runs": [f"run-{i}" for i in range(6)]}
+            evidence_file = root / "evidence.json"; evidence_file.write_bytes(ledger.canonical(evidence))
+            c = SimpleNamespace(STATE=root, load_queue=lambda: q, iso=lambda: AT, save_queue=lambda queue: None)
+            args = SimpleNamespace(command="quarantine-release", family=family, evidence=str(evidence_file),
+                                   operator="operator", reason="terminal scope investigated")
+            with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
+                 mock.patch.object(backfill.runtime, "services", return_value=(None, None, None, None)):
+                item["run"] = {"run_id": "live"}
+                evidence["queue_digest"] = backfill.queue_digest_v1(q); evidence_file.write_bytes(ledger.canonical(evidence))
+                with self.assertRaises(ledger.IntegrityError):
+                    backfill.execute(c, args)
+                item.pop("run")
+                item["vendor_state"] = "unknown"
+                evidence["queue_digest"] = backfill.queue_digest_v1(q); evidence_file.write_bytes(ledger.canonical(evidence))
+                with self.assertRaises(ledger.IntegrityError):
+                    backfill.execute(c, args)
+                item.pop("vendor_state")
+                evidence["queue_digest"] = backfill.queue_digest_v1(q); evidence_file.write_bytes(ledger.canonical(evidence))
+                self.assertTrue(backfill.execute(c, args)["released"])
+                self.assertTrue(coverage_policy.legacy_retry_view(q, 7, "a.py", AT)["allowed"])
+                self.assertEqual(ledger.canonical(item["attempts"]), before_attempts)
+                self.assertEqual(ledger.canonical(q["backfill_families"][family]), before_family)
+                self.assertEqual(q["legacy_coverage_releases"][0]["reason"], "terminal scope investigated")
+                self.assertEqual(q["backfill_families"][sibling]["failures"], 4)
+                item["attempts"].append({"run_id": "new-run", "outcome": "error", "counted": False,
+                                         "at": AT, "head": "a" * 40, "base": "b" * 40})
+                item["failures"] = 7
+                coverage_policy.record_legacy_failure(q, item, AT, "error", "new-run")
+                later = coverage_policy.legacy_retry_view(q, 7, "a.py", "2026-11-01T00:00:00Z")
+                self.assertEqual(later["failures"], 1)
+                self.assertTrue(later["allowed"])
+                args.family = "nonexistent"
+                with self.assertRaises(ledger.IntegrityError):
+                    backfill.execute(c, args)
+
     def test_release_queue_digest_handles_unicode_and_finite_diagnostics(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

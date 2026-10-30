@@ -233,7 +233,15 @@ class Repository:
         if sum(e["blob"] == blob for e in old_entries.values()) != 1 or any(e["blob"] == blob for e in new_entries.values()):
             return False
         changes = self.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", old, new).split(b"\0")
-        return changes == [b"D", name.encode("utf-8"), b""]
+        if not changes or changes[-1] != b"" or len(changes) % 2 != 1:
+            return False
+        if (b"D", name.encode("utf-8")) not in zip(changes[0:-1:2], changes[1:-1:2]):
+            return False
+        renamed = self.git("diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--name-status", "-z", old, new).split(b"\0")
+        for index, part in enumerate(renamed[:-1]):
+            if part.startswith((b"R", b"C")) and index + 1 < len(renamed) and renamed[index + 1] == name.encode("utf-8"):
+                return False
+        return True
 
     def carry(self, old, new, name, lines):
         mapped = self.lineage(old, new, name)

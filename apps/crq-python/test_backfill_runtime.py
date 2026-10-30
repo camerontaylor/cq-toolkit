@@ -16,6 +16,36 @@ from test_backfill_jobs import AT
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_required_collector_rejects_ambiguous_rename_as_deletion(self):
+        self.f.commit({"unrelated": b"before\n"})
+        merge = self.f.commit({"old": b"same\n"})
+        target = self.f.commit({"old": None, "copy-one": b"same\n", "copy-two": b"same\n"})
+        original = subprocess.run
+        response = ledger.canonical({"number": 7, "merged": True, "merge_commit_sha": merge})
+        def offline(command, *args, **kwargs):
+            return SimpleNamespace(stdout=response) if command[0] == "gh" else original(command, *args, **kwargs)
+        with mock.patch.object(runtime.subprocess, "run", side_effect=offline):
+            paths, _ = runtime.collect_required(self.f.repo, target, {"rows": [{"pr": 7}]}, self.f.store)
+        self.assertEqual(paths["7"][0]["disposition"], "ambiguous")
+        self.assertNotIn("deletion_evidence", paths["7"][0])
+
+    def test_required_collector_proves_deletion_with_unrelated_edit(self):
+        self.f.commit({"unrelated": b"before\n"})
+        merge = self.f.commit({"old": b"unique\n"})
+        target = self.f.commit({"old": None, "unrelated": b"after\n"})
+        original = subprocess.run
+        response = ledger.canonical({"number": 7, "merged": True, "merge_commit_sha": merge})
+        def offline(command, *args, **kwargs):
+            return SimpleNamespace(stdout=response) if command[0] == "gh" else original(command, *args, **kwargs)
+        with mock.patch.object(runtime.subprocess, "run", side_effect=offline):
+            paths, _ = runtime.collect_required(self.f.repo, target, {"rows": [{"pr": 7}]}, self.f.store)
+        self.assertEqual(paths["7"][0]["disposition"], "deleted")
+
+    def test_modified_rename_is_not_proven_deletion(self):
+        old = self.f.commit({"old": b"one\ntwo\nthree\nfour\nfive\n"})
+        target = self.f.commit({"old": None, "new": b"one\ntwo\nthree\nfour\nchanged\n"})
+        self.assertFalse(self.f.repo.proven_deleted(old, target, "old"))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name); self.f = Fixture(self.root / "repo")

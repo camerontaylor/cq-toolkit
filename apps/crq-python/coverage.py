@@ -108,15 +108,13 @@ def legacy_retry_view(queue, pr, original_path, at):
     """Derive restrictions from retained guarded-harvest records without mutation."""
     family = _legacy_family(pr, original_path)
     histories = [queue.get("backfill_families", {}).get(family, {}), queue.get("backfill_scope_failures", {}).get(family, {})]
-    reasons, runs, deadlines = [], {}, []
+    reasons, runs, deadlines, resets = [], {}, [], []
     if queue.get("cooldown_until"):
         try:
             deadlines.append(_time(queue["cooldown_until"]))
         except (TypeError, ValueError):
             reasons.append("invalid global deadline")
     for h in histories:
-        if h.get("quarantined"):
-            reasons.append("persisted quarantine")
         if h.get("next_eligible_at"):
             try:
                 deadlines.append(_time(h["next_eligible_at"]))
@@ -154,8 +152,25 @@ def legacy_retry_view(queue, pr, original_path, at):
         failures = [a for a in item.get("attempts", []) if a.get("outcome") in ("error", "interrupted", "skipped", "too_large", "malformed")]
         if item.get("state") in ("blocked", "failed", "quarantined") and not failures and not any(v.get("item") == item.get("id") for v in seen.values()):
             reasons.append("terminal history missing")
-        if item.get("cycles") and failures:
-            reasons.append("success and failure ordering unresolved")
+        item_resets = []
+        for cycle in item.get("cycles", []):
+            run_id = cycle.get("run_id")
+            attempt = next((a for a in item.get("attempts", []) if a.get("run_id") == run_id), None)
+            credit = (queue.get("coverage") or {}).get("runs", {}).get(run_id)
+            try:
+                if (not attempt or attempt.get("outcome") != "completed" or attempt.get("counted") is not True
+                        or attempt.get("head") != cycle.get("head") or attempt.get("base") != cycle.get("base")
+                        or not credit or not credit.get("paths")):
+                    raise ValueError("unverified success")
+                _, credited_origins = _legacy_origins(queue, item, credit["paths"])
+                completed = _time(cycle["completed_at"])
+                if original_path in credited_origins:
+                    if _time(attempt["at"]) > completed or _time(credit["completed_at"]) != completed:
+                        raise ValueError("conflicting success chronology")
+                    resets.append(completed)
+                    item_resets.append(completed)
+            except (KeyError, TypeError, ValueError):
+                reasons.append("success scope or ordering unresolved")
         if item.get("run") or item.get("vendor_state") in ("live", "unknown"):
             reasons.append("live or unknown legacy ownership")
         for attempt in failures:
@@ -172,8 +187,14 @@ def legacy_retry_view(queue, pr, original_path, at):
             if run_id in runs and runs[run_id] != key:
                 reasons.append("conflicting run identity")
             runs[run_id] = key
-        if type(item.get("failures")) is int and item["failures"] != len(failures):
-            reasons.append("unexplained item failure aggregate")
+        if type(item.get("failures")) is int:
+            try:
+                cutoff = max(item_resets, default=None)
+                expected = sum(not cutoff or _time(a["at"]) > cutoff for a in failures)
+                if item["failures"] != expected:
+                    reasons.append("unexplained item failure aggregate")
+            except (KeyError, TypeError, ValueError):
+                reasons.append("unexplained item failure aggregate")
     for run_id, record in seen.items():
         if original_path not in record.get("origins", []):
             continue
@@ -194,18 +215,63 @@ def legacy_retry_view(queue, pr, original_path, at):
                 reasons.append("conflicting run identity")
         else:
             runs[run_id] = (record.get("item"), record.get("outcome"), when)
+    baseline = [0, 0]
+    released = False
+    for event in queue.get("legacy_coverage_releases", []):
+        if event.get("family") != family:
+            continue
+        proofs = event.get("runs") or {}
+        if not proofs or any(key not in runs or list(runs[key][:2]) + [_iso(runs[key][2])] != value
+                             for key, value in proofs.items()):
+            reasons.append("released history no longer matches")
+            continue
+        if (type(event.get("floors")) is not list or len(event["floors"]) != len(histories)
+                or any(type(n) is not int or n < 0 for n in event["floors"])):
+            reasons.append("invalid release accounting")
+            continue
+        baseline = event["floors"]
+        runs = {key: value for key, value in runs.items() if key not in proofs}
+        released = True
+    reset = max(resets, default=None)
+    if reset:
+        if any(value[2] == reset for value in runs.values()):
+            reasons.append("failure and success chronology ambiguous")
+        runs = {key: value for key, value in runs.items() if value[2] > reset}
     ordered = sorted(runs.values(), key=lambda value: value[2])
     for index, (_, _, when) in enumerate(ordered, 1):
         deadlines.append(when + dt.timedelta(seconds=min(86400, 3600 * 2 ** min(index - 1, 5))))
     count = len(ordered)
-    if any(type(h.get("failures", 0)) is not int or h.get("failures", 0) > count for h in histories):
+    if any(type(h.get("failures", 0)) is not int or h.get("failures", 0) < floor
+           or h.get("failures", 0) - floor > count for h, floor in zip(histories, baseline)):
         reasons.append("unreconciled family aggregate")
+    if any(h.get("quarantined") for h in histories) and not released:
+        reasons.append("persisted quarantine")
     if count >= 6:
         reasons.append("family failure limit")
     deadline = max(deadlines, default=None)
     return {"allowed": not reasons and (deadline is None or deadline <= _time(at)),
             "failures": count, "deadline": _iso(deadline) if deadline else None, "reasons": reasons,
-            "runs": sorted(runs)}
+            "runs": sorted(runs), "run_proofs": {key: list(value[:2]) + [_iso(value[2])] for key, value in runs.items()}}
+
+
+def release_legacy_quarantine(queue, pr, original_path, at, operator, reason, evidence):
+    """Record a scope-bound release without rewriting retained failure history."""
+    family = _legacy_family(pr, original_path)
+    if not operator or not reason or not evidence:
+        raise ValueError("legacy release requires operator, reason and no-live evidence")
+    view = legacy_retry_view(queue, pr, original_path, _time(at))
+    if not view["runs"] or any(r not in ("persisted quarantine", "family failure limit") for r in view["reasons"]):
+        raise ValueError("legacy release has missing or unresolved scoped history")
+    if not any(r in ("persisted quarantine", "family failure limit") for r in view["reasons"]):
+        raise ValueError("legacy scope is not quarantined")
+    if set(evidence.get("checked_runs", [])) != set(view["runs"]):
+        raise ValueError("legacy release evidence must bind all scoped run identities")
+    histories = [queue.get("backfill_families", {}).get(family, {}), queue.get("backfill_scope_failures", {}).get(family, {})]
+    floors = [h.get("failures", 0) for h in histories]
+    event = {"family": family, "at": _iso(at), "operator": operator, "reason": reason,
+             "runs": view["run_proofs"], "floors": floors, "evidence": evidence}
+    queue.setdefault("legacy_coverage_releases", []).append(event)
+    return event
 
 
 def _legacy_retry_allowed(queue, pr, original_path, at):

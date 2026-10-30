@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import backfill_jobs as jobs
+import coverage as coverage_policy
 import backfill_report as reporting
 import backfill_runtime as runtime
 import finding_delivery
@@ -56,7 +57,26 @@ def execute(c, args):
         store.put(ledger.canonical(value))
         return value
     if args.command == "quarantine-release":
-        jobs.release_quarantine(queue, args.family, c.iso(), args.operator, args.reason)
+        if args.family.startswith("legacy-coverage:"):
+            if not getattr(args, "evidence", None):
+                raise ledger.IntegrityError("legacy release requires scoped no-live evidence")
+            evidence = ledger.loads(Path(args.evidence).read_bytes())
+            if (evidence.get("family") != args.family or evidence.get("queue_digest") != queue_digest_v1(queue)
+                    or evidence.get("exact_no_live_run") is not True):
+                raise ledger.IntegrityError("legacy evidence must bind this family and current queue")
+            age = (ledger.timestamp(c.iso()) - ledger.timestamp(evidence.get("checked_at"))).total_seconds()
+            if age < 0 or age > 60:
+                raise ledger.IntegrityError("legacy no-live verification must be at most 60 seconds old")
+            parts = args.family.split(":", 2)
+            try:
+                pr = int(parts[1])
+                if pr <= 0 or str(pr) != parts[1] or len(parts) != 3:
+                    raise ValueError("invalid legacy family")
+                coverage_policy.release_legacy_quarantine(queue, pr, parts[2], c.iso(), args.operator, args.reason, evidence)
+            except (ValueError, IndexError) as exc:
+                raise ledger.IntegrityError(str(exc)) from exc
+        else:
+            jobs.release_quarantine(queue, args.family, c.iso(), args.operator, args.reason)
         for item in queue["items"]:
             if item.get("family") == args.family:
                 runtime.state_event(c, queue, item, c.iso(), args.reason, args.operator, "quarantine-released")
@@ -113,7 +133,7 @@ def main():
     p = sub.add_parser("collect-history"); p.add_argument("output"); p.add_argument("--github", action="store_true")
     p = sub.add_parser("release"); p.add_argument("item"); p.add_argument("--evidence", required=True)
     p.add_argument("--operator", required=True); p.add_argument("--reason", required=True)
-    p = sub.add_parser("quarantine-release"); p.add_argument("family")
+    p = sub.add_parser("quarantine-release"); p.add_argument("family"); p.add_argument("--evidence")
     p.add_argument("--operator", required=True); p.add_argument("--reason", required=True)
     p = sub.add_parser("reconcile-no-launch"); p.add_argument("item"); p.add_argument("--evidence", required=True)
     p.add_argument("--operator", required=True); p.add_argument("--reason", required=True)

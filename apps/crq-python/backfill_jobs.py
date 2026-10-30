@@ -231,6 +231,8 @@ def release_quarantine(queue, family, at, operator, reason):
         raise ledger.IntegrityError("quarantine release requires operator and reason")
     ledger.timestamp(at)
     affected = [j for j in queue["items"] if j.get("family") == family]
+    if not affected:
+        raise ledger.IntegrityError("quarantine family has no affected items")
     if any(is_execution_owner(j) for j in affected):
         raise ledger.IntegrityError("unknown/live vendor run still owns family")
     for item in affected:

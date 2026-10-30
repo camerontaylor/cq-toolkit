@@ -335,7 +335,7 @@ def collect_required(repo, target, required, store):
             if mapped:
                 source_paths.append({"path": mapped, "source_path": name, "source_evidence": reference})
                 member_paths.append({"path": mapped, "source_path": name, "lineage_verified": True})
-            elif name not in repo.entries(target):
+            elif repo.proven_deleted(merge, target, name):
                 source_paths.append({"path": name, "disposition": "deleted", "deletion_evidence": {"target": target, "merge": merge, "source": reference}})
             else:
                 source_paths.append({"path": name, "disposition": "ambiguous", "source_evidence": reference})

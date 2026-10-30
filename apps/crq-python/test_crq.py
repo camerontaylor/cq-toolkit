@@ -2219,6 +2219,37 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
 
 
 class CoverageFallbackTargetTest(unittest.TestCase):
+    def test_harvested_scope_success_resets_only_matching_legacy_streak(self):
+        import datetime as dt
+        at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
+        source = {"id": "source", "pr": 42, "kind": "merged", "measure": {"files": [
+            {"path": "old.py", "now": "new.py"}, {"path": "sibling.py", "now": "sibling.py"}]}}
+        failure = {"run_id": "old-run", "outcome": "error", "counted": False,
+                   "at": (at - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "head": "a" * 40, "base": "b" * 40}
+        item = {"id": "legacy", "kind": "coverage", "state": "reviewing", "pr": 42,
+                "coverage_source": "source", "coverage_paths": ["new.py", "sibling.py"],
+                "run": {"run_id": "success"}, "failures": 1, "attempts": [failure], "cycles": []}
+        q = {"items": [source, item]}
+        crq.coverage.record_legacy_failure(q, item, failure["at"], "error", "old-run")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rdir = root / "runs" / "success"; rdir.mkdir(parents=True)
+            (rdir / "exit.json").write_text(json.dumps({"exit": 0}))
+            (rdir / "meta.json").write_text(json.dumps({"run_id": "success", "head": "c" * 40,
+                "base": "d" * 40, "cycle": 1, "worktree": str(root / "wt"), "wt_branch": "fixture",
+                "coverage_paths": ["new.py", "sibling.py"]}))
+            (rdir / "review.ndjson").write_text(json.dumps({"type": "complete", "reviewedFiles": ["new.py"]}) + "\n")
+            cls = {"outcome": "completed", "counted": True, "findings": 0, "severity_counts": {}}
+            with mock.patch.object(crq, "RUNS", root / "runs"), mock.patch.object(crq, "STATE", root), \
+                 mock.patch.object(crq, "run_liveness", return_value="harvest"), mock.patch.object(crq, "now", return_value=at), \
+                 mock.patch.object(crq, "classify", return_value=cls), mock.patch.object(crq, "findings_md", return_value=""), \
+                 mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                 mock.patch.object(crq.usage_slots, "write_next"), mock.patch.object(crq.repair_tick, "enqueue", return_value=False):
+                crq.harvest_review(q, item, False)
+        self.assertTrue(crq.coverage.legacy_retry_view(q, 42, "old.py", at)["allowed"])
+        self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "sibling.py", at)["allowed"])
+        self.assertEqual(len(item["attempts"]), 2)
+        self.assertIn("old-run", q["legacy_coverage_failure_runs"])
+
     def test_pending_candidate_obeys_real_historical_family_deadline(self):
         import datetime as dt
         at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
