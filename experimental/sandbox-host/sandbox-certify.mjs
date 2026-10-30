@@ -9,7 +9,7 @@
 // environmental blocker instead of quietly passing.
 //
 // Usage:
-//   pnpm exec tsc --target ES2023 --module NodeNext --moduleResolution NodeNext \
+//   pnpm exec tsc --ignoreConfig --target ES2023 --module NodeNext --moduleResolution NodeNext \
 //     --types node --skipLibCheck --strict --outDir dist --rootDir . \
 //     experimental/sandbox-host/probe.ts && \
 //   node experimental/sandbox-host/sandbox-certify.mjs \
