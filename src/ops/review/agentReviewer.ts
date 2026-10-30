@@ -6,6 +6,7 @@ import type { OpResult } from '../../kernel/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../dev/denylist.js';
 import type { Finding } from './findings.js';
 import { REVIEW_SESSION_DEFAULTS } from '../analyze/cqConfig.js';
+import { createAreaReviewPlan } from './internal/areaReviewPlan.js';
 import { createReviewPlan } from './internal/reviewPlan.js';
 import {
   isCoverageV2Complete,
@@ -22,6 +23,7 @@ import {
 import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 export interface AgentReviewerInput {
+  areas?: boolean;
   repoRoot: string;
   head: string;
   branch: string;
@@ -166,7 +168,7 @@ export async function runAgentReviewer(
       ).map((component) => Object.freeze({ ...component }));
       if (new Set(components.map((component) => component.component)).size !== components.length)
         throw new Error('agent review component identities must be unique');
-      const plan = createReviewPlan({
+      const plan = (input.areas ? createAreaReviewPlan : createReviewPlan)({
         head: input.head,
         base: input.base ?? input.head,
         scope: input.scope ?? 'full',

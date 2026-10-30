@@ -48,6 +48,7 @@ const sumUsage = (a: ReviewCoverageV2['sessions'][number]['usage'], b: Usage): U
 });
 
 export interface PlannedReviewSession {
+  contextOnly?: boolean;
   id: string;
   prompt: string;
   placements: { component: string; start: number; end: number; offset: number }[];
@@ -214,6 +215,8 @@ export async function runReviewSession(
         !frozenContents.some((content) => content.text === plan.prompt)
       )
         return;
+      if (plan.contextOnly)
+        evidence.contextSha256 = createHash('sha256').update(plan.prompt).digest('hex');
       // Tool steps and repair replay the prompt. They do not add coverage.
       if (evidence.deliveries.length > 0) return;
       for (const placement of plan.placements) {
@@ -344,7 +347,7 @@ export async function runReviewSession(
     evidence.status = 'error';
     return { status: 'failed', error: 'agent review returned invalid structured output' };
   }
-  if (evidence.deliveries.length === 0) {
+  if (evidence.deliveries.length === 0 && !evidence.contextSha256) {
     evidence.status = 'error';
     return {
       status: 'needs-human',

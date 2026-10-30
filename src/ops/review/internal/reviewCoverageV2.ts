@@ -46,6 +46,10 @@ export const ReviewCoverageV2Schema = z
       z
         .object({
           id: z.string().min(1),
+          contextSha256: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .optional(),
           /** complete also requires schema-valid final output in the producer. */
           status: z.enum(['complete', 'budget', 'error', 'aborted']),
           usage: z
@@ -101,7 +105,11 @@ export const ReviewCoverageV2Schema = z
       { delivery: z.infer<typeof DeliverySchema>; session: (typeof coverage.sessions)[number] }[]
     >();
     for (const session of coverage.sessions) {
-      if (session.status === 'complete' && session.deliveries.length === 0)
+      if (
+        session.status === 'complete' &&
+        session.deliveries.length === 0 &&
+        !(session.contextSha256 && session.requests.length > 0)
+      )
         invalid('a complete review session must deliver content');
       if (session.deliveries.length > 0 && session.requests.length === 0)
         invalid('review delivery needs a scanned request');

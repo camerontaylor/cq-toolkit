@@ -76,6 +76,34 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
 }
 
 describe('review.run', () => {
+  it('forwards opt-in area execution through the public op', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('a/api.ts', 'export const a = 1;');
+      await repo.write('b/client.ts', 'export const b = 2;');
+      repo.commitAll('two areas');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => (components) =>
+          components.map(({ component }) => ({ component, hits: [] })),
+      })({ repoRoot: repo.root, areas: true });
+      expect(result.status).toBe('ok');
+      expect(prompts.some((prompt) => prompt.includes('Review cross-area contracts'))).toBe(true);
+      const record = result.status === 'ok' ? result.value : result.report;
+      expect(record?.sources.find((source) => source.kind === 'agent')?.coverage).toMatchObject({
+        modeReason: expect.stringContaining('area review:'),
+        sessions: expect.arrayContaining([
+          expect.objectContaining({ id: 'cross-area', status: 'complete', deliveries: [] }),
+        ]),
+      });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('requires a readable cq.json before starting a review', async () => {
     const repo = await makeTestRepo();
     try {

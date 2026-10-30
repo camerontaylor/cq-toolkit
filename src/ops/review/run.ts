@@ -52,6 +52,7 @@ import { collectBoundedReviewContext } from './internal/reviewContext.js';
 import { foldKnownUsageSummaries, type KnownUsageSummary } from '../../shared/knownUsage.js';
 
 export interface ReviewRunInput {
+  areas?: boolean;
   repoRoot: string;
   uncommitted?: boolean;
   target?: string;
@@ -609,6 +610,7 @@ export function makeReviewRun(
                       .map((component) => `--- ${component.path} ---\n${component.text}`)
                       .join('\n'),
                     components,
+                    ...(input.areas === undefined ? {} : { areas: input.areas }),
                     base: reviewedBase,
                     scope: reviewedScope,
                     intent: context.context.intent,

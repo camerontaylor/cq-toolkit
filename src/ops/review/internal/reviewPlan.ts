@@ -95,6 +95,7 @@ export interface ReviewPlacement {
 }
 
 export interface PlannedReviewSession {
+  contextOnly?: boolean;
   id: string;
   prompt: string;
   placements: ReviewPlacement[];

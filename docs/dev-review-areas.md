@@ -1,0 +1,3 @@
+# Area review
+
+Opt in with `cq review.run --repoRoot=/path/to/repo --reviewers='["agent"]' --areas --json`. The default remains the existing session/partition planner. Area mode groups nonexcluded changed components by directory into bounded review sessions, then runs a required cross-area contract pass when the planner identifies contracts or multiple areas. Every primary byte must still be delivered in a successful area session; the cross-area pass records a scanned prompt hash and cannot substitute for primary coverage. A failed required pass leaves the review incomplete. Unsafe grouping or oversized cross-area context falls back to the existing planner with an advisory. All sessions share the existing run token and wall budgets.

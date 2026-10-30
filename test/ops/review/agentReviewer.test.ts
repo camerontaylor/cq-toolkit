@@ -96,6 +96,48 @@ function fakeDrivers(options: FakeDriverOptions = {}) {
 }
 
 describe('runAgentReviewer v3 session engine', () => {
+  it('executes opt-in areas and a scanned cross-area pass without double-counting bytes', async () => {
+    const fake = fakeDrivers();
+    const components = [
+      { component: 'diff:a', path: 'a/a.ts', text: 'export const a = 1;' },
+      { component: 'diff:b', path: 'b/b.ts', text: 'export const b = 2;' },
+    ];
+    const result = await runAgentReviewer(fake.drivers, reviewerInput({ areas: true, components }));
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(fake.invocations).toHaveLength(3);
+    expect(result.value.coverage.pieces.map((piece) => piece.state)).toEqual([
+      'completed',
+      'completed',
+    ]);
+    const cross = result.value.coverage.sessions.find((session) => session.id === 'cross-area')!;
+    expect(cross.status).toBe('complete');
+    expect(cross.deliveries).toEqual([]);
+    expect(cross.contextSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(cross.requests.length).toBeGreaterThan(0);
+  });
+
+  it('keeps a failed required cross-area pass incomplete after primary areas succeed', async () => {
+    const fake = fakeDrivers({
+      run: async (invocation) =>
+        invocation.prompt.includes('Review cross-area contracts')
+          ? workerResult({ stopReason: 'error', error: 'cross-area failure' })
+          : workerResult(),
+    });
+    const result = await runAgentReviewer(
+      fake.drivers,
+      reviewerInput({
+        areas: true,
+        components: [{ component: 'diff:a', path: 'a.ts', text: 'export const a = 1;' }],
+      }),
+    );
+    expect(result.status).not.toBe('ok');
+    expect(result.report?.coverage.pieces[0]?.state).toBe('completed');
+    expect(
+      result.report?.coverage.sessions.find((session) => session.id === 'cross-area')?.status,
+    ).not.toBe('complete');
+  });
+
   it('persists an error-stop driver detail through review.run into the record, ledger and log', async () => {
     const repo = await makeTestRepo();
     try {
