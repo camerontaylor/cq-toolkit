@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   INTERRUPT_GRACE_MS,
@@ -516,6 +517,55 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
 });
 
 describe('interruptAction', () => {
+  it.each([3_600_000, -3_600_000])(
+    'keeps the runner grace window monotonic across a %i ms wall-clock jump',
+    (wallJump) => {
+      // Exercise the runner's wiring as well as the pure decision: supplying
+      // monotonic values only to interruptAction would miss a Date.now caller.
+      const source = readFileSync(
+        new URL('../../scripts/test-narrow.mjs', import.meta.url),
+        'utf8',
+      );
+      const start = source.indexOf('for (const signal of SIGNALS) {');
+      const end = source.indexOf('// 2. Arguments', start);
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      const handlers: Record<string, () => void> = {};
+      const relayedAt: Record<string, number> = {};
+      const events: string[] = [];
+      let monotonic = 5_000;
+      let wall = 1_800_000_000_000;
+      runInNewContext(source.slice(start, end), {
+        SIGNALS: ['SIGINT'],
+        process: { on: (signal: string, handler: () => void) => (handlers[signal] = handler) },
+        performance: { now: () => monotonic },
+        Date: { now: () => wall },
+        interruptAction,
+        child: { pid: 123 },
+        childDone: false,
+        relayedAt,
+        interruptedBy: null,
+        signalChild: (signal: string) => events.push(signal),
+        sweepChild: () => events.push('sweep'),
+        say: () => {},
+        finish: () => {
+          throw new Error('live child must not finish');
+        },
+        signalExit,
+      });
+      handlers.SIGINT!();
+      expect(relayedAt.SIGINT).toBe(5_000);
+      expect(events).toEqual(['SIGINT']);
+      wall += wallJump;
+      monotonic += INTERRUPT_GRACE_MS - 1;
+      handlers.SIGINT!();
+      expect(events).toEqual(['SIGINT']);
+      monotonic += 1;
+      handlers.SIGINT!();
+      expect(events).toEqual(['SIGINT', 'sweep']);
+    },
+  );
+
   it('relays the first copy of a signal to the child group', () => {
     expect(interruptAction({ childLive: true, signal: 'SIGINT', relayedAt: {}, now: 5_000 })).toBe(
       'relay',
