@@ -119,15 +119,17 @@ calling principal:
    the server-only principal and policy inside that command:
 
    ```text
-   restrict,command="/usr/bin/env PATH=<cli-path> CRQ_QUEUE_PRINCIPAL=<principal> CRQ_QUEUE_POLICY=<policy.json> python3 <runner-root>/apps/crq-python/capability_dispatcher.py" ssh-ed25519 <public-key> <comment>
+   restrict,command="/usr/bin/env PATH=<cli-path> CRQ_QUEUE_PRINCIPAL=<principal> CRQ_QUEUE_POLICY=<policy.json> /usr/bin/python3 <runner-root>/apps/crq-python/capability_dispatcher.py" ssh-ed25519 <public-key> <comment>
    ```
 
    Do not run the dispatcher with `python3 -I`: it imports its sibling transport
    modules. Never accept these variables from the client (`PermitUserEnvironment`
-   stays off). `PATH` must resolve the CLI tools the runner uses for forge reads.
+   stays off). Do not add `CRQ_AUTHOR_*` settings to this queue identity.
+   `PATH` must resolve `git` and `gh`; authenticate `gh` as the queue account.
 
-3. Create the policy file (mode 0600) disabled. Turn it on only for an approved
-   window:
+3. Create the policy file (mode 0600) disabled, owned by the queue-state account
+   that runs the dispatcher. Verify that account can read it before enabling it.
+   Turn it on only for an approved window:
 
    ```json
    {"enabled": false, "repo": "<owner/repo>", "read": ["<principal>"], "write": ["<principal>"], "targets": ["promoted-main"], "branches": ["<base-branch>"], "max_requests": 50}
