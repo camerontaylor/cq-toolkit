@@ -492,9 +492,21 @@ export function makeApplyRemediation(
     // assert a fact that is false for the acquire case, and "unspent" would
     // be false for the release case.
     let writeEntered = false;
+    let exerciseStarted = false;
+    let exerciseOutcome: Awaited<ReturnType<ApprovalAuthority['exercise']>> | undefined;
+    // Preserve the denial too: a release fault can discard a result that
+    // already established the nonce was spent, without entering the write.
+    const observedApproval: ApprovalAuthority = {
+      ...approval,
+      exercise: async (grant, candidate) => {
+        exerciseStarted = true;
+        exerciseOutcome = await approval.exercise(grant, candidate);
+        return exerciseOutcome;
+      },
+    };
     let approved: ApprovedMutation<RemediationFileApplied[]>;
     try {
-      approved = await withApprovedMutation(approval, subject, async () => {
+      approved = await withApprovedMutation(observedApproval, subject, async () => {
         // Entering this callback is proof the exercise granted, i.e. the
         // nonce is spent.
         writeEntered = true;
@@ -573,16 +585,15 @@ export function makeApplyRemediation(
       // So it becomes `failed` — the op's own machinery failing, which is
       // explicitly NOT an approval refusal and must not read as one.
       //
-      // The token's fate is reported as the PHASE allows, never assumed:
-      // `writeEntered` is true only once the exercise granted, so a fault
-      // before the write means the nonce is still UNSPENT and re-approval
-      // after a repair is possible, while a fault after it means the token
-      // is spent and cannot be replayed. Either way the write set is named,
-      // because a lock fault proves neither that those files were written
-      // nor that they were not.
+      // A denied exercise can already have observed a spent nonce. Keep
+      // that verdict rather than deriving token fate from write entry alone.
       const tokenFate = writeEntered
         ? 'the approval WAS exercised, so the token is spent (safe: a spent token cannot be replayed)'
-        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT and may be re-approved once the lock is healthy';
+        : exerciseOutcome?.granted === false
+          ? `the approval exercise refused: ${exerciseOutcome.reason}`
+          : exerciseStarted
+            ? 'the approval exercise faulted, so the token fate is INDETERMINATE; inspect the ledger before re-approving'
+            : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT and may be re-approved once the lock is healthy';
       return {
         status: 'failed',
         error: `remediation: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. ${tokenFate}, and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a LOCK FAULT is not a proof that any of them was written and not a proof that none was, so inspect the workspace before re-running; this is the op's machinery failing, NOT an approval refusal`,

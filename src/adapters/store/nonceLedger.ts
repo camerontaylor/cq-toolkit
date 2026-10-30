@@ -11,11 +11,13 @@ import {
   fdatasyncSync,
   readFileSync,
   realpathSync,
+  readlinkSync,
   fsyncSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
-import { makeGitMutex } from '../../shared/gitMutex.js';
+import { mkdir, rmdir } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { NonceLedger } from '../../ops/analyze/approval.js';
 
 /** A ledger that can also answer the "left UNSPENT" question the tests assert. */
@@ -88,13 +90,13 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * replays cleanly, which is the one outcome this file exists to prevent. So
  * the write loops until the whole line is out, and any write that cannot
  * make progress THROWS: the caller (`exercise`) turns a throw into a
- * `needs-human` refusal with the nonce UNSPENT, which is the fail-closed
- * direction. A torn record left behind by such a failure is NOT truncated
+ * `needs-human` refusal. Once a write is attempted, its persistence is
+ * INDETERMINATE until inspected. A torn record left behind is NOT truncated
  * away on purpose: the file is shared, and truncating to a remembered
  * length could discard a CONCURRENT append, converting this safe failure
- * into an unsafe replay of another writer's token. A torn line is inert —
- * it parses as one meaningless nonce string, and it cannot make a real
- * 128-bit nonce look spent.
+ * into an unsafe replay of another writer's token. Malformed records and
+ * unterminated tails fail the entire read closed; even 32 valid nonce
+ * characters without a newline are never accepted as committed history.
  */
 export function makeFileNonceLedger(
   ledgerPath: string,
@@ -140,6 +142,12 @@ export function makeFileNonceLedger(
       }
       known.add(record);
     });
+    // Validate before ANY spent lookup, including read-only inspection.
+    if (hasUnterminatedTail(path)) {
+      throw new Error(
+        `approval ledger: '${path}' ends with an unterminated record — the ledger is fail-closed until an operator inspects and repairs it`,
+      );
+    }
   };
   // LEDGER-WIDE append lock. The per-workspace mutation lock does not
   // serialize two DIFFERENT workspaces that share one operator ledger, and a
@@ -147,19 +155,10 @@ export function makeFileNonceLedger(
   // lines. This lock is keyed on the CANONICAL ledger path, so every
   // read-check-append sequence over one ledger is exclusive across processes
   // whatever spelling each process was handed.
-  const appendLock = makeGitMutex({ lockPath: `${path}.append` });
+  const appendLock = makeAppendLock(`${path}.append.lock`);
   const consumeLocked = async (nonce: string): Promise<'consumed' | 'spent'> => {
     absorb();
     if (known.has(nonce)) return 'spent';
-    // TORN-TAIL GUARD, before the O_APPEND. A previous write that failed
-    // part-way can leave bytes with no terminating newline; appending now
-    // would fuse the partial record with this one and corrupt BOTH. So an
-    // unterminated tail is refused outright rather than papered over.
-    if (hasUnterminatedTail(path)) {
-      throw new Error(
-        `approval ledger: '${path}' ends with an unterminated record (a previous write appears to have been torn) — appending would fuse it with the next record and corrupt both, so the consume is refused; an operator must inspect and repair the ledger`,
-      );
-    }
     // Synchronous on purpose: the append must be COMPLETE before this
     // promise resolves, or the exercise would report "consumed" for a
     // nonce that is still only a promise of a byte on disk.
@@ -169,8 +168,15 @@ export function makeFileNonceLedger(
     try {
       // WRITE-ALL, then one fsync of the completed record: the record
       // that reaches the platter is the whole nonce, never a prefix.
+      // A throwing write may already have changed the file, regardless of
+      // the count it returned. Never assert UNSPENT after entering it.
       writeAll(handle, line, write, nonce);
       fdatasyncSync(handle);
+    } catch (err) {
+      throw new Error(
+        `approval ledger: append persistence is INDETERMINATE after a write attempt — ${err instanceof Error ? err.message : String(err)}; inspect the ledger before re-approving`,
+        { cause: err },
+      );
     } finally {
       closeSync(handle);
     }
@@ -219,18 +225,73 @@ export function makeFileNonceLedger(
  */
 export function realpathOrSelf(path: string): string {
   const segments: string[] = [];
-  let current = path;
+  let current = resolve(path);
+  const links = new Set<string>();
   for (;;) {
     try {
       const resolved = realpathSync(current);
       return segments.length === 0 ? resolved : join(resolved, ...segments.reverse());
     } catch {
+      let link: string | undefined;
+      try {
+        link = readlinkSync(current);
+      } catch {
+        // Not a symlink: resolve the longest existing ancestor below.
+      }
+      if (link !== undefined) {
+        if (links.has(current) || links.size >= 40) {
+          throw new Error('approval ledger: symlink cycle or excessive symlink depth');
+        }
+        links.add(current);
+        current = resolve(dirname(current), link);
+        continue;
+      }
       const parent = dirname(current);
       if (parent === current) return path; // reached the root without resolving
       segments.push(basename(current));
       current = parent;
     }
   }
+}
+
+/**
+ * An append owner never expires by age. Synchronous read/write/fsync can
+ * block heartbeat timers indefinitely, so a timed lease cannot serialize
+ * this section. Acquisition is bounded; after a crash the artifact stays
+ * fail-closed. An operator must verify all ledger users are stopped before
+ * removing it. Never recover it merely because its mtime is old.
+ */
+function makeAppendLock(artifact: string): {
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
+} {
+  return {
+    async withLock<T>(fn: () => Promise<T>): Promise<T> {
+      await mkdir(dirname(artifact), { recursive: true });
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await mkdir(artifact);
+          break;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt >= 9) {
+            throw new Error('approval ledger: append lock unavailable; never reclaim by age', {
+              cause: err,
+            });
+          }
+          await delay(100 * 2 ** attempt);
+        }
+      }
+      let value: T;
+      try {
+        value = await fn();
+      } catch (err) {
+        // Keep the section's original fault primary if release also fails.
+        await rmdir(artifact).catch(() => undefined);
+        throw err;
+      }
+      await rmdir(artifact);
+      return value;
+    },
+  };
 }
 
 /**
@@ -306,8 +367,8 @@ const defaultWrite: NonNullable<FileNonceLedgerConfig['write']> = (
  * claim success on a partial record. A non-positive count means the write
  * can make no progress (a full disk, a closed handle); a count larger than
  * what was asked for means the writer is not honouring the contract. Either
- * way the throw propagates to `exercise`, which refuses the mutation with
- * the token unspent.
+ * way the throw propagates to `exercise`, which refuses the mutation;
+ * attempted writes leave persistence indeterminate.
  */
 function writeAll(
   handle: number,
@@ -320,12 +381,12 @@ function writeAll(
     const count = write(handle, line, written, line.length - written);
     if (!Number.isInteger(count) || count <= 0) {
       throw new Error(
-        `approval ledger: the append of nonce '${nonce}' made no progress (${String(count)} bytes written of ${String(line.length - written)} remaining) — the record is incomplete, so the nonce is NOT marked spent and the write is refused`,
+        `approval ledger: the append of nonce '${nonce}' made no progress (${String(count)} bytes written of ${String(line.length - written)} remaining) — the record is incomplete and persistence is INDETERMINATE`,
       );
     }
     if (written + count > line.length) {
       throw new Error(
-        `approval ledger: the append of nonce '${nonce}' reported ${String(count)} bytes written but only ${String(line.length - written)} were requested — the writer is not honouring the write contract, so the nonce is NOT marked spent and the write is refused`,
+        `approval ledger: the append of nonce '${nonce}' reported ${String(count)} bytes written but only ${String(line.length - written)} were requested — the writer is not honouring the write contract and persistence is INDETERMINATE`,
       );
     }
     written += count;

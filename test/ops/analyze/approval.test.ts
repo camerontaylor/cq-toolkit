@@ -31,13 +31,15 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type {
   ApprovalState,
   ApprovalStateReader,
@@ -932,8 +934,20 @@ function realRepo(): string {
 
 /** macOS temp dirs are symlinked (/var → /private/var); the reader realpaths, so bind the real one. */
 function realpathOf(dir: string): string {
-  return execFileSync('realpath', [dir], { encoding: 'utf8' }).trim();
+  return realpathSync(dir);
 }
+
+test('realpath fixture setup works without an external realpath executable', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cq-realpath-native-'));
+  const alias = join(dir, 'alias');
+  symlinkSync(dir, alias);
+  vi.stubEnv('PATH', '');
+  try {
+    expect(realpathOf(alias)).toBe(realpathSync(dir));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 
 /** Run `git` in `cwd`, failing loudly: a silently-unset git would fake the proof. */
 function git(cwd: string, args: string[]): void {
@@ -1136,6 +1150,61 @@ describe('a dirty workspace is not an approvable state (the clean BOOLEAN is not
 });
 
 describe('the operator ledger is durable before it reports a spend (ADR-0003 §4c step 2)', () => {
+  test('malformed history fails closed for read-only inspection as well as consume', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'cq-malformed-history-')), 'ledger');
+    writeFileSync(path, `${'a'.repeat(32)}\nbroken\n`);
+    const ledger = makeFileNonceLedger(path);
+    expect(() => ledger.spent()).toThrow(/malformed/);
+    expect(() => ledger.isSpent('a'.repeat(32))).toThrow(/malformed/);
+    await expect(ledger.consume('a'.repeat(32))).rejects.toThrow(/malformed/);
+  });
+
+  test('a write that loses only the newline is indeterminate and never reads as spent', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'cq-newline-tear-')), 'ledger');
+    const nonce = 'a'.repeat(32);
+    const torn = makeFileNonceLedger(path, {
+      write: (handle, buffer, offset) => {
+        if (offset !== 0) throw new Error('newline write failed');
+        return writeSync(handle, buffer, offset, 32);
+      },
+    });
+    await expect(torn.consume(nonce)).rejects.toThrow(/INDETERMINATE.*newline write failed/);
+    expect(readFileSync(path, 'utf8')).toBe(nonce);
+    for (const ledger of [torn, makeFileNonceLedger(path)]) {
+      await expect(ledger.consume(nonce)).rejects.toThrow(/unterminated record/);
+      expect(() => ledger.isSpent(nonce)).toThrow(/unterminated record/);
+      expect(() => ledger.spent()).toThrow(/unterminated record/);
+    }
+    expect(readFileSync(path, 'utf8')).toBe(nonce);
+  });
+
+  test('the authority reports a newline-tear append as indeterminate and never writes', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'cq-newline-authority-')), 'ledger');
+    const ledger = makeFileNonceLedger(path, {
+      write: (handle, buffer, offset) => (offset === 0 ? writeSync(handle, buffer, offset, 32) : 0),
+    });
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'a'.repeat(32),
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(CLEAN_STATE),
+    });
+    const write = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), write.run);
+    expect(outcome.status).toBe('needs-human');
+    if (outcome.status !== 'needs-human') return;
+    expect(outcome.reason).toContain('append persistence is INDETERMINATE');
+    expect(outcome.reason).toContain('including a short write');
+    expect(write.calls).toBe(0);
+    expect(readFileSync(path, 'utf8')).toBe('a'.repeat(32));
+  });
+
   test('the nonce is on disk, and the directory entry exists, when consume resolves', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cq-durable-'));
     const ledgerPath = join(dir, 'approvals.ndjson');
@@ -1405,6 +1474,48 @@ describe('lock-only sections, provider faults and nested lock domains', () => {
 
 // Conductor pass (2026-10-08): the three Codex findings fixed on this head.
 describe('index-hidden edits, ledger identity, and the public binding surface', () => {
+  test('a dangling final symlink shares the target append lock before the ledger exists', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-dangling-ledger-')));
+    const path = join(dir, 'ledger');
+    const alias = join(dir, 'alias');
+    symlinkSync('ledger', alias);
+    const ledger = makeFileNonceLedger(alias);
+    let settled = false;
+    let pending: Promise<'consumed' | 'spent'> | undefined;
+    await makeGitMutex({ lockPath: `${path}.append` }).withLock(async () => {
+      pending = ledger.consume('a'.repeat(32)).finally(() => {
+        settled = true;
+      });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+      expect(settled).toBe(false);
+      expect(existsSync(path)).toBe(false);
+    });
+    expect(await pending).toBe('consumed');
+    expect(await makeFileNonceLedger(path).consume('a'.repeat(32))).toBe('spent');
+    expect(readFileSync(path, 'utf8')).toBe(`${'a'.repeat(32)}\n`);
+  });
+
+  test('an aged append lock cannot be stolen while its holder is alive', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-aged-ledger-')));
+    const path = join(dir, 'ledger');
+    const ledger = makeFileNonceLedger(path);
+    let settled = false;
+    let pending: Promise<'consumed' | 'spent'> | undefined;
+    await makeGitMutex({ lockPath: `${path}.append` }).withLock(async () => {
+      // Deterministically simulate a stalled heartbeat beyond the 30s lease.
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(`${path}.append.lock`, old, old);
+      pending = ledger.consume('b'.repeat(32)).finally(() => {
+        settled = true;
+      });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+      expect(settled).toBe(false);
+      expect(existsSync(path)).toBe(false);
+    });
+    expect(await pending).toBe('consumed');
+    expect(readFileSync(path, 'utf8')).toBe(`${'b'.repeat(32)}\n`);
+  });
+
   test.each(['--assume-unchanged', '--skip-worktree'])(
     'an index entry flagged %s cannot hide an edit from the clean predicate',
     async (flag) => {
