@@ -927,7 +927,10 @@ export function makeSubprocessWorktreeEffects(
       // primary's index scope (jGSnx). One path per line — the same
       // non-empty-line shape the branch-ref parser handles; only the COUNT
       // matters to the op.
-      parseBranchRefs(await runGit(['ls-files', '--', relTarget], worktreePath, timeoutMs)),
+      // Cache names are filesystem paths, including colons and glob characters.
+      parseBranchRefs(
+        await runGit(['--literal-pathspecs', 'ls-files', '--', relTarget], worktreePath, timeoutMs),
+      ),
     isStrictClean: async (worktreePath) =>
       (await runGit(['status', '--porcelain'], worktreePath, timeoutMs)).trim() === '',
     worktreeAdd: async (add) => {
