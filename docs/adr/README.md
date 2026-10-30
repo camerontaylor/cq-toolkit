@@ -184,10 +184,10 @@ classes and `runDriverConformance`, is re-exported from the package root, so
 consumers import them from `@camerontaylor/cq-toolkit` until the subpath is
 added.
 
-### N11 — ADR-0002 §3, ADR-0003 §2.5 and the approval-token annex §4c: O-1, O-5 and O-8 settled in code
+### N11 — ADR-0002 §3, ADR-0003 §2.5 and the approval-token annex §4c: O-1, O-5 and O-8
 
-Three points left open at acceptance are resolved by the implementation; none
-rewrites a decision.
+Two points left open at acceptance are resolved by the implementation; O-5
+retains the differing-ledger-path residual described below. None rewrites a decision.
 
 - **O-1 (ADR-0002 §3, the `RunOptions` collision).** The root barrel exports
   the seam's per-call options as `DriverRunOptions` — an explicit aliased
@@ -199,10 +199,11 @@ rewrites a decision.
   The record lives beside the operator approval ledger in the P1-trusted
   layer, keyed on the sha256 of the workspace's enclosing git worktree root —
   the annex keyed the lock on `sha256(realpath(workspace))`, and the shipped
-  key is the worktree root, so every path into the same workspace computes the
-  same record. The annex's two rejected candidates are excluded on evidence:
-  an environment-derived location reintroduces §2.5's split-brain, and a
-  record inside the workspace is tamper vector #26
+  key is the worktree root. Paths into the same workspace compute the same
+  record only when contenders use the same canonical ledger directory. If
+  operators select different ledger directories, they use different lock
+  records for the same workspace; that split-brain residual remains open.
+  A record inside the workspace is tamper vector #26
   ([`src/ops/analyze/approval.ts`](../../src/ops/analyze/approval.ts),
   `makeLedgerBesideMutationLocks`).
 - **O-8 (ADR-0003 §2.5 acquire step 4, the empty or half-written record).**
@@ -274,8 +275,9 @@ neither changes a decision.
 ### N16 — ADR-0004 D-K.7: the gate sweep interval is every 15 minutes
 
 D-K.7 left the gate sweep's interval unspecified (open point O-7). Decided:
-every 15 minutes (`cron: '7,22,37,52 * * * *'`), so a missed wake-up delays
-promotion by at most 15 minutes
+every 15 minutes (`cron: '7,22,37,52 * * * *'`). A missed wake-up waits for a
+subsequent nominal sweep; delayed or skipped scheduled runs mean this is not a
+maximum promotion delay
 ([`policy/templates/gate.yml`](../../policy/templates/gate.yml)). The
 `cq-signal` sweep's separate automation-window cadence is unchanged and still
 does not bound promotion.
