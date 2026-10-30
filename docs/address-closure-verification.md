@@ -1,4 +1,4 @@
-# R4C closure evidence verification (standalone helper)
+# R4C closure evidence verification
 
 Status: the pure verifier is wired into `review.address` behind the optional
 `--verifyClosure` boolean flag (SDK input `verifyClosure: true`). The default
@@ -13,7 +13,7 @@ working-tree content. It records packets and verdicts in the report's
 and budget refusal cannot close a finding. Dependency completeness is currently
 **unattested**: the assembler supplies no dependencies and sets
 `relevantDependenciesComplete: false`. Thus this opt-in path conservatively
-returns `uncertain` even for a plausible fix; it does not offer a flag to invent
+cannot return `resolved` (`uncertain` or concrete `unresolved` instead); it does not offer a flag to invent
 completeness. A future dependency-evidence producer is needed for resolved
 runtime verdicts.
 
@@ -139,7 +139,7 @@ stable `verification gate refused` reason in that case; evidence failures
 retain `unavailable-evidence`. Ordinary Error messages and non-Error string
 details are preserved. Diagnostic failure cannot establish closure.
 
-## Integration contract (for the later single writer)
+## Integration contract
 
 - Assemble the packet from the pinned execution revision: `before`/`after`
   from the tree at `metadata.revision.head` and `.parent`, patch from the
@@ -167,5 +167,16 @@ non-Error gate refusal, a check-side storage failure and the cross-scenario
 verdict invariants (resolved has five passes; uncertain never carries a
 fail; check names are always a canonical prefix).
 
-Evidence boundary: no test invokes a provider, spawns a process or touches
-the network; the suite is pure computation on literals.
+The helper tests are pure computation on literals. The op-path tests in
+`address.test.ts` and `address-pr.test.ts` exercise opt-in uncertainty,
+unchanged default behavior, pinned snapshots despite live-file drift,
+report persistence and PR-thread resolution refusal. They script model
+responses; the local composition test uses real git.
+
+The CLI fixture in `test/fixtures/review-closure-cli/entry.mjs` uses production
+CLI dispatch and the production operation with a scripted fixer. It demonstrates
+the closure gate, not real model quality. Commits that pass existing worker
+checks remain eligible for publication even when deterministic closure is
+uncertain; `verifiedHead` denotes worker validation, not a resolved finding.
+The packet patch covers the finding file only, consistent with the verifier's
+single-file contract; it is not a claim of complete multi-file evidence.

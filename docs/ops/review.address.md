@@ -58,6 +58,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minLength": 1,
       "type": "string"
     },
+    "verifyClosure": {
+      "type": "boolean"
+    },
     "wallMs": {
       "exclusiveMinimum": 0,
       "maximum": 9007199254740991,

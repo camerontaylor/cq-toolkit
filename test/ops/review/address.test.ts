@@ -97,7 +97,7 @@ describe('review.address composition', () => {
   test.each([true, false])(
     'closure verification opt-in=%s uses pinned evidence',
     async (verifyClosure) => {
-      const f = await fixture([finding('a')]);
+      const f = await fixture([{ ...finding('a'), text: 'Replace `a = 1`' }]);
       try {
         let committed = '';
         const before = f.repo.git('show', 'HEAD:src/a.ts');
@@ -107,7 +107,7 @@ describe('review.address composition', () => {
             escalation: createEscalationState,
             fix: async (item) => {
               const observedHead = f.record().head;
-              await f.repo.write('src/a.ts', 'export const a = 2;\n');
+              await f.repo.write('src/a.ts', 'export const fixedA = 2;\n');
               committed = f.repo.commitAll('fix a');
               // The packet must read the committed snapshot, never this live file.
               await f.repo.write('src/a.ts', 'uncommitted drift\n');
@@ -129,13 +129,14 @@ describe('review.address composition', () => {
           expect(report.findings[0]?.status).toBe('open');
           const evidence = report.closureVerifications?.[0];
           expect(evidence?.packet.before).toBe(before);
-          expect(evidence?.packet.after).toBe('export const a = 2;\n');
+          expect(evidence?.packet.after).toBe('export const fixedA = 2;\n');
           expect(evidence?.packet.metadata.revision.head).toBe(committed);
-          expect(evidence?.packet.patch).toContain('+export const a = 2;');
+          expect(evidence?.packet.patch).toContain('+export const fixedA = 2;');
           expect(evidence?.packet.relevantDependenciesComplete).toBe(false);
           expect(evidence?.verification.verdict).toBe('uncertain');
-          expect(JSON.parse(await readFile(report.reportPath, 'utf8')).closureVerifications)
-            .toEqual(report.closureVerifications);
+          expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toMatchObject({
+            closureVerifications: report.closureVerifications,
+          });
         } else {
           expect(report.closureVerifications).toBeUndefined();
           expect(f.calls).toContain('disposition:fixed');
