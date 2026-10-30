@@ -1770,6 +1770,59 @@ test.each([
   },
 );
 
+test.each([
+  ['wall deadline abort', 0, true, false, true],
+  ['parent abort before deadline', 1000, true, false, false],
+  ['null exit without interruption', 0, false, false, false],
+  ['explicit refusal before wall deadline abort', 0, true, true, false],
+] as const)(
+  '#534: %s attributes budget stops only to an interrupted reviewer without a refusal',
+  async (_mode, wall, interrupted, refused, marked) => {
+    const controller = new AbortController();
+    let remaining = 1000;
+    const effects = repoEffects(
+      repo,
+      reviewer(() => {
+        remaining = wall;
+        if (interrupted) controller.abort(new Error('review interrupted'));
+        return ran(
+          null,
+          JSON.stringify(
+            refused
+              ? { type: 'error', message: 'auth_required' }
+              : { type: 'heartbeat', status: 'reviewing' },
+          ),
+          {
+            timedOut: false,
+            ...(interrupted
+              ? { interruption: { kind: 'abort' as const, reason: controller.signal.reason } }
+              : {}),
+          },
+        );
+      }),
+    );
+    const result = await makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      signal: controller.signal,
+      remainingWallMs: () => remaining,
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (marked) expect(result).toMatchObject({ report: { budgetStopped: true } });
+    else expect(result).not.toMatchObject({ report: { budgetStopped: true } });
+    const cycles = effects
+      .openLedger('feature/x')
+      .load()
+      .records.filter((entry) => entry.kind === 'cycle');
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+    if (refused)
+      expect(cycles[0]?.completion).toMatchObject({
+        reason: expect.stringContaining('error event') as unknown,
+      });
+  },
+);
+
 test.each(['queued', 'running', 'expired'] as const)(
   'bounded review persists blocked evidence when %s without a completed review',
   async (mode) => {

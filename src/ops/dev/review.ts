@@ -756,7 +756,8 @@ function makeReviewCycle(
         const budgetStopped =
           streamRefusal === undefined &&
           wallRemainingMs <= 0 &&
-          (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
+          (ordinaryCompletion?.kind === 'terminal' ||
+            (raw.exitCode === null && (raw.timedOut || raw.interruption?.kind === 'abort')));
         const completion: DevReviewCompletion =
           streamRefusal ??
           (signal?.aborted || wallRemainingMs <= 0
