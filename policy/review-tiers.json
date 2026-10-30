@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "protected_policy_sha256": "4deb689299328dc666c512a7e1fc37ccfca3620b8edec756f3b71f3f308bd34e",
+  "protected_patterns": [
+    "^policy/protected-paths\\.json$",
+    "^policy/promotion-reviewer\\.json$",
+    "^\\.github/workflows/denylist\\.yml$",
+    "^policy/denylist/",
+    "^scripts/denylist-scan$",
+    "^src/selfhost/promote-gate\\.ts$",
+    "^scripts/github-settings-drift\\.mjs$",
+    "^scripts/lib/github-settings\\.mjs$",
+    "^policy/templates/github-settings\\.json$",
+    "^policy/attestations/",
+    "^apps/crq-python/(?:signer/|ops/systemd/|config\\.json$)"
+  ],
+  "tiers": {
+    "T1": ["apps/crq-python/**", "src/selfhost/promote-gate.ts"],
+    "T2": [
+      "src/selfhost/**",
+      "src/adapters/git/**",
+      "src/adapters/forge-github/**",
+      ".github/workflows/**",
+      "src/sandbox/**",
+      "src/ops/merge/**",
+      "src/ops/ratchet/**",
+      "src/ops/fix/**",
+      "scripts/**",
+      "src/kernel/**",
+      "src/ops/**",
+      "src/driver/**"
+    ],
+    "T3": ["src/**"],
+    "T4": ["**"]
+  }
+}
