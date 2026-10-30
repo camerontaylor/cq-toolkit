@@ -247,6 +247,73 @@ describe('vitest-json adapter unnamed assertions', () => {
   });
 });
 
+describe('vitest fallback assertion identities', () => {
+  test.each([undefined, '', '   '])(
+    'ancestor titles without an assertion title (%s) remain unnamed',
+    (title) => {
+      const result = parseWith('vitest-json', {
+        stdout: JSON.stringify({
+          success: false,
+          numTotalTests: 2,
+          testResults: [
+            {
+              name: '/tmp/a.test.ts',
+              status: 'failed',
+              assertionResults: [10, 40].map((line) => ({
+                status: 'failed',
+                ancestorTitles: ['outer', 'inner'],
+                title,
+                location: { line, column: 3 },
+                failureMessages: ['AssertionError: expected equality'],
+              })),
+            },
+          ],
+        }),
+        stderr: '',
+        exitCode: 1,
+      });
+      expect(result).toMatchObject({
+        verdict: 'parsed',
+        set: {
+          failures: [
+            { ruleId: 'vitest-unnamed', line: 10, message: 'AssertionError: expected equality' },
+            { ruleId: 'vitest-unnamed', line: 40, message: 'AssertionError: expected equality' },
+          ],
+        },
+      });
+    },
+  );
+
+  test('distinct fallback chains containing the display separator retain distinct identities', () => {
+    const result = parseWith('vitest-json', {
+      stdout: JSON.stringify({
+        success: false,
+        numTotalTests: 2,
+        testResults: [
+          {
+            name: '/tmp/a.test.ts',
+            status: 'failed',
+            assertionResults: [
+              { ancestorTitles: ['a > b'], title: 'c' },
+              { ancestorTitles: ['a'], title: 'b > c' },
+            ].map((name) => ({ ...name, status: 'failed' })),
+          },
+        ],
+      }),
+      stderr: '',
+      exitCode: 1,
+    });
+    expect(result.verdict).toBe('parsed');
+    if (result.verdict !== 'parsed') return;
+    const messages = result.set.failures.map((failure) => failure.message);
+    expect(messages[0]).not.toBe(messages[1]);
+    expect(messages.map((message) => JSON.parse(message) as string[])).toEqual([
+      ['a > b', 'c'],
+      ['a', 'b > c'],
+    ]);
+  });
+});
+
 describe('eslint-json adapter (real captured fixture)', () => {
   const ESLINT_FILE = '/private/tmp/cq-gates-fixtures.TA8IFi/bad.ts';
 
