@@ -74,10 +74,11 @@ class OperatorTest(unittest.TestCase):
                 with self.assertRaises(ledger.IntegrityError):
                     backfill.execute(c, args)  # a fresh assertion cannot release an already released epoch
                 self.assertEqual(len(q["legacy_coverage_releases"]), 1)
+                after_release = "2026-10-30T00:01:00Z"
                 item["attempts"].append({"run_id": "new-run", "outcome": "error", "counted": False,
-                                         "at": AT, "head": "a" * 40, "base": "b" * 40})
+                                         "at": after_release, "head": "a" * 40, "base": "b" * 40})
                 item["failures"] = 7
-                coverage_policy.record_legacy_failure(q, item, AT, "error", "new-run")
+                coverage_policy.record_legacy_failure(q, item, after_release, "error", "new-run")
                 later = coverage_policy.legacy_retry_view(q, 7, "a.py", "2026-11-01T00:00:00Z")
                 self.assertEqual(later["failures"], 1)
                 self.assertTrue(later["allowed"])

@@ -217,6 +217,7 @@ def legacy_retry_view(queue, pr, original_path, at):
             runs[run_id] = (record.get("item"), record.get("outcome"), when)
     baseline = [0, 0]
     released = False
+    last_release = None
     for event in queue.get("legacy_coverage_releases", []):
         if event.get("family") != family:
             continue
@@ -229,10 +230,23 @@ def legacy_retry_view(queue, pr, original_path, at):
                 or any(type(n) is not int or n < 0 for n in event["floors"])):
             reasons.append("invalid release accounting")
             continue
+        try:
+            release_at = _time(event["at"])
+            if last_release and release_at <= last_release:
+                raise ValueError("release order")
+        except (KeyError, TypeError, ValueError):
+            reasons.append("invalid release chronology")
+            continue
         baseline = event["floors"]
         runs = {key: value for key, value in runs.items() if key not in proofs}
         released = True
+        last_release = release_at
     reset = max(resets, default=None)
+    # The authorized release captures immutable counter floors. Check those
+    # before a later scoped success derives its additional effective floor.
+    if any(type(h.get("failures", 0)) is not int or h.get("failures", 0) < floor
+           for h, floor in zip(histories, baseline)):
+        reasons.append("released counter floor missing or reduced")
     if reset:
         if any(value[2] == reset for value in runs.values()):
             reasons.append("failure and success chronology ambiguous")
@@ -240,11 +254,15 @@ def legacy_retry_view(queue, pr, original_path, at):
             # The persisted counters intentionally retain pre-release and
             # subsequent failures. A proven scoped success starts a new
             # effective streak, without changing those historical counters.
-            consumed = sum(key in seen and value[2] < reset for key, value in runs.items())
+            if any(value[2] == last_release and value[2] < reset for value in runs.values()):
+                reasons.append("failure and release chronology ambiguous")
+            consumed = sum(key in seen and last_release < value[2] < reset for key, value in runs.items())
             baseline = [min(h.get("failures", 0), floor + consumed)
                         if type(h.get("failures", 0)) is int else floor
                         for h, floor in zip(histories, baseline)]
         runs = {key: value for key, value in runs.items() if value[2] > reset}
+    if last_release and any(value[2] <= last_release for value in runs.values()):
+        reasons.append("failure predates or coincides with release but lacks release proof")
     ordered = sorted(runs.values(), key=lambda value: value[2])
     for index, (_, _, when) in enumerate(ordered, 1):
         deadlines.append(when + dt.timedelta(seconds=min(86400, 3600 * 2 ** min(index - 1, 5))))
