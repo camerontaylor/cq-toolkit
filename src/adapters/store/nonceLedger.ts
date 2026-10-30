@@ -243,7 +243,7 @@ export function realpathOrSelf(path: string): string {
           throw new Error('approval ledger: symlink cycle or excessive symlink depth');
         }
         links.add(current);
-        current = resolve(dirname(current), link);
+        current = resolve(realpathSync(dirname(current)), link);
         continue;
       }
       const parent = dirname(current);

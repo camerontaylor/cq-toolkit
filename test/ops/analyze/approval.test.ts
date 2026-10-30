@@ -1474,6 +1474,23 @@ describe('lock-only sections, provider faults and nested lock domains', () => {
 
 // Conductor pass (2026-10-08): the three Codex findings fixed on this head.
 describe('index-hidden edits, ledger identity, and the public binding surface', () => {
+  test('a relative dangling ledger link uses its canonical parent through a directory alias', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'cq-ledger-parent-alias-')));
+    const real = join(root, 'real');
+    const sub = join(real, 'sub');
+    mkdirSync(sub, { recursive: true });
+    symlinkSync(sub, join(root, 'alias'));
+    symlinkSync('../ledger', join(sub, 'link'));
+    const nonce = 'b'.repeat(32);
+
+    await expect(makeFileNonceLedger(join(root, 'alias', 'link')).consume(nonce)).resolves.toBe(
+      'consumed',
+    );
+    await expect(makeFileNonceLedger(join(real, 'ledger')).consume(nonce)).resolves.toBe('spent');
+    expect(existsSync(join(root, 'ledger'))).toBe(false);
+    expect(readFileSync(join(real, 'ledger'), 'utf8')).toBe(`${nonce}\n`);
+  });
+
   test('a dangling final symlink shares the target append lock before the ledger exists', async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-dangling-ledger-')));
     const path = join(dir, 'ledger');
