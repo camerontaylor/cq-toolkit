@@ -1096,7 +1096,8 @@ describe('main — usage reporting', () => {
         finishWrite?.(new Error(message));
       }
       await expect(pending).resolves.toBeUndefined();
-      const warningDetail = mode === 'callback with long message' ? 'x'.repeat(500) : 'stdout failed';
+      const warningDetail =
+        mode === 'callback with long message' ? 'x'.repeat(500) : 'stdout failed';
       expect(stderr).toHaveBeenCalledExactlyOnceWith(
         `sweep-usage: could not write stdout: ${warningDetail}\n`,
       );
@@ -1112,8 +1113,9 @@ describe('main — usage reporting', () => {
     const { out, stepSummary } = setup();
     const stringify = JSON.stringify;
     let payloadEncounters = 0;
-    const stringifySpy = vi.spyOn(JSON, 'stringify').mockImplementation(
-      (...args: Parameters<typeof JSON.stringify>) => {
+    const stringifySpy = vi
+      .spyOn(JSON, 'stringify')
+      .mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
         const value: unknown = args[0];
         if (
           typeof value === 'object' &&
@@ -1139,8 +1141,7 @@ describe('main — usage reporting', () => {
           throw new Error('payload serialization failed');
         }
         return stringify(...args);
-      },
-    );
+      });
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
