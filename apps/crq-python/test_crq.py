@@ -1615,6 +1615,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.patch(crq, "STATE", new=self.root)
         self.patch(crq, "QUEUE", new=self.root / "queue.json")
         self.patch(crq, "now", return_value=crq.parse_iso("2026-10-03T00:00:01Z"))
+        self.patch(crq, "CONFIG", new={**crq.CONFIG, "merged_discovery": {
+            "enabled": True, "after": self.AFTER, "before": self.BEFORE}})
         self.forge = self.patch(crq, "gh_json", side_effect=self.forge_response)
         self.reset_case()
 
@@ -1791,7 +1793,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                         effects["refresh_deferred"].side_effect = (
                                             lambda *a, **k: order.append("refresh") or [])
                                         crq.tick()
-                                        self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+                                        self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
                                         for name in ("harvest_review", "harvest", "enroll", "promotion_audit",
                                                      "promotion_tick", "read_slot_usage", "admit_available",
                                                      "write_status", "write_heartbeat"):
@@ -1971,7 +1973,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                 mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
             effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
             crq.tick()
-            self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+            self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
             for name in ("harvest_review", "harvest", "enroll", "promotion_audit", "promotion_tick",
                          "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
                 effects[name].assert_called_once()
