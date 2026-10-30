@@ -7,9 +7,10 @@ export const PROTECTED_TEST_ROOT_PATTERN_SOURCES: readonly string[] = Object.fre
   '(^|/)(?:test|tests|spec|specs|__tests__|__mocks__|__fixtures__|__snapshots__|cypress|e2e|test-utils)/',
 ]);
 
-/** Regex sources for test/spec filenames in every supported module suffix. */
+/** Regex sources for JS/TS test/spec filenames and Python test basenames. */
 export const PROTECTED_TEST_FILE_PATTERN_SOURCES: readonly string[] = Object.freeze([
   '\\.(?:test|spec)\\.[cm]?[jt]sx?$',
+  '(?:^|/)(?:test_[^/]*|[^/]*_test)\\.py$',
 ]);
 
 /** Test and test-support roots protected at every depth. */
@@ -17,7 +18,7 @@ export const PROTECTED_TEST_ROOT_PATTERNS: readonly RegExp[] = Object.freeze(
   PROTECTED_TEST_ROOT_PATTERN_SOURCES.map((source) => new RegExp(source, 'i')),
 );
 
-/** Test/spec filenames, including every JavaScript/TypeScript module suffix. */
+/** Test/spec filenames, including JS/TS module suffixes and Python basenames. */
 export const PROTECTED_TEST_FILE_PATTERNS: readonly RegExp[] = Object.freeze(
   PROTECTED_TEST_FILE_PATTERN_SOURCES.map((source) => new RegExp(source, 'i')),
 );
