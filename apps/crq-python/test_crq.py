@@ -30,6 +30,26 @@ COMPLETE = {"type": "complete", "status": "review_completed", "reviewedFiles": [
 # Registered by CurrentTest before its first Git invocation. No other class
 # needs a real process, and no selected fixture needs a real scanner.
 OFFLINE_REPOS = set()
+OFFLINE_INDEXES = {}
+
+
+@contextlib.contextmanager
+def offline_index_directory(repo, root):
+    repo = Path(repo).resolve(strict=True)
+    root = Path(root).resolve(strict=True)
+    if repo not in OFFLINE_REPOS or repo.parent != root:
+        raise AssertionError("private index fixture owner missing")
+    with tempfile.TemporaryDirectory(dir=root) as td:
+        parent = Path(td).resolve(strict=True)
+        index = parent / "index"
+        info = parent.stat()
+        if index in OFFLINE_INDEXES:
+            raise AssertionError("private index already registered")
+        OFFLINE_INDEXES[index] = (repo, info.st_dev, info.st_ino)
+        try:
+            yield str(parent)
+        finally:
+            del OFFLINE_INDEXES[index]
 
 
 _TRACE_OBSERVER_RESTORE = None
@@ -123,6 +143,18 @@ def offline_git_boundary(real_popen, home, violations):
                        and all(operand(v) for v in tail[-2:]) for flags in shapes)
         return False
 
+    def check_index_file(index):
+        parent = index.parent
+        if parent.resolve(strict=True) != parent or not parent.is_dir():
+            refuse("index-path")
+        if index.is_symlink() or (index.exists() and
+                (not index.is_file() or index.stat().st_nlink != 1)):
+            refuse("index-path")
+        lock = index.with_name(index.name + ".lock")
+        if lock.exists() or lock.is_symlink():
+            refuse("index-path")
+        return parent.stat()
+
     def offline_process(argv, *args, **kwargs):
         if (not isinstance(argv, (list, tuple)) or not argv or
                 argv[0] not in {"git", "/usr/bin/git"} or args or
@@ -158,9 +190,29 @@ def offline_git_boundary(real_popen, home, violations):
                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
                "GIT_TERMINAL_PROMPT": "0", "GIT_TEMPLATE_DIR": str(home / "templates")}
         for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-                    "GIT_INDEX_FILE", "GIT_LITERAL_PATHSPECS"):
+                    "GIT_LITERAL_PATHSPECS"):
             if key in incoming:
                 env[key] = incoming[key]
+        try:
+            if "GIT_INDEX_FILE" in incoming:
+                raw = incoming["GIT_INDEX_FILE"]
+                index = Path(raw)
+                if not index.is_absolute() or str(index) != raw or ".." in index.parts:
+                    refuse("index-path")
+                owner = OFFLINE_INDEXES.get(index)
+                if owner is None or owner[0] != cwd:
+                    refuse("index-path")
+                info = check_index_file(index)
+                if owner[1:] != (info.st_dev, info.st_ino):
+                    refuse("index-path")
+                env["GIT_INDEX_FILE"] = str(index)
+            else:
+                gitdir = cwd / ".git"
+                if not (list(argv[1:]) == ["init", "-q"] and
+                        not gitdir.exists() and not gitdir.is_symlink()):
+                    check_index_file(gitdir / "index")
+        except (OSError, ValueError, RuntimeError):
+            refuse("index-path")
         launch_kwargs = {"cwd": str(cwd), "env": env, "close_fds": True,
                          "stdin": kwargs.get("stdin"), "stdout": kwargs.get("stdout"),
                          "stderr": kwargs.get("stderr")}
@@ -223,6 +275,7 @@ class OfflineBoundaryTest(unittest.TestCase):
     def test_ordinary_runner_shape_reaches_only_captured_launcher(self):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td).resolve()
+            (repo / ".git").mkdir()
             OFFLINE_REPOS.add(repo)
             self.addCleanup(OFFLINE_REPOS.discard, repo)
             launcher = mock.Mock(return_value=mock.sentinel.child)
@@ -239,6 +292,126 @@ class OfflineBoundaryTest(unittest.TestCase):
             self.assertEqual(options["cwd"], str(repo))
             self.assertIs(options["close_fds"], True)
             self.assertEqual(options["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
+
+    def test_private_index_registration_controls_captured_launcher(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            OFFLINE_REPOS.add(repo)
+            self.addCleanup(OFFLINE_REPOS.discard, repo)
+            launcher = mock.Mock(return_value=mock.sentinel.child)
+            boundary = offline_git_boundary(launcher, root, [])
+            outside = root / "outside-index"
+            outside.write_bytes(b"fixture")
+            def denied(value):
+                launcher.reset_mock()
+                with self.assertRaises(AssertionError):
+                    boundary(["git", "read-tree", "HEAD"], cwd=repo,
+                             env={"GIT_INDEX_FILE": value})
+                launcher.assert_not_called()
+            denied(str(outside))
+            denied("index")
+            denied("")
+            with offline_index_directory(repo, root) as directory:
+                index = Path(directory) / "index"
+                denied(str(index.parent / ".." / index.parent.name / "index"))
+                for existing in (False, True):
+                    if existing:
+                        index.write_bytes(b"fixture")
+                    launcher.reset_mock()
+                    child = boundary(["git", "read-tree", "HEAD"], cwd=repo,
+                                     env={"GIT_INDEX_FILE": str(index)})
+                    self.assertIs(child, mock.sentinel.child)
+                    launcher.assert_called_once()
+                    self.assertEqual(launcher.call_args.kwargs["env"]["GIT_INDEX_FILE"], str(index))
+                index.unlink()
+                index.symlink_to(outside)
+                denied(str(index))
+                index.unlink()
+                alias = root / "index-parent-alias"
+                alias.symlink_to(index.parent, target_is_directory=True)
+                denied(str(alias / "index"))
+                alias.unlink()
+                os.link(outside, index)
+                denied(str(index))
+                index.unlink()
+                index.mkdir()
+                denied(str(index))
+                index.rmdir()
+                lock = index.with_name("index.lock")
+                lock.write_bytes(b"fixture")
+                denied(str(index))
+                lock.unlink()
+                other = root / "other-repo"
+                other.mkdir()
+                (other / ".git").mkdir()
+                OFFLINE_REPOS.add(other)
+                try:
+                    launcher.reset_mock()
+                    with self.assertRaises(AssertionError):
+                        boundary(["git", "read-tree", "HEAD"], cwd=other,
+                                 env={"GIT_INDEX_FILE": str(index)})
+                    launcher.assert_not_called()
+                finally:
+                    OFFLINE_REPOS.discard(other)
+                saved_parent = root / "saved-index-parent"
+                index.parent.rename(saved_parent)
+                try:
+                    index.parent.mkdir()
+                    denied(str(index))  # Same name, different parent inode: refuse.
+                    index.parent.rmdir()
+                finally:
+                    if index.parent.exists():
+                        index.parent.rmdir()
+                    saved_parent.rename(index.parent)
+                # Exact registered parent is now missing; never recreate on launch.
+                index.parent.rmdir()
+                denied(str(index))
+            self.assertNotIn(index, OFFLINE_INDEXES)
+            denied(str(index))
+            with self.assertRaisesRegex(RuntimeError, "fixture unwind"):
+                with offline_index_directory(repo, root) as directory:
+                    retired = Path(directory) / "index"
+                    raise RuntimeError("fixture unwind")
+            self.assertNotIn(retired, OFFLINE_INDEXES)
+            self.assertFalse(retired.parent.exists())
+            denied(str(retired))
+
+    def test_default_index_and_ambient_env_are_confined(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td).resolve()
+            OFFLINE_REPOS.add(repo)
+            self.addCleanup(OFFLINE_REPOS.discard, repo)
+            launcher = mock.Mock(return_value=mock.sentinel.child)
+            boundary = offline_git_boundary(launcher, repo, [])
+            def denied():
+                launcher.reset_mock()
+                with self.assertRaises(AssertionError):
+                    boundary(["git", "add", "."], cwd=repo)
+                launcher.assert_not_called()
+            denied()  # Missing parent, not merely missing index.
+            boundary(["git", "init", "-q"], cwd=repo)  # Captured MOCK only.
+            (repo / ".git").mkdir()
+            outside = repo / "outside-index"
+            outside.write_bytes(b"fixture")
+            with mock.patch.dict(os.environ, {"GIT_INDEX_FILE": str(outside)}):
+                for options in ({}, {"env": None}, {"env": {}}):
+                    launcher.reset_mock()
+                    boundary(["git", "add", "."], cwd=repo, **options)
+                    launcher.assert_called_once()
+                    self.assertNotIn("GIT_INDEX_FILE", launcher.call_args.kwargs["env"])
+            index = repo / ".git" / "index"
+            index.symlink_to(outside)
+            denied()
+            index.unlink()
+            os.link(outside, index)
+            denied()
+            index.unlink()
+            (repo / ".git").rmdir()
+            (repo / ".git").symlink_to(repo, target_is_directory=True)
+            denied()
 
 
 class ClassifierTest(unittest.TestCase):
@@ -453,6 +626,14 @@ class CurrentTest(unittest.TestCase):
         self.repo.mkdir()
         OFFLINE_REPOS.add(self.repo.resolve())
         self.addCleanup(OFFLINE_REPOS.discard, self.repo.resolve())
+        patch = mock.patch.object(crq, "tempfile", SimpleNamespace(
+            TemporaryDirectory=lambda: offline_index_directory(self.repo, self.root)))
+        patch.start()
+        self.addCleanup(patch.stop)
+        def assert_indexes_retired():
+            self.assertFalse(any(owner[0] == self.repo.resolve()
+                                 for owner in OFFLINE_INDEXES.values()))
+        self.addCleanup(assert_indexes_retired)
         self.g("init", "-q")
         self.g("config", "user.email", "fixture@localhost")
         self.g("config", "user.name", "fixture")
@@ -1220,7 +1401,7 @@ class CurrentTest(unittest.TestCase):
         for path in (self.state / "reconcile").glob("*.json"):
             path.unlink()
         with mock.patch.object(crq, "gh_json", side_effect=actual) as calls,              mock.patch.object(crq.repair_tick, "atomic", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
+            with self.assertRaisesRegex(crq.DiscoveryStorageFailed, "merged discovery storage failure: wrapper-save; tick aborted"):
                 self.reconcile_inventory(budget=4)
             self.assertEqual(calls.call_count, 1)
 
@@ -1401,6 +1582,401 @@ class CurrentTest(unittest.TestCase):
             crq.enroll(self.q, False)
         self.assertEqual(sum(item["kind"] == "delta" and item["pr"] == 43 for item in self.q["items"]), 1)
 
+
+
+class DiscoveryFailureBoundaryTest(unittest.TestCase):
+    """Real discovery/persistence; temporary files and counter-only tick effects."""
+
+    AFTER = "2026-10-01T00:00:00Z"
+    BEFORE = "2026-10-03T00:00:00Z"
+
+    def patch(self, obj, name, **kwargs):
+        patcher = mock.patch.object(obj, name, **kwargs)
+        value = patcher.start()
+        self.addCleanup(patcher.stop)
+        return value
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="q2-discovery-fault-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.patch(crq, "STATE", new=self.root)
+        self.patch(crq, "QUEUE", new=self.root / "queue.json")
+        self.patch(crq, "now", return_value=crq.parse_iso("2026-10-03T00:00:01Z"))
+        self.forge = self.patch(crq, "gh_json", side_effect=self.forge_response)
+        self.reset_case()
+
+    def reset_case(self, count=1):
+        self.count = count
+        self.q = {"created_at": self.AFTER, "items": [], "starts": [],
+                  "merged_watermark": self.AFTER,
+                  "merged_discovery": {"after": self.AFTER, "before": self.BEFORE, "complete": False}}
+        key = review_receipt.digest({"repo": crq.REPO, "base": "merge-queue",
+                                     "after": self.AFTER, "before": self.BEFORE})
+        self.path = self.root / "reconcile" / (key + ".json")
+        self.path.parent.mkdir(exist_ok=True)
+        self.path.unlink(missing_ok=True)
+        crq.save_queue(self.q)
+        self.forge.reset_mock()
+
+    def forge_response(self, args):
+        self.assertEqual(args[:3], ["api", "graphql", "-f"])
+        self.assertEqual(len(args), 4)
+        self.assertTrue(args[3].startswith("query="))
+        repository = {"id": "fixture-repository", "nameWithOwner": crq.REPO}
+        if "issues(last:" in args[3]:
+            repository.update(issues={"totalCount": 0, "nodes": []},
+                              pullRequests={"totalCount": self.count, "nodes": [{"number": self.count}]})
+        else:
+            numbers = re.findall(r"issueOrPullRequest\(number:(\d+)\)", args[3])
+            self.assertTrue(numbers)
+            for value in numbers:
+                repository["n" + value] = {"__typename": "PullRequest", "number": int(value),
+                    "baseRefName": "merge-queue", "mergedAt": "2026-10-02T00:00:00Z",
+                    "mergeCommit": {"oid": "a" * 40}, "headRefOid": "b" * 40}
+        return {"data": {"repository": repository}}
+
+    def wrapper(self, checkpoint=None):
+        value = {"source": {"version": 1, "method": "all-number-slots-v1", "repo": crq.REPO,
+            "base": "merge-queue", "repository_id": "fixture-repository", "ceiling": self.count,
+            "window": crq.merged_reconcile.NUMBER_WINDOW}, "checkpoint": checkpoint}
+        value["digest"] = review_receipt.digest(value)
+        return value
+
+    def put_wrapper(self, value):
+        self.path.write_text(json.dumps(value))
+
+    def manual(self, q=None, budget=4):
+        return crq.reconcile_merged(self.q if q is None else q, after=self.AFTER,
+                                    before=self.BEFORE, page_budget=budget)
+
+    def discover(self, q=None):
+        return crq.discover_merged(self.q if q is None else q, crq.ForgeBudget())
+
+    @contextlib.contextmanager
+    def fault(self, *, stage=None, wrapper_write=None, post=False):
+        """Raise before install or after a real isolated atomic replacement."""
+        atomic = crq.repair_tick.atomic
+        save = crq._save_discovery_queue
+        events = []
+        current = [None]
+        wrapper_count = [0]
+        failed = [False]
+
+        def save_stage(q, name):
+            current[0] = name
+            return save(q, name)
+
+        def write(path, value):
+            self.assertFalse(failed[0], "write after uncertain durability")
+            if path == self.path:
+                wrapper_count[0] += 1
+            target = ((path == crq.QUEUE and current[0] == stage and stage is not None) or
+                      (path == self.path and wrapper_count[0] == wrapper_write))
+            events.append((str(path), current[0], copy.deepcopy(value), target))
+            if target:
+                if post:
+                    atomic(path, value)
+                failed[0] = True
+                raise OSError("fixture storage fault")
+            return atomic(path, value)
+
+        with mock.patch.object(crq, "_save_discovery_queue", side_effect=save_stage), \
+                mock.patch.object(crq.repair_tick, "atomic", side_effect=write):
+            yield events
+        self.assertTrue(failed[0], "intended storage boundary was not reached")
+        self.assertTrue(events[-1][3])
+        self.assertEqual(sum(event[3] for event in events), 1)
+
+    def test_wrapper_decode_and_schema_refusal_records_debt_without_forge(self):
+        malformed = [b"\xff", b"{", b"null", b"[]"]
+        for field in ("source", "checkpoint"):
+            value = self.wrapper()
+            del value[field]
+            malformed.append(json.dumps(value).encode())
+        for source in (None, [], "fixture"):
+            value = self.wrapper()
+            value["source"] = source
+            value["digest"] = review_receipt.digest({k: v for k, v in value.items() if k != "digest"})
+            malformed.append(json.dumps(value).encode())
+        for field, bad in (("version", True), ("repo", "other/repository"), ("base", "main"),
+                           ("repository_id", ""), ("ceiling", False), ("window", 1)):
+            value = self.wrapper()
+            value["source"][field] = bad
+            value["digest"] = review_receipt.digest({k: v for k, v in value.items() if k != "digest"})
+            malformed.append(json.dumps(value).encode())
+        for checkpoint in ({}, [], False, 0, "", [1], "invalid"):
+            malformed.append(json.dumps(self.wrapper(checkpoint)).encode())
+        value = self.wrapper()
+        value["digest"] = "0" * 64
+        malformed.append(json.dumps(value).encode())
+        for shape, raw in enumerate(malformed):
+            with self.subTest(shape=shape):
+                self.reset_case()
+                self.q["items"] = [{"id": "prior", "kind": "merged", "state": "done",
+                                    "cycles": [{"run_id": "retained"}], "blocking": [{"id": "finding"}]}]
+                self.q["merged_current_requests"] = {"retained": {"receiptId": "prior-receipt"}}
+                retained = copy.deepcopy(self.q)
+                self.path.write_bytes(raw)
+                with mock.patch.object(crq.review_receipt, "enroll") as enroll:
+                    for _ in range(2):
+                        self.assertIn("incomplete", self.discover()[0])
+                        self.assertEqual(self.path.read_bytes(), raw)
+                        self.assertEqual(self.q["items"], retained["items"])
+                        self.assertEqual(self.q["merged_current_requests"], retained["merged_current_requests"])
+                        self.assertEqual(self.q["merged_watermark"], self.AFTER)
+                        self.assertFalse(self.q["merged_discovery"]["complete"])
+                        self.assertTrue(crq.load_queue()["merged_discovery"]["error"])
+                    enroll.assert_not_called()
+                self.forge.assert_not_called()
+
+    def test_wrapper_parser_failures_preserve_debt_and_storage_boundary(self):
+        original_loads = json.loads
+        reason = "wrapper-decode: invalid JSON"
+        for error in (ValueError, RecursionError):
+            for mode in ("manual", "discovery", "tick", "save-before", "save-after"):
+                with self.subTest(error=error.__name__, mode=mode):
+                    self.reset_case()
+                    self.q["items"] = [{"id": "older-review", "kind": "open", "state": "reviewing",
+                        "cycles": [{"run_id": "retained"}], "repair_runs": {"older-repair": {}}}]
+                    self.q["merged_current_requests"] = {"retained": {"receiptId": "prior-receipt"}}
+                    crq.save_queue(self.q)
+                    baseline = copy.deepcopy(self.q)
+                    retained_digest = review_receipt.digest(baseline)
+                    sentinel = json.dumps({"fixture_parser_boundary": str(self.path),
+                                           "error": error.__name__, "mode": mode})
+                    self.path.write_text(sentinel)
+                    encounters = []
+                    order = []
+                    save = crq._save_discovery_queue
+
+                    def dispatch(*args, **kwargs):
+                        text = args[0] if args else kwargs.get("s")
+                        if text == sentinel:
+                            encounters.append("wrapper-parse")
+                            raise error("fixture parser fault")
+                        return original_loads(*args, **kwargs)
+
+                    def record(q, stage):
+                        result = save(q, stage)
+                        order.append(stage)
+                        return result
+
+                    rounds = 2 if mode == "discovery" else 1
+                    with mock.patch.object(crq.review_receipt, "enroll") as enroll:
+                        for attempt in range(rounds):
+                            with mock.patch.object(crq.json, "loads", side_effect=dispatch):
+                                if mode == "manual":
+                                    with self.assertRaisesRegex(crq.merged_reconcile.ReconcileRefused,
+                                                               "^" + reason + "$"):
+                                        self.manual()
+                                elif mode == "discovery":
+                                    self.assertEqual(self.discover(), [
+                                        "merged discovery incomplete; cursor/debt retained: " + reason])
+                                elif mode == "tick":
+                                    with self.tick_effects() as effects, mock.patch.object(
+                                            crq, "_save_discovery_queue", side_effect=record):
+                                        effects["refresh_deferred"].side_effect = (
+                                            lambda *a, **k: order.append("refresh") or [])
+                                        crq.tick()
+                                        self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+                                        for name in ("harvest_review", "harvest", "enroll", "promotion_audit",
+                                                     "promotion_tick", "read_slot_usage", "admit_available",
+                                                     "write_status", "write_heartbeat"):
+                                            effects[name].assert_called_once()
+                                else:
+                                    with self.tick_effects() as effects, self.fault(
+                                            stage="refusal-debt-save", post=mode == "save-after") as events:
+                                        with self.assertRaisesRegex(crq.DiscoveryStorageFailed,
+                                                                   "refusal-debt-save"):
+                                            crq.tick()
+                                        for effect in effects.values():
+                                            effect.assert_not_called()
+                                        self.assertEqual(len(events), 1)
+                            # Shared parser restored before persisted reloads or digest checks.
+                            self.assertIs(json.loads, original_loads)
+                            self.assertEqual(len(encounters), attempt + 1)
+                            disk = crq.load_queue()
+                            self.assertEqual(self.path.read_text(), sentinel)
+                            for value in (self.q, disk):
+                                for field in ("items", "merged_current_requests", "merged_watermark"):
+                                    self.assertEqual(value[field], baseline[field])
+                                for field in ("after", "before", "complete"):
+                                    self.assertEqual(value["merged_discovery"][field],
+                                                     baseline["merged_discovery"][field])
+                            if mode == "manual" or mode.startswith("save-"):
+                                self.assertEqual(self.q, baseline)
+                                self.assertEqual(review_receipt.digest(self.q), retained_digest)
+                            if mode in ("manual", "save-before"):
+                                self.assertEqual(disk, baseline)
+                            else:
+                                self.assertEqual(disk["merged_discovery"]["error"], reason)
+                            if mode.startswith("save-"):
+                                self.assertEqual(disk, events[-1][2] if mode == "save-after" else baseline)
+                            if mode == "discovery":
+                                # Resume only from actual persisted debt, after parser restoration.
+                                self.assertEqual(self.q, disk)
+                                self.q = disk
+                        enroll.assert_not_called()
+                    self.forge.assert_not_called()
+
+    def test_valid_complete_wrapper_validates_and_enrolls_once(self):
+        first = self.manual()
+        self.assertTrue(first["complete"])
+        self.assertEqual(first["reviewed"], 0)
+        saved = crq.load_queue()
+        self.assertEqual(len(saved["items"]), 1)
+        self.assertEqual(saved["items"][0]["state"], "pending")
+        self.forge.reset_mock()
+        self.manual(saved)
+        self.assertEqual(crq.load_queue(), saved)
+        self.assertEqual(len(saved["items"]), 1)
+        self.forge.assert_not_called()
+        # A valid digest cannot make the complete fast path skip source validation.
+        value = json.loads(self.path.read_text())
+        value["source"]["repo"] = "other/repository"
+        value["digest"] = review_receipt.digest({k: v for k, v in value.items() if k != "digest"})
+        self.put_wrapper(value)
+        with self.assertRaises(crq.merged_reconcile.ReconcileRefused):
+            self.manual(saved)
+
+    def test_wrapper_read_io_aborts_without_mutating_caller(self):
+        read = Path.read_text
+        for error in (PermissionError, OSError):
+            with self.subTest(error=error.__name__):
+                baseline = copy.deepcopy(self.q)
+                def denied(path, *args, **kwargs):
+                    if path == self.path:
+                        raise error("fixture read fault")
+                    return read(path, *args, **kwargs)
+                with mock.patch.object(Path, "read_text", new=denied), \
+                        mock.patch.object(crq, "save_queue") as save:
+                    with self.assertRaisesRegex(crq.DiscoveryStorageFailed, "wrapper-read"):
+                        self.discover()
+                    save.assert_not_called()
+                self.assertEqual(self.q, baseline)
+                self.forge.assert_not_called()
+        # Missing wrapper is a first run, not a storage refusal.
+        self.assertFalse(self.path.exists())
+        self.assertTrue(self.manual()["complete"])
+
+    def test_wrapper_save_failure_stops_before_next_fetch(self):
+        for write in (1, 3):
+            for post in (False, True):
+                with self.subTest(write=write, post=post):
+                    self.reset_case(count=51)
+                    baseline = copy.deepcopy(self.q)
+                    with self.fault(wrapper_write=write, post=post):
+                        with self.assertRaisesRegex(crq.DiscoveryStorageFailed, "wrapper-save"):
+                            self.discover()
+                    self.assertEqual(self.q, baseline)
+                    self.assertEqual(crq.load_queue(), baseline)
+                    self.assertEqual(self.forge.call_count, 1 if write == 1 else 2)
+                    # Read actual remaining disk bytes on a new invocation; no rollback.
+                    fresh = crq.load_queue()
+                    self.assertIn("complete=True", self.discover(fresh)[0])
+                    self.assertEqual(len(fresh["items"]), 51)
+                    self.assertTrue(all(item["state"] == "pending" for item in fresh["items"]))
+
+    def test_queue_write_failure_discards_memory_and_never_retries(self):
+        stages = ("bounds-save", "enrollment-save", "inventory-summary-save",
+                  "discovery-summary-save", "watermark-save", "refusal-debt-save")
+        for stage in stages:
+            for post in (False, True):
+                with self.subTest(stage=stage, post=post):
+                    self.reset_case(count=201 if stage == "inventory-summary-save" else 1)
+                    if stage == "bounds-save":
+                        self.q.pop("merged_discovery")
+                        crq.save_queue(self.q)
+                    if stage == "refusal-debt-save":
+                        self.path.write_bytes(b"{")
+                    baseline = copy.deepcopy(self.q)
+                    with self.fault(stage=stage, post=post) as events:
+                        with self.assertRaisesRegex(crq.DiscoveryStorageFailed, stage):
+                            self.discover()
+                    self.assertEqual(self.q, baseline)
+                    attempted = events[-1][2]
+                    disk = crq.load_queue()
+                    self.assertEqual(disk, attempted if post else
+                        (events[-2][2] if len(events) > 1 and events[-2][0] == str(crq.QUEUE) else baseline))
+                    self.assertTrue(all(item["state"] == "pending" for item in disk["items"]))
+                    self.assertFalse(any(item.get("cycles") for item in disk["items"]))
+                    if stage != "watermark-save" or not post:
+                        self.assertEqual(disk["merged_watermark"], self.AFTER)
+                    # Restart from disk, never from the discarded private view.
+                    self.discover(disk)
+                    self.assertFalse(any(item.get("cycles") for item in disk["items"]))
+
+    @contextlib.contextmanager
+    def tick_effects(self):
+        """Every external continuation seam is counter-only; discovery stays real."""
+        with contextlib.ExitStack() as stack:
+            effects = {}
+            def counter(obj, name, result=None):
+                effects[name] = stack.enter_context(mock.patch.object(obj, name, return_value=result))
+            counter(crq, "load_queue", self.q)
+            counter(crq, "fetch")
+            counter(crq, "promotion_mode", "user")
+            for name in ("harvest_signer", "harvest_review", "apply_signer_backoff", "refresh_slot_deadline",
+                         "write_status", "write_heartbeat", "event", "notify_owner"):
+                counter(crq, name)
+            for name in ("enroll", "promotion_audit", "promotion_tick"):
+                counter(crq, name, [])
+            for name in ("harvest", "backfill", "archive_legacy", "reconcile_fix_prs"):
+                counter(crq.repair_tick, name, [])
+            counter(crq.deferred_refresh, "refresh_deferred", [])
+            counter(crq, "read_slot_usage", (None, []))
+            counter(crq, "admit_available", (False, "fixture-control-flow", 0))
+            counter(crq.coverage, "record_opportunity", {})
+            yield {k: v for k, v in effects.items() if k not in ("load_queue", "fetch")}
+
+    def test_storage_failure_aborts_tick_before_follow_on_effects(self):
+        for stage in ("bounds-save", "refusal-debt-save"):
+            self.reset_case()
+            if stage == "bounds-save":
+                self.q.pop("merged_discovery")
+            else:
+                self.path.write_bytes(b"{")
+            baseline = copy.deepcopy(self.q)
+            with self.tick_effects() as effects, self.fault(stage=stage):
+                with self.assertRaisesRegex(crq.DiscoveryStorageFailed, stage):
+                    crq.tick()
+                for effect in effects.values():
+                    effect.assert_not_called()
+            self.assertEqual(self.q, baseline)
+
+    def test_decode_refusal_allows_existing_tick_work_after_debt_commit(self):
+        self.q["items"] = [{"id": "older-review", "kind": "open", "state": "reviewing",
+                            "repair_runs": {"older-repair": {}}}]
+        self.path.write_bytes(b"{")
+        order = []
+        save = crq._save_discovery_queue
+        def record(q, stage):
+            result = save(q, stage)
+            order.append(stage)
+            return result
+        with self.tick_effects() as effects, \
+                mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
+            effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
+            crq.tick()
+            self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
+            for name in ("harvest_review", "harvest", "enroll", "promotion_audit", "promotion_tick",
+                         "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
+                effects[name].assert_called_once()
+        self.assertEqual(crq.load_queue()["merged_watermark"], self.AFTER)
+        self.assertEqual(self.path.read_bytes(), b"{")
+        self.forge.assert_not_called()
+
+    def test_incomplete_and_manual_calls_never_publish_failed_save(self):
+        for stage, count in (("inventory-summary-save", 201), ("enrollment-save", 1)):
+            for post in (False, True):
+                with self.subTest(stage=stage, post=post):
+                    self.reset_case(count=count)
+                    baseline = copy.deepcopy(self.q)
+                    with self.fault(stage=stage, post=post):
+                        with self.assertRaisesRegex(crq.DiscoveryStorageFailed, stage):
+                            self.manual()
+                    self.assertEqual(self.q, baseline)
 
 
 class DeferredSourceSearchTest(unittest.TestCase):

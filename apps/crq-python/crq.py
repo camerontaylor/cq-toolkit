@@ -954,6 +954,51 @@ def current_report(request_id: str, receipt_id: Optional[str] = None, cursor: Op
     return review_receipt.read_receipt(STATE / "receipts", actual, cursor)
 
 
+class DiscoveryStorageFailed(RuntimeError):
+    """Durability is uncertain: abort this tick before any further effects."""
+
+
+def _save_discovery_queue(q, stage):
+    try:
+        save_queue(q)
+    except OSError:
+        raise DiscoveryStorageFailed("merged discovery storage failure: " + stage +
+                                     "; tick aborted; persisted progress must be revalidated") from None
+
+
+def _read_reconcile_wrapper(path, interval, page_budget):
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        raise merged_reconcile.ReconcileRefused("wrapper-decode: invalid text") from None
+    except OSError:
+        raise DiscoveryStorageFailed("merged discovery storage failure: wrapper-read; tick aborted") from None
+    try:
+        wrapper = json.loads(text)
+    except (ValueError, RecursionError):
+        raise merged_reconcile.ReconcileRefused("wrapper-decode: invalid JSON") from None
+    if (not isinstance(wrapper, dict) or set(wrapper) != {"source", "checkpoint", "digest"} or
+            not isinstance(wrapper["source"], dict)):
+        raise merged_reconcile.ReconcileRefused("wrapper-schema: required fields malformed")
+    source = wrapper["source"]
+    if (set(source) != {"version", "method", "repo", "base", "repository_id", "ceiling", "window"} or
+            type(source.get("version")) is not int or source["version"] != 1 or
+            source.get("method") != "all-number-slots-v1" or source.get("repo") != REPO or
+            source.get("base") != "merge-queue" or source.get("window") != merged_reconcile.NUMBER_WINDOW or
+            not isinstance(source.get("repository_id"), str) or not source["repository_id"] or
+            type(source.get("ceiling")) is not int or
+            not 0 <= source["ceiling"] <= merged_reconcile.MAX_REPOSITORY_NUMBER):
+        raise merged_reconcile.ReconcileRefused("wrapper-schema: source identity malformed")
+    if wrapper["digest"] != review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"}):
+        raise merged_reconcile.ReconcileRefused("source/checkpoint wrapper digest mismatch")
+    if wrapper["checkpoint"] is not None:
+        wrapper["checkpoint"] = merged_reconcile.load_checkpoint(wrapper["checkpoint"], interval, page_budget,
+            repo=REPO, base="merge-queue", allow_complete=True)
+    return wrapper
+
+
 def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     """Caller owns tick.lock; persist source/page before reads and Q1 before watermark."""
     interval = merged_reconcile.normalize_interval(after, before)
@@ -962,14 +1007,14 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     merged_reconcile.normalize_page_budget(page_budget)
     key = review_receipt.digest({"repo": REPO, "base": "merge-queue", **interval})
     path = STATE / "reconcile" / (key + ".json")
-    wrapper = json.loads(path.read_text()) if path.exists() else None
-    if wrapper is not None and (not isinstance(wrapper, dict) or
-            wrapper.get("digest") != review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})):
-        raise merged_reconcile.ReconcileRefused("source/checkpoint wrapper digest mismatch")
+    wrapper = _read_reconcile_wrapper(path, interval, page_budget)
 
     def save_wrapper():
         wrapper["digest"] = review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})
-        repair_tick.atomic(path, wrapper)
+        try:
+            repair_tick.atomic(path, wrapper)
+        except OSError:
+            raise DiscoveryStorageFailed("merged discovery storage failure: wrapper-save; tick aborted") from None
 
     def forge(query):
         try:
@@ -1013,17 +1058,22 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
                 review_receipt.enroll(staged, **binding, request_id=entry["request_id"], at=iso())
             staged["merged_reconcile"] = summary
             # Completeness does not confer review credit, even on old done/skipped items.
-            save_queue(staged)
+            _save_discovery_queue(staged, "enrollment-save")
             q.clear()
             q.update(staged)
     elif not dry_run:
-        q["merged_reconcile"] = summary
-        save_queue(q)
+        staged = json.loads(json.dumps(q))
+        staged["merged_reconcile"] = summary
+        _save_discovery_queue(staged, "inventory-summary-save")
+        q.clear()
+        q.update(staged)
     return summary
 
 
 def discover_merged(q, budget):
     """Natural nonselective tick, same bounded inventory and overlap replay."""
+    caller = q
+    q = json.loads(json.dumps(q))
     active = q.get("merged_discovery") or {}
     if active and not active.get("complete"):
         after, before = active["after"], active["before"]
@@ -1037,19 +1087,23 @@ def discover_merged(q, budget):
     # before page one must not cause the next tick to choose a different upper.
     if not active or active.get("complete"):
         q["merged_discovery"] = {"after": after, "before": before, "complete": False}
-        save_queue(q)
+        _save_discovery_queue(q, "bounds-save")
     try:
         with forge_window(budget):
             result = reconcile_merged(q, after=after, before=before, page_budget=4)
         q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
-        save_queue(q)
+        _save_discovery_queue(q, "discovery-summary-save")
         if result["complete"]:
             q["merged_watermark"] = before
-            save_queue(q)
+            _save_discovery_queue(q, "watermark-save")
+        caller.clear()
+        caller.update(q)
         return [f"merged discovery: complete={result['complete']} represented={result['represented']}"]
     except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
         q["merged_discovery"]["error"] = str(exc)[:200]
-        save_queue(q)
+        _save_discovery_queue(q, "refusal-debt-save")
+        caller.clear()
+        caller.update(q)
         return ["merged discovery incomplete; cursor/debt retained: " + str(exc)[:200]]
 
 

@@ -544,10 +544,6 @@ class DurableBoundaryTests(unittest.TestCase):
         self.assertEqual(result["summary"]["intents"], 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class NumericSourceTests(unittest.TestCase):
     def response(self, **fields):
         return {"data": {"repository": {"id": "R", "nameWithOwner": "owner/repo", **fields}}}
@@ -611,3 +607,7 @@ class NumericSourceTests(unittest.TestCase):
         with mock.patch.object(mr, "MAX_INVENTORY", 1), self.assertRaises(mr.ReconcileRefused):
             mr.reconcile_page(checkpoint, [pr(1, "2026-10-02T00:00:00Z"), pr(2, "2026-10-02T00:00:00Z")])
         self.assertEqual(checkpoint["inventory"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
