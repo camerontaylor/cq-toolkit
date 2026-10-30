@@ -1,3 +1,7 @@
+import type {
+  EvidencePreparationContext,
+  AnchorBlobInput,
+} from './internal/reviewEvidencePreparation.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -54,6 +58,8 @@ import { foldKnownUsageSummaries, type KnownUsageSummary } from '../../shared/kn
 export interface ReviewRunInput {
   repoRoot: string;
   uncommitted?: boolean;
+  /** Produce and validate anchored evidence, with at most two repair requests. */
+  prepareEvidence?: boolean;
   target?: string;
   base?: string;
   maxTokens?: number;
@@ -601,7 +607,49 @@ export function makeReviewRun(
                   const reviewedScope = input.uncommitted
                     ? ('uncommitted' as const)
                     : ('full' as const);
+                  let evidenceContext: EvidencePreparationContext | undefined;
+                  if (input.prepareEvidence) {
+                    const blobs = new Map<string, AnchorBlobInput>();
+                    for (const component of components) {
+                      const readBlob = async (revision: string) => {
+                        const result = await effects.runCommand(
+                          'git',
+                          ['show', `${revision}:${component.path}`],
+                          {
+                            timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
+                            ...(deadline.signal ? { signal: deadline.signal } : {}),
+                          },
+                        );
+                        return result.exitCode === 0 ? result.stdout : undefined;
+                      };
+                      const base = await readBlob(reviewedBase);
+                      const head = input.uncommitted
+                        ? await readFile(join(input.repoRoot, component.path), 'utf8').catch(
+                            () => undefined,
+                          )
+                        : await readBlob(state.head);
+                      const baseHunks: { start: number; end: number }[] = [];
+                      const headHunks: { start: number; end: number }[] = [];
+                      for (const match of component.text.matchAll(
+                        /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm,
+                      )) {
+                        baseHunks.push({
+                          start: Number(match[1]),
+                          end: Number(match[1]) + Number(match[2] ?? 1),
+                        });
+                        headHunks.push({
+                          start: Number(match[3]),
+                          end: Number(match[3]) + Number(match[4] ?? 1),
+                        });
+                      }
+                      if (component.component.startsWith('untracked:') && head !== undefined)
+                        headHunks.push({ start: 1, end: head.split('\n').length + 1 });
+                      blobs.set(component.path, { base, head, baseHunks, headHunks });
+                    }
+                    evidenceContext = { blobs, renames: new Map() };
+                  }
                   const agent = await runReview(deps.drivers, {
+                    ...(evidenceContext === undefined ? {} : { evidenceContext }),
                     repoRoot: input.repoRoot,
                     head: state.head,
                     branch: state.branch,

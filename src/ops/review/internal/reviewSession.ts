@@ -10,7 +10,11 @@ import { defaultHarnessConfig } from '../../../harness/config.js';
 import { currentJobContext } from '../../../kernel/governor.js';
 import type { OpResult } from '../../../kernel/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../../dev/denylist.js';
-import type { Finding } from '../findings.js';
+import { FindingEvidenceV1Schema, type Finding, type FindingEvidenceV1 } from '../findings.js';
+import {
+  prepareFindingEvidence,
+  type EvidencePreparationContext,
+} from './reviewEvidencePreparation.js';
 import type { ReviewCoverageV2 } from './reviewCoverageV2.js';
 
 // A finding item STRIPS unknown keys (S7 attempts G/H: GLM added
@@ -29,6 +33,7 @@ const OutputSchema = z
         rule: z.string().optional(),
         severity: z.enum(['high', 'medium', 'low']),
         text: z.string().min(1),
+        evidenceV1: FindingEvidenceV1Schema.optional(),
       }),
     ),
   })
@@ -127,6 +132,7 @@ export async function runReviewSession(
     signal: AbortSignal;
     scanSecrets: DiffSecretScanner;
     components: readonly ScanComponentInput[];
+    evidenceContext?: EvidencePreparationContext;
     plan: PlannedReviewSession;
     evidence: ReviewCoverageV2['sessions'][number];
     onUsage: (usage: Usage) => void;
@@ -141,7 +147,11 @@ export async function runReviewSession(
     sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   },
 ): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass; fatal?: boolean }> {
-  const { plan, evidence, signal } = input;
+  const { evidence, signal } = input;
+  const plan = { ...input.plan };
+  if (input.evidenceContext !== undefined)
+    plan.prompt +=
+      '\nFor every finding emit evidenceV1: {version:1,failureScenario:string,primary:{file,side:"base"|"head",start,end,quote},supporting:[]}. Quote exact complete source lines at their original line numbers. Read the source to verify anchors. Primary must overlap changed hunks; supporting may contain at most five anchors with relevance.';
   if (evidence.deliveries.length > 0 || evidence.requests.length > 0)
     throw new Error('agent review session evidence must start empty');
   const sources = new Map(input.components.map((component) => [component.component, component]));
@@ -352,6 +362,61 @@ export async function runReviewSession(
       fatal: true,
     };
   }
+  if (input.evidenceContext !== undefined) {
+    for (const item of parsed.data.findings) {
+      const original = item.evidenceV1;
+      const repairs: FindingEvidenceV1[] = [];
+      let candidate = original;
+      let prepared =
+        candidate === undefined
+          ? undefined
+          : prepareFindingEvidence({
+              candidate,
+              context: input.evidenceContext,
+            });
+      const initialPrompt = plan.prompt;
+      for (let turn = 0; turn < 2 && prepared?.status !== 'valid'; turn++) {
+        if (!canRetry()) break;
+        plan.prompt =
+          initialPrompt +
+          '\nRepair only the evidence for this exact finding. Return one finding with unchanged text, severity, file, line and rule. ' +
+          JSON.stringify({
+            finding: item,
+            reasons: prepared?.status === 'invalid' ? prepared.reasons : ['missing-evidence'],
+          });
+        const repaired = await runDriver(input.maxTokens - spent);
+        settle(repaired);
+        if (repaired.stopReason !== 'complete') break;
+        const output = OutputSchema.safeParse(repaired.structuredOutput);
+        const replacement =
+          output.success && output.data.findings.length === 1 ? output.data.findings[0] : undefined;
+        if (
+          replacement === undefined ||
+          replacement.text !== item.text ||
+          replacement.file !== item.file ||
+          replacement.line !== item.line ||
+          replacement.rule !== item.rule ||
+          replacement.severity !== item.severity ||
+          replacement.evidenceV1 === undefined
+        )
+          continue;
+        if (candidate === undefined) candidate = replacement.evidenceV1;
+        else repairs.push(replacement.evidenceV1);
+        prepared = prepareFindingEvidence({ candidate, repairs, context: input.evidenceContext });
+      }
+      plan.prompt = initialPrompt;
+      if (prepared !== undefined) {
+        input.onAdvisories?.(['evidence preparation: ' + JSON.stringify(prepared)]);
+        item.evidenceV1 =
+          prepared.status === 'valid'
+            ? prepared.evidence
+            : {
+                ...prepared.candidates[prepared.candidates.length - 1]!.evidence,
+                validation: { status: 'invalid', reasons: [...prepared.reasons] },
+              };
+      } else input.onAdvisories?.(['evidence preparation: missing evidence after bounded repairs']);
+    }
+  }
   return {
     status: 'ok',
     value: parsed.data.findings.map((item, index) => ({
@@ -363,6 +428,7 @@ export async function runReviewSession(
       severity: input.severityMap[item.severity] ?? 'minor',
       text: item.text,
       status: 'open',
+      ...(item.evidenceV1 === undefined ? {} : { evidenceV1: item.evidenceV1 }),
     })),
   };
 }

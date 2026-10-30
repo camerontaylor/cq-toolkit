@@ -1,3 +1,4 @@
+import type { EvidencePreparationContext } from './internal/reviewEvidencePreparation.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { ModelSpec } from '../../driver/types.js';
 import { boundedErrorText } from '../../driver/error-text.js';
@@ -22,6 +23,7 @@ import {
 import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 export interface AgentReviewerInput {
+  evidenceContext?: EvidencePreparationContext;
   repoRoot: string;
   head: string;
   branch: string;
@@ -341,6 +343,9 @@ export async function runAgentReviewer(
             scanSecrets: input.scanSecrets,
             components,
             plan: session,
+            ...(input.evidenceContext === undefined
+              ? {}
+              : { evidenceContext: input.evidenceContext }),
             evidence,
             logToolFailures: input.logToolFailures ?? false,
             onUsage: (usage) => {
@@ -444,6 +449,19 @@ export async function runAgentReviewer(
         return {
           status: 'needs-human',
           reason: incompleteReason(report.coverage),
+          report: snapshot()!,
+        };
+      if (
+        report.findings.some(
+          (finding) =>
+            input.evidenceContext !== undefined &&
+            (finding.evidenceV1 === undefined ||
+              finding.evidenceV1.validation?.status === 'invalid'),
+        )
+      )
+        return {
+          status: 'needs-human',
+          reason: 'agent evidence preparation incomplete after bounded repairs',
           report: snapshot()!,
         };
       return { status: 'ok', value: snapshot()! };
