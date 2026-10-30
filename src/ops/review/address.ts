@@ -19,7 +19,7 @@ import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { fetchReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import { requestReviewers } from '../../adapters/forge-github/requestReviewers.js';
 import { fileWorktreeRegistry, type WorktreeRegistry } from '../../adapters/git/prWorktree.js';
-import { loopReplyVerdict, replySignature, runReviewLoop } from '../../plans/review-loop.js';
+import { loopReplyVerdict, replySignature } from '../../plans/review-loop.js';
 import { parseCqConfig, type CqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults, requireAgenticTokenBudget } from '../analyze/cqConfigDefaults.js';
 import { makeDevDisposition } from '../dev/disposition.js';
@@ -61,7 +61,17 @@ import {
   type FixReviewItemResult,
 } from './fixReviewItem.js';
 import { readWorkState } from '../dev/internal/workState.js';
-import { makeGitMutex } from '../../shared/gitMutex.js';
+import {
+  addressChildSignal,
+  addressCancelledResult,
+  noteAddressOpaqueInvocation,
+  bindAddressTerminalReport,
+  addressTerminalWorkerBinding,
+  isAddressOwnershipAdmissionRefusal,
+  runAddressReviewLoop,
+  withAddressOwnership,
+  type AddressLease,
+} from './internal/addressOwnership.js';
 import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/record.js';
 
 export interface ReviewAddressInput {
@@ -209,7 +219,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
   return async (input: ReviewAddressInput): Promise<ReviewAddressResult> => {
     const start = Date.now();
     const enclosingContext = currentJobContext();
-    const parent = enclosingContext?.signal;
+    const ownershipAbort = new AbortController();
+    const parent = AbortSignal.any(
+      [enclosingContext?.signal, addressChildSignal(), ownershipAbort.signal].filter(
+        (signal): signal is AbortSignal => signal !== undefined,
+      ),
+    );
+    let addressLease: AddressLease | undefined;
     const journalDir = resolve(
       input.journalDir ?? resolve(input.repoRoot, '..', '.cq-address-runs', randomUUID()),
     );
@@ -315,6 +331,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       reason = '',
       structuredStop?: 'round-cap' | 'rereview-blocked' | 'budget',
     ): Promise<ReviewAddressResult> => {
+      if (parent?.aborted) {
+        delete report.stop;
+        if (!report.reasons.includes('parent cancelled')) report.reasons.push('parent cancelled');
+        if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
+        if (worker) report.escalation = worker.escalation();
+        return addressCancelledResult(addressLease);
+      }
       if (reason) report.reasons.push(reason);
       let publicationFailed = false;
       if (publishOnExit && !parent?.aborted) {
@@ -465,7 +488,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       ).size;
       if (worker) report.escalation = worker.escalation();
       try {
+        if (parent?.aborted) return finish('needs-human', 'parent cancelled');
+        if (addressLease) await addressLease.assertOwned();
         await mkdir(journalDir, { recursive: true });
+        if (parent?.aborted) return finish('needs-human', 'parent cancelled');
+        if (addressLease) await addressLease.assertOwned();
         await writeFile(report.reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
       } catch (error) {
         return {
@@ -474,6 +501,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           report,
         };
       }
+      if (parent?.aborted) return finish('needs-human', 'parent cancelled');
       if (status === 'ok') return { status, value: report };
       const detail = `${reason || report.reasons.join('; ') || 'open blocking findings or incomplete review'}; report: ${report.reportPath}`;
       return status === 'failed'
@@ -541,7 +569,27 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             enclosingContext.reportResult(measurement);
         }
       };
-      const drivers = deps.drivers ?? createDriverFactory();
+      const rawDrivers = deps.drivers ?? createDriverFactory();
+      const drivers: DriverFactory = {
+        resolve(request) {
+          const resolved = rawDrivers.resolve(request);
+          return {
+            ...resolved,
+            driver: {
+              ...resolved.driver,
+              run: (input, options) => {
+                if (!addressLease) throw new Error('address ownership: driver before acquisition');
+                return addressLease.track(() =>
+                  resolved.driver.run(input, {
+                    ...options,
+                    signal: options?.signal ? AbortSignal.any([parent, options.signal]) : parent,
+                  }),
+                );
+              },
+            },
+          };
+        },
+      };
       // Review source calls share the same landed usage meter as fix/feedback/closure calls.
       const reviewDrivers: DriverFactory = {
         resolve(request) {
@@ -567,7 +615,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         | ((evidence: { receiptId: string; path: string }) => Promise<void>)
         | undefined;
       let noteLedgerWriteImpl: ((branch: string, repoRoot: string) => Promise<void>) | undefined;
-      const reviewImplementation =
+      const rawReviewImplementation =
         deps.review ??
         makeReviewRun({
           drivers: reviewDrivers,
@@ -585,9 +633,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             await noteLedgerWriteImpl?.(branch, repoRoot);
           },
         });
-      const git =
+      const reviewImplementation: typeof rawReviewImplementation = (input) => {
+        if (!addressLease) throw new Error('address ownership: review before acquisition');
+        return addressLease.track(() => {
+          if (deps.review) noteAddressOpaqueInvocation(addressLease!);
+          return rawReviewImplementation(input);
+        });
+      };
+      const rawGit =
         deps.git ??
         makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: Math.min(cap, 60_000) });
+      // The ownership helper alone uses rawGit for read-only bootstrap.
+      // Every operational command, including injected runners, needs an owner.
+      const git: GhFn = async (args) => {
+        if (!addressLease) throw new Error('address ownership: command before acquisition');
+        parent.throwIfAborted();
+        await addressLease.assertOwned();
+        return rawGit(args);
+      };
       const gh =
         deps.gh ??
         makeGhRunner({
@@ -598,23 +661,64 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // Ownership spans worker edits as well as index mutation, restoration and
       // publication. Linked worktrees share this conservative exclusion domain;
       // UUID journal paths and lexical checkout aliases cannot split it.
-      const common = await git([
-        '-C',
-        input.repoRoot,
-        'rev-parse',
-        '--path-format=absolute',
-        '--git-common-dir',
-      ]);
-      if (common.code !== 0 || !common.stdout.trim())
-        throw new Error('checkout ownership identity unavailable');
-      const commonPath = resolve(input.repoRoot, common.stdout.trim());
-      await mkdir(commonPath, { recursive: true });
-      const ownership = makeGitMutex({
-        lockPath: resolve(await realpath(commonPath), 'cq-review-address-ownership'),
-        failFast: true,
-      });
-      return await ownership.withLock(async () => {
+      const withOwnership = async (
+        action: (lease: AddressLease) => Promise<ReviewAddressResult>,
+      ) => {
+        let entered = false;
         try {
+          return await withAddressOwnership(
+            {
+              repoRoot: input.repoRoot,
+              git: rawGit,
+              source: input.source,
+              production: Object.keys(deps).length === 0,
+              controller: ownershipAbort,
+              signal: parent,
+            },
+            (lease) => {
+              entered = true;
+              return action(lease);
+            },
+          );
+        } catch (cause) {
+          let detail = 'unprintable ownership error';
+          try {
+            detail = String(cause instanceof Error ? cause.message : cause);
+          } catch {
+            // Error formatting cannot reenter effectful finalization.
+          }
+          if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
+            const { stop: _stop, ...observed } = report;
+            return {
+              status: 'needs-human' as const,
+              reason: detail,
+              report: {
+                ...observed,
+                reasons: observed.reasons.includes(detail)
+                  ? [...observed.reasons]
+                  : [...observed.reasons, detail],
+              },
+            };
+          }
+          const error = `address lifetime finalization failed; durability unconfirmed: ${detail}`;
+          const { stop: _stop, ...observed } = report;
+          return {
+            status: 'failed' as const,
+            error,
+            report: {
+              ...observed,
+              reasons: observed.reasons.includes(error)
+                ? [...observed.reasons]
+                : [...observed.reasons, error],
+            },
+          };
+        }
+      };
+      return await withOwnership(async (lease) => {
+        addressLease = lease;
+        await bindAddressTerminalReport(lease, report);
+        try {
+          await lease.assertOwned();
           await mkdir(journalDir, { recursive: true });
           const bookkeepingKey = async (root: string, path: string) =>
             resolve(await realpath(root), path);
@@ -827,8 +931,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               throw error;
             }
           };
-          const bindWorker = (root: string) =>
-            (worker ??= (deps.workerFactory ?? makeAddressWorker)({
+          const bindWorker = (root: string): AddressWorker => {
+            if (worker) return worker;
+            const workerDeps: Parameters<typeof makeAddressWorker>[0] = {
               repoRoot: root,
               dependencyRoot: input.repoRoot,
               journalDir,
@@ -863,7 +968,32 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               remainingWallMs,
               account,
               ...(parent ? { parentSignal: parent } : {}),
-            }));
+            };
+            const implementation = deps.workerFactory
+              ? deps.workerFactory(workerDeps)
+              : makeAddressWorker({
+                  ...workerDeps,
+                  terminalBinding: addressTerminalWorkerBinding(lease),
+                });
+            worker = {
+              fix: (finding, round) =>
+                lease.track(() => {
+                  if (deps.workerFactory) noteAddressOpaqueInvocation(lease);
+                  return implementation.fix(finding, round);
+                }),
+              escalation: () => implementation.escalation(),
+              ...(implementation.withVerifiedHead
+                ? {
+                    withVerifiedHead: <T>(action: (head: string) => Promise<T>) =>
+                      lease.track(() => {
+                        if (deps.workerFactory) noteAddressOpaqueInvocation(lease);
+                        return implementation.withVerifiedHead!(action);
+                      }),
+                  }
+                : {}),
+            };
+            return worker;
+          };
           const publicationTreeClean = async (root: string) => {
             // A later engine rewrite must not erase an observed ownership violation.
             if (bookkeepingTampered) return false;
@@ -1268,6 +1398,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   allowAdvisoryProvenance: 'product',
                 },
               );
+              if (parent?.aborted) {
+                noteRound(round, record, run);
+                return;
+              }
               for (const row of run.jobs) {
                 if (row.result.status !== 'ok') {
                   report.reasons.push(`finding job ${row.jobId}: ${issue(row.result)}`);
@@ -1518,6 +1652,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
+                  if (parent?.aborted)
+                    return {
+                      status: 'needs-human',
+                      reason: 'parent cancelled; disposition withheld',
+                    };
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
                   remember(fix);
@@ -1554,7 +1693,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   return { status: 'ok', value };
                 },
               };
-              const loop = await runReviewLoop({
+              const loop = await runAddressReviewLoop(lease, {
                 owner: meta.owner,
                 repo: meta.repo,
                 pr: meta.pr,
@@ -1565,7 +1704,20 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 git,
                 registry:
                   deps.worktreeRegistry ??
+                  lease.registry ??
                   fileWorktreeRegistry(resolve(journalDir, 'worktrees.json')),
+                ...(lease.expectedHead ? { expectedHead: lease.expectedHead } : {}),
+                beforeWorktreeResolve: () =>
+                  lease.assertSelection({
+                    pr: meta.pr,
+                    headRepo: meta.headRepo ?? `${meta.owner}/${meta.repo}`,
+                    headRefName: meta.headRefName,
+                  }),
+                onWorktreeResolved: async (info) =>
+                  lease.claimCheckout({
+                    ...info,
+                    head: await gitText(info.path, ['rev-parse', 'HEAD']),
+                  }),
                 driver: policy.roles.worker!,
                 driverRegistryView: {
                   get: (name) => (name === 'review.fixItem' ? entry : undefined),
@@ -1594,6 +1746,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   );
                 },
                 onWorktreeStaleRefresh: async () => {
+                  await lease.assertOwned();
                   // The refresh removal refused on untracked files. Clear
                   // ONLY what the existing receipt strictly attests as
                   // engine-owned (identity/root/branch/head, path allowlist
@@ -1606,6 +1759,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   return true;
                 },
                 onWorktreeCreated: async () => {
+                  await lease.assertOwned();
                   // Engine-verified creation of the per-PR worktree: any
                   // receipt from a previous checkout instance describes a
                   // root/head this run did not create. Retire it so the fresh
@@ -1912,7 +2066,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             error instanceof Error ? error.message : String(error),
           );
         }
-      }, parent);
+      });
     } catch (error) {
       return await finish('needs-human', error instanceof Error ? error.message : String(error));
     }
