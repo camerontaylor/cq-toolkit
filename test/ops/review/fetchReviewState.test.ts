@@ -801,3 +801,26 @@ describe('fetchReviewState', () => {
     await expect(fetchReviewState(INPUT, {}, run)).rejects.toThrow(/permission denied/);
   });
 });
+
+test('rate limiting on page two never returns page one as a complete review snapshot', async () => {
+  const cursors: string[] = [];
+  const firstPage = fakeGh({
+    graphql: () =>
+      graphqlPayload(
+        { hasNextPage: true, endCursor: 'page-two', nodes: [threadNode('thread-1')] },
+        { hasNextPage: false, endCursor: null, nodes: [] },
+      ),
+  });
+  const run: GhFn = async (args) => {
+    if (args.includes('graphql')) {
+      const cursor = flagValue(args, 'threadsAfter');
+      cursors.push(cursor);
+      if (cursor === 'page-two') {
+        return { code: 1, stdout: '', stderr: 'HTTP 403: API rate limit exceeded' };
+      }
+    }
+    return firstPage(args);
+  };
+  await expect(fetchReviewState(INPUT, {}, run)).rejects.toBeInstanceOf(GhError);
+  expect(cursors).toEqual(['', 'page-two']);
+});

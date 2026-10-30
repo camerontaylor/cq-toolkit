@@ -888,3 +888,29 @@ test('bounded reports preserve consistent skipped and todo totals', () => {
     }).verdict,
   ).toBe('indeterminate');
 });
+
+test.each(['vitest-json', 'eslint-json'] as const)(
+  '%s retains captured failures even if the process erroneously exits zero',
+  (adapter) => {
+    const stdout = fixture(adapter === 'vitest-json' ? 'vitest.json' : 'eslint.json');
+    const failed = parseWith(adapter, { stdout, stderr: '', exitCode: 1 });
+    const zeroExit = parseWith(adapter, { stdout, stderr: '', exitCode: 0 });
+    expect(failed.verdict).toBe('parsed');
+    expect(zeroExit.verdict).toBe('parsed');
+    if (failed.verdict !== 'parsed' || zeroExit.verdict !== 'parsed') return;
+    expect(failed.set.failures.length).toBeGreaterThan(0);
+    expect(zeroExit.set.failures).toEqual(failed.set.failures);
+  },
+);
+
+test('ESLint captured error counts cannot certify cleanliness after diagnostic details are lost (I5)', () => {
+  // Fault injection into the recorded ESLint output, not a new claimed capture.
+  const entries = JSON.parse(fixture('eslint.json')) as Array<Record<string, unknown>>;
+  expect(
+    entries.some((entry) => typeof entry.errorCount === 'number' && entry.errorCount > 0),
+  ).toBe(true);
+  const stdout = JSON.stringify(entries.map((entry) => ({ ...entry, messages: [] })));
+  expect(parseWith('eslint-json', { stdout, stderr: '', exitCode: 0 }).verdict).toBe(
+    'indeterminate',
+  );
+});

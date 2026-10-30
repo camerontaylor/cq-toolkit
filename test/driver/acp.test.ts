@@ -2955,3 +2955,20 @@ describe('acp driver seam v2 §2.3 (S3): invocation outputSchema + output-invali
     });
   });
 });
+
+test('an output-invalid invocation does not leak its schema into the next run on the same driver', async () => {
+  await withScratch(async (scratchDir) => {
+    const calls: SpawnCall[] = [];
+    const driver = new AcpDriver(
+      driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":42}' }, calls),
+    );
+    const invalid = await driver.run(invocation({ outputSchema: S3_ANSWER_SCHEMA }));
+    expect(invalid.stopReason).toBe('error');
+    expect(invalid.errorClass).toBe('output-invalid');
+    const independent = await driver.run(invocation({ prompt: 'plain text, no schema' }));
+    expect(independent.stopReason).toBe('complete');
+    expect(independent.structuredOutput).toBeUndefined();
+    expect(independent.errorClass).toBeUndefined();
+    expect(calls).toHaveLength(2);
+  });
+});

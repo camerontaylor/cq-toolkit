@@ -109,3 +109,15 @@ test('occurrence fingerprints preserve multiplicity and distinguish signatures r
   expect(all.fixedFingerprints).toHaveLength(2);
   expect(recordFixedFailures(all, before, failures(0)).fixedFingerprints).toHaveLength(2);
 });
+
+test('exhausting one package escalates it without spending another package rescue slot', () => {
+  const bounded = { ...policy, rescueBase: 2, rescuePerPackageCap: 1 };
+  const first = nextEscalation(createEscalationState(), bounded, request);
+  const exhausted = nextEscalation(first.state, bounded, { ...request, rescueUsed: 1 });
+  expect(exhausted.decision.tier).toBe('human');
+  expect(exhausted.state.perRunUsed).toBe(1);
+  const independent = nextEscalation(exhausted.state, bounded, { ...request, package: 'other' });
+  expect(independent.decision).toMatchObject({ tier: 'rescue', attempt: 1 });
+  expect(independent.state.perRunUsed).toBe(2);
+  expect(first.state.perRunUsed).toBe(1);
+});

@@ -105,6 +105,41 @@ class PromotionRetryTest(unittest.TestCase):
         self.mock_now = self.clock.start()
         self.addCleanup(self.clock.stop)
 
+    def test_repeated_observation_of_promoted_batch_closes_once_without_dispatch_or_push(self):
+        q = make_queue()
+        item = q['items'][0]
+        with mock.patch.object(crq, 'main_sha', return_value=BATCH), \
+             mock.patch.object(crq, 'is_ancestor', side_effect=lambda a, b: a == b), \
+             mock.patch.object(crq, 'cut_promotion') as cut, \
+             mock.patch.object(crq, 'newest_green_tip', return_value=None), \
+             mock.patch.object(crq, 'git', return_value='0'):
+            crq.promotion_tick(q, dry=False)
+            self.assertEqual(item['state'], 'done')
+            self.assertEqual(q['promotion']['last_promoted_sha'], BATCH)
+            crq.promotion_tick(q, dry=False)
+        self.assertEqual(item['state'], 'done')
+        self.assertEqual(sum(c.args[0] == 'promoted' for c in self.mock_event.call_args_list), 1)
+        self.assertFalse(any(c.args[0][0] in ('gh', 'git') for c in self.mock_run.call_args_list))
+        cut.assert_not_called()
+
+    def test_signer_success_cannot_advance_a_different_request_identity(self):
+        for field in ('item', 'base_sha', 'batch_sha', 'request_sha256'):
+            with self.subTest(field=field):
+                q = make_queue(state='signer_pending', signer=True)
+                item = q['items'][0]
+                item['request'] = {'sha256': 'd' * 64, 'requested_at': success_at(1)}
+                result = {'item': item['id'], 'base_sha': BASE, 'batch_sha': BATCH,
+                          'request_sha256': 'd' * 64, 'outcome': 'completed',
+                          'posted_state': 'success'}
+                result[field] = 'forged'
+                snapshot = {'result': json.dumps(result), 'claimed': True, 'request': False}
+                with mock.patch.object(crq.SPOOL, 'snapshot', return_value=snapshot):
+                    crq.harvest_signer(q, item, dry=False)
+                self.assertEqual(item['state'], 'signer_pending')
+                self.assertNotIn('signer_result', item)
+                self.assertNotIn('attempts', item)
+        self.mock_run.assert_not_called()
+
     def gh_calls(self):
         return [c for c in self.mock_run.call_args_list if c.args[0][0] == "gh"]
 

@@ -2648,3 +2648,19 @@ describe('bindQueueAuthorization — the object cq-verify consumes', () => {
     }
   });
 });
+
+test('a newer success for another queue tip cannot override the current tip failure', () => {
+  const currentFailure = run({ id: 10, conclusion: 'failure' });
+  const staleSuccess = run({
+    id: 11,
+    head_sha: H2,
+    external_id: `${MAIN}:${H2}`,
+    completed_at: '2026-09-02T00:00:00Z',
+  });
+  for (const rows of [
+    [currentFailure, staleSuccess],
+    [staleSuccess, currentFailure],
+  ]) {
+    expect(selectVerdict(rows, appWant)).toMatchObject({ state: 'failure', winner: 10 });
+  }
+});

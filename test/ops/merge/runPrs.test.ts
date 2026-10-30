@@ -1237,3 +1237,22 @@ describe('runMergePrs', () => {
     }
   });
 });
+
+test('a forge rate-limit refusal does not retry or prevent an independent PR from merging', async () => {
+  const effects = new FakeMergeEffects();
+  const original = effects.mergePr.bind(effects);
+  effects.mergePr = async (pr, opts) => {
+    if (pr === 44) {
+      effects.calls.push('rate-limit:44');
+      return { code: 1, stdout: '', stderr: 'HTTP 403: API rate limit exceeded' };
+    }
+    return original(pr, opts);
+  };
+  const { resolve, calls } = fakeResolve(acted(999));
+  const outcome = await runMergePrs(baseInput([eligible(44), eligible(45)]), { effects, resolve });
+  expect(outcome.firstPass.merged).toEqual([45]);
+  expect(outcome.needsHuman.map((row) => row.pr)).toContain(44);
+  expect(outcome.secondPass).toBeNull();
+  expect(effects.calls.filter((call) => call === 'rate-limit:44')).toHaveLength(1);
+  expect(calls).toEqual([]);
+});

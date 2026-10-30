@@ -1011,6 +1011,44 @@ describe('subprocess cleanup effects (real git smoke)', () => {
     throw last;
   };
 
+  test('real cleanup preserves an aged directory whose branch carries a fresh unpushed commit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cleanup-unpushed-'));
+    try {
+      await run(['init', '-q', '-b', 'main', dir], dir);
+      await run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir);
+      await run(['-C', dir, 'config', 'user.name', 'T'], dir);
+      writeFileSync(join(dir, 'seed.txt'), 'seed');
+      await run(['-C', dir, 'add', 'seed.txt'], dir);
+      await run(['-C', dir, 'commit', '-qm', 'seed'], dir);
+      const worktreesDir = join(dir, 'trees');
+      const tree = join(worktreesDir, 'fix');
+      const branch = 'cq/preserve/fix/core';
+      await run(['-C', dir, 'worktree', 'add', '-b', branch, tree, 'main'], dir);
+      writeFileSync(join(tree, 'valuable.txt'), 'unpublished work');
+      await run(['-C', tree, 'add', 'valuable.txt'], dir);
+      await run(['-C', tree, 'commit', '-qm', 'valuable unpublished commit'], dir);
+      const tip = (await run(['-C', tree, 'rev-parse', 'HEAD'], dir)).trim();
+      const realEffects = makeSubprocessCleanupEffects(dir);
+      // A stale directory timestamp is insufficient: the real branch tip is fresh.
+      const effects = { ...realEffects, modifiedTimeMs: async () => 0 };
+      const result = await makeCleanup(effects)({
+        repoRoot: dir,
+        worktreesDir,
+        runPrefix: 'cq/preserve',
+        olderThanMs: 86_400_000,
+        dryRun: false,
+      });
+      expect(result.status).toBe('ok');
+      expect((await run(['-C', tree, 'rev-parse', 'HEAD'], dir)).trim()).toBe(tip);
+      expect((await run(['-C', tree, 'show', 'HEAD:valuable.txt'], dir)).trim()).toBe(
+        'unpublished work',
+      );
+      expect((await run(['-C', dir, 'rev-parse', branch], dir)).trim()).toBe(tip);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('init → worktree add → dirty: plain remove REJECTED by git → --force succeeds → branchTimeMs parses → branch -D works', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cleanup-smoke-'));
     try {

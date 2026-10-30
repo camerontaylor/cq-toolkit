@@ -231,3 +231,131 @@ class RenameScan(SignerTest):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SpoolContractBehaviour(SignerTest):
+    """signer/README.md: strict REQUEST and durable idempotency contract."""
+
+    def request(self):
+        return {'v': 1, 'kind': 'promotion', 'item': IID, 'base_sha': BASE,
+                'batch_sha': BATCH, 'requested_at': '2026-10-18T00:00:00Z'}
+
+    def test_valid_request_binds_the_exact_bytes_and_filename(self):
+        import hashlib
+        path = signer.REQUESTS / f'{IID}.json'
+        raw = json.dumps(self.request()).encode()
+        path.write_bytes(raw)
+        request, digest = signer.read_request(path)
+        self.assertEqual(request, self.request())
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+        renamed = path.with_name('promo-ffffffffff.json')
+        path.rename(renamed)
+        with self.assertRaises(signer.Reject):
+            signer.read_request(renamed)
+
+    def test_malformed_requests_never_reach_identity_or_paid_work(self):
+        token = mock.Mock(side_effect=AssertionError('must not mint a token'))
+        cli = mock.Mock(side_effect=AssertionError('must not start review'))
+        self.patch('install_token', token)
+        self.patch('run_cli', cli)
+        cases = [dict(self.request(), v=True), dict(self.request(), extra='untrusted'),
+                 dict(self.request(), base_sha='HEAD'), dict(self.request(), batch_sha=7),
+                 dict(self.request(), requested_at='2026-02-30T00:00:00Z'),
+                 dict(self.request(), kind='override'), [], None]
+        path = signer.REQUESTS / f'{IID}.json'
+        result_path = signer.RESULTS / f'{IID}.json'
+        for request in cases:
+            with self.subTest(request=request):
+                result_path.unlink(missing_ok=True)
+                path.write_text(json.dumps(request))
+                signer.process_request(path)
+                result = json.loads(result_path.read_text())
+                self.assertEqual((result['outcome'], result['posted_state']), ('rejected', 'none'))
+                self.assertFalse(path.exists())
+        token.assert_not_called()
+        cli.assert_not_called()
+
+    def test_either_durable_marker_suppresses_replay_even_for_invalid_payload(self):
+        token = mock.Mock(side_effect=AssertionError('replay reached token mint'))
+        cli = mock.Mock(side_effect=AssertionError('replay reached CLI'))
+        self.patch('install_token', token)
+        self.patch('run_cli', cli)
+        for suffix in ('json', 'claimed'):
+            with self.subTest(marker=suffix):
+                marker = signer.RESULTS / f'{IID}.{suffix}'
+                marker.write_bytes(b'original durable evidence')
+                path = signer.REQUESTS / f'{IID}.json'
+                path.write_text('{invalid replay')
+                signer.process_request(path)
+                self.assertEqual(marker.read_bytes(), b'original durable evidence')
+                self.assertFalse(path.exists())
+                marker.unlink()
+        token.assert_not_called()
+        cli.assert_not_called()
+
+    def test_symlinks_and_oversize_input_are_refused_without_reading_target(self):
+        path = signer.REQUESTS / f'{IID}.json'
+        target = self.root / 'private'
+        target.write_text(json.dumps(self.request()))
+        path.symlink_to(target)
+        with self.assertRaises(signer.Reject):
+            signer.read_request(path)
+        self.assertEqual(json.loads(target.read_text()), self.request())
+        path.unlink()
+        path.write_bytes(b' ' * 4097)
+        with self.assertRaises(signer.Reject):
+            signer.read_request(path)
+
+    def test_trusted_status_requires_all_identity_fields_and_newest_wins(self):
+        self.patch('REVIEWER_BOT_LOGIN', 'fixture-reviewer[bot]')
+        self.patch('REVIEWER_BOT_ID', 123456789)
+        creator = {'login': 'fixture-reviewer[bot]', 'id': 123456789, 'type': 'Bot'}
+        good = {'context': signer.STATUS_CONTEXT, 'state': 'failure', 'creator': creator}
+        forged = [dict(good, creator=dict(creator, **change)) for change in
+                  ({'id': 987654321}, {'login': 'lookalike[bot]'}, {'type': 'User'}, {'id': '123456789'})]
+        old_success = dict(good, state='success')
+        self.patch('commit_statuses', lambda *args: forged + [good, old_success])
+        self.assertIs(signer.newest_trusted_status('unused', 'fixture/repo', BATCH), good)
+
+
+class AppSignatureBehaviour(SignerTest):
+    """Local ephemeral keys only; prove the App JWT signature binds its bytes."""
+
+    def test_signature_verifies_only_for_the_original_header_and_claims(self):
+        import base64
+        import subprocess
+        key = self.root / 'fixture.pem'
+        metadata = self.root / 'fixture-app.json'
+        public = self.root / 'fixture.pub'
+        signature = self.root / 'signature.bin'
+        self.patch('PEM', key)
+        self.patch('APP_META', metadata)
+        metadata.write_text(json.dumps({'id': signer.REVIEWER_APP_ID,
+                                        'slug': 'cq-promotion-reviewer', 'client_id': 'fixture-client'}))
+        subprocess.run([signer.OPENSSL, 'genpkey', '-algorithm', 'RSA', '-pkeyopt',
+                        'rsa_keygen_bits:2048', '-out', str(key)], check=True, capture_output=True)
+        subprocess.run([signer.OPENSSL, 'pkey', '-in', str(key), '-pubout', '-out', str(public)],
+                       check=True, capture_output=True)
+        header, claims, sig = signer.app_jwt().split('.')
+        decode = lambda part: base64.urlsafe_b64decode(part + '=' * (-len(part) % 4))
+        self.assertEqual(json.loads(decode(header)), {'alg': 'RS256', 'typ': 'JWT'})
+        self.assertEqual(json.loads(decode(claims))['iss'], 'fixture-client')
+        signature.write_bytes(decode(sig))
+        verify = [signer.OPENSSL, 'dgst', '-sha256', '-verify', str(public), '-signature', str(signature)]
+        original = f'{header}.{claims}'.encode()
+        self.assertEqual(subprocess.run(verify, input=original, capture_output=True).returncode, 0)
+        self.assertNotEqual(subprocess.run(verify, input=original + b'x', capture_output=True).returncode, 0)
+
+    def test_forged_app_metadata_is_refused_before_signing(self):
+        key = self.root / 'fixture.pem'
+        key.write_text('deliberately not a key')
+        metadata = self.root / 'fixture-app.json'
+        metadata.write_text(json.dumps({'id': -1, 'slug': 'cq-promotion-reviewer',
+                                        'client_id': 'untrusted'}))
+        self.patch('PEM', key)
+        self.patch('APP_META', metadata)
+        run = mock.Mock(side_effect=AssertionError('must refuse before signing'))
+        self.patch('run', run)
+        with self.assertRaises(signer.Fatal):
+            signer.app_jwt()
+        run.assert_not_called()

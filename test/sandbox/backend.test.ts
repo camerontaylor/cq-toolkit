@@ -902,3 +902,15 @@ describe('launcher hardening (PR review)', () => {
     }
   });
 });
+
+test('child flags remain command arguments and cannot reopen container networking', () => {
+  const child = ['/usr/bin/printf', '--network', 'host', '--privileged'];
+  const argv = containerArgv({}, '/ws', 'model-only', '/private/child.env', child);
+  const imageAt = argv.indexOf(DEFAULT_SANDBOX_IMAGE);
+  expect(imageAt).toBeGreaterThan(0);
+  expect(argv.slice(imageAt + 1)).toEqual(child.slice(1));
+  expect(argv.slice(0, imageAt)).toContain('none');
+  expect(argv.slice(0, imageAt)).not.toContain('host');
+  expect(argv.slice(0, imageAt)).not.toContain('--privileged');
+  expect(argv.slice(0, imageAt)).toContain(`--entrypoint=${child[0]}`);
+});

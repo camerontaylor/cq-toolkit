@@ -1208,3 +1208,16 @@ describe('pruneBaselines', () => {
     });
   });
 });
+
+test('a missing summary between two valid captures cannot erase the last measured baseline', async () => {
+  sourceRaw = { count: 3 };
+  expect((await capture(captureInput())).status).toBe('ok');
+  const original = await readFile(join(ws, REL), 'utf8');
+  sourceRaw = null;
+  expect((await capture(captureInput({ capturedAt: CAPTURED_AT_2 }))).status).toBe('failed');
+  expect(await readFile(join(ws, REL), 'utf8')).toBe(original);
+  sourceRaw = { count: 2 };
+  const recovered = await capture(captureInput({ capturedAt: CAPTURED_AT_2 }));
+  expect(recovered).toMatchObject({ status: 'ok', value: { previous: 3, value: 2 } });
+  expect(parseBaseline(await readFile(join(ws, REL), 'utf8')).value).toBe(2);
+});
