@@ -122,3 +122,20 @@ test('oversized reservation never dispatches either PR', async () => {
   expect(result.report?.rows.every((row) => row.status === 'not-admitted')).toBe(true);
   expect(address).not.toHaveBeenCalled();
 });
+
+test('unclean summaries retain each PR reason when aggregate accounting is clean', async () => {
+  const address = vi.fn(async () => ({
+    status: 'needs-human' as const,
+    reason: 'reviewer unavailable',
+    report: report(),
+  }));
+  const result = await makeReviewAddressMany({ gh, address })(input);
+  expect(result.status).toBe('needs-human');
+  if (result.status !== 'needs-human') throw new Error('expected needs-human');
+  expect(result.reason).toContain('PR #1: reviewer unavailable');
+  expect(result.reason).toContain('PR #2: reviewer unavailable');
+  expect(result.report?.reasons).toEqual([
+    'PR #1: reviewer unavailable',
+    'PR #2: reviewer unavailable',
+  ]);
+});
