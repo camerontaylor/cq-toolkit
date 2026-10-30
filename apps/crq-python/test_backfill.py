@@ -14,6 +14,21 @@ AT = "2026-10-30T00:00:00Z"
 
 
 class OperatorTest(unittest.TestCase):
+    def test_release_queue_digest_handles_unicode_and_finite_diagnostics(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            queue = {"items": [{"id": "coverage-test", "kind": "coverage", "state": "blocked", "run": None}], "notes": "waiting — verify", "diagnostic": 1.5}
+            saved = []
+            c = SimpleNamespace(STATE=root, load_queue=lambda: queue, iso=lambda: AT, save_queue=lambda q: saved.append(q))
+            evidence = {"item": "coverage-test", "queue_digest": backfill.queue_digest_v1(queue), "checked_at": AT, "vendor_state": "terminal", "exact_no_live_run": True}
+            file = root / "evidence.json"; file.write_bytes(ledger.canonical(evidence))
+            args = SimpleNamespace(command="release", item="coverage-test", evidence=str(file), operator="fixture", reason="verified")
+            backfill.execute(c, args)
+            self.assertEqual(queue["items"][0]["state"], "skipped")
+            self.assertEqual(len(saved), 1)
+            with self.assertRaises(ValueError):
+                backfill.queue_digest_v1({"diagnostic": float("nan")})
+
     def test_history_retry_reuses_unpublished_outbox_record(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

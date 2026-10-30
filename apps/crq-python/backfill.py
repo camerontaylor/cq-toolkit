@@ -12,6 +12,12 @@ import finding_delivery
 import review_ledger as ledger
 
 
+def queue_digest_v1(queue):
+    """Bind evidence to the complete queue using the release JSON encoding."""
+    raw = json.dumps(queue, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def execute(c, args):
     queue = c.load_queue()
     config = runtime.settings(c.STATE)
@@ -20,8 +26,7 @@ def execute(c, args):
         item = next(i for i in queue["items"] if i["id"] == args.item)
         if evidence.get("item") != item["id"] or evidence.get("vendor_state") != "terminal" or not evidence.get("exact_no_live_run"):
             raise ledger.IntegrityError("evidence must bind this item and exact no-live-run verification")
-        queue_digest = hashlib.sha256(json.dumps(queue, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-        if evidence.get("queue_digest") != queue_digest:
+        if evidence.get("queue_digest") != queue_digest_v1(queue):
             raise ledger.IntegrityError("no-live-run evidence must bind the current queue snapshot")
         checked = ledger.timestamp(evidence.get("checked_at"))
         age = (ledger.timestamp(c.iso()) - checked).total_seconds()

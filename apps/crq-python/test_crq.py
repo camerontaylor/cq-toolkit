@@ -2219,6 +2219,47 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
 
 
 class CoverageFallbackTargetTest(unittest.TestCase):
+    def test_pending_candidate_obeys_real_historical_family_deadline(self):
+        import datetime as dt
+        at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
+        source = {"id": "source", "pr": 42, "kind": "merged",
+                  "measure": {"files": [{"path": "old.py", "now": "new.py"}]}}
+        old = {"id": "old", "kind": "coverage", "state": "blocked", "pr": 42,
+               "coverage_source": "source", "coverage_paths": ["new.py"], "failures": 3,
+               "attempts": [{"run_id": f"r{i}", "outcome": "error", "counted": False,
+                             "at": (at - dt.timedelta(hours=3-i)).isoformat(),
+                             "head": "a" * 40, "base": "b" * 40} for i in range(3)]}
+        pending = {"id": "new", "kind": "coverage", "state": "pending", "pr": 42,
+                   "coverage_source": "source", "coverage_paths": ["new.py"]}
+        q = {"items": [source, old, pending]}
+        with mock.patch.object(crq.backfill_runtime, "select", return_value=(None, False)), \
+             mock.patch.object(crq.backfill_runtime, "settings", return_value=None), \
+             mock.patch.object(crq, "git", return_value="a" * 40), \
+             mock.patch.object(crq, "now", return_value=at), \
+             mock.patch.object(crq, "deps_met", return_value=True), \
+             mock.patch.object(crq, "build_synthetic") as build:
+            self.assertEqual(crq.coverage_fallback(q, [], False, None), (None, False))
+        build.assert_not_called()
+        self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "old.py", at)["allowed"])
+        self.assertTrue(crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(hours=4))["allowed"])
+
+    def test_pending_legacy_candidate_obeys_family_cooldown_before_planning(self):
+        source = {"id": "source", "pr": 42, "kind": "merged",
+                  "measure": {"files": [{"path": "old.py", "now": "new.py"}]}}
+        item = {"id": "coverage", "kind": "coverage", "state": "pending",
+                "coverage_source": "source", "coverage_paths": ["new.py"]}
+        q = {"items": [source, item]}
+        with mock.patch.object(crq.backfill_runtime, "select", return_value=(None, False)), \
+             mock.patch.object(crq.backfill_runtime, "settings", return_value=None), \
+             mock.patch.object(crq, "git", return_value="a" * 40), \
+             mock.patch.object(crq, "deps_met", return_value=True), \
+             mock.patch.object(crq.coverage, "_legacy_retry_allowed", return_value=False) as gate, \
+             mock.patch.object(crq, "build_synthetic") as build:
+            self.assertEqual(crq.coverage_fallback(q, [], False, None), (None, False))
+        gate.assert_called_once()
+        build.assert_not_called()
+        self.assertIn("cooldown unresolved", item["wait_reason"])
+
     def test_measure_skips_repair_only_merged_item(self):
         repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}
         queue = {"items": [repair]}

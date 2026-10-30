@@ -112,7 +112,22 @@ class Repository:
         # --no-ext-diff/--no-textconv ensure repository configuration cannot run
         # helpers. Literal path/blob mapping comes from raw name-status + hunks.
         patch = self.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0", base, head).decode("utf-8", "replace")
-        for line in patch.splitlines():
+        old_left = new_left = 0
+        for line in patch.split("\n"):
+            if old_left or new_left:
+                if line.startswith(" "):
+                    old_left -= 1; new_left -= 1
+                elif line.startswith("-"):
+                    old_left -= 1
+                elif line.startswith("+"):
+                    new_left -= 1
+                elif line.startswith("\\ No newline at end of file"):
+                    continue
+                else:
+                    raise ledger.IntegrityError("malformed diff hunk")
+                if old_left < 0 or new_left < 0:
+                    raise ledger.IntegrityError("malformed diff hunk length")
+                continue
             if line.startswith("+++ b/"):
                 name = line[6:]
                 if name.startswith('"') or "\\" in name:
@@ -120,13 +135,19 @@ class Repository:
                 else:
                     current = name
                     result.setdefault(current, set())
-            elif line == "+++ /dev/null":
+            elif line.startswith("+++ "):
                 current = None
-            elif current and line.startswith("@@ "):
-                match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            elif line.startswith("@@ "):
+                match = re.match(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
                 if match:
-                    start, count = int(match[1]), int(match[2] or 1)
-                    result[current].update(range(start, start + count))
+                    old_left = int(match[1] if match[1] is not None else 1)
+                    start, new_left = int(match[2]), int(match[3] if match[3] is not None else 1)
+                    if current:
+                        result[current].update(range(start, start + new_left))
+                else:
+                    raise ledger.IntegrityError("malformed diff hunk header")
+        if old_left or new_left:
+            raise ledger.IntegrityError("truncated diff hunk")
         return result
 
     def verify_review(self, value):
@@ -200,6 +221,19 @@ class Repository:
             if current not in entries:
                 return None
         return current
+
+    def proven_deleted(self, old, new, name):
+        """Recognize only an unambiguous deletion; other missing lineage is unknown."""
+        old_entries, new_entries = self.entries(old), self.entries(new)
+        if name not in old_entries or name in new_entries:
+            return False
+        if old not in self.git("rev-list", "--first-parent", new).decode().splitlines():
+            return False
+        blob = old_entries[name]["blob"]
+        if sum(e["blob"] == blob for e in old_entries.values()) != 1 or any(e["blob"] == blob for e in new_entries.values()):
+            return False
+        changes = self.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", old, new).split(b"\0")
+        return changes == [b"D", name.encode("utf-8"), b""]
 
     def carry(self, old, new, name, lines):
         mapped = self.lineage(old, new, name)

@@ -7,6 +7,7 @@ all protocol counters/intervals are integers; floating point is never hashed.
 import contextlib
 import datetime as dt
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -152,8 +153,13 @@ def event(kind, source_key, occurred_at, payload):
     return value
 
 
+@functools.lru_cache(maxsize=4)
+def _schema_for_bytes(raw):
+    return loads(raw)
+
+
 def validate(value):
-    _schema(value, loads(SCHEMA.read_bytes()))
+    _schema(value, _schema_for_bytes(SCHEMA.read_bytes()))
     timestamp(value["occurred_at"])
     if value["id"] != digest({k: v for k, v in value.items() if k != "id"}):
         raise IntegrityError("event hash mismatch")
@@ -396,7 +402,7 @@ class GitLedger:
             # A writer serializes transitions in separate commits. Reviews precede
             # imports; predecessor chains must already exist in earlier commits.
             values.extend(sorted(batch, key=lambda v: (v["event_type"] != "review", v["id"])))
-            validate_sequence(values)
+        validate_sequence(values)
         return values
 
     def fetch(self):

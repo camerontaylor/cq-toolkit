@@ -123,8 +123,13 @@ def select(c, queue, log, dry, only):
     repo, store, outbox, publisher = services(c, config)
     # New publication may remove eligibility without moving the job's T.
     head, events = publisher.fetch()
+    coverage_by_target = {}
+    def coverage_for(target):
+        if target not in coverage_by_target:
+            coverage_by_target[target] = repo.coverage(target, events, store)
+        return coverage_by_target[target]
     for item in items:
-        covered, _, _ = repo.coverage(item["target"], events, store)
+        covered, _, _ = coverage_for(item["target"])
         remaining = [r for r in item["scope"] if ledger.intervals(r["intervals"]) - covered.get(r["path"], set())]
         item["dispatch_tier_importance"] = min((item.get("path_tiers", {}).get(r["path"], item["tier_importance"]) for r in remaining), default=item["tier_importance"])
     items.sort(key=lambda j: (j["dispatch_tier_importance"], j.get("retry", False), j["subject_kind"],
@@ -133,7 +138,7 @@ def select(c, queue, log, dry, only):
     for item in items:
         if not jobs.eligible(queue, item, c.iso()):
             continue
-        covered, _, gaps = repo.coverage(item["target"], events, store)
+        covered, _, gaps = coverage_for(item["target"])
         if gaps:
             item["wait_reason"] = "missing retained evidence; reconcile before dispatch"
             continue
@@ -181,8 +186,7 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at):
                 for (name, blob), lines in requested_scope.items() if lines & terminal_scope.get((name, blob), set())]
     findings = []
     entries = repo.entries(item["target"])
-    for line in raw.splitlines():
-        value = ledger.loads(line)
+    for value in history.vendor_events(raw):
         if value.get("type") != "finding":
             continue
         name = value.get("fileName") or value.get("path")
@@ -213,7 +217,7 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at):
     return value
 
 
-def harvest(c, queue, item, rdir, meta, classification, exit_code):
+def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_verified=False):
     config = settings(c.STATE)
     if not config:
         raise ledger.IntegrityError("cannot harvest backfill without durable rollout configuration")
@@ -242,13 +246,39 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code):
         finding_delivery.Inbox(c.STATE / "backfill/findings", outbox).ingest(value)
     else:
         outcome = classification["outcome"]
+        causes = (classification.get("failure_provenance") or {}).get("causes") or []
+        if (any(cause.get("category") == "vendor-rate-limited" for cause in causes)
+                and any(cause.get("source") != "vendor" for cause in causes)):
+            return "backfill mixed quota and hard causes; retain run ownership"
         if outcome == "rate_limited":
-            c.set_rate_cooldown(queue, classification, rdir)
+            # Reclassify retained bytes and require exact bound terminal ownership;
+            # an outcome label alone is not evidence for the Q49 exception.
+            verified = c.classify(rdir / "review.ndjson", exit_code)
+            provenance = verified.get("failure_provenance") or {}
+            causes = provenance.get("causes") or []
+            run = item.get("run") or {}
+            hold = queue.get("backfill_reservations", {}).get(item.get("attempt_id")) or {}
+            if (terminal_verified is not True
+                    or verified.get("outcome") != "rate_limited" or provenance.get("complete") is not True
+                    or not causes or any(cause.get("source") != "vendor" or cause.get("category") != "vendor-rate-limited" for cause in causes)
+                    or item.get("vendor_state") != "live" or run.get("run_id") != meta.get("run_id")
+                    or hold.get("item") != item.get("id") or hold.get("vendor_run_id") != meta.get("run_id")
+                    or terminal.get("exit") != exit_code):
+                return "backfill quota refusal unverified; retain run ownership"
+            wait = verified.get("wait_seconds")
+            if type(wait) is not int or wait <= 0:
+                fallback = queue.get("rl_backoff_min") or c.CONFIG.get("rate_limit_default_backoff_min")
+                if type(fallback) is not int or fallback <= 0:
+                    return "backfill quota refusal lacks usable cooldown; retain run ownership"
+                wait = fallback * 60
+            c.set_rate_cooldown(queue, {**verified, "wait_seconds": wait}, rdir)
+            jobs.defer_terminal_quota(queue, item, ended_at, wait)
         elif outcome in ("auth", "action_required"):
             queue.update(paused=True, pause_reason="backfill vendor authentication/action required; operator ruling needed")
             outcome = "auth"
-        jobs.terminal(queue, item, ended_at, outcome, vendor_terminal=True,
-                      retry_after=classification.get("wait_seconds") or 0, reason=classification.get("message") or outcome)
+        if outcome != "rate_limited":
+            jobs.terminal(queue, item, ended_at, outcome, vendor_terminal=True,
+                          retry_after=classification.get("wait_seconds") or 0, reason=classification.get("message") or outcome)
     state_event(c, queue, item, ended_at, classification["outcome"])
     counted_runs = queue.setdefault("backfill_capacity_runs", [])
     if meta["run_id"] not in counted_runs:

@@ -1559,7 +1559,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
         return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (no repair)"
     if item["kind"] == backfill_jobs.KIND:
-        return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code)
+        return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
+                                        terminal_verified=(state == "harvest"))
     if item["kind"] == "coverage" and item.get("attempt_id"):
         item["vendor_state"] = "terminal"
         q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
@@ -1603,6 +1604,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             run_id=meta["run_id"], completed_at=record["completed_at"], reviewed_paths=terminal_paths,
             review_sha=meta.get("coverage_sha") or meta.get("reviewed_tip") or meta["head"],
             counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
+        if item["kind"] == "coverage" and item.get("coverage_source"):
+            coverage.record_legacy_success(q, item, terminal_paths)
         if item["kind"] == "promotion":
             promotion_result = harvest_promotion(item, meta, cls, rdir)
             repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
@@ -1633,6 +1636,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # error / interrupted / skipped / too_large: item-level backoff, never counted
     item["failures"] = item.get("failures", 0) + 1
     item["last_error"] = f"{o}: {cls.get('message')}"
+    if item["kind"] == "coverage":
+        coverage.record_legacy_failure(q, item, iso(), o, r["run_id"])
     if item["kind"] == author_quota.AUTHOR_KIND:
         # An attempted author dispatch is always a consumed terminal: the generic
         # pending/backoff retry path below must never apply to it.
@@ -3011,6 +3016,15 @@ def coverage_fallback(q, log, dry, only):
     available = False
     for item in sorted(candidates, key=sort_key):
         if item.get("not_before") and parse_iso(item["not_before"]) > now() or not deps_met(q, item):
+            continue
+        try:
+            source, origins = coverage._legacy_origins(q, item)
+            if not origins or any(not coverage._legacy_retry_allowed(q, source["pr"], origin, now())
+                                  for origin in origins):
+                item["wait_reason"] = "legacy coverage retry history or cooldown unresolved"
+                continue
+        except (ValueError, KeyError, TypeError):
+            item["wait_reason"] = "legacy coverage retry identity unresolved"
             continue
         available = True
         if dry:

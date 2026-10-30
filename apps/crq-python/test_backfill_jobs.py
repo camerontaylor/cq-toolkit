@@ -21,6 +21,17 @@ def partition(number=0, generation=0, target="a" * 40, path="a"):
 
 
 class JobsTest(unittest.TestCase):
+    def test_quota_deadline_survives_new_generation_and_target(self):
+        q = {"items": []}
+        old = jobs.enqueue(q, partition(), AT)
+        jobs.admission(q, old, AT, {"successful": True, "remaining": 8, "observed_at": AT}, False)
+        jobs.bind_run(q, old, "quota-run")
+        jobs.defer_terminal_quota(q, old, AT, 3600)
+        moved = jobs.enqueue(q, partition(1, generation=1, target="c" * 40), AT)
+        self.assertFalse(jobs.eligible(q, moved, "2026-10-30T00:30:00Z"))
+        self.assertTrue(jobs.eligible(q, moved, "2026-10-30T01:00:00Z"))
+        self.assertEqual(q["backfill_reservations"][old["attempt_id"]]["quota_state"], "reserved")
+
     def test_atomic_effective_two_admits_only_one_and_reserve_survives_restart(self):
         with tempfile.TemporaryDirectory() as td:
             journal = jobs.Journal(Path(td) / "queue.json", Path(td) / "tick.lock")

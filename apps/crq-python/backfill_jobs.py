@@ -64,10 +64,40 @@ def enqueue(queue, partition, at):
 def eligible(queue, item, at):
     if item.get("state") != "pending" or is_execution_owner(item):
         return False
+    current = ledger.timestamp(at)
+    try:
+        if any(deadline and ledger.timestamp(deadline) > current for deadline in (item.get("not_before"), queue.get("cooldown_until"))):
+            return False
+    except ValueError:
+        return False
     for h in history(queue, item):
-        if h["quarantined"] or h.get("next_eligible_at") and h["next_eligible_at"] > at:
+        try:
+            if h["quarantined"] or h.get("next_eligible_at") and ledger.timestamp(h["next_eligible_at"]) > current:
+                return False
+        except ValueError:
             return False
     return True
+
+
+def defer_terminal_quota(queue, item, at, retry_seconds):
+    """Q49: retain consumed quota and prior failures while deferring a verified refusal."""
+    delay = retry_seconds if type(retry_seconds) is int and retry_seconds > 0 else 3600
+    deadline = (ledger.timestamp(at) + dt.timedelta(seconds=delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    histories = history(queue, item)
+    deadlines = [deadline, item.get("not_before"), queue.get("cooldown_until")]
+    deadlines += [h.get("next_eligible_at") for h in histories]
+    for value in deadlines:
+        if value:
+            ledger.timestamp(value)
+    deadline = max(value for value in deadlines if value)
+    hold = queue.get("backfill_reservations", {}).get(item.get("attempt_id"))
+    if not hold:
+        raise ledger.IntegrityError("quota refusal requires retained reservation")
+    hold["terminal_at"] = at
+    for h in histories:
+        h["next_eligible_at"] = deadline
+    item.update(vendor_state="terminal", run=None, state="pending", not_before=deadline, last_error="verified quota refusal")
+    return deadline
 
 
 def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):

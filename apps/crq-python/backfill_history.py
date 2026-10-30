@@ -6,6 +6,8 @@ No provider review is launched to fill historical evidence gaps.
 """
 import copy
 import hashlib
+import json
+import math
 import subprocess
 
 import review_ledger as ledger
@@ -13,9 +15,36 @@ import review_ledger as ledger
 CLASSES = ("crq-counted-cycle", "merged-current-receipt", "promotion-range", "github-app-review")
 
 
+def vendor_events(raw):
+    """Parse vendor envelopes while keeping credit fields subject to ledger validation."""
+    def pairs(values):
+        result = {}
+        for key, value in values:
+            if key in result:
+                raise ledger.IntegrityError("duplicate vendor JSON key")
+            result[key] = value
+        return result
+    def number(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ledger.IntegrityError("non-finite vendor number")
+        return parsed
+    def refuse(value):
+        raise ledger.IntegrityError("non-finite vendor number")
+    result = []
+    for line in raw.split(b"\n"):
+        if not line.strip():
+            continue
+        value = json.loads(line, object_pairs_hook=pairs, parse_float=number, parse_constant=refuse)
+        if not isinstance(value, dict):
+            raise ledger.IntegrityError("vendor event must be an object")
+        result.append(value)
+    return result
+
+
 def terminal_scope(raw, expected_head):
     """Only explicit, terminal path/blob/interval evidence is scoped completion."""
-    events = [ledger.loads(line) for line in raw.splitlines() if line.strip()]
+    events = vendor_events(raw)
     if not events or any(e.get("type") in ("error", "action_required") for e in events):
         raise ledger.IntegrityError("error or missing terminal evidence")
     complete = events[-1]
@@ -31,6 +60,7 @@ def terminal_scope(raw, expected_head):
         if not isinstance(item, dict) or set(item) != {"path", "blob", "intervals"}:
             raise ledger.IntegrityError("path-only receipts cannot infer full-file scope")
         rows.append(item)
+    ledger.canonical(rows)  # Credit-bearing fields remain in the strict ledger domain.
     ledger.scope(rows)
     return rows
 

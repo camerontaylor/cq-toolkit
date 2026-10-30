@@ -1,5 +1,6 @@
 """Four historical source classes are accounted, without inferred path credit."""
 import copy
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -37,6 +38,18 @@ class HistoryTest(unittest.TestCase):
         alias, result = history.import_source(self.f.repo, self.f.store, history.CLASSES[1], "vendor-1", raw, envelope, AT, first)
         self.assertEqual(result["payload"]["result"], "duplicate")
         ledger.validate_sequence(first + alias)
+
+    def test_vendor_metadata_numbers_and_blank_lines_preserve_strict_scope(self):
+        raw = b'{"type":"heartbeat","duration":1.5}\n\n' + self.stream() + b'\n'
+        self.assertEqual(history.terminal_scope(raw, self.value["payload"]["head"]), self.value["payload"]["input_scope"])
+        with self.assertRaises(ledger.IntegrityError):
+            history.terminal_scope(b'{"type":"heartbeat","type":"complete"}\n' + self.stream(), self.value["payload"]["head"])
+        invalid = ledger.loads(self.stream()); invalid["reviewedFiles"][0]["intervals"] = [[1.5, 2]]
+        with self.assertRaises(ledger.IntegrityError):
+            history.terminal_scope(json.dumps(invalid).encode(), self.value["payload"]["head"])
+        invalid["reviewedFiles"][0]["intervals"] = [[1, 2**54]]
+        with self.assertRaises(ledger.IntegrityError):
+            history.terminal_scope(json.dumps(invalid).encode(), self.value["payload"]["head"])
 
     def test_wrong_head_author_path_only_and_walkthrough_never_credit(self):
         cases = [(self.stream(head="f" * 40), self.envelope()),

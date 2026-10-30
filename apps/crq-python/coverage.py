@@ -6,6 +6,7 @@ runtime services. All returned structures are JSON serializable.
 import datetime as dt
 import hashlib
 from pathlib import PurePosixPath
+import backfill_jobs
 from backfill_jobs import is_execution_owner
 
 
@@ -17,8 +18,10 @@ def _time(value):
         result = value
     elif isinstance(value, (int, float)):
         result = dt.datetime.fromtimestamp(value, dt.timezone.utc)
-    else:
+    elif isinstance(value, str):
         result = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("invalid timestamp")
     if result.tzinfo is None:
         raise ValueError("timestamps must have a timezone")
     return result.astimezone(dt.timezone.utc)
@@ -40,6 +43,173 @@ def _path(value):
 def new_ledger():
     """Store as queue['coverage']; only the locked tick should modify it."""
     return {"schema_version": 1, "paths": {}, "runs": {}, "observations": {}}
+
+
+def _legacy_family(pr, original_path):
+    return "legacy-coverage:" + str(pr) + ":" + _path(original_path)
+
+
+def _legacy_origins(queue, item, reviewed_paths=None):
+    names = set(item.get("coverage_paths", [])) | set((item.get("measure") or {}).get("synthetic_paths", []))
+    if reviewed_paths is not None:
+        names &= set(reviewed_paths)
+    source = next((i for i in queue.get("items", []) if i.get("id") == item.get("coverage_source")), None)
+    if not source and not item.get("coverage_source") and names:
+        possible = [i for i in queue.get("items", []) if i.get("kind") == "merged" and i.get("pr") is not None
+                    and all(any(name in (f.get("path"), f.get("now")) for f in (i.get("measure") or {}).get("files", []))
+                            for name in names)]
+        if len(possible) == 1:
+            source = possible[0]
+    if not source:
+        raise ValueError("legacy coverage source is required for retry identity")
+    files = (source.get("measure") or {}).get("files", [])
+    origins = set()
+    for name in names:
+        matches = {_path(f["path"]) for f in files if f.get("path")
+                   and name in (f.get("path"), f.get("now"))}
+        if len(matches) != 1:
+            raise ValueError("legacy coverage path lacks unambiguous source lineage")
+        origins.update(matches)
+    return source, origins
+
+
+def record_legacy_failure(queue, item, at, outcome, run_id):
+    """Retain legacy failure budgets across coverage item generations."""
+    source, origins = _legacy_origins(queue, item)
+    if not origins:
+        raise ValueError("legacy coverage paths lack source lineage")
+    if not run_id:
+        raise ValueError("legacy coverage failure requires run identity")
+    identity = {"item": item["id"], "outcome": outcome, "origins": sorted(origins), "at": at}
+    seen = queue.setdefault("legacy_coverage_failure_runs", {})
+    if run_id in seen:
+        if seen[run_id] != identity:
+            raise ValueError("legacy coverage run identity conflict")
+        return
+    for origin in sorted(origins):
+        family = _legacy_family(source["pr"], origin)
+        adapter = {"family": family, "scope": [{"path": family}], "failures": 0}
+        backfill_jobs.terminal(queue, adapter, at, outcome, vendor_terminal=True)
+    seen[run_id] = identity
+
+
+def record_legacy_success(queue, item, reviewed_paths):
+    source, origins = _legacy_origins(queue, item, reviewed_paths)
+    for origin in origins:
+        family = _legacy_family(source["pr"], origin)
+        family_history = queue.get("backfill_families", {}).get(family, {})
+        scope_history = queue.get("backfill_scope_failures", {}).get(family, {})
+        if not family_history.get("quarantined") and not scope_history.get("quarantined"):
+            queue.get("backfill_families", {}).pop(family, None)
+            queue.get("backfill_scope_failures", {}).pop(family, None)
+
+
+def legacy_retry_view(queue, pr, original_path, at):
+    """Derive restrictions from retained guarded-harvest records without mutation."""
+    family = _legacy_family(pr, original_path)
+    histories = [queue.get("backfill_families", {}).get(family, {}), queue.get("backfill_scope_failures", {}).get(family, {})]
+    reasons, runs, deadlines = [], {}, []
+    if queue.get("cooldown_until"):
+        try:
+            deadlines.append(_time(queue["cooldown_until"]))
+        except (TypeError, ValueError):
+            reasons.append("invalid global deadline")
+    for h in histories:
+        if h.get("quarantined"):
+            reasons.append("persisted quarantine")
+        if h.get("next_eligible_at"):
+            try:
+                deadlines.append(_time(h["next_eligible_at"]))
+            except (TypeError, ValueError):
+                reasons.append("invalid persisted deadline")
+    seen = queue.get("legacy_coverage_failure_runs", {})
+    for item in queue.get("items", []):
+        if item.get("kind") != "coverage":
+            continue
+        try:
+            source, origins = _legacy_origins(queue, item)
+        except ValueError:
+            # Without lineage we cannot prove a same-PR item disjoint. A
+            # missing PR identity is also potentially relevant to this scope.
+            if item.get("pr") in (None, pr):
+                reasons.append("unresolved legacy source or lineage")
+            continue
+        if source.get("pr") != pr or original_path not in origins:
+            continue
+        if item.get("not_before"):
+            try:
+                deadlines.append(_time(item["not_before"]))
+            except (TypeError, ValueError):
+                reasons.append("invalid item deadline")
+        if any(a.get("outcome") not in ("error", "interrupted", "skipped", "too_large", "malformed", "completed", "rate_limited")
+               for a in item.get("attempts", [])):
+            reasons.append("unknown attempt outcome")
+        for attempt in item.get("attempts", []):
+            if attempt.get("outcome") == "rate_limited":
+                try:
+                    if _time(queue["cooldown_until"]) <= _time(attempt["at"]):
+                        raise ValueError("deadline predates refusal")
+                except (KeyError, TypeError, ValueError):
+                    reasons.append("historical vendor deadline unavailable")
+        failures = [a for a in item.get("attempts", []) if a.get("outcome") in ("error", "interrupted", "skipped", "too_large", "malformed")]
+        if item.get("state") in ("blocked", "failed", "quarantined") and not failures and not any(v.get("item") == item.get("id") for v in seen.values()):
+            reasons.append("terminal history missing")
+        if item.get("cycles") and failures:
+            reasons.append("success and failure ordering unresolved")
+        if item.get("run") or item.get("vendor_state") in ("live", "unknown"):
+            reasons.append("live or unknown legacy ownership")
+        for attempt in failures:
+            run_id, timestamp = attempt.get("run_id"), attempt.get("at")
+            if not run_id or not timestamp or attempt.get("counted") is not False or not attempt.get("head") or not attempt.get("base"):
+                reasons.append("incomplete guarded harvest attempt")
+                continue
+            try:
+                when = _time(timestamp)
+            except (ValueError, TypeError):
+                reasons.append("invalid attempt time")
+                continue
+            key = (item.get("id"), attempt.get("outcome"), when)
+            if run_id in runs and runs[run_id] != key:
+                reasons.append("conflicting run identity")
+            runs[run_id] = key
+        if type(item.get("failures")) is int and item["failures"] != len(failures):
+            reasons.append("unexplained item failure aggregate")
+    for run_id, record in seen.items():
+        if original_path not in record.get("origins", []):
+            continue
+        item = next((i for i in queue.get("items", []) if i.get("id") == record.get("item")), None)
+        if not item:
+            reasons.append("orphan adapter run")
+            continue
+        try:
+            source, origins = _legacy_origins(queue, item)
+            if source.get("pr") != pr or original_path not in origins:
+                continue
+            when = _time(record["at"])
+        except (ValueError, TypeError, KeyError):
+            reasons.append("incomplete adapter run")
+            continue
+        if run_id in runs:
+            if runs[run_id][:2] != (record.get("item"), record.get("outcome")):
+                reasons.append("conflicting run identity")
+        else:
+            runs[run_id] = (record.get("item"), record.get("outcome"), when)
+    ordered = sorted(runs.values(), key=lambda value: value[2])
+    for index, (_, _, when) in enumerate(ordered, 1):
+        deadlines.append(when + dt.timedelta(seconds=min(86400, 3600 * 2 ** min(index - 1, 5))))
+    count = len(ordered)
+    if any(type(h.get("failures", 0)) is not int or h.get("failures", 0) > count for h in histories):
+        reasons.append("unreconciled family aggregate")
+    if count >= 6:
+        reasons.append("family failure limit")
+    deadline = max(deadlines, default=None)
+    return {"allowed": not reasons and (deadline is None or deadline <= _time(at)),
+            "failures": count, "deadline": _iso(deadline) if deadline else None, "reasons": reasons,
+            "runs": sorted(runs)}
+
+
+def _legacy_retry_allowed(queue, pr, original_path, at):
+    return legacy_retry_view(queue, pr, original_path, at)["allowed"]
 
 
 def record_review(ledger, *, run_id, completed_at, reviewed_paths,
@@ -114,6 +284,8 @@ def coverage_candidate(queue, ledger, *, merge_queue_sha, ordinary_eligible,
         by_current = {}
         for file in measure.get("files", []):
             if not file.get("now") or not file.get("synthetic_added"):
+                continue
+            if not _legacy_retry_allowed(queue, item["pr"], file["path"], at):
                 continue
             path = _path(file["now"])
             if path in excluded or _path(file["path"]) in excluded:

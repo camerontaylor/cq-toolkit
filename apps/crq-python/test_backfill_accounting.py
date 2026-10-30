@@ -76,6 +76,31 @@ class AccountingTest(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             self.f.repo.verify_review(rehash(value))
 
+    def test_patch_content_cannot_forge_changed_intervals(self):
+        old = self.f.commit({"a": b"first\nsecond\nthird\n", "other": b"unchanged\n"})
+        head = self.f.commit({"a": b"first\n++ b/other\nthird\n"})
+        intervals = self.f.repo.changed_intervals(old, head)
+        self.assertEqual(intervals.get("a"), {2})
+        self.assertNotIn("other", intervals)
+        old = head
+        head = self.f.commit({"a": b"first\ncontent\x0c@@ -1 +1,100 @@\nthird\n"})
+        intervals = self.f.repo.changed_intervals(old, head)
+        self.assertEqual(intervals.get("a"), {2})
+        blob = self.f.repo.entries(head)["a"]["blob"]
+        value = self.f.evidence(head, old, head, [{"path": "a", "blob": blob, "intervals": [[1, 3]]}])
+        with self.assertRaisesRegex(ledger.IntegrityError, "changed intervals"):
+            self.f.repo.verify_review(value)
+
+    def test_changed_intervals_handles_multiple_hunks_and_no_final_newline(self):
+        old = self.f.commit({"a": b"one\ntwo\nthree\nfour\nfive"})
+        head = self.f.commit({"a": b"ONE\ntwo\nthree\nfour\nFIVE"})
+        self.assertEqual(self.f.repo.changed_intervals(old, head)["a"], {1, 5})
+
+    def test_quoted_path_cannot_inherit_the_previous_file(self):
+        old = self.f.commit({"a": b"one\ntwo\nthree\n", "é": b"one\ntwo\nthree\n"})
+        head = self.f.commit({"a": b"ONE\ntwo\nthree\n", "é": b"one\ntwo\nTHREE\n"})
+        self.assertEqual(self.f.repo.changed_intervals(old, head)["a"], {1})
+
     def test_diff_context_and_unchanged_lines_are_not_credit(self):
         old = self.f.commit({"a": b"one\ntwo\nthree\n"})
         t = self.f.commit({"a": b"one\nchanged\nthree\n"})

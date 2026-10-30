@@ -66,6 +66,16 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             ledger.validate(value)
 
+    def test_schema_cache_is_bound_to_current_schema_bytes(self):
+        value = review([self.ref])
+        schema = self.root / "schema.json"
+        schema.write_bytes(ledger.SCHEMA.read_bytes())
+        with mock.patch.object(ledger, "SCHEMA", schema):
+            ledger.validate(value)
+            schema.write_text('{"const": null}')
+            with self.assertRaises(ledger.IntegrityError):
+                ledger.validate(value)
+
     def test_source_conflict_and_replay(self):
         first = review([self.ref])
         same = ledger.loads(ledger.canonical(first))
@@ -160,6 +170,9 @@ class LedgerTest(unittest.TestCase):
         recovered_head, records = publisher.fetch()
         self.assertEqual({v["id"] for v in records}, {value["id"], first["id"], second["id"]})
         self.assertEqual(len(raced), 1)
+        with mock.patch.object(ledger, "validate_sequence", wraps=ledger.validate_sequence) as sequence:
+            self.assertEqual(publisher.read(recovered_head), records)
+            self.assertEqual(sequence.call_count, 1)
         # A normal forward commit deleting the old record must halt readers.
         git("read-tree", recovered_head)
         git("update-index", "--force-remove", "--", ledger.record_path(value))

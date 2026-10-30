@@ -49,6 +49,22 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             runtime.settings(self.state, dispatch=True)
 
+    def test_select_reuses_coverage_only_within_one_ledger_snapshot(self):
+        first = copy.deepcopy(self.item)
+        second = copy.deepcopy(self.item); second["id"] += "-second"
+        third = copy.deepcopy(self.item); third["id"] += "-third"; third["target"] = "c" * 40
+        self.q["items"] = [first, second, third]
+        repo = SimpleNamespace(coverage=mock.Mock(return_value=({}, [], [])))
+        publisher = SimpleNamespace(fetch=mock.Mock(side_effect=[("head1", ["first"]), ("head2", ["second"])]))
+        with mock.patch.object(runtime, "services", return_value=(repo, object(), object(), publisher)), \
+             mock.patch.object(jobs, "eligible", return_value=True), \
+             mock.patch.object(runtime, "rank4_gate", return_value=False):
+            runtime.select(self.c, self.q, [], False, None)
+            self.assertEqual(repo.coverage.call_count, 2)
+            runtime.select(self.c, self.q, [], False, None)
+        self.assertEqual(repo.coverage.call_count, 4)
+        self.assertEqual([call.args[1] for call in repo.coverage.call_args_list], [["first"], ["first"], ["second"], ["second"]])
+
     def test_acknowledged_state_event_replay_preserves_identity_after_queue_cache_loss(self):
         runtime.state_event(self.c, self.q, self.item, AT, "created")
         _, _, out, _ = runtime.services(self.c, self.config)
@@ -68,6 +84,79 @@ class RuntimeTest(unittest.TestCase):
         self.c.iso = lambda: "2026-10-30T01:00:00Z"
         runtime.usage_context(self.c, self.q, {"remaining": 8, "rollingWindowMs": 3600000}, [])
         self.assertEqual(self.q["backfill_reservations"][self.item["attempt_id"]]["quota_state"], "expired")
+
+    def test_harvest_accepts_blank_lines_and_float_only_in_vendor_metadata(self):
+        jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 2, "observed_at": AT}, False)
+        self.item.update(state="reviewing", run={"run_id": "vendor-meta", "started_at": AT})
+        rdir = self.root / "run-meta"; rdir.mkdir()
+        terminal = ledger.canonical({"type": "complete", "status": "review_completed", "head": self.item["head"], "reviewedFiles": self.item["scope"]})
+        (rdir / "review.ndjson").write_bytes(b'{"type":"heartbeat","duration":1.5}\n\n' + terminal + b'\n')
+        (rdir / "exit.json").write_bytes(ledger.canonical({"exit": 0, "ended_at": AT}))
+        runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "vendor-meta", "head": self.item["head"]}, {"counted": True, "outcome": "completed"}, 0)
+        self.assertEqual(self.item["state"], "publication-pending")
+
+    def test_verified_quota_refusals_keep_prior_failures_and_reservations(self):
+        import crq
+        self.c.classify = crq.classify
+        self.c.set_rate_cooldown = crq.set_rate_cooldown
+        self.item["failures"] = 2
+        histories = jobs.history(self.q, self.item)
+        for entry in histories:
+            entry.update(failures=2, next_eligible_at="2026-10-30T02:00:00Z")
+        raw = b'{"type":"error","errorType":"rate_limit","recoverable":true,"metadata":{"waitTime":"30 minutes"}}\n'
+        for index, at in enumerate((AT, "2026-10-30T03:00:00Z")):
+            self.c.iso = lambda at=at: at
+            decision = jobs.admission(self.q, self.item, at, {"successful": True, "remaining": 8, "observed_at": at}, False)
+            self.assertEqual(decision["decision"], "admit")
+            run = "quota-" + str(index)
+            jobs.bind_run(self.q, self.item, run)
+            self.item["run"] = {"run_id": run, "started_at": at}
+            rdir = self.root / run; rdir.mkdir()
+            (rdir / "review.ndjson").write_bytes(raw)
+            (rdir / "exit.json").write_bytes(ledger.canonical({"exit": 1, "ended_at": at}))
+            classification = crq.classify(rdir / "review.ndjson", 1)
+            if index == 0:
+                result = runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": run, "head": self.item["head"]}, classification, 1)
+                self.assertIn("retain run ownership", result)
+                self.assertTrue(jobs.is_execution_owner(self.item))
+            runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": run, "head": self.item["head"]}, classification, 1, terminal_verified=True)
+            self.assertEqual(self.item["state"], "pending")
+            self.assertEqual(self.item["failures"], 2)
+            self.assertTrue(all(entry["failures"] == 2 and not entry["quarantined"] for entry in histories))
+            self.assertFalse(jobs.eligible(self.q, self.item, at))
+            self.assertEqual(self.q["backfill_reservations"][self.item["attempt_id"]]["quota_state"], "reserved")
+            self.assertNotIn("publication_event_id", self.item)
+            self.c.launch = mock.Mock()
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+            self.c.launch.assert_not_called()
+        self.assertEqual(len(self.q["backfill_reservations"]), 2)
+        self.assertEqual(histories[0]["next_eligible_at"], "2026-10-30T03:30:00Z")
+
+    def test_unverified_quota_label_retains_bound_run(self):
+        self.c.classify = lambda path, code: {"outcome": "error", "failure_provenance": {"complete": False, "causes": []}}
+        jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 8, "observed_at": AT}, False)
+        jobs.bind_run(self.q, self.item, "run-mixed")
+        self.item["run"] = {"run_id": "run-mixed", "started_at": AT}
+        rdir = self.root / "run-mixed"; rdir.mkdir()
+        (rdir / "review.ndjson").write_bytes(b'{"type":"error","errorType":"auth"}\n')
+        (rdir / "exit.json").write_bytes(ledger.canonical({"exit": 1, "ended_at": AT}))
+        result = runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "run-mixed"}, {"counted": False, "outcome": "rate_limited"}, 1)
+        self.assertIn("retain run ownership", result)
+        self.assertTrue(jobs.is_execution_owner(self.item))
+
+    def test_mixed_quota_and_hard_cause_keeps_bound_run(self):
+        import crq
+        jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 8, "observed_at": AT}, False)
+        jobs.bind_run(self.q, self.item, "run-mixed")
+        self.item["run"] = {"run_id": "run-mixed", "started_at": AT}
+        rdir = self.root / "run-mixed"; rdir.mkdir()
+        raw = b'{"type":"error","errorType":"rate_limit","recoverable":true}\n{"type":"error","errorType":"auth"}\n'
+        (rdir / "review.ndjson").write_bytes(raw)
+        (rdir / "exit.json").write_bytes(ledger.canonical({"exit": 1, "ended_at": AT}))
+        result = runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "run-mixed"}, crq.classify(rdir / "review.ndjson", 1), 1)
+        self.assertIn("mixed quota", result)
+        self.assertTrue(jobs.is_execution_owner(self.item))
+        self.assertEqual(self.item["failures"], 0)
 
     def test_select_harvest_crash_replay_publish_and_lost_coverage_cache(self):
         runtime.usage_context(self.c, self.q, {"remaining": 2}, [])

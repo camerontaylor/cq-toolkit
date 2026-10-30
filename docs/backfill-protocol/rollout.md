@@ -54,6 +54,13 @@ and M2 holds. Spare included quota only; no paid retry and no LLM launcher.
    `item`, `vendor_state: terminal`, `exact_no_live_run: true`, `queue_digest`
    and `checked_at` no older than 60 seconds. A run still present or unknown
    refuses release. This command is prepared, never executed by this lane.
+   Compute `queue_digest` using `backfill.queue_digest_v1` on the exact current
+   queue snapshot: sorted compact JSON, ASCII escaping, finite numbers only,
+   SHA-256 over UTF-8 bytes. Keep the original snapshot with the evidence.
+   Q49 prospectively treats a positively verified terminal quota-only refusal as
+   deferred without adding failure counts. Preserve consumed attempts, existing
+   failures and reservations, and enforce all applicable cooldowns; unknown or
+   conflicting run evidence remains held. No quota refund or review credit follows.
 8. After these actions, provision `state/backfill-rollout.json` from the inert
    example with evidence references and a durable artifact path. Keep
    `enabled: false` while collecting/importing historical sources and reports.
