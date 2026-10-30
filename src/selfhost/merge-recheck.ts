@@ -47,6 +47,9 @@
 // that is not durable does not exist, and no durable observation means no
 // merge — an ok recheck WRITES its observation (the audit record of the
 // settled tuple) before it answers ok, and a failed write refuses.
+// A trusted explicit all-clear strictly after the pinned head commit can
+// replace the settle wait (I2), while every other guard and the audit write
+// still apply. Commit timestamps are never used to infer elapsed settle.
 //
 // WRITES SCALE WITH ACTIVITY, NOT CRON FIRES. Every push to cq-state runs
 // the repo's unfiltered `push:` workflows on that branch, so a write happens
@@ -84,6 +87,7 @@ import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
 import { parseIndependentReview } from '../shared/independent-review.js';
 import type { IndependentReviewAttestation } from '../shared/independent-review.js';
+import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 
 /**
  * The ONE GraphQL document the recheck reads, paged by three independent
@@ -967,6 +971,105 @@ export function judgeAtHead(
 
 // -- the recheck --------------------------------------------------------------
 
+/** Read the pinned commit and top-level conversation, independently paginated. */
+const ALL_CLEAR_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $commentsAfter: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      headRefOid
+      commits(last: 1) { nodes { commit { oid committedDate } } }
+      comments(first: 100, after: $commentsAfter) {
+        pageInfo { hasNextPage endCursor }
+        nodes { author { login __typename } authorAssociation body createdAt }
+      }
+    }
+  }
+}`;
+
+/** All-clear can replace only the wait, never exact-head acceptance or trust. */
+const fetchAllClear = async (
+  deps: RecheckDeps,
+  snapshot: PrSnapshot,
+  nowMs: number,
+): Promise<boolean> => {
+  const comments: BoundReview[] = [];
+  let cursor: string | null = null;
+  let commitMs = Number.NaN;
+  for (let page = 1; page <= SNAPSHOT_PAGE_CAP; page += 1) {
+    const args = [
+      'api',
+      'graphql',
+      '-f',
+      `query=${ALL_CLEAR_QUERY}`,
+      '-f',
+      `owner=${deps.owner}`,
+      '-f',
+      `name=${deps.repo}`,
+      '-F',
+      `pr=${String(snapshot.pr)}`,
+    ];
+    if (cursor !== null) args.push('-f', `commentsAfter=${cursor}`);
+    const payload = asRecord(await ghJson<unknown>(deps.gh, args));
+    if (Array.isArray(payload['errors']) && payload['errors'].length > 0) {
+      throw new Error('all-clear GraphQL errors');
+    }
+    const pull = asRecord(asRecord(asRecord(payload['data'])['repository'])['pullRequest']);
+    const nodes = asRecord(pull['commits'])['nodes'];
+    const commit = asRecord(asRecord(Array.isArray(nodes) ? nodes[0] : null)['commit']);
+    const date = Date.parse(asString(commit['committedDate']));
+    if (
+      asOid(pull['headRefOid']) !== snapshot.headRefOid ||
+      asOid(commit['oid']) !== snapshot.headRefOid ||
+      !Number.isFinite(date) ||
+      date > nowMs ||
+      (page > 1 && date !== commitMs)
+    )
+      return false;
+    commitMs = date;
+    const connection = readPage(pull['comments']);
+    if (connection === null) return false;
+    comments.push(
+      ...connection.nodes.map((node) => {
+        const comment = asRecord(node);
+        return toBoundReview({
+          ...comment,
+          state: 'COMMENTED',
+          submittedAt: comment['createdAt'],
+          commit: { oid: snapshot.headRefOid },
+        });
+      }),
+    );
+    if (!connection.more) {
+      const acceptStates: ReadonlySet<string> = deps.policy.acceptStates;
+      const relevant = new Set<string>([...acceptStates, 'CHANGES_REQUESTED', 'DISMISSED']);
+      const reviews = [
+        ...foldLatestOpinionated(
+          snapshot.reviews.filter((review) => isTrusted(review, snapshot.authorLogin, deps.policy)),
+          relevant,
+        ).values(),
+      ].filter(
+        (review) =>
+          review.commitOid === snapshot.headRefOid &&
+          review.state !== null &&
+          acceptStates.has(review.state),
+      );
+      return [...reviews, ...comments].some((evidence) => {
+        const at = Date.parse(evidence.submittedAt ?? '');
+        return (
+          isTrusted(evidence, snapshot.authorLogin, deps.policy) &&
+          Number.isFinite(at) &&
+          at > commitMs &&
+          at <= nowMs &&
+          defaultClassifyPrConfig.allClearPattern.test(evidence.body)
+        );
+      });
+    }
+    if (connection.cursor === null) return false;
+    cursor = connection.cursor;
+  }
+  // Never grant a bypass from a truncated conversation.
+  return false;
+};
+
 /** recheckBeforeMerge's injected seams. */
 export interface RecheckDeps extends ForgeDeps {
   /** The injected clock — read ONCE per recheck, AFTER the snapshot fetch. */
@@ -1105,7 +1208,17 @@ const recheckOrThrow = async (
   }
   // (i) Settle, judged on the observed ledger.
   const settle = settleStatus(observed.state.prs[String(pr)], tuple, nowMs, deps.settleMs);
-  if (!settle.settled) return refuseAfterObserving(`settle: ${settle.reason}`);
+  if (!settle.settled) {
+    let allClear = false;
+    if (settle.reason === 'single_observation' || settle.reason === 'settle_pending') {
+      try {
+        allClear = await fetchAllClear(deps, snapshot, nowMs);
+      } catch (error) {
+        return refuseAfterObserving(`all-clear fetch failed: ${describeError(error)}`);
+      }
+    }
+    if (!allClear) return refuseAfterObserving(`settle: ${settle.reason}`);
+  }
   // (j) About to answer ok: the audit observation MUST be durable first.
   let write: StateBranchWriteResult;
   try {
@@ -1118,7 +1231,9 @@ const recheckOrThrow = async (
     ok: true,
     tuple,
     acceptedBy: judgment.by,
-    firstObservedAt: settle.firstObservedAt,
+    firstObservedAt: settle.settled
+      ? settle.firstObservedAt
+      : observed.state.prs[String(pr)]!.observations[0]!.observedAt,
     discarded: read.discarded,
   };
 };
@@ -1137,7 +1252,8 @@ const recheckOrThrow = async (
  * root is missing from the snapshot, or a REST read fails/is capped (see
  * checkReviewDataLag); (g) refuse unresolved external review threads; (h) refuse without head-bound trusted acceptance or with
  * an outstanding objection; (i) refuse unless settled per the observed
- * ledger; (j) WRITE the observation (compare-and-swap) and answer ok — a
+ * ledger or a freshly validated trusted all-clear postdates the pinned
+ * commit; (j) WRITE the observation (compare-and-swap) and answer ok — a
  * failed write refuses as not durable. A refusal at (g0)–(i) writes only
  * when the observation created/reset the record (best effort); on an
  * unchanged tuple it writes nothing. Every refusal past (f) carries a
