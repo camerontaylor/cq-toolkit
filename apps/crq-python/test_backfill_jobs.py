@@ -81,6 +81,18 @@ class JobsTest(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             jobs.release(q, item, AT, "operator", "check", {"not_live": True})
 
+    def test_unknown_launch_requires_bound_vendor_absence_and_known_prelaunch_cancel_releases_quota(self):
+        q = {"items": []}; item = jobs.enqueue(q, partition(), AT)
+        observation = {"successful": True, "remaining": 2, "observed_at": AT}
+        jobs.admission(q, item, AT, observation, False)
+        with self.assertRaises(ledger.IntegrityError):
+            jobs.reconcile_absent(q, item, AT, "operator", "checked", {"verdict": "vendor-confirmed-not-started"})
+        proof = {"attempt_id": item["attempt_id"], "verdict": "vendor-confirmed-not-started", "vendor_query": {"sha256": "proof"}}
+        jobs.reconcile_absent(q, item, AT, "operator", "authenticated run lookup found no invocation", proof)
+        self.assertFalse(jobs.is_execution_owner(item))
+        self.assertEqual(q["backfill_reservations"][item["attempt_id"]]["quota_state"], "released")
+        self.assertEqual(item["state"], "pending")
+
     def test_failure_cooldown_and_immediate_quarantine_survive_serialization(self):
         q = {"items": []}; item = jobs.enqueue(q, partition(), AT)
         jobs.terminal(q, item, AT, "error", vendor_terminal=True, retry_after=7200)

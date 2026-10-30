@@ -93,7 +93,7 @@ class LedgerTest(unittest.TestCase):
 
     def test_finding_predecessors_and_fixed_evidence(self):
         finding = {"id": "e" * 64, "severity": "major", "source_id": None, "path": "src/a.ts", "blob": SHA,
-                   "intervals": [[1, 1]], "title": "Issue", "body": "Details", "status": "untriaged"}
+                   "intervals": [[1, 1]], "title": "Issue", "body": "Details", "status": "untriaged", "anchor_status": "verified"}
         original = review([self.ref], findings=[finding])
         p = {"finding_id": finding["id"], "review_id": original["id"], "previous_event_id": None,
              "action": "needs-human", "evidence": {"reason": "ambiguous anchor"}, "actor": "operator"}
@@ -118,7 +118,17 @@ class LedgerTest(unittest.TestCase):
         git("push", "origin", genesis + ":refs/heads/cq/review-ledger")
         publisher = ledger.GitLedger(repo)
         out = ledger.Outbox(self.root / "outbox", self.store)
-        value = review([self.ref]); out.spool(value)
+        from test_backfill_accounting import Fixture
+        # A publisher verifies actual Git scope as well as event schema.
+        fixture = Fixture(self.root / "source")
+        target = fixture.commit({"src/a.ts": b"one\ntwo\n"})
+        value = fixture.full_review(target, "src/a.ts", [[1, 2]])
+        for ref in value["payload"]["artifacts"]:
+            self.store.put(Path(ref["location"]).read_bytes())
+        value["payload"]["artifacts"] = [self.ref]
+        rehash(value)
+        git("fetch", str(fixture.root), value["payload"]["head"])
+        out.spool(value)
         # Successful remote push followed by local acknowledgement loss: recovery
         # observes the same source, performs no extra append or vendor execution.
         with mock.patch.object(out, "acknowledge", side_effect=OSError("crash before ack")):
@@ -128,6 +138,28 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(records, [value])
         self.assertEqual(publisher.publish(out), recovered_head)
         self.assertFalse(out.pending())
+        # Another publisher wins a normal push race. Refetch/rebuild must retain
+        # both append-only records; there is no force push or lost update.
+        import backfill_history as history
+        contender = self.root / "contender"
+        subprocess.run(["git", "clone", "-q", str(remote), str(contender)], check=True, capture_output=True)
+        other = ledger.GitLedger(contender)
+        other_out = ledger.Outbox(self.root / "other-outbox", self.store)
+        first = history.import_source(fixture.repo, self.store, "crq-counted-cycle", "race-first", b"one", {}, AT, [])[0][0]
+        second = history.import_source(fixture.repo, self.store, "crq-counted-cycle", "race-second", b"two", {}, AT, [])[0][0]
+        out.spool(first); other_out.spool(second)
+        actual_git = publisher.git
+        raced = []
+        def concurrent_git(*args, **kwargs):
+            if args[0] == "push" and not raced:
+                raced.append(True)
+                other.publish(other_out)
+            return actual_git(*args, **kwargs)
+        with mock.patch.object(publisher, "git", side_effect=concurrent_git):
+            publisher.publish(out)
+        recovered_head, records = publisher.fetch()
+        self.assertEqual({v["id"] for v in records}, {value["id"], first["id"], second["id"]})
+        self.assertEqual(len(raced), 1)
         # A normal forward commit deleting the old record must halt readers.
         git("read-tree", recovered_head)
         git("update-index", "--force-remove", "--", ledger.record_path(value))

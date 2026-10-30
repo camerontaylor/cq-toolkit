@@ -4,6 +4,7 @@ import datetime as dt
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 import review_ledger as ledger
 
@@ -36,6 +37,29 @@ class Repository:
         if not re.fullmatch(r"[0-9a-f]{40,64}", value):
             raise ledger.IntegrityError("target must be an immutable full object ID")
         return self.git("rev-parse", value + "^{commit}").decode().strip()
+
+    def retain(self, store, commits):
+        refs = []
+        for commit in sorted(set(commits)):
+            self.resolve(commit)
+            ref = "refs/crq/evidence/" + commit
+            existing = self.git("rev-parse", "--verify", "--quiet", ref, check=False).decode().strip()
+            if existing and existing != commit:
+                raise ledger.IntegrityError("retained object ref conflict")
+            if not existing:
+                self.git("update-ref", ref, commit, "0" * len(commit))
+            refs.append(ref)
+        with tempfile.TemporaryDirectory() as directory:
+            filename = Path(directory) / "evidence.bundle"
+            self.git("bundle", "create", str(filename), *refs)
+            return {**store.put_file(filename), "kind": "git-bundle"}
+
+    def restore(self, artifacts, store):
+        for reference in artifacts:
+            store.verify(reference)
+            if reference.get("kind") == "git-bundle":
+                self.git("bundle", "verify", reference["location"])
+                self.git("bundle", "unbundle", reference["location"])
 
     def tree(self, commit):
         return self.git("rev-parse", self.resolve(commit) + "^{tree}").decode().strip()
@@ -146,6 +170,8 @@ class Repository:
         ends inherited coverage. Explicit verified nonancestor mappings may be
         supplied by a later evidence importer; ancestry alone cannot provide one.
         """
+        if name not in self.entries(old):
+            return None
         chain = self.git("rev-list", "--first-parent", new).decode().splitlines()
         if old not in chain:
             return None
@@ -195,6 +221,7 @@ class Repository:
             try:
                 for ref in value["payload"]["artifacts"]:
                     artifacts.verify(ref)
+                self.restore(value["payload"]["artifacts"], artifacts)
                 verified = self.verify_review(value)
                 for name, lines in verified.items():
                     mapped, inherited = (name, lines) if value["payload"]["target"] == target else self.carry(value["payload"]["target"], target, name, lines)

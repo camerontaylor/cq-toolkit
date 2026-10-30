@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tempfile
+import shutil
 
 REPO = "camerontaylor/cq-toolkit"
 SCHEMA = Path(__file__).resolve().parents[2] / "policy/review-ledger.schema.json"
@@ -178,8 +179,11 @@ def validate(value):
             if row.get("disposition") not in ("included", "renamed") or row.get("blob") != blob:
                 raise IntegrityError("credit on excluded or mismatched path")
         for finding in p["findings"]:
-            path(finding["path"])
+            if finding["path"] is not None:
+                path(finding["path"])
             intervals(finding["intervals"])
+            if finding["anchor_status"] == "verified" and (not finding["path"] or not finding["blob"] or not finding["intervals"]):
+                raise IntegrityError("verified finding requires exact anchor")
         if p["outcome"] == "completed" and not creditable(value):
             raise IntegrityError("completed review lacks authenticated scoped completion")
     elif value["event_type"] == "finding-event":
@@ -299,8 +303,32 @@ class ArtifactStore:
         expected = self.root / "sha256" / reference["sha256"]
         if Path(reference["location"]).resolve() != expected:
             raise IntegrityError("artifact outside configured durable store")
-        if not expected.is_file() or hashlib.sha256(expected.read_bytes()).hexdigest() != reference["sha256"]:
+        hasher = hashlib.sha256()
+        if not expected.is_file():
             raise IntegrityError("missing or corrupt retained artifact")
+        with expected.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        if hasher.hexdigest() != reference["sha256"]:
+            raise IntegrityError("missing or corrupt retained artifact")
+
+    def put_file(self, filename):
+        hasher = hashlib.sha256()
+        with Path(filename).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        ident = hasher.hexdigest()
+        destination = self.root / "sha256" / ident
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+                with Path(filename).open("rb") as source:
+                    shutil.copyfileobj(source, stream)
+                stream.flush(); os.fsync(stream.fileno()); temporary = stream.name
+            os.replace(temporary, destination); fsync_dir(destination.parent)
+        reference = {"sha256": ident, "location": str(destination)}
+        self.verify(reference)
+        return reference
 
 
 class Outbox:
@@ -318,9 +346,13 @@ class Outbox:
             atomic(filename, canonical(value))
         return value["id"]
 
+    def retained(self):
+        """Acknowledged events remain recovery authority after local state loss."""
+        return [loads(p.read_bytes()) for p in sorted((self.root / "pending").glob("*.json"))]
+
     def pending(self):
-        return [loads(p.read_bytes()) for p in sorted((self.root / "pending").glob("*.json"))
-                if not (self.root / "ack" / p.name).exists()]
+        return [value for value in self.retained()
+                if not (self.root / "ack" / (value["id"] + ".json")).exists()]
 
     def acknowledge(self, value, remote_ids):
         if value["id"] not in remote_ids:
@@ -352,6 +384,9 @@ class GitLedger:
                 status, filename = changes[i].decode(), changes[i + 1].decode()
                 if status != "A":
                     raise IntegrityError("ledger history modifies/deletes existing records")
+                mode = self.git("ls-tree", commit, "--", filename).split(b" ", 1)[0]
+                if mode != b"100644":
+                    raise IntegrityError("ledger records must be regular non-executable blobs")
                 raw = self.git("show", commit + ":" + filename)
                 value = loads(raw)
                 validate(value)
@@ -367,7 +402,13 @@ class GitLedger:
     def fetch(self):
         self.git("fetch", "--no-tags", self.remote, "refs/heads/" + self.branch)
         head = self.git("rev-parse", "FETCH_HEAD").decode().strip()
-        return head, self.read(head)
+        checkpoint = "refs/crq/review-ledger-validated"
+        previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
+        if previous and subprocess.run(["git", "merge-base", "--is-ancestor", previous, head], cwd=self.repo, capture_output=True).returncode:
+            raise IntegrityError("ledger head is not a descendant of validated history")
+        values = self.read(head)
+        self.git("update-ref", checkpoint, head, previous or "0" * len(head))
+        return head, values
 
     def publish(self, outbox, attempts=3):
         common = self.git("rev-parse", "--git-common-dir").decode().strip()
@@ -377,12 +418,33 @@ class GitLedger:
                 head, values = self.fetch()
                 ids = validate_sequence(values)
                 pending = outbox.pending()
+                # Order by causal dependencies rather than hash/file arrival.
+                ordered, available = [], set(ids)
+                while pending:
+                    ready = []
+                    for value in pending:
+                        p = value["payload"]
+                        deps = []
+                        if value["event_type"] == "finding-event":
+                            deps = [p["review_id"], p["previous_event_id"]]
+                        elif value["event_type"] == "import-result":
+                            deps = [p["review_id"], p["duplicate_id"]]
+                        if all(d is None or d in available for d in deps):
+                            ready.append(value)
+                    if not ready:
+                        raise IntegrityError("outbox has missing/forked causal dependencies")
+                    for value in ready:
+                        ordered.append(value); available.add(value["id"]); pending.remove(value)
+                pending = ordered
                 for value in pending:
                     if value["id"] in ids:
                         outbox.acknowledge(value, ids)
                         continue
                     for reference in value["payload"].get("artifacts", []):
                         outbox.artifacts.verify(reference)
+                    if creditable(value):
+                        from backfill_accounting import Repository
+                        Repository(self.repo).verify_review(value)
                     validate_sequence(values + [value])
                     with tempfile.TemporaryDirectory() as directory:
                         env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"),

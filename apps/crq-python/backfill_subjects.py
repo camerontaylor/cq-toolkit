@@ -100,8 +100,12 @@ def construct(repo, candidate, policy, members=(), *, offline=False):
     limits = effective_limits(policy, require_verified=not offline)
     target = repo.resolve(candidate["target"])
     objects = {r["path"]: r for r in repo.inventory(target, limits["per_file"])}
+    for name, row in objects.items():
+        row["tier"] = candidate.get("path_tiers", {}).get(name, candidate["tier"])
     requested = {r["path"]: r for r in candidate["scope"]}
     debt, partitions = [], []
+    context = {"trust": "untrusted-data-only", "prs": candidate["prs"],
+               "sources": [{"pr": m.get("pr"), "context": m.get("context", {})} for m in members]}
     names = sorted(requested, key=lambda n: n.encode())
     names.sort(key=lambda n: objects.get(n, {}).get("tier", candidate["tier"]))
     eligible = []
@@ -127,6 +131,11 @@ def construct(repo, candidate, policy, members=(), *, offline=False):
         else:
             base, head = projection(repo, target, nameset)
             provenance = {n: {"method": "projection", "reason": "residual uncovered lines" if residual else "path cluster"} for n in nameset}
+        # Context is transported in the synthetic input commit, as inert text.
+        # It cannot change the target tree, Git argv, baseline or requested paths.
+        if context["sources"]:
+            message = "crq pinned current subject\n\nBEGIN UNTRUSTED PR CONTEXT\n" + ledger.canonical(context).decode() + "\nEND UNTRUSTED PR CONTEXT"
+            head = _commit(repo, repo.tree(target), base, message)
         diff_bytes = len(repo.git("diff", "--no-ext-diff", "--no-textconv", "--binary", base, head))
         if limits["diff"] is not None and diff_bytes > limits["diff"]:
             if len(nameset) > 1:
@@ -148,11 +157,14 @@ def construct(repo, candidate, policy, members=(), *, offline=False):
             identity = ledger.digest({"parent": candidate["subject_id"], "scope": scope, "partition": number, "residual": residual})
             refs = pin(repo, identity, candidate["generation"], number, base, head, target)
             paths = [{"path": n, "blob": objects[n]["blob"], "mode": objects[n]["mode"], "disposition": "included", "reason": "bounded verified input", "baseline": provenance[n]} for n in nameset]
-            partitions.append({**candidate, "subject_id": identity, "job_id": identity + ":" + str(candidate["generation"]),
+            partitions.append({**candidate, "subject_id": identity, "inventory_subject_id": candidate["subject_id"],
+                               "tier": min(objects[s["path"]]["tier"] for s in scope),
+                               "score": sum(candidate.get("path_scores", {}).get(s["path"], 0) for s in scope),
+                               "job_id": identity + ":" + str(candidate["generation"]),
                                "partition": number, "scope": scope, "scope_digest": ledger.digest(scope),
                                "base": base, "head": head, "head_tree": repo.tree(head), "target_tree": repo.tree(target),
                                "refs": refs, "paths": paths, "diff_bytes": diff_bytes, "residual": residual,
-                               "context": {"trust": "untrusted-data-only", "prs": candidate["prs"]}})
+                               "context": context})
         if remaining:
             if residual:
                 debt.extend({"path": n, "disposition": "unsupported", "reason": "projection cannot expose requested head intervals"} for n in remaining)

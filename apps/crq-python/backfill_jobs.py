@@ -48,7 +48,9 @@ def enqueue(queue, partition, at):
             return item
         if scope_owner(item) and item.get("target") == partition["target"] and item.get("scope_digest") == partition["scope_digest"]:
             return item
-    job = {**copy.deepcopy(partition), "id": "backfill-" + jid, "kind": KIND, "tier": 4,
+    job = {**copy.deepcopy(partition), "id": "backfill-" + partition["subject_id"] + "-g" + str(partition["generation"]), "kind": KIND, "tier": 4,
+           "subject_kind": partition.get("subject_kind", partition["kind"]),
+           "tier_importance": partition.get("tier_importance", partition.get("tier", "T4")),
            "state": "pending", "vendor_state": "none", "attempt": 0, "failures": 0,
            "created_at": at, "cycles": [], "attempts": [], "notes": [], "pr": (partition.get("prs") or [0])[0]}
     histories = history(queue, job)
@@ -84,7 +86,7 @@ def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
             reason = "usage-stale-or-invalid"
         else:
             reflected = set(observation.get("reflected_reservations", []))
-            unreflected = [key for key, hold in holds.items() if key not in reflected and hold.get("quota_state") != "released"]
+            unreflected = [key for key, hold in holds.items() if key not in reflected and hold.get("quota_state") not in ("released", "expired")]
             effective = remaining - len(unreflected)
             if effective < 2:
                 reason = "one-slot-reserve"
@@ -112,12 +114,38 @@ def bind_run(queue, item, vendor_run_id):
     item.update(vendor_state="live", state="reviewing")
 
 
+def cancel_before_vendor(queue, item):
+    """Positive local evidence: scanning/preparation refused before vendor spawn."""
+    if item.get("run"):
+        raise ledger.IntegrityError("cannot cancel a run with recorded ownership")
+    hold = queue.get("backfill_reservations", {}).get(item.get("attempt_id"))
+    if hold:
+        hold["quota_state"] = "released"
+    item["vendor_state"] = "terminal"
+
+
+def reconcile_absent(queue, item, at, operator, reason, evidence):
+    ledger.timestamp(at)
+    if (not operator or not reason or evidence.get("attempt_id") != item.get("attempt_id")
+            or evidence.get("verdict") != "vendor-confirmed-not-started" or not evidence.get("vendor_query")
+            or item.get("run")):
+        raise ledger.IntegrityError("unknown launch requires exact authenticated vendor absence evidence")
+    item["vendor_state"] = "terminal"
+    cancel_before_vendor(queue, item)
+    terminal(queue, item, at, "error", vendor_terminal=True, reason=reason)
+    queue.setdefault("backfill_operator_events", []).append({"at": at, "item": item["id"], "operator": operator,
+                                                              "reason": reason, "reconciliation": evidence})
+
+
 def terminal(queue, item, at, outcome, *, vendor_terminal, retry_after=0, reason=""):
     if not vendor_terminal:
         item.update(vendor_state="unknown", state="launch-unknown")
         return
     item["vendor_state"] = "terminal"
     item["run"] = None
+    hold = queue.get("backfill_reservations", {}).get(item.get("attempt_id"))
+    if hold:
+        hold["terminal_at"] = at
     if outcome == "completed":
         # No success reset until validated remote coverage is acknowledged.
         item["state"] = "publication-pending"

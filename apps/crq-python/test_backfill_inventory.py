@@ -90,6 +90,43 @@ class InventoryTest(unittest.TestCase):
         with self.assertRaisesRegex(ledger.IntegrityError, "protected-path"):
             self.capture(t)
 
+    def test_verified_rename_cannot_reset_failure_quarantine(self):
+        t = self.f.commit({"apps/crq-python/old.py": b"unique\n"})
+        blob = self.f.repo.entries(t)["apps/crq-python/old.py"]["blob"]
+        self.f.git("mv", "apps/crq-python/old.py", "apps/crq-python/new.py")
+        newer = self.f.commit({})
+        queue = {"items": [{"target": t, "state": "quarantined", "scope": [{"path": "apps/crq-python/old.py", "blob": blob, "intervals": [[1, 1]]}]}],
+                 "backfill_scope_failures": {"apps/crq-python/old.py": {"failures": 6, "quarantined": True, "next_eligible_at": AT}}}
+        result = inventory.replay(self.capture(newer, queue), self.f.store)
+        self.assertFalse(result["candidates"])
+        self.assertEqual(result["paths"][0]["uncovered"], [[1, 1]])
+
+    def test_publication_ownership_maps_across_target_moves_and_new_generation_survives_construction(self):
+        t = self.f.commit({"src/kernel/a.ts": b"a\nb\n"})
+        self.limits["reviewer"] = {"verified": True, "evidence": "fixture", "max_files": 8, "max_diff_bytes": 2097152}
+        old = inventory.replay(self.capture(t), self.f.store)["candidates"][0]
+        from backfill_subjects import construct
+        partition = construct(self.f.repo, old, self.limits)["partitions"][0]
+        current = self.f.commit({"unrelated": b"new\n"})
+        queue = {"items": [{**partition, "state": "publication-pending"}]}
+        result = inventory.replay(self.capture(current, queue), self.f.store)
+        self.assertFalse(any("src/kernel/a.ts" in c["paths"] for c in result["candidates"]))
+        queue["items"][0]["state"] = "blocked"
+        result = inventory.replay(self.capture(t, queue), self.f.store)
+        retry = next(c for c in result["candidates"] if c["kind"] == "A")
+        self.assertEqual(retry["generation"], 1)
+
+    def test_first_parent_churn_counts_merge_once(self):
+        root = self.f.commit({"a": b"root\n"})
+        original_branch = self.f.git("symbolic-ref", "--short", "HEAD")
+        self.f.git("checkout", "-qb", "side")
+        self.f.commit({"side": b"side1\n"}); self.f.commit({"side": b"side2\n"})
+        self.f.git("checkout", "-q", original_branch)
+        self.f.commit({"a": b"main\n"})
+        self.f.git("merge", "--no-ff", "-qm", "Fixture merge", "side")
+        target = self.f.git("rev-parse", "HEAD")
+        self.assertEqual(self.f.repo.churn(target, AT)["side"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

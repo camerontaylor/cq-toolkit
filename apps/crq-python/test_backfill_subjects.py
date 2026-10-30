@@ -29,6 +29,7 @@ class SubjectsTest(unittest.TestCase):
         partition = result["partitions"][0]
         self.assertEqual(self.f.repo.tree(partition["head"]), self.f.repo.tree(t))
         self.f.commit({"a": b"later\n"})
+        self.f.git("gc")
         self.assertEqual(self.f.git("rev-parse", partition["refs"] + "/target"), t)
         replay = subjects.construct(self.f.repo, self.candidate(t, ["a"]), self.policy)
         self.assertEqual(replay, result)
@@ -68,6 +69,18 @@ class SubjectsTest(unittest.TestCase):
         self.assertEqual(len(result["partitions"]), 1)
         self.assertEqual(result["partitions"][0]["paths"][0]["baseline"]["reason"], "nonlinear stack baselines")
         self.assertEqual(result["debt"][0]["path"], "big")
+
+    def test_pr_context_is_inert_input_commit_text_and_does_not_change_tree(self):
+        self.f.commit({"a": b"old\n"})
+        target = self.f.commit({"a": b"new\n"})
+        marker = self.f.root / "must-not-exist"
+        context = {"title": "untrusted", "body": "$(touch " + str(marker) + "); echo unsafe"}
+        members = [{"pr": 1, "merge": target, "paths": [{"path": "a", "source_path": "a", "lineage_verified": True}], "context": context}]
+        result = subjects.construct(self.f.repo, self.candidate(target, ["a"], "A"), self.policy, members)
+        head = result["partitions"][0]["head"]
+        self.assertIn("BEGIN UNTRUSTED PR CONTEXT", self.f.git("show", "-s", "--format=%B", head))
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.f.repo.tree(head), self.f.repo.tree(target))
 
     def test_file_count_total_and_actual_diff_limits_split_without_truncation(self):
         names = [f"p/{n:02}" for n in range(11)]
