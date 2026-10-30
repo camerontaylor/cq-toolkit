@@ -357,7 +357,8 @@ jobs:
             printf '%s\n' "{\"status\":\"failed\",\"error\":\"$msg\"}" \
               > "${RUNNER_TEMP}/gate.json"
           fi
-          cat "${RUNNER_TEMP}/gate.json"
+          # Versioned audit record consumed pull-only by crq. Emit exactly once.
+          printf 'cq-promotion-result-v1 %s\n' "$(jq -c . "${RUNNER_TEMP}/gate.json")"
           # The run report (each promoted PR's cq-override record included)
           # is the step summary: fenced so SHAs and paths render verbatim,
           # and capped.
