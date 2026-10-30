@@ -10,7 +10,8 @@ export const registry = [
     name: 'review.address',
     inputSchema: ReviewAddressInputSchema,
     importer: async () => async (input) => {
-      const git = (...args) => execFileSync('git', args, { cwd: input.repoRoot, encoding: 'utf8' }).trim();
+      const git = (...args) =>
+        execFileSync('git', args, { cwd: input.repoRoot, encoding: 'utf8' }).trim();
       const role = { provider: 'mock', model: 'mock' };
       const finding = {
         id: 'demo',
@@ -44,7 +45,15 @@ export const registry = [
             const observedHead = git('rev-parse', 'HEAD');
             await writeFile(join(input.repoRoot, 'a.ts'), 'export const value = "GOOD";\n');
             git('add', 'a.ts');
-            git('-c', 'user.name=Demo', '-c', 'user.email=demo@example.invalid', 'commit', '-qm', 'fix');
+            git(
+              '-c',
+              'user.name=Demo',
+              '-c',
+              'user.email=demo@example.invalid',
+              'commit',
+              '-qm',
+              'fix',
+            );
             return {
               finding: { ...item, status: 'fixed' },
               observedHead,
