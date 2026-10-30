@@ -5,9 +5,9 @@
 // out and settled (admission), and how independent per-PR results roll up
 // truthfully (aggregate). It performs no I/O, has no runtime imports, reads no
 // configuration, dispatches no driver, queue, provider or provider CLI, and is
-// imported only by its own test. `review.addressMany` itself, the registry/CLI
-// grammar, per-PR worktrees, enrollment transport and shared spend seams are
-// later integration work and are deliberately absent here.
+// consumed by addressMany.ts for serial explicit-PR dispatch. Worktree and
+// publication behavior remains owned by review.address; enrollment transport
+// and parallel scheduling are outside this planning module.
 //
 // What this contract does NOT claim, stated once so no caller can infer it:
 //   - Admissions bound ALLOCATIONS, never provider spend. The governor's

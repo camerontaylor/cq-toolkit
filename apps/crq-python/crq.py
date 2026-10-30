@@ -32,6 +32,8 @@ import review_receipt
 import deferred_refresh
 import merged_reconcile
 import usage_slots
+import backfill_runtime
+import backfill_jobs
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -640,11 +642,12 @@ def is_doc(path: str) -> bool:
     return path.endswith((".md", ".mdx", ".txt")) or path.startswith("docs/")
 
 
-def measure_merged(item: Dict[str, Any]) -> Dict[str, Any]:
+def measure_merged(item: Dict[str, Any], target: Optional[str] = None) -> Dict[str, Any]:
     """Blame-based survival: of the lines the PR added, how many are still
-    attributed (git blame -w -M) to the PR's own commits in origin/merge-queue."""
+    attributed (git blame -w -M) to the PR's own commits at the selected target.
+    Without an explicit target, use origin/merge-queue as before."""
     merge = item["merge_commit"]
-    mq = git("rev-parse", "origin/merge-queue")
+    mq = target if target is not None else git("rev-parse", "origin/merge-queue")
     commits = pr_commit_set(merge)
     renames = rename_map(merge, mq)
     files = []
@@ -713,35 +716,20 @@ def synth_paths(merge: str, mq: str) -> List[str]:
     return sorted(names)
 
 
-def build_synthetic(item: Dict[str, Any]) -> Tuple[str, str, int]:
-    """Synthetic pair, both descending from current merge-queue:
-         MQ → B' (PR-touched paths reset to pre-merge content) → H (tree == MQ)
-       Reviewing H against B' shows exactly what the PR introduced to those
-       paths plus every later change to them, with today's tree as context."""
+def build_synthetic(item: Dict[str, Any], target: str) -> Tuple[str, str, int]:
+    """Explicit immutable T; generation pins replace mutable per-PR refs."""
+    repo = backfill_runtime.accounting.Repository(CLONE)
+    repo.resolve(target)
     merge = item["merge_commit"]
-    mq = git("rev-parse", "origin/merge-queue")
-    pre = git("rev-parse", f"{merge}^1")
-    paths = (item.get("measure") or {}).get("synthetic_paths") or synth_paths(merge, mq)
-    with tempfile.TemporaryDirectory() as td:
-        env = dict(os.environ, GIT_INDEX_FILE=str(Path(td) / "index"))
-        git("read-tree", mq, env=env)
-        for p in paths:
-            ls = git("ls-tree", pre, "--", p)
-            if ls:
-                mode, _typ, rest = ls.split(" ", 2)
-                sha = rest.split("\t", 1)[0]
-                git("update-index", "--add", "--cacheinfo", f"{mode},{sha},{p}", env=env)
-            else:
-                git("update-index", "--force-remove", "--", p, env=env)
-        tree = git("write-tree", env=env)
-    ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
-                 GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
-    base = run(["git", "commit-tree", tree, "-p", mq, "-m",
-                f"crq synthetic base: PR #{item['pr']} paths at pre-merge {pre[:10]}"], cwd=CLONE, env=ident).stdout.strip()
-    head = run(["git", "commit-tree", f"{mq}^{{tree}}", "-p", base, "-m",
-                f"crq synthetic head: PR #{item['pr']} paths at merge-queue {mq[:10]}"], cwd=CLONE, env=ident).stdout.strip()
-    git("update-ref", f"refs/crq/synth/pr{item['pr']}-base", base)
-    git("update-ref", f"refs/crq/synth/pr{item['pr']}-head", head)
+    paths = (item.get("measure") or {}).get("synthetic_paths") or synth_paths(merge, target)
+    live = repo.entries(target)
+    paths = sorted(p for p in paths if p in live)
+    # Legacy subjects use the same safe full-file projection when provenance
+    # cannot establish complete residual scope. New A unions use the bounded
+    # synthetic/residual constructor in backfill_subjects directly.
+    base, head = backfill_runtime.subjects.projection(repo, target, paths)
+    identity = backfill_runtime.ledger.digest({"item": item["id"], "target": target, "paths": paths})
+    backfill_runtime.subjects.pin(repo, identity, item.get("generation", 0), 0, base, head, target)
     return base, head, len(paths)
 
 
@@ -1070,12 +1058,14 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     return summary
 
 
-def discover_merged(q, budget):
-    """Natural nonselective tick, same bounded inventory and overlap replay."""
+def discover_merged(q, budget, *, interval=None):
+    """Natural tick adapter; configured bounds take priority over retained state."""
     caller = q
     q = json.loads(json.dumps(q))
     active = q.get("merged_discovery") or {}
-    if active and not active.get("complete"):
+    if interval is not None:
+        after, before = interval["after"], interval["before"]
+    elif active and not active.get("complete"):
         after, before = active["after"], active["before"]
     else:
         watermark = q.get("merged_watermark") or q["created_at"]
@@ -1085,7 +1075,7 @@ def discover_merged(q, budget):
         return []
     # Record the frozen bounds in queue too: a crash after source pinning but
     # before page one must not cause the next tick to choose a different upper.
-    if not active or active.get("complete"):
+    if interval is not None or not active or active.get("complete"):
         q["merged_discovery"] = {"after": after, "before": before, "complete": False}
         _save_discovery_queue(q, "bounds-save")
     try:
@@ -1173,11 +1163,14 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
     if dry:
-        return {"base": "(synthetic)", "head": "(synthetic)", "target": "origin/merge-queue",
+        return {"base": "(synthetic)", "head": "(synthetic)", "target": "origin/main",
                 "label": "post-merge synthetic review", "cycle": None, "notes": [], "branch": None}
-    base, head, n = build_synthetic(item)
-    return {"base": base, "head": head, "target": "origin/merge-queue", "cycle": None, "branch": None,
-            "label": f"post-merge synthetic review ({n} PR-touched paths, pre-merge → merge-queue)", "notes": []}
+    target = git("rev-parse", "origin/main^{commit}")
+    if not is_ancestor(item["merge_commit"], target):
+        raise NotReady("not-yet-promoted: merge commit is not an ancestor of origin/main")
+    base, head, n = build_synthetic(item, target)
+    return {"base": base, "head": head, "target": target, "cycle": None, "branch": None,
+            "label": f"post-merge current projection ({n} PR-touched paths at promoted main)", "notes": []}
 
 
 def object_present(sha: str) -> bool:
@@ -1211,7 +1204,7 @@ def starts_last_hour(q: Dict[str, Any]) -> int:
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [i for i in q["items"] if i["state"] == "reviewing" or (i["kind"] == "promotion" and (
+    return [i for i in q["items"] if i["state"] == "reviewing" or (i.get("kind") in backfill_jobs.RANK4 and backfill_jobs.is_execution_owner(i)) or (i["kind"] == "promotion" and (
         i["state"] in SIGNER_STATES or (i.get("request") or {}).get("reconciliation_required")))]
 
 
@@ -1227,6 +1220,10 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"])
     else:
         ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json")
+    if ok and item["kind"] == backfill_jobs.KIND:
+        context = backfill_runtime.ledger.canonical(item.get("context", {})).decode()
+        patch = "diff --git a/.crq-review-context.json b/.crq-review-context.json\n--- /dev/null\n+++ b/.crq-review-context.json\n@@ -0,0 +1 @@\n+" + context + "\n"
+        ok, scan = secret_scan_diff(patch, rdir / "context-secret-scan.json", base=plan["base"], head=plan["head"])
     if not ok:
         item["state"] = "blocked"
         item["last_error"] = (f"secret scan failed before upload: {len(scan['denylist_hits'])} denylist + "
@@ -1262,6 +1259,8 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
+    if item["kind"] == backfill_jobs.KIND:
+        meta["backfill"] = {k: item[k] for k in ("subject_id", "job_id", "attempt_id", "target", "scope_digest")}
     if item["kind"] == review_receipt.KIND:
         meta["capture"] = item["capture"]
         meta["source"] = item["subject"]
@@ -1371,6 +1370,23 @@ def cmd_review_child(run_id: str) -> int:
     identity = {"run_id": run_id, "pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(),
                 "sid": os.getsid(0), "group_owner": author_quota.GROUP_OWNER_MARKER}
     repair_tick.atomic(pidfile, identity)
+    try:
+        if meta.get("kind") == backfill_jobs.KIND:
+            version = subprocess.run([meta["cmd"][0], "--version"], capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+            if version != "0.8.2":
+                raise RuntimeError("backfill scope adapter refuses unknown CodeRabbit version")
+            repository = backfill_runtime.accounting.Repository(meta["worktree"])
+            if repository.git("rev-parse", "HEAD^{commit}").decode().strip() != meta["head"] or repository.git("status", "--porcelain").strip():
+                raise RuntimeError("backfill submission must match clean pinned head")
+            proof = {"cli_version": version, "format": "coderabbit-agent-0.8.2", "run_id": run_id,
+                     "head": meta["head"], "base": meta["base"], "attempt_id": meta["backfill"]["attempt_id"],
+                     "submitted_scope": backfill_runtime.history.submitted_scope(repository, meta["base"], meta["head"])}
+            repair_tick.atomic(rdir / "submission.json", proof)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        (rdir / "review.ndjson").write_text(json.dumps({"type": "error", "message": str(exc)}) + "\n")
+        repair_tick.atomic(rdir / "exit.json", {"exit": 3, "ended_at": iso(), "timed_out": False,
+                                               "pre_vendor_refusal": True})
+        return 3
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
         proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
         repair_tick.atomic(pidfile, {**identity, "cli_pid": proc.pid})
@@ -1563,6 +1579,27 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         save_queue(q)
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
         return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (no repair)"
+    if item["kind"] == backfill_jobs.KIND:
+        return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
+                                        terminal_verified=(state == "harvest"))
+    if item["kind"] == "coverage":
+        try:
+            coverage._legacy_origins(q, item)
+        except ValueError as exc:
+            item.update(state="blocked", vendor_state="terminal", run=None,
+                        last_error="legacy coverage lineage unresolved: " + str(exc))
+            if item.get("attempt_id"):
+                q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
+            if cls["outcome"] in ("auth", "action_required"):
+                q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+            if cls["outcome"] == "rate_limited":
+                set_rate_cooldown(q, cls, rdir)
+            save_queue(q)
+            remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
+            return item["last_error"]
+    if item["kind"] == "coverage" and item.get("attempt_id"):
+        item["vendor_state"] = "terminal"
+        q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
     attempt = {"run_id": r["run_id"], "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
@@ -1603,6 +1640,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             run_id=meta["run_id"], completed_at=record["completed_at"], reviewed_paths=terminal_paths,
             review_sha=meta.get("coverage_sha") or meta.get("reviewed_tip") or meta["head"],
             counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
+        if item["kind"] == "coverage" and item.get("coverage_source"):
+            coverage.record_legacy_success(q, item, terminal_paths)
         if item["kind"] == "promotion":
             promotion_result = harvest_promotion(item, meta, cls, rdir)
             repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
@@ -1612,6 +1651,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         return f"{item['id']}: completed ({cls['findings']} findings)"
     if o == "rate_limited":
         set_rate_cooldown(q, cls, rdir)
+        attempt["deadline"] = q["cooldown_until"]
         q["rl_backoff_min"] = min(240, (q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]) * 2)
         item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
         if item["kind"] == author_quota.AUTHOR_KIND:
@@ -1633,6 +1673,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # error / interrupted / skipped / too_large: item-level backoff, never counted
     item["failures"] = item.get("failures", 0) + 1
     item["last_error"] = f"{o}: {cls.get('message')}"
+    if item["kind"] == "coverage":
+        coverage.record_legacy_failure(q, item, iso(), o, r["run_id"])
     if item["kind"] == author_quota.AUTHOR_KIND:
         # An attempted author dispatch is always a consumed terminal: the generic
         # pending/backoff retry path below must never apply to it.
@@ -2656,14 +2698,77 @@ def notify_owner(text: str) -> Dict[str, Any]:
     return res
 
 
+def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
+    """Read the trusted gate's own result, not PR comments or subject code.
+
+    A successful decide job built at the previous main already checked closure,
+    independent exact-head acceptance, policy and exact-subject CI. Its result
+    also uses the canonical privileged-path predicate. Keep this bounded; a
+    missing/expired log remains unverified, never inferred from green alone.
+    """
+    prefix = f"repos/{REPO}/actions"
+    runs = json.loads(run(["gh", "api", f"{prefix}/workflows/gate.yml/runs?per_page=30&head_sha={last}&status=success"],
+                          timeout=120).stdout)["workflow_runs"]
+    for candidate in runs:
+        if (candidate.get("head_sha") != last or candidate.get("head_branch") != "main"
+                or candidate.get("path") != ".github/workflows/gate.yml"
+                or candidate.get("event") not in ("schedule", "workflow_dispatch", "workflow_run", "push")
+                or candidate.get("status") != "completed" or candidate.get("conclusion") != "success"):
+            continue
+        try:
+            jobs = json.loads(run(["gh", "api", f"{prefix}/runs/{candidate['id']}/jobs?per_page=100"],
+                                  timeout=120).stdout)["jobs"]
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            continue
+        for job in jobs:
+            if job.get("name") != "decide" or job.get("conclusion") != "success":
+                continue
+            try:
+                log = run(["gh", "api", "--allow-escape-sequences", f"{prefix}/jobs/{job['id']}/logs"],
+                          timeout=120).stdout
+            except (subprocess.SubprocessError, OSError, RuntimeError):
+                continue
+            # Any duplicate marker is ambiguous, including malformed records.
+            records = [line for line in log.splitlines() if re.match(
+                r"^[0-9T:.Z-]+ cq-promotion-result-v1(?: |$)", line)]
+            if len(records) != 1:
+                continue
+            match = re.fullmatch(r"[0-9T:.Z-]+ cq-promotion-result-v1 (\{.*\})", records[0])
+            if not match:
+                continue
+            try:
+                result = json.loads(match.group(1))
+            except ValueError:
+                continue
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                continue
+            value = result.get("value")
+            if not isinstance(value, dict):
+                continue
+            if (value.get("verdict") == "promoted" and value.get("main") == last
+                    and value.get("subject") == main
+                    and value.get("signer") in ("present", "advisory-missing", "advisory-failed")):
+                return {"run_id": candidate["id"], "job_id": job["id"], "signer": value["signer"]}
+    return None
+
+
 def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """PRIMARY (P1 / admin-bypass detector): main advanced only with a trusted bot
-    success (login, Bot, numeric id) whose main=<base> is contained in the
-    previous main. Corroboration against crq's own requests is informational."""
+    """Verify ordinary gate evidence, or require the pinned signer success.
+    Privileged ranges never qualify for the ordinary gate evidence path.
+    Corroboration against crq's own requests is informational."""
     reasons: List[str] = []
     notes: List[str] = []
     if not is_ancestor(last, main):
         reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
+    if not reasons:
+        try:
+            evidence = ordinary_gate_evidence(last, main)
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            evidence = None
+            notes.append(f"ordinary gate evidence unavailable ({type(exc).__name__})")
+        if evidence:
+            rec["ordinary_gate"] = evidence
+            return reasons, notes
     sts = promotion_statuses(main)
     ident = reviewer_identity()  # None → nothing is trusted (fail closed)
     bot = [x for x in sts if ident and x["type"] == "Bot" and x["login"] == ident[0] and x.get("creator_id") == ident[1]]
@@ -2857,7 +2962,7 @@ def rank(item: Dict[str, Any]) -> int:
         return 5
     if item["kind"] == review_receipt.KIND:
         return 2
-    if item["kind"] == "coverage":
+    if item["kind"] in ("coverage", backfill_jobs.KIND):
         return coverage.COVERAGE_RANK
     if item["kind"] == author_quota.AUTHOR_KIND:
         return author_quota.AUTHOR_RANK
@@ -2970,15 +3075,28 @@ def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     return d is None or d["state"] in ("done", "skipped") or additional_cycle(d)
 
 
+def ordinary_review_eligible(q):
+    if q.get("backfill_ordinary_exhausted"):
+        return False
+    return any(i.get("state") == "pending" and rank(i) <= 3
+               and not parked_merged_linked_receipt(q, i) and deps_met(q, i)
+               and (not i.get("not_before") or parse_iso(i["not_before"]) <= now())
+               for i in q["items"])
+
+
 def coverage_fallback(q, log, dry, only):
+    started, available = backfill_runtime.select(sys.modules[__name__], q, log, dry, only)
+    if started or available:
+        return started, available
+    if backfill_runtime.settings(STATE, dispatch=True):
+        return None, False
     if only:
         return None, False
-    mq = git("rev-parse", "origin/merge-queue")
+    mq = git("rev-parse", "origin/main^{commit}")
     candidates = [i for i in q["items"] if i["kind"] == "coverage" and i["state"] == "pending"]
     for i in candidates:
-        if i.get("coverage_sha") != mq:
-            i["state"] = "skipped"
-            i["last_error"] = "coverage tip moved; re-cut"
+        # A captured coverage target is immutable across tip moves.
+        i.setdefault("coverage_sha", mq)
     candidates = [i for i in candidates if i["state"] == "pending"]
     if not candidates:
         if any(i["kind"] == "coverage" and i["state"] == "reviewing" for i in q["items"]):
@@ -2986,7 +3104,7 @@ def coverage_fallback(q, log, dry, only):
         for i in q["items"]:
             if i["kind"] == "merged" and i.get("merge_commit"):
                 try:
-                    i["measure"] = measure_merged(i)
+                    i["measure"] = measure_merged(i, mq)
                 except Exception as exc:
                     log.append("coverage measurement failed: " + str(exc)[:150])
         candidate = coverage.coverage_candidate(q, q.get("coverage") or coverage.new_ledger(),
@@ -2999,18 +3117,34 @@ def coverage_fallback(q, log, dry, only):
     for item in sorted(candidates, key=sort_key):
         if item.get("not_before") and parse_iso(item["not_before"]) > now() or not deps_met(q, item):
             continue
+        try:
+            source, origins = coverage._legacy_origins(q, item)
+            if not origins or any(not coverage._legacy_retry_allowed(q, source["pr"], origin, now())
+                                  for origin in origins):
+                item["wait_reason"] = "legacy coverage retry history or cooldown unresolved"
+                continue
+        except (ValueError, KeyError, TypeError):
+            item["wait_reason"] = "legacy coverage retry identity unresolved"
+            continue
         available = True
         if dry:
             log.append("DRY-RUN would cut coverage " + item["id"])
             return None, True
         try:
-            base, head, paths = build_synthetic(item)
+            base, head, paths = build_synthetic(item, item["coverage_sha"])
             if not git("diff", "--name-only", base, head):
                 item.update(state="skipped", last_error="empty coverage range")
                 continue
             plan = dict(base=base, head=head, target="origin/merge-queue", cycle=None,
                         branch=None, notes=[], label="lowest-priority coverage review")
+            plan["target"] = item["coverage_sha"]
+            if not backfill_runtime.rank4_gate(sys.modules[__name__], q, item, dry):
+                continue
             run_id = launch(q, item, plan)
+            if item["state"] == "reviewing":
+                backfill_jobs.bind_run(q, item, run_id)
+            elif not item.get("run"):
+                backfill_jobs.cancel_before_vendor(q, item)
             log.append("coverage " + item["id"] + ": " + item["state"])
             return run_id if item["state"] == "reviewing" else None, True
         except Exception as exc:
@@ -3023,6 +3157,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     started = None
     has_coverage = False
     reservations_before = len(q.get("starts", []))
+    q["backfill_ordinary_exhausted"] = False
     for item in sorted(q["items"], key=sort_key):
         if only and item["id"] != only:
             continue
@@ -3031,7 +3166,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
         if item["kind"] == review_receipt.KIND and not capture_current and not item.get("capture"):
             item["wait_reason"] = "first current capture waits for fetching maintenance tick"
             continue
-        if item["kind"] == "coverage":
+        if item["kind"] in ("coverage", backfill_jobs.KIND):
             if item.get("operator_priority"):
                 started, has_coverage = coverage_fallback(q, log, dry, only)
                 if started or (dry and has_coverage):
@@ -3147,6 +3282,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
                                       f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
         break
     else:
+        q["backfill_ordinary_exhausted"] = not bool(only)
         started, has_coverage = coverage_fallback(q, log, dry, only)
         if not started:
             log.append("no eligible item this tick")
@@ -3211,6 +3347,8 @@ def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, res
     has_coverage = False
     global_gate = None
     q["usage"] = usage
+    backfill_runtime.usage_context(sys.modules[__name__], q, usage, reserved)
+    q["backfill_starts_at_observation"] = len(q.get("starts", []))
     if usage is not None:
         slots = max(0, usage["remaining"] - len(reserved))
     else:
@@ -3283,9 +3421,28 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
+    if not dry:
+        try:
+            backfill_runtime.publish(sys.modules[__name__], q)
+            rollout = backfill_runtime.settings(STATE)
+            if rollout and rollout.get("inventory_mode") == "integrated" and not only:
+                backfill_runtime.run_inventory(sys.modules[__name__], q)
+        except Exception as exc:
+            # Fail closed for rank4 while retaining ordinary scheduler progress.
+            q["backfill_halted"] = str(exc)[:300]
+            log.append("backfill halted: " + str(exc)[:300])
     if not dry and only is None:
         budget = ForgeBudget()
-        log += discover_merged(q, budget)
+        discovery = CONFIG.get("merged_discovery")
+        if isinstance(discovery, dict) and discovery.get("enabled") is True:
+            try:
+                interval = merged_reconcile.normalize_interval(discovery.get("after"), discovery.get("before"))
+                if interval["before"] >= iso():
+                    raise ValueError("interval must end before startup")
+            except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
+                log.append("merged discovery disabled: invalid configured interval")
+            else:
+                log += discover_merged(q, budget, interval=interval)
         with forge_window(budget):
             refreshed = deferred_refresh.refresh_deferred(q,
                 verify_source=verify_deferred_source, find_source=find_deferred_source,
@@ -3535,7 +3692,9 @@ def cmd_measure() -> None:
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
-    merged = [i for i in q["items"] if i["kind"] == "merged"]
+    # Repair-only backfill items share the merged kind but have no PR merge.
+    merged = [i for i in q["items"] if i["kind"] == "merged"
+              and not (i.get("pr") == 0 and i.get("repair_runs") and not i.get("merge_commit"))]
     for i in merged:
         if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
             continue  # merged head already reviewed; not a supersession decision
@@ -3924,7 +4083,7 @@ def main() -> int:
         q = load_queue()
         fetch()
         item = next(i for i in q["items"] if i["kind"] == "merged" and i["pr"] == args.pr)
-        base, head, n = build_synthetic(item)
+        base, head, n = build_synthetic(item, git("rev-parse", "origin/main^{commit}"))
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "promotion-ack":

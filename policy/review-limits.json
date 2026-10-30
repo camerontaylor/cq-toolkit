@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "construction_version": "current-scoped-v1",
+  "scoring_version": "uncovered-churn-findings-v1",
+  "max_files": 8,
+  "max_file_bytes": 200000,
+  "max_total_bytes": 500000,
+  "reviewer": {
+    "verified": true,
+    "version": "0.8.2",
+    "max_files": 8,
+    "max_diff_bytes": 262144,
+    "evidence": "docs/backfill-protocol/reviewer-verification-20261031.json"
+  },
+  "blame_options": ["--line-porcelain", "--encoding=UTF-8"]
+}

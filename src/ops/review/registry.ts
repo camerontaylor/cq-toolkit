@@ -414,6 +414,7 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
       .min(1)
       .exactOptional(),
     uncommitted: z.boolean().exactOptional(),
+    prepareEvidence: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: z
       .string()
@@ -547,7 +548,27 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
   })
   .strict();
 
+export const ReviewAddressManyInputSchema = z
+  .object({
+    repoRoot: z.string().min(1),
+    repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
+    pulls: z.array(z.number().int().positive()).min(1),
+    owner: z.string().min(1),
+    maxTokens: z.number().int().positive(),
+    tokensPerPr: z.number().int().positive(),
+    rounds: z.number().int().positive().exactOptional(),
+    wallMs: z.number().int().positive().exactOptional(),
+    push: z.boolean().exactOptional(),
+  })
+  .strict();
+
 export const registry: OpRegistryEntry[] = [
+  {
+    name: 'review.addressMany',
+    inputSchema: ReviewAddressManyInputSchema,
+    importer: async () =>
+      (await import('./addressMany.js')).makeReviewAddressMany() as Op<unknown, unknown>,
+  },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {
     name: 'review.enqueue',

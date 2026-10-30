@@ -11,6 +11,7 @@
   "rate_limit_default_backoff_min": 30,
   "error_backoff_min": 30,
   "max_item_failures": 3,
+  "merged_discovery": {"enabled": false},
   "merged_min_survival": 0.25,
   "merged_min_surviving_lines": 15,
   "merged_min_file_focus": 0.25,

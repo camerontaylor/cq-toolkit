@@ -1,3 +1,7 @@
+import type {
+  EvidencePreparationContext,
+  AnchorBlobInput,
+} from './internal/reviewEvidencePreparation.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -55,6 +59,8 @@ export interface ReviewRunInput {
   areas?: boolean;
   repoRoot: string;
   uncommitted?: boolean;
+  /** Produce and validate anchored evidence, with at most two repair requests. */
+  prepareEvidence?: boolean;
   target?: string;
   base?: string;
   maxTokens?: number;
@@ -602,7 +608,76 @@ export function makeReviewRun(
                   const reviewedScope = input.uncommitted
                     ? ('uncommitted' as const)
                     : ('full' as const);
+                  let evidenceContext: EvidencePreparationContext | undefined;
+                  let loadEvidencePaths: ((paths: readonly string[]) => Promise<void>) | undefined;
+                  if (input.prepareEvidence) {
+                    const blobs = new Map<string, AnchorBlobInput>();
+                    for (const component of components) {
+                      const readBlob = async (revision: string) => {
+                        const result = await effects.runCommand(
+                          'git',
+                          ['show', `${revision}:${component.path}`],
+                          {
+                            timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
+                            ...(deadline.signal ? { signal: deadline.signal } : {}),
+                          },
+                        );
+                        return result.exitCode === 0 ? result.stdout : undefined;
+                      };
+                      const base = await readBlob(reviewedBase);
+                      const captured = component.component.startsWith('untracked:')
+                        ? { ok: true as const, text: component.text }
+                        : await effects.readWorktreeFile(component.path, 4 * 1024 * 1024);
+                      const head = captured.ok ? captured.text : undefined;
+                      const baseHunks: { start: number; end: number }[] = [];
+                      const headHunks: { start: number; end: number }[] = [];
+                      for (const match of component.text.matchAll(
+                        /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm,
+                      )) {
+                        baseHunks.push({
+                          start: Number(match[1]),
+                          end: Number(match[1]) + Number(match[2] ?? 1),
+                        });
+                        headHunks.push({
+                          start: Number(match[3]),
+                          end: Number(match[3]) + Number(match[4] ?? 1),
+                        });
+                      }
+                      if (component.component.startsWith('untracked:') && head !== undefined)
+                        headHunks.push({ start: 1, end: head.split('\n').length + 1 });
+                      blobs.set(component.path, { base, head, baseHunks, headHunks });
+                    }
+                    loadEvidencePaths = async (paths) => {
+                      for (const path of new Set(paths)) {
+                        if (
+                          blobs.has(path) ||
+                          path.startsWith('/') ||
+                          path.split('/').some((part) => part === '..' || part === '.')
+                        )
+                          continue;
+                        deadline.signal?.throwIfAborted();
+                        const baseResult = await effects.runCommand(
+                          'git',
+                          ['show', `${reviewedBase}:${path}`],
+                          {
+                            timeoutMs: Math.max(1, Math.min(60_000, remainingWallMs())),
+                            ...(deadline.signal ? { signal: deadline.signal } : {}),
+                          },
+                        );
+                        const captured = await effects.readWorktreeFile(path, 4 * 1024 * 1024);
+                        blobs.set(path, {
+                          base: baseResult.exitCode === 0 ? baseResult.stdout : undefined,
+                          head: captured.ok ? captured.text : undefined,
+                          baseHunks: [],
+                          headHunks: [],
+                        });
+                      }
+                    };
+                    evidenceContext = { blobs, renames: new Map() };
+                  }
                   const agent = await runReview(deps.drivers, {
+                    ...(evidenceContext === undefined ? {} : { evidenceContext }),
+                    ...(loadEvidencePaths === undefined ? {} : { loadEvidencePaths }),
                     repoRoot: input.repoRoot,
                     head: state.head,
                     branch: state.branch,

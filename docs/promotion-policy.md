@@ -183,13 +183,18 @@ fail-closed).
   §Deviations 4) a root-capable agent can reach the signer's key, so the signal is T1-proof (no
   overeager-agent forgery), not yet T2-proof; and P1 (the owner's PAT becoming interactive-only)
   is what makes the repository as a whole, not just the signal, agent-proof.
-- The crq-side audit stays **detective**. On each tick, crq checks that every `main` advance was
-  authorized by a trusted bot success bound to the previous main, and corroborates it against its
-  own spool records; anything else raises a loud alert. Only the newest of several promotions
-  within one tick is audited. This detector still requires signer evidence for ordinary ranges,
-  even though the promotion gate makes that evidence advisory under #376/#388. Its
-  `UNVERIFIED` verdict is retained when the owner procedurally acknowledges such an alert;
-  acknowledgement does not certify the review, CI, or promotion.
+- The crq-side audit stays **detective**. Ordinary advances qualify through the successful
+  `gate.yml` run built at the previous main: its `decide` job must record a single `promoted`
+  `cq-promotion-result-v1` result binding that previous main and the exact new main, with an ordinary signer disposition.
+  crq reads Actions API run/job metadata and job logs, never PR comment text. Runs must
+  name `.github/workflows/gate.yml` on `main`, at the exact previous main SHA, from
+  schedule, workflow_run, push or workflow_dispatch; PR workflow runs never qualify. The gate itself
+  already verifies independent head-bound acceptance for every admitted PR, exact-subject CI,
+  closure and policy using the canonical privileged-path predicate. A green run alone, a noop,
+  a dry run, another head or a privileged (`required`) disposition does not qualify.
+  Missing or expired evidence falls back to the pinned signer requirement; privileged advances
+  retain that requirement. The audit scans at most 30 recent successful gate runs at the previous main, so delayed observations
+  can remain unverified. Procedural acknowledgement never certifies review, CI or promotion.
 
 ### Exact procedural audit acknowledgement
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=CRQ deterministic scoped backfill inventory (requires operational rollout ruling)
+ConditionPathExists=@CRQ_ROOT@/state/backfill-rollout.json
+[Service]
+Type=oneshot
+Nice=10
+Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=@CRQ_ROOT@
+ExecStart=/usr/bin/env python3 @CRQ_ROOT@/backfill.py inventory
+TimeoutStartSec=45min
+KillMode=control-group

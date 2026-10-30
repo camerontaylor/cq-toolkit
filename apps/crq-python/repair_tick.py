@@ -24,7 +24,8 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     existing = item.get('repair_runs', {}).get(run)
     if existing:
         return job_id
-    history = [r for i in q['items'] if i.get('pr') == item.get('pr')
+    history = [r for i in q['items'] if (i.get('id') == item.get('id') if old.get('canonical_finding_id')
+                                        else i.get('pr') == item.get('pr'))
                for r in i.get('repair_runs', {}).values()]
     count = sum(r.get('pin') == source_sha for r in history)
     if count >= c.CONFIG['repair'].get('max_rounds_per_pin', 2):
