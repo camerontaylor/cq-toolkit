@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile, readFile, readlink, unlink } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  symlink,
+  writeFile,
+  readFile,
+  readlink,
+  unlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
@@ -75,7 +84,6 @@ test.each([1, 3])(
     }
   },
 );
-
 
 test('candidate relinking and metadata writes leave caller dependencies intact', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cq-dependency-snapshot-'));

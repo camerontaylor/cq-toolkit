@@ -510,7 +510,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         let detail: string = result.status;
         if (result.status === 'indeterminate') detail = result.detail;
         else if (result.status === 'failed') detail = result.error;
-        throw new Error(`configured check was ${result.status} (${check.adapter}): ${detail}`);
+        throw new Error(
+          `configured check was ${result.status} (${check.adapter}): ${detail.slice(0, 1000)}`,
+        );
       }
       results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
     }
@@ -926,7 +928,13 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 (await git(candidate, ['diff', '--name-only', '-z'])) ||
                 zList(
                   await git(candidate, ['ls-files', '-z', '--others', '--exclude-standard']),
-                ).filter((path) => path !== 'node_modules').length > 0
+                ).filter(
+                  (path) =>
+                    !(
+                      dependencies &&
+                      (path === 'node_modules' || path.startsWith('node_modules/'))
+                    ),
+                ).length > 0
               )
                 throw new AddressRefusal('check or feedback mutated candidate', true);
               if ((await git(root, ['rev-parse', 'HEAD'])) !== parent)
