@@ -79,6 +79,8 @@ export interface ParsedReviewerStream {
    * uses an anchored pattern. Structured rate limits are handled separately.
    */
   errorCodes: string[];
+  /** Every parsed object in source order; prose codes cannot override these causes. */
+  structuredEvents: Record<string, unknown>[];
   /** Present only for a well-formed stream containing exclusively recoverable rate limits. */
   rateLimitWait?: { ms: number; text: string };
   /** true when an action-required (billing-confirmation-class) event arrived. */
@@ -89,6 +91,48 @@ export interface ParsedReviewerStream {
   unparsedLines: number;
   /** The last `status` event's word, when any (diagnostic evidence only). */
   lastStatus?: string;
+}
+
+/** Deferred debt requires exclusively literal recoverable rate-limit evidence.
+ * Legacy message codes remain diagnostics/retry inputs, never this authority.
+ */
+export function deferredVendorErrorCodes(parsed: ParsedReviewerStream): string[] {
+  if (
+    !parsed.sawError ||
+    parsed.sawComplete ||
+    parsed.sawActionRequired ||
+    parsed.unparsedLines > 0 ||
+    parsed.trailingAfterComplete > 0 ||
+    parsed.findings.length > 0
+  )
+    return [];
+  const codes: string[] = [];
+  for (const event of parsed.structuredEvents) {
+    if (event['type'] === 'error') {
+      if (
+        event['errorType'] !== 'rate_limit' ||
+        event['recoverable'] !== true ||
+        event['status'] !== undefined
+      )
+        return [];
+      codes.push('rate_limited');
+      continue;
+    }
+    if (event['errorType'] !== undefined || event['recoverable'] !== undefined) return [];
+    const status = event['status'];
+    if (
+      event['type'] === 'status' &&
+      (status === undefined ||
+        status === 'scanning' ||
+        status === 'reviewing' ||
+        status === 'writing')
+    )
+      continue;
+    if (event['type'] === 'heartbeat' && (status === undefined || status === 'reviewing')) continue;
+    if (event['type'] === 'review_context' && status === undefined) continue;
+    return [];
+  }
+  return codes;
 }
 
 /** True when the value is a plain JSON object (parsed JSON, non-null, non-array). */
@@ -124,6 +168,7 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
     trailingAfterComplete: 0,
     sawError: false,
     errorCodes: [],
+    structuredEvents: [],
     sawActionRequired: false,
     unparsedLines: 0,
   };
@@ -144,6 +189,7 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
       if (parsed.sawComplete) parsed.trailingAfterComplete += 1;
       continue;
     }
+    parsed.structuredEvents.push(event);
     if (parsed.sawComplete) parsed.trailingAfterComplete += 1;
     const type = stringAt(event, 'type');
     switch (type) {
@@ -167,7 +213,7 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
             : undefined;
         const codegen = stringAt(event, 'codegenInstructions');
         const excerpt = codegen ?? comment ?? firstSuggestion;
-        const fileName = stringAt(event, 'fileName');
+        const fileName = typeof event['fileName'] === 'string' ? event['fileName'] : undefined;
         const finding: Omit<DevFinding, 'id'> = { severity };
         if (fileName !== undefined) finding.fileName = fileName;
         if (excerpt !== undefined) finding.excerpt = excerpt;
@@ -197,7 +243,9 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
         )
           waits.push({ ms, text: waitTime });
         parsed.errorCodes.push(
-          /^(?:Review failed: )?([a-z]+_err):/.exec(stringAt(event, 'message') ?? '')?.[1] ?? '',
+          /^(?:Review failed: )?([a-z]+_err|auth|rate_limited):/.exec(
+            stringAt(event, 'message') ?? '',
+          )?.[1] ?? '',
         );
         break;
       }

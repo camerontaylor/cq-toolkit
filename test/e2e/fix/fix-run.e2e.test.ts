@@ -54,7 +54,7 @@ async function fixture(budget: number | undefined = 1000, configuredDenylist = t
     `
 const fs = require('node:fs');
 const files = process.argv.slice(2).filter(x => x !== '--');
-const names = files.length ? files : ['cases/a.test.cjs', 'cases/b.test.cjs'];
+const names = files.length ? files : fs.readdirSync('cases').filter(n => n.endsWith('.test.cjs')).sort().map(n => 'cases/' + n);
 let failed = false;
 const testResults = names.map(name => {
  const { actual, expected } = require(require('node:path').resolve(name));
@@ -522,12 +522,13 @@ test('one failing task has a failed-attempt commit while a passing sibling remai
     ]);
     expect(reportOf(result).fixesPerRun).toBe(1);
     expect(reportOf(result).tasks[1]?.failedAttempt?.branch).toMatch(
-      /^cq\/fixture\/failed\/tests-1\/scratch-repo\/.*\/a\d+$/,
+      /^cq\/fixture\/failed\/tests-1-[0-9a-f]{16}\/scratch-repo-[0-9a-f]{16}\/cases-b-test-cjs-[0-9a-f]{16}\/a[1-9][0-9]*$/,
     );
-    expect(reportOf(result).failed.map((attempt) => attempt.branch.split('/').at(-1))).toEqual([
-      'a1',
-      'a2',
-    ]);
+    expect(
+      reportOf(result)
+        .failed.filter((attempt) => 'branch' in attempt)
+        .map((attempt) => attempt.branch.split('/').at(-1)),
+    ).toEqual(['a1', 'a2']);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -1009,6 +1010,351 @@ test.each(['denylist hit', 'scanner fault'] as const)(
   },
 );
 
+test('PR summary Unfixed section reads final refined planned rows (issue 615 #1)', async () => {
+  const f = await fixture();
+  let packageBody = '';
+  try {
+    // The failure that strands the unit leaves the run's planned rows empty
+    // until the pre-assembly refresh; the uploaded Unfixed section must still
+    // name the retained-branch row from the final accounting.
+    const result = await makeFixRun({
+      drivers: scripted('fail-b-safe-change'),
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (raw as { packages: Array<{ body?: string }> }).packages;
+                packageBody = packages[0]?.body ?? '';
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true, pushFailed: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(packageBody).toContain('## Unfixed (1)');
+    expect(packageBody).toContain('`cases/b.test.cjs`');
+    // The planned accounting behind the body matches the persisted report.
+    const report = reportOf(result);
+    expect(report.planned.length).toBeGreaterThan(0);
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('PR summary keeps an exhausted task when another unit retained the same task ID (#631)', async () => {
+  const f = await fixture();
+  const bodies = new Map<string, string>();
+  try {
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      checks: unknown[];
+    };
+    config.checks.push({ ...(config.checks[0] as object) });
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'seed two units with matching task paths');
+
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (request, options) => {
+            if (!request.workspace) throw new Error('fixture requires a workspace');
+            const line = request.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            const unit2 = request.prompt.includes(join('tests-2', 'scratch-repo'));
+            const failingFile = task.files.find(
+              (file) => file.includes('b.test') || file.includes('c.test'),
+            );
+            if (failingFile && (!unit2 || failingFile.includes('b.test'))) {
+              await writeFile(
+                join(request.workspace.path, failingFile),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+              return {
+                stopReason: unit2 ? 'budget' : 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'broken-test',
+                  summary: 'wrong fix',
+                  confidence: 0.8,
+                },
+              } as const;
+            }
+            return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
+          },
+        },
+      }),
+    };
+    const result = await makeFixRun({
+      drivers,
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (
+                  raw as {
+                    packages: Array<{ branch: string; body?: string }>;
+                  }
+                ).packages;
+                for (const pkg of packages) bodies.set(pkg.branch, pkg.body ?? '');
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const report = reportOf(result);
+    const unit1 = 'cq/fixture/tests-1/scratch-repo';
+    const unit2 = 'cq/fixture/tests-2/scratch-repo';
+    const retained = report.planned.find(
+      (row) => row.branch === unit1 && row.task.id === 'cases/c.test.cjs',
+    );
+    const exhausted = report.planned.find(
+      (row) => row.branch === unit2 && row.task.id === 'cases/c.test.cjs',
+    );
+    expect(retained?.failures.some((failure) => 'branch' in failure)).toBe(true);
+    expect(exhausted?.outcome).toBe('exhausted');
+    expect(exhausted?.attempts).toHaveLength(0);
+    expect(exhausted?.failures.every((failure) => !('branch' in failure))).toBe(true);
+    expect(bodies.size).toBe(2);
+    expect(bodies.get(unit1)).toContain('cases/c.test.cjs');
+    expect(bodies.get(unit1)).toContain('local branch');
+    expect(bodies.get(unit2)).toContain('cases/c.test.cjs');
+    expect(bodies.get(unit2)).toContain('exhausted;');
+    expect(bodies.get(unit2)).not.toContain('failed/tests-1/');
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('mixed outcomes are fully accounted: fixed, failed-with-branch, branchless failure and never-started', async () => {
+  const f = await fixture(1000);
+  try {
+    // A third failing task the run never reaches: the budget stop lands after
+    // the second task's first worker call, so tasks one (fixed), two (failed
+    // with a retained branch) and the never-started remainder are all visible.
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'seed third failing task');
+    // Worker contract: fix a.test.cjs, fail b.test.cjs with a retained patch,
+    // and stop honestly with a budget stopReason before touching c.
+    const calls: string[] = [];
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (invocation) => {
+            if (!invocation.workspace) throw new Error('fixture requires a workspace');
+            const line = invocation.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            calls.push(task.files[0] ?? '');
+            if (task.files.some((file) => file.includes('a.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/a.test.cjs'),
+                'module.exports = { actual: 1, expected: 1 };\n',
+              );
+            if (task.files.some((file) => file.includes('b.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/b.test.cjs'),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+            if (calls.length >= 2 && invocation.prompt.includes('Tier: worker')) {
+              // The run budget (below) exhausts after this call settles.
+              return {
+                stopReason: 'complete',
+                denials: [],
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                structuredOutput: {
+                  outcome: 'broken-test',
+                  summary: 'attempt',
+                  confidence: 0.8,
+                },
+              };
+            }
+            return {
+              stopReason: 'complete',
+              denials: [],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              structuredOutput: {
+                outcome: 'broken-test',
+                summary: 'correct fixture expectation',
+                confidence: 0.8,
+              },
+            };
+          },
+        },
+      }),
+    };
+    // Five tokens total: a(2), b(2) settle; c never starts (b's feedback or
+    // the next invocation breaches the budget first).
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      budgets?: { run: { maxTokens: number } };
+    };
+    config.budgets = { run: { maxTokens: 5 } };
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure tighter budget');
+    const result = await makeFixRun({ drivers })({ ...input(f), push: true });
+    const report = reportOf(result);
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    const outcomes = report.planned.map((row) => [row.task.id, row.outcome] as const);
+    // Every planned row appears exactly once with a truthful outcome.
+    expect(outcomes).toContainEqual(['cases/a.test.cjs', 'fixed']);
+    expect(outcomes).toContainEqual(['cases/b.test.cjs', 'unfixed']);
+    const outstanding = report.planned.filter((row) => row.outcome !== 'fixed');
+    expect(outstanding.length).toBeGreaterThanOrEqual(2);
+    // Issue 615 (2): no placeholder row duplicates an attempted unit —
+    // every not-started/exhausted/cancelled row names a task no other row
+    // carries.
+    const plannedIds = report.planned.map((row) => row.task.id);
+    expect(new Set(plannedIds).size).toBe(plannedIds.length);
+    // The fixed row keeps its verified evidence and the legacy metric.
+    const fixed = report.planned.find((row) => row.outcome === 'fixed');
+    expect(fixed?.commits).toHaveLength(1);
+    expect(fixed?.attempts.length).toBeGreaterThan(0);
+    // The failed task's retained branch survives in both views; the failed
+    // row's failures carry branch and sha while every branchless row omits
+    // both (no invented artifact).
+    const failedWithBranch = report.planned.find(
+      (row) => row.outcome === 'unfixed' && row.failures.some((failure) => 'branch' in failure),
+    );
+    const retained = failedWithBranch?.failures.find((failure) => 'branch' in failure);
+    expect(retained && 'branch' in retained ? retained.branch : undefined).toMatch(
+      /^cq\/fixture\/failed\//,
+    );
+    expect(retained && 'sha' in retained ? retained.sha : undefined).toMatch(/^[0-9a-f]{40}$/);
+    for (const row of outstanding)
+      for (const failure of row.failures)
+        if (!('branch' in failure)) {
+          expect(failure.gate).toBe('none');
+          expect(failure.reason).toBeTruthy();
+        }
+    // Explicit denominators: planned = fixed + unresolved.
+    expect(report.counters.planned).toBe(report.planned.length);
+    expect(report.counters.fixed).toBe(1);
+    expect(report.counters.unresolved).toBe(report.counters.planned - 1);
+    expect(report.counters.attempted).toBeGreaterThanOrEqual(1);
+    // The legacy failed evidence still carries the retained branch row.
+    expect(report.failed.some((row) => 'branch' in row)).toBe(true);
+    // fixesPerRun keeps its meaning: verified fixes only.
+    expect(report.fixesPerRun).toBe(1);
+    // The persisted artifact matches the returned report exactly.
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('PR summary carries branchless refined rows before finalization (issue 615 #1)', async () => {
+  const f = await fixture(1000);
+  let packageBody = '';
+  try {
+    await writeFile(
+      join(f.repo, 'cases', 'c.test.cjs'),
+      'module.exports = { actual: 1, expected: 2 };\n',
+    );
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'seed third failing task');
+    const calls: string[] = [];
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (invocation) => {
+            if (!invocation.workspace) throw new Error('fixture requires a workspace');
+            const line = invocation.prompt.split('\n').find((text) => text.startsWith('Task: '));
+            const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
+            calls.push(task.files[0] ?? '');
+            if (task.files.some((file) => file.includes('a.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/a.test.cjs'),
+                'module.exports = { actual: 1, expected: 1 };\n',
+              );
+            if (task.files.some((file) => file.includes('b.test')))
+              await writeFile(
+                join(invocation.workspace.path, 'cases/b.test.cjs'),
+                'module.exports = { actual: 1, expected: 3 };\n',
+              );
+            return {
+              stopReason: 'complete',
+              denials: [],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              structuredOutput: {
+                outcome: 'broken-test',
+                summary: 'attempt',
+                confidence: 0.8,
+              },
+            };
+          },
+        },
+      }),
+    };
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      budgets?: { run: { maxTokens: number } };
+    };
+    config.budgets = { run: { maxTokens: 5 } };
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure tighter budget');
+    // The predecessor built the Unfixed section from report.planned, which
+    // was empty until finish() — the branchless exhausted row for c and the
+    // never-started remainder were omitted from the uploaded body. The body
+    // must now carry them BEFORE finalization.
+    const result = await makeFixRun({
+      drivers,
+      registry: {
+        get: (name) => {
+          if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
+          return {
+            name,
+            inputSchema: z.unknown(),
+            importer: async () => async (raw: unknown) => {
+              if (name === 'pr.assemblePrs') {
+                const packages = (raw as { packages: Array<{ body?: string }> }).packages;
+                packageBody = packages[0]?.body ?? '';
+              }
+              return { status: 'ok', value: { offline: true } };
+            },
+          } as unknown as OpRegistryEntry<never, never>;
+        },
+      },
+    })({ ...input(f), pr: true });
+    expect(result.status, JSON.stringify(result)).toBe('needs-human');
+    expect(packageBody).toContain('## Unfixed (');
+    expect(packageBody).toContain('`cases/c.test.cjs`');
+    // The retained-branch row still names its local branch in the same body.
+    expect(packageBody).toContain('`cases/b.test.cjs`');
+    expect(packageBody).toContain('local branch `cq/fixture');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test.each(['absolute', 'relative'] as const)(
   'nested check cwd preserves repo-root task identity (%s failure names)',
   async (names) => {
@@ -1136,6 +1482,113 @@ test.each(['active', 'entry', 'after-first'] as const)(
     }
   },
 );
+
+test('cancellation keeps completed unit evidence and truthful sibling rows (issue 615 #2)', async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let parentSignal: AbortSignal | undefined;
+  let result: Awaited<ReturnType<ReturnType<typeof makeFixRun>>> | undefined;
+  let workerCalls = 0;
+  try {
+    // Two units over one package (two identical checks = two fixers), run
+    // sequentially: the first completes both tasks; the second is cancelled
+    // at its first worker call.
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      checks: unknown[];
+    };
+    config.checks.push({ ...(config.checks[0] as object) });
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure a second unit');
+    const drivers: DriverFactory = {
+      resolve: ({ modelSpec }) => ({
+        modelSpec,
+        lane: 'ai-sdk',
+        driver: {
+          run: async (request, options) => {
+            workerCalls++;
+            // The shipped prompt template embeds the unit's worktree path,
+            // which carries the unit's kind/slug segments — the observable
+            // first-unit/second-unit boundary. Unit tests-1 runs to genuine
+            // completion (both tasks commit); the abort fires at the FIRST
+            // tests-2 dispatch, so its task loop sees the cancel at the top.
+            if (!request.prompt.includes(join('tests-2', 'scratch-repo')))
+              return scripted().resolve({ role: 'fixer', modelSpec }).driver.run(request, options);
+            controller.abort();
+            const signal = options?.signal;
+            if (!signal) throw new Error('missing inner worker signal');
+            return {
+              stopReason: 'aborted',
+              denials: [],
+              usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+              wallMs: 0,
+            };
+          },
+        },
+      }),
+    };
+    const entry: OpRegistryEntry = {
+      name: 'fixture.fix',
+      inputSchema: z.object({}),
+      importer: async () => async () => {
+        parentSignal = currentJobContext()?.signal;
+        result = await makeFixRun({ drivers })({
+          repoRoot: f.repo,
+          source: 'tests',
+          selector: { mode: 'workspace-all' },
+          journalDir: f.journalDir,
+          push: true,
+        });
+        return { status: 'ok', value: 'settled' };
+      },
+    };
+    await runPlan(
+      { id: 'enclosing', jobs: [{ id: 'fix', op: entry.name, input: {} }] },
+      { concurrency: 1, stopOnError: false },
+      { get: () => entry as unknown as OpRegistryEntry<never, never> },
+      {
+        governor: createGovernor({ maxTokens: 1000 }),
+        signal: controller.signal,
+        allowAdvisory: true,
+      },
+    );
+    expect(parentSignal?.aborted).toBe(true);
+    expect(result?.status).toBe('needs-human');
+    const report = result?.report;
+    expect(report).toBeDefined();
+    if (!report) throw new Error('unreachable');
+    // The completed unit's real evidence survives untouched.
+    const fixedRows = report.planned.filter((row) => row.outcome === 'fixed');
+    expect(fixedRows).toHaveLength(2);
+    for (const row of fixedRows) {
+      expect(row.commits).toHaveLength(1);
+      expect(row.unit).toBe('tests-1/scratch-repo');
+    }
+    // Unit tests-2's first dispatch aborts mid-flight: task a carries its
+    // recorded aborted attempt and escalates; task b, never dispatched,
+    // refines to cancelled. Both keep unit tests-2's identity.
+    const escalated = report.planned.find(
+      (row) => row.outcome === 'escalated-to-human' && row.unit === 'tests-2/scratch-repo',
+    );
+    if (escalated === undefined) throw new Error('no escalated row for unit tests-2');
+    expect(escalated.task.id).toBe('cases/a.test.cjs');
+    expect(escalated.attempts).toHaveLength(1);
+    expect(escalated.attempts[0]?.stopReason).toBe('aborted');
+    const cancelledRows = report.planned.filter((row) => row.outcome === 'cancelled');
+    expect(cancelledRows.map((row) => row.task.id)).toEqual(['cases/b.test.cjs']);
+    for (const row of cancelledRows) expect(row.unit).toBe('tests-2/scratch-repo');
+    // No false never-started placeholder beside the real rows (the finding-2
+    // dedup: the cancelled unit was dispatched, so its rows are its own).
+    const neverStarted = report.planned.filter((row) => row.outcome === 'not-started');
+    expect(neverStarted).toEqual([]);
+    // Distinct identities: every (unit, task) pair appears once.
+    const plannedIds = report.planned.map((row) => `${row.unit}\n${row.task.id}`);
+    expect(new Set(plannedIds).size).toBe(plannedIds.length);
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 
 test.each(['missing-policy', 'scanner-fault'] as const)(
   'real scanner composition refuses %s before worker dispatch',
@@ -1267,7 +1720,7 @@ test.each([
           ?.flatMap((round) => round.failedAttempt?.branch.split('/').at(-1) ?? [])
           .toSorted(),
       ).toEqual(['a1', 'a2']);
-      expect(report.failed).toHaveLength(2);
+      expect(report.failed.filter((row) => 'branch' in row)).toHaveLength(2);
     } else if (mode === 'regression-rescue') {
       expect(report.tasks[0]?.attempts.map((a) => [a.tier, a.attempt])).toEqual([
         ['worker', 1],
@@ -1318,6 +1771,84 @@ test.each([
         JSON.stringify({ argv, exit, artifact }, null, 2) + '\n',
       );
     }
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('pre-task unit failure fallback keeps collision-resolved plan segments (issue 615 #3)', async () => {
+  const f = await fixture();
+  try {
+    // Two packages whose normalized slugs collide: 'scratch-repo' and
+    // 'scratch.repo' both derive slug 'scratch-repo', so the plan builder
+    // resolves the second unit to 'scratch-repo-2' and ships kind/slug on
+    // its dispatch. The check script faults (invalid JSON) only inside the
+    // second unit's worktree — its path carries the resolved slug — so that
+    // unit fails at its baseline probe, before deriving any tasks.
+    const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+      packages?: Array<{ name: string; path: string }>;
+      checks: Array<{
+        kind?: string;
+        adapter: string;
+        command: { command: string; args: string[] };
+      }>;
+    };
+    config.packages = [
+      { name: 'scratch-repo', path: '.' },
+      { name: 'scratch.repo', path: '.' },
+    ];
+    const script = config.checks[0]!;
+    // The shim must forward EVERY appended argument (the related checks pass
+    // task files after the configured argv; relatedCheckCommand appends them
+    // to the command's args) while faulting only in the second unit's
+    // worktree — whose directory name carries the resolved slug.
+    config.checks[0] = {
+      adapter: 'vitest-json',
+      command: {
+        command: '/bin/sh',
+        args: [
+          '-c',
+          `if [ "$(basename "$(pwd)")" = "scratch-repo-2" ]; then echo '{invalid'; exit 1; fi; exec "${script.command.command}" "${script.command.args.join('" "')}" "$@"`,
+          'sh',
+        ],
+      },
+    };
+    await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+    await git(f.repo, 'add', '-A');
+    await git(f.repo, 'commit', '-m', 'configure colliding packages and probe fault');
+    const result = await makeFixRun({ drivers: scripted() })({ ...input(f) });
+    expect(result.status, JSON.stringify(result)).toBe('failed');
+    const report = reportOf(result);
+    // Unit 1 completed with its real task rows on the base identity.
+    const unit1 = report.planned.filter((row) => row.unit === 'tests-1/scratch-repo');
+    expect(unit1.map((row) => row.outcome).toSorted()).toEqual(['fixed', 'fixed']);
+    // The failed second unit's fallback row carries the SHIPPED segments:
+    // branch and unit label end in the resolved slug, not the collided fold.
+    const fallback = report.planned.find((row) => row.unit === 'tests-1/scratch-repo-2');
+    if (fallback === undefined) throw new Error('no fallback row for the failed unit');
+    // The fallback is never-started work: its row names the planned branch,
+    // and its failure evidence is branchless (no artifact was retained).
+    expect(fallback.branch).toBe('cq/fixture/tests-1/scratch-repo-2');
+    expect(fallback.outcome).toBe('not-started');
+    const fallbackFailure = fallback.failures[0];
+    if (fallbackFailure === undefined) throw new Error('fallback row carries no failure');
+    expect('branch' in fallbackFailure).toBe(false);
+    // Truthful stable classification: the unit label, the package-name task,
+    // not-started, no gate (no artifact was retained), and the reason naming
+    // the derivation boundary and the [PROBE] baseline fault class.
+    expect(fallbackFailure).toEqual({
+      unit: 'tests-1/scratch-repo-2',
+      task: 'scratch.repo',
+      outcome: 'not-started',
+      gate: 'none',
+      reason:
+        'unit failed before deriving tasks: [PROBE] sweep.unit scratch.repo: ' +
+        'the baseline probe returned indeterminate — vitest-json: output is not valid JSON',
+    });
+    // Distinct identities: the fallback never shares unit1's identity.
+    const identities = report.planned.map((row) => `${row.unit}\n${row.task.id}`);
+    expect(new Set(identities).size).toBe(identities.length);
+    expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

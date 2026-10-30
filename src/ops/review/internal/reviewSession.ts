@@ -281,28 +281,40 @@ export async function runReviewSession(
   // spend cover both attempts; deliveries describe only the final attempt.
   const canRetry = () => !signal.aborted && input.maxTokens - spent > 0;
   let retry = result.stopReason === 'error' && result.errorClass === 'transient' && canRetry();
-  if (result.stopReason === 'error' && result.errorClass === 'rate-limit' && canRetry()) {
+  // A rate limit that is not retried keeps the provider's wait and the cause,
+  // so the block reason says why (#578): over the cap, past the wall, out of
+  // tokens, or an unusable retry-after.
+  let refused: { waitMs: number; cause: 'cap' | 'wall' | 'tokens' | 'invalid' } | undefined;
+  if (result.stopReason === 'error' && result.errorClass === 'rate-limit' && !signal.aborted) {
     const waitMs = result.providerSignals?.retryAfterMs ?? 30_000;
     // A provider asking for more than two minutes is left blocked, never
     // retried earlier than its retry-after. Leave a second for actual work.
-    if (
-      Number.isFinite(waitMs) &&
-      waitMs >= 0 &&
-      waitMs <= 120_000 &&
-      waitMs + 1000 < (input.remainingWallMs?.() ?? 0)
-    ) {
+    const cause = !canRetry()
+      ? 'tokens'
+      : !Number.isFinite(waitMs) || waitMs < 0
+        ? 'invalid'
+        : waitMs > 120_000
+          ? 'cap'
+          : waitMs + 1000 >= (input.remainingWallMs?.() ?? 0)
+            ? 'wall'
+            : undefined;
+    if (cause !== undefined) refused = { waitMs, cause };
+    else {
       input.onAdvisories?.([
         `session ${plan.id}: rate-limit wait ${String(waitMs)}ms before retry 1`,
       ]);
       if (input.sleep) await input.sleep(waitMs, signal);
       else await delay(waitMs, undefined, { signal });
       signal.throwIfAborted();
+      // Tokens cannot change during the wait and an abort has thrown, so a
+      // refusal here is the wall running out.
       retry = canRetry() && (input.remainingWallMs?.() ?? 0) > 0;
-      if (!retry)
-        input.onAdvisories?.([
-          `session ${plan.id}: rate-limit retry 1 refused after wait (budget)`,
-        ]);
+      if (!retry) refused = { waitMs, cause: 'wall' };
     }
+    if (refused)
+      input.onAdvisories?.([
+        `session ${plan.id}: rate-limit wait ${String(refused.waitMs)}ms not retried (${refused.cause})`,
+      ]);
   }
   if (retry) {
     signal.throwIfAborted();
@@ -317,9 +329,13 @@ export async function runReviewSession(
   if (result.stopReason !== 'complete') {
     if (result.stopReason === 'budget') return { status: 'budget-exhausted' };
     const detail = result.error === undefined ? '' : `: ${boundedErrorText(result.error)}`;
+    const wait =
+      refused === undefined
+        ? ''
+        : `; rate-limit wait ${String(refused.waitMs)}ms not retried (${refused.cause})`;
     return {
       status: 'needs-human',
-      reason: `agent review did not complete (${result.stopReason})${detail}`,
+      reason: `agent review did not complete (${result.stopReason})${wait}${detail}`,
       ...(result.errorClass === undefined ? {} : { errorClass: result.errorClass }),
     };
   }
@@ -341,9 +357,9 @@ export async function runReviewSession(
     value: parsed.data.findings.map((item, index) => ({
       id: `${plan.id}-${index + 1}`,
       source: 'agent',
-      ...(item.file ? { file: item.file } : {}),
+      ...(item.file !== undefined ? { file: item.file } : {}),
       ...(item.line ? { line: item.line } : {}),
-      ...(item.rule ? { rule: item.rule } : {}),
+      ...(item.rule !== undefined ? { rule: item.rule } : {}),
       severity: input.severityMap[item.severity] ?? 'minor',
       text: item.text,
       status: 'open',

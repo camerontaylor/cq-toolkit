@@ -54,6 +54,52 @@ const write = (dir: string) => async () => {
 };
 
 describe('makeAttendedApprovalAuthority', () => {
+  test('separate authorities serialize their state recheck and write for one workspace', async () => {
+    const { dir } = repo();
+    let clean = true;
+    // Immediate reads keep the interleaving independent of git subprocess timing.
+    const readState = { read: async () => ({ workspace: dir, headSha: 'head', treeClean: clean }) };
+    const first = makeAttendedApprovalAuthority({ confirm: () => true, readState });
+    const second = makeAttendedApprovalAuthority({ confirm: () => true, readState });
+    let enteredFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      enteredFirst = resolve;
+    });
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstResult = withApprovedMutation(first, subjectFor(dir), async () => {
+      enteredFirst();
+      await holdFirst;
+      clean = false;
+      return write(dir)();
+    });
+    await firstEntered;
+    let admittedSecond!: () => void;
+    const secondAdmitted = new Promise<void>((resolve) => {
+      admittedSecond = resolve;
+    });
+    const admit = second.admit.bind(second);
+    second.admit = async (subject) => {
+      const result = await admit(subject);
+      admittedSecond();
+      return result;
+    };
+    let secondWrote = false;
+    const secondResult = withApprovedMutation(second, subjectFor(dir), async () => {
+      secondWrote = true;
+      return 'unexpected';
+    });
+    await secondAdmitted;
+    // Let any unqueued critical section finish while the first write is held.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseFirst();
+    expect((await firstResult).status).toBe('ok');
+    expect((await secondResult).status).toBe('needs-human');
+    expect(secondWrote).toBe(false);
+    expect(readFileSync(join(dir, 'src/a.ts'), 'utf8')).toBe('export const a = 2;\n');
+  });
   test('confirm true on a clean tree → the write happens; confirm saw the exact subject', async () => {
     const { dir } = repo();
     const seen: ApprovalSubject[] = [];

@@ -71,6 +71,9 @@ import {
 /** The default exempt prefixes: the toolkit's own report area. */
 export const ATTENDED_DEFAULT_EXEMPT: readonly string[] = ['.cq/'];
 
+// All attended flows in this process serialize mutations of the same workspace.
+const attendedMutationLocks = makeProcessLocalMutationLocks();
+
 /** Configuration of {@link makeAttendedApprovalAuthority}. */
 export interface AttendedApprovalConfig {
   /**
@@ -120,8 +123,8 @@ function targetUnderExempt(
 
 /**
  * Build the attended authority (see the module header for what it does and
- * does not guarantee). Each call builds an independent ledger and lock set,
- * so compose ONE per attended flow and use it for that flow's writes.
+ * does not guarantee). Each flow has its own confirmation and nonce ledger;
+ * mutation locks are shared across attended authorities in this process.
  */
 export function makeAttendedApprovalAuthority(config: AttendedApprovalConfig): ApprovalAuthority {
   const exempt = config.exempt ?? ATTENDED_DEFAULT_EXEMPT;
@@ -160,7 +163,7 @@ export function makeAttendedApprovalAuthority(config: AttendedApprovalConfig): A
   return makeApprovalAuthority({
     approvals,
     ledger: makeSingleUseNonceLedger(),
-    locks: makeProcessLocalMutationLocks(),
+    locks: attendedMutationLocks,
     readState,
   });
 }

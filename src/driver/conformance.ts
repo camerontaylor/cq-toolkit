@@ -1007,8 +1007,30 @@ export function runDriverConformance(
       expect(remap.pass).toBe(false);
     });
 
-    test('v. SEAM_VERSION is 2 on the seam barrel (the conformance suite pins the frozen seam version)', () => {
-      expect(SEAM_VERSION).toBe(2);
+    test('v. SEAM_VERSION is 3 on the seam barrel (the conformance suite pins the frozen seam version)', () => {
+      expect(SEAM_VERSION).toBe(3);
+    });
+
+    test('v-i. usageProvenance (seam v3): measured/unmeasured round-trip; absence stays absent; invalid values are refused', () => {
+      const base = {
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason: 'complete' as const,
+      };
+      for (const provenance of ['measured', 'unmeasured'] as const) {
+        const parsed = WorkerResultSchema.parse(
+          JSON.parse(JSON.stringify({ ...base, usageProvenance: provenance })),
+        );
+        expect(parsed.usageProvenance).toBe(provenance);
+      }
+      // Absence is a real state: it must survive as NO key (legacy/custom
+      // results), never as an `undefined` member the schema would reject.
+      const absent = WorkerResultSchema.parse(JSON.parse(JSON.stringify(base)));
+      expect('usageProvenance' in absent).toBe(false);
+      expect(WorkerResultSchema.safeParse({ ...base, usageProvenance: 'assumed' }).success).toBe(
+        false,
+      );
+      expect(WorkerResultSchema.safeParse({ ...base, usageProvenance: null }).success).toBe(false);
     });
 
     test('b-iii. RunOptions.signal: PRE-aborted never dispatches; fired mid-run settles aborted', async () => {

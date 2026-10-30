@@ -3,7 +3,7 @@
 // per-path scan components (committed/staged/unstaged/untracked, binary
 // bytes included), the scan BEFORE any reviewer run, honest completion
 // recording, drift refusal, and the finding-id minting in the ledger.
-import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -18,7 +18,12 @@ import {
 } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
+import { makeAgentReviewRunner } from '../../../src/ops/dev/agentReview.js';
+import { makeDevReady } from '../../../src/ops/dev/ready.js';
+import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
+import { parseDevLedger, serializeDevLedger } from '../../../src/ops/dev/record.js';
+import { restoreDurableDisposition } from '../../../src/ops/review/internal/durableDisposition.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
@@ -32,8 +37,8 @@ import {
 } from '../../../src/ops/dev/review.js';
 import { sshAuthorTransport, type AuthorTransport } from '../../../src/ops/dev/review-transport.js';
 import type { CommandResult } from '../../../src/ops/dev/effects.js';
-import { makeFakeEffects, stubScanner } from './fakes.js';
-import { makeTestRepo, repoEffects, type CommandHandler, type TestRepo } from './repo.js';
+import { checkRecord, cycleRecord, makeFakeEffects, stubScanner } from './fakes.js';
+import { makeTestRepo, repoEffects, seed, type CommandHandler, type TestRepo } from './repo.js';
 
 /** The cycle branch of the composed op. */
 const cycleReview = (
@@ -213,6 +218,244 @@ describe('dev.review pre-upload project scan fails closed', () => {
 });
 
 describe('dev.review cycle', () => {
+  test.each(['terminal', 'blocked'] as const)(
+    'configured agent composes the scripted engine, shared lock and %s author evidence',
+    async (outcome) => {
+      const role = { provider: 'scripted', model: 'fixture-reviewer' };
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: role },
+          budgets: { run: { maxTokens: 5000, wallMs: 20000 } },
+          review: { reviewers: ['coderabbit', 'agent'] },
+        }),
+      );
+      repo.commitAll('configure scripted reviewer');
+      const effects = repoEffects(repo);
+      let locked = false;
+      const lock = vi.fn(async (fn: () => unknown) => {
+        expect(locked).toBe(false);
+        locked = true;
+        try {
+          return await fn();
+        } finally {
+          locked = false;
+        }
+      });
+      effects.withHostLock = async (fn) => (await lock(fn)) as Awaited<ReturnType<typeof fn>>;
+      const scanner = capturingScanner();
+      const dispatch = vi.fn(async (invocation: { prompt: string }) => {
+        expect(locked).toBe(true);
+        const payload = wireRequest(invocation.prompt);
+        return payload;
+      });
+      const resolve = vi.fn(
+        (request: {
+          modelSpec: unknown;
+          beforeRequest?: (
+            text: string,
+            contents: readonly { text: string }[],
+            context: { kind: 'model-request' },
+          ) => Promise<void>;
+        }) => {
+          expect(locked).toBe(true);
+          expect(request.modelSpec).toEqual(role);
+          return {
+            lane: 'ai-sdk',
+            modelSpec: role,
+            driver: {
+              run: async (invocation: {
+                prompt: string;
+                toolPolicy: unknown;
+                sandboxPolicy: unknown;
+              }) => {
+                expect(invocation.toolPolicy).toEqual({
+                  mode: 'allowlist',
+                  allow: ['read', 'grep', 'glob'],
+                });
+                expect(invocation.sandboxPolicy).toEqual({ level: 'read-only' });
+                const payload = await dispatch(invocation);
+                await request.beforeRequest?.(payload.text, payload.contents, {
+                  kind: 'model-request',
+                });
+                return {
+                  stopReason: outcome === 'terminal' ? 'complete' : 'error',
+                  error: outcome === 'blocked' ? 'scripted provider unavailable' : undefined,
+                  structuredOutput: { findings: [] },
+                  usage: { input: 12, output: 4, cacheRead: 0, cacheWrite: 0 },
+                  denials: [],
+                };
+              },
+            },
+          };
+        },
+      );
+      const runner = makeAgentReviewRunner({
+        repoRoot: repo.root,
+        readFile: async (path) => {
+          expect(locked).toBe(true);
+          return readFile(path, 'utf8');
+        },
+        drivers: { resolve } as unknown as DriverFactory,
+        scanSecrets: scanner,
+        run: runAgentReviewer,
+      });
+      const state = await readWorkState(effects, { target: 'merge-queue' });
+      expect(state.ok).toBe(true);
+      if (!state.ok) return;
+      const { base, head, dirtySha256 } = state.state;
+      const op = makeDevReview({ effects, scanSecrets: scanner, runAgentReviewer: runner });
+      const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+      expect(result.status).toBe(outcome === 'terminal' ? 'ok' : 'needs-human');
+      // Reuse admission and fresh dispatch acquire the same host lock separately.
+      expect(lock).toHaveBeenCalledTimes(2);
+      expect(resolve).toHaveBeenCalledOnce();
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(reviewerCalls(effects)).toEqual([]);
+      expect(scanner.seen.some((c) => c.component === 'request')).toBe(true);
+      const store = effects.openLedger('feature/x');
+      const ledger = store.load();
+      const [cycle] = ledger.records;
+      expect(cycle).toMatchObject({
+        kind: 'cycle',
+        reviewer: 'agent:reviewer',
+        scope: 'full',
+        target: 'merge-queue',
+        base,
+        head,
+        dirtySha256,
+        completion: { kind: outcome },
+      });
+      for (const field of [
+        `reviewer: agent:reviewer`,
+        `base: ${base}`,
+        `head: ${head}`,
+        `dirtySha256: ${dirtySha256}`,
+        'scope: full',
+        `completion: ${outcome}`,
+        'coverage: v2 mode=session',
+      ]) {
+        expect(effects.logs[0]).toContain(field);
+      }
+      if (cycle?.kind !== 'cycle') return;
+      if (outcome === 'blocked' && cycle.completion.kind === 'blocked')
+        expect(cycle.completion.reason).toContain('scripted provider unavailable');
+      expect(cycle.logPath).toContain('/tmp/fake-cq-dev-review/');
+      // A scripted green check supplies the separate check prerequisite; no gate runs here.
+      store.save({
+        ...ledger,
+        records: [...ledger.records, checkRecord({ base, head, dirtySha256 })],
+      });
+      const ready = await makeDevReady(effects)({ repoRoot: repo.root });
+      if (outcome === 'terminal') {
+        expect(ready.status).toBe('ok');
+        if (ready.status === 'ok') {
+          expect(ready.value).toMatchObject({
+            evidenceClass: 'author',
+            reviewer: 'agent:reviewer',
+            cycleId: cycle.cycleId,
+            checkId: 'k001-aaaaaaaa',
+            base,
+            head,
+            dirtySha256,
+          });
+          expect(ready.value.caveat).toContain('not verification');
+        }
+      } else {
+        expect(ready.status).toBe('needs-human');
+        if (ready.status === 'needs-human') expect(ready.reason).toContain('latest-review-blocked');
+      }
+    },
+  );
+
+  test.each([
+    ['missing', undefined, 'requires cq.json'],
+    ['malformed', '{ invalid', 'agent reviewer config:'],
+    [
+      'missing role',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+      }),
+      'roles.reviewer is required',
+    ],
+  ] as const)(
+    'unavailable agent config (%s) records blocked identity without dispatch',
+    async (_name, config, reason) => {
+      const effects = repoEffects(repo);
+      const run = vi.fn();
+      const runner = makeAgentReviewRunner({
+        repoRoot: repo.root,
+        readFile: async () => {
+          if (config === undefined) throw new Error('ENOENT');
+          return config;
+        },
+        drivers: { resolve: vi.fn() } as unknown as DriverFactory,
+        scanSecrets: stubScanner(),
+        run,
+      });
+      const result = await makeDevReview({
+        effects,
+        scanSecrets: stubScanner(),
+        runAgentReviewer: runner,
+      })({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+      expect(result.status).toBe('needs-human');
+      expect(run).not.toHaveBeenCalled();
+      expect(reviewerCalls(effects)).toEqual([]);
+      const [cycle] = effects.openLedger('feature/x').load().records;
+      expect(cycle).toMatchObject({
+        kind: 'cycle',
+        reviewer: 'agent:reviewer',
+        completion: { kind: 'blocked' },
+      });
+      if (cycle?.kind === 'cycle' && cycle.completion.kind === 'blocked')
+        expect(cycle.completion.reason).toContain(reason);
+      expect(effects.logs[0]).toContain('completion: blocked');
+    },
+  );
+
+  test.each(['hit', 'scanner fault', 'symlink', 'oversized'] as const)(
+    'agent safety refusal (%s) precedes dispatch and records no cycle',
+    async (failure) => {
+      if (failure === 'symlink')
+        await symlink('/outside-scripted-workspace', join(repo.root, 'link'));
+      if (failure === 'oversized')
+        await repo.write('big.txt', 'x'.repeat(SCAN_COMPONENT_CAP_BYTES + 1));
+      const effects = repoEffects(repo);
+      const runner = vi.fn();
+      const scanner: DiffSecretScanner =
+        failure === 'scanner fault'
+          ? () => {
+              throw new Error('scripted scanner unavailable');
+            }
+          : stubScanner(
+              failure === 'hit'
+                ? [{ component: 'committed:src/a.ts', ruleId: 'fixture:secret' }]
+                : [],
+            );
+      const result = await makeDevReview({
+        effects,
+        scanSecrets: scanner,
+        runAgentReviewer: runner,
+      })({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain(
+          {
+            hit: 'fixture:secret',
+            'scanner fault': 'scripted scanner unavailable',
+            symlink: "untracked file 'link'",
+            oversized: 'per-file scan cap',
+          }[failure],
+        );
+      expect(runner).not.toHaveBeenCalled();
+      expect(reviewerCalls(effects)).toEqual([]);
+      expect(effects.openLedger('feature/x').load().records).toEqual([]);
+    },
+  );
+
   test('refuses agent cycles when a changed policy file is excluded from the upload scan', async () => {
     await repo.write('policy/denylist/patterns.yml', 'rules: []\n');
     repo.commitAll('change scanner policy');
@@ -256,7 +499,13 @@ describe('dev.review cycle', () => {
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
-  test('agent:reviewer runs the scripted read-only reviewer and records a terminal ledger cycle', async () => {
+  test.each([
+    ['src/a.ts', 'fixture-rule'],
+    ['', 'fixture-rule'],
+    [undefined, 'fixture-rule'],
+    ['src/a.ts', ''],
+    ['src/a.ts', undefined],
+  ])('agent:reviewer records file %j and rule %j identity verbatim', async (file, rule) => {
     const effects = repoEffects(repo);
     const run = vi.fn(
       async (invocation: {
@@ -272,9 +521,9 @@ describe('dev.review cycle', () => {
           structuredOutput: {
             findings: [
               {
-                file: 'src/a.ts',
+                ...(file === undefined ? {} : { file }),
                 line: 1,
-                rule: 'fixture-rule',
+                ...(rule === undefined ? {} : { rule }),
                 severity: 'high',
                 text: 'Seeded agent finding',
               },
@@ -332,7 +581,7 @@ describe('dev.review cycle', () => {
     expect(result.value.findings).toEqual([
       expect.objectContaining({
         severity: 'major',
-        fileName: 'src/a.ts',
+        ...(file === undefined ? {} : { fileName: file }),
         excerpt: 'Seeded agent finding',
       }),
     ]);
@@ -343,9 +592,169 @@ describe('dev.review cycle', () => {
       reviewer: 'agent:reviewer',
       completion: { kind: 'terminal' },
     });
+    if (cycle?.kind !== 'cycle') throw new Error('missing agent cycle');
+    if (file === undefined) expect(cycle.findings[0]).not.toHaveProperty('fileName');
+    else expect(cycle.findings[0]).toHaveProperty('fileName', file);
+    if (rule === undefined) {
+      expect(result.value.findings[0]).not.toHaveProperty('rule');
+      expect(cycle.findings[0]).not.toHaveProperty('rule');
+    } else {
+      expect(result.value.findings[0]).toHaveProperty('rule', rule);
+      expect(cycle.findings[0]).toHaveProperty('rule', rule);
+    }
+    if (rule === '' || rule === undefined) {
+      const produced = cycle.findings[0]!;
+      const persisted = parseDevLedger(
+        serializeDevLedger({
+          ...effects.openLedger('feature/x').load(),
+          records: [
+            cycle,
+            {
+              kind: 'disposition',
+              findingId: produced.id,
+              action: 'rejected',
+              why: 'reviewed original identity',
+              head: cycle.head,
+              at: cycle.at,
+            },
+          ],
+        }),
+      );
+      // Reuse the ACTUAL producer's persisted ID. Fresh cycles mint different
+      // IDs; this checks same-ID replay rather than cross-cycle inheritance.
+      const absentRule = {
+        id: produced.id,
+        source: 'agent',
+        severity: 'major',
+        text: 'Seeded agent finding',
+        file: 'src/a.ts',
+        line: 1,
+        status: 'open' as const,
+      };
+      const restoredAbsent = restoreDurableDisposition(absentRule, persisted);
+      expect(restoredAbsent.status).toBe(rule === '' ? 'open' : 'rejected');
+      if (rule === '') {
+        expect(restoredAbsent).not.toHaveProperty('reason');
+        expect(restoreDurableDisposition({ ...absentRule, rule: '' }, persisted)).toMatchObject({
+          status: 'rejected',
+          reason: 'reviewed original identity',
+          rule: '',
+        });
+      } else expect(restoredAbsent.reason).toBe('reviewed original identity');
+    }
     expect(effects.logs[0]).toContain('coverage: v2 mode=session');
     expect(effects.logs[0]).toContain('advisories: none');
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  test.each(['full', 'uncommitted'] as const)(
+    'passes bounded truthful %s context to the agent after the scan',
+    async (scope) => {
+      await repo.write('src/committed.ts', 'export const committed = 1;\n');
+      repo.commitAll('CONTEXT_COMMITTED_INTENT\n\n' + 'x'.repeat(5000));
+      await repo.write('src/dirty.ts', 'export const dirty = 1;\n');
+      repo.git('add', 'src/dirty.ts');
+      const run = vi.fn<NonNullable<Parameters<typeof makeDevReview>[0]['runAgentReviewer']>>(
+        async () => ({ status: 'needs-human', reason: 'fixture stop after context capture' }),
+      );
+      const effects = repoEffects(repo);
+      await makeDevReview({ effects, scanSecrets: stubScanner(), runAgentReviewer: run })({
+        repoRoot: repo.root,
+        reviewer: 'agent:reviewer',
+        ...(scope === 'uncommitted' ? { uncommitted: true } : {}),
+      });
+      expect(run).toHaveBeenCalledOnce();
+      const input = run.mock.calls[0]![0];
+      expect(input.scope).toBe(scope);
+      expect(input.intent!.length).toBeLessThanOrEqual(4000);
+      expect(input.fileList!.length).toBeLessThanOrEqual(4000);
+      expect(input.fileList).toContain('src/dirty.ts');
+      if (scope === 'full') {
+        expect(input.intent).toContain('CONTEXT_COMMITTED_INTENT');
+        expect(input.intent).toContain('[truncated:');
+        expect(input.fileList).toContain('src/committed.ts');
+        expect(input.base).toBe(repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim());
+      } else {
+        expect(input.intent).toBe('');
+        expect(input.fileList).not.toContain('src/committed.ts');
+        expect(input.base).toBe(repo.git('rev-parse', 'HEAD').trim());
+      }
+    },
+  );
+
+  test('caps oversized changed-file context before agent invocation', async () => {
+    const effects = repoEffects(repo, (command, args) =>
+      command === 'git' && args.includes('--numstat') ? '1\t0\t' + 'path'.repeat(2000) : undefined,
+    );
+    const run = vi.fn<NonNullable<Parameters<typeof makeDevReview>[0]['runAgentReviewer']>>(
+      async () => ({ status: 'needs-human', reason: 'fixture context captured' }),
+    );
+    await makeDevReview({ effects, scanSecrets: stubScanner(), runAgentReviewer: run })({
+      repoRoot: repo.root,
+      reviewer: 'agent:reviewer',
+    });
+    expect(run).toHaveBeenCalledOnce();
+    const files = run.mock.calls[0]![0].fileList!;
+    expect(files.length).toBeLessThanOrEqual(4000);
+    const marker = /\n\[truncated: (\d+) characters omitted\]$/.exec(files)!;
+    expect(marker).not.toBeNull();
+    expect(files.slice(0, marker.index).length + Number(marker[1])).toBe(8004);
+  });
+
+  test('cancellation during context collection refuses agent dispatch and persists a blocker', async () => {
+    const controller = new AbortController();
+    const inner = repoEffects(repo);
+    const effects = {
+      ...inner,
+      runCommand: async (...args: Parameters<typeof inner.runCommand>) => {
+        const result = await inner.runCommand(...args);
+        if (args[0] === 'git' && args[1].includes('--numstat'))
+          controller.abort(new Error('fixture context cancelled'));
+        return result;
+      },
+    };
+    const run = vi.fn<NonNullable<Parameters<typeof makeDevReview>[0]['runAgentReviewer']>>();
+    const result = await makeDevReview({
+      effects,
+      signal: controller.signal,
+      remainingWallMs: () => 5000,
+      scanSecrets: stubScanner(),
+      runAgentReviewer: run,
+    })({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    expect(run).not.toHaveBeenCalled();
+    const attempt = effects.openLedger('feature/x').load().records.at(-1);
+    expect(attempt?.kind).toBe('cycle');
+    if (attempt?.kind === 'cycle') expect(attempt.completion.kind).toBe('blocked');
+  });
+
+  test('a secret present only in commit context is scanned before the session engine uploads', async () => {
+    await repo.write('src/context.ts', 'export const context = 1;\n');
+    repo.commitAll('CONTEXT_SECRET_ONLY_IN_COMMIT');
+    const drivers = { resolve: vi.fn() } as unknown as DriverFactory;
+    const scan: DiffSecretScanner = async (components) =>
+      components.map((component) => ({
+        component: component.component,
+        hits: component.text.includes('CONTEXT_SECRET_ONLY_IN_COMMIT')
+          ? [{ ruleId: 'fixture-context-secret', lines: [1] }]
+          : [],
+      }));
+    const result = await makeDevReview({
+      effects: repoEffects(repo),
+      scanSecrets: scan,
+      runAgentReviewer: (input) =>
+        runAgentReviewer(drivers, {
+          ...input,
+          scanSecrets: scan,
+          role: { provider: 'scripted', model: 'reviewer' },
+          maxTokens: 500,
+          wallMs: 5000,
+          severityMap: { high: 'major', medium: 'minor' },
+        }),
+    })({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('protected content');
+    expect(drivers.resolve).not.toHaveBeenCalled();
   });
 
   test('an ok agent result with incomplete coverage is blocked, never terminal', async () => {
@@ -748,6 +1157,283 @@ describe('dev.review cycle', () => {
     )(null as unknown as DevCycleInput);
     expect(result.status).toBe('failed');
   });
+
+  // --- Q4 (#485): exact-terminal reuse before vendor dispatch --------------
+
+  test('records only literal recoverable rate-limit provenance without completion', async () => {
+    const effects = repoEffects(
+      repo,
+      reviewer(
+        ran(
+          1,
+          JSON.stringify({
+            type: 'error',
+            errorType: 'rate_limit',
+            recoverable: true,
+          }),
+        ),
+      ),
+    );
+    expect((await cycleReview(effects, stubScanner())({ repoRoot: repo.root })).status).toBe(
+      'needs-human',
+    );
+    expect(
+      effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle'),
+    ).toMatchObject({
+      completion: { kind: 'blocked' },
+      vendorFailure: {
+        source: 'vendor',
+        category: 'vendor-rate-limited',
+        codes: ['rate_limited'],
+      },
+    });
+  });
+  const literalVendor = { type: 'error', errorType: 'rate_limit', recoverable: true };
+  const scanWithVendorProse = {
+    type: 'error',
+    errorType: 'scan',
+    message: 'Review failed: con_err: fixture',
+  };
+  test.each([
+    [scanWithVendorProse],
+    [literalVendor, scanWithVendorProse],
+    [scanWithVendorProse, literalVendor],
+    [{ type: 'error', errorType: 'unknown', message: 'Review failed: rate_limited: fixture' }],
+    [{ type: 'error', errorType: 'rate_limit', recoverable: false }],
+    [literalVendor, { type: 'status', status: 'budget_exhausted' }],
+    [literalVendor, { type: 'status', status: 'cancelled' }],
+    [literalVendor, { type: 'finding', severity: 'major', comment: 'defect' }],
+
+    [
+      { type: 'error', message: 'Review failed: con_err: fixture' },
+      { type: 'error', message: 'Review failed: scan_err: fixture' },
+    ],
+    [{ type: 'error', message: 'please login again' }],
+    [{ type: 'error', message: 'Review failed: auth: fixture' }, { type: 'action_required' }],
+    [
+      { type: 'error', message: 'Review failed: auth: fixture' },
+      { type: 'complete', status: 'review_skipped' },
+    ],
+  ])(
+    'mixed/unknown vendor stream keeps the blocker without outage authority: %j',
+    async (...events) => {
+      const effects = repoEffects(
+        repo,
+        reviewer(ran(1, events.map((event) => JSON.stringify(event)).join('\n'))),
+      );
+      expect((await cycleReview(effects, stubScanner())({ repoRoot: repo.root })).status).toBe(
+        'needs-human',
+      );
+      const cycle = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle');
+      expect(cycle?.kind === 'cycle' ? cycle.vendorFailure : undefined).toBeUndefined();
+    },
+  );
+
+  const NO_FRESH_REASON =
+    "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
+    '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran';
+
+  test('an unchanged rerun over an exact terminal record makes ZERO vendor calls and returns reuse evidence', async () => {
+    const state = await seed(repo);
+    // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
+    const reuseId = `r001-${state.head.slice(0, 8)}`;
+    let coderabbitRuns = 0;
+    const effects = repoEffects(repo, (command) => {
+      if (command === 'coderabbit') coderabbitRuns += 1;
+      return reviewer(ran(0))(command, []);
+    });
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(coderabbitRuns).toBe(0);
+    if (result.status !== 'ok') return;
+    expect(result.value.reuse).toMatchObject({
+      reuseId,
+      basis: 'exact-terminal',
+    });
+    expect(result.value.cycleId).toBe('c001-aaaaaaaa');
+    expect(result.value.base).toBe(state.base);
+    expect(result.value.head).toBe(state.head);
+    expect(result.value.completion).toEqual({ kind: 'terminal' });
+    const ledger = effects.openLedger('feature/x').load();
+    // APPEND-ONLY: the terminal cycle and the green check are intact, and
+    // exactly one reuse record was added. No new cycle was appended.
+    expect(ledger.records.filter((r) => r.kind === 'cycle')).toHaveLength(1);
+    expect(ledger.records.filter((r) => r.kind === 'check')).toHaveLength(1);
+    const reuse = ledger.records.find((r) => r.kind === 'reuse');
+    expect(reuse).toMatchObject({
+      kind: 'reuse',
+      reuseId,
+      cycleId: 'c001-aaaaaaaa',
+      basis: 'exact-terminal',
+      base: state.base,
+      head: state.head,
+      reviewer: 'coderabbit',
+      scope: 'full',
+    });
+    expect(effects.logs.at(-1)).toContain('# dev.review reuse log');
+  });
+
+  test('a same-identity no-fresh BLOCKED tail is explicitly resolved by reuse; the tail stays verbatim', async () => {
+    const state = await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+    ]);
+    // The reuse id derives the head8 of the CURRENT HEAD (review.ts).
+    const reuseId = `r001-${state.head.slice(0, 8)}`;
+    const effects = repoEffects(repo, reviewer(ran(0)));
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.reuse).toMatchObject({
+      basis: 'no-fresh-tail',
+      resolvesCycleId: 'c002-bbbbbbbb',
+    });
+    const ledger = effects.openLedger('feature/x').load();
+    const tail = ledger.records.find((r) => r.kind === 'cycle' && r.cycleId === 'c002-bbbbbbbb');
+    // The blocked tail is NOT overwritten, deleted, or relabeled.
+    expect(tail).toMatchObject({
+      kind: 'cycle',
+      completion: { kind: 'blocked', reason: NO_FRESH_REASON },
+    });
+    const reuse = ledger.records.find((r) => r.kind === 'reuse');
+    expect(reuse).toMatchObject({
+      reuseId,
+      cycleId: 'c001-aaaaaaaa',
+      basis: 'no-fresh-tail',
+      resolvesCycleId: 'c002-bbbbbbbb',
+      base: state.base,
+    });
+    expect(effects.logs.at(-1)).toContain('resolves blocked attempt: c002-bbbbbbbb');
+  });
+
+  test('a genuine later blocker (CLI error tail) refuses reuse and dispatches a fresh cycle', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+    ]);
+    let coderabbitRuns = 0;
+    const effects = repoEffects(repo, (command) => {
+      if (command === 'coderabbit') coderabbitRuns += 1;
+      return reviewer(ran(0))(command, []);
+    });
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(coderabbitRuns).toBe(1);
+    if (result.status === 'ok') expect(result.value.reuse).toBeUndefined();
+    const ledger = effects.openLedger('feature/x').load();
+    expect(ledger.records.some((r) => r.kind === 'reuse')).toBe(false);
+    expect(ledger.records.filter((r) => r.kind === 'cycle')).toHaveLength(3);
+  });
+
+  test('a changed identity (new commit) never reuses and dispatches a fresh cycle', async () => {
+    await seed(repo);
+    await repo.write('src/a.ts', 'export const a = 2;\n');
+    repo.commitAll('more work');
+    let coderabbitRuns = 0;
+    const effects = repoEffects(repo, (command) => {
+      if (command === 'coderabbit') coderabbitRuns += 1;
+      return reviewer(ran(0))(command, []);
+    });
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(coderabbitRuns).toBe(1);
+    if (result.status === 'ok') expect(result.value.reuse).toBeUndefined();
+  });
+
+  test('a reuse record-store fault refuses honestly and never dispatches the vendor', async () => {
+    await seed(repo);
+    const effects = repoEffects(repo, undefined, {
+      openLedger: () => {
+        throw new Error('dev-record: ledger unreadable');
+      },
+    });
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('reuse check could not complete');
+      expect(result.reason).toContain('ledger unreadable');
+    }
+    expect(reviewerCalls(effects)).toEqual([]);
+  });
+
+  test('drift while the reuse ledger is read refuses before any vendor call or append', async () => {
+    await seed(repo);
+    // The tree changes while the reuse selection holds the host lock: the
+    // in-lock re-read must see it and refuse before the vendor (which this
+    // fixture makes fatal) or any append can happen.
+    const effects = repoEffects(
+      repo,
+      reviewer(() => {
+        throw new Error('fixture: the vendor must never run on a reuse path');
+      }),
+      {
+        withHostLock: async (fn) => {
+          await repo.write('src/a.ts', 'export const a = 3;\n');
+          return fn();
+        },
+      },
+    );
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('while the reuse ledger was read');
+    const ledger = effects.openLedger('feature/x').load();
+    expect(ledger.records.some((r) => r.kind === 'reuse')).toBe(false);
+    expect(reviewerCalls(effects)).toEqual([]);
+  });
+
+  test('a reuse selection preserves the source cycle findings verbatim in the report', async () => {
+    await seed(repo);
+    const effects = repoEffects(repo);
+    const ledgerStore = effects.openLedger('feature/x');
+    const ledger = ledgerStore.load();
+    ledgerStore.save({
+      ...ledger,
+      records: ledger.records.map((record) =>
+        record.kind === 'cycle'
+          ? {
+              ...record,
+              findings: [
+                {
+                  id: 'c001-aaaaaaaa#f1',
+                  severity: 'major',
+                  fileName: 'src/a.ts',
+                  excerpt: 'handle the null case',
+                },
+              ],
+            }
+          : record,
+      ),
+    });
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.findings).toEqual([
+        {
+          id: 'c001-aaaaaaaa#f1',
+          severity: 'major',
+          fileName: 'src/a.ts',
+          excerpt: 'handle the null case',
+        },
+      ]);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1770,59 @@ test.each([
   },
 );
 
+test.each([
+  ['wall deadline abort', 0, true, false, true],
+  ['parent abort before deadline', 1000, true, false, false],
+  ['null exit without interruption', 0, false, false, false],
+  ['explicit refusal before wall deadline abort', 0, true, true, false],
+] as const)(
+  '#534: %s attributes budget stops only to an interrupted reviewer without a refusal',
+  async (_mode, wall, interrupted, refused, marked) => {
+    const controller = new AbortController();
+    let remaining = 1000;
+    const effects = repoEffects(
+      repo,
+      reviewer(() => {
+        remaining = wall;
+        if (interrupted) controller.abort(new Error('review interrupted'));
+        return ran(
+          null,
+          JSON.stringify(
+            refused
+              ? { type: 'error', message: 'auth_required' }
+              : { type: 'heartbeat', status: 'reviewing' },
+          ),
+          {
+            timedOut: false,
+            ...(interrupted
+              ? { interruption: { kind: 'abort' as const, reason: controller.signal.reason } }
+              : {}),
+          },
+        );
+      }),
+    );
+    const result = await makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      signal: controller.signal,
+      remainingWallMs: () => remaining,
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (marked) expect(result).toMatchObject({ report: { budgetStopped: true } });
+    else expect(result).not.toMatchObject({ report: { budgetStopped: true } });
+    const cycles = effects
+      .openLedger('feature/x')
+      .load()
+      .records.filter((entry) => entry.kind === 'cycle');
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+    if (refused)
+      expect(cycles[0]?.completion).toMatchObject({
+        reason: expect.stringContaining('error event') as unknown,
+      });
+  },
+);
+
 test.each(['queued', 'running', 'expired'] as const)(
   'bounded review persists blocked evidence when %s without a completed review',
   async (mode) => {
@@ -1099,13 +1838,21 @@ test.each(['queued', 'running', 'expired'] as const)(
           return ran(0);
         }),
       );
-      if (mode === 'queued')
-        effects.withHostLock = async (_fn, signal) => {
+      if (mode === 'queued') {
+        // The Q4 reuse check acquires the host lock FIRST; a queued cancel
+        // must land in the vendor span's own guard so the pre-existing
+        // blocked-evidence persistence (#534) is what the assertions below
+        // verify. Pass the reuse acquisition through uncancelled.
+        let locks = 0;
+        effects.withHostLock = async (fn, signal) => {
+          locks += 1;
+          if (locks === 1) return fn();
           expect(signal).toBe(controller.signal);
           controller.abort(new Error('parent cancelled queued review'));
           signal!.throwIfAborted();
           throw new Error('unreachable');
         };
+      }
       const run = effects.runCommand;
       effects.runCommand = async (command, args, opts) => {
         if (command === 'coderabbit') {

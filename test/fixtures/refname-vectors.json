@@ -1,0 +1,50 @@
+{
+  "$comment": "Canonical branch-refname vectors. Shared verbatim by test/shared/refname.test.ts and apps/crq-python/test_queue_transport.py so the TypeScript grammar and its Python mirror cannot drift apart. Every row names the rule it exercises.",
+  "vectors": [
+    { "value": "merge-queue", "accept": true, "rule": "plain" },
+    { "value": "release/1.4", "accept": true, "rule": "slash target" },
+    { "value": "stacked/parent-branch", "accept": true, "rule": "stacked parent" },
+    { "value": "feature/a/b-1.0", "accept": true, "rule": "multi-segment" },
+    { "value": "a", "accept": true, "rule": "single character" },
+    { "value": "a.b", "accept": true, "rule": "internal dot" },
+    { "value": "a_b-c.d", "accept": true, "rule": "allowed punctuation" },
+    {
+      "value": "a\u0085b",
+      "accept": true,
+      "rule": "U+0085 NEXT LINE is not forbidden (Python \\s would reject it, ECMAScript \\s would not)"
+    },
+    {
+      "value": "a\ufeffb",
+      "accept": true,
+      "rule": "U+FEFF is not forbidden (ECMAScript \\s would reject it, Python \\s would not)"
+    },
+    {
+      "value": "a\u00a0b",
+      "accept": true,
+      "rule": "U+00A0 NBSP is not forbidden (both \\s sets would reject it)"
+    },
+
+    { "value": "", "accept": false, "rule": "empty" },
+    { "value": "@", "accept": false, "rule": "single @ character" },
+    { "value": "/main", "accept": false, "rule": "leading slash" },
+    { "value": "main/", "accept": false, "rule": "trailing slash" },
+    { "value": "a//b", "accept": false, "rule": "empty component" },
+    { "value": "a b", "accept": false, "rule": "space" },
+    { "value": "a\tb", "accept": false, "rule": "control 0x09" },
+    { "value": "a\u0001b", "accept": false, "rule": "control 0x01" },
+    { "value": "a\u007fb", "accept": false, "rule": "DEL 0x7F" },
+    { "value": "a~b", "accept": false, "rule": "tilde" },
+    { "value": "a^b", "accept": false, "rule": "caret" },
+    { "value": "a:b", "accept": false, "rule": "colon" },
+    { "value": "a?b", "accept": false, "rule": "question mark" },
+    { "value": "a*b", "accept": false, "rule": "asterisk" },
+    { "value": "a[b", "accept": false, "rule": "open bracket" },
+    { "value": "a\\b", "accept": false, "rule": "backslash" },
+    { "value": "a..b", "accept": false, "rule": "double dot" },
+    { "value": "a@{b", "accept": false, "rule": "at-brace" },
+    { "value": "main.", "accept": false, "rule": "trailing dot" },
+    { "value": "a.lock", "accept": false, "rule": "lock suffix" },
+    { "value": ".hidden", "accept": false, "rule": "dot-start component" },
+    { "value": "a/.b", "accept": false, "rule": "dot-start component after slash" }
+  ]
+}

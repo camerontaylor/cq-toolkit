@@ -33,6 +33,7 @@ import {
   type FindingsRecord,
 } from './findings.js';
 import { makeReviewRun, type ReviewRunInput, type ReviewRunResult } from './run.js';
+import { restoreDurableDisposition, sameFindingContent } from './internal/durableDisposition.js';
 import {
   makeAddressWorker,
   type AddressAttempt,
@@ -40,6 +41,17 @@ import {
   type AddressWorker,
 } from './addressWorker.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
+import { parseQueueReceipt } from './internal/queueEvidence.js';
+import type { DeferredQueueClient } from './internal/queueProtocol.js';
+import {
+  resolveDeferredVendorContext,
+  type DeferredVendorContextRequest,
+  type DeferredVendorContext,
+} from './internal/addressDeferred.js';
+import {
+  hasDeferredReviewSources,
+  type DeferredVendorDebt,
+} from '../dev/internal/deferredReview.js';
 import type { AddressFailedAttempt } from './internal/addressEvidence.js';
 import { FixReviewItemInputSchema } from './registry.js';
 import {
@@ -97,6 +109,19 @@ export interface ReviewAddressReport {
   stop?: 'round-cap' | 'budget' | 'rereview-blocked';
   /** Last admitted head, advanced only by verified fix commits. */
   verifiedHead?: string;
+  /**
+   * The engine-verified head this invocation's report is attributable to,
+   * captured once at the first successful admission and never advanced by fix
+   * commits or refreshed by a re-review. Consumers that must attribute a report
+   * to an observed head compare against THIS witness; `verifiedHead` (last
+   * admitted) and `rounds[].record.head` (overwritten by `noteRound` after a
+   * successful re-review) are not substitutes. Absent when the invocation
+   * refused before admitting any head — and a report that admitted earlier work
+   * keeps its witness through a later refusal.
+   */
+  admissionHead?: string;
+  /** Durable author debt remains explicit; address success is not vendor completion. */
+  deferredVendorDebt?: DeferredVendorDebt;
 }
 export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
@@ -108,9 +133,17 @@ export interface ReviewAddressDeps {
   worktreeRegistry?: WorktreeRegistry;
   config?: CqConfig;
   initialRecord?: FindingsRecord;
+  /**
+   * Narrow queue capability for the DEFAULT runner only: it is forwarded verbatim
+   * into `makeReviewRun`, never into `deps.review`, and changes no other wiring.
+   */
+  queueClient?: DeferredQueueClient;
   review?: (input: ReviewRunInput) => Promise<ReviewRunResult>;
   workerFactory?: (deps: Parameters<typeof makeAddressWorker>[0]) => AddressWorker;
   disposition?: (root: string, finding: Finding) => Promise<OpResult<unknown>>;
+  resolveDeferredVendorContext?: (
+    request: DeferredVendorContextRequest,
+  ) => Promise<DeferredVendorContext | undefined>;
 }
 
 /** Deterministic file-disjoint waves. Missing scope is handled explicitly, never fanned out. */
@@ -124,7 +157,10 @@ export function addressBatches(findings: readonly Finding[], concurrency: number
     const batch: Finding[] = [];
     for (let i = 0; i < pending.length && batch.length < concurrency;) {
       const finding = pending[i]!;
-      const file = finding.file === undefined ? undefined : posix.normalize(finding.file);
+      const file =
+        finding.file === undefined || finding.file === ''
+          ? undefined
+          : posix.normalize(finding.file);
       if (file === undefined) {
         if (batch.length) break;
         batch.push(finding);
@@ -221,15 +257,59 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     // `finish(stop())`, or the driver wrapper's thrown stop reaching a catch.
     let budgetSpent = false;
     /**
-     * The exit publication's terminal state, settled by the wrapper below:
-     * 'published' once a push left this process, 'failed' with its error
-     * otherwise. #469's report-truth rule consumes it — the engine, not a
-     * loop-side guess, is the only witness of what was actually pushed.
-     * Irreversible in one direction: once 'published', a later (post-push)
-     * failure never downgrades it — the commit is out regardless of what the
-     * post-push bookkeeping threw.
+     * The terminal state of the most recent publication attempt for the
+     * CURRENT outstanding range, settled by the wrapper below: 'published'
+     * once a push left this process, 'failed' with its error otherwise.
+     * #469's report-truth rule consumes it — the engine, not a loop-side
+     * guess, is the only witness of what was actually pushed. Per-range
+     * (publication-range truth, PRRT_kwDOUY73E86w9hwK): a verified commit
+     * remembered after a settled push opens a NEW outstanding range and
+     * resets a 'published' witness, so a later range's pre-push failure is
+     * recorded instead of being suppressed by the earlier range's success.
+     * Irreversible within one attempt: once 'published', a post-push failure
+     * of that same attempt never downgrades it — the commit is out
+     * regardless of what the post-push bookkeeping threw.
      */
     let exitPublication: { state: 'published' } | { state: 'failed'; error: string } | undefined;
+    /**
+     * Publication-range truth (PRRT_kwDOUY73E86w9hwK): withhold rows settle
+     * PER RANGE, at the moment that range's truth is decided — never all at
+     * once at exit. A successful push settles every not-yet-settled row
+     * immediately (at the witness below); finish() settles only the rows
+     * still unsettled, by the most recent attempt. Indices are stable:
+     * report.reasons is append-only and settled rows are replaced in place.
+     */
+    const settledWithholdRows = new Set<number>();
+    const settleWithholdRows = (tail: string) => {
+      for (const [index, row] of report.reasons.entries()) {
+        if (!row.includes('publish-withheld-mixed-worktree')) continue;
+        // A settled row keeps the shared label, so re-match it here and skip.
+        if (settledWithholdRows.has(index)) continue;
+        // Keep only the shared item prefix ("item …: " + the label); the
+        // loop-side clauses after it describe the pre-publication state and
+        // are REPLACED by the settled tail, never appended to.
+        const label = 'publish-withheld-mixed-worktree';
+        const at = row.indexOf(label);
+        report.reasons[index] = `${row.slice(0, at + label.length)}${tail}`;
+        settledWithholdRows.add(index);
+      }
+    };
+    /**
+     * #490: the exact findings array each dispatch started from, mapped to
+     * the number of fixes already recorded then. The local loop's report rows
+     * are that pre-dispatch snapshot until a re-review succeeds, so a run that
+     * stops after fixing (budget, blocked re-review, round cap) would leave
+     * fixed rows reading 'open'. finish() overlays only fixes recorded AFTER
+     * the stamp, and only onto a stamped array: a successful re-review
+     * assigns a new array, so its rows stay authoritative (a reopened defect
+     * stays open). The stamp also carries the blocking severities the
+     * dispatch ran under, so finish() can re-derive openBlocking from the
+     * overlaid rows under the same policy.
+     */
+    const rowsDispatchedAt = new WeakMap<
+      Finding[],
+      { fixes: number; severities: readonly string[] }
+    >();
     const finish = async (
       status: 'ok' | 'failed' | 'needs-human',
       reason = '',
@@ -298,15 +378,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // envelope (and the publication-failure clearing above, which erases
       // the marker, is included in both).
       if (marker !== undefined) report.stop = marker;
-      // #469: settle the mixed-worktree withhold rows with the engine's own
-      // publication truth. The loop wrote them BEFORE the exit publication
-      // ran ("the loop pushed nothing … may still happen at engine exit");
-      // only the engine knows what its exit push actually did. Amend each
-      // row IN PLACE (a separate appended reason cannot be tied to its item
-      // and would leave the stale claim standing):
+      // #469 + publication-range truth: settle the mixed-worktree withhold
+      // rows with the engine's own publication truth. The loop wrote them
+      // BEFORE the exit publication ran ("the loop pushed nothing … may
+      // still happen at engine exit"); only the engine knows what its exit
+      // push actually did. A successful push already settled its range's
+      // rows AT the push; only rows of the CURRENT outstanding range reach
+      // here, and they take the most recent actual attempt's truth. Each
+      // row is amended IN PLACE (a separate appended reason cannot be tied
+      // to its item and would leave the stale claim standing):
       //   - a settled push → "exit-published": the exact verified range is
       //     out; only the reply/resolve stay withheld (S6 attempt D's
-      //     8f78ca91 read "not published" while remote head already had it);
+      //     8f78ca91 read "not published" while remote head already had
+      //     it). Normally a no-op here — the push settles its rows at the
+      //     witness itself — but it stands as the truthful branch for the
+      //     most-recent-attempt rule;
       //   - a failed exit publication → the row names the failure and that
       //     the commit stays local (the outcome reason carries it too);
       //   - a run with no push → "publication is off": the commit truly is
@@ -315,18 +401,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       //     skips publishOnExit on a parent cancel) → "no engine publication
       //     ran": the dead run can never publish, so the verified commit
       //     stays local.
-      const settleWithholdRows = (tail: string) => {
-        for (const [index, row] of report.reasons.entries()) {
-          if (row.includes('publish-withheld-mixed-worktree')) {
-            // Keep only the shared item prefix ("item …: " + the label); the
-            // loop-side clauses after it describe the pre-publication state
-            // and are REPLACED by the settled tail, never appended to.
-            const label = 'publish-withheld-mixed-worktree';
-            const at = row.indexOf(label);
-            report.reasons[index] = `${row.slice(0, at + label.length)}${tail}`;
-          }
-        }
-      };
       if (exitPublication?.state === 'published') {
         settleWithholdRows(
           "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
@@ -351,6 +425,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         settleWithholdRows(
           '; no engine publication ran for this run — the verified commit stays local',
         );
+      }
+      // #490: rows still holding a dispatched snapshot take the outcome each
+      // later fix recorded for them, as the producer recorded it (status,
+      // reason, evidence). A fix whose disposition write failed already reads
+      // 'open', so it leaves its row open. No publication claim is added here.
+      const dispatchedAt = rowsDispatchedAt.get(report.findings);
+      if (dispatchedAt !== undefined) {
+        const later = report.fixes.slice(dispatchedAt.fixes);
+        report.findings = report.findings.map((finding) => {
+          const outcome = later.findLast((fix) => fix.finding.id === finding.id)?.finding;
+          if (outcome === undefined || outcome.status === 'open') return finding;
+          const { reason, evidence } = outcome;
+          const { reason: _reason, evidence: _evidence, ...row } = finding;
+          return {
+            ...row,
+            status: outcome.status,
+            ...(reason === undefined ? {} : { reason }),
+            ...(evidence === undefined ? {} : { evidence }),
+          };
+        });
+        // The same rows, so the same blockers: openBlocking was taken from the
+        // pre-dispatch snapshot, and would still list a finding whose fix
+        // outcome (persisted, or its row would still read 'open') is fixed or
+        // rejected. Deferred and still-open rows stay blocking.
+        report.openBlocking = openBlocking({ findings: report.findings }, dispatchedAt.severities);
       }
       // Jobs cancelled by the enclosing runner still retain independently
       // recorded branch pointers, even when their result/disposition is absent.
@@ -464,15 +563,23 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       };
       // Bound inside the ownership lock below (it needs the bookkeeping FIFO);
       // reviews only fire after that lock is held, so the binding is always set.
+      let noteEvidenceImportedImpl:
+        | ((evidence: { receiptId: string; path: string }) => Promise<void>)
+        | undefined;
       let noteLedgerWriteImpl: ((branch: string, repoRoot: string) => Promise<void>) | undefined;
       const reviewImplementation =
         deps.review ??
         makeReviewRun({
           drivers: reviewDrivers,
+          ...(deps.queueClient ? { queueClient: deps.queueClient } : {}),
           ...(parent ? { parentSignal: parent } : {}),
           writeFindingsRecord: async (path, content) => {
             await writeFile(path, content, { flag: 'wx', mode: 0o600 });
             await noteBookkeeping(path);
+          },
+          onEvidenceImported: async (evidence) => {
+            if (!noteEvidenceImportedImpl) throw new Error('queue evidence ownership unavailable');
+            await noteEvidenceImportedImpl(evidence);
           },
           noteLedgerWrite: async (branch, repoRoot) => {
             await noteLedgerWriteImpl?.(branch, repoRoot);
@@ -601,7 +708,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 throw error;
               }
               const revision = bookkeepingRevision;
-              const result = await action();
+              const outcome = await action().then(
+                (value) => ({ ok: true as const, value }),
+                (error: unknown) => ({ ok: false as const, error }),
+              );
+              // Import ownership survives a later ack/settlement failure.
               if (persistedBookkeeping && bookkeepingRevision !== revision) {
                 try {
                   await persistedBookkeeping.persist();
@@ -610,7 +721,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   throw error;
                 }
               }
-              return result;
+              if (!outcome.ok) throw outcome.error;
+              return outcome.value;
             });
             bookkeepingWrites = pending.catch(() => undefined);
             return pending;
@@ -632,6 +744,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let rereviewStillTransient = false;
           const review = async (request: ReviewRunInput) => {
             const first = await reviewOnce(request);
+            if (
+              first.status === 'needs-human' &&
+              first.report?.deferredVendorDebt &&
+              first.report.blockedBudget !== true &&
+              !stop() &&
+              (await hasRequiredSources(request.repoRoot, first.report))
+            )
+              return first;
             if (first.status !== 'needs-human' || first.report?.blockedTransient !== true || stop())
               return first;
             report.reasons.push('re-review blocked on a network/transient class; retrying once');
@@ -667,6 +787,45 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               relative(repoRoot, devLedgerPath(repoRoot, branch)),
             );
             await noteBookkeeping(path);
+          };
+          // Already inside the review/context bookkeeping FIFO: never re-enter it.
+          const noteQueueEvidence = async (
+            root: string,
+            evidence: { receiptId: string; path: string },
+          ) => {
+            const canonicalRoot = await realpath(root);
+            if (!/^[0-9a-f]{64}$/.test(evidence.receiptId))
+              throw new Error('invalid queue evidence identity');
+            const expected = resolve(
+              canonicalRoot,
+              '.cq/queue-evidence',
+              evidence.receiptId + '.json',
+            );
+            if (evidence.path !== expected || (await realpath(expected)) !== expected)
+              throw new Error('queue evidence path mismatch');
+            const stat = await lstat(expected);
+            if (!stat.isFile() || stat.nlink !== 1)
+              throw new Error('queue evidence is not an ordinary exact file');
+            const bytes = await readFile(expected);
+            const hash = createHash('sha256').update(bytes).digest('hex');
+            if (
+              hash !== evidence.receiptId ||
+              (bookkeeping.has(expected) && bookkeeping.get(expected) !== hash)
+            )
+              throw new Error('queue evidence changed or digest mismatch');
+            parseQueueReceipt(JSON.parse(bytes.toString('utf8')));
+            if (!persistedBookkeeping)
+              throw new Error('durable queue evidence ownership unavailable');
+            bookkeeping.set(expected, hash);
+            bookkeepingRevision++;
+            // The caller sends ack immediately after this observer returns. Commit
+            // ownership inline in the FIFO slot, before that irreversible boundary.
+            try {
+              await persistedBookkeeping.persist();
+            } catch (error) {
+              bookkeepingTampered = true;
+              throw error;
+            }
           };
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
@@ -738,9 +897,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let publishRemote = 'origin';
           let publishedBase: string | undefined;
           let workerRoot = resolve(input.repoRoot);
+          noteEvidenceImportedImpl = (evidence) => noteQueueEvidence(workerRoot, evidence);
           const remember = (fix: AddressFix) => {
             report.fixes.push(fix);
             if (fix.commit) {
+              // Publication-range truth: a verified commit arriving after a
+              // settled push opens a NEW outstanding range. The previous
+              // push's 'published' witness speaks only for its own range —
+              // whose withhold rows it already settled at the push — so it
+              // must not suppress the record of THIS range's later failure.
+              // A 'failed' witness stands: it is the most recent actual
+              // attempt for the still-outstanding range.
+              if (exitPublication?.state === 'published') exitPublication = undefined;
               unpublished.add(fix.commit);
               report.verifiedHead = fix.commit;
             }
@@ -768,6 +936,24 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             // early return (no push run, nothing unpublished) never counts
             // as published.
             exitPublication = { state: 'published' };
+            // Publication-range truth: settle the not-yet-settled withhold
+            // rows NOW, at the witness, before the post-push rev-parse can
+            // throw. Invariant — every row settled here describes a commit
+            // this push carried out, without inferring anything from the
+            // row's prose: each unsettled row was written for an item whose
+            // verified commit entered `unpublished` (remember runs before
+            // the loop writes its row) and leaves it only through a
+            // successful push — which settles the rows outstanding at that
+            // moment — or the loop's own ok-push reset, which only runs on
+            // a round that wrote no withhold rows while none were left
+            // unsettled; so the rows still unsettled name commits of THIS
+            // outstanding range, which the checks above proved identical to
+            // the pushed range (and the push sends HEAD, so any earlier
+            // verified commit rides along inside it). A later range's
+            // failure must never rewrite these rows.
+            settleWithholdRows(
+              "; exit-published — the engine's exit publication pushed the exact verified range; only this item's reply and resolve remain withheld",
+            );
             publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
             unpublished.clear();
           };
@@ -793,6 +979,91 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const dispositions = new Map<string, Finding>();
           let bookkeepingFailed = false;
           let reviewedBase: string | undefined;
+          const hasRequiredSources = async (root: string, record: FindingsRecord) => {
+            if (stop()) return false;
+            const complete = isComplete(record, policy.review.reviewers);
+            if (!policy.review.reviewers.includes('coderabbit')) return complete;
+            return withBookkeepingAccess(root, async () => {
+              if (stop()) return false;
+              const context = await (
+                deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
+              )({
+                repoRoot: root,
+                target: input.target ?? 'merge-queue',
+                base: reviewedBase,
+                record,
+                onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
+                ...(parent ? { signal: parent } : {}),
+              });
+              if (!deps.resolveDeferredVendorContext && context)
+                await noteBookkeeping(devLedgerPath(root, record.branch));
+              if (stop()) return false;
+              if (!context) {
+                if (complete) delete report.deferredVendorDebt;
+                // Q17b ordinary path: retained dispositions live in the branch ledger, so
+                // restore them here too (the deferred context is not the only authority).
+                // The restoration is content-bound: a same-id row whose original content
+                // differs never inherits a status or reason, and the raw ledger is never
+                // rewritten. Run under the same bookkeeping access as every ledger read.
+                const ledger = makeSubprocessDevEffects(root).openLedger(record.branch).load();
+                record.findings = record.findings.map((finding) =>
+                  restoreDurableDisposition(finding, ledger),
+                );
+                return complete;
+              }
+              if (
+                !complete &&
+                !hasDeferredReviewSources(
+                  record,
+                  policy.review.reviewers,
+                  context.debt,
+                  context.identity,
+                )
+              )
+                return false;
+              // New receipt findings enter the normal dispatcher. Existing
+              // dispositions come from the ledger, never a cached record's
+              // status. A newer record cannot silently adjudicate an old ID.
+              const retained = new Map(context.findings.map((finding) => [finding.id, finding]));
+              record.findings = [
+                ...record.findings.map((finding) => {
+                  const current = retained.get(finding.id);
+                  // Q17b: only an identical original witness may lend its disposition.
+                  // A same-id row with changed content (or a legacy row missing the
+                  // metadata) never inherits one — no ID-only authority. Such a row is
+                  // reset to OPEN with its cached reason cleared, exactly as the ordinary
+                  // path's restoreDurableDisposition does, so a stale fixed/rejected
+                  // status can never suppress openBlocking.
+                  if (current === undefined) return finding;
+                  if (!sameFindingContent(finding, current)) {
+                    const { reason: _reason, ...row } = finding;
+                    return { ...row, status: 'open' as const };
+                  }
+                  return {
+                    ...finding,
+                    status: current.status,
+                    ...(current.reason !== undefined ? { reason: current.reason } : {}),
+                  };
+                }),
+                ...context.findings.filter(
+                  (finding) => !record.findings.some((item) => item.id === finding.id),
+                ),
+              ];
+              report.deferredVendorDebt = context.debt;
+              return true;
+            });
+          };
+          /**
+           * Capture the immutable admission witness exactly once: the
+           * engine-verified head of the first successful admission. It is never
+           * advanced by a verified fix commit and never refreshed by a
+           * re-review, and it is deliberately NOT set on a refusal or on an
+           * injected-disposition bypass (`admitRecord` returns before admission
+           * there), so no caller can fabricate one.
+           */
+          const noteAdmission = (head: string) => {
+            report.admissionHead ??= head;
+          };
           const admitCleanRecord = async (root: string, record: FindingsRecord) => {
             const effects = makeSubprocessDevEffects(root);
             const read = await readWorkState(effects, {
@@ -812,6 +1083,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 'clean findings record lacks matching full reviewed base/scope; run review.run again',
               );
             if (stop()) throw new Error(stop());
+            // Final guards passed: this clean record's head is the engine-read
+            // head of a comparable, admitted comparison.
+            noteAdmission(state.head);
           };
           const admitRecord = async (root: string, record: FindingsRecord) => {
             if (deps.disposition) return;
@@ -852,7 +1126,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   findings: record.findings.map((finding) => ({
                     id: finding.id,
                     severity: finding.severity,
-                    ...(finding.file ? { fileName: finding.file } : {}),
+                    ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                    ...(finding.line !== undefined ? { line: finding.line } : {}),
+                    ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                    ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                    ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
                     excerpt: finding.text,
                   })),
                   logPath: report.reportPath,
@@ -871,6 +1149,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               await noteBookkeeping(
                 await bookkeepingKey(root, relative(root, devLedgerPath(root, state.branch))),
               );
+              // The ledger mutation above completed for this engine-verified
+              // head: that is the one admission event, so the witness is taken
+              // here and nowhere else. Both admissions funnel through this
+              // function; the `deps.disposition` bypass above returned before
+              // it and must never fabricate a witness.
+              noteAdmission(state.head);
             });
           };
           const recordDisposition = async (root: string, finding: Finding) => {
@@ -914,6 +1198,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             return entry;
           };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
+            rowsDispatchedAt.set(record.findings, {
+              fixes: report.fixes.length,
+              severities: policy.review.blockingSeverities,
+            });
             if (
               new Set(record.findings.map((finding) => finding.id)).size !== record.findings.length
             )
@@ -921,8 +1209,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             await admitRecord(root, record);
             report.verifiedHead ??= record.head;
             publishedBase ??= await gitText(root, ['rev-parse', 'HEAD']);
+            const unresolvedReason = 'unresolved: finding has no file path';
+            const pathless = record.findings.filter(
+              (finding) => finding.status === 'open' && finding.file === '',
+            );
+            for (const finding of pathless) finding.reason = unresolvedReason;
+            noteRound(round, record);
             for (const batch of addressBatches(
-              record.findings.filter((finding) => finding.status === 'open'),
+              record.findings.filter((finding) => finding.status === 'open' && finding.file !== ''),
               policy.review.addressConcurrency,
             )) {
               if (stop()) return;
@@ -955,6 +1249,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   journalDir: resolve(journalDir, `round-${round}`),
                 },
                 {
+                  // SAFETY: the runner's registry view is generic over op I/O; this
+                  // entry is the concrete single-job 'review.fixItem' op built immediately
+                  // above, and the plan resolves it by that exact name only, so the erased
+                  // I/O type parameters cannot be observed through this view.
                   get: (name) =>
                     name === entry.name
                       ? (entry as unknown as OpRegistryEntry<never, never>)
@@ -980,6 +1278,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               }
               noteRound(round, record, run);
             }
+            return pathless.length > 0 ? unresolvedReason : undefined;
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
             const findings = record.findings.map((finding) => {
@@ -1505,8 +1804,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 return await finish('ok');
               }
               // Local agent findings share the same engine and round cap as forge threads.
-              await dispatchFindings(root, retainDeferred(agent.value), round);
+              const unresolved = await dispatchFindings(root, retainDeferred(agent.value), round);
               await publishOnExit();
+              if (unresolved) return await finish('needs-human', stop() ?? unresolved);
               continue;
             }
             if (!previous) {
@@ -1547,16 +1847,20 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             report.findings = previous.findings;
             noteAdvisories(previous);
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
-            if (!isComplete(previous, policy.review.reviewers))
+            if (!(await hasRequiredSources(root, previous)))
               return await finish('needs-human', 'review source incomplete');
+            if (stop()) return await finish('needs-human', stop());
+            report.findings = previous.findings;
+            report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             const pending = previous.findings.filter((f) => f.status === 'open');
             if (!pending.length && !report.openBlocking.length && !bookkeepingFailed) {
               await admitCleanRecord(root, previous);
               return await finish('ok');
             }
-            await dispatchFindings(root, previous, round);
+            const unresolved = await dispatchFindings(root, previous, round);
             await publishOnExit();
             if (stop()) return await finish('needs-human', stop());
+            if (unresolved) return await finish('needs-human', unresolved);
             const priorFindings = priorRoundFindings(previous);
             const refreshed = await review({
               repoRoot: root,
@@ -1566,7 +1870,17 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               wallMs: Math.max(1, remainingWallMs()),
               ...(priorFindings.length > 0 ? { priorFindings } : {}),
             });
-            if (refreshed.status !== 'ok') {
+            const refreshedRecord =
+              refreshed.status === 'ok'
+                ? refreshed.value
+                : refreshed.status === 'needs-human' &&
+                    refreshed.report?.deferredVendorDebt &&
+                    refreshed.report.blockedBudget !== true &&
+                    !stop() &&
+                    (await hasRequiredSources(root, refreshed.report))
+                  ? FindingsRecordSchema.strip().parse(refreshed.report)
+                  : undefined;
+            if (!refreshedRecord) {
               if (refreshed.report) noteAdvisories(refreshed.report);
               return await finish(
                 'needs-human',
@@ -1575,20 +1889,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               );
             }
             if (
-              refreshed.value.branch !== (await branchName(root)) ||
-              refreshed.value.head !== (await gitText(root, ['rev-parse', 'HEAD']))
+              refreshedRecord.branch !== (await branchName(root)) ||
+              refreshedRecord.head !== (await gitText(root, ['rev-parse', 'HEAD']))
             )
               return await finish('needs-human', 're-review identity changed');
-            previous = retainDeferred(refreshed.value);
+            previous = retainDeferred(refreshedRecord);
+            const complete = await hasRequiredSources(root, previous);
+            if (stop()) return await finish('needs-human', stop());
             noteAdvisories(previous);
             report.findings = previous.findings;
             report.openBlocking = openBlocking(previous, policy.review.blockingSeverities);
             noteRound(round, previous).record = previous;
-            if (
-              isComplete(previous, policy.review.reviewers) &&
-              !report.openBlocking.length &&
-              !bookkeepingFailed
-            ) {
+            if (complete && !report.openBlocking.length && !bookkeepingFailed) {
               await admitCleanRecord(root, previous);
               return await finish('ok');
             }

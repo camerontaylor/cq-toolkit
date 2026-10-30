@@ -1095,6 +1095,43 @@ describe('W4.3 approval at the mutation boundary (applyRemediation)', () => {
 // handler said "already EXERCISED, so the token is spent" for every fault,
 // which is false for the acquire case.
 describe('W4.3 a lock fault reports the token fate the phase allows', () => {
+  test('release failure preserves an already-spent exercise denial without claiming UNSPENT', async () => {
+    const store = approvedStore();
+    const ledger = makeInMemoryNonceLedger();
+    const nonce = '7'.repeat(32);
+    await ledger.consume(nonce);
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: () =>
+          Promise.resolve({
+            nonce,
+            state: { workspace: '/ws', headSha: 'head', treeClean: true },
+          }),
+      },
+      ledger,
+      locks: {
+        forWorkspace: () => ({
+          withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
+            await fn();
+            throw new Error('release failed after denial');
+          },
+        }),
+      },
+      readState: {
+        read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+      },
+    });
+    const result = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    expect(result.error).toContain('release failed after denial');
+    expect(result.error).toContain('nonce spent');
+    expect(result.error).not.toContain('UNSPENT');
+    expect(result.error).not.toContain('was NOT exercised');
+    expect(store.written.size).toBe(0);
+    expect(ledger.isSpent(nonce)).toBe(true);
+  });
+
   function approvedStore(): AnalyzeFileStore & { written: Map<string, Uint8Array> } {
     return memoryStore('/ws', {
       ...FIXTURE_FILES,

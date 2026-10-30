@@ -38,7 +38,15 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
-import { foldMessage, runHarnessTool, sandboxOption } from '../../../src/driver/claude-code/sdk.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  foldMessage,
+  installNativeToolCallAdapter,
+  runHarnessTool,
+  sandboxOption,
+} from '../../../src/driver/claude-code/sdk.js';
 import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
 import type { SdkTransportOptions } from '../../../src/driver/claude-code/sdk.js';
 import { allowedToolNames } from '../../../src/driver/claude-code/cli.js';
@@ -361,8 +369,87 @@ const mockAdapters = {
   }): Record<string, unknown> => ({
     type: 'sdk-mcp',
     ...opts,
+    instance: {
+      server: {
+        setRequestHandler: (_schema: unknown, _handler: unknown): void => {},
+      },
+    },
   }),
 };
+
+test('native MCP registration advertises canonical keys while raw legacy calls reach strict validation', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'cq-native-alias-')));
+  const server = new McpServer({ name: 'cq-harness', version: 'test' });
+  const client = new Client({ name: 'native-fixture', version: 'test' });
+  try {
+    await writeFile(join(dir, 'a.txt'), 'alpha');
+    const manifest = await buildManifest({
+      workspace: dir,
+      sandbox: 'workspace-write',
+      toolPolicy: { allow: ['read', 'run'], mode: 'allowlist' },
+      harness: defaultHarnessConfig,
+    });
+    if (manifest === undefined) throw new Error('expected a manifest');
+    const surface = createHarnessSurface(manifest);
+    expect(() => installNativeToolCallAdapter({ instance: {} }, surface, async () => ({}))).toThrow(
+      /lacks the tools\/call request-handler seam/,
+    );
+    for (const tool of surface.tools) {
+      server.registerTool(
+        tool.name,
+        { description: tool.description, inputSchema: tool.inputSchema },
+        async () => {
+          throw new Error('SDK raw-shape handler must be intercepted');
+        },
+      );
+    }
+    installNativeToolCallAdapter(
+      { instance: server },
+      surface,
+      async (name, args) => (await surface.call(name, args)).result,
+    );
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const listed = await client.listTools();
+    expect(listed.tools.map((tool) => tool.name)).toEqual(['read', 'bash']);
+    const read = listed.tools.find((tool) => tool.name === 'read');
+    expect(read?.inputSchema.required).toEqual(['file_path']);
+    expect(read?.inputSchema.additionalProperties).toBe(false);
+    expect(read?.inputSchema.properties).not.toHaveProperty('path');
+    expect(
+      (await client.callTool({ name: 'read', arguments: { path: 'a.txt' } })).isError,
+    ).not.toBe(true);
+    expect(
+      (await client.callTool({ name: 'read', arguments: { file_path: 'a.txt', path: 'a.txt' } }))
+        .isError,
+    ).not.toBe(true);
+    const conflict = await client.callTool({
+      name: 'read',
+      arguments: { file_path: 'a.txt', path: 'b.txt' },
+    });
+    expect(conflict.isError).toBe(true);
+    expect(JSON.stringify(conflict.content)).toContain('conflicting aliases');
+    const unsupported = await client.callTool({
+      name: 'read',
+      arguments: { path: 'a.txt', extra: true },
+    });
+    expect(unsupported.isError).toBe(true);
+    const aliasName = await client.callTool({ name: 'run', arguments: { command: 'echo x' } });
+    expect(aliasName.isError).toBe(true);
+    expect(JSON.stringify(aliasName.content)).toContain('CMD_DENIED');
+    const unserved = await client.callTool({
+      name: 'write',
+      arguments: { file_path: 'a.txt', content: 'x' },
+    });
+    expect(unserved.isError).toBe(true);
+    expect(JSON.stringify(unserved.content)).toContain('UNKNOWN_TOOL');
+  } finally {
+    await client.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 /** Build the mock module for one directive; records every query call. */
 function mockSdkModule(script: {
@@ -735,11 +822,16 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       expect(options['tools']).toEqual([]);
       expect(options['allowedTools']).toEqual(['mcp__cq-harness__read']);
       expect(options['permissionMode']).toBe('default');
-      const server = (options['mcpServers'] as Record<string, { tools: Array<{ name: string }> }>)[
+      const server = (options['mcpServers'] as Record<string, { tools: MockSdkTool[] }>)[
         'cq-harness'
       ];
       if (server === undefined) throw new Error('missing cq-harness server');
       expect(server.tools.map((t) => t.name)).toEqual(['read']);
+      const registeredRead = server.tools[0];
+      if (registeredRead === undefined) throw new Error('missing registered read tool');
+      expect(z.toJSONSchema(registeredRead.inputSchema as ZodType).additionalProperties).toBe(
+        false,
+      );
       // workspace-write sandbox → the defense-in-depth option.
       expect(options['sandbox']).toEqual({ enabled: true, failIfUnavailable: false });
     } finally {
@@ -925,6 +1017,9 @@ describe('claude-code sdk transport specifics (mock sdk)', () => {
       if (outcome.outcome !== 'completed') return; // narrow for TS
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      // Seam v3: the placeholder declares itself unmeasured, so the summary
+      // observer counts it as unknown rather than a known zero.
+      expect(outcome.value.usageProvenance).toBe('unmeasured');
       expect(outcome.value.costUSD).toBeUndefined(); // unmeasured: 0 would be a fabricated fact
       expect(outcome.value.costBasis).toBeUndefined();
     } finally {
@@ -1829,7 +1924,6 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
           'mcp__cq-harness__read',
           'mcp__cq-harness__edit',
           'mcp__cq-harness__bash',
-          'mcp__cq-harness__run',
           'mcp__cq-harness__write',
         ],
         mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
@@ -1930,7 +2024,6 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
             'mcp__cq-harness__bash',
             'mcp__cq-harness__edit',
             'mcp__cq-harness__read',
-            'mcp__cq-harness__run',
             'mcp__cq-harness__write',
           ],
         },
@@ -2028,7 +2121,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
             calls: [],
             tamperInit: (surface) => ({
               ...surface,
-              tools: surface.tools.filter((t) => t !== 'mcp__cq-harness__run'),
+              tools: surface.tools.filter((t) => t !== 'mcp__cq-harness__bash'),
             }),
           }),
         routingTable: conformanceEndpointTable(),
@@ -2452,7 +2545,7 @@ describe('claude-code sdk transport seam v2: RunOptions.signal + workspace bindi
       const { driver, calls } = driverWithCalls(scratchDir, {
         directive: {
           kind: 'tool-then-reply',
-          tool: 'run',
+          tool: 'bash',
           input: { command: 'echo conformance-marker > note.txt' },
           reply: 'wrote note.txt',
         },

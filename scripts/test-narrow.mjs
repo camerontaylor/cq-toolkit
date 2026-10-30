@@ -231,18 +231,19 @@ process.on('exit', (code) => {
 // timeout (#283). The sweep never signals an unverifiable group.
 for (const signal of SIGNALS) {
   process.on(signal, () => {
+    const now = performance.now();
     const action = interruptAction({
       childLive: child !== null && !childDone,
       signal,
       relayedAt,
-      now: Date.now(),
+      now,
     });
     if (action === 'finish') {
       finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
     }
     interruptedBy ??= signal;
     if (action === 'relay') {
-      relayedAt[signal] = Date.now();
+      relayedAt[signal] = now;
       signalChild(signal); // the code awaiting the child finishes
       return;
     }

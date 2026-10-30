@@ -220,6 +220,9 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     model: z.string().exactOptional(),
     structuredOutput: z.unknown().optional(),
     usage: UsageSchema,
+    // Seam v3: optional provenance declaration, absent when a lane cannot
+    // state it (legacy/custom results). Strict by value, permissive by key.
+    usageProvenance: z.enum(['measured', 'unmeasured']).exactOptional(),
     steps: z.number().int().nonnegative().exactOptional(),
     costUSD: z.number().exactOptional(),
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),

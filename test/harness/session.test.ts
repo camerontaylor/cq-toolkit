@@ -10,11 +10,12 @@
 //   - issue #18's append-side serialization: torn-tail recovery runs INSIDE
 //     the write chain, so it can never interleave with an in-flight append.
 //   - issue #18's privacy: the store dir is 0o700, the record file 0o600.
-import { appendFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { SessionStore } from '../../src/harness/session.js';
+import { z } from 'zod';
+import { SessionLineSchema, SessionStore } from '../../src/harness/session.js';
 
 // TRANSPARENT fs gate for the serialization test (below): when `gate` is
 // null every call delegates untouched; when armed, calls on the gated
@@ -78,6 +79,53 @@ async function withScratch(body: (scratchDir: string) => Promise<void>): Promise
     await rm(scratchDir, { recursive: true, force: true });
   }
 }
+
+test('new reader resumes old rows, while an old reader rejects additive diagnostics', async () => {
+  await withScratch(async (dir) => {
+    const store = new SessionStore(dir);
+    const record = await store.create(dir);
+    const path = join(dir, `${record.sessionId}.jsonl`);
+    await store.appendMessage(record.sessionId, {
+      role: 'user',
+      content: 'old conversation',
+      at: '2026-10-01T00:00:00Z',
+    });
+    expect((await store.load(record.sessionId))?.messages[0]?.content).toBe('old conversation');
+    await store.appendToolFailure(record.sessionId, {
+      type: 'tool-failure',
+      kind: 'INPUT_INVALID',
+      tool: 'read',
+      reason: 'INPUT_INVALID: missing file_path',
+      inputSummary: '{}',
+      step: 0,
+      at: '2026-10-28T00:00:00Z',
+    });
+    expect((await store.load(record.sessionId))?.messages).toHaveLength(1);
+    const lines = (await readFile(path, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => SessionLineSchema.parse(JSON.parse(line)));
+    expect(lines.every((line) => SessionLineSchema.safeParse(line).success)).toBe(true);
+    const oldReaderLine = z.discriminatedUnion('type', [
+      z
+        .object({
+          type: z.literal('session'),
+          sessionId: z.string(),
+          createdAt: z.string(),
+          workspace: z.string(),
+        })
+        .strict(),
+      z
+        .object({
+          type: z.literal('message'),
+          message: z.object({ role: z.string(), content: z.string(), at: z.string() }).strict(),
+        })
+        .strict(),
+    ]);
+    expect(lines.slice(0, 2).every((line) => oldReaderLine.safeParse(line).success)).toBe(true);
+    expect(oldReaderLine.safeParse(lines.at(-1)).success).toBe(false);
+  });
+});
 
 describe('SessionStore torn-tail recovery (fix 2)', () => {
   test('torn tail + append + load: the session stays loadable with all complete messages', async () => {

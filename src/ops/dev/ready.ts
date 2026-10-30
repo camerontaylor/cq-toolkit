@@ -21,6 +21,8 @@ import type { DevLedgerFile, DevReadinessRecord, ReadinessGap } from './record.j
 import { DEFAULT_DEV_TARGET, assembleReadiness } from './record.js';
 import { DevReadyInputSchema } from './registry.js';
 import { readWorkState, type WorkState } from './internal/workState.js';
+import { loadCurrentDeferredVendorDebt } from './internal/deferredLedger.js';
+import type { DeferredQueueClient } from '../review/internal/queueProtocol.js';
 
 /** Input of the `dev.ready` op (plain JSON; the registry schema mirrors it). */
 export interface DevReadyInput {
@@ -65,6 +67,7 @@ export async function readReadinessWithGaps(
   name: string,
   target: string,
   policy?: { reviewers: readonly string[]; blockingSeverities: readonly string[] },
+  queueClient?: DeferredQueueClient,
 ): Promise<
   | { ok: true; read: ReadinessRead }
   | {
@@ -82,13 +85,18 @@ export async function readReadinessWithGaps(
   if (!read.ok) return { ok: false, reason: `${name}: ${read.reason}` };
   const { state } = read;
   // A malformed ledger throws; the op boundary names it.
-  const ledger = effects.openLedger(state.branch).load();
+  let ledger = effects.openLedger(state.branch).load();
+  const debt = (policy?.reviewers ?? ['coderabbit', 'agent']).includes('coderabbit')
+    ? await loadCurrentDeferredVendorDebt(effects, target, state, ledger, queueClient)
+    : undefined;
+  if (debt !== undefined) ledger = effects.openLedger(state.branch).load();
   const assembled = assembleReadiness({
     branch: state.branch,
     target,
     identity: { base: state.base, head: state.head, dirtySha256: state.dirtySha256 },
     ledger,
     untracked: state.untracked,
+    ...(debt === undefined ? {} : { deferredVendorDebt: debt }),
     ...(policy === undefined
       ? {}
       : { configuredReviewers: policy.reviewers, blockingSeverities: policy.blockingSeverities }),

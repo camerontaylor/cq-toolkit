@@ -16,6 +16,14 @@ adapter = importlib.util.module_from_spec(spec)
 loader.exec_module(adapter)
 
 
+def setUpModule():
+    # Every producer probe is faked explicitly; no real process is needed.
+    patch = mock.patch.object(adapter.subprocess, "Popen",
+        side_effect=AssertionError("unmocked producer probe in offline fixture"))
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+
+
 class SummaryTest(unittest.TestCase):
     def test_optional_open_cycles_are_not_pending_review_debt(self):
         queue = {"items": [
@@ -145,3 +153,82 @@ class SummaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergedCurrentSummaryTest(unittest.TestCase):
+    def test_discovery_and_legacy_done_do_not_count_as_current_review(self):
+        q = {"items": [{"kind": "merged", "state": "done"},
+                       {"kind": "merged-current", "state": "done"},
+                       {"kind": "merged-current", "state": "pending"}],
+             "merged_reconcile": {"complete": True, "represented": 125,
+                                  "source": "private", "secret": "not exported"}}
+        summary = adapter.merged_current(q)
+        self.assertEqual(summary["receipts"]["unverified"], 1)
+        self.assertEqual(summary["receipts"]["pending"], 1)
+        self.assertEqual(summary["receipts"]["proven_terminal"], 0)
+        self.assertEqual(summary["coverage_at_today_target"], "unverified")
+        self.assertNotIn("private", json.dumps(summary))
+
+    def test_only_bound_verified_receipts_count_at_retained_target_with_exclusions(self):
+        rr = adapter.review_receipt
+        paths = [{"path": "gone.py", "disposition": "deleted"}]
+        capture = {"target": "a" * 40, "tree": "b" * 40, "paths": paths,
+                   "scope_digest": rr.digest(paths), "policy": rr.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1", "reviewer_version": "fixture"}
+        capture["equivalence"] = rr.current_equivalence(capture)
+        subject = {"repo": "owner/repo", "pr": 1}
+        document = {"version": 1, "source": subject, "capture": capture, "outcome": "no-current-code",
+                    "counted": False, "classification": None}
+        with tempfile.TemporaryDirectory() as td:
+            receipt_id = rr.write_receipt(td, document)
+            item = {"kind": "merged-current", "state": "no-current-code", "subject": subject,
+                    "capture": capture, "receipt_id": receipt_id}
+            summary = adapter.merged_current({"items": [item]}, td)
+            self.assertEqual(summary["receipts"]["no_current_code"], 1)
+            self.assertEqual(summary["receipts"]["proven_terminal"], 0)
+            self.assertEqual(summary["captured_targets"], ["a" * 40])
+            self.assertEqual(summary["path_exclusions"], {"deleted": 1})
+            document.update(outcome="partial-scope", counted=True,
+                            classification={"counted": True, "outcome": "completed"})
+            item.update(state="done", receipt_id=rr.write_receipt(td, document))
+            self.assertEqual(adapter.merged_current({"items": [item]}, td)["receipts"]["partial_scope"], 1)
+            document["outcome"] = "terminal-with-findings"
+            item["receipt_id"] = rr.write_receipt(td, document)
+            self.assertEqual(adapter.merged_current({"items": [item]}, td)["receipts"]["proven_terminal"], 1)
+            (Path(td) / (item["receipt_id"] + ".json")).write_text("{}")
+            summary = adapter.merged_current({"items": [item]}, td)
+            self.assertEqual(summary["receipts"]["unverified"], 1)
+            self.assertEqual(summary["receipts"]["proven_terminal"], 0)
+
+
+
+    def test_reused_receipt_requires_retained_lineage_and_equivalent_scope(self):
+        rr = adapter.review_receipt
+        paths = [{"path": "gone.py", "disposition": "deleted"}]
+        capture = {"target": "a" * 40, "tree": "b" * 40, "paths": paths,
+                   "scope_digest": rr.digest(paths), "policy": rr.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1", "reviewer_version": "fixture"}
+        capture["equivalence"] = rr.current_equivalence(capture)
+        document = {"version": 1, "source": {"repo": "owner/repo", "pr": 1},
+                    "capture": capture, "outcome": "terminal-with-findings", "counted": True,
+                    "classification": {"counted": True, "outcome": "completed"}}
+        with tempfile.TemporaryDirectory() as td:
+            receipt = rr.write_receipt(td, document)
+            original = {"id": "original", "kind": "merged-current", "state": "done",
+                        "receipt_id": receipt, "subject": document["source"], "capture": capture}
+            reused = {**original, "id": "reused", "subject": {"repo": "owner/repo", "pr": 2},
+                      "capture": {**capture, "captured_at": "later", "base": "c" * 40},
+                      "reused_from": "original"}
+            queue = {"items": [original, reused]}
+            summary = adapter.merged_current(queue, td)
+            self.assertEqual(summary["receipts"]["proven_terminal"], 2)
+            self.assertEqual(summary["path_exclusions"], {"deleted": 2})
+            for bad in ({"reused_from": "missing"}, {"reused_from": "reused"},
+                        {"capture": {**reused["capture"], "target": "d" * 40}},
+                        {"receipt_id": "e" * 64}, {"state": "unsupported"}):
+                with self.subTest(bad=bad):
+                    result = adapter.merged_current({"items": [original, {**reused, **bad}]}, td)
+                    self.assertEqual(result["receipts"]["unverified"], 1)
+                    self.assertEqual(result["receipts"]["proven_terminal"], 1)

@@ -514,3 +514,44 @@ Owner direction: change tools per session, not per turn. The ai-sdk lane sends t
 
 Why: the Step 4 eval (cq-toolkit #483) showed that removing the definitions (`activeTools: []`) and forcing
 `toolChoice: 'none'` mid-session both made DeepSeek reply with DSML tool-call markup instead of JSON.
+
+## Amendment 2026-10-28: seam v3 — `usageProvenance` on the result
+
+`SEAM_VERSION` is now **3**. The result gains one optional field:
+
+```ts
+usageProvenance?: 'measured' | 'unmeasured';
+```
+
+**What it declares.** `'measured'` means provider usage was observed for this run, and a genuine
+all-zero report counts as measured. `'unmeasured'` means `usage` is a placeholder: no provider
+measurement was observed (a pre-dispatch abort, a spawn failure, an uncompilable schema, or a run
+whose steps carried no provider usage evidence).
+
+**Absence is a state.** A result without the field did not report provenance — legacy results and
+custom drivers. Consumers must treat absence as **unknown**: it never aggregates as a measurement
+and is never inferred from the token values. The frozen `usage` field keeps its numeric meaning, so
+budgets, token debits and cost derivation are unchanged by this field.
+
+**Evidence rule.** Producers set `'measured'` only from raw provider usage presence: a numeric
+token field on the SDK's own usage object (ai-sdk), a shaped wire usage record (Claude Code), a
+schema-valid wire usage (ACP). Normalized zeros, a completed step, a resolved run, or a result
+object's mere existence are **not** evidence. Duplicates of that rule per lane:
+
+- ai-sdk: any finite numeric field among `inputTokens`, `outputTokens`, `totalTokens`,
+  `inputTokenDetails.*`, `outputTokenDetails.reasoningTokens`; the provider's unmapped `raw` payload
+  is not evidence.
+- Claude Code: at least one valid integer wire field (`input_tokens`, `output_tokens`,
+  `cache_read_input_tokens`, `cache_creation_input_tokens`), or a shaped `modelUsage` aggregate.
+  An object with no valid numeric field is no measurement — it no longer folds to a measured zero.
+- ACP: `mapWireUsage` returns a value only for a schema-valid usage (`inputTokens`/`outputTokens`
+  required); malformed reported usage stays an error verdict, never a measurement.
+
+**Replay compatibility.** Journals and run reports are untouched: an op result's value is not
+structurally validated on that path, so a legacy entry parses unchanged and a new entry carries the
+field verbatim. `WorkerResultSchema` is strict, so the field is mirrored with `exactOptional()`:
+present is validated, absent stays absent (never an `undefined` member).
+
+**Consumer effect.** Only the known-usage summaries read it. `dev.cycle`'s driver meter and
+`review.run`'s agent observer contribute usage to `knownCount` for `'measured'` only;
+`'unmeasured'` and absence count as unknown. Cost stays independent of the usage disposition.

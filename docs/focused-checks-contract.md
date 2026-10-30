@@ -165,7 +165,7 @@ Never invoke the leaf tools (`oxlint --fix`, `oxfmt`) directly: that bypasses
 the containment checks above, and an invocation that omits the file list or
 substitutes a repository-wide glob rewrites the whole tree. `pnpm run
 format:check` remains the read-only whole-tree formatting check — a
-candidate-level check, not per-turn feedback.
+required local checkpoint-level check (§1), not per-turn feedback.
 
 Read-only syntactic feedback on an explicit list is genuinely file-scoped and
 is the right default:

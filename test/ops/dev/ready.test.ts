@@ -3,9 +3,10 @@
 // dispositions append only for findings a cycle recorded.
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
-import { makeDevReady } from '../../../src/ops/dev/ready.js';
+import { makeDevReady, readReadinessWithGaps } from '../../../src/ops/dev/ready.js';
 import type { DevRecord } from '../../../src/ops/dev/record.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
+import type { DeferredQueueClient } from '../../../src/ops/review/internal/queueProtocol.js';
 import { cycleRecord, makeFakeEffects } from './fakes.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
 
@@ -51,6 +52,31 @@ describe('dev.ready', () => {
     expect(result.status).toBe('ok');
     if (result.status === 'ok')
       expect(result.value).toMatchObject({ cycleId: 'c002-bbbbbbbb', reviewer: 'agent:reviewer' });
+  });
+
+  test('a later blocked agent attempt prevents readiness over an older terminal CodeRabbit cycle', async () => {
+    const state = await seed(repo, (identity) => [
+      cycleRecord({
+        cycleId: 'c002-blocked-agent',
+        reviewer: 'agent:reviewer',
+        base: identity.base,
+        head: identity.head,
+        dirtySha256: identity.dirtySha256,
+        completion: { kind: 'blocked', reason: 'scripted provider unavailable' },
+      }),
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('latest-review-blocked');
+      expect(result.reason).toContain('c002-blocked-agent');
+      expect(result.reason).toContain('scripted provider unavailable');
+      expect(result.reason).not.toContain('stale-review-identity');
+    }
+    const records = repoEffects(repo).openLedger(state.branch).load().records;
+    expect(
+      records.filter((record) => record.kind === 'cycle').map((record) => record.reviewer),
+    ).toEqual(['coderabbit', 'agent:reviewer']);
   });
 
   test('an unconfigured reviewer terminal cycle cannot satisfy readiness', async () => {
@@ -112,6 +138,97 @@ describe('dev.ready', () => {
     const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root, target: 'main' });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain("not 'main'");
+  });
+
+  test('a same-identity no-fresh tail resolves to ready through its reuse record (#485)', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: {
+          kind: 'blocked',
+          reason:
+            "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
+            '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran',
+        },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+      {
+        kind: 'reuse',
+        reuseId: 'r001-bbbbbbbb',
+        cycleId: 'c001-aaaaaaaa',
+        basis: 'no-fresh-tail',
+        resolvesCycleId: 'c002-bbbbbbbb',
+        target: 'merge-queue',
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+        scope: 'full',
+        reviewer: 'coderabbit',
+        logPath: '/tmp/reuse.log',
+        at: '2026-10-18T00:30:00.000Z',
+      },
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.cycleId).toBe('c001-aaaaaaaa');
+      expect(result.value.reuse).toBe('r001-bbbbbbbb');
+    }
+  });
+
+  test('the same no-fresh tail without a reuse record stays NOT READY (latest-review-blocked)', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: {
+          kind: 'blocked',
+          reason:
+            "reviewer completed 'review_completed' with an AFFIRMATIVE no-fresh/skipped notice " +
+            '("No fresh detailed file review was performed in this run.") — a fresh detailed review never ran',
+        },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('latest-review-blocked');
+      expect(result.reason).toContain('c002-bbbbbbbb');
+    }
+  });
+
+  test('a genuine later blocker (CLI error) still refuses readiness over an older terminal', async () => {
+    await seed(repo, (current) => [
+      cycleRecord({
+        cycleId: 'c002-bbbbbbbb',
+        completion: { kind: 'blocked', reason: 'reviewer stream carried an error event' },
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+      }),
+      {
+        kind: 'reuse',
+        reuseId: 'r001-bbbbbbbb',
+        cycleId: 'c001-aaaaaaaa',
+        basis: 'no-fresh-tail',
+        resolvesCycleId: 'c002-bbbbbbbb',
+        target: 'merge-queue',
+        base: current.base,
+        head: current.head,
+        dirtySha256: current.dirtySha256,
+        scope: 'full',
+        reviewer: 'coderabbit',
+        logPath: '/tmp/reuse.log',
+        at: '2026-10-18T00:30:00.000Z',
+      },
+    ]);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('latest-review-blocked');
   });
 
   test('a corrupt ledger or a detached head is needs-human, never a silent pass', async () => {
@@ -222,5 +339,165 @@ describe('dev.disposition', () => {
       why: 'done',
     });
     expect(result.status).toBe('needs-human');
+  });
+});
+
+describe('dev.ready deferred lineage', () => {
+  const failure = {
+    source: 'vendor' as const,
+    category: 'vendor-unavailable' as const,
+    codes: ['con_err'],
+  };
+  function vendorCycle(
+    identity: { head: string; base: string; dirtySha256: string },
+    cycleId: string,
+  ) {
+    return cycleRecord({
+      head: identity.head,
+      base: identity.base,
+      dirtySha256: identity.dirtySha256,
+      cycleId,
+      reviewer: 'coderabbit',
+      completion: { kind: 'blocked', reason: 'structured vendor outage' },
+      vendorFailure: failure,
+    });
+  }
+  function pendingDebt(
+    identity: { head: string; base: string; dirtySha256: string },
+    requestId: string,
+  ) {
+    return {
+      reference: {
+        requestId,
+        binding: {
+          kind: 'deferred-author' as const,
+          repo: 'owner/repo',
+          producer: 'author',
+          head: identity.head,
+          target: 'merge-queue' as const,
+          targetSelector: 'promoted-main' as const,
+        },
+      },
+      originAttempt: {
+        cycleId: 'c001-vendor-origin',
+        head: identity.head,
+        base: identity.base,
+        target: 'merge-queue',
+        scope: 'full' as const,
+        dirtySha256: 'clean-tree' as const,
+        failure,
+      },
+      deferral: { id: requestId, base: identity.base, dirtySha256: 'clean-tree' as const },
+      queue: {
+        state: 'awaiting-pr' as const,
+        pr: null,
+        mergeSha: null,
+        itemId: null,
+        receiptId: null,
+        consumed: false,
+        reviewed: false,
+        fixed: false as const,
+      },
+      vendor: 'vendor-blocked-transient' as const,
+      vendorCompleted: false as const,
+    };
+  }
+  const queueClient: DeferredQueueClient = {
+    enqueue: async () => {
+      throw new Error('no enrollment expected');
+    },
+    bind: async () => {
+      throw new Error('no bind expected');
+    },
+    cancel: async () => {
+      throw new Error('no cancel expected');
+    },
+    status: async () => ({
+      state: 'awaiting-pr',
+      pr: null,
+      mergeSha: null,
+      itemId: null,
+      receiptId: null,
+      consumed: false,
+      reviewed: false,
+      fixed: false,
+    }),
+  };
+
+  test('a pending current enrollment alone still continues readiness', async () => {
+    const state = await seed(repo, (identity) => [
+      vendorCycle(identity, 'c001-vendor-origin'),
+      cycleRecord({
+        head: identity.head,
+        base: identity.base,
+        dirtySha256: identity.dirtySha256,
+        cycleId: 'c002-agent',
+        reviewer: 'agent:reviewer',
+      }),
+    ]);
+    const effects = repoEffects(repo, (command, args) =>
+      command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
+    );
+    effects.openLedger(state.branch).save({
+      version: 2,
+      branch: state.branch,
+      records: [
+        ...effects.openLedger(state.branch).load().records,
+        { kind: 'vendor-debt', debt: pendingDebt(state, 'current'), at: effects.nowIso() },
+      ],
+    });
+    const result = await readReadinessWithGaps(
+      effects,
+      'dev.ready',
+      'merge-queue',
+      undefined,
+      queueClient,
+    );
+    // A pending CURRENT enrollment is a legitimate continuation: it never becomes an
+    // unsettled-ancestry gap (other readiness requirements are not the subject here).
+    expect(
+      result.ok || !result.reason.includes('authorized predecessor obligation(s) unsettled'),
+    ).toBe(true);
+  });
+
+  test('an unsettled authorized predecessor blocks readiness and the gap is never clean', async () => {
+    const state = await seed(repo, (identity) => [
+      vendorCycle(identity, 'c001-vendor-origin'),
+      cycleRecord({
+        head: identity.head,
+        base: identity.base,
+        dirtySha256: identity.dirtySha256,
+        cycleId: 'c002-agent',
+        reviewer: 'agent:reviewer',
+      }),
+    ]);
+    const effects = repoEffects(repo, (command, args) =>
+      command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
+    );
+    const ancestor = pendingDebt({ ...state, head: 'a'.repeat(40) }, 'ancestor');
+    const current = {
+      ...pendingDebt(state, 'current'),
+      predecessor: ancestor.reference,
+    };
+    effects.openLedger(state.branch).save({
+      version: 2,
+      branch: state.branch,
+      records: [
+        ...effects.openLedger(state.branch).load().records,
+        { kind: 'vendor-debt', debt: ancestor, at: effects.nowIso() },
+        { kind: 'vendor-debt', debt: current, at: effects.nowIso() },
+      ],
+    });
+    const result = await readReadinessWithGaps(
+      effects,
+      'dev.ready',
+      'merge-queue',
+      undefined,
+      queueClient,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unexpected readiness');
+    expect(result.reason).toContain('authorized predecessor obligation(s) unsettled');
+    expect(result.reason).toContain('ancestor');
   });
 });

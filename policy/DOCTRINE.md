@@ -64,9 +64,14 @@ reality.
 
 **Enforcement (today).** `policy/templates/gate.yml`, instantiated as
 `.github/workflows/gate.yml` (armed — `CQ_GATE_PROMOTES: 'true'`), is the only component that advances
-`main`, behind merge-base guards in order: an already-promoted sha is a
-logged no-op; divergence refuses and a human merges `main` into `merge-queue`;
-only then `<sha>:refs/heads/main`. The old `merge-queue-gate.yml` is retired at the C2 cutover
+`main`, behind merge-base guards: an already-contained queue tip is a logged
+no-op; divergence refuses and a human merges `main` into `merge-queue`.
+After subject selection and all admission checks, the CLI uses one atomic leased
+push with three refspecs: `<subject>:refs/heads/main`,
+`<subject>:refs/heads/cq/promoted`, and `<tip>:refs/heads/merge-queue`.
+`main` advances only by fast-forward; the queue ref retains the observed tip.
+Each ref must still equal its leased value; rejection prevents every update.
+The old `merge-queue-gate.yml` is retired at the C2 cutover
 (2026-10-11): its instance entry and rendered workflow are deleted, and (Phase 0.2) so is its template. The repo's merge settings allow merge commits
 only. Adopting repos: disable squash and rebase merges in repo settings —
 nothing in the templates configures it for you.
@@ -75,8 +80,12 @@ nothing in the templates configures it for you.
 
 Personal accounts get merge-queue 422 — why this queue is branch-based; the refs
 PATCH `force=false` is the server-side ff invariant for sync's merge-queue advance,
-while the gate promotes `main` by unforced git push behind a merge-queue-tip
-guard plus two merge-base guards. Dated API facts live once:
+while the gate selects the newest eligible subject on the `main..tip` first-parent
+line of `merge-queue`; the subject may precede the queue tip. Merge-base guards
+make already-contained history a no-op and refuse divergence. Promotion is an
+atomic leased push: `main` and the `cq/promoted` replay marker advance to the
+selected subject, while `merge-queue` stays at the observed tip. Leases reject
+concurrent movement of any of those refs. Dated API facts live once:
 `policy/templates/README.md`.
 
 ## I4 — required checks never filter triggers

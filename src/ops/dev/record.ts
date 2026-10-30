@@ -41,6 +41,25 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { makeGitMutex } from '../../shared/gitMutex.js';
+import {
+  DeferredVendorDebtSchema,
+  VendorFailureProvenanceSchema,
+  hasPersistedVendorOutageOrigin,
+  matchesDeferredVendorDebt,
+  deferredReceiptFindings,
+  type DeferredVendorDebt,
+  type VendorFailureProvenance,
+} from './internal/deferredReview.js';
+import { readCurrentEnrollment } from './internal/deferredLedger.js';
+import {
+  isCoverageV2Complete,
+  ReviewCoverageV2Schema,
+  type ReviewCoverageV2,
+} from '../review/internal/reviewCoverageV2.js';
+import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
+import { branchPathFault } from '../../shared/refname.js';
+
+export { branchPathFault };
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.
@@ -77,6 +96,20 @@ export interface DevFinding {
   fileName?: string;
   /** The finding's comment (or its first suggestion), when reported. */
   excerpt?: string;
+  /** The reported line, when the producer's contract supplies one (never inferred). */
+  line?: number;
+  /** The reported rule/lint id, when the producer's contract supplies one. */
+  rule?: string;
+  /**
+   * The producer's receipt reference (vendor receipts only), preserved verbatim so a
+   * later projection can prove WHICH receipt this finding came from.
+   */
+  evidence?: string;
+  /**
+   * The R3S versioned agent evidence payload, carried verbatim. It is persisted and
+   * compared structurally; it is never re-derived, repaired or used as authority here.
+   */
+  evidenceV1?: FindingEvidenceV1;
 }
 
 /** Whether one review cycle completed, or was blocked — and why. */
@@ -107,10 +140,70 @@ export interface DevCycleRecord {
    * Optional so v2 ledgers written before this field still parse.
    */
   advisories?: string[];
+  /** Positive structured local CLI provenance; never a completed vendor review. */
+  vendorFailure?: VendorFailureProvenance;
+  /** Retained engine proof for a fresh agent cycle; legacy cycles remain readable. */
+  agentCoverage?: ReviewCoverageV2;
   /** Where the raw stream log was saved — OUTSIDE the repository (protocol §3). */
   logPath: string;
   /** Untracked non-ignored files present at cycle time (outside the review scope). */
   untracked: string[];
+  /** ISO-8601 timestamp. */
+  at: string;
+}
+
+/** The reuse basis a {@link DevReuseRecord} attests. */
+export type DevReuseBasis = 'exact-terminal' | 'no-fresh-tail';
+
+/**
+ * One deliberate reuse selection (Q4, #485): the cycle op found a terminal
+ * full-scope record with the EXACT requested identity (repository ledger,
+ * target, base, head, dirtySha256, scope and reviewer all matching) and
+ * settled the author review requirement from it — zero vendor calls, zero
+ * new cycles, every finding and disposition intact. The record is
+ * APPEND-ONLY audit trail: it never overwrites, deletes or re-labels the
+ * cycle it selects, and it is not a review run, a completion, or
+ * independent acceptance.
+ *
+ * `basis: 'no-fresh-tail'` is the narrower later case: the LEDGER'S LATEST
+ * same-identity cycle is a BLOCKED attempt whose reason is the reviewer's
+ * affirmative no-fresh notice — the vendor never reviewed, so re-running
+ * cannot create the review the earlier receipt already holds, and an
+ * unchanged retry would spend quota to record the same refusal again. The
+ * reuse record names that blocked attempt in `resolvesCycleId`, keeping it
+ * verbatim in the ledger (readiness resolves it only through the linkage,
+ * never by ignoring or rewriting the tail). Any OTHER blocked attempt —
+ * error, auth, rate limit, malformed stream, deadline kill, or a
+ * structured vendor-failure provenance — is a genuine blocker and stays
+ * one; the selector refuses it.
+ */
+export interface DevReuseRecord {
+  kind: 'reuse';
+  /** `r<NNN>-<head8>` — the NNN is the 1-based reuse count in this ledger when written. */
+  reuseId: string;
+  /** The selected source cycle. Terminal (exact-terminal) or the earlier receipt (no-fresh-tail). */
+  cycleId: string;
+  /** Why the source cycle satisfies the requirement (the selector's basis). */
+  basis: DevReuseBasis;
+  /**
+   * The same-identity no-fresh BLOCKED attempt this selection resolves —
+   * set only when `basis` is `no-fresh-tail`. It stays in the ledger verbatim.
+   */
+  resolvesCycleId?: string;
+  /** The intended PR target the selection was made against. */
+  target: string;
+  /** The pinned immutable base both the selection and the source cycle carry. */
+  base: string;
+  /** The reviewed HEAD sha both the selection and the source cycle carry. */
+  head: string;
+  /** The dirty identity both the selection and the source cycle carry. */
+  dirtySha256: string;
+  /** The diff scope of both the selection and the source cycle. */
+  scope: 'full' | 'uncommitted';
+  /** The reviewer of both the selection and the source cycle. */
+  reviewer: string;
+  /** Where the selection's own raw log was saved (outside the repository). */
+  logPath: string;
   /** ISO-8601 timestamp. */
   at: string;
 }
@@ -185,7 +278,19 @@ export interface DevDispositionRecord {
 }
 
 /** The ledger's record union — discriminated on `kind`. */
-export type DevRecord = DevCycleRecord | DevCheckRecord | DevDispositionRecord;
+export type DevRecord =
+  | DevCycleRecord
+  | DevCheckRecord
+  | DevDispositionRecord
+  | DevReuseRecord
+  | DevVendorDebtRecord;
+
+/** Additive audit snapshot, including predecessors whose obligations remain open. */
+export interface DevVendorDebtRecord {
+  kind: 'vendor-debt';
+  debt: DeferredVendorDebt;
+  at: string;
+}
 
 /** The persisted dev-record file. Version 1 — the only version parse accepts. */
 export interface DevLedgerFile {
@@ -207,12 +312,24 @@ export interface DevIdentity {
 
 // --- Zod mirrors (parse boundary; key order is the serialize order) --------
 
+/**
+ * The ledger's finding mirror. Identity-bearing STRINGS accept exactly what the
+ * review record (FindingSchema) accepts, including the empty string, and are stored
+ * verbatim: the ledger never rejects a value its producer was allowed to emit, and
+ * never drops one either (an empty value is stored, not treated as absent). `id`,
+ * `severity` and `line` keep their strict constraints because FindingSchema has the
+ * same ones. Widening acceptance cannot invalidate an existing ledger.
+ */
 const DevFindingSchema = z
   .object({
     id: z.string().min(1),
     severity: z.string().min(1),
-    fileName: z.string().min(1).exactOptional(),
-    excerpt: z.string().min(1).exactOptional(),
+    fileName: z.string().exactOptional(),
+    excerpt: z.string().exactOptional(),
+    line: z.number().int().positive().exactOptional(),
+    rule: z.string().exactOptional(),
+    evidence: z.string().exactOptional(),
+    evidenceV1: FindingEvidenceV1Schema.exactOptional(),
   })
   .strict();
 
@@ -234,6 +351,8 @@ const DevCycleRecordSchema = z
     completion: DevCompletionSchema,
     findings: z.array(DevFindingSchema),
     advisories: z.array(z.string().min(1)).exactOptional(),
+    vendorFailure: VendorFailureProvenanceSchema.exactOptional(),
+    agentCoverage: ReviewCoverageV2Schema.exactOptional(),
     logPath: z.string().min(1),
     untracked: z.array(z.string().min(1)),
     at: z.string().min(1),
@@ -298,11 +417,149 @@ const DevDispositionRecordSchema = z
   })
   .strict();
 
+const DevReuseRecordSchema = z
+  .object({
+    kind: z.literal('reuse'),
+    reuseId: z.string().min(1),
+    cycleId: z.string().min(1),
+    basis: z.enum(['exact-terminal', 'no-fresh-tail']),
+    resolvesCycleId: z.string().min(1).exactOptional(),
+    target: z.string().min(1),
+    base: z.string().min(1),
+    head: z.string().min(1),
+    dirtySha256: z.string().min(1),
+    scope: z.enum(['full', 'uncommitted']),
+    reviewer: z.string().min(1),
+    logPath: z.string().min(1),
+    at: z.string().min(1),
+  })
+  .strict()
+  .refine(
+    (record) => record.basis !== 'exact-terminal' || record.resolvesCycleId === undefined,
+    'an exact-terminal reuse selects a terminal cycle and names no blocked attempt',
+  );
+
 const DevRecordSchema = z.discriminatedUnion('kind', [
   DevCycleRecordSchema,
   DevCheckRecordSchema,
   DevDispositionRecordSchema,
+  DevReuseRecordSchema,
+  z
+    .object({
+      kind: z.literal('vendor-debt'),
+      debt: DeferredVendorDebtSchema,
+      at: z.string().min(1),
+    })
+    .strict(),
 ]);
+
+/**
+ * The affirmative no-fresh/skipped notice, VERBATIM as
+ * `decideCompletion` (coderabbit.ts) records it: the blocked reason of a
+ * run the reviewer itself said never reviewed. A reuse resolution exists
+ * for exactly this tail — nothing else (an error, auth, rate limit,
+ * malformed stream, a deadline kill, or any structured vendor-failure
+ * class) may ever be selected over or resolved away.
+ */
+const NO_FRESH_TAIL_PATTERN =
+  /^reviewer completed '.+?' with an AFFIRMATIVE no-fresh\/skipped notice \(".+"\) — a fresh detailed review never ran$/u;
+
+/**
+ * True when the cycle is an affirmative no-fresh BLOCKED attempt: the vendor
+ * itself said it never reviewed, with no structured vendor-failure class.
+ * EXACTLY these attempts are eligible for a `no-fresh-tail` reuse — as the
+ * resolved tail, and as every attempt between that tail and its selected
+ * terminal. Nothing else (an error, auth, rate limit, malformed stream, a
+ * deadline kill, or any vendor-failure class) is ever eligible.
+ */
+const isAffirmativeNoFreshAttempt = (cycle: DevCycleRecord): boolean =>
+  cycle.vendorFailure === undefined &&
+  cycle.completion.kind === 'blocked' &&
+  NO_FRESH_TAIL_PATTERN.test(cycle.completion.reason);
+
+/** The exact match {@link findReusableCycle} looks for (record.ts reuse/readiness). */
+export interface ReuseSelectionInput {
+  /** The intended PR target of the review request. */
+  target: string;
+  /** The pinned immutable base of the review request. */
+  base: string;
+  /** The HEAD sha of the review request. */
+  head: string;
+  /** The dirty identity of the review request. */
+  dirtySha256: string;
+  /** The diff scope of the review request. */
+  scope: 'full' | 'uncommitted';
+  /** The reviewer of the review request. */
+  reviewer: string;
+}
+
+/** One reuse selection: the matching cycle, why it qualifies, and the blocked tail it resolves. */
+export type ReuseSelection =
+  | { cycle: DevCycleRecord; basis: 'exact-terminal' }
+  | {
+      cycle: DevCycleRecord;
+      basis: 'no-fresh-tail';
+      /** The latest same-identity affirmative no-fresh blocked attempt. */
+      resolvesCycleId: string;
+    };
+
+/**
+ * Pure Q4 selector (#485): find the terminal full-scope cycle whose record
+ * identity EXACTLY equals the request (target, base, head, dirtySha256,
+ * scope and reviewer — the readiness anchor's identity fields plus the
+ * request shape; a dirty scope mismatch, a changed target at the same
+ * merge-base, a moved head or base, or a different reviewer never match),
+ * and classify the ledger's same-identity resolution tail — every attempt
+ * after the selected cycle:
+ *   - there is no tail (the latest cycle IS the selected cycle) →
+ *     `exact-terminal`;
+ *   - EVERY tail attempt is an affirmative NO-FRESH blocked attempt (the
+ *     vendor itself said it never reviewed; retries may each come back
+ *     empty) → `no-fresh-tail` carrying `resolvesCycleId` of the last one —
+ *     the explicit, auditable reuse resolution; every blocked attempt stays
+ *     in the ledger verbatim;
+ *   - the latest cycle is any OTHER blocked attempt, a genuine blocker
+ *     ANYWHERE in the tail, or a terminal cycle that is not the selection
+ *     (an earlier terminal does not paper over a newer unrelated one) → no
+ *     reuse. An intervening genuine blocker is never resolved away by a
+ *     later no-fresh attempt: it was never reviewed, so no reuse may be
+ *     selected over it.
+ *
+ * Configuration (which reviewers count) is the readiness core's concern;
+ * the cycle op additionally re-checks its own scope emptiness before
+ * selecting, so this function deliberately reads ONLY identity and
+ * completion. `null` means: dispatch a fresh cycle.
+ */
+export function findReusableCycle(
+  records: readonly DevRecord[],
+  input: ReuseSelectionInput,
+): ReuseSelection | null {
+  const sameIdentity = (cycle: DevCycleRecord): boolean =>
+    cycle.scope === input.scope &&
+    cycle.reviewer === input.reviewer &&
+    cycle.target === input.target &&
+    cycle.base === input.base &&
+    cycle.head === input.head &&
+    cycle.dirtySha256 === input.dirtySha256;
+  const cycles = records.filter(
+    (record): record is DevCycleRecord =>
+      record.kind === 'cycle' && record.scope === 'full' && sameIdentity(record),
+  );
+  const selected = [...cycles]
+    .reverse()
+    .find((cycle) => cycle.completion.kind === 'terminal' && cycle.vendorFailure === undefined);
+  if (selected === undefined) return null;
+  const tail = cycles.slice(cycles.lastIndexOf(selected) + 1);
+  const latest = tail.at(-1);
+  if (latest === undefined) return { cycle: selected, basis: 'exact-terminal' };
+  // The WHOLE tail is the resolution: an attempt between the selected
+  // terminal and the latest one is never skipped over. A genuine blocker
+  // there (unknown error, action required, malformed stream, deadline kill,
+  // structured vendor failure) was never reviewed, so it refuses reuse even
+  // when the latest attempt is a resolvable affirmative no-fresh notice.
+  if (!tail.every(isAffirmativeNoFreshAttempt)) return null;
+  return { cycle: selected, basis: 'no-fresh-tail', resolvesCycleId: latest.cycleId };
+}
 
 const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
   .object({
@@ -312,10 +569,16 @@ const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
   })
   .strict();
 
-/** The record id of a cycle/check record (dispositions have none). */
+/**
+ * The record id of a cycle/check/reuse record (dispositions have none).
+ * The kinds share ONE uniqueness space: a duplicate id is a format error,
+ * so a hand-merged file can never slip a second cycle or reuse past the
+ * store under another record's identity.
+ */
 function recordIdOf(record: DevRecord): string | null {
   if (record.kind === 'cycle') return record.cycleId;
   if (record.kind === 'check') return record.checkId;
+  if (record.kind === 'reuse') return record.reuseId;
   return null;
 }
 
@@ -377,29 +640,10 @@ export function parseDevLedger(text: string): DevLedgerFile {
 
 // --- Branch-path safety -----------------------------------------------------
 
-/**
- * A git refname segment (git check-ref-format rules, enforced here
- * fail-closed): no leading '.', no trailing '.lock', no '..' anywhere, and
- * none of the characters git forbids in a refname. A branch name is joined
- * into a path under `.cq/dev/`, so every segment must be path-safe.
- */
-export function branchPathFault(branch: string): string | null {
-  if (branch === '' || branch.startsWith('/') || branch.endsWith('/')) {
-    return `branch '${branch}' must be a non-empty relative refname`;
-  }
-  for (const segment of branch.split('/')) {
-    if (
-      segment === '' ||
-      segment.startsWith('.') ||
-      segment.endsWith('.lock') ||
-      segment.includes('..') ||
-      /[\s~^:?*[\]\\]/.test(segment)
-    ) {
-      return `branch '${branch}' is not a path-safe refname (segment '${segment}')`;
-    }
-  }
-  return null;
-}
+// The refname grammar itself is the shared zero-import leaf (shared/refname.ts):
+// the dev ledger validator and the queue wire/origin schemas must agree on it, and
+// this module cannot host it without closing the queueProtocol -> record ->
+// deferredReview -> queueProtocol runtime cycle.
 
 /**
  * The branch encoded into ONE bounded, collision-free filename segment: a
@@ -527,6 +771,15 @@ export interface DevReadinessRecord {
   cycleId: string;
   /** Which configured reviewer supplied the terminal cycle. */
   reviewer: string;
+  /** Visible vendor obligation or verified affected-current completion; never full-branch credit. */
+  vendorDebt?: DeferredVendorDebt;
+  /**
+   * The explicit Q4 reuse selection behind this record, when readiness
+   * resolved an affirmative no-fresh blocked tail (#485) — the reuse
+   * record's id in the same ledger. Report context only: the reuse is
+   * author evidence, never verification or independent acceptance.
+   */
+  reuse?: string;
   /** The green check run the readiness rests on. */
   checkId: string;
   at: string;
@@ -552,6 +805,8 @@ export interface AssembleReadinessInput {
   blockingSeverities?: readonly string[];
   /** Configured reviewer families (`agent` admits `agent:<role>` ledger identities). */
   configuredReviewers?: readonly string[];
+  /** Fresh authoritative queue read over the latest exact persisted debt. */
+  deferredVendorDebt?: DeferredVendorDebt;
   /** ISO-8601 timestamp for the assembled record. */
   nowIso: string;
 }
@@ -565,7 +820,11 @@ export interface AssembleReadinessInput {
  *     a stale identity; a blocked or uncommitted-scope cycle never counts);
  *     a stacked branch pins its stack parent by naming it as the target;
  *   - the latest review ATTEMPT was not blocked (a blocker is reported, never
- *     papered over by an older terminal cycle);
+ *     papered over by an older terminal cycle) — with ONE Q4 exception
+ *     (#485): an affirmative NO-FRESH blocked attempt at the current
+ *     identity is resolved by an explicit reuse record that names both it
+ *     and the selected terminal cycle; any other blocked attempt, or a
+ *     reuse record for anything else, stays a gap and is reported;
  *   - zero OPEN blocking findings across EVERY cycle in the ledger, blocked
  *     attempts included: a blocking-severity finding is open until a
  *     fixed/rejected disposition names it. A newer cycle re-reviews the
@@ -586,6 +845,55 @@ export function assembleReadiness(
   const isConfigured = (reviewer: string) =>
     configuredReviewers.has(reviewer) ||
     (reviewer.startsWith('agent:') && configuredReviewers.has('agent'));
+  const debt = input.deferredVendorDebt;
+  const cycles = ledger.records.filter(
+    (record): record is DevCycleRecord => record.kind === 'cycle',
+  );
+  // Current authority is the identity-matched enrollment and its authorized predecessor chain,
+  // never the positionally last appended snapshot.
+  const enrollmentRead = readCurrentEnrollment(ledger, identity, input.target);
+  if (enrollmentRead.kind === 'ambiguous')
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `ambiguous current enrollment: ${enrollmentRead.requestIds.join(', ')} claim one identity`,
+    });
+  const enrollment = enrollmentRead.kind === 'enrollment' ? enrollmentRead.enrollment : undefined;
+  const binding = debt?.reference.binding;
+  const debtValid =
+    debt !== undefined &&
+    binding?.kind === 'deferred-author' &&
+    enrollment !== undefined &&
+    JSON.stringify(enrollment.snapshot.reference) === JSON.stringify(debt.reference) &&
+    JSON.stringify(enrollment.snapshot.originAttempt) === JSON.stringify(debt.originAttempt) &&
+    JSON.stringify(enrollment.snapshot.deferral) === JSON.stringify(debt.deferral) &&
+    hasPersistedVendorOutageOrigin(debt.originAttempt, cycles) &&
+    matchesDeferredVendorDebt(debt, {
+      repo: binding.repo,
+      producer: binding.producer,
+      target: input.target,
+      head: identity.head,
+      base: identity.base,
+      dirtySha256: identity.dirtySha256,
+      deferralId: debt.deferral.id,
+    }) &&
+    configuredReviewers.has('coderabbit') &&
+    configuredReviewers.has('agent') &&
+    [...configuredReviewers].every((reviewer) => reviewer === 'coderabbit' || reviewer === 'agent');
+  if (debt !== undefined && !debtValid)
+    gaps.push({
+      field: 'vendor-debt',
+      detail:
+        'deferred debt does not match the retained origin, latest enrollment and current identity',
+    });
+  // A pending current enrollment legitimately continues; an unsettled AUTHORIZED ANCESTOR never
+  // does. This is derived from the ledger, so a truncated or unrefreshed lineage is never clean.
+  if (enrollment !== undefined && enrollment.pendingAncestry.length > 0)
+    gaps.push({
+      field: 'vendor-debt',
+      detail: `authorized predecessor obligation(s) unsettled: ${enrollment.pendingAncestry
+        .map((ancestor) => ancestor.reference.requestId)
+        .join(', ')}`,
+    });
 
   // Only a FULL-scope terminal cycle satisfies readiness: an
   // uncommitted-scope cycle never covered the committed part of the
@@ -596,6 +904,8 @@ export function assembleReadiness(
       record.kind === 'cycle' &&
       record.scope === 'full' &&
       record.completion.kind === 'terminal' &&
+      record.vendorFailure === undefined &&
+      (!debtValid || record.reviewer.startsWith('agent:')) &&
       isConfigured(record.reviewer),
   );
   const cycle = terminalCycles[terminalCycles.length - 1];
@@ -606,6 +916,19 @@ export function assembleReadiness(
         'no terminal full-scope review cycle recorded — run dev.review without --uncommitted (a blocked or uncommitted-scope cycle does not count)',
     });
   } else {
+    if (
+      debtValid &&
+      (!cycle.agentCoverage ||
+        !isCoverageV2Complete(cycle.agentCoverage) ||
+        cycle.agentCoverage.scope !== 'full' ||
+        cycle.agentCoverage.head !== identity.head ||
+        cycle.agentCoverage.base !== identity.base)
+    )
+      gaps.push({
+        field: 'agent-coverage',
+        detail:
+          'deferred vendor readiness requires fresh full v2 engine coverage at the current head and base',
+      });
     const stale: string[] = [];
     // The cycle's RECORDED TARGET must be the requested one — the same rule
     // the check record enforces: when two targets share a merge-base,
@@ -622,7 +945,7 @@ export function assembleReadiness(
     if (stale.length > 0) {
       gaps.push({
         field: 'stale-review-identity',
-        detail: `review ${cycle.cycleId} is stale: ${stale.join('; ')}`,
+        detail: `review ${cycle.cycleId} (reviewer '${cycle.reviewer}', scope '${cycle.scope}') is stale: ${stale.join('; ')}`,
       });
     }
     // EVERY cycle's blocking findings — any scope, blocked attempts
@@ -650,10 +973,22 @@ export function assembleReadiness(
         if (action === 'fixed' || action === 'rejected') continue;
         open.push(
           entry.cycleId === cycle.cycleId
-            ? `${finding.id} (${finding.severity})`
-            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)`,
+            ? `${finding.id} (${finding.severity})${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`
+            : `${finding.id} (${finding.severity}, from earlier cycle ${entry.cycleId} — a newer cycle does not adjudicate it; record its disposition)${finding.fileName === '' ? ': unresolved: finding has no file path' : ''}`,
         );
       }
+    }
+    const receipts = deferredReceiptFindings([
+      ...ledger.records.filter((entry) => entry.kind === 'vendor-debt').map((entry) => entry.debt),
+      ...(debt ? [debt] : []),
+    ]);
+    for (const finding of receipts) {
+      if (!blocking.has(finding.severity.toLowerCase())) continue;
+      const action = closed.get(finding.id);
+      if (action !== 'fixed' && action !== 'rejected')
+        open.push(
+          `${finding.id} (${finding.severity}, from verified affected-current vendor receipt)${finding.file === '' ? ': unresolved: finding has no file path' : ''}`,
+        );
     }
     if (open.length > 0) {
       gaps.push({
@@ -663,18 +998,130 @@ export function assembleReadiness(
     }
   }
 
-  // The LATEST review ATTEMPT overall: if it was BLOCKED, the author's most
+  // The LATEST configured review ATTEMPT overall: if it was BLOCKED, the author's most
   // recent review evidence is a failure — readiness never silently leans on
-  // an older terminal cycle past a blocked attempt.
+  // an older terminal cycle past a blocked attempt. The ONE Q4 resolution
+  // (#485): an affirmative NO-FRESH attempt at the CURRENT request identity
+  // (the vendor itself said it never reviewed — the earlier receipt is the
+  // only review that exists) is settled by an explicit reuse record naming
+  // both the blocked tail and the selected terminal cycle. That resolution
+  // is auditable, additive, and reported on the ready record; every other
+  // blocked attempt (error, auth, rate limit, malformed stream, deadline
+  // kill, or any structured vendor-failure class) stays a real gap.
   const allCycles = ledger.records.filter(
     (record): record is DevCycleRecord => record.kind === 'cycle' && isConfigured(record.reviewer),
   );
   const latestAttempt = allCycles[allCycles.length - 1];
-  if (latestAttempt !== undefined && latestAttempt.completion.kind === 'blocked') {
+  // A later unrelated vendor blocker must survive even when a fresh agent ran after it.
+  const latestVendor = allCycles.filter((entry) => entry.reviewer === 'coderabbit').at(-1);
+  const latestAgent = allCycles.filter((entry) => entry.reviewer.startsWith('agent:')).at(-1);
+  if (debtValid && latestAgent?.cycleId !== cycle?.cycleId)
     gaps.push({
       field: 'latest-review-blocked',
-      detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
+      detail: 'the latest agent attempt is not the current full terminal coverage anchor',
     });
+  if (!debtValid && latestVendor?.vendorFailure !== undefined)
+    gaps.push({
+      field: 'vendor-debt',
+      detail: 'vendor outage requires verified durable current enrollment before continuation',
+    });
+  if (
+    debtValid &&
+    latestVendor?.completion.kind === 'blocked' &&
+    latestVendor.cycleId !== debt.originAttempt.cycleId
+  )
+    gaps.push({
+      field: 'latest-review-blocked',
+      detail: 'a newer vendor blocker is not covered by the persisted outage origin',
+    });
+  const noFreshReuse =
+    [...ledger.records]
+      .reverse()
+      .find(
+        (record): record is DevReuseRecord =>
+          record.kind === 'reuse' && record.basis === 'no-fresh-tail',
+      ) ?? null;
+  // The row that actually resolves this readiness, set ONLY where the linkage
+  // is validated below: the ready record attributes this row, so attribution
+  // can never rest on a second, divergent predicate.
+  let resolvedNoFreshReuse: DevReuseRecord | undefined;
+  if (
+    latestAttempt !== undefined &&
+    latestAttempt.completion.kind === 'blocked' &&
+    !(
+      debtValid &&
+      latestAttempt.reviewer === 'coderabbit' &&
+      latestAttempt.cycleId === debt.originAttempt.cycleId
+    )
+  ) {
+    const sameRequest =
+      latestAttempt.target === input.target &&
+      latestAttempt.base === identity.base &&
+      latestAttempt.head === identity.head &&
+      latestAttempt.dirtySha256 === identity.dirtySha256;
+    // The reuse row resolves ONLY the eligible tail: every same-identity
+    // full-scope attempt after the named anchor terminal must itself be an
+    // affirmative no-fresh notice. A genuine blocker in between (unknown
+    // error, action required, malformed stream, deadline kill, structured
+    // vendor failure) was never reviewed and is never resolved away —
+    // findReusableCycle refuses it too, so a linkage persisted before that
+    // rule (or forged into the ledger) cannot pass readiness either.
+    const identityCycles = cycles.filter(
+      (entry) =>
+        entry.scope === 'full' &&
+        entry.reviewer === latestAttempt.reviewer &&
+        entry.target === latestAttempt.target &&
+        entry.base === latestAttempt.base &&
+        entry.head === latestAttempt.head &&
+        entry.dirtySha256 === latestAttempt.dirtySha256,
+    );
+    // The persisted reuse resolves against the terminal cycle IT NAMES — the
+    // blocked attempt's own reviewer at the exact request identity — not the
+    // global readiness anchor, which may be another configured reviewer's
+    // later terminal (PR580 thread 4394615080, tracking #593). The global
+    // anchor keeps its coverage role on the ready record below and must still
+    // exist; it just may not stand in for a different reviewer's evidence.
+    const referencedIndex =
+      noFreshReuse === null
+        ? -1
+        : identityCycles.findIndex(
+            (entry) =>
+              entry.cycleId === noFreshReuse.cycleId &&
+              entry.completion.kind === 'terminal' &&
+              entry.vendorFailure === undefined,
+          );
+    const tailIndex = identityCycles.findIndex((entry) => entry.cycleId === latestAttempt.cycleId);
+    // The full-tail proof stays (Q6 #485 / 70601ab1): every same-reviewer
+    // same-identity attempt AFTER the referenced terminal — the blocked tail
+    // included — must be an eligible affirmative no-fresh notice.
+    const resolvedTailIsEligible =
+      referencedIndex >= 0 &&
+      tailIndex > referencedIndex &&
+      identityCycles.slice(referencedIndex + 1).every(isAffirmativeNoFreshAttempt);
+    const reuseResolves =
+      sameRequest &&
+      latestAttempt.scope === 'full' &&
+      isConfigured(latestAttempt.reviewer) &&
+      isAffirmativeNoFreshAttempt(latestAttempt) &&
+      resolvedTailIsEligible &&
+      noFreshReuse !== null &&
+      noFreshReuse.resolvesCycleId === latestAttempt.cycleId &&
+      noFreshReuse.reviewer === latestAttempt.reviewer &&
+      noFreshReuse.scope === 'full' &&
+      noFreshReuse.target === input.target &&
+      noFreshReuse.head === identity.head &&
+      noFreshReuse.base === identity.base &&
+      noFreshReuse.dirtySha256 === identity.dirtySha256 &&
+      ledger.records.indexOf(noFreshReuse) > ledger.records.indexOf(latestAttempt) &&
+      cycle !== undefined;
+    if (!reuseResolves) {
+      gaps.push({
+        field: 'latest-review-blocked',
+        detail: `the latest review attempt ${latestAttempt.cycleId} was BLOCKED (${latestAttempt.completion.reason}) — resolve the blocker and re-run dev.review (an older terminal cycle does not paper over it)`,
+      });
+    } else if (noFreshReuse !== null) {
+      resolvedNoFreshReuse = noFreshReuse;
+    }
   }
 
   // The LATEST check record, WHATEVER its verdict: a green run followed by
@@ -739,6 +1186,8 @@ export function assembleReadiness(
     dirtySha256: identity.dirtySha256,
     cycleId: cycle.cycleId,
     reviewer: cycle.reviewer,
+    ...(debtValid ? { vendorDebt: debt } : {}),
+    ...(resolvedNoFreshReuse === undefined ? {} : { reuse: resolvedNoFreshReuse.reuseId }),
     checkId: check.checkId,
     at: input.nowIso,
   };

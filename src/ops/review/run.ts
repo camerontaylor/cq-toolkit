@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { readFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -12,7 +13,20 @@ import {
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import type { DevEffects } from '../dev/effects.js';
 import type { DiffSecretScanner } from '../dev/denylist.js';
-import { DEV_LEDGER_VERSION, type DevCycleRecord } from '../dev/record.js';
+import {
+  prepareDeferredVendorReview,
+  retainedReceiptFindings,
+  loadCurrentDeferredVendorDebt,
+  readCurrentEnrollment,
+} from '../dev/internal/deferredLedger.js';
+import {
+  hasDeferredReviewSources,
+  verifiedCompletedDebt,
+  deferredReceiptFindings,
+  type DeferredVendorDebt,
+} from '../dev/internal/deferredReview.js';
+import type { DeferredQueueClient } from './internal/queueProtocol.js';
+import { DEV_LEDGER_VERSION, type DevCycleRecord, type DevLedgerFile } from '../dev/record.js';
 import {
   makeGitleaksDefaultsScanner,
   makeRepoDiffScanner,
@@ -33,6 +47,9 @@ import {
   type ReviewSource,
 } from './findings.js';
 import { ReviewCoverageSchema } from './internal/reviewPartitions.js';
+import { sameFindingContent } from './internal/durableDisposition.js';
+import { collectBoundedReviewContext } from './internal/reviewContext.js';
+import { foldKnownUsageSummaries, type KnownUsageSummary } from '../../shared/knownUsage.js';
 
 export interface ReviewRunInput {
   repoRoot: string;
@@ -51,6 +68,8 @@ export interface ReviewRunInput {
 }
 export interface ReviewRunDeps {
   drivers: DriverFactory;
+  queueClient?: DeferredQueueClient;
+  onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
   /** Abortable CodeRabbit backoff, injected by deterministic tests. */
   sleep?: import('../dev/review.js').DevReviewDeps['sleep'];
   /** Injection seam for the engine; production binds {@link runAgentReviewer}. */
@@ -79,8 +98,16 @@ export interface ReviewRunDeps {
  * have stopped on the engine's budget and no repository drift or parent cancel.
  * Both ride the report envelope and are never persisted.
  */
-export type ReviewRunResult = OpResult<FindingsRecord> & {
-  report?: FindingsRecord & { blockedTransient?: true; blockedBudget?: true };
+type ReviewRunCoreResult = OpResult<FindingsRecord> & {
+  report?: FindingsRecord & {
+    blockedTransient?: true;
+    blockedBudget?: true;
+    deferredVendorDebt?: DeferredVendorDebt;
+  };
+};
+export type ReviewRunResult = ReviewRunCoreResult & {
+  /** Known driver spend for this invocation, independent of persisted findings. */
+  usageSummary?: KnownUsageSummary;
 };
 
 function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): FindingsRecord {
@@ -93,74 +120,14 @@ function blocked(kind: ReviewSource['kind'], reason: string, cycleId?: string): 
   };
 }
 
-/** The reviewer's intent budget; the truncation marker is inside the cap. */
-const REVIEW_INTENT_CAP = 4_000;
-
-function capReviewIntent(text: string): string {
-  if (text.length <= REVIEW_INTENT_CAP) return text;
-  const marker = `\n[truncated: ${String(text.length - REVIEW_INTENT_CAP)} characters omitted]`;
-  if (marker.length >= REVIEW_INTENT_CAP) return text.slice(0, REVIEW_INTENT_CAP);
-  return text.slice(0, REVIEW_INTENT_CAP - marker.length) + marker;
-}
-
-/**
- * The intent and file list are prompt context, not coverage pieces. The engine
- * scans the composed session prompt before upload, so both ride the same
- * beforeRequest gate as the diff.
- */
-async function collectReviewContext(
-  effects: DevEffects,
-  comparison: string,
-  head: string,
-  deadline: { signal?: AbortSignal; remainingWallMs: () => number },
-): Promise<
-  { ok: true; intent: string; fileList: string } | { ok: false; fatal: boolean; reason: string }
-> {
-  const callOptions = (): { timeoutMs: number; signal?: AbortSignal } => ({
-    timeoutMs: Math.max(1, Math.min(60_000, deadline.remainingWallMs())),
-    ...(deadline.signal === undefined ? {} : { signal: deadline.signal }),
-  });
-  try {
-    deadline.signal?.throwIfAborted();
-    const log = await effects.runCommand(
-      'git',
-      ['log', '--format=%s%n%n%b', `${comparison}..${head}`],
-      callOptions(),
-    );
-    if (log.exitCode !== 0)
-      return {
-        ok: false,
-        fatal: false,
-        reason: `could not collect review intent (exit ${log.exitCode === null ? 'none (killed)' : String(log.exitCode)})`,
-      };
-    deadline.signal?.throwIfAborted();
-    const numstat = await effects.runCommand(
-      'git',
-      ['diff', '--numstat', ...HARDENED_DIFF_FLAGS, comparison],
-      callOptions(),
-    );
-    if (numstat.exitCode !== 0)
-      return {
-        ok: false,
-        fatal: false,
-        reason: `could not list review diff stats (exit ${numstat.exitCode === null ? 'none (killed)' : String(numstat.exitCode)})`,
-      };
-    deadline.signal?.throwIfAborted();
-    return { ok: true, intent: capReviewIntent(log.stdout), fileList: numstat.stdout };
-  } catch (error) {
-    return {
-      ok: false,
-      fatal: true,
-      reason: `could not collect review context — ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-
 /** Produce a single normalized record from the configured sources. */
 export function makeReviewRun(
   deps: ReviewRunDeps,
 ): (input: ReviewRunInput) => Promise<ReviewRunResult> {
-  return async (input): Promise<ReviewRunResult> => {
+  const execute = async (
+    input: ReviewRunInput,
+    usageSummaries: KnownUsageSummary[],
+  ): Promise<ReviewRunCoreResult> => {
     const runReview = deps.runAgentReviewer ?? runAgentReviewer;
     const started = Date.now();
     const effects =
@@ -220,7 +187,146 @@ export function makeReviewRun(
       const budgetBlocks = new Set<ReviewSource['kind']>();
       const budgetStopped = () =>
         !parent?.aborted && (deadline.expired() || remainingWallMs() <= 0);
-      if (coderabbitConfigured) {
+      let deferredVendorDebt: DeferredVendorDebt | undefined;
+      const prepareDebt = async () => {
+        const before = structuredClone(effects.openLedger(state.branch).load());
+        // Correlate durable bytes with the mutation this invocation requested,
+        // including an enrollment whose status read later fails; never bless
+        // bytes the engine did not request — external appends stay unowned and
+        // fail closed at the address bookkeeping fingerprint check.
+        let requestedLedger: DevLedgerFile | undefined;
+        let provisionalLedger: DevLedgerFile | undefined;
+        let debt: DeferredVendorDebt | undefined;
+        let failure: { thrown: boolean; error: unknown } | undefined;
+        try {
+          debt = await prepareDeferredVendorReview(
+            {
+              ...effects,
+              openLedger: (branch) => {
+                const store = effects.openLedger(branch);
+                return {
+                  ...store,
+                  mutate: (update) =>
+                    store
+                      .mutate((latest) => {
+                        const change = update(latest);
+                        provisionalLedger = structuredClone(change.ledger);
+                        return change;
+                      })
+                      .then((result) => {
+                        // Promote only once the store durably accepted the
+                        // requested state; a capture that never successfully
+                        // persisted must never own the notification.
+                        requestedLedger = provisionalLedger;
+                        return result;
+                      }),
+                };
+              },
+            },
+            target,
+            state,
+            deps.queueClient,
+            deadline.signal,
+            {
+              remainingMs: remainingWallMs,
+              ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+            },
+          );
+        } catch (error) {
+          failure = { thrown: true, error };
+        }
+        // Ownership settlement for both outcomes: durable bytes are owned only
+        // when they exactly equal the engine-requested, successfully persisted
+        // mutation. Unowned changed bytes never reach the ownership callback;
+        // on a preparation failure the original error propagates and the
+        // enclosing address bookkeeping fingerprint check fails closed.
+        const after = effects.openLedger(state.branch).load();
+        if (!isDeepStrictEqual(before, after)) {
+          if (requestedLedger !== undefined && isDeepStrictEqual(requestedLedger, after))
+            await deps.noteLedgerWrite?.(state.branch, input.repoRoot);
+          else if (!failure)
+            throw new Error('deferred preparation changed unrecognized ledger bytes');
+        }
+        if (failure) throw failure.error;
+        if (debt) {
+          if (
+            input.uncommitted ||
+            !agentConfigured ||
+            policy.review.reviewers.some((source) => source !== 'agent' && source !== 'coderabbit')
+          )
+            throw new Error(
+              'deferred vendor review requires full coverage of every configured nonvendor source',
+            );
+        }
+        return debt;
+      };
+      if (coderabbitConfigured && agentConfigured) {
+        try {
+          deferredVendorDebt = await prepareDebt();
+        } catch (error) {
+          return {
+            status: 'indeterminate',
+            detail: `review.run: deferred vendor trust/enrollment failed — ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+      // Retained receipt findings are obligations, not a current review source.
+      // Include them even when settling an old head requires a fresh vendor run.
+      const retainedLedger = effects.openLedger(state.branch).load();
+      const retainedFindings = retainedReceiptFindings(retainedLedger);
+      if (retainedFindings.length > 0)
+        records.push({
+          schemaVersion: 1,
+          branch: state.branch,
+          head: state.head,
+          sources: [],
+          findings: retainedFindings,
+        });
+      if (deferredVendorDebt) {
+        const ledger = retainedLedger;
+        const dispositions = new Map(
+          ledger.records
+            .filter((entry) => entry.kind === 'disposition')
+            .map((entry) => [entry.findingId, entry]),
+        );
+        records.push({
+          schemaVersion: 1,
+          branch: state.branch,
+          head: state.head,
+          sources: [
+            {
+              kind: 'coderabbit',
+              status: 'blocked',
+              cycleId: deferredVendorDebt.originAttempt.cycleId,
+              reason: deferredVendorDebt.vendorCompleted
+                ? 'verified affected-current vendor completion; full-branch coverage remains agent evidence'
+                : 'vendor review remains outstanding under durable deferred debt',
+            },
+          ],
+          findings: [
+            ...ledger.records
+              .filter(
+                (entry): entry is DevCycleRecord =>
+                  entry.kind === 'cycle' && entry.reviewer === 'coderabbit',
+              )
+              .flatMap((entry) =>
+                entry.findings.map((finding): Finding => {
+                  const disposition = dispositions.get(finding.id);
+                  return {
+                    id: finding.id,
+                    source: 'coderabbit',
+                    severity: finding.severity,
+                    text: finding.excerpt ?? '',
+                    ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
+                    status: disposition?.action ?? 'open',
+                    ...(disposition ? { reason: disposition.why } : {}),
+                  };
+                }),
+              ),
+          ],
+        });
+      }
+      if (coderabbitConfigured && !deferredVendorDebt) {
         const result = await makeDevReview({
           effects,
           ...(deadline.signal ? { signal: deadline.signal } : {}),
@@ -240,21 +346,47 @@ export function makeReviewRun(
         if (result.status === 'ok') {
           const value = result.value as {
             cycleId: string;
-            findings: Array<{ id: string; severity: string; fileName?: string; excerpt?: string }>;
+            findings: Array<{
+              id: string;
+              severity: string;
+              fileName?: string;
+              excerpt?: string;
+              line?: number;
+              rule?: string;
+              evidence?: string;
+              evidenceV1?: Finding['evidenceV1'];
+            }>;
+            retainedFindings?: Finding[];
           };
           records.push({
             schemaVersion: 1,
             branch: state.branch,
             head: state.head,
             sources: [{ kind: 'coderabbit', status: 'terminal', cycleId: value.cycleId }],
-            findings: value.findings.map((item) => ({
-              id: item.id,
-              source: 'coderabbit',
-              ...(item.fileName ? { file: item.fileName } : {}),
-              severity: item.severity,
-              text: item.excerpt ?? '',
-              status: 'open',
-            })),
+            findings: value.findings.map((item) => {
+              const base: Finding = {
+                id: item.id,
+                source: 'coderabbit',
+                ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                ...(item.line !== undefined ? { line: item.line } : {}),
+                ...(item.rule !== undefined ? { rule: item.rule } : {}),
+                ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+                ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
+                severity: item.severity,
+                text: item.excerpt ?? '',
+                status: 'open',
+              };
+              // Q17b: a REUSE report's projection is the only source of a retained
+              // disposition. It is consumed by id AND revalidated against full original
+              // content, so a same-id row with different content never inherits one.
+              const retained = value.retainedFindings?.find((row) => row.id === item.id);
+              if (retained === undefined || !sameFindingContent(base, retained)) return base;
+              return {
+                ...base,
+                status: retained.status,
+                ...(retained.reason !== undefined ? { reason: retained.reason } : {}),
+              };
+            }),
           });
         } else {
           const reason =
@@ -316,13 +448,27 @@ export function makeReviewRun(
                 ? cycle.findings.map((item) => ({
                     id: item.id,
                     source: 'coderabbit',
-                    ...(item.fileName ? { file: item.fileName } : {}),
+                    ...(item.fileName !== undefined ? { file: item.fileName } : {}),
+                    ...(item.line !== undefined ? { line: item.line } : {}),
+                    ...(item.rule !== undefined ? { rule: item.rule } : {}),
+                    ...(item.evidence !== undefined ? { evidence: item.evidence } : {}),
+                    ...(item.evidenceV1 !== undefined ? { evidenceV1: item.evidenceV1 } : {}),
                     severity: item.severity,
                     text: item.excerpt ?? '',
                     status: 'open' as const,
                   }))
                 : [],
           });
+          if (cycle?.vendorFailure && agentConfigured) {
+            try {
+              deferredVendorDebt = await prepareDebt();
+            } catch (error) {
+              return {
+                status: 'needs-human',
+                reason: `review.run: vendor failure retained but durable queue enrollment failed — ${error instanceof Error ? error.message : String(error)}`,
+              };
+            }
+          }
         }
       }
       if (agentConfigured && (deadline.signal?.aborted || remainingWallMs() <= 0)) {
@@ -357,10 +503,13 @@ export function makeReviewRun(
               ),
             );
           else {
-            const context = await collectReviewContext(effects, comparison, state.head, {
-              ...(deadline.signal ? { signal: deadline.signal } : {}),
-              remainingWallMs,
-            });
+            const context = await collectBoundedReviewContext(
+              effects,
+              comparison,
+              state.head,
+              input.uncommitted ? 'uncommitted' : 'full',
+              { ...(deadline.signal ? { signal: deadline.signal } : {}), remainingWallMs },
+            );
             if (!context.ok && context.fatal)
               return { status: 'failed', error: `review.run: ${context.reason}` };
             if (!context.ok) {
@@ -462,8 +611,8 @@ export function makeReviewRun(
                     components,
                     base: reviewedBase,
                     scope: reviewedScope,
-                    intent: context.intent,
-                    fileList: context.fileList,
+                    intent: context.context.intent,
+                    fileList: context.context.fileList,
                     searchTools: policy.review.searchTools,
                     logToolFailures: policy.harness.logToolFailures,
                     session: policy.review.session,
@@ -484,6 +633,9 @@ export function makeReviewRun(
                     ...(deadline.signal ? { signal: deadline.signal } : {}),
                     severityMap: policy.review.agentSeverityMap,
                   });
+                  const observed = agent.status === 'ok' ? agent.value : agent.report;
+                  if (observed?.usageSummary !== undefined)
+                    usageSummaries.push(observed.usageSummary);
                   let blockedReason =
                     agent.status === 'needs-human'
                       ? agent.reason
@@ -513,6 +665,11 @@ export function makeReviewRun(
                   });
                   if (blockedReason === undefined && !coverage.ok)
                     blockedReason = `agent review returned no verifiable coverage proof — ${coverage.reason}`;
+                  if (
+                    blockedReason === undefined &&
+                    (deadline.signal?.aborted || remainingWallMs() <= 0)
+                  )
+                    blockedReason = 'review cancelled or wall budget exhausted';
                   const agentFindings = report?.findings ?? [];
                   const advisories = report?.advisories ?? [];
                   const failureEvidence = ReviewCoverageV2Schema.safeParse(report?.coverage);
@@ -556,10 +713,19 @@ export function makeReviewRun(
                           blockedReason === undefined
                             ? { kind: 'terminal' }
                             : { kind: 'blocked', reason: blockedReason },
+                        ...(blockedReason === undefined && coverage.ok
+                          ? { agentCoverage: coverage.coverage }
+                          : {}),
                         findings: agentFindings.map((finding, index) => ({
                           id: `${id}#f${String(index + 1)}`,
                           severity: finding.severity,
-                          ...(finding.file ? { fileName: finding.file } : {}),
+                          ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+                          ...(finding.line !== undefined ? { line: finding.line } : {}),
+                          ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                          ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                          ...(finding.evidenceV1 !== undefined
+                            ? { evidenceV1: finding.evidenceV1 }
+                            : {}),
                           excerpt: finding.text,
                         })),
                         ...(advisories.length > 0 ? { advisories } : {}),
@@ -697,7 +863,124 @@ export function makeReviewRun(
           detail: `review.run: findings record write outcome is uncertain at '${path}' — ${error instanceof Error ? error.message : String(error)}`,
         };
       }
-      if (stopped() || !isComplete(record, policy.review.reviewers)) {
+      let deferredComplete = false;
+      if (deferredVendorDebt && !stopped()) {
+        try {
+          const beforeRefresh = structuredClone(effects.openLedger(state.branch).load());
+          // Correlate durable bytes with this loader's mutation, including a
+          // successful write whose return fails; never bless an external append.
+          let requestedLedger: DevLedgerFile | undefined;
+          const refreshed = await loadCurrentDeferredVendorDebt(
+            {
+              ...effects,
+              openLedger: (branch) => {
+                const store = effects.openLedger(branch);
+                return {
+                  ...store,
+                  mutate: (update) =>
+                    store.mutate((latest) => {
+                      const change = update(latest);
+                      requestedLedger = structuredClone(change.ledger);
+                      return change;
+                    }),
+                };
+              },
+            },
+            target,
+            state,
+            beforeRefresh,
+            deps.queueClient,
+            deadline.signal,
+            {
+              remainingMs: remainingWallMs,
+              ...(deps.onEvidenceImported ? { onEvidenceImported: deps.onEvidenceImported } : {}),
+            },
+          ).then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({ ok: false as const, error }),
+          );
+          const afterRefresh = effects.openLedger(state.branch).load();
+          if (!isDeepStrictEqual(beforeRefresh, afterRefresh)) {
+            // This refresh may settle the current enrollment AND its authorized ancestors, so the
+            // owned shape is an append-only extension in which every added snapshot is a verified
+            // completion of the current enrollment or of one of its authorized ancestors. Any other
+            // extra byte still fails closed.
+            const authority = readCurrentEnrollment(
+              beforeRefresh,
+              { head: state.head, base: state.base, dirtySha256: state.dirtySha256 },
+              target,
+            );
+            const authorized = new Set<string>([deferredVendorDebt.reference.requestId]);
+            if (authority.kind === 'enrollment')
+              for (const ancestor of authority.enrollment.ancestry)
+                authorized.add(ancestor.reference.requestId);
+            const appended = afterRefresh.records.slice(beforeRefresh.records.length);
+            if (
+              !requestedLedger ||
+              !isDeepStrictEqual(requestedLedger, afterRefresh) ||
+              !isDeepStrictEqual(
+                afterRefresh.records.slice(0, beforeRefresh.records.length),
+                beforeRefresh.records,
+              ) ||
+              appended.length === 0 ||
+              appended.some(
+                (record) =>
+                  record.kind !== 'vendor-debt' ||
+                  !verifiedCompletedDebt(record.debt) ||
+                  !authorized.has(record.debt.reference.requestId),
+              )
+            )
+              throw new Error('final queue refresh changed unrecognized ledger bytes');
+            if (!deps.noteLedgerWrite)
+              throw new Error('final queue settlement requires ledger ownership notification');
+            await deps.noteLedgerWrite(state.branch, input.repoRoot);
+          }
+          if (!refreshed.ok) throw refreshed.error;
+          deferredVendorDebt = refreshed.value;
+          const imported = deferredReceiptFindings(
+            effects
+              .openLedger(state.branch)
+              .load()
+              .records.filter((entry) => entry.kind === 'vendor-debt')
+              .map((entry) => entry.debt),
+          );
+          const unseen = imported.filter(
+            (finding) => !record.findings.some((item) => item.id === finding.id),
+          );
+          if (unseen.length > 0)
+            return {
+              status: 'needs-human',
+              reason:
+                'review.run: newly consumed vendor findings retained; re-run composition to address them',
+              report: {
+                ...record,
+                findings: [...record.findings, ...unseen],
+                ...(deferredVendorDebt ? { deferredVendorDebt } : {}),
+              },
+            };
+          deferredComplete =
+            deferredVendorDebt !== undefined &&
+            hasDeferredReviewSources(record, policy.review.reviewers, deferredVendorDebt, {
+              repo: deferredVendorDebt.reference.binding.repo,
+              producer:
+                deferredVendorDebt.reference.binding.kind === 'deferred-author'
+                  ? deferredVendorDebt.reference.binding.producer
+                  : '',
+              target,
+              head: state.head,
+              base: state.base,
+              dirtySha256: state.dirtySha256,
+              deferralId: deferredVendorDebt.deferral.id,
+            });
+        } catch (error) {
+          return {
+            status: 'needs-human',
+            reason: `review.run: current queue trust could not be verified — ${error instanceof Error ? error.message : String(error)}`,
+            report: record,
+          };
+        }
+      }
+      if (stopped() || (!deferredComplete && !isComplete(record, policy.review.reviewers))) {
         const blockedSources = record.sources.filter((source) => source.status !== 'terminal');
         const blockedTransient =
           !stopped() &&
@@ -719,9 +1002,61 @@ export function makeReviewRun(
           },
         };
       }
-      return { status: 'ok', value: record };
+      // Q15d clean refusal asks ONE question: is an authorized obligation pending AT THIS REVIEW
+      // IDENTITY? It is read from the post-refresh ledger, so a predecessor settled by this
+      // invocation is not counted, and it refuses here rather than decorating outer usage or
+      // rewriting notifications. A superseded OLDER-head predecessor does not refuse the run: its
+      // receipt is carried as a retained obligation and its findings block once imported, while the
+      // durable READINESS gap in record.ts still refuses ANY pending ancestor. Run acceptance and
+      // durable readiness are therefore deliberately different verdicts.
+      const currentIdentity = {
+        head: state.head,
+        base: state.base,
+        dirtySha256: state.dirtySha256,
+      };
+      const ancestry = readCurrentEnrollment(
+        effects.openLedger(state.branch).load(),
+        currentIdentity,
+        target,
+      );
+      const pendingAtThisIdentity =
+        ancestry.kind === 'ambiguous'
+          ? ancestry.requestIds
+          : ancestry.kind === 'enrollment'
+            ? ancestry.enrollment.pendingAncestry
+                .filter((ancestor) => {
+                  const binding = ancestor.reference.binding;
+                  return (
+                    binding.kind === 'deferred-author' &&
+                    binding.head === currentIdentity.head &&
+                    binding.target === target &&
+                    ancestor.deferral.base === currentIdentity.base
+                  );
+                })
+                .map((ancestor) => ancestor.reference.requestId)
+            : [];
+      if (pendingAtThisIdentity.length > 0)
+        return {
+          status: 'needs-human',
+          reason: `review.run: authorized predecessor obligation(s) remain unsettled at this review identity (${pendingAtThisIdentity.join(
+            ', ',
+          )}); a clean completion cannot be claimed`,
+          report: record,
+        };
+      return {
+        status: 'ok',
+        value: record,
+        ...(deferredComplete && deferredVendorDebt
+          ? { report: { ...record, deferredVendorDebt } }
+          : {}),
+      };
     } finally {
       deadline.dispose();
     }
+  };
+  return async (input): Promise<ReviewRunResult> => {
+    const usageSummaries: KnownUsageSummary[] = [];
+    const result = await execute(input, usageSummaries);
+    return { ...result, usageSummary: foldKnownUsageSummaries(usageSummaries) };
   };
 }

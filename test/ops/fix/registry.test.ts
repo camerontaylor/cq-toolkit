@@ -1,5 +1,14 @@
-import { expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { FixRunInputSchema } from '../../../src/ops/fix/registry.js';
+import {
+  failureRowsOf,
+  fixRunCounters,
+  neverStartedRow,
+  plannedTaskRowOf,
+  unitLabelOf,
+  type PlannedTaskRow,
+} from '../../../src/ops/fix/report.js';
+import type { FixTaskReport } from '../../../src/ops/sweep/taskLoop.js';
 import { SweepUnitDispatchInputSchema } from '../../../src/ops/sweep/registry.js';
 
 test('fix.run defaults to local gated work and requires an explicit selector', () => {
@@ -28,4 +37,316 @@ test('sweep rejects invalid related argv before dispatch', () => {
     taskLoop: { relatedArgs: ['embedded-{files}'] },
   };
   expect(SweepUnitDispatchInputSchema.safeParse(input).success).toBe(false);
+});
+
+describe('fix-run report accounting', () => {
+  const branch = 'cq/run/tests-1/scratch-repo';
+  const model = { provider: 'fixture', model: 'scripted' } as const;
+  const task = (overrides: Partial<FixTaskReport> = {}): FixTaskReport => ({
+    task: {
+      id: 'cases/a.test.cjs',
+      files: ['cases/a.test.cjs'],
+      failures: [
+        {
+          file: 'cases/a.test.cjs',
+          line: 1,
+          column: 1,
+          ruleId: null,
+          message: 'expected 1, received 2',
+          severity: 'error',
+        },
+      ],
+    },
+    attempts: [],
+    outcome: 'unfixed',
+    branch,
+    commits: [],
+    ...overrides,
+  });
+
+  test('unitLabelOf derives <kind>/<slug> from the sweep branch', () => {
+    expect(unitLabelOf('cq/run/tests-1/scratch-repo')).toBe('tests-1/scratch-repo');
+    expect(unitLabelOf('short')).toBe('short');
+  });
+
+  test('a fixed task with past failed rounds keeps the evidence and counts as fixed', () => {
+    const report = task({
+      outcome: 'fixed',
+      commits: ['a'.repeat(40)],
+      rounds: [
+        {
+          tier: 'worker',
+          attempt: 1,
+          reason: 'validation refused',
+          failedAttempt: { branch: 'cq/run/failed/tests-1/scratch-repo/t/a1', sha: 'b'.repeat(40) },
+        },
+        { tier: 'rescue', attempt: 1, reason: 'rescue retry' },
+      ],
+      attempts: [
+        {
+          tier: 'worker',
+          attempt: 1,
+          invocation: 'edit',
+          model,
+          wallMs: 1,
+          reason: 'initial task',
+        },
+        {
+          tier: 'rescue',
+          attempt: 1,
+          invocation: 'edit',
+          model,
+          wallMs: 1,
+          reason: 'rescue retry',
+        },
+      ],
+    });
+    const row = plannedTaskRowOf(report);
+    expect(row.outcome).toBe('fixed');
+    expect(row.failures).toHaveLength(1);
+    expect(row.failures[0]).toMatchObject({
+      unit: 'tests-1/scratch-repo',
+      outcome: 'unfixed',
+      gate: 'none',
+      branch: 'cq/run/failed/tests-1/scratch-repo/t/a1',
+    });
+    expect(fixRunCounters([row])).toMatchObject({
+      planned: 1,
+      attempted: 1,
+      fixed: 1,
+      skipped: 0,
+      unresolved: 0,
+      rescueAttempts: 1,
+      rescueFixes: 1,
+    });
+  });
+
+  test('a retained failed artifact stays branch-bearing while no-artifact failures stay branchless', () => {
+    const withBranch = plannedTaskRowOf(
+      task({
+        outcome: 'unfixed',
+        reason: 'Error: validation refused task',
+        failedAttempt: { branch: 'cq/run/failed/tests-1/scratch-repo/t/a1', sha: 'c'.repeat(40) },
+      }),
+    );
+    expect(withBranch.failures[0]).toMatchObject({
+      branch: 'cq/run/failed/tests-1/scratch-repo/t/a1',
+      sha: 'c'.repeat(40),
+      gate: 'none',
+    });
+    const withoutBranch = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
+    );
+    expect(withoutBranch.outcome).toBe('escalated-to-human');
+    const branchlessRow = withoutBranch.failures[0];
+    if (branchlessRow === undefined) throw new Error('no branchless failure row recorded');
+    expect('branch' in branchlessRow).toBe(false);
+    expect(branchlessRow).toEqual({
+      unit: 'tests-1/scratch-repo',
+      task: 'cases/a.test.cjs',
+      outcome: 'escalated-to-human',
+      gate: 'none',
+      reason: 'failure has no attributed file',
+    });
+  });
+
+  test('never-dispatched, cancelled and budget-stopped siblings refine their outcomes', () => {
+    const notStarted = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'unit stopped for human review' }),
+    );
+    expect(notStarted.outcome).toBe('not-started');
+    const cancelled = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'enclosing job cancelled' }),
+    );
+    expect(cancelled.outcome).toBe('cancelled');
+    // The loop leaves undispatched budget-stopped siblings at their initial
+    // 'unfixed' label with no attempts; the refinement relabels them.
+    const exhausted = plannedTaskRowOf(
+      task({ outcome: 'unfixed', reason: 'token or wall budget exhausted' }),
+    );
+    expect(exhausted.outcome).toBe('exhausted');
+    const exhaustedEscalated = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'token or wall budget exhausted' }),
+    );
+    expect(exhaustedEscalated.outcome).toBe('exhausted');
+    // A terminal no-attempt conclusion with its own evidence keeps its
+    // outcome: a failure the loop escalated (no attributed file) is work
+    // done, not work never started.
+    const terminal = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
+    );
+    expect(terminal.outcome).toBe('escalated-to-human');
+    // Issue 615 (4): the refined outcome reaches the branchless failure row
+    // (and the failed evidence built from it), while retained attempt rows
+    // keep their recorded history.
+    const refined = plannedTaskRowOf(
+      task({ outcome: 'unfixed', reason: 'token or wall budget exhausted' }),
+    );
+    expect(refined.failures[0]?.outcome).toBe('exhausted');
+    const terminalRow = plannedTaskRowOf(
+      task({ outcome: 'escalated-to-human', reason: 'failure has no attributed file' }),
+    );
+    expect(terminalRow.failures[0]?.outcome).toBe('escalated-to-human');
+    const history = plannedTaskRowOf(
+      task({
+        outcome: 'fixed',
+        commits: ['1'.repeat(40)],
+        rounds: [
+          {
+            tier: 'worker',
+            attempt: 1,
+            reason: 'first refusal',
+            outcome: 'unfixed',
+            gate: 'related',
+            failedAttempt: { branch: 'cq/run/failed/k/s/t/a1', sha: '2'.repeat(40) },
+          },
+        ],
+      }),
+    );
+    expect(history.failures[0]).toMatchObject({
+      outcome: 'unfixed',
+      branch: 'cq/run/failed/k/s/t/a1',
+    });
+    // An attempted task keeps its terminal outcome even when the reason names
+    // a budget: the loop concluded the attempt honestly.
+    const attempted = plannedTaskRowOf(
+      task({
+        outcome: 'escalated-to-human',
+        reason: 'token or wall budget exhausted',
+        attempts: [
+          {
+            tier: 'worker',
+            attempt: 1,
+            invocation: 'edit',
+            model,
+            wallMs: 1,
+            reason: 'initial task',
+          },
+        ],
+      }),
+    );
+    expect(attempted.outcome).toBe('escalated-to-human');
+  });
+
+  test('a skipped task (fixed by an earlier verified sibling) counts skipped, not unresolved-free', () => {
+    const skipped = plannedTaskRowOf(
+      task({
+        outcome: 'fixed',
+        reason: 'earlier verified task resolved this file or cluster',
+      }),
+    );
+    expect(skipped.outcome).toBe('fixed');
+    const rows: PlannedTaskRow[] = [skipped];
+    expect(fixRunCounters(rows)).toMatchObject({
+      planned: 1,
+      attempted: 0,
+      fixed: 0,
+      skipped: 1,
+      unresolved: 1,
+    });
+  });
+
+  test('a never-started unit row names the unit branchlessly and counts planned and unresolved', () => {
+    const row = neverStartedRow(
+      { kind: 'tests-1', slug: 'other-repo', branch: 'cq/run/tests-1/other-repo' },
+      'other-repo',
+      'unit halted on a budget bound',
+    );
+    expect(row.outcome).toBe('not-started');
+    expect(row.branch).toBe('cq/run/tests-1/other-repo');
+    expect(row.failures[0]).toEqual({
+      unit: 'tests-1/other-repo',
+      task: 'other-repo',
+      outcome: 'not-started',
+      gate: 'none',
+      reason: 'unit halted on a budget bound',
+    });
+    expect(fixRunCounters([row])).toMatchObject({
+      planned: 1,
+      attempted: 0,
+      fixed: 0,
+      unresolved: 1,
+      rescueAttempts: 0,
+    });
+  });
+
+  test('counters sum across a mixed set with explicit denominators', () => {
+    const fixed = plannedTaskRowOf(
+      task({
+        outcome: 'fixed',
+        commits: ['d'.repeat(40)],
+        attempts: [
+          {
+            tier: 'worker',
+            attempt: 1,
+            invocation: 'edit',
+            model,
+            wallMs: 1,
+            reason: 'initial task',
+          },
+        ],
+      }),
+    );
+    const humanNoArtifact = plannedTaskRowOf(
+      task({
+        task: {
+          id: 'cases/x.test.cjs',
+          files: ['cases/x.test.cjs'],
+          failures: [
+            {
+              file: 'cases/x.test.cjs',
+              line: 1,
+              column: 1,
+              ruleId: null,
+              message: 'expected 1, received 2',
+              severity: 'error',
+            },
+          ],
+        },
+        outcome: 'escalated-to-human',
+        reason: 'failure has no attributed file',
+      }),
+    );
+    const rows = [
+      fixed,
+      humanNoArtifact,
+      neverStartedRow({ kind: 'k', slug: 's', branch: 'cq/run/k/s' }, 'p', 'cancelled'),
+    ];
+    expect(fixRunCounters(rows)).toEqual({
+      planned: 3,
+      attempted: 1,
+      fixed: 1,
+      skipped: 0,
+      unresolved: 2,
+      rescueAttempts: 0,
+      rescueFixes: 0,
+    });
+  });
+
+  test('failureRowsOf preserves one row per failed round including rescue history', () => {
+    const report = task({
+      outcome: 'unfixed',
+      reason: 'cap exhausted',
+      rounds: [
+        {
+          tier: 'worker',
+          attempt: 1,
+          reason: 'first refusal',
+          failedAttempt: { branch: 'cq/run/failed/k/s/t/a1', sha: 'e'.repeat(40) },
+          gate: 'related',
+        },
+        {
+          tier: 'rescue',
+          attempt: 1,
+          reason: 'second refusal',
+          failedAttempt: { branch: 'cq/run/failed/k/s/t/a2', sha: 'f'.repeat(40) },
+          gate: 'broader',
+        },
+      ],
+    });
+    const rows = failureRowsOf(report, 'k/s');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ gate: 'related', outcome: 'unfixed' });
+    expect(rows[1]).toMatchObject({ gate: 'broader', outcome: 'unfixed' });
+  });
 });

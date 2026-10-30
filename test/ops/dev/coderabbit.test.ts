@@ -8,6 +8,7 @@ import {
   coderabbitReviewArgv,
   CODERABBIT_REVIEWER,
   decideCompletion,
+  deferredVendorErrorCodes,
   isTransientReviewerFailure,
   parseReviewerStream,
   parseReviewerWaitTime,
@@ -98,6 +99,19 @@ describe('parseReviewerStream', () => {
     );
     expect(parsed.findings[0]).toEqual({ severity: 'minor', fileName: 'a.ts' });
   });
+
+  test.each(['', 'src/a.ts', undefined, null, 7])(
+    'fileName preserves string identity without accepting other values: %s',
+    (fileName) => {
+      const parsed = parseReviewerStream(
+        JSON.stringify({ type: 'finding', severity: 'major', fileName }),
+      );
+      expect(parsed.findings).toHaveLength(1);
+      if (typeof fileName === 'string')
+        expect(parsed.findings[0]).toHaveProperty('fileName', fileName);
+      else expect(parsed.findings[0]).not.toHaveProperty('fileName');
+    },
+  );
 
   test('non-JSON lines count as unparsed and contribute nothing', () => {
     const parsed = parseReviewerStream(
@@ -340,6 +354,22 @@ describe('decideCompletion — the three-part protocol definition', () => {
     expect(stream.findings[0]?.severity).toBe('minor');
   });
 
+  test.each([
+    { type: 'finding', severity: '', fileName: '' },
+    { type: '', severity: 'major', fileName: '' },
+    { type: 'complete', status: '' },
+  ])('empty semantic fields still fail closed: %j', (event) => {
+    const stream = parseReviewerStream(
+      [event, { type: 'complete', status: 'review_completed' }]
+        .map((item) => JSON.stringify(item))
+        .join('\n'),
+    );
+    expect(stream.findings).toEqual([]);
+    expect(decideCompletion(0, stream).kind).toBe('blocked');
+    if (event.type !== 'complete') expect(stream.unparsedLines).toBe(1);
+    else expect(stream).not.toHaveProperty('completeStatus');
+  });
+
   test('a finding event WITHOUT a severity is malformed — never a fabricated nonblocking none', () => {
     const stream = parseReviewerStream(
       [
@@ -455,5 +485,49 @@ describe('recoverable rate-limit waits (#551)', () => {
       ].join('\n'),
     );
     expect(parsed.rateLimitWait).toBeUndefined();
+  });
+});
+
+describe('structured deferred vendor authority', () => {
+  const vendor = { type: 'error', errorType: 'rate_limit', recoverable: true };
+  const scan = { type: 'error', errorType: 'scan', message: 'Review failed: con_err: fixture' };
+  test('retains all literal causes in source order and accepts only vendor causes', () => {
+    const events = [
+      { type: 'status', status: 'scanning' },
+      vendor,
+      { type: 'heartbeat', status: 'reviewing' },
+      vendor,
+    ];
+    const parsed = parseReviewerStream(events.map((event) => JSON.stringify(event)).join('\n'));
+    expect(parsed.structuredEvents).toEqual(events);
+    expect(deferredVendorErrorCodes(parsed)).toEqual(['rate_limited', 'rate_limited']);
+    expect(parsed.sawComplete).toBe(false);
+  });
+  test.each([
+    [scan],
+    [vendor, scan],
+    [scan, vendor],
+    [{ type: 'error', message: 'Review failed: con_err: fixture' }],
+    [{ ...vendor, recoverable: 'true' }],
+    [{ ...vendor, recoverable: false }],
+    [{ ...vendor, errorType: ['rate_limit'] }],
+    [vendor, { type: 'status', status: 'scan_failed' }],
+    [vendor, { type: 'status', status: 'unknown' }],
+    [vendor, { type: 'status', status: ['reviewing'] }],
+    [vendor, { type: 'status', status: 'cancelled' }],
+    [vendor, { type: 'status', status: 'budget_exhausted' }],
+    [vendor, { type: 'action_required' }],
+    [vendor, { type: 'complete', status: 'review_completed' }],
+    [vendor, { type: 'finding', severity: 'major' }],
+    [vendor, { type: 'unknown' }],
+  ])('refuses contradictory or unrecognized causes: %j', (...events) => {
+    const parsed = parseReviewerStream(events.map((event) => JSON.stringify(event)).join('\n'));
+    expect(parsed.structuredEvents).toEqual(events);
+    expect(deferredVendorErrorCodes(parsed)).toEqual([]);
+  });
+  test('malformed bytes cannot grant vendor authority', () => {
+    expect(
+      deferredVendorErrorCodes(parseReviewerStream(JSON.stringify(vendor) + '\ninvalid')),
+    ).toEqual([]);
   });
 });

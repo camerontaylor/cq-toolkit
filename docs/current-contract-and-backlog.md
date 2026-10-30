@@ -5,6 +5,27 @@
 - **Supersedes:** this page supersedes the 2026-09-12 spec (`specs/portable-code-quality-toolkit-spec.md` in toolkit-research) as the normative contract. The spec and all pre-2026-10-16 plans carry a historical header and are kept for reference.
 - **Next step:** the approved next-step spec and plan live in toolkit-research at `specs/cq-next-step-slice-spec.md` and `plans/cq-next-step-slice-plan.md`.
 
+## CRQ scheduling (owner-directed 2026-10-28)
+
+The Team plan supplies 10 included review starts in a rolling 60-minute window.
+CRQ reads repository-scoped `coderabbit usage --agent`, fills available slots
+concurrently (default inflight and per-tick ceiling 10), and keeps promotion →
+prioritize → rank ordering. Unavailable/invalid usage falls back to the existing
+local starts/hour cap. Every runner and signer review passes `--deep` with a
+120-minute deadline. Rate-limit cooldown uses exact waitTime without padding.
+The next local slot expiry is cross-checked against vendor usage. A minute timer
+runs a timestamp-first entry: future hints exit before imports/lock/network;
+due entries take the shared lock non-blocking, collect only ownership-verified
+terminal detached results, apply signer cooldown, and fill slots after protecting
+outstanding reservations. Dated subminute slots may sleep once; undated minute
+retries do not. In-flight runs cap hints at the next minute for result collection,
+including during pause/cooldown. Other idle admission backs off twelve minutes.
+The 12-minute maintenance tick refreshes the hint and waits up to 90 seconds for
+that lock; harvest clears the hint. Completion requests prompt
+harvest. Operational fallback and
+residual ownership rules: [CRQ contract](../apps/crq-python/README.md#runtime-ownership),
+[deployment](../apps/crq-python/ops/HOST-DEPLOY.md#slot-scheduling-deployment-owner-directed-2026-10-28).
+
 ## Current contract
 
 1. **SDK first; every op runnable standalone from TS and the CLI.** Spec, 2026-09-12. _Amended:_ ADR-0005 (2026-10-16) found it "met in letter, missed in default wiring". The 2026-10-20 posture makes CLI usability the goal and fresh-repo transcripts the acceptance bar.
@@ -18,7 +39,7 @@
 9. **Remediation is approval-gated; nothing is auto-applied.** _Realised_ 2026-10-20 as an attended authority bound to the preview digest and a clean tree.
 10. **Workers may not commit tests, runner config or snapshots** (W1.8). Enforced in sweep, not in `analyze.fix`.
 11. **Baselines only tighten; a missing summary is non-passing; the monotonic guard is mandatory.**
-12. **Review = one CodeRabbit CLI cycle plus one independent head-bound review; P2s go to issues** (2026-10-16). Supersedes the 0.2 plan's two cycles.
+12. **Review = one CodeRabbit CLI cycle, or visible durable vendor debt under approved DEC1, plus one independent head-bound review; P2s go to issues** (2026-10-16; DEC1, 2026-10-27). During vendor availability/rate-limit/login outages, development and merge may continue before vendor recovery after authorized durable enrollment. Vendor completion remains false; queue authorization/persistence, scan/tamper, stale identity, unknown failures, substantive blocking findings, CI, independence and privileged trust still block. Supersedes the 0.2 plan's two cycles. Lifecycle: [CodeRabbit protocol](coderabbit-review.md#6-completion-semantics-and-blockers).
 13. **Acceptance = independent PASS on the exact head, not draft, right base; unresolved threads are reported, not blocking** (2026-10-20).
 14. **Author evidence is a claim; verification uses only facts an owner credential cannot write** (2026-10-16).
 15. **The PR is not development state; every checkable rule is a command** (2026-10-16).

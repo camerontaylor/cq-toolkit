@@ -84,6 +84,13 @@ interface ThreadSpec {
 }
 
 interface PrSpec {
+  committedDate: string | null;
+  issueComments: Array<{
+    author: { login: string; __typename: string } | null;
+    authorAssociation: string;
+    body: string;
+    createdAt: string | null;
+  }>;
   state: string;
   isDraft: boolean;
   /** The PR author's login; null → a null author (deleted account / partial payload). */
@@ -117,6 +124,8 @@ interface PrSpec {
 }
 
 const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
+  committedDate: new Date(T0).toISOString(),
+  issueComments: [],
   state: 'OPEN',
   isDraft: false,
   author: 'alice',
@@ -212,7 +221,8 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
   const reviewsFrom = Number(flagValue(args, 'reviewsAfter') || '0');
   const timelineFrom = Number(flagValue(args, 'timelineAfter') || '0');
   const threadsFrom = Number(flagValue(args, 'threadsAfter') || '0');
-  const laterPage = reviewsFrom > 0 || timelineFrom > 0 || threadsFrom > 0;
+  const commentsFrom = Number(flagValue(args, 'commentsAfter') || '0');
+  const laterPage = reviewsFrom > 0 || timelineFrom > 0 || threadsFrom > 0 || commentsFrom > 0;
   const reviewsMore = reviewsFrom + PAGE < spec.reviews.length;
   const threadsMore = threadsFrom + PAGE < spec.threads.length;
   const timelineMore = timelineFrom + PAGE < spec.forcePushes;
@@ -220,6 +230,17 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
     data: {
       repository: {
         pullRequest: {
+          commits: { nodes: [{ commit: { oid: spec.head, committedDate: spec.committedDate } }] },
+          comments: {
+            nodes: spec.issueComments.slice(commentsFrom, commentsFrom + PAGE),
+            pageInfo: {
+              hasNextPage: commentsFrom + PAGE < spec.issueComments.length,
+              endCursor:
+                commentsFrom + PAGE < spec.issueComments.length
+                  ? String(commentsFrom + PAGE)
+                  : null,
+            },
+          },
           state: spec.state,
           isDraft: spec.isDraft,
           author: spec.author === null ? null : { login: spec.author, __typename: 'User' },
@@ -526,6 +547,8 @@ describe('fetchPrSnapshot', () => {
       `name=${REPO}`,
       '-F',
       'pr=7',
+      '-F',
+      'allClear=false',
     ]);
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/\$query\b/);
     expect(PR_SNAPSHOT_QUERY).toMatch(
@@ -535,6 +558,34 @@ describe('fetchPrSnapshot', () => {
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/totalCount/);
     expect(calls).toHaveLength(1); // one page: no cursor flag ever sent
   });
+
+  test.each([false, true])(
+    'sends a typed allClear=%s on every snapshot page',
+    async (includeAllClear) => {
+      const reviews = Array.from({ length: 101 }, () => review());
+      const forge = makeForge({ 7: prSpec({ reviews }) });
+      const calls: string[][] = [];
+      const snapshot = await fetchPrSnapshot(
+        {
+          ...forgeDeps(forge),
+          gh: (args) => {
+            calls.push(args);
+            return forge.gh(args);
+          },
+        },
+        7,
+        includeAllClear,
+      );
+      expect(calls).toHaveLength(2);
+      for (const args of calls) {
+        const binding = `allClear=${String(includeAllClear)}`;
+        expect(args.filter((arg) => arg.startsWith('allClear='))).toEqual([binding]);
+        expect(args[args.indexOf(binding) - 1]).toBe('-F');
+      }
+      expect(snapshot.truncated).toBe(false);
+      expect(snapshot.allClear === undefined).toBe(!includeAllClear);
+    },
+  );
 
   test('>100 reviews page across 2 requests; a trusted approval on page 2 is accepted', async () => {
     const crowd = Array.from({ length: 140 }, (_, i) =>
@@ -707,7 +758,10 @@ describe('judgeAtHead', () => {
       allowSameAccountAgentReview: true,
       automationLogin: 'alice',
     });
-    expect(judgeAtHead(atHead, SHA_B, enabled)).toEqual({ accepted: true, by: ['user:alice'] });
+    expect(judgeAtHead(atHead, SHA_B, enabled)).toMatchObject({
+      accepted: true,
+      by: ['user:alice'],
+    });
     const laterNonUser = await snapshotOf(
       prSpec({
         author: 'alice',
@@ -760,6 +814,127 @@ describe('judgeAtHead', () => {
       }),
     );
     expect(judgeAtHead(retracted, SHA_B, enabled)).toMatchObject({ accepted: false });
+  });
+
+  test('marker evidence is a fresh frozen copy bound to the selected review', async () => {
+    const snapshot = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review({
+            login: 'alice',
+            association: 'OWNER',
+            state: 'COMMENTED',
+            body: agentMarker('PASS'),
+          }),
+        ],
+      }),
+    );
+    const policy = trustPolicyFromConfig({ allowSameAccountAgentReview: true });
+    const result = judgeAtHead(snapshot, SHA_B, policy);
+    const repeated = judgeAtHead(snapshot, SHA_B, policy);
+    if (!result.accepted || !repeated.accepted)
+      throw new Error('expected existing marker acceptance');
+    const evidence = result.authenticatedR4;
+    expect(evidence).toEqual({
+      actorKey: 'user:alice',
+      reviewNodeId: 'R_0',
+      reviewCommitOid: SHA_B,
+      submittedAt: '2026-09-24T10:00:00Z',
+      attestation: {
+        version: 1,
+        reviewerAgentId: 'reviewer-agent',
+        authorAgentId: 'author-agent',
+        headSha: SHA_B,
+        verdict: 'PASS',
+        independent: true,
+      },
+    });
+    if (evidence === undefined) throw new Error('expected marker evidence');
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(Object.isFrozen(evidence.attestation)).toBe(true);
+    expect(evidence).not.toBe(repeated.authenticatedR4);
+    expect(evidence.attestation).not.toBe(repeated.authenticatedR4?.attestation);
+    expect(Reflect.set(evidence, 'actorKey', 'user:mallory')).toBe(false);
+    expect(Reflect.set(evidence.attestation, 'verdict', 'HOLD')).toBe(false);
+    const selected = snapshot.reviews[0];
+    if (selected === undefined) throw new Error('expected source review');
+    selected.nodeId = null;
+    selected.commitOid = SHA_A;
+    selected.body = agentMarker('HOLD');
+    expect(evidence.reviewNodeId).toBe('R_0');
+    expect(evidence.reviewCommitOid).toBe(SHA_B);
+    expect(evidence.attestation.verdict).toBe('PASS');
+    // Missing node identity was never an acceptance predicate.
+    selected.commitOid = SHA_B;
+    selected.body = agentMarker('PASS');
+    expect(judgeAtHead(snapshot, SHA_B, policy)).toMatchObject({
+      accepted: true,
+      by: ['user:alice'],
+      authenticatedR4: { reviewNodeId: null },
+    });
+  });
+
+  test.each([
+    ['HOLD', { body: agentMarker('HOLD') }],
+    ['RETRACT', { body: agentMarker('RETRACT') }],
+    ['dismissed', { state: 'DISMISSED' }],
+    ['malformed', { body: '<!-- cq-agent-review: {} -->' }],
+    ['duplicate', { body: `${agentMarker('PASS')} ${agentMarker('PASS')}` }],
+    ['wrong marker head', { body: agentMarker('PASS', SHA_A) }],
+    ['wrong review head', { oid: SHA_A }],
+    ['untrusted association', { association: 'NONE' }],
+    ['non-user actor', { typename: 'Bot' }],
+    ['invalid submission time', { submittedAt: 'invalid' }],
+    ['same agent', { body: agentMarker('PASS').replace('reviewer-agent', 'author-agent') }],
+  ] satisfies [string, Partial<ReviewSpec>][])(
+    '%s marker does not turn generic approval into R4',
+    async (_, over) => {
+      const snapshot = await snapshotOf(
+        prSpec({
+          author: 'alice',
+          reviews: [
+            review(),
+            review({
+              login: 'alice',
+              association: 'OWNER',
+              state: 'COMMENTED',
+              body: agentMarker('PASS'),
+              submittedAt: '2026-09-24T11:00:00Z',
+            }),
+            review({
+              login: 'alice',
+              association: 'OWNER',
+              state: 'COMMENTED',
+              body: agentMarker('PASS'),
+              submittedAt: '2026-09-24T12:00:00Z',
+              ...over,
+            }),
+          ],
+        }),
+      );
+      expect(
+        judgeAtHead(snapshot, SHA_B, trustPolicyFromConfig({ allowSameAccountAgentReview: true })),
+      ).toEqual({ accepted: true, by: ['user:carol'] });
+    },
+  );
+
+  test('disabled opt-in and exclusions omit evidence without changing generic acceptance', async () => {
+    const snapshot = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review(),
+          review({ login: 'alice', state: 'COMMENTED', body: agentMarker('PASS') }),
+        ],
+      }),
+    );
+    for (const policy of [
+      CONSERVATIVE_TRUST_POLICY,
+      trustPolicyFromConfig({ allowSameAccountAgentReview: true, excludedLogins: ['alice'] }),
+    ]) {
+      expect(judgeAtHead(snapshot, SHA_B, policy)).toEqual({ accepted: true, by: ['user:carol'] });
+    }
   });
 
   test('an approval whose commit.oid ≠ headRefOid at merge time is not acceptance', async () => {
@@ -1160,6 +1335,243 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     // A refusal on an unchanged tuple writes nothing.
     expect(forge.log.filter((entry) => /^state:(POST|PATCH)/.test(entry))).toEqual([]);
   });
+
+  const allClearReview = (over: Partial<ReviewSpec> = {}): ReviewSpec =>
+    review({
+      body: 'LGTM!',
+      submittedAt: new Date(T0 + 100).toISOString(),
+      ...over,
+    });
+  const allClearComment = () => ({
+    author: { login: 'dave', __typename: 'User' },
+    authorAssociation: 'COLLABORATOR',
+    body: 'all clear',
+    createdAt: new Date(T0 + 100).toISOString(),
+  });
+
+  test.each(['review', 'comment'] as const)(
+    '%s all-clear bypasses only the wait and persists before merge',
+    async (kind) => {
+      const forge = makeForge({
+        7: prSpec({
+          reviews: [kind === 'review' ? allClearReview() : review()],
+          issueComments: kind === 'comment' ? [allClearComment()] : [],
+        }),
+      });
+      // No first observation: without all-clear even a first merge attempt refuses.
+      const { effects, mergeCalls } = gated(forge, T0 + 1000);
+      expect(
+        (await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B })).code,
+      ).toBe(0);
+      expect(mergeCalls).toHaveLength(1);
+      const { state } = await readSettleState(forgeDeps(forge));
+      expect(state.prs['7']?.observations).toEqual([
+        { observedAt: new Date(T0 + 1000).toISOString(), by: 'self-merge-prs:recheck' },
+      ]);
+      expect(forge.log.findIndex((entry) => entry.startsWith('state:POST'))).toBeLessThan(
+        forge.log.indexOf('inner-merge:7'),
+      );
+    },
+  );
+
+  test.each([
+    { body: 'not LGTM' },
+    { body: 'LGTM\nexcept this bug' },
+    { submittedAt: new Date(T0).toISOString() },
+    { submittedAt: new Date(T0 - 1).toISOString() },
+    { submittedAt: null },
+    { submittedAt: 'invalid' },
+    { submittedAt: new Date(T0 + 2000).toISOString() },
+    { oid: SHA_A },
+    { login: 'alice' },
+    { login: null },
+    { association: 'NONE' },
+    { typename: 'Bot' },
+    { state: 'DISMISSED' },
+  ] satisfies Partial<ReviewSpec>[])(
+    'invalid review all-clear cannot bypass settle: %j',
+    async (over) => {
+      const forge = makeForge({
+        7: prSpec({ reviews: [review(), allClearReview({ login: 'dave', ...over })] }),
+      });
+      expect(await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).toEqual({
+        ok: false,
+        reason: 'settle: single_observation',
+      });
+    },
+  );
+
+  test('a superseded all-clear review cannot bypass settle', async () => {
+    const forge = makeForge({
+      7: prSpec({
+        reviews: [allClearReview(), review({ submittedAt: new Date(T0 + 200).toISOString() })],
+      }),
+    });
+    expect(await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).toEqual({
+      ok: false,
+      reason: 'settle: single_observation',
+    });
+  });
+
+  test.each(['before', 'same-time', 'after'] as const)(
+    'comment all-clear %s exact-head acceptance with a backdated commit',
+    async (ordering) => {
+      const forge = makeForge({
+        7: prSpec({
+          committedDate: new Date(T0 - 60_000).toISOString(),
+          reviews: [review({ submittedAt: new Date(T0 + 200).toISOString() })],
+          issueComments: [
+            {
+              ...allClearComment(),
+              createdAt: new Date(
+                T0 + (ordering === 'before' ? 100 : ordering === 'same-time' ? 200 : 300),
+              ).toISOString(),
+            },
+          ],
+        }),
+      });
+      const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME);
+      expect(result.ok).toBe(ordering === 'after');
+    },
+  );
+
+  test.each(['later', 'unorderable'] as const)(
+    'a %s comment cannot revive an earlier all-clear',
+    async (kind) => {
+      const forge = makeForge({
+        7: prSpec({
+          reviews: [review()],
+          issueComments: [
+            allClearComment(),
+            {
+              ...allClearComment(),
+              body: 'Please wait for my follow-up',
+              createdAt: kind === 'later' ? new Date(T0 + 200).toISOString() : null,
+            },
+          ],
+        }),
+      });
+      expect(await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).toEqual({
+        ok: false,
+        reason: 'settle: single_observation',
+      });
+    },
+  );
+
+  test.each(['self', 'untrusted', 'unknown', 'old', 'missing', 'future'] as const)(
+    'invalid %s comment all-clear cannot bypass settle',
+    async (kind) => {
+      const comment = allClearComment();
+      if (kind === 'self') comment.author.login = 'alice';
+      if (kind === 'untrusted') comment.authorAssociation = 'NONE';
+      const forge = makeForge({
+        7: prSpec({
+          reviews: [review()],
+          issueComments: [
+            {
+              ...comment,
+              ...(kind === 'unknown' ? { author: null } : {}),
+              ...(kind === 'old' ? { createdAt: new Date(T0).toISOString() } : {}),
+              ...(kind === 'missing' ? { createdAt: null } : {}),
+              ...(kind === 'future' ? { createdAt: new Date(T0 + 2000).toISOString() } : {}),
+            },
+          ],
+        }),
+      });
+      expect(await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).toEqual({
+        ok: false,
+        reason: 'settle: single_observation',
+      });
+    },
+  );
+
+  test.each([null, 'invalid', new Date(T0 + 2000).toISOString()])(
+    'invalid commit timestamp %s refuses bypass',
+    async (committedDate) => {
+      const forge = makeForge({ 7: prSpec({ committedDate, reviews: [allClearReview()] }) });
+      expect(await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).toEqual({
+        ok: false,
+        reason: 'settle: single_observation',
+      });
+    },
+  );
+
+  test.each(['acceptance', 'objection', 'threads', 'lag', 'write'] as const)(
+    'all-clear never bypasses %s',
+    async (guard) => {
+      const forge = makeForge({
+        7: prSpec({
+          reviews:
+            guard === 'acceptance'
+              ? []
+              : [
+                  review(),
+                  ...(guard === 'objection'
+                    ? [review({ login: 'dave', state: 'CHANGES_REQUESTED' })]
+                    : []),
+                ],
+          issueComments: [allClearComment()],
+          threads: guard === 'threads' ? [{ isResolved: false, root: 'dave' }] : [],
+          restExtraReviews: guard === 'lag' ? [{ node_id: 'unseen', state: 'APPROVED' }] : [],
+        }),
+      });
+      if (guard === 'write')
+        forge.hook = (args) => (args.includes('POST') ? unprocessable('write refused') : undefined);
+      const { effects, mergeCalls } = gated(forge, T0 + 1000);
+      const result = await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain(
+        {
+          acceptance: 'no_head_bound_acceptance',
+          objection: 'objection_outstanding',
+          threads: 'unresolved external threads',
+          lag: 'review data lag',
+          write: 'not durable',
+        }[guard],
+      );
+      expect(mergeCalls).toEqual([]);
+    },
+  );
+
+  test.each(['complete', 'moved', 'capped'] as const)(
+    'all-clear conversation pagination: %s',
+    async (kind) => {
+      const comments = Array.from(
+        { length: kind === 'capped' ? PAGE * SNAPSHOT_PAGE_CAP + 1 : PAGE + 1 },
+        () => ({ ...allClearComment(), body: '' }),
+      );
+      comments[kind === 'complete' ? comments.length - 1 : 0] = allClearComment();
+      const forge = makeForge({
+        7: prSpec({
+          reviews: [review()],
+          issueComments: comments,
+          headOnLaterPages: kind === 'moved' ? SHA_A : null,
+        }),
+      });
+      const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME);
+      expect(result.ok).toBe(kind === 'complete');
+    },
+  );
+
+  test.each(['error', 'malformed', 'moved'] as const)(
+    'all-clear fetch %s fails closed',
+    async (kind) => {
+      const forge = makeForge({ 7: prSpec({ reviews: [allClearReview()] }) });
+      forge.hook = (args) =>
+        flagValue(args, 'query').includes('commentsAfter')
+          ? kind === 'error'
+            ? { code: 1, stdout: '', stderr: 'offline fixture failure' }
+            : okRes(
+                kind === 'malformed'
+                  ? { errors: [{ message: 'unavailable' }] }
+                  : { data: { repository: { pullRequest: { headRefOid: SHA_A } } } },
+              )
+          : undefined;
+      expect(
+        (await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).ok,
+      ).toBe(false);
+    },
+  );
 
   test('a refusal that creates a new anchor writes it (best effort) so a later run can settle', async () => {
     const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });

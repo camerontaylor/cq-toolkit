@@ -136,6 +136,18 @@ previously verified commits with `--push`. Reports retain decisions, reasons, mo
 per-invocation tokens, wall time and available cost with its modeled/billed basis. Unknown
 cost stays absent. Full JSON evidence is persisted on every exit.
 
+Every planned unit of work appears in the report's `planned` rows with an honest outcome:
+`fixed`, `unfixed`, `escalated-to-human`, `not-started`, `cancelled` or `exhausted`. A unit
+that stopped before deriving its tasks is one branchless row naming the unit and the stop
+reason (its task list was never known, so none is invented). The `failed` evidence keeps
+every retained failed-attempt branch and sha; a task fixed after earlier failed rounds keeps
+that history under its `fixed` row. Work with no retained artifact stays branchless — no
+commit URL is fabricated. Explicit `counters` carry the denominators (planned, attempted,
+verified fixed, skipped by an earlier verified sibling, unresolved, plus rescue attempts and
+verified rescue fixes as separate counts, never a ratio). The opt-in PR summary's Unfixed
+section names every outstanding unit, branch-bearing rows with their compare link or local
+branch, branchless rows with their stop reason only, and stays bounded and scan-gated.
+
 `analyze.init` writes only the version and detected checks unless optional fields are
 explicitly supplied as flags (for example `--budgets='{"run":{"maxTokens":100000}}'`).
 No model is selected by the generated starter config. New agentic compositions use the

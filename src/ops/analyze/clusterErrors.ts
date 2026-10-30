@@ -162,7 +162,14 @@ const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
 
 /** True when the character before `index` is a Unicode letter, number, or underscore. */
 function isAfterUnicodeWordChar(message: string, index: number): boolean {
-  return index > 0 && WORD_CHAR.test(message[index - 1] as string);
+  if (index === 0) return false;
+  let start = index - 1;
+  const last = message.charCodeAt(start);
+  if (last >= 0xdc00 && last <= 0xdfff && start > 0) {
+    const first = message.charCodeAt(start - 1);
+    if (first >= 0xd800 && first <= 0xdbff) start -= 1;
+  }
+  return WORD_CHAR.test(message.slice(start, index));
 }
 
 /** Numbers with an optional decimal part (codes, counts, line:col refs). */

@@ -17,8 +17,12 @@ export type {
   DevLoadStamp,
   DevReadinessRecord,
   DevRecord,
+  DevReuseBasis,
+  DevReuseRecord,
   DevReviewCompletion,
   ReadinessGap,
+  ReuseSelection,
+  ReuseSelectionInput,
 } from './record.js';
 export type { DevCheckInput, DevCheckReport } from './check.js';
 export type { DevDispositionInput } from './disposition.js';
@@ -36,6 +40,7 @@ export {
   DEFAULT_REVIEWER_TIMEOUT_MS,
   devLedgerPath,
   DEV_LEDGER_VERSION,
+  findReusableCycle,
   parseDevLedger,
   pathDevLedgerStore,
   serializeDevLedger,

@@ -812,7 +812,12 @@ export class AcpDriver implements Driver {
     // Cancellation outranks the strict refusal.
     const signal = options?.signal;
     if (signalAborted(signal)) {
-      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
     assertStrictTokenBudgetSupported(opInvocation.budget, 'acp');
 
@@ -875,7 +880,12 @@ export class AcpDriver implements Driver {
     // leaves neither a dangling user turn, nor a session record, nor a spawn.
     // The strict refusal already ran at entry (no duplicate here).
     if (signalAborted(signal)) {
-      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
 
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in
@@ -917,6 +927,8 @@ export class AcpDriver implements Driver {
       // — a synchronous spawn failure is a LOCAL failure.
       return {
         usage: zeroUsage(),
+        // Seam v3: no session reached the provider — a placeholder, not a measurement.
+        usageProvenance: 'unmeasured',
         sessionId: record.sessionId,
         denials: [],
         stopReason: 'error',
@@ -1764,6 +1776,10 @@ export class AcpDriver implements Driver {
     inputs: VerdictInputs,
   ): WorkerResult {
     const usage = inputs.measuredUsage ?? zeroUsage();
+    // Seam v3: `measuredUsage` is the wire gate's verdict (mapWireUsage returns
+    // undefined for absent or malformed reported usage) — the only presence
+    // signal; the normalized zero is never consulted.
+    const usageProvenance = inputs.measuredUsage === undefined ? 'unmeasured' : 'measured';
     const stopReason = stopReasonOf({
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
       answerWriteFailed: inputs.answerWriteFailed,
@@ -1832,6 +1848,7 @@ export class AcpDriver implements Driver {
         ? { structuredOutput: inputs.structured }
         : {}),
       usage,
+      usageProvenance,
       ...cost,
       sessionId,
       denials: observation.denials,

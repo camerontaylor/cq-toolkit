@@ -31,8 +31,10 @@ import type {
   JobState,
   JobStatus,
   JournalEvent,
+  KnownUsageSummary,
   Limits,
   OpResult,
+  OpResultArtifact,
   Plan,
   RunCounts,
   RunEarlyStopReason,
@@ -89,34 +91,73 @@ export function opResultSchema<R>(value: z.ZodType<R>): z.ZodType<OpResult<R>> {
 
 export const OpResultSchema: z.ZodType<OpResult<unknown>> = opResultSchema(z.unknown());
 
+const NonnegativeSafeCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+/** Typed, strict optional result envelope; absent usage stays distinct from zero. */
+export const KnownUsageSummarySchema: z.ZodType<KnownUsageSummary> = z
+  .object({
+    usage: UsageSchema.exactOptional(),
+    costUSD: z.number().finite().nonnegative().exactOptional(),
+    knownCount: NonnegativeSafeCountSchema,
+    unknownCount: NonnegativeSafeCountSchema,
+    unpricedCount: NonnegativeSafeCountSchema,
+  })
+  .strict();
+
 /** Consumer envelope only; the frozen base taxonomy remains strict and unchanged. */
-export const OpResultArtifactSchema = z.unknown().transform((raw, ctx): OpResult<unknown> => {
-  let base = raw;
-  const hasReport = typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'report');
-  if (hasReport) {
-    const { report: _report, ...rest } = raw as Record<string, unknown>;
-    base = rest;
-  }
-  const parsed = OpResultSchema.safeParse(base);
-  if (!parsed.success) {
-    ctx.addIssue({ code: 'custom', message: 'invalid strict OpResult base' });
-    return z.NEVER;
-  }
-  if (hasReport) {
-    try {
-      const report = (raw as Record<string, unknown>).report;
-      JSON.stringify(report, (_key, value: unknown) => {
-        if (value === undefined) throw new Error('undefined member in report');
-        return value;
-      });
-      assertJsonLossless(report);
-    } catch (error) {
-      ctx.addIssue({ code: 'custom', message: `non-lossless report: ${String(error)}` });
+export const OpResultArtifactSchema = z
+  .unknown()
+  .transform((raw, ctx): OpResultArtifact<unknown> => {
+    let base = raw;
+    const hasReport = typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'report');
+    const hasUsageSummary =
+      typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'usageSummary');
+    if (hasReport || hasUsageSummary) {
+      const {
+        report: _report,
+        usageSummary: _usageSummary,
+        ...rest
+      } = raw as Record<string, unknown>;
+      base = rest;
+    }
+    const parsed = OpResultSchema.safeParse(base);
+    if (!parsed.success) {
+      ctx.addIssue({ code: 'custom', message: 'invalid strict OpResult base' });
       return z.NEVER;
     }
-  }
-  return raw as OpResult<unknown>;
-});
+    if (hasReport) {
+      try {
+        const report = (raw as Record<string, unknown>).report;
+        JSON.stringify(report, (_key, value: unknown) => {
+          if (value === undefined) throw new Error('undefined member in report');
+          return value;
+        });
+        assertJsonLossless(report);
+      } catch (error) {
+        ctx.addIssue({ code: 'custom', message: `non-lossless report: ${String(error)}` });
+        return z.NEVER;
+      }
+    }
+    if (hasUsageSummary) {
+      const usageSummary = (raw as Record<string, unknown>).usageSummary;
+      const summary = KnownUsageSummarySchema.safeParse(usageSummary);
+      if (!summary.success) {
+        ctx.addIssue({ code: 'custom', message: 'invalid usageSummary' });
+        return z.NEVER;
+      }
+      try {
+        JSON.stringify(usageSummary, (_key, value: unknown) => {
+          if (value === undefined) throw new Error('undefined member in usageSummary');
+          return value;
+        });
+        assertJsonLossless(usageSummary);
+      } catch (error) {
+        ctx.addIssue({ code: 'custom', message: `non-lossless usageSummary: ${String(error)}` });
+        return z.NEVER;
+      }
+    }
+    return raw as OpResultArtifact<unknown>;
+  });
 
 // ---------------------------------------------------------------------------
 // Kernel: jobs, plans, run options, limits, reports

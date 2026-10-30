@@ -395,7 +395,12 @@ export class ClaudeCodeCliTransport implements Driver {
     // Cancellation outranks the strict refusal.
     const signal = options?.signal;
     if (signalAborted(signal)) {
-      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
     assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-code');
 
@@ -427,7 +432,12 @@ export class ClaudeCodeCliTransport implements Driver {
     // abort that fired since entry never spawns and never creates a session
     // record. The strict refusal already ran at entry (no duplicate here).
     if (signalAborted(signal)) {
-      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        usageProvenance: 'unmeasured',
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
 
     // --- Structured-output preflight (PR #238 review round 2): the schema
@@ -597,6 +607,9 @@ export class ClaudeCodeCliTransport implements Driver {
       await removeMcpConfig(mcpConfigPath);
       return {
         usage: zeroUsage(),
+        // Seam v3: the spawn never reached the provider, so the zero is a
+        // placeholder, never a measurement.
+        usageProvenance: 'unmeasured',
         sessionId: record.sessionId,
         denials: [],
         stopReason: 'error',
@@ -836,6 +849,10 @@ export class ClaudeCodeCliTransport implements Driver {
   ): WorkerResult {
     const measuredFrame = measureResultUsage(observation.result);
     const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
+    // Seam v3: measurement PRESENCE is decided here, from the two raw sources
+    // (the result frame's shaped usage, else the assistant frames' shaped
+    // usage) — never from the normalized zero. `zeroUsage()` is the placeholder.
+    const usageMeasured = measured !== undefined || observation.assistantUsage !== undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted,
@@ -880,7 +897,7 @@ export class ClaudeCodeCliTransport implements Driver {
           texts: [...(resultFailed ? [resultCause, subtype ?? ''] : []), ...observation.stderr],
           ...(observation.close?.oversizedLine === true ? { oversizedLine: true } : {}),
           ...(observation.close !== undefined ? { close: observation.close } : {}),
-          measuredUsage: measured !== undefined || observation.assistantUsage !== undefined,
+          measuredUsage: usageMeasured,
           codexBinary,
         });
         errorClass = classified.errorClass;
@@ -902,14 +919,13 @@ export class ClaudeCodeCliTransport implements Driver {
       observation.servedModel !== undefined
         ? { ...modelSpec, model: observation.servedModel }
         : modelSpec;
-    const cost =
-      measured === undefined && observation.assistantUsage === undefined
-        ? {}
-        : costField(
-            (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
-            pricedModel,
-            usage,
-          );
+    const cost = !usageMeasured
+      ? {}
+      : costField(
+          (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
+          pricedModel,
+          usage,
+        );
     return {
       // The observed served model: what the endpoint reports it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
@@ -921,6 +937,7 @@ export class ClaudeCodeCliTransport implements Driver {
         ? { structuredOutput: structured }
         : {}),
       usage,
+      usageProvenance: usageMeasured ? 'measured' : 'unmeasured',
       ...cost,
       sessionId,
       // Session-log preservation item 1.5: the harness-native session id

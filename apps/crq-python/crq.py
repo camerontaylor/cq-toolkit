@@ -8,6 +8,7 @@ never own GitHub or queue mutation. See README.md and ops/CUTOVER.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import hashlib
@@ -25,8 +26,12 @@ import status_summary
 import repair_tick
 import coverage
 import author_quota
+import queue_transport
 import author_lease
 import review_receipt
+import deferred_refresh
+import merged_reconcile
+import usage_slots
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,8 +110,40 @@ def is_ancestor(a: str, b: str) -> bool:
     return run(["git", "merge-base", "--is-ancestor", a, b], cwd=CLONE, check=False).returncode == 0
 
 
+_FORGE_BUDGET = None
+
+
+class ForgeBudget:
+    """One aggregate request/deadline allowance for locked recovery reads."""
+    def __init__(self, requests=24, seconds=30, clock=None):
+        self.clock = clock or time.monotonic
+        self.deadline = self.clock() + seconds
+        self.remaining = requests
+
+    def available(self):
+        return self.remaining > 0 and self.clock() < self.deadline
+
+    def take(self):
+        if not self.available():
+            raise deferred_refresh.RefreshExhausted("aggregate forge budget exhausted; debt retained")
+        self.remaining -= 1
+        return max(0.001, min(10, self.deadline - self.clock()))
+
+
+@contextlib.contextmanager
+def forge_window(budget):
+    global _FORGE_BUDGET
+    previous = _FORGE_BUDGET
+    _FORGE_BUDGET = budget
+    try:
+        yield
+    finally:
+        _FORGE_BUDGET = previous
+
+
 def gh_json(args: List[str]) -> Any:
-    return json.loads(run(["gh", *args], cwd=CLONE, timeout=120).stdout)
+    timeout = _FORGE_BUDGET.take() if _FORGE_BUDGET is not None else 120
+    return json.loads(run(["gh", *args], cwd=CLONE, timeout=timeout).stdout)
 
 
 def paseo_json(args: List[str]) -> Any:
@@ -314,28 +351,63 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         counts[severity] = counts.get(severity, 0) + 1
     res: Dict[str, Any] = {"exit": exit_code, "events": len(events), "bad_lines": bad_lines,
                            "findings": len(findings), "severity_counts": counts}
+    # Authorization is derived from every structured cause, never message text.
+    causes = []
+    proof_complete = ndjson.exists() and bad_lines == 0 and type(exit_code) is int
+    def hard(code):
+        causes.append({"source": "queue", "category": "unknown", "code": code})
+    for _ in range(bad_lines):
+        hard("malformed-stream")
+    for e in events:
+        if e.get("type") == "error":
+            if e.get("errorType") == "rate_limit" and e.get("recoverable") is True:
+                causes.append({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"})
+            else:
+                code = e.get("errorType")
+                hard(code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", code)
+                     else "unknown-error")
+        if e.get("type") == "action_required" or e.get("status") == "awaiting_confirmation":
+            hard("action-required")
+        # Unknown status values are not evidence of a harmless progress event.
+        # In particular scan/budget/cancel statuses must survive a vendor error.
+        if e.get("type") == "finding" and isinstance(e.get("severity"), str) and e["severity"] in BLOCKING_SEVERITIES:
+            hard("blocking-finding")
+        if e.get("type") != "complete" and "status" in e:
+            status = e["status"]
+            # Explicit protocol progress is neutral, never completion/vendor proof.
+            # TS fixtures: status/scanning, reviewing, writing; heartbeat/reviewing.
+            progress = (e["type"] == "status" and isinstance(status, str) and
+                        status in ("scanning", "reviewing", "writing") or
+                        e["type"] == "heartbeat" and status == "reviewing")
+            if not progress:
+                hard(status if isinstance(status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", status)
+                     else "unrecognized-status")
+                proof_complete = False
+    if errors and complete:
+        hard("conflicting-terminal")
+    vendor_only = bool(causes) and all(c["source"] == "vendor" for c in causes)
+    if type(exit_code) is not int:
+        hard("missing-exit")
+    elif exit_code != 0 and not (exit_code == 1 and vendor_only):
+        hard("unexpected-exit")
     if actions:
-        res.update(outcome="action_required", message=str(actions[0])[:400])
+        res.update(outcome="action_required", message="structured action required")
+    elif any(e.get("errorType") == "auth" for e in errors):
+        # Operational stop only: auth remains a hard cause, never vendor authority.
+        res.update(outcome="auth", message="structured authentication failure; owner action needed")
     elif errors:
-        e = errors[0]
-        et = str(e.get("errorType", "")).lower()
-        msg = str(e.get("message", ""))
-        res["message"] = f"{e.get('errorType')}: {msg}"[:400]
-        if SIZE_REFUSAL.search(f"{et} {msg}"):
-            res.update(outcome="too_large")
-        elif "rate" in et or "limit" in et or "quota" in et or "rate limit" in msg.lower():
-            metadata = e.get("metadata")
-            wait = str(metadata.get("waitTime", "")) if isinstance(metadata, dict) else ""
-            m = re.search(r"(\d+)\s*(second|minute|hour)", wait)
-            mins = None
-            if m:
-                k = {"second": 1 / 60, "minute": 1, "hour": 60}[m.group(2)]
-                mins = int(int(m.group(1)) * k) + 1
-            res.update(outcome="rate_limited", wait_minutes=mins)
-        elif "auth" in et or "login" in msg.lower() or "unauthor" in msg.lower():
-            res.update(outcome="auth")
+        if vendor_only and proof_complete and type(exit_code) is int and exit_code in (0, 1):
+            res.update(outcome="rate_limited")
+            waits = []
+            for e in errors:
+                metadata = e.get("metadata")
+                wait = metadata.get("waitTime") if isinstance(metadata, dict) else None
+                m = re.fullmatch(r"(\d+)\s*(second|minute|hour)s?", wait) if isinstance(wait, str) else None
+                if m:
+                    waits.append(int(m.group(1)) * {"second": 1, "minute": 60, "hour": 3600}[m.group(2)])
+            res["wait_seconds"] = max(waits) if waits else None
         else:
-            res.update(outcome="error")
+            res.update(outcome="error", message="structured failure; see failure provenance")
     elif exit_code is None:
         res.update(outcome="interrupted", message="no exit status recorded")
     elif exit_code != 0:
@@ -353,6 +425,12 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         reviewed = last.get("reviewedFiles") or []
         count = len(reviewed) if isinstance(reviewed, list) else reviewed if isinstance(reviewed, int) and not isinstance(reviewed, bool) and reviewed >= 0 else 0
         res.update(outcome="completed", reviewed_files=count)
+    if not errors and not actions and res["outcome"] != "completed":
+        hard("nonterminal-review")
+    # Unknown statuses also invalidate an otherwise apparently successful stream.
+    if not proof_complete and res["outcome"] == "completed":
+        res.update(outcome="malformed", message="stream contains an unrecognized status")
+    res["failure_provenance"] = {"version": 1, "complete": proof_complete, "causes": causes}
     res["counted"] = res["outcome"] == "completed"
     return res
 
@@ -382,6 +460,83 @@ def findings_md(ndjson: Path, meta: Dict[str, Any], cls: Dict[str, Any]) -> str:
 def pr_info(pr: int) -> Dict[str, Any]:
     return gh_json(["pr", "view", str(pr), "--repo", REPO, "--json",
                     "number,state,isDraft,headRefName,headRefOid,baseRefName,updatedAt,mergeCommit,mergedAt"])
+
+
+def deferred_forge(args: List[str]) -> Any:
+    """Normalize a bounded forge timeout into retryable deferred debt."""
+    try:
+        return gh_json(args)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("deferred forge request timed out") from None
+
+
+def verify_deferred_source(repo: str, pr: int) -> Dict[str, Any]:
+    """Trusted forge identity for one explicitly enrolled request, no discovery."""
+    if repo != REPO or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise ValueError("deferred repository is outside configured scope")
+    if type(pr) is not int or pr <= 0:
+        raise ValueError("invalid deferred PR")
+    data = deferred_forge(["api", f"repos/{repo}/pulls/{pr}"])
+    if not isinstance(data, dict):
+        raise ValueError("missing forge PR metadata")
+    base = data.get("base") or {}
+    head = data.get("head") or {}
+    user = data.get("user") or {}
+    if (not isinstance(base, dict) or not isinstance(head, dict) or not isinstance(user, dict) or
+            not isinstance(base.get("repo"), dict) or base["repo"].get("full_name") != repo or
+            type(data.get("number")) is not int or data["number"] != pr or
+            not isinstance(user.get("login"), str) or not user["login"] or
+            not isinstance(head.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", head["sha"]) or
+            not isinstance(base.get("ref"), str) or not base["ref"] or type(data.get("merged")) is not bool or
+            data.get("state") not in ("open", "closed") or (data["merged"] and data["state"] != "closed")):
+        raise ValueError("invalid forge PR identity")
+    merge = data.get("merge_commit_sha") if data["merged"] else None
+    if data["merged"] and (not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge)):
+        raise ValueError("missing immutable forge merge identity")
+    return {"repo": repo, "pr": pr, "producer": user["login"], "head": head["sha"],
+            "target": base["ref"], "state": "MERGED" if data["merged"] else data["state"].upper(),
+            "mergeSha": merge}
+
+
+def find_deferred_source(repo: str, producer: str, head: str, target: str, limit: int) -> List[Dict[str, Any]]:
+    """Recover a lost publication reply, all states, refusing incomplete search.
+
+    Search is restricted to the explicit request's repo/producer/head/base. Its
+    candidates are re-read as trusted PR metadata; search snippets are no proof.
+    Search text is not identity: a candidate that re-reads as a well-formed forge
+    PR naming another publication (different producer/head/target) is skipped as
+    search noise. Malformed candidates, an incomplete or over-limit envelope and
+    duplicate candidates still fail closed, as does any malformed trusted re-read.
+    Empty/index-lag results leave the intent unpublished for a later tick.
+    """
+    if (repo != REPO or not isinstance(producer, str) or
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", producer) or
+            not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head) or
+            queue_transport.branch_fault(target) is not None or type(limit) is not int or limit != 2):
+        raise ValueError("invalid deferred publication binding")
+    query = f"repo:{repo} is:pr author:{producer} base:{target} {head}"
+    result = deferred_forge(["api", "--method", "GET", "search/issues", "-f", "q=" + query,
+                             "-f", "per_page=" + str(limit), "-f", "page=1"])
+    if (not isinstance(result, dict) or result.get("incomplete_results") is not False or
+            type(result.get("total_count")) is not int or not isinstance(result.get("items"), list) or
+            not 0 <= result["total_count"] <= limit or len(result["items"]) != result["total_count"]):
+        raise RuntimeError("deferred publication search incomplete; debt retained")
+    matches = []
+    seen = set()
+    for candidate in result["items"]:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("pull_request"), dict):
+            raise ValueError("search candidate is not a forge PR")
+        number = candidate.get("number")
+        actual = verify_deferred_source(repo, number)
+        # Count every verified candidate before the match test: a duplicate fails
+        # closed whether or not it names this publication.
+        if number in seen:
+            raise RuntimeError("duplicate search candidate; debt retained")
+        seen.add(number)
+        if any(actual[k] != value for k, value in (("producer", producer), ("head", head), ("target", target))):
+            continue  # well-formed forge PR for another publication: search noise
+        matches.append(actual)
+    return matches
 
 
 _AGENTS_CACHE: Dict[str, Any] = {}
@@ -799,6 +954,159 @@ def current_report(request_id: str, receipt_id: Optional[str] = None, cursor: Op
     return review_receipt.read_receipt(STATE / "receipts", actual, cursor)
 
 
+class DiscoveryStorageFailed(RuntimeError):
+    """Durability is uncertain: abort this tick before any further effects."""
+
+
+def _save_discovery_queue(q, stage):
+    try:
+        save_queue(q)
+    except OSError:
+        raise DiscoveryStorageFailed("merged discovery storage failure: " + stage +
+                                     "; tick aborted; persisted progress must be revalidated") from None
+
+
+def _read_reconcile_wrapper(path, interval, page_budget):
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        raise merged_reconcile.ReconcileRefused("wrapper-decode: invalid text") from None
+    except OSError:
+        raise DiscoveryStorageFailed("merged discovery storage failure: wrapper-read; tick aborted") from None
+    try:
+        wrapper = json.loads(text)
+    except (ValueError, RecursionError):
+        raise merged_reconcile.ReconcileRefused("wrapper-decode: invalid JSON") from None
+    if (not isinstance(wrapper, dict) or set(wrapper) != {"source", "checkpoint", "digest"} or
+            not isinstance(wrapper["source"], dict)):
+        raise merged_reconcile.ReconcileRefused("wrapper-schema: required fields malformed")
+    source = wrapper["source"]
+    if (set(source) != {"version", "method", "repo", "base", "repository_id", "ceiling", "window"} or
+            type(source.get("version")) is not int or source["version"] != 1 or
+            source.get("method") != "all-number-slots-v1" or source.get("repo") != REPO or
+            source.get("base") != "merge-queue" or source.get("window") != merged_reconcile.NUMBER_WINDOW or
+            not isinstance(source.get("repository_id"), str) or not source["repository_id"] or
+            type(source.get("ceiling")) is not int or
+            not 0 <= source["ceiling"] <= merged_reconcile.MAX_REPOSITORY_NUMBER):
+        raise merged_reconcile.ReconcileRefused("wrapper-schema: source identity malformed")
+    if wrapper["digest"] != review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"}):
+        raise merged_reconcile.ReconcileRefused("source/checkpoint wrapper digest mismatch")
+    if wrapper["checkpoint"] is not None:
+        wrapper["checkpoint"] = merged_reconcile.load_checkpoint(wrapper["checkpoint"], interval, page_budget,
+            repo=REPO, base="merge-queue", allow_complete=True)
+    return wrapper
+
+
+def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
+    """Caller owns tick.lock; persist source/page before reads and Q1 before watermark."""
+    interval = merged_reconcile.normalize_interval(after, before)
+    if before >= iso():
+        raise merged_reconcile.ReconcileRefused("upper bound must precede scan startup")
+    merged_reconcile.normalize_page_budget(page_budget)
+    key = review_receipt.digest({"repo": REPO, "base": "merge-queue", **interval})
+    path = STATE / "reconcile" / (key + ".json")
+    wrapper = _read_reconcile_wrapper(path, interval, page_budget)
+
+    def save_wrapper():
+        wrapper["digest"] = review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})
+        try:
+            repair_tick.atomic(path, wrapper)
+        except OSError:
+            raise DiscoveryStorageFailed("merged discovery storage failure: wrapper-save; tick aborted") from None
+
+    def forge(query):
+        try:
+            return gh_json(["api", "graphql", "-f", "query=" + query])
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, deferred_refresh.RefreshExhausted):
+            raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
+
+    if wrapper is None:
+        source = merged_reconcile.freeze_source(forge, repo=REPO, base="merge-queue")
+        wrapper = {"source": source, "checkpoint": None}
+        if not dry_run:
+            save_wrapper()
+    source = wrapper["source"]
+
+    def persist(checkpoint):
+        wrapper["checkpoint"] = checkpoint
+        save_wrapper()
+
+    raw = wrapper["checkpoint"]
+    if raw and raw.get("complete"):
+        result = merged_reconcile.load_checkpoint(raw, interval, page_budget, repo=REPO,
+                                                   base="merge-queue", allow_complete=True)
+    else:
+        result = merged_reconcile.reconcile(None,
+            lambda cursor: merged_reconcile.number_page(forge, source, cursor, repo=REPO, base="merge-queue"),
+            repo=REPO, **interval, page_budget=page_budget, checkpoint_raw=raw,
+            checkpoint_save=persist, dry_run=dry_run)
+    summary = {**result["summary"], "inventory_digest": result["digest"],
+               "source": source, "checkpoint_key": key}
+    if result["complete"]:
+        existing = [v["binding"] for v in q.get("merged_current_requests", {}).values()]
+        plan = merged_reconcile.enrollment_plan(result, repo=REPO, existing_requests=existing, dry_run=dry_run)
+        if not dry_run:
+            # The adapter validated live forge provenance for each exact slot.
+            # No second per-PR read of mutable metadata, no inline review launch.
+            staged = json.loads(json.dumps(q))
+            for entry in plan["entries"]:
+                if entry["disposition"] != "intent":
+                    continue
+                binding = {k: v for k, v in entry["binding"].items() if k != "policy"}
+                review_receipt.enroll(staged, **binding, request_id=entry["request_id"], at=iso())
+            staged["merged_reconcile"] = summary
+            # Completeness does not confer review credit, even on old done/skipped items.
+            _save_discovery_queue(staged, "enrollment-save")
+            q.clear()
+            q.update(staged)
+    elif not dry_run:
+        staged = json.loads(json.dumps(q))
+        staged["merged_reconcile"] = summary
+        _save_discovery_queue(staged, "inventory-summary-save")
+        q.clear()
+        q.update(staged)
+    return summary
+
+
+def discover_merged(q, budget):
+    """Natural nonselective tick, same bounded inventory and overlap replay."""
+    caller = q
+    q = json.loads(json.dumps(q))
+    active = q.get("merged_discovery") or {}
+    if active and not active.get("complete"):
+        after, before = active["after"], active["before"]
+    else:
+        watermark = q.get("merged_watermark") or q["created_at"]
+        after = iso(parse_iso(watermark) - dt.timedelta(minutes=5))
+        before = iso(now() - dt.timedelta(seconds=1))
+    if after >= before:
+        return []
+    # Record the frozen bounds in queue too: a crash after source pinning but
+    # before page one must not cause the next tick to choose a different upper.
+    if not active or active.get("complete"):
+        q["merged_discovery"] = {"after": after, "before": before, "complete": False}
+        _save_discovery_queue(q, "bounds-save")
+    try:
+        with forge_window(budget):
+            result = reconcile_merged(q, after=after, before=before, page_budget=4)
+        q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
+        _save_discovery_queue(q, "discovery-summary-save")
+        if result["complete"]:
+            q["merged_watermark"] = before
+            _save_discovery_queue(q, "watermark-save")
+        caller.clear()
+        caller.update(q)
+        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"]
+    except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
+        q["merged_discovery"]["error"] = str(exc)[:200]
+        _save_discovery_queue(q, "refusal-debt-save")
+        caller.clear()
+        caller.update(q)
+        return ["merged discovery incomplete; cursor/debt retained: " + str(exc)[:200]]
+
+
 # ----------------------------------------------------------- planning a review
 
 
@@ -815,34 +1123,20 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
     target = f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head)
     notes = []
-    if item.get("pinned_base"):
-        # The merge-base only moves when the PR absorbs newer target commits
-        # (restack/rebase/merge-in). Then old-pin..head would drag unrelated
-        # target changes into the review, so prior review evidence is stale.
-        # (Ancestry alone is not enough: an old target pin stays an ancestor.)
-        if pin != item["pinned_base"]:
-            notes.append(f"base drift: merge-base moved {item['pinned_base'][:10]} → {pin[:10]} (PR restacked) "
-                         f"→ earlier cycles void, re-pinned, 1 cycle owed")
-            if not dry:
-                item.setdefault("voided_cycles", []).extend(item.get("cycles", []))
-                item["cycles"] = []
-                item["prior_cycles"] = 0
-                item["pinned_base"] = pin
-        else:
-            pin = item["pinned_base"]
-    else:
-        if item.get("prior_cycles") and item.get("prior_base") and item["prior_base"] != pin:
-            notes.append(f"prior cycle-1 base {item['prior_base'][:10]} ≠ current merge-base {pin[:10]} "
-                         f"→ prior cycle invalid on this base; 1 cycle owed")
-            if not dry:
-                item["voided_prior_cycles"] = item["prior_cycles"]
-                item["prior_cycles"] = 0
-        if not dry:
-            item["pinned_base"] = pin
-            item["target_ref"] = target
-    cycle = completed_open_cycles(item) + 1
-    return {"base": pin, "head": head, "target": target, "label": "cycle 1 (required)" if cycle == 1 else "additional cycle (optional)", "cycle": cycle,
-            "notes": notes, "branch": info["headRefName"], "review_pin": pin}
+    for record in item.get("cycles", []):
+        if (record.get("base") == pin and record.get("head") == head and
+                record.get("dirty_diff") == "clean tree" and record.get("run_id") and
+                record.get("range_policy") == "full-range-once-v1"):
+            raise NothingToReview("exact captured base/head range already reviewed")
+    if item.get("pinned_base") and pin != item["pinned_base"]:
+        notes.append("base drift: retain prior evidence; review the newly captured range once")
+    if not dry:
+        item["pinned_base"] = pin
+        item["target_ref"] = target
+    cycle = len(item.get("cycles", [])) + 1
+    return {"base": pin, "head": head, "target": target, "label": "one review of captured range", "cycle": cycle,
+            "notes": notes, "branch": info["headRefName"], "review_pin": pin,
+            "range_policy": "full-range-once-v1"}
 
 
 class NothingToReview(Exception):
@@ -859,53 +1153,22 @@ def ensure_commit(pr: int, sha: str) -> bool:
 
 
 def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
-    """One informational review of what the last CLI review did not see.
-    Open PRs: since..head. Merged PRs: since..final head against the target as
-    it was at merge. Restacked (pin moved / since not an ancestor): replay the
-    reviewed head onto the new pin with merge-tree and review new-head vs that
-    replay, so only post-review changes show; a conflicting replay falls back
-    to the full PR diff (still ONE review, not a two-cycle redo)."""
-    merged = info["state"] == "MERGED"
+    """Conservative full-range fallback when equivalent scope is unproven."""
     if info["state"] not in ("OPEN", "MERGED"):
         raise NotReady(f"PR is {info['state']}")
     head = info["headRefOid"]
     if not ensure_commit(item["pr"], head):
-        raise NotReady(f"head {head[:10]} not fetchable")
-    target = f"{info['mergeCommit']['oid']}^1" if merged else f"origin/{info['baseRefName']}"
+        raise NotReady("source head unavailable")
+    target = f"{info['mergeCommit']['oid']}^1" if info["state"] == "MERGED" else f"origin/{info['baseRefName']}"
     pin = git("merge-base", target, head)
-    base, review_head = pin, head
-    scope = "full PR diff (no usable last CLI-reviewed head)"
-    since = item.get("since")
-    if since and ensure_commit(item["pr"], since):
-        since = git("rev-parse", f"{since}^{{commit}}")
-        if since == head:
-            raise NothingToReview(f"head {head[:10]} is the last CLI-reviewed head")
-        if is_ancestor(since, head) and git("merge-base", target, since) == pin:
-            base, scope = since, f"delta since last CLI-reviewed head {since[:10]}"
-        else:
-            m = run(["git", "merge-tree", "--write-tree", "--no-messages", pin, since], cwd=CLONE, check=False)
-            tree = m.stdout.split()[0] if m.returncode == 0 and m.stdout.strip() else None
-            if tree is None:
-                scope = f"full PR diff (reviewed head {since[:10]} does not replay cleanly onto {pin[:10]})"
-            elif tree == git("rev-parse", f"{head}^{{tree}}"):
-                raise NothingToReview(f"pure restack of reviewed head {since[:10]} onto {pin[:10]}; nothing unreviewed")
-            else:
-                scope = f"delta since {since[:10]}, replayed onto restacked pin {pin[:10]}"
-                if not dry:
-                    ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
-                                 GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
-                    base = run(["git", "commit-tree", tree, "-p", pin, "-m",
-                                f"crq replay: PR #{item['pr']} reviewed head {since[:10]} on {pin[:10]}"],
-                               cwd=CLONE, env=ident).stdout.strip()
-                    review_head = run(["git", "commit-tree", f"{head}^{{tree}}", "-p", base, "-m",
-                                       f"crq replay head: PR #{item['pr']} at {head[:10]}"],
-                                      cwd=CLONE, env=ident).stdout.strip()
-                    git("update-ref", f"refs/crq/synth/pr{item['pr']}-delta-base", base)
-                    git("update-ref", f"refs/crq/synth/pr{item['pr']}-delta-head", review_head)
-    when = "post-merge" if merged else "post-cycle"
-    return {"base": base, "head": review_head, "pr_head": head, "target": target,
-            "label": f"informational {when} review — {scope}", "cycle": None, "notes": [],
-            "branch": None if merged else info["headRefName"], "review_pin": pin}
+    for record in item.get("cycles", []):
+        if (record.get("base") == pin and record.get("head") == head and
+                record.get("range_policy") == "full-range-once-v1" and record.get("run_id")):
+            raise NothingToReview("equivalent captured full range already reviewed")
+    return {"base": pin, "head": head, "pr_head": head, "target": target,
+            "label": "one full-range review (prior equivalent scope unproven)", "cycle": None,
+            "notes": [], "branch": info.get("headRefName") if info["state"] == "OPEN" else None,
+            "review_pin": pin, "range_policy": "full-range-once-v1"}
 
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -944,11 +1207,12 @@ def plan_author(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
 
 def starts_last_hour(q: Dict[str, Any]) -> int:
     cutoff = now() - dt.timedelta(hours=1)
-    return sum(1 for s in q.get("starts", []) if parse_iso(s) >= cutoff)
+    return sum(1 for s in q.get("starts", []) if parse_iso(s) > cutoff)
 
 
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [i for i in q["items"] if i["state"] == "reviewing" or (i["kind"] == "promotion" and i["state"] in SIGNER_STATES)]
+    return [i for i in q["items"] if i["state"] == "reviewing" or (i["kind"] == "promotion" and (
+        i["state"] in SIGNER_STATES or (i.get("request") or {}).get("reconciliation_required")))]
 
 
 def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str:
@@ -985,9 +1249,9 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         # required smudge filter) stays ungranted and waits for its lease deadline, which
         # authorizes the agent fallback, instead of failing every tick.
         raise author_quota.AuthorRefused("author head cannot be checked out") from exc
-    cli_cmd = ["coderabbit", "review", "--agent"]
-    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND):
-        # Author/current cycles review the COMMITTED base..head (the original manual cycle 1
+    cli_cmd = ["coderabbit", "review", "--agent", "--deep"]
+    if item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) or plan.get("range_policy"):
+        # Author/current/full-range cycles review the COMMITTED base..head (the original manual cycle 1
         # form) on a clean worktree, never uncommitted working-tree edits. The
         # natural argv is deliberately unchanged.
         cli_cmd.append("--committed")
@@ -996,7 +1260,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
-            "dirty_diff": "clean tree", "started_at": iso(),
+            "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
     if item["kind"] == review_receipt.KIND:
         meta["capture"] = item["capture"]
@@ -1117,6 +1381,10 @@ def cmd_review_child(run_id: str) -> int:
     # is not independently proved.
     repair_tick.atomic(rdir / "exit.json",
                        {"exit": rc, "ended_at": iso(), "timed_out": rc in (124, 137)})
+    try:
+        run(["systemctl", "--user", "--no-block", "start", "crq-tick.service"], check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # periodic tick remains the recovery path on non-systemd hosts
     return 0
 
 
@@ -1206,6 +1474,43 @@ def author_dispatch_failed(item: Dict[str, Any], r: Dict[str, Any], o: str, cls:
 # ----------------------------------------------------------- harvesting
 
 
+def set_rate_cooldown(q, cls, rdir):
+    seconds = cls.get("wait_seconds")
+    if seconds is None:
+        seconds = (q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]) * 60
+    try:
+        ended = parse_iso(json.loads((rdir / "exit.json").read_text()).get("ended_at")) or now()
+    except (OSError, ValueError, TypeError):
+        ended = now()
+    until = ended + dt.timedelta(seconds=seconds)
+    current = parse_iso(q.get("cooldown_until"))
+    q["cooldown_until"] = iso(max(current, until) if current else until)
+
+
+def has_collectable_runs(q):
+    """Match the minute harvester's reviewing/run eligibility without probing owners."""
+    return any(i["state"] == "reviewing" and i.get("run") for i in q["items"])
+
+
+def refresh_slot_deadline(q, usage, remaining, gate, at=None):
+    at = now() if at is None else at
+    if q.get("paused") or gate == "inflight" or not any(i["state"] == "pending" for i in q["items"]):
+        deadline = at + dt.timedelta(minutes=12)
+    elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > at:
+        deadline = parse_iso(q["cooldown_until"])
+    elif remaining <= 0:
+        deadline = usage_slots.next_slot([parse_iso(s) for s in q.get("starts", [])], at, usage)
+        deadline = deadline or at + dt.timedelta(seconds=60)
+    else:
+        deadline = at + dt.timedelta(minutes=12)  # available slots, no eligible item
+    hint = deadline
+    if has_collectable_runs(q):
+        # Detached reviews need minute collection; signer holds await full ticks.
+        hint = min(hint, at.replace(second=0, microsecond=0) + dt.timedelta(minutes=1))
+    usage_slots.write_next(STATE / "next-review-at", hint)
+    return deadline  # admission time, not the earlier result-collection hint
+
+
 def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
     r = item["run"]
     rdir = RUNS / r["run_id"]
@@ -1234,6 +1539,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     exit_code = json.loads(exitf.read_text())["exit"]
     if dry:
         return f"would harvest {r['run_id']}"
+    usage_slots.write_next(STATE / "next-review-at", now())
     meta = json.loads((rdir / "meta.json").read_text())
     cls = classify(rdir / "review.ndjson", exit_code)
     (rdir / "classification.json").write_text(json.dumps(cls, indent=2) + "\n")
@@ -1251,8 +1557,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["state"] = "done" if cls["counted"] else "blocked"
         item["last_error"] = cls.get("message")
         if cls["outcome"] == "rate_limited":
-            mins = cls.get("wait_minutes") or CONFIG["rate_limit_default_backoff_min"]
-            q["cooldown_until"] = iso(now() + dt.timedelta(minutes=mins + 2))
+            set_rate_cooldown(q, cls, rdir)
         if cls["outcome"] in ("action_required", "auth"):
             q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
         save_queue(q)
@@ -1271,7 +1576,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["last_error"] = None
         record = {"run_id": r["run_id"], "cycle": meta["cycle"], "base": meta["base"], "head": meta["head"],
                   "pr_head": meta.get("pr_head", meta["head"]),
-                  "dirty_diff": "clean tree", "ndjson": str(rdir / "review.ndjson"),
+                  "dirty_diff": "clean tree", "range_policy": meta.get("range_policy"), "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
         if item["kind"] == author_quota.AUTHOR_KIND:
             # Genuine cycle evidence, but NEVER repair debt and NEVER promoted
@@ -1306,8 +1611,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["state"] = "repairing" if repair_pending else "done"
         return f"{item['id']}: completed ({cls['findings']} findings)"
     if o == "rate_limited":
-        mins = cls.get("wait_minutes") or q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]
-        q["cooldown_until"] = iso(now() + dt.timedelta(minutes=mins + 2))
+        set_rate_cooldown(q, cls, rdir)
         q["rl_backoff_min"] = min(240, (q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]) * 2)
         item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
         if item["kind"] == author_quota.AUTHOR_KIND:
@@ -1336,7 +1640,9 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         return f"{item['id']}: {o} (not counted) → {item['state']} (author, no retry)"
     if item["kind"] == "promotion" and o in ("skipped", "too_large"):
         item["state"] = "split_needed"  # promotion_tick re-cuts a smaller prefix (never reported as success)
-    elif item["kind"] == "promotion":  # retried, never blocked: promotion must not stall on a flaky run
+    elif item["kind"] == "promotion" and o == "error" and item["failures"] >= CONFIG["max_item_failures"]:
+        item.update(state="blocked", not_before=None)
+    elif item["kind"] == "promotion":  # other failures retain the existing promotion retry policy
         item["state"] = "pending"
         item["not_before"] = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
     elif o in ("skipped", "too_large") or item["failures"] >= CONFIG["max_item_failures"]:
@@ -1362,9 +1668,17 @@ def additional_cycle(item: Dict[str, Any]) -> bool:
                                    and (item.get("author") or {}).get("cycle", 1) > 1)
 
 
+def parked_merged_linked_receipt(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    """A merged row parked because a linked current-code receipt owns recovery
+    never starts on its own, so it demands no additional-cycle wait."""
+    return item["kind"] == "merged" and any(
+        i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"] for i in q["items"])
+
+
 def optional_wait(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     return additional_cycle(item) and any(
-        i["state"] == "pending" and rank(i) <= 3 for i in q["items"] if i is not item)
+        i["state"] == "pending" and rank(i) <= 3 and not parked_merged_linked_receipt(q, i)
+        for i in q["items"] if i is not item)
 
 
 def advance_open(item: Dict[str, Any]) -> None:
@@ -2165,9 +2479,9 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         if snap["claimed"]:
             if not dry:
                 item["state"] = "signer_running"
-            if age > PROMO.get("signer_stall_min", 90) and not item.get("stall_alerted") and not dry:
+            if age > PROMO.get("signer_stall_min", 150) and not item.get("stall_alerted") and not dry:
                 item["stall_alerted"] = iso()
-                signer_alert(q, item, f"{iid} claimed but no result after {age:.0f}m (signer CLI timeout 75m)", log)
+                signer_alert(q, item, f"{iid} claimed but no result after {age:.0f}m (signer CLI timeout 120m)", log)
             return "; ".join(log) or None
         if item["base_sha"] != main_sha() and not dry:  # stale before the signer claimed it: withdraw (contract B)
             try:  # the signer renames a request to a dot-name before claiming: we win, or ENOENT
@@ -2205,6 +2519,7 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             item["mismatch_alerted"] = iso()
             signer_alert(q, item, f"{iid}: signer result does not match crq's request (sha256/item/base/batch) — ignored", log)
         return "; ".join(log)
+    usage_slots.write_next(STATE / "next-review-at", now())
     o, posted = r.get("outcome"), r.get("posted") or {}
     item["signer_result"] = {k: r.get(k) for k in ("outcome", "posted_state", "posted", "blocking", "started_at",
                                                    "ended_at", "wait_minutes", "reason")}
@@ -2262,8 +2577,12 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["state"] = "split_needed"  # signer already posted error; promotion_tick halves
         return f"{iid}: signer {o} → split"
     if o == "rate_limited":
-        mins = (r.get("wait_minutes") or CONFIG["rate_limit_default_backoff_min"]) + 2
-        q["cooldown_until"] = iso(now() + dt.timedelta(minutes=mins))
+        mins = r.get("wait_minutes")
+        if mins is None:
+            mins = CONFIG["rate_limit_default_backoff_min"]
+        until = (parse_iso(r.get("ended_at")) or now()) + dt.timedelta(minutes=mins)
+        current = parse_iso(q.get("cooldown_until"))
+        q["cooldown_until"] = iso(max(current, until) if current else until)
         recut_promotion(q, item, log, dry, "retried", f"signer rate limited ({mins}m)", not_before=q["cooldown_until"])
         return "; ".join(log)
     if o == "auth":
@@ -2445,7 +2764,22 @@ def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
     if dry:
         return [line]
     a["last_main"] = main
-    a["records"] = (a["records"] + [rec])[-300:]
+    # Retain positions needed by any alert, including acknowledged receipt retries.
+    # Do not deduplicate: duplicate exact identities must remain ambiguous.
+    def identity(x):
+        key = tuple(x.get(k) for k in ("from", "to", "at"))
+        if (not all(isinstance(v, str) and v for v in key)
+                or not all(re.fullmatch(r"[0-9a-f]{40}", v) for v in key[:2])):
+            return None
+        try:
+            observed = parse_iso(key[2])
+            return key if observed is not None and iso(observed) == key[2] else None
+        except ValueError:
+            return None
+
+    referenced = {identity(x) for x in a["alerts"]} - {None}
+    records = a["records"] + [rec]
+    a["records"] = [x for x in records[:-300] if identity(x) in referenced] + records[-300:]
     LEDGER.mkdir(parents=True, exist_ok=True)
     with (LEDGER / "promotion-audit.md").open("a") as f:
         f.write(f"- {rec['at']} main {last[:12]} → {main[:12]}: **{rec['verdict']}**"
@@ -2455,8 +2789,9 @@ def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
     if rec["verdict"] == "UNVERIFIED":
         rec["notified"] = notify_owner(f"crq PROMOTION UNVERIFIED: main advanced {last[:10]} → {main[:10]} without a "
                                        f"crq-verified promotion review. {'; '.join(reasons)[:600]} — see "
-                                       f"{STATE / 'status.md'}; ack with `crq.py promotion-ack {main[:10]} \"<reason>\"`.")
-        a["alerts"].append({"to": main, "at": rec["at"], "reasons": reasons, "acked": None})
+                                       f"{STATE / 'status.md'}; procedural ack with `crq.py promotion-ack {main} "
+                                       f"\"<reason>\" --audit-from {last} --audit-at {rec['at']}`.")
+        a["alerts"].append({"from": last, "to": main, "at": rec["at"], "reasons": reasons, "acked": None})
         event("promotion_unverified", **{k: v for k, v in rec.items() if k != "at"})
     else:
         if rec.get("notes"):
@@ -2582,19 +2917,11 @@ def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dic
 
 
 def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
-    """Each tick: (1) open non-draft PRs into merge-queue (or stacked on a chain
-    ending there) that are not enrolled → open item, one required cycle; (2) a PR whose
-    head moved past its last CLI review, with nothing in flight → one delta item
-    for the new commits; (3) PRs merged into merge-queue after the seed →
-    never CLI-reviewed: merged-tier item (supersession filter); reviewed at an
-    older head: post-merge delta; reviewed at the merged head: recorded, skipped."""
+    """Enroll open PR work only; merged discovery uses the durable numeric adapter."""
     log: List[str] = []
     try:
         opened = gh_json(["pr", "list", "--repo", REPO, "--state", "open", "--limit", "200", "--json",
                           "number,isDraft,baseRefName,headRefName,headRefOid"])
-        merged = gh_json(["pr", "list", "--repo", REPO, "--state", "merged", "--base", "merge-queue", "--limit",
-                          "100", "--search", f"merged:>={q['created_at'][:10]}", "--json",
-                          "number,mergedAt,mergeCommit,headRefOid"])
     except Exception as exc:
         return [f"enrollment skipped: {exc}"[:300]]
     by_head = {p["headRefName"]: p for p in opened}
@@ -2610,46 +2937,28 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") and not optional_open(i) for i in mine):
             continue
+        try:
+            if not ensure_commit(n, head):
+                raise NotReady("source head unavailable")
+            pin = git("merge-base", f"origin/{p['baseRefName']}", head)
+        except (NotReady, OSError, RuntimeError, subprocess.TimeoutExpired):
+            log.append(f"PR #{n}: range identity unavailable; enrollment deferred")
+            continue
         last = last_reviewed(q, n)
-        own = False
         if last and reviewed_head(last) != head:
             try:
-                own = repair_tick.own_range(sys.modules[__name__], q, reviewed_head(last), head)
+                if repair_tick.own_range(sys.modules[__name__], q, reviewed_head(last), head):
+                    continue
             except Exception:
-                own = False
-        if last and not own and reviewed_head(last) != head and not any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
-            new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", pr=n, kind="delta", followup="open",
-                     since=reviewed_head(last), why=f"head moved {reviewed_head(last)[:10]} → {head[:10]} after CLI review")
-    seeded_at = parse_iso(q["created_at"])
-    for p in sorted(merged, key=lambda x: x["mergedAt"]):
-        n, head = p["number"], p["headRefOid"]
-        if parse_iso(p["mergedAt"]) <= seeded_at or any(i["pr"] == n and i["kind"] == "merged" for i in q["items"]):
-            continue
-        mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
-        if any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
-            continue  # this merged head already has its delta (done, skipped as a pure restack, …): sticky
-        if any(i["state"] in ("reviewing", "repairing") for i in mine):
-            continue  # harvest first
-        for i in mine:
-            if i["kind"] == "open" and i["state"] == "pending":
-                i["state"] = "skipped"
-                i["last_error"] = "merged before its cycles ran → post-merge follow-up"
-        if any(i["kind"] == "delta" and i["state"] == "pending" for i in mine):
-            continue  # a pending delta now plans against the merged head
-        last = last_reviewed(q, n)
-        common = dict(pr=n, merge_commit=p["mergeCommit"]["oid"], merged_at=p["mergedAt"])
-        if last is None:
-            item = new_item(q, log, dry, id=f"pr{n}-merged", kind="merged", source="followup",
-                            why="merged after the seed without a CLI review → merged-tier", **common)
-            apply_measure(item)
-        elif reviewed_head(last) == head:
-            new_item(q, log, dry, id=f"pr{n}-merged", kind="merged", source="followup", state="skipped",
-                     last_error=f"merged head {head[:10]} already CLI-reviewed ({last['run_id']})",
-                     why="merged after the seed; merged head already reviewed", **common)
-        else:
-            new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", kind="delta", followup="merged",
-                     since=reviewed_head(last), why=f"merged with commits after its last CLI review "
-                     f"({reviewed_head(last)[:10]} → {head[:10]}) → post-merge delta", **common)
+                pass  # without repair proof the full range remains owed
+        evidence = [record for item in mine for record in item.get("cycles", [])]
+        equivalent = any(record.get("base") == pin and record.get("head") == head and
+                         record.get("range_policy") == "full-range-once-v1" and record.get("run_id")
+                         for record in evidence)
+        identity = f"pr{n}-range-{pin[:10]}-{head[:10]}"
+        if not equivalent and not any(i["id"] == identity for i in mine):
+            new_item(q, log, dry, id=identity, pr=n, kind="delta", followup="open",
+                     why="current full range lacks equivalent captured evidence; retain earlier cycles/findings")
     return log
 
 
@@ -2672,6 +2981,8 @@ def coverage_fallback(q, log, dry, only):
             i["last_error"] = "coverage tip moved; re-cut"
     candidates = [i for i in candidates if i["state"] == "pending"]
     if not candidates:
+        if any(i["kind"] == "coverage" and i["state"] == "reviewing" for i in q["items"]):
+            return None, False
         for i in q["items"]:
             if i["kind"] == "merged" and i.get("merge_commit"):
                 try:
@@ -2707,12 +3018,282 @@ def coverage_fallback(q, log, dry, only):
     return None, available
 
 
+def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
+    """Select in policy order; launch reserves identity and quota before spawn."""
+    started = None
+    has_coverage = False
+    reservations_before = len(q.get("starts", []))
+    for item in sorted(q["items"], key=sort_key):
+        if only and item["id"] != only:
+            continue
+        if item["state"] != "pending":
+            continue
+        if item["kind"] == review_receipt.KIND and not capture_current and not item.get("capture"):
+            item["wait_reason"] = "first current capture waits for fetching maintenance tick"
+            continue
+        if item["kind"] == "coverage":
+            if item.get("operator_priority"):
+                started, has_coverage = coverage_fallback(q, log, dry, only)
+                if started or (dry and has_coverage):
+                    break
+            continue
+        if only and item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) and not dry:
+            # Author enrollment is PENDING NATURAL-ONLY by design. A selective
+            # `crq start <author-id>` would dispatch the author item while a
+            # pending promotion/ordinary item is skipped by the `only` filter,
+            # bypassing the priority order, so it is refused. The natural tick
+            # (no `only`) is unaffected. An explicit --dry-run may still show
+            # the plan; it never launches.
+            log.append(f"{item['id']}: selective start refused — author items start only "
+                       f"from the natural tick (pending natural-only)")
+            break
+        if optional_wait(q, item):
+            item["wait_reason"] = "optional cycle waits until no rank <=3 work is pending"
+            continue
+        if additional_cycle(item):
+            # Coverage gets first refusal even though it uses a fallback.
+            started, has_coverage = coverage_fallback(q, log, dry, only)
+            if started or (dry and has_coverage):
+                break
+        if item["kind"] == "merged" and any(i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"]
+                                              for i in q["items"]):
+            item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
+            continue
+        if item.get("not_before") and parse_iso(item["not_before"]) > now():
+            item["wait_reason"] = f"backoff until {item['not_before']}"
+            continue
+        if not deps_met(q, item):
+            item["wait_reason"] = f"waiting for {item['depends_on']}"
+            continue
+        try:
+            if item["kind"] == "promotion" and promotion_mode() != "user":
+                if promotion_mode() != "signer":
+                    raise NotReady("reviewer identity not pinned (signer_unconfigured)")
+                if item["base_sha"] != main_sha():
+                    raise NotReady("main moved since the cut; re-cut pending")
+                if dry:
+                    log.append(f"DRY-RUN would request signer review {item['id']} "
+                               f"main={item['base_sha'][:10]}..{item['batch_sha'][:10]}")
+                else:
+                    request_promotion_review(q, item, log)
+                break
+            if item["kind"] == "promotion":
+                plan = plan_promotion(item)
+            elif item["kind"] == author_quota.AUTHOR_KIND:
+                # Author items bind their own base/head/target: no PR, no
+                # active-agent quiet gate. Global pause/cooldown/hourly/
+                # inflight gates and the pre-upload secret scan still apply.
+                plan = plan_author(item, dry)
+            elif item["kind"] == review_receipt.KIND:
+                plan = prepare_current(q, item, dry)
+                if plan is None:
+                    log.append(f"{item['id']}: {item['state']} (no vendor start)")
+                    continue
+            elif item["kind"] == "merged":
+                plan = plan_merged(item, dry)
+            else:
+                info = pr_info(item["pr"])
+                post_merge = item["kind"] == "delta" and info["state"] == "MERGED"
+                if info["state"] != "OPEN" and not post_merge:
+                    if not dry:
+                        item["state"] = "skipped"
+                        item["last_error"] = f"PR {info['state'].lower()} before review"
+                    log.append(f"{item['id']}: PR {info['state']} → skipped")
+                    continue
+                # merged heads are immutable and get no addressing agent: no busy/quiet gate
+                qr = None if post_merge else quiet_reason(item, info, ignore_age=ignore_quiet)
+                if qr:
+                    item["wait_reason"] = qr
+                    continue
+                plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry)
+        except NotReady as exc:
+            item["wait_reason"] = str(exc)
+            if len(q.get("starts", [])) > reservations_before:
+                break  # unknown delivery still owns its journaled admission
+            continue
+        except NothingToReview as exc:
+            if not dry:
+                item["state"] = "skipped"
+                item["last_error"] = f"nothing to review: {exc}"
+                event("skipped", item=item["id"], reason=item["last_error"])
+            log.append(f"{item['id']}: nothing to review ({exc}) → skipped")
+            continue
+        except Exception as exc:
+            item["wait_reason"] = f"planning error: {exc}"[:300]
+            log.append(f"{item['id']}: planning error {exc}"[:300])
+            if len(q.get("starts", [])) > reservations_before:
+                break
+            continue
+        for n in plan["notes"]:
+            log.append(f"{item['id']}: {n}")
+            if not dry:
+                item.setdefault("notes", []).append(f"{iso()} {n}")
+        if dry:
+            log.append(f"DRY-RUN would start {item['id']} [{plan['label']}] base {plan['base'][:12]} "
+                       f"head {plan['head'][:12]} target {plan['target']}")
+        else:
+            try:
+                started = launch(q, item, plan)
+            except author_quota.AuthorRefused as exc:
+                item["wait_reason"] = str(exc)
+                log.append(f"{item['id']}: author launch refused: {exc}")
+                continue
+            if item["state"] == "blocked":
+                log.append(f"{item['id']}: blocked before vendor start")
+                continue
+            log.append(f"started {item['id']} [{plan['label']}] run {started}")
+            if item["kind"] == "promotion" and item["state"] == "reviewing":
+                post_promotion_status(item, item["batch_sha"], "pending",
+                                      f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
+        break
+    else:
+        started, has_coverage = coverage_fallback(q, log, dry, only)
+        if not started:
+            log.append("no eligible item this tick")
+    if dry:
+        log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(q["items"], key=sort_key)
+                if i["state"] == "pending" and i.get("wait_reason")]
+    return started, has_coverage
+
+
+def read_slot_usage(q):
+    """Subtract reservations lacking vendor evidence BEFORE the usage snapshot.
+
+    Aggregate usage cannot identify an unclaimed signer or a detached child
+    still preparing its CLI session. Never reallocate those promised slots.
+    Signer claims/start journals are pre-admission too: retain their hold until
+    the result is harvested. Local progress may be cached only after a valid
+    subsequent usage observation, never from a pid or review_context alone.
+    """
+    held = []
+    observed = []
+    for item in q["items"]:
+        request = item.get("request") or {}
+        if item.get("kind") == "promotion" and (
+                item["state"] in SIGNER_STATES or request.get("reconciliation_required")):
+            held.append(request.get("requested_at"))
+        elif item["state"] == "reviewing":
+            run = item.get("run") or {}
+            if run.get("vendor_observed"):
+                continue
+            run_id = run.get("run_id")
+            if run_id and usage_slots.vendor_progress(RUNS / run_id / "review.ndjson"):
+                observed.append(run)
+            else:
+                held.append(run.get("started_at"))
+    usage = usage_slots.read_usage(CLONE)
+    if usage is not None:
+        for run in observed:
+            run["vendor_observed"] = True
+    else:
+        held.extend(run.get("started_at") for run in observed)
+    return usage, held
+
+
+def collect_finished(q, log):
+    """Terminal detached reviews only; no enrollment, repairs or promotion audits."""
+    for item in list(q["items"]):
+        if item["state"] != "reviewing" or not item.get("run"):
+            continue
+        run = item["run"]
+        rdir = RUNS / run["run_id"]
+        if not (rdir / "exit.json").exists():
+            continue
+        if run_liveness(rdir, item, run, True) != "harvest":
+            continue  # live or unverifiable owners retain their capacity
+        msg = harvest_review(q, item, False)
+        if msg:
+            log.append(msg)
+
+
+def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, reserved=(), capture_current=True):
+    before_all = len(q.get("starts", []))
+    has_coverage = False
+    global_gate = None
+    q["usage"] = usage
+    if usage is not None:
+        slots = max(0, usage["remaining"] - len(reserved))
+    else:
+        # Recent reservations are already in starts; older/undated outstanding
+        # promises still need protection after their local rolling hour expires.
+        cutoff = now() - dt.timedelta(hours=1)
+        old_holds = sum(1 for stamp in reserved if not stamp or parse_iso(stamp) <= cutoff)
+        slots = max(0, CONFIG.get("max_starts_per_hour", 5) - starts_last_hour(q) - old_holds)
+    admissions = min(slots, CONFIG.get("max_starts_per_tick", 10),
+                     max(0, CONFIG.get("max_inflight", 10) - len(inflight(q))))
+    if q.get("paused"):
+        global_gate = "paused"
+        log.append(f"queue paused: {q.get('pause_reason')}")
+    elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > now():
+        global_gate = "cooldown"
+        log.append(f"rate-limit cooldown until {q['cooldown_until']}")
+    elif slots <= 0:
+        global_gate = "slots"
+        log.append("included review slots exhausted" if usage is not None else
+                   "hourly cap reached (usage unavailable; conservative start-log fallback)")
+    elif len(inflight(q)) >= CONFIG.get("max_inflight", 10):
+        global_gate = "inflight"
+        log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG.get('max_inflight', 10)})")
+    else:
+        while (len(q.get("starts", [])) - before_all < admissions and
+               len(inflight(q)) < CONFIG.get("max_inflight", 10)):
+            # Recount actual journaled reservations, including unknown delivery,
+            # rather than assuming one start_one call spends exactly one slot.
+            before = len(q.get("starts", []))
+            _, candidate = start_one(q, log, dry, only, ignore_quiet, capture_current=capture_current)
+            has_coverage = has_coverage or candidate
+            # A dry run, refusal or no eligible candidate cannot reserve more.
+            if dry or only or len(q.get("starts", [])) == before:
+                break
+            if len(inflight(q)) >= CONFIG.get("max_inflight", 10):
+                break
+    spent = len(q.get("starts", [])) - before_all
+    return has_coverage, global_gate, max(0, slots - spent)
+
+
+def slot():
+    """Collect terminal reviews and admit under the tick lock; no enrollment/audit."""
+    if (STATE / "runner-disabled").exists():
+        return ["runner disabled for host handover"]
+    q = load_queue()
+    log = []
+    # One short wait at most, bounded to <60s; usage can be slow/unavailable.
+    # After an early local reservation expiry, the next minute retries rather
+    # than trusting fullCapacityInMs as the first available slot.
+    for attempt in range(2):
+        collect_finished(q, log)
+        if PROMO.get("enabled") and promotion_mode() == "signer":
+            apply_signer_backoff(q, log)
+        usage, reserved = read_slot_usage(q)
+        _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
+        save_queue(q)
+        at = now()
+        deadline = refresh_slot_deadline(q, usage, remaining, gate, at=at)
+        delay = (deadline - at).total_seconds()
+        if attempt == 0 and 0 < delay < 60 and gate in ("slots", "cooldown"):
+            time.sleep(delay)
+            continue
+        break
+    return log
+
+
 def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = False) -> List[str]:
     log: List[str] = []
     if (STATE / "runner-disabled").exists():
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
+    if not dry and only is None:
+        budget = ForgeBudget()
+        log += discover_merged(q, budget)
+        with forge_window(budget):
+            refreshed = deferred_refresh.refresh_deferred(q,
+                verify_source=verify_deferred_source, find_source=find_deferred_source,
+                at=iso(), limit=20, may_continue=budget.available)
+        if refreshed:
+            # Binding/enrollment must survive a crash before reservation/dispatch.
+            save_queue(q)
+            log.append(f"refreshed {len(refreshed)} deferred author intent(s)")
     starts_before = len(q.get("starts", []))
     for item in list(q["items"]):
         if item["kind"] == "promotion" and item["state"] in SIGNER_STATES:
@@ -2758,149 +3339,16 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         log += promotion_tick(q, dry)
     except Exception as exc:  # never let promotion bookkeeping stop the queue
         log.append(f"promotion: error {exc}"[:300])
-    started = None
-    has_coverage = False
-    global_gate = None
     pending_at_selection = any(i["state"] == "pending" for i in q["items"])
-    if q.get("paused"):
-        global_gate = "paused"
-        log.append(f"queue paused: {q.get('pause_reason')}")
-    elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > now():
-        global_gate = "cooldown"
-        log.append(f"rate-limit cooldown until {q['cooldown_until']}")
-    elif starts_last_hour(q) >= CONFIG["max_starts_per_hour"]:
-        global_gate = "hourly_cap"
-        log.append(f"hourly cap reached ({CONFIG['max_starts_per_hour']} starts in the last 60m)")
-    elif len(inflight(q)) >= CONFIG["max_inflight"]:
-        global_gate = "inflight"
-        log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG['max_inflight']})")
-    else:
-        for item in sorted(q["items"], key=sort_key):
-            if only and item["id"] != only:
-                continue
-            if item["state"] != "pending":
-                continue
-            if item["kind"] == "coverage":
-                if item.get("operator_priority"):
-                    started, has_coverage = coverage_fallback(q, log, dry, only)
-                    if started or (dry and has_coverage):
-                        break
-                continue
-            if only and item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) and not dry:
-                # Author enrollment is PENDING NATURAL-ONLY by design. A selective
-                # `crq start <author-id>` would dispatch the author item while a
-                # pending promotion/ordinary item is skipped by the `only` filter,
-                # bypassing the priority order, so it is refused. The natural tick
-                # (no `only`) is unaffected. An explicit --dry-run may still show
-                # the plan; it never launches.
-                log.append(f"{item['id']}: selective start refused — author items start only "
-                           f"from the natural tick (pending natural-only)")
-                break
-            if optional_wait(q, item):
-                item["wait_reason"] = "optional cycle waits until no rank <=3 work is pending"
-                continue
-            if additional_cycle(item):
-                # Coverage gets first refusal even though it uses a fallback.
-                started, has_coverage = coverage_fallback(q, log, dry, only)
-                if started or (dry and has_coverage):
-                    break
-            if item["kind"] == "merged" and any(i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"]
-                                                  for i in q["items"]):
-                item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
-                continue
-            if item.get("not_before") and parse_iso(item["not_before"]) > now():
-                item["wait_reason"] = f"backoff until {item['not_before']}"
-                continue
-            if not deps_met(q, item):
-                item["wait_reason"] = f"waiting for {item['depends_on']}"
-                continue
-            try:
-                if item["kind"] == "promotion" and promotion_mode() != "user":
-                    if promotion_mode() != "signer":
-                        raise NotReady("reviewer identity not pinned (signer_unconfigured)")
-                    if item["base_sha"] != main_sha():
-                        raise NotReady("main moved since the cut; re-cut pending")
-                    if dry:
-                        log.append(f"DRY-RUN would request signer review {item['id']} "
-                                   f"main={item['base_sha'][:10]}..{item['batch_sha'][:10]}")
-                    else:
-                        request_promotion_review(q, item, log)
-                    break
-                if item["kind"] == "promotion":
-                    plan = plan_promotion(item)
-                elif item["kind"] == author_quota.AUTHOR_KIND:
-                    # Author items bind their own base/head/target: no PR, no
-                    # active-agent quiet gate. Global pause/cooldown/hourly/
-                    # inflight gates and the pre-upload secret scan still apply.
-                    plan = plan_author(item, dry)
-                elif item["kind"] == review_receipt.KIND:
-                    plan = prepare_current(q, item, dry)
-                    if plan is None:
-                        log.append(f"{item['id']}: {item['state']} (no vendor start)")
-                        continue
-                elif item["kind"] == "merged":
-                    plan = plan_merged(item, dry)
-                else:
-                    info = pr_info(item["pr"])
-                    post_merge = item["kind"] == "delta" and info["state"] == "MERGED"
-                    if info["state"] != "OPEN" and not post_merge:
-                        if not dry:
-                            item["state"] = "skipped"
-                            item["last_error"] = f"PR {info['state'].lower()} before review"
-                        log.append(f"{item['id']}: PR {info['state']} → skipped")
-                        continue
-                    # merged heads are immutable and get no addressing agent: no busy/quiet gate
-                    qr = None if post_merge else quiet_reason(item, info, ignore_age=ignore_quiet)
-                    if qr:
-                        item["wait_reason"] = qr
-                        continue
-                    plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry)
-            except NotReady as exc:
-                item["wait_reason"] = str(exc)
-                continue
-            except NothingToReview as exc:
-                if not dry:
-                    item["state"] = "skipped"
-                    item["last_error"] = f"nothing to review: {exc}"
-                    event("skipped", item=item["id"], reason=item["last_error"])
-                log.append(f"{item['id']}: nothing to review ({exc}) → skipped")
-                continue
-            except Exception as exc:
-                item["wait_reason"] = f"planning error: {exc}"[:300]
-                log.append(f"{item['id']}: planning error {exc}"[:300])
-                continue
-            for n in plan["notes"]:
-                log.append(f"{item['id']}: {n}")
-                if not dry:
-                    item.setdefault("notes", []).append(f"{iso()} {n}")
-            if dry:
-                log.append(f"DRY-RUN would start {item['id']} [{plan['label']}] base {plan['base'][:12]} "
-                           f"head {plan['head'][:12]} target {plan['target']}")
-            else:
-                try:
-                    started = launch(q, item, plan)
-                except author_quota.AuthorRefused as exc:
-                    item["wait_reason"] = str(exc)
-                    log.append(f"{item['id']}: author launch refused: {exc}")
-                    continue
-                log.append(f"started {item['id']} [{plan['label']}] run {started}")
-                if item["kind"] == "promotion" and item["state"] == "reviewing":
-                    post_promotion_status(item, item["batch_sha"], "pending",
-                                          f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
-            break
-        else:
-            started, has_coverage = coverage_fallback(q, log, dry, only)
-            if not started:
-                log.append("no eligible item this tick")
-        if dry:
-            log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(q["items"], key=sort_key)
-                    if i["state"] == "pending" and i.get("wait_reason")]
+    usage, reserved = read_slot_usage(q)
+    has_coverage, global_gate, remaining = admit_available(q, usage, log, dry, only, ignore_quiet, reserved=reserved)
     if not dry:
         q["coverage"] = coverage.record_opportunity(q.get("coverage") or coverage.new_ledger(),
             at=q["last_tick"], started=len(q.get("starts", [])) > starts_before,
             pending=pending_at_selection, candidate_exists=has_coverage,
             blocked_reason=global_gate or ("only" if only else None))
         save_queue(q)  # before the slow Paseo calls: a killed tick must not lose a launch
+        refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
         save_queue(q)
@@ -2955,8 +3403,16 @@ def write_status(q: Dict[str, Any]) -> None:
             next_run = f"(schedule inspect failed: {exc})"[:200]
     recent = EVENTS.read_text().splitlines()[-15:] if EVENTS.exists() else []
     alerts = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) if not x.get("acked")]
-    banner = [f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: {'; '.join(x['reasons'])[:300]}. "
-              f"Ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`" for x in alerts]
+    banner = []
+    for x in alerts:
+        if (re.fullmatch(r"[0-9a-f]{40}", x.get("from", ""))
+                and re.fullmatch(r"[0-9a-f]{40}", x["to"])):
+            ack = (f"Procedural ack: `crq.py promotion-ack {x['to']} \"<reason>\" "
+                   f"--audit-from {x['from']} --audit-at {x['at']}`")
+        else:
+            ack = f"Legacy ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`"
+        banner.append(f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: "
+                      f"{'; '.join(x['reasons'])[:300]}. {ack}")
     st_p = q.get("promotion") or {}
     for x in st_p.get("escalations", []):
         if not x.get("acked"):
@@ -2993,10 +3449,12 @@ def write_status(q: Dict[str, Any]) -> None:
           f"- queue: {'**PAUSED** — ' + str(q.get('pause_reason')) if q.get('paused') else 'active'}",
           f"- schedule: `{sched}` {next_run}",
           f"- rate-limit cooldown until: {q.get('cooldown_until') or '—'}",
-          f"- starts in last 60m: {starts_last_hour(q)}/{CONFIG['max_starts_per_hour']}; in flight: "
+          f"- included review usage: {json.dumps(q.get('usage'))}; local starts in last 60m: {starts_last_hour(q)}; in flight: "
           f"{', '.join(i['id'] + ' (' + ((i.get('run') or {}).get('run_id') or 'signer ' + i['state']) + ')' for i in inflight(q)) or 'none'}",
           f"- legacy addressing: {', '.join(i['id'] + ' agent ' + i['addressing']['agent_id'][:8] for i in items if i['state'] == 'addressing') or 'none'}",
           f"- open-PR CLI reviews still owed: {owed_open}",
+          "- merged-current discovery/receipt proof (retained capture T): " +
+          json.dumps(status_summary.merged_current(q, STATE / "receipts"), sort_keys=True),
           f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'} · mode {mode}"
           f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
           f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}"
@@ -3136,15 +3594,21 @@ def cmd_selfcheck() -> int:
     return 0
 
 
-def with_lock(fn, *a, **kw):
+def with_lock(fn, *a, lock_wait=0, **kw):
     STATE.mkdir(parents=True, exist_ok=True)
     fh = LOCK.open("w")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fh.close()
-        print("another crq tick holds the lock; exiting", file=sys.stderr)
-        return None
+    deadline = time.monotonic() + lock_wait
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fh.close()
+                print("another crq tick holds the lock; exiting", file=sys.stderr)
+                return None
+            time.sleep(min(0.25, remaining))
     try:
         return fn(*a, **kw)
     finally:
@@ -3152,14 +3616,59 @@ def with_lock(fn, *a, **kw):
         fh.close()
 
 
-def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
+def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
+          audit_from: Optional[str] = None, audit_at: Optional[str] = None) -> None:
     q = load_queue()
+    if action == "promotion-ack" and (audit_from is not None or audit_at is not None):
+        # Procedural disposition only: never changes the audit verdict or promotion authority.
+        sha, _, why = (reason or "").partition(" ")
+        if (not audit_from or not audit_at or not why.strip()
+                or not re.fullmatch(r"[0-9a-f]{40}", audit_from)
+                or not re.fullmatch(r"[0-9a-f]{40}", sha)):
+            sys.exit("exact audit acknowledgement requires full from/to SHAs, --audit-at and a reason")
+        try:
+            observed = parse_iso(audit_at)
+            valid_at = iso(observed) == audit_at and observed <= now()
+        except ValueError:
+            valid_at = False
+        if not valid_at:
+            sys.exit("audit acknowledgement requires a recorded UTC observation timestamp")
+        audit = q.get("promotion_audit") or {}
+        matches = lambda x: x.get("from") == audit_from and x.get("to") == sha and x.get("at") == audit_at
+        records = [x for x in audit.get("records", []) if matches(x)]
+        alerts = [x for x in audit.get("alerts", []) if matches(x)]
+        if len(records) != 1 or len(alerts) != 1 or records[0].get("verdict") != "UNVERIFIED":
+            sys.exit("audit acknowledgement requires one matching UNVERIFIED record and alert")
+        record, alert = records[0], alerts[0]
+        identity = {"from": audit_from, "to": sha, "audit_at": audit_at, "reason": why.strip()}
+        previous = alert.get("acknowledgement")
+        if alert.get("acked") or previous or record.get("acknowledgement"):
+            if (not isinstance(previous, dict) or set(previous) != set(identity) | {"acknowledged_at"}
+                    or any(previous.get(k) != v for k, v in identity.items())
+                    or not previous.get("acknowledged_at") or record.get("acknowledgement") != previous
+                    or alert.get("acked") != f"{previous['acknowledged_at']} {why.strip()}"):
+                sys.exit("audit acknowledgement already has a different or incomplete disposition")
+            write_status(q)  # A prior status/event failure cannot undo the durable disposition.
+            print("promotion-ack already recorded (procedural only)")
+            return
+        acknowledgement = {**identity, "acknowledged_at": iso()}
+        record["acknowledgement"] = alert["acknowledgement"] = acknowledgement
+        alert["acked"] = f"{acknowledgement['acknowledged_at']} {why.strip()}"
+        save_queue(q)  # Commit before any event, status rendering, or success output.
+        event("admin_promotion_audit_ack", **acknowledgement)
+        write_status(q)
+        print("promotion-ack ok (procedural only)")
+        return
     if action in ("pause", "resume"):
         q["paused"] = action == "pause"
         q["pause_reason"] = reason if action == "pause" else None
     elif action == "promotion-ack":
         sha, _, why = (reason or "").partition(" ")
-        hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) + (q.get("promotion") or {}).get("escalations", [])
+        legacy_audit = [x for x in (q.get("promotion_audit") or {}).get("alerts", [])
+                        if not (isinstance(x.get("from"), str) and isinstance(x.get("to"), str)
+                                and re.fullmatch(r"[0-9a-f]{40}", x["from"])
+                                and re.fullmatch(r"[0-9a-f]{40}", x["to"]))]
+        hit = [x for x in legacy_audit + (q.get("promotion") or {}).get("escalations", [])
                + (q.get("promotion") or {}).get("signer_alerts", [])
                + (q.get("promotion") or {}).get("gate_alerts", [])
                if not x.get("acked") and (sha == "all" or x.get("to", x.get("sha", "")).startswith(sha))]
@@ -3322,6 +3831,11 @@ def main() -> int:
     p.add_argument("--merge-sha", required=True)
     p.add_argument("--request-id", required=True)
     p.add_argument("--target-selector", choices=sorted(review_receipt.SELECTORS), default="promoted-main")
+    p = sub.add_parser("reconcile-merged", help="bounded interval inventory and enrollment; no inline dispatch")
+    p.add_argument("--after", required=True)
+    p.add_argument("--before", required=True)
+    p.add_argument("--page-budget", type=int, required=True)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("report", help="read immutable receipt manifest or bounded chunk; no dispatch")
     p.add_argument("--request-id", required=True)
     p.add_argument("--receipt-id")
@@ -3336,6 +3850,8 @@ def main() -> int:
     p = sub.add_parser("promotion-ack", help="acknowledge an unverified-promotion alert")
     p.add_argument("sha")
     p.add_argument("reason")
+    p.add_argument("--audit-from", help="exact previous main SHA; requires --audit-at and full target SHA")
+    p.add_argument("--audit-at", help="exact recorded audit observation UTC timestamp; requires --audit-from")
     p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
     p.add_argument("finding", help="finding number, or all")
     p.add_argument("disposition")
@@ -3348,9 +3864,15 @@ def main() -> int:
     p.add_argument("run_id")
     args = ap.parse_args()
 
-    if args.cmd in ("enqueue-merged", "report"):
+    if args.cmd in ("enqueue-merged", "report", "reconcile-merged"):
         try:
-            if args.cmd == "enqueue-merged":
+            if args.cmd == "reconcile-merged":
+                def reconcile_command():
+                    with forge_window(ForgeBudget()):
+                        return reconcile_merged(load_queue(), after=args.after, before=args.before,
+                                                page_budget=args.page_budget, dry_run=args.dry_run)
+                result = with_lock(reconcile_command)
+            elif args.cmd == "enqueue-merged":
                 result = with_lock(enqueue_merged, args.pr, args.merge_sha, args.request_id, args.target_selector)
             else:
                 result = current_report(args.request_id, args.receipt_id, args.cursor)
@@ -3358,7 +3880,7 @@ def main() -> int:
                 return 3
             print(json.dumps(result, sort_keys=True))
             return 0
-        except (ValueError, OSError, RuntimeError) as exc:
+        except (ValueError, OSError, RuntimeError, merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
             print(f"{args.cmd} refused: {exc}", file=sys.stderr)
             return 3
     if args.cmd == "_review":
@@ -3379,7 +3901,7 @@ def main() -> int:
         with_lock(prepare)
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
-        out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False))
+        out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False), lock_wait=90)
         for line in out or []:
             print(line)
         if not args.dry_run:
@@ -3406,7 +3928,8 @@ def main() -> int:
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "promotion-ack":
-        with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}")
+        with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}",
+                  audit_from=args.audit_from, audit_at=args.audit_at)
     elif args.cmd == "promotion-resolve":
         with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
     elif args.cmd == "author-enroll":

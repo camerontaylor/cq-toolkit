@@ -660,6 +660,10 @@ test.each([
       // Every case here completed admitted work: later disposition/publication
       // bookkeeping refusals must retain that settled run exactly once.
       expect(report.rounds).toHaveLength(1);
+      // Admission happened at the PR's initial head. The witness is taken once,
+      // so it is still `initial` in every mode — including the ones whose later
+      // bookkeeping/disposition refusal happened after the run was admitted.
+      expect(report.admissionHead).toBe(initial);
       expect(report.rounds[0]?.record.branch).toBe('cq-review/pr-7');
       expect(report.rounds[0]?.runs).toHaveLength(1);
       if (!earlyTamper)
@@ -698,6 +702,10 @@ test.each([
         target: 'merge-queue',
       });
       expect(state.ok && state.state.branch).toBe('cq-review/pr-7');
+      // Verified fix commits advance the mutable last-admitted head only; the
+      // admission witness still names the head this invocation admitted.
+      expect(report.verifiedHead).not.toBe(initial);
+      expect(report.verifiedHead).toBe(state.ok && state.state.head);
       expect(report.fixes.map((fix) => fix.commit)).toContain(state.ok && state.state.head);
       const scanCount = (await scanner.calls()).length;
       if (tampered) expect(scanCount).toBe(3);

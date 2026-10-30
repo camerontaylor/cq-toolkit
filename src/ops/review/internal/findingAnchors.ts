@@ -63,7 +63,10 @@ export type AnchorVerdict =
   | { status: 'invalid'; reasons: AnchorInvalidReason[] };
 
 /** `end` is exclusive, so an empty file has no valid line range at all. */
-const lineCount = (text: string): number => text.split('\n').length;
+const lineCount = (text: string): number => {
+  const lines = text.split('\n');
+  return text.endsWith('\n') ? lines.length - 1 : lines.length;
+};
 
 /** NUL and newline bytes are git plumbing separators, never path text. */
 const isMalformedPath = (path: string): boolean => path.includes('\0') || path.includes('\n');

@@ -162,6 +162,31 @@ class HostConfigTests(unittest.TestCase):
                 overlay['config']['promotion']['record_url_template'] = template
                 host.validate(overlay)
 
+    def test_overlay_requires_distinct_paseo_endpoints(self):
+        overlay = copy.deepcopy(self.overlay)
+        endpoint = overlay['config']['paseo_hosts'][0]
+        for endpoints in ([endpoint, endpoint], [endpoint] * 3):
+            with self.subTest(endpoints=endpoints):
+                overlay['config']['paseo_hosts'] = endpoints
+                with self.assertRaisesRegex(ValueError, 'two distinct'):
+                    host.validate(overlay)
+        overlay['config']['paseo_hosts'] = [endpoint, endpoint, 'other.example.invalid:6767']
+        self.assertEqual(host.validate(overlay), overlay)
+
+    def test_alert_agent_id_is_optional_and_rendered(self):
+        host.validate(self.overlay)  # absent: the committed recipient stays
+        overlay = copy.deepcopy(self.overlay)
+        agent = '5626afa6-1349-4051-ae3a-e39d42cf8daa'
+        overlay['config']['promotion']['alert_agent_id'] = agent
+        host.validate(overlay)
+        config = json.loads(host.render(self.root, overlay))
+        self.assertEqual(config['promotion']['alert_agent_id'], agent)
+        for bad in ['', '5626afa6', agent.upper(), agent + '\n', 5, None]:
+            with self.subTest(bad=bad):
+                overlay['config']['promotion']['alert_agent_id'] = bad
+                with self.assertRaisesRegex(ValueError, 'alert_agent_id'):
+                    host.validate(overlay)
+
     def test_spool_alias_matches_runtime_client_format(self):
         import crq
 
@@ -358,6 +383,10 @@ class HostConfigTests(unittest.TestCase):
         self.assertNotIn('@CRQ_ROOT@', contents)
         self.assertNotIn('repos/coderabbit-queue', contents)
         self.assertIn(str(self.runner / 'crq.py') + ' tick', contents)
+        self.assertIn(str(self.runner / 'crq_slot.py'), contents)
+        slot_timer = (self.base / 'units/crq-slot.timer').read_text()
+        self.assertIn('OnCalendar=*-*-* *:*:00', slot_timer)
+        self.assertIn('AccuracySec=1s', slot_timer)
         self.assertIn(str(self.runner / 'state/repair/inbox'), contents)
 
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze runs in Linux CI')
@@ -402,6 +431,38 @@ class HostConfigTests(unittest.TestCase):
         self.assertTrue((self.base / 'installed/crq-tick.service').is_file())
         self.assertIn(['systemctl', '--user', 'daemon-reload'], calls)
         self.assertFalse(any('start' in argv or 'enable' in argv for argv in calls))
+
+    def test_prepare_installs_only_verified_commit_units_despite_worktree_drift(self):
+        self.command('checkout', '-q', '--detach', self.target)
+        directory = self.runner / 'ops/systemd'
+        expected = {
+            path.name: self.command('show', f'{self.target}:apps/crq-python/ops/systemd/{path.name}')
+                .replace('@CRQ_ROOT@', str(self.runner)).encode()
+            for path in directory.glob('crq-*')
+        }
+        # Retaining the placeholder used to let unapproved commands pass validation.
+        unit = directory / 'crq-tick.service'
+        unit.write_text(unit.read_text() + '\nExecStartPost=/unapproved-command\n')
+        (directory / 'crq-slot.timer').unlink()
+        (directory / 'crq-extra.service').write_text('[Service]\nExecStart=@CRQ_ROOT@/extra\n')
+        verified = []
+
+        def stopped(argv):
+            if argv[0] == 'systemd-analyze':
+                verified.append({Path(p).name: Path(p).read_bytes() for p in argv[3:]})
+                self.assertFalse((self.base / 'installed').exists())
+                return ''
+            return self.stopped(argv)
+
+        with mock.patch.object(host, 'run', side_effect=stopped):
+            host.main(['--overlay', str(self.overlay_path), 'prepare',
+                       '--units-output', str(self.base / 'installed'), '--tag', self.tag])
+        self.assertEqual(verified, [expected])
+        installed = {p.name: p.read_bytes() for p in (self.base / 'installed').iterdir()}
+        self.assertEqual(installed, expected)
+        receipt = json.loads(next((self.base / 'records').glob('*.json')).read_text())
+        self.assertEqual(receipt['sha'], self.target)
+        self.assertEqual(receipt['unit_sha256'], {name: host.digest(data) for name, data in expected.items()})
 
     def test_legacy_drift_is_read_only_and_allows_only_trigger_5_to_1(self):
         legacy = self.base / 'old'

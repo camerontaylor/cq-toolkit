@@ -92,11 +92,25 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 export function usageFromWire(raw: unknown): Usage | undefined {
   const rec = asRecord(raw);
   if (rec === undefined) return undefined;
+  const input = asWireInt(rec['input_tokens']);
+  const output = asWireInt(rec['output_tokens']);
+  const cacheRead = asWireInt(rec['cache_read_input_tokens']);
+  const cacheWrite = asWireInt(rec['cache_creation_input_tokens']);
+  // Seam v3: an unshaped record is NO measurement — an object that carries no
+  // valid numeric field reports nothing, and normalizing it to zeros would
+  // make a missing measurement indistinguishable from a measured zero.
+  if (
+    input === undefined &&
+    output === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined
+  )
+    return undefined;
   return {
-    input: asWireInt(rec['input_tokens']) ?? 0,
-    output: asWireInt(rec['output_tokens']) ?? 0,
-    cacheRead: asWireInt(rec['cache_read_input_tokens']) ?? 0,
-    cacheWrite: asWireInt(rec['cache_creation_input_tokens']) ?? 0,
+    input: input ?? 0,
+    output: output ?? 0,
+    cacheRead: cacheRead ?? 0,
+    cacheWrite: cacheWrite ?? 0,
   };
 }
 

@@ -10,6 +10,12 @@ import { assembleReadiness, DEV_LEDGER_VERSION } from '../../../src/ops/dev/reco
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
+import { readWorkState } from '../../../src/ops/dev/internal/workState.js';
+import { deferVendorReview } from '../../../src/ops/dev/internal/deferredReview.js';
+import type {
+  DeferredQueueClient,
+  QueueStatus,
+} from '../../../src/ops/review/internal/queueProtocol.js';
 import { cycleRecord, dispositionRecord } from '../dev/fakes.js';
 import { repoEffects, makeTestRepo, seed } from '../dev/repo.js';
 
@@ -56,6 +62,9 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
                 findings: [{ severity: 'high', text: 'seeded' }],
               },
               usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
+              // Seam v3: this scripted driver models a provider MEASUREMENT, so
+              // the fixture must declare it; absence would count as unknown.
+              usageProvenance: 'measured',
               denials: [],
               toolFailures,
             };
@@ -75,7 +84,11 @@ describe('review.run', () => {
         drivers,
         effectsFactory: () => repoEffects(repo),
       })({ repoRoot: repo.root });
-      expect(result).toEqual({ status: 'needs-human', reason: 'review.run: cq.json is required' });
+      expect(result).toEqual({
+        status: 'needs-human',
+        reason: 'review.run: cq.json is required',
+        usageSummary: { knownCount: 0, unknownCount: 0, unpricedCount: 0 },
+      });
       expect(drivers.resolve).not.toHaveBeenCalled();
     } finally {
       await repo.cleanup();
@@ -1303,7 +1316,7 @@ it.each(['deadline', 'parent'] as const)(
       const controller = new AbortController();
       const effects = repoEffects(repo, (command) => {
         if (command !== 'coderabbit') return undefined;
-        if (mode === 'deadline') clock += 1001;
+        if (mode === 'deadline') clock += 10_001;
         else controller.abort(new Error('parent stopped reviewer'));
         return {
           exitCode: 0,
@@ -1323,7 +1336,7 @@ it.each(['deadline', 'parent'] as const)(
       const originalRun = effects.runCommand;
       effects.runCommand = async (command, args, opts) => {
         if (command === 'coderabbit') {
-          expect(opts.timeoutMs).toBe(1000);
+          expect(opts.timeoutMs).toBe(10_000);
           expect(opts.signal).toBeDefined();
         }
         return originalRun(command, args, opts);
@@ -1340,7 +1353,7 @@ it.each(['deadline', 'parent'] as const)(
         writeFindingsRecord: async (_path, content) => {
           persisted = JSON.parse(content);
         },
-      })({ repoRoot: repo.root, wallMs: 1000, reviewers: ['coderabbit', 'agent'] });
+      })({ repoRoot: repo.root, wallMs: 10_000, reviewers: ['coderabbit', 'agent'] });
       expect(result.status).toBe('needs-human');
       if (mode === 'deadline') expect(result).toMatchObject({ report: { blockedBudget: true } });
       else expect(result).not.toMatchObject({ report: { blockedBudget: true } });
@@ -1676,6 +1689,7 @@ it('keeps blocked evidence when an engine report carries malformed coverage', as
         report: {
           findings: [],
           usage: 1,
+          usageSummary: { knownCount: 0, unknownCount: 1, unpricedCount: 1 },
           coverage: malformed as never,
           advisories: ['fixture advisory'],
           limitations: ['fixture limitation'],
@@ -1727,6 +1741,7 @@ it('maps blocked partial findings to the ledger cycle so a disposition closes th
             },
           ],
           usage: 1,
+          usageSummary: { knownCount: 0, unknownCount: 1, unpricedCount: 1 },
           coverage: undefined as never,
           advisories: ['blocked advisory'],
           limitations: [],
@@ -2048,6 +2063,181 @@ it('#532: an agent wall stop is attributed through the real review engine', asyn
   }
 });
 
+it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as const)(
+  'durable vendor debt %s invokes fresh full agent coverage without a paid vendor call',
+  async (scenario) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const config = await readFile(join(repo.root, 'cq.json'), 'utf8');
+      await repo.write('cq.json', config.replace('["agent"]', '["agent","coderabbit"]'));
+      repo.commitAll('configure deferred review');
+      const effects = repoEffects(repo, (command, args) => {
+        if (command === 'coderabbit') throw new Error('must not dispatch paid vendor');
+        if (command === 'gh') return args[0] === 'api' ? 'author' : 'owner/repo';
+        return undefined;
+      });
+      const read = await readWorkState(effects, { target: 'merge-queue' });
+      if (!read.ok) throw new Error(read.reason);
+      const state = read.state;
+      const status: QueueStatus = {
+        state: 'awaiting-pr',
+        pr: null,
+        mergeSha: null,
+        itemId: null,
+        receiptId: null,
+        consumed: false,
+        reviewed: false,
+        fixed: false,
+      };
+      const queue: DeferredQueueClient = {
+        enqueue: async () => status,
+        bind: async () => status,
+        cancel: async () => {
+          throw new Error('do not cancel');
+        },
+        status: async () => {
+          if (scenario === 'queue-auth') throw new Error('queue authorization unavailable');
+          return status;
+        },
+      };
+      const failure = {
+        source: 'vendor' as const,
+        category: 'vendor-unavailable' as const,
+        codes: ['con_err'],
+      };
+      const origin = cycleRecord({
+        head: state.head,
+        base: state.base,
+        dirtySha256: 'clean-tree',
+        cycleId: 'c001-origin',
+        vendorFailure: failure,
+        completion: { kind: 'blocked', reason: 'structured local vendor outage' },
+        findings: [
+          {
+            id: 'retained',
+            severity: 'major',
+            excerpt: 'prior vendor finding',
+            ...(scenario === 'empty-file' ? { fileName: '' } : {}),
+          },
+        ],
+      });
+      const debt = await deferVendorReview(
+        queue,
+        {
+          requestId: 'origin-intent',
+          binding: {
+            kind: 'deferred-author',
+            repo: 'owner/repo',
+            producer: 'author',
+            head: state.head,
+            target: 'merge-queue',
+            targetSelector: 'promoted-main',
+          },
+        },
+        'unavailable',
+        { id: 'origin-intent', base: state.base, dirtySha256: 'clean-tree' },
+        {
+          cycleId: origin.cycleId,
+          head: state.head,
+          base: state.base,
+          target: 'merge-queue',
+          scope: 'full',
+          dirtySha256: 'clean-tree',
+          failure,
+        },
+      );
+      effects.openLedger(state.branch).save({
+        version: 2,
+        branch: state.branch,
+        records: [origin, { kind: 'vendor-debt', debt, at: effects.nowIso() }],
+      });
+      if (scenario === 'changed') {
+        await repo.write('src/a.ts', 'export const a = 2;\n');
+        repo.git('add', 'src/a.ts');
+        repo.git('commit', '-qm', 'new current head');
+      }
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        queueClient: queue,
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(0);
+      if (scenario === 'queue-auth') {
+        expect(result.status).toBe('indeterminate');
+        expect(drivers.resolve).not.toHaveBeenCalled();
+      } else {
+        expect(result.status).toBe('ok');
+        expect(result.report?.deferredVendorDebt?.vendorCompleted).toBe(false);
+        expect(result.usageSummary).toMatchObject({ knownCount: 1, unknownCount: 0 });
+        expect(result.report).not.toHaveProperty('usageSummary');
+        if (result.status === 'ok') {
+          expect(result.value.findings).toContainEqual(
+            expect.objectContaining({ id: 'retained', status: 'open' }),
+          );
+          const retained = result.value.findings.find((finding) => finding.id === 'retained');
+          if (scenario === 'empty-file') expect(retained).toHaveProperty('file', '');
+          else expect(retained).not.toHaveProperty('file');
+          expect(result.value.sources.find((source) => source.kind === 'coderabbit')?.status).toBe(
+            'blocked',
+          );
+        }
+        const ledger = effects.openLedger(state.branch).load();
+        expect(ledger.records.findLast((entry) => entry.kind === 'cycle')).toMatchObject({
+          reviewer: 'agent:reviewer',
+          completion: { kind: 'terminal' },
+          agentCoverage: { version: 2, head: repo.git('rev-parse', 'HEAD').trim(), scope: 'full' },
+        });
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
+
+it.each(['full', 'uncommitted'] as const)(
+  'collects bounded %s context at the reviewed comparison',
+  async (scope) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/committed-context.ts', 'export const committed = 1;\n');
+      repo.commitAll('RUN_CONTEXT_COMMITTED\n\n' + 'x'.repeat(5000));
+      await repo.write('src/dirty-context.ts', 'export const dirty = 1;\n');
+      repo.git('add', 'src/dirty-context.ts');
+      const review = vi.fn<
+        typeof import('../../../src/ops/review/agentReviewer.js').runAgentReviewer
+      >(async () => ({ status: 'needs-human' as const, reason: 'fixture context captured' }));
+      await makeReviewRun({
+        drivers: scriptedDrivers(),
+        runAgentReviewer: review,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, ...(scope === 'uncommitted' ? { uncommitted: true } : {}) });
+      expect(review).toHaveBeenCalledOnce();
+      const input = review.mock.calls[0]!;
+      expect(input[1].scope).toBe(scope);
+      expect(input[1].intent!.length).toBeLessThanOrEqual(4000);
+      expect(input[1].fileList!.length).toBeLessThanOrEqual(4000);
+      expect(input[1].fileList).toContain('src/dirty-context.ts');
+      if (scope === 'full') {
+        expect(input[1].intent).toContain('RUN_CONTEXT_COMMITTED');
+        expect(input[1].intent).toContain('[truncated:');
+        expect(input[1].fileList).toContain('src/committed-context.ts');
+      } else {
+        expect(input[1].intent).toBe('');
+        expect(input[1].fileList).not.toContain('src/committed-context.ts');
+        expect(input[1].base).toBe(repo.git('rev-parse', 'HEAD').trim());
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
 it('#551: review.run completes after the scripted CodeRabbit rate limit', async () => {
   const repo = await makeTestRepo();
   try {
@@ -2096,3 +2286,114 @@ it('#551: review.run completes after the scripted CodeRabbit rate limit', async 
     await repo.cleanup();
   }
 });
+
+it.each(['terminal', 'blocked'] as const)(
+  'CodeRabbit %s findings retain empty file identity in the ledger and persisted report',
+  async (completion) => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          review: { reviewers: ['coderabbit'] },
+        }),
+      );
+      repo.commitAll('configure offline CodeRabbit stream');
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? {
+              exitCode: completion === 'terminal' ? 0 : 1,
+              stdout: [
+                { type: 'finding', severity: 'major', fileName: '', comment: 'empty identity' },
+                ...(completion === 'terminal'
+                  ? [{ type: 'complete', status: 'review_completed' }]
+                  : []),
+              ]
+                .map((event) => JSON.stringify(event))
+                .join('\n'),
+              stderr: '',
+              timedOut: false,
+            }
+          : undefined,
+      );
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe(completion === 'terminal' ? 'ok' : 'needs-human');
+      const cycle = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle' && entry.reviewer === 'coderabbit');
+      if (cycle?.kind !== 'cycle') throw new Error('missing vendor cycle');
+      expect(cycle.findings[0]).toHaveProperty('fileName', '');
+      const persisted = JSON.parse(
+        await readFile(join(repo.root, '.cq/review/feature%2Fx/1.json'), 'utf8'),
+      ) as { findings: Array<{ file?: string }> };
+      expect(persisted.findings[0]).toHaveProperty('file', '');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]).toHaveProperty('file', '');
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);
+
+it.each(['', undefined])(
+  'agent blocked partial findings persist file identity: %j',
+  async (file) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const effects = repoEffects(repo);
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+        runAgentReviewer: async () => ({
+          status: 'needs-human',
+          reason: 'fixture partial evidence',
+          report: {
+            findings: [
+              {
+                id: 'partial',
+                source: 'agent',
+                severity: 'major',
+                text: 'identity',
+                status: 'open',
+                ...(file === undefined ? {} : { file }),
+              },
+            ],
+            usage: 1,
+            coverage: undefined as never,
+            advisories: [],
+            limitations: [],
+          },
+        }),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      const cycle = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'cycle' && entry.reviewer === 'agent:reviewer');
+      if (cycle?.kind !== 'cycle') throw new Error('missing agent cycle');
+      const persisted = JSON.parse(
+        await readFile(join(repo.root, '.cq/review/feature%2Fx/1.json'), 'utf8'),
+      ) as { findings: Array<{ file?: string }> };
+      if (file === undefined) {
+        expect(cycle.findings[0]).not.toHaveProperty('fileName');
+        expect(persisted.findings[0]).not.toHaveProperty('file');
+      } else {
+        expect(cycle.findings[0]).toHaveProperty('fileName', '');
+        expect(persisted.findings[0]).toHaveProperty('file', '');
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);

@@ -39,17 +39,25 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentReviewReport, AgentReviewResult } from '../review/agentReviewer.js';
+import { collectBoundedReviewContext } from '../review/internal/reviewContext.js';
 import {
   isCoverageV2Complete,
   ReviewCoverageV2Schema,
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
 import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.js';
+import type { Finding } from '../review/findings.js';
+import { restoreDurableDisposition } from '../review/internal/durableDisposition.js';
+import {
+  classifyDeferredVendorFailure,
+  type VendorFailureProvenance,
+} from './internal/deferredReview.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
   coderabbitReviewArgv,
   decideCompletion,
+  deferredVendorErrorCodes,
   isTransientReviewerFailure,
   parseReviewerStream,
 } from './coderabbit.js';
@@ -60,8 +68,10 @@ import {
   DEFAULT_DEV_TARGET,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   DEV_LEDGER_VERSION,
+  findReusableCycle,
   type DevCycleRecord,
   type DevFinding,
+  type DevReuseRecord,
   type DevReviewCompletion,
 } from './record.js';
 import { DevCycleInputSchema, type DevTransportInput } from './registry.js';
@@ -241,6 +251,8 @@ export interface DevReviewDeps {
     components: readonly ScanComponentInput[];
     base: string;
     scope: 'full' | 'uncommitted';
+    intent?: string;
+    fileList?: string;
   }) => Promise<AgentReviewResult>;
   /**
    * The author-admission transport (admission actions). When omitted, the
@@ -261,11 +273,36 @@ export interface DevReviewReport {
   dirtySha256: string;
   completion: DevReviewCompletion;
   findings: DevFinding[];
+  /**
+   * Q17b: the FULL normalized projection of the selected cycle's findings — present only
+   * on a REUSE report. `findings` above stays the raw source-cycle evidence; each row here
+   * is that raw finding with its LATEST persisted disposition applied by the authoritative
+   * helper (content-bound, import cycles never witness). A normalizer consumes this field
+   * keyed by id and revalidated against full content; the raw ledger is never rewritten.
+   */
+  retainedFindings?: Finding[];
   /** Report context only: never dispatched or counted as blocking findings. */
   advisories: string[];
   logPath: string;
   untracked: string[];
   at: string;
+  /**
+   * Q4 (#485): present only when this report settled the requirement by
+   * REUSING an earlier terminal cycle instead of a new vendor run — the
+   * explicit, auditable source-cycle evidence. The referenced cycle and
+   * every finding/disposition stay verbatim in the ledger; the reuse is
+   * author evidence, never verification or independent acceptance.
+   */
+  reuse?: {
+    /** The reuse record appended to the ledger for this selection. */
+    reuseId: string;
+    /** Why the source cycle satisfies the requirement. */
+    basis: 'exact-terminal' | 'no-fresh-tail';
+    /** The same-identity no-fresh blocked attempt this selection resolves. */
+    resolvesCycleId?: string;
+    /** The selection's own raw log (outside the repository). */
+    logPath: string;
+  };
 }
 
 /**
@@ -320,6 +357,8 @@ function makeReviewCycle(
   },
 ): Op<DevCycleInput, DevReviewReport> {
   return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
+    const contextDeadlineAt = Date.now() + DEFAULT_REVIEWER_TIMEOUT_MS;
+    const contextRemaining = remainingWallMs ?? (() => contextDeadlineAt - Date.now());
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const scope = input.uncommitted === true ? 'uncommitted' : 'full';
     const reviewer = input.reviewer ?? CODERABBIT_REVIEWER;
@@ -379,6 +418,137 @@ function makeReviewCycle(
       );
     }
 
+    // Q4 (#485) — EXACT-TERMINAL REUSE, BEFORE any vendor dispatch. A
+    // terminal full-scope record with the EXACT requested identity (the
+    // branch ledger, target, pinned base, head, dirty identity, scope and
+    // reviewer all matching) settles this cycle with ZERO vendor calls and
+    // zero new cycles: the selection is appended as an explicit reuse
+    // record (auditable source-cycle evidence) and returned. The selection
+    // runs under its own host-lock acquisition with the same drift
+    // re-read, so a tree that changes while the ledger is read can never
+    // be attributed a review it did not hold. A same-identity affirmative
+    // no-fresh BLOCKED tail is resolved the same way (basis
+    // 'no-fresh-tail', the tail named in the reuse record, kept verbatim
+    // in the ledger); any other blocked attempt — error, auth, rate
+    // limit, malformed stream, deadline kill, or a structured
+    // vendor-failure class — is a genuine later blocker: no reuse, and the
+    // dispatch below proceeds exactly as before. Findings and
+    // dispositions are untouched; reuse is author evidence, never
+    // verification or independent acceptance.
+    let reuseReport: DevReviewReport | undefined;
+    try {
+      await effects.withHostLock(async () => {
+        signal?.throwIfAborted();
+        await refuseDrift('while the reuse ledger was read');
+        const ledger = effects.openLedger(state.branch).load();
+        const selection = findReusableCycle(ledger.records, {
+          target,
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
+          scope,
+          reviewer,
+        });
+        if (selection === null) return;
+        const resolvesCycleId =
+          selection.basis === 'no-fresh-tail' ? selection.resolvesCycleId : undefined;
+        const selectionAt = effects.nowIso();
+        const reuseCount = ledger.records.filter((entry) => entry.kind === 'reuse').length;
+        const reuseId = `r${String(reuseCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
+        const logPath = await effects.writeReviewLog(
+          state.branch,
+          `${Date.now()}`,
+          [
+            '# dev.review reuse log',
+            `basis: ${selection.basis}`,
+            `selected cycle: ${selection.cycle.cycleId}`,
+            ...(selection.basis === 'no-fresh-tail'
+              ? [`resolves blocked attempt: ${resolvesCycleId}`]
+              : []),
+            `reviewer: ${reviewer}`,
+            `target: ${target}`,
+            `base: ${state.base}`,
+            `head: ${state.head}`,
+            `dirtySha256: ${state.dirtySha256}`,
+            `scope: ${scope}`,
+            `findings preserved: ${String(selection.cycle.findings.length)}`,
+            `at: ${selectionAt}`,
+            '',
+          ].join('\n'),
+        );
+        const selectionBasis = selection.basis;
+        const entry: DevReuseRecord = {
+          kind: 'reuse',
+          reuseId,
+          cycleId: selection.cycle.cycleId,
+          basis: selectionBasis,
+          ...(resolvesCycleId === undefined ? {} : { resolvesCycleId }),
+          target,
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
+          scope,
+          reviewer,
+          logPath,
+          at: selectionAt,
+        };
+        await effects.openLedger(state.branch).mutate((current) => {
+          return {
+            ledger: {
+              version: DEV_LEDGER_VERSION,
+              branch: current.branch,
+              records: [...current.records, entry],
+            },
+            value: entry,
+          };
+        });
+        reuseReport = {
+          cycleId: selection.cycle.cycleId,
+          reviewer: selection.cycle.reviewer,
+          scope: selection.cycle.scope,
+          target: selection.cycle.target,
+          base: selection.cycle.base,
+          head: selection.cycle.head,
+          dirtySha256: selection.cycle.dirtySha256,
+          completion: selection.cycle.completion,
+          findings: selection.cycle.findings,
+          retainedFindings: selection.cycle.findings.map((finding) =>
+            restoreDurableDisposition(
+              {
+                id: finding.id,
+                source: selection.cycle.reviewer,
+                text: finding.excerpt ?? '',
+                severity: finding.severity,
+                status: 'open',
+                ...(finding.fileName !== undefined ? { file: finding.fileName } : {}),
+                ...(finding.line !== undefined ? { line: finding.line } : {}),
+                ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+                ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+                ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
+              },
+              ledger,
+            ),
+          ),
+          advisories: selection.cycle.advisories ?? [],
+          logPath: selection.cycle.logPath,
+          untracked: selection.cycle.untracked,
+          at: selectionAt,
+          reuse: {
+            reuseId,
+            basis: selectionBasis,
+            ...(resolvesCycleId === undefined ? {} : { resolvesCycleId }),
+            logPath,
+          },
+        };
+      }, signal);
+    } catch (err) {
+      // A queued cancellation still reaches the ordinary blocked-outcome recorder.
+      // It must not spend vendor quota or disappear before the durable attempt.
+      if (!signal?.aborted && (remainingWallMs?.() ?? Infinity) > 0)
+        return needsHuman(`the reuse check could not complete — ${faultText(err)}`);
+    }
+    if (reuseReport !== undefined) return { status: 'ok', value: reuseReport };
+
     // The run under the HOST lock; the completion is decided and the log
     // written inside the span, the record appended after it.
     const at = effects.nowIso();
@@ -388,6 +558,8 @@ function makeReviewCycle(
       logPath: string;
       findings: Omit<DevFinding, 'id'>[];
       advisories: string[];
+      vendorFailure?: VendorFailureProvenance;
+      agentCoverage?: ReviewCoverageV2;
       /** The block came from the network/transient class (#509): a re-review may retry it. */
       transient?: boolean;
       /** A deadline/signal stopped the CLI itself, rather than a safety or provider refusal. */
@@ -400,6 +572,19 @@ function makeReviewCycle(
         if (isAgent) {
           const role = reviewer.slice('agent:'.length);
           if (!role) throw new Error('agent reviewer role is empty');
+          const context = await collectBoundedReviewContext(
+            effects,
+            scope === 'uncommitted' ? 'HEAD' : state.base,
+            state.head,
+            scope,
+            { ...(signal ? { signal } : {}), remainingWallMs: contextRemaining },
+          );
+          if (!context.ok) throw new Error(context.reason);
+          await refuseDrift('while the review context was read');
+          signal?.throwIfAborted();
+          const remaining = contextRemaining();
+          if (!Number.isFinite(remaining) || remaining <= 0)
+            throw new Error('review wall budget exhausted before agent dispatch');
           const result = await runAgentReviewer!({
             repoRoot: input.repoRoot,
             head: state.head,
@@ -409,6 +594,8 @@ function makeReviewCycle(
             components: collected.components,
             base: scope === 'uncommitted' ? state.head : state.base,
             scope,
+            intent: context.context.intent,
+            fileList: context.context.fileList,
           });
           await refuseDrift('during the agent review run');
           const report = result.status === 'ok' ? result.value : result.report;
@@ -459,10 +646,20 @@ function makeReviewCycle(
             logPath,
             findings: findings.map((finding) => ({
               severity: finding.severity,
-              ...(finding.file ? { fileName: finding.file } : {}),
+              ...(finding.file !== undefined ? { fileName: finding.file } : {}),
+              ...(finding.line !== undefined ? { line: finding.line } : {}),
+              ...(finding.rule !== undefined ? { rule: finding.rule } : {}),
+              ...(finding.evidence !== undefined ? { evidence: finding.evidence } : {}),
+              ...(finding.evidenceV1 !== undefined ? { evidenceV1: finding.evidenceV1 } : {}),
               excerpt: finding.text,
             })),
             advisories,
+            ...(completion.kind === 'terminal' &&
+            coverage.ok &&
+            !signal?.aborted &&
+            (remainingWallMs?.() ?? Infinity) > 0
+              ? { agentCoverage: coverage.coverage }
+              : {}),
             ...(result.status === 'needs-human' && report?.transient === true
               ? { transient: true }
               : {}),
@@ -559,7 +756,8 @@ function makeReviewCycle(
         const budgetStopped =
           streamRefusal === undefined &&
           wallRemainingMs <= 0 &&
-          (ordinaryCompletion?.kind === 'terminal' || (raw.exitCode === null && raw.timedOut));
+          (ordinaryCompletion?.kind === 'terminal' ||
+            (raw.exitCode === null && (raw.timedOut || raw.interruption?.kind === 'abort')));
         const completion: DevReviewCompletion =
           streamRefusal ??
           (signal?.aborted || wallRemainingMs <= 0
@@ -605,11 +803,32 @@ function makeReviewCycle(
           !signal?.aborted &&
           (remainingWallMs?.() ?? Infinity) > 0 &&
           isTransientReviewerFailure(parsed, raw);
+        const vendorFailure =
+          completion.kind === 'blocked'
+            ? classifyDeferredVendorFailure({
+                origin: 'vendor-cli',
+                codes:
+                  raw.exitCode === 0 || raw.exitCode === 1 ? deferredVendorErrorCodes(parsed) : [],
+                exitCode: raw.exitCode,
+                timedOut: raw.timedOut,
+                cancelled: signal?.aborted === true,
+                budgetStopped: (remainingWallMs?.() ?? Infinity) <= 0,
+                malformed:
+                  parsed.unparsedLines > 0 ||
+                  parsed.trailingAfterComplete > 0 ||
+                  (parsed.sawComplete && parsed.completeStatus !== 'review_completed'),
+                actionRequired: parsed.sawActionRequired,
+                // With error events, a completion can mix no-fresh and failure evidence.
+                // Refuse the mixed stream rather than classifying its prose.
+                skipped: parsed.sawComplete,
+              })
+            : undefined;
         return {
           completion,
           logPath,
           findings: [...priorFindings, ...parsed.findings],
           advisories: [],
+          ...(vendorFailure === undefined ? {} : { vendorFailure }),
           ...(transient ? { transient: true } : {}),
           ...(budgetStopped ? { budgetStopped: true as const } : {}),
         };
@@ -649,6 +868,8 @@ function makeReviewCycle(
             id: `${cycleId}#f${String(index + 1)}`,
           })),
           ...(span.advisories.length > 0 ? { advisories: span.advisories } : {}),
+          ...(span.vendorFailure === undefined ? {} : { vendorFailure: span.vendorFailure }),
+          ...(span.agentCoverage === undefined ? {} : { agentCoverage: span.agentCoverage }),
           logPath: span.logPath,
           untracked: state.untracked,
           at,
