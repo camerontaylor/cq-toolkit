@@ -175,7 +175,15 @@ export async function runAgentReviewer(
         scope: input.scope ?? 'full',
         branch: input.branch,
         components,
-        ...(input.intent === undefined ? {} : { intent: input.intent }),
+        ...(input.evidenceContext === undefined
+          ? input.intent === undefined
+            ? {}
+            : { intent: input.intent }
+          : {
+              intent:
+                'For every finding emit evidenceV1: {version:1,failureScenario:string,primary:{file,side:"base"|"head",start,end,quote},supporting:[]}. Quote exact complete source lines at original line numbers. Read source to verify anchors. Primary must overlap changed hunks; supporting may contain at most five anchors with relevance.\n' +
+                (input.intent ?? ''),
+            }),
         ...(input.fileList === undefined ? {} : { fileList: input.fileList }),
         ...(input.priorFindings === undefined ? {} : { priorFindings: input.priorFindings }),
         ...(input.session === undefined ? {} : { session: input.session }),
@@ -352,6 +360,10 @@ export async function runAgentReviewer(
               : { loadEvidencePaths: input.loadEvidencePaths }),
             evidence,
             logToolFailures: input.logToolFailures ?? false,
+            onFindings: (findings) => {
+              outcomes[index] = findings;
+              rebuildFindings();
+            },
             onUsage: (usage) => {
               report!.usage += totalUsage(usage);
             },

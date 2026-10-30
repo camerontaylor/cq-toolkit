@@ -183,6 +183,34 @@ describe('review.run', () => {
     }
   });
 
+  it('retains completed findings when an evidence repair throws', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => {
+          prompts.push(input.prompt);
+          if (prompts.length === 2) throw new Error('repair transport failed');
+        }),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toContain('emit evidenceV1');
+      expect(prompts[1]).toContain('Repair only the evidence');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.text).toBe('seeded');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('requires a readable cq.json before starting a review', async () => {
     const repo = await makeTestRepo();
     try {

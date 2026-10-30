@@ -137,6 +137,7 @@ export async function runReviewSession(
     plan: PlannedReviewSession;
     evidence: ReviewCoverageV2['sessions'][number];
     onUsage: (usage: Usage) => void;
+    onFindings?: (findings: Finding[]) => void;
     onAdvisories?: (advisories: readonly string[]) => void;
     searchTools: boolean;
     logToolFailures?: boolean;
@@ -150,9 +151,6 @@ export async function runReviewSession(
 ): Promise<OpResult<Finding[]> & { errorClass?: WorkerErrorClass; fatal?: boolean }> {
   const { evidence, signal } = input;
   const plan = { ...input.plan };
-  if (input.evidenceContext !== undefined)
-    plan.prompt +=
-      '\nFor every finding emit evidenceV1: {version:1,failureScenario:string,primary:{file,side:"base"|"head",start,end,quote},supporting:[]}. Quote exact complete source lines at their original line numbers. Read the source to verify anchors. Primary must overlap changed hunks; supporting may contain at most five anchors with relevance.';
   if (evidence.deliveries.length > 0 || evidence.requests.length > 0)
     throw new Error('agent review session evidence must start empty');
   const sources = new Map(input.components.map((component) => [component.component, component]));
@@ -363,6 +361,19 @@ export async function runReviewSession(
       fatal: true,
     };
   }
+  const normalized = (): Finding[] =>
+    parsed.data.findings.map((item, index) => ({
+      id: `${plan.id}-${index + 1}`,
+      source: 'agent',
+      ...(item.file !== undefined ? { file: item.file } : {}),
+      ...(item.line ? { line: item.line } : {}),
+      ...(item.rule !== undefined ? { rule: item.rule } : {}),
+      severity: input.severityMap[item.severity] ?? 'minor',
+      text: item.text,
+      status: 'open',
+      ...(item.evidenceV1 === undefined ? {} : { evidenceV1: item.evidenceV1 }),
+    }));
+  input.onFindings?.(normalized());
   if (input.evidenceContext !== undefined) {
     for (const item of parsed.data.findings) {
       const load = async (candidate: FindingEvidenceV1 | undefined) => {
@@ -393,6 +404,10 @@ export async function runReviewSession(
             finding: item,
             reasons: prepared?.status === 'invalid' ? prepared.reasons : ['missing-evidence'],
           });
+        if (plan.prompt.length > input.maxPromptChars) {
+          input.onAdvisories?.(['evidence repair withheld: prompt budget exceeded']);
+          break;
+        }
         const repaired = await runDriver(input.maxTokens - spent);
         settle(repaired);
         if (repaired.stopReason !== 'complete') break;
@@ -425,20 +440,8 @@ export async function runReviewSession(
                 validation: { status: 'invalid', reasons: [...prepared.reasons] },
               };
       } else input.onAdvisories?.(['evidence preparation: missing evidence after bounded repairs']);
+      input.onFindings?.(normalized());
     }
   }
-  return {
-    status: 'ok',
-    value: parsed.data.findings.map((item, index) => ({
-      id: `${plan.id}-${index + 1}`,
-      source: 'agent',
-      ...(item.file !== undefined ? { file: item.file } : {}),
-      ...(item.line ? { line: item.line } : {}),
-      ...(item.rule !== undefined ? { rule: item.rule } : {}),
-      severity: input.severityMap[item.severity] ?? 'minor',
-      text: item.text,
-      status: 'open',
-      ...(item.evidenceV1 === undefined ? {} : { evidenceV1: item.evidenceV1 }),
-    })),
-  };
+  return { status: 'ok', value: normalized() };
 }
