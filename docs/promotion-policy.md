@@ -188,12 +188,12 @@ fail-closed).
   `cq-promotion-result-v1` result binding that previous main and the exact new main, with an ordinary signer disposition.
   crq reads Actions API run/job metadata and job logs, never PR comment text. Runs must
   name `.github/workflows/gate.yml` on `main`, at the exact previous main SHA, from
-  schedule, push or workflow_dispatch; PR workflow runs never qualify. The gate itself
+  schedule, workflow_run, push or workflow_dispatch; PR workflow runs never qualify. The gate itself
   already verifies independent head-bound acceptance for every admitted PR, exact-subject CI,
   closure and policy using the canonical privileged-path predicate. A green run alone, a noop,
   a dry run, another head or a privileged (`required`) disposition does not qualify.
   Missing or expired evidence falls back to the pinned signer requirement; privileged advances
-  retain that requirement. The audit scans at most 30 recent gate runs, so delayed observations
+  retain that requirement. The audit scans at most 30 recent successful gate runs at the previous main, so delayed observations
   can remain unverified. Procedural acknowledgement never certifies review, CI or promotion.
 
 ### Exact procedural audit acknowledgement

@@ -2665,21 +2665,27 @@ def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
     missing/expired log remains unverified, never inferred from green alone.
     """
     prefix = f"repos/{REPO}/actions"
-    runs = json.loads(run(["gh", "api", f"{prefix}/workflows/gate.yml/runs?per_page=30"],
+    runs = json.loads(run(["gh", "api", f"{prefix}/workflows/gate.yml/runs?per_page=30&head_sha={last}&status=success"],
                           timeout=120).stdout)["workflow_runs"]
     for candidate in runs:
         if (candidate.get("head_sha") != last or candidate.get("head_branch") != "main"
                 or candidate.get("path") != ".github/workflows/gate.yml"
-                or candidate.get("event") not in ("schedule", "workflow_dispatch", "push")
+                or candidate.get("event") not in ("schedule", "workflow_dispatch", "workflow_run", "push")
                 or candidate.get("status") != "completed" or candidate.get("conclusion") != "success"):
             continue
-        jobs = json.loads(run(["gh", "api", f"{prefix}/runs/{candidate['id']}/jobs?per_page=100"],
-                              timeout=120).stdout)["jobs"]
+        try:
+            jobs = json.loads(run(["gh", "api", f"{prefix}/runs/{candidate['id']}/jobs?per_page=100"],
+                                  timeout=120).stdout)["jobs"]
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            continue
         for job in jobs:
             if job.get("name") != "decide" or job.get("conclusion") != "success":
                 continue
-            log = run(["gh", "api", "--allow-escape-sequences", f"{prefix}/jobs/{job['id']}/logs"],
-                      timeout=120).stdout
+            try:
+                log = run(["gh", "api", "--allow-escape-sequences", f"{prefix}/jobs/{job['id']}/logs"],
+                          timeout=120).stdout
+            except (subprocess.SubprocessError, OSError, RuntimeError):
+                continue
             # Any duplicate marker is ambiguous, including malformed records.
             records = [line for line in log.splitlines() if re.match(
                 r"^[0-9T:.Z-]+ cq-promotion-result-v1(?: |$)", line)]
@@ -2715,7 +2721,7 @@ def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str,
     if not reasons:
         try:
             evidence = ordinary_gate_evidence(last, main)
-        except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError) as exc:
+        except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
             evidence = None
             notes.append(f"ordinary gate evidence unavailable ({type(exc).__name__})")
         if evidence:
