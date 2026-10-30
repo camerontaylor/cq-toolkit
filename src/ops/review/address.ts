@@ -1597,6 +1597,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   const fix = await bound.fix(finding, round);
                   await verifyFix(root, fix);
                   if (fix.finding.status === 'open') {
+                    fixesById.set(finding.id, fix);
                     remember(fix);
                     return { status: 'needs-human', reason: fix.reason };
                   }
@@ -1721,7 +1722,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   'needs-human',
                   'PR worker admission refused; persisted/caller bytes retained',
                 );
-              if (closureRefused) return await finish('needs-human', closureRefused);
+              if (closureRefused) {
+                if (dispatchedRecord) {
+                  const record = {
+                    ...dispatchedRecord,
+                    findings: dispatchedFindings.map(
+                      (finding) => fixesById.get(finding.id)?.finding ?? finding,
+                    ),
+                  };
+                  report.findings = record.findings;
+                  report.openBlocking = openBlocking(record, policy.review.blockingSeverities);
+                }
+                return await finish('needs-human', closureRefused);
+              }
               const fetched = await fetchReviewState(
                 { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                 undefined,

@@ -549,6 +549,9 @@ describe('review.address PR phase-one orchestration', () => {
       expect(result.status).toBe('needs-human');
       const report = result.status === 'ok' ? result.value : result.report!;
       expect(report.closureVerifications?.[0]?.verification.verdict).toBe('uncertain');
+      expect(report.findings).toMatchObject([{ id: 'T1', status: 'open' }]);
+      expect(report.openBlocking).toMatchObject([{ id: 'T1', status: 'open' }]);
+      expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
       expect(w.resolved.has('T1')).toBe(false);
       expect(w.actions).not.toContain('resolve:T1');
       expect(w.reviewerCalls()).toBe(0);
