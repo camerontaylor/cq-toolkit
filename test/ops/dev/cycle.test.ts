@@ -7,6 +7,7 @@
 // network, no credentials.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { rm } from 'node:fs/promises';
+import { relative } from 'node:path';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import {
@@ -251,6 +252,35 @@ async function seedReadyLedger(state: WorkState): Promise<void> {
 }
 
 describe('dev.cycle', () => {
+  test('a relative repoRoot publishes and verifies the reviewed head with the production Git runner', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const repoRoot = relative(process.cwd(), repo.root);
+    expect(repoRoot).not.toBe(repo.root);
+    expect(repo.git('ls-remote', 'origin', 'refs/heads/feature/x')).toBe('');
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake(opens),
+      // No git override: exercise cwd and -C together against the local origin.
+    });
+
+    const result = await op({ repoRoot });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.pushed).toBe(true);
+    expect(result.value.head).toBe(state.head);
+    expect(repo.git('ls-remote', 'origin', 'refs/heads/feature/x').trim()).toBe(
+      `${state.head}\trefs/heads/feature/x`,
+    );
+    expect(opens).toEqual([{ repoRoot: repo.root, target: 'merge-queue' }]);
+    expect(result.value.followUp).toBe(followUpCommand(42, repo.root));
+  });
+
   test('the clean loop: check → review → address → final check → push → ready PR (ok)', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
