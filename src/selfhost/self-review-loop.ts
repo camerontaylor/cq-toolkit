@@ -826,7 +826,12 @@ function runStartInstant(deps: SelfReviewLoopDeps): number {
  * artifact upload, both best-effort. Exit 0 even with failures — honest
  * outcomes are the contract (they are mirrored to stderr, prominently, for
  * the workflow log); only a whole-run throw (bad args, a failed listing)
- * exits 1.
+ * exits 1. Q34 adds a scoped policy: after a successful sweep and usage
+ * capture, ordinary stdout transport failures are best-effort. Await write
+ * callback settlement, attempt one bounded warning, and continue the table,
+ * per-PR diagnostics and usage artifact without a whole-run transport error.
+ * This does not establish successful stdout delivery. Payload construction
+ * and serialization, and all pre-sweep failure boundaries, still throw.
  */
 export async function main(
   deps: SelfReviewLoopDeps = {
@@ -917,10 +922,10 @@ export async function main(
       excluded: summary.excluded ?? [],
     };
 
-    // The sweep token-usage emission (D11b). ORDER MATTERS: every stdout
-    // write callback completes before the step-summary append. This drains
-    // Node's buffered output; a downstream tee must still finish separately
-    // before its own writes to the same summary file are known to be complete.
+    // The sweep token-usage emission (D11b; scoped transport policy Q34).
+    // Await callback success/failure before appending the step summary; a
+    // callback does not establish delivery through a downstream tee. Keep
+    // serialization outside transport suppression so serialization still fails.
     const stdoutPayload = `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`;
     try {
       await new Promise<void>((resolve, reject) => {
@@ -930,8 +935,8 @@ export async function main(
         });
       });
     } catch (error) {
-      // The sweep's effects are already committed. A reporting failure must
-      // not turn that completed work into a whole-run failure or skip the table.
+      // Q34 newly classifies only this post-sweep transport failure as
+      // best-effort; oneLine bounds the warning detail to 500 characters.
       try {
         process.stderr.write(
           `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
