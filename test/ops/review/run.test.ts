@@ -34,7 +34,12 @@ async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>
   repo.commitAll('fixture agent review setup');
 }
 
-function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailures = 0) {
+function scriptedDrivers(
+  onRun?: (input: { prompt: string }) => void,
+  toolFailures = 0,
+  findings?: () => unknown[],
+  stopReason?: () => 'complete' | 'error',
+) {
   return {
     resolve: vi.fn(
       (request: {
@@ -57,9 +62,11 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
               { kind: 'model-request' },
             );
             return {
-              stopReason: 'complete' as const,
+              stopReason: stopReason?.() ?? ('complete' as const),
+              error: 'provider quota refused',
+              errorClass: 'quota' as const,
               structuredOutput: {
-                findings: [{ severity: 'high', text: 'seeded' }],
+                findings: findings?.() ?? [{ severity: 'high', text: 'seeded' }],
               },
               usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
               // Seam v3: this scripted driver models a provider MEASUREMENT, so
@@ -76,6 +83,178 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
 }
 
 describe('review.run', () => {
+  it.each([
+    'valid',
+    'repaired',
+    'invalid',
+    'dirty',
+    'untracked',
+    'supporting',
+    'historical-invalid',
+  ] as const)('prepares %s anchored evidence through review.run', async (mode) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/dependency.ts', 'export const dependency = 1;\n');
+      repo.commitAll('dependency baseline');
+      const base = repo.git('rev-parse', 'HEAD').trim();
+      if (mode === 'dirty') {
+        await repo.write('src/evidence.ts', 'export const value = 0;\n');
+        repo.commitAll('old evidence value');
+      }
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      if (mode !== 'untracked' && mode !== 'dirty') repo.commitAll('evidence fixture');
+      let requests = 0;
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(
+          () => {
+            requests++;
+          },
+          0,
+          () => [
+            {
+              file: 'src/evidence.ts',
+              line: 1,
+              severity: 'high',
+              text: 'seeded',
+              evidenceV1: {
+                version: 1,
+                ...(mode === 'historical-invalid'
+                  ? { validation: { status: 'invalid', reasons: ['quote-mismatch'] } }
+                  : {}),
+                failureScenario: 'seeded scenario',
+                primary: {
+                  file: 'src/evidence.ts',
+                  side: 'head',
+                  start: 1,
+                  end: 1,
+                  quote:
+                    !['repaired', 'invalid'].includes(mode) || (mode === 'repaired' && requests > 1)
+                      ? 'export const value = 1;'
+                      : 'wrong quote',
+                },
+                supporting:
+                  mode === 'supporting'
+                    ? [
+                        {
+                          file: 'src/dependency.ts',
+                          side: 'head',
+                          start: 1,
+                          end: 1,
+                          quote: 'export const dependency = 1;',
+                          relevance: 'caller dependency',
+                        },
+                      ]
+                    : [],
+              },
+            },
+          ],
+        ),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, base, prepareEvidence: true, maxTokens: 5000 });
+      expect(requests).toBe(mode === 'invalid' ? 3 : mode === 'repaired' ? 2 : 1);
+      expect(result.status).toBe(mode === 'invalid' ? 'needs-human' : 'ok');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.evidenceV1?.primary.quote).toBe(
+        mode === 'invalid' ? 'wrong quote' : 'export const value = 1;',
+      );
+      expect(report?.findings[0]?.evidenceV1?.validation?.status).toBe(
+        mode === 'invalid' ? 'invalid' : undefined,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('opt-in evidence preparation invokes repair on the operation path and blocks missing evidence', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(3);
+      expect(prompts[0]).toContain('emit evidenceV1');
+      expect(prompts[1]).toContain('Repair only the evidence');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.text).toBe('seeded');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('retains completed findings when an evidence repair throws', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => {
+          prompts.push(input.prompt);
+          if (prompts.length === 2) throw new Error('repair transport failed');
+        }),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toContain('emit evidenceV1');
+      expect(prompts[1]).toContain('Repair only the evidence');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.text).toBe('seeded');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('stops all repair dispatch after a provider refusal and retains both findings', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(
+          () => {
+            prompts.push('request');
+          },
+          0,
+          () => [
+            { severity: 'high', text: 'first' },
+            { severity: 'medium', text: 'second' },
+          ],
+          () => (prompts.length === 1 ? 'complete' : 'error'),
+        ),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(2);
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings.map((finding) => finding.text)).toEqual(['first', 'second']);
+      expect(report?.sources[0]?.reason).toContain('provider quota refused');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('requires a readable cq.json before starting a review', async () => {
     const repo = await makeTestRepo();
     try {

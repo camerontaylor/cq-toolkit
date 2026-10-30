@@ -413,6 +413,7 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
       .min(1)
       .exactOptional(),
     uncommitted: z.boolean().exactOptional(),
+    prepareEvidence: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: z
       .string()

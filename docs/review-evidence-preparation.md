@@ -1,0 +1,3 @@
+# Anchored review evidence
+
+`cq review.run --prepareEvidence=true` opts the agent reviewer into producing `evidenceV1` anchors and validating their exact quotes against the reviewed base/head blobs and changed hunk ranges. It is off by default. Each finding can receive at most two additional evidence repair requests under the existing session token allowance and run deadline. The operation retains invalid candidates and validation reasons in review advisories, preserves the finding, and blocks the agent source when evidence is missing or invalid; evidence validation establishes citation integrity rather than semantic correctness. CodeRabbit output is unchanged. This producing path supplies the prerequisite for R9 baseline work.
