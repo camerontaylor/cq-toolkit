@@ -102,3 +102,23 @@ test('changed head before dispatch refuses and never invokes the address engine'
   expect(address).not.toHaveBeenCalled();
   expect(result.report?.rows[0]?.status).toBe('exception');
 });
+
+test('refuses a repository mismatch without dispatching', async () => {
+  const otherGh = async () => ({
+    code: 0,
+    stderr: '',
+    stdout: JSON.stringify({ nameWithOwner: 'other/repo' }),
+  });
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  const result = await makeReviewAddressMany({ gh: otherGh, address })(input);
+  expect(result.status).toBe('needs-human');
+  expect(address).not.toHaveBeenCalled();
+});
+
+test('oversized reservation never dispatches either PR', async () => {
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  const result = await makeReviewAddressMany({ gh, address })({ ...input, maxTokens: 10 });
+  expect(result.status).toBe('budget-exhausted');
+  expect(result.report?.rows.every((row) => row.status === 'not-admitted')).toBe(true);
+  expect(address).not.toHaveBeenCalled();
+});

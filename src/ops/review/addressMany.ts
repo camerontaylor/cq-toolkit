@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
@@ -15,6 +16,20 @@ import {
   type AddressManyAggregate,
   type AddressManyOutcomeInput,
 } from './internal/addressManyPlan.js';
+
+const PullMetadata = z.object({
+  number: z.number().int().positive(),
+  merged: z.boolean(),
+  state: z.enum(['open', 'closed']),
+  draft: z.boolean(),
+  user: z.object({ login: z.string(), type: z.enum(['User', 'Organization', 'Bot']) }).nullable(),
+  head: z.object({
+    sha: z.string(),
+    ref: z.string(),
+    repo: z.object({ full_name: z.string() }).nullable(),
+  }),
+});
+const RepositoryMetadata = z.object({ nameWithOwner: z.string() });
 
 export interface ReviewAddressManyInput {
   repoRoot: string;
@@ -45,13 +60,13 @@ export function makeReviewAddressMany(
     const facts = async (number: number): Promise<AddressManyPrFacts> => {
       const response = await gh(['api', `repos/${input.repo}/pulls/${number}`]);
       if (response.code !== 0) throw new Error(`cannot read PR #${number}: ${response.stderr}`);
-      const pr = JSON.parse(response.stdout);
+      const pr = PullMetadata.parse(JSON.parse(response.stdout) as unknown);
       return {
         repo: input.repo,
         number: pr.number,
         state: pr.merged ? 'MERGED' : pr.state === 'open' ? 'OPEN' : 'CLOSED',
         isDraft: pr.draft,
-        author: { login: pr.user.login, type: pr.user.type },
+        author: { login: pr.user?.login ?? '', type: pr.user?.type ?? 'User' },
         headRepository: pr.head.repo?.full_name ?? '',
         headRefName: pr.head.ref,
         headOid: pr.head.sha,
@@ -61,7 +76,9 @@ export function makeReviewAddressMany(
       const repository = await gh(['repo', 'view', '--json', 'nameWithOwner']);
       if (
         repository.code !== 0 ||
-        JSON.parse(repository.stdout).nameWithOwner?.toLowerCase() !== input.repo.toLowerCase()
+        RepositoryMetadata.parse(
+          JSON.parse(repository.stdout) as unknown,
+        ).nameWithOwner.toLowerCase() !== input.repo.toLowerCase()
       )
         return { status: 'needs-human', reason: 'repoRoot remote does not match requested repo' };
       const selection = selectAddressMany(
