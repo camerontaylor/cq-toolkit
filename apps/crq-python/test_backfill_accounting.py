@@ -62,6 +62,13 @@ class Fixture:
 
 
 class AccountingTest(unittest.TestCase):
+    def test_space_in_filename_preserves_changed_intervals(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Fixture(Path(td) / "repo")
+            base = f.commit({"my file.ts": b"before\n"})
+            head = f.commit({"my file.ts": b"after\n"})
+            self.assertEqual(f.repo.changed_intervals(base, head), {"my file.ts": {1}})
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.f = Fixture(Path(self.tmp.name) / "repo")

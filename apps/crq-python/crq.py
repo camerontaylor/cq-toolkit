@@ -1164,6 +1164,8 @@ def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
         return {"base": "(synthetic)", "head": "(synthetic)", "target": "origin/main",
                 "label": "post-merge synthetic review", "cycle": None, "notes": [], "branch": None}
     target = git("rev-parse", "origin/main^{commit}")
+    if not is_ancestor(item["merge_commit"], target):
+        raise NotReady("not-yet-promoted: merge commit is not an ancestor of origin/main")
     base, head, n = build_synthetic(item, target)
     return {"base": base, "head": head, "target": target, "cycle": None, "branch": None,
             "label": f"post-merge current projection ({n} PR-touched paths at promoted main)", "notes": []}
@@ -1588,7 +1590,10 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
             if cls["outcome"] in ("auth", "action_required"):
                 q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+            if cls["outcome"] == "rate_limited":
+                set_rate_cooldown(q, cls, rdir)
             save_queue(q)
+            remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
             return item["last_error"]
     if item["kind"] == "coverage" and item.get("attempt_id"):
         item["vendor_state"] = "terminal"

@@ -40,6 +40,12 @@ class LedgerTest(unittest.TestCase):
         self.store = ledger.ArtifactStore(self.root / "durable")
         self.ref = self.store.put(b"retained terminal bytes")
 
+    def test_untrusted_intervals_and_schema_ids_are_bounded(self):
+        with self.assertRaises(ledger.IntegrityError):
+            ledger.intervals([[1, 2**53 - 1]])
+        with self.assertRaises(ledger.IntegrityError):
+            ledger._schema("a" * 40 + "\n", {"type": "string", "pattern": "^[0-9a-f]{40,64}$"})
+
     def test_canonical_unicode_order_and_strict_json(self):
         self.assertEqual(ledger.canonical({"b": 2, "a": 1}), b'{"a":1,"b":2}')
         self.assertEqual(list(json.loads(ledger.canonical({"\ue000": 1, "\U00010000": 2}))), ["\U00010000", "\ue000"])

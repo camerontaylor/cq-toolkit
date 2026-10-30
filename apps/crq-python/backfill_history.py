@@ -137,8 +137,8 @@ def import_source(repo, store, source_class, source_id, raw, envelope, at, exist
         if source_class == "github-app-review":
             api = ledger.loads(raw)
             if (str(api.get("id")) != source_id or api.get("commit_id") != p["head"]
-                    or api.get("user", {}).get("login") != producer
-                    or api.get("user", {}).get("type") != "Bot"):
+                    or (api.get("user") or {}).get("login") != producer
+                    or (api.get("user") or {}).get("type") != "Bot"):
                 outcome = "rejected"
                 raise ledger.IntegrityError("GitHub review identity/head/producer mismatch")
             scope_proof = envelope.get("scope_artifact")
@@ -262,6 +262,6 @@ def github_sources(store):
     for pr in sorted((p for p in prs if p.get("merged_at")), key=lambda p: p["number"]):
         reviews, review_pages = fetch(f"repos/{ledger.REPO}/pulls/{pr['number']}/reviews?per_page=100")
         for review in reviews:
-            if review.get("user", {}).get("login") == "coderabbitai[bot]":
+            if (review.get("user") or {}).get("login") == "coderabbitai[bot]":
                 yield {"raw": json.dumps(review, sort_keys=True).encode(),
                        "metadata": {"pr": pr["number"], "pr_pages": pr_pages, "review_pages": review_pages}}

@@ -69,7 +69,7 @@ class Inbox:
             self.publication.spool(value)  # Durable event before local transition.
             row.update(status=action, previous_event_id=value["id"], target_current=promoted,
                        mapped_path=name, mapped_intervals=ranges(lines),
-                       canonical_id=canonical_id or row["canonical_id"])
+                       canonical_id=canonical_id if action == "duplicate" else row["canonical_id"])
             ledger.atomic(filename, ledger.canonical(row))
             return value
 

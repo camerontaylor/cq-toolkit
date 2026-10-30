@@ -118,7 +118,7 @@ def _schema(value, rule):
         for item in value:
             _schema(item, rule.get("items", {}))
     if isinstance(value, str):
-        if len(value) < rule.get("minLength", 0) or "pattern" in rule and not re.search(rule["pattern"], value):
+        if len(value) < rule.get("minLength", 0) or "pattern" in rule and not re.fullmatch(rule["pattern"], value):
             raise IntegrityError("schema string bound")
     if type(value) is int and value < rule.get("minimum", value):
         raise IntegrityError("schema integer bound")
@@ -128,7 +128,7 @@ def intervals(rows):
     result = set()
     last = 0
     for start, end in rows:
-        if type(start) is not int or type(end) is not int or start <= last or end < start:
+        if type(start) is not int or type(end) is not int or start <= last or end < start or end > 1_000_000 or len(result) + end - start + 1 > 1_000_000:
             raise IntegrityError("invalid or overlapping intervals")
         result.update(range(start, end + 1))
         last = end
@@ -373,9 +373,9 @@ class GitLedger:
         if remote.startswith("-") or branch != "cq/review-ledger":
             raise IntegrityError("invalid publication destination")
 
-    def git(self, *args, env=None, input=None, check=True):
+    def git(self, *args, env=None, input=None, check=True, timeout=300):
         return subprocess.run(["git", *args], cwd=self.repo, env=env, input=input,
-                              capture_output=True, check=check).stdout
+                              capture_output=True, check=check, timeout=timeout).stdout
 
     def read(self, head):
         values = []

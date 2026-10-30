@@ -30,8 +30,8 @@ repository denylist scanner and Gitleaks (zero hits each).
 
 Commands ran on triton with named canonical tests, nice=5 and the host lock.
 Full suites, builds, providers and credential/network access were not used by
-these tests. Commands below refer to the identical implementation tree before
-this documentation-only receipt. Full exact-head CI remains pending.
+these tests. Commands below are historical results from the initial implementation tree,
+not evidence for later successor commits. Full exact-head CI remains authoritative.
 
 ```sh
 pnpm test:narrow apps/crq-python/test_review_ledger.py apps/crq-python/test_backfill_accounting.py apps/crq-python/test_backfill_inventory.py apps/crq-python/test_backfill_subjects.py apps/crq-python/test_backfill_jobs.py apps/crq-python/test_backfill_history.py apps/crq-python/test_coverage.py apps/crq-python/test_backfill_runtime.py apps/crq-python/test_backfill_report.py apps/crq-python/test_finding_delivery.py

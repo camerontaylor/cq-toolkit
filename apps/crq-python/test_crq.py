@@ -2431,6 +2431,14 @@ class CoverageFallbackTargetTest(unittest.TestCase):
                     self.assertEqual(result, 3); spawn.assert_not_called()
                     self.assertTrue(json.loads((run_dir / "exit.json").read_text())["pre_vendor_refusal"])
 
+    def test_merged_projection_waits_for_promoted_code(self):
+        with mock.patch.object(crq, "git", return_value="a" * 40), \
+             mock.patch.object(crq, "is_ancestor", return_value=False), \
+             mock.patch.object(crq, "build_synthetic") as build:
+            with self.assertRaises(crq.NotReady):
+                crq.plan_merged({"merge_commit": "b" * 40}, False)
+        build.assert_not_called()
+
     def test_selective_backfill_preserves_ordinary_priority(self):
         queue = {"items": [{"id": "ordinary", "kind": "open", "state": "pending", "pr": 1}]}
         observed = []

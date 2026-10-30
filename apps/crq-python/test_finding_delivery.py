@@ -26,6 +26,11 @@ class FindingTest(unittest.TestCase):
         self.inbox = delivery.Inbox(self.root / "findings", self.out)
         self.inbox.ingest(self.value)
 
+    def test_confirmed_cannot_override_canonical_identity(self):
+        self.inbox.triage(self.fid, self.f.repo, self.t, "confirmed", "reviewer", "valid", AT, canonical_id="foreign")
+        row = ledger.loads((self.root / "findings/triage" / (self.fid + ".json")).read_bytes())
+        self.assertEqual(row["canonical_id"], self.fid)
+
     def test_occurrences_never_silently_merge_by_title_path(self):
         finding = self.value["payload"]["findings"][0]
         self.assertNotEqual(delivery.occurrence("crq-runner-app", "run-2", finding), self.fid)

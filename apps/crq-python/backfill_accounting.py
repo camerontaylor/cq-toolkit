@@ -130,6 +130,8 @@ class Repository:
                 continue
             if line.startswith("+++ b/"):
                 name = line[6:]
+                if " " in name and name.endswith("\t"):
+                    name = name[:-1]
                 if name.startswith('"') or "\\" in name:
                     current = None  # quoted names use whole-file residual fallback
                 else:
