@@ -1,0 +1,778 @@
+{
+  "version": 1,
+  "source_sha256": "d8ecbf7d914491884ebbe4a8820ca1fc0c4426c02091b198955f8f1d8099c374",
+  "explicit_unions": [
+    [262, 263],
+    [641, 649, 653]
+  ],
+  "rows": [
+    {
+      "row": 1,
+      "pr": 105,
+      "title": "feat(ratchet): self-host swap + template drills (H4)",
+      "note": ""
+    },
+    {
+      "row": 2,
+      "pr": 269,
+      "title": "feat(ci): batch promotion to main behind a CodeRabbit promot",
+      "note": ""
+    },
+    {
+      "row": 3,
+      "pr": 294,
+      "title": "promote-gate learns the promotion review (C2 prerequisite)",
+      "note": ""
+    },
+    {
+      "row": 4,
+      "pr": 310,
+      "title": "feat(gate): arm cq-gate and retire merge-queue-gate (C2 step",
+      "note": ""
+    },
+    {
+      "row": 5,
+      "pr": 322,
+      "title": "feat(gates): decisive D11 authorization for push subjects (C",
+      "note": ""
+    },
+    {
+      "row": 6,
+      "pr": 333,
+      "title": "[protected] fix(policy): run every trusted verdict job throu",
+      "note": ""
+    },
+    {
+      "row": 7,
+      "pr": 237,
+      "title": "fix(merge): accept independent agent reviews from a shared a",
+      "note": ""
+    },
+    {
+      "row": 8,
+      "pr": 276,
+      "title": "fix(denylist-scan): validate every required pair in a multi-",
+      "note": ""
+    },
+    {
+      "row": 9,
+      "pr": 368,
+      "title": "refactor(shared): Extract common error message coercion",
+      "note": ""
+    },
+    {
+      "row": 10,
+      "pr": 195,
+      "title": "fix(denylist): reject Windows-plain-name probe_path segments",
+      "note": ""
+    },
+    {
+      "row": 11,
+      "pr": 340,
+      "title": "fix(protected): C3 never honours a pre-attestation cq-overri",
+      "note": ""
+    },
+    {
+      "row": 12,
+      "pr": 360,
+      "title": "refactor(policy): Move settle schema to policy/queue",
+      "note": ""
+    },
+    {
+      "row": 13,
+      "pr": 262,
+      "title": "build: migrate from npm to pnpm with the global virtual stor",
+      "note": ""
+    },
+    {
+      "row": 14,
+      "pr": 263,
+      "title": "build: migrate from npm to pnpm with the global virtual stor",
+      "note": "same diff as #262 \u2014 review once as #262/#263"
+    },
+    {
+      "row": 15,
+      "pr": 132,
+      "title": "build!: Implement agent mechanical tooling",
+      "note": ""
+    },
+    {
+      "row": 16,
+      "pr": 649,
+      "title": "fix(review): persist verified queue receipt ownership before",
+      "note": "stacked \u2014 see #641"
+    },
+    {
+      "row": 17,
+      "pr": 653,
+      "title": "test(review): Cover offline queue transport boundaries",
+      "note": "stacked on #641/#649 \u2014 review the #641\u2192#653 union once"
+    },
+    {
+      "row": 18,
+      "pr": 641,
+      "title": "fix(review): bind authenticated same-item receipt aliases",
+      "note": "review #641+#649+#653 as one union diff"
+    },
+    {
+      "row": 19,
+      "pr": 324,
+      "title": "refactor(sandbox): Move host launchers to experimental [prot",
+      "note": ""
+    },
+    {
+      "row": 20,
+      "pr": 544,
+      "title": "feat(review): Add authorized queue operations and verified e",
+      "note": ""
+    },
+    {
+      "row": 21,
+      "pr": 133,
+      "title": "feat(merge): executeMerges effects seam + diagnoseMergeFailu",
+      "note": ""
+    },
+    {
+      "row": 22,
+      "pr": 74,
+      "title": "feat(ratchet): checkRatchet + monotonic guard (H2)",
+      "note": ""
+    },
+    {
+      "row": 23,
+      "pr": 440,
+      "title": "fix(sweep): Pin failed task attempts as commits",
+      "note": ""
+    },
+    {
+      "row": 24,
+      "pr": 125,
+      "title": "feat(merge): classifyPrs \u2014 the I2 acceptance decision table",
+      "note": ""
+    },
+    {
+      "row": 25,
+      "pr": 316,
+      "title": "fix(policy): per-run App mint for the last PAT consumers (C3",
+      "note": ""
+    },
+    {
+      "row": 26,
+      "pr": 267,
+      "title": "fix(ci): failed runs mean a human must act (verdicts in chec",
+      "note": ""
+    },
+    {
+      "row": 27,
+      "pr": 543,
+      "title": "feat(crq): Review merged PR affected code at a pinned curren",
+      "note": ""
+    },
+    {
+      "row": 28,
+      "pr": 571,
+      "title": "fix(fix-run): account for all planned residue",
+      "note": ""
+    },
+    {
+      "row": 29,
+      "pr": 330,
+      "title": "feat(crq): Port author lease and timed agent fallback",
+      "note": ""
+    },
+    {
+      "row": 30,
+      "pr": 540,
+      "title": "fix(review): Verify typed lint and bounded related tests",
+      "note": ""
+    },
+    {
+      "row": 31,
+      "pr": 131,
+      "title": "feat(merge): planMergeOrder \u2014 topological stacked ordering (",
+      "note": ""
+    },
+    {
+      "row": 32,
+      "pr": 336,
+      "title": "[protected] fix(ratchet): never propose a baseline stricter",
+      "note": ""
+    },
+    {
+      "row": 33,
+      "pr": 109,
+      "title": "fix(ratchet): close review-debt #66 and #68 \u2014 family barrel",
+      "note": ""
+    },
+    {
+      "row": 34,
+      "pr": 156,
+      "title": "feat(sweep): salvage classifier + age-based cleanup (D2)",
+      "note": ""
+    },
+    {
+      "row": 35,
+      "pr": 318,
+      "title": "feat(driver): add strict pre-request token reservation ceili",
+      "note": ""
+    },
+    {
+      "row": 36,
+      "pr": 63,
+      "title": "feat(review): fetchReviewState + shared thread vocabulary +",
+      "note": ""
+    },
+    {
+      "row": 37,
+      "pr": 62,
+      "title": "feat(gates): CheckRunner contract + vitest/eslint/tsc adapte",
+      "note": ""
+    },
+    {
+      "row": 38,
+      "pr": 572,
+      "title": "feat(review): Add standalone closure evidence verifier",
+      "note": ""
+    },
+    {
+      "row": 39,
+      "pr": 636,
+      "title": "fix(harness): bound grep include matching and expansion",
+      "note": ""
+    },
+    {
+      "row": 40,
+      "pr": 585,
+      "title": "fix(harness): stream grep include enumeration within budgets",
+      "note": ""
+    },
+    {
+      "row": 41,
+      "pr": 31,
+      "title": "fix(kernel): runner resume-safety and journal integrity (rev",
+      "note": ""
+    },
+    {
+      "row": 42,
+      "pr": 207,
+      "title": "fix(driver): surface driver failure causes; decouple ai-sdk",
+      "note": ""
+    },
+    {
+      "row": 43,
+      "pr": 279,
+      "title": "fix: address crq post-merge majors (ensureDist timeout, DATA",
+      "note": ""
+    },
+    {
+      "row": 44,
+      "pr": 270,
+      "title": "fix(gates): count local actions a required-check producer ru",
+      "note": ""
+    },
+    {
+      "row": 45,
+      "pr": 531,
+      "title": "fix(promotion): Honor trusted advisory ratchet posture",
+      "note": ""
+    },
+    {
+      "row": 46,
+      "pr": 583,
+      "title": "test(dev): Prove explicit configured agent fallback",
+      "note": ""
+    },
+    {
+      "row": 47,
+      "pr": 623,
+      "title": "feat(review): Add blind rejection shadow protocol",
+      "note": ""
+    },
+    {
+      "row": 48,
+      "pr": 268,
+      "title": "ci: share the static gate steps through one composite action",
+      "note": ""
+    },
+    {
+      "row": 49,
+      "pr": 118,
+      "title": "fix(ratchet): close the PR #108/#109/#110 follow-ups \u2014 key-p",
+      "note": ""
+    },
+    {
+      "row": 50,
+      "pr": 525,
+      "title": "fix(review): Preserve session evidence and bound diff anchor",
+      "note": ""
+    },
+    {
+      "row": 51,
+      "pr": 576,
+      "title": "fix(review): Retry recoverable rate limits within review bud",
+      "note": ""
+    },
+    {
+      "row": 52,
+      "pr": 253,
+      "title": "feat(scripts): advisory affected-test selector (slice 2 / T2",
+      "note": ""
+    },
+    {
+      "row": 53,
+      "pr": 284,
+      "title": "fix(analyze): run playbook preflight inside the approval loc",
+      "note": ""
+    },
+    {
+      "row": 54,
+      "pr": 287,
+      "title": "fix(analyze): keep rendered reports out of the approval work",
+      "note": ""
+    },
+    {
+      "row": 55,
+      "pr": 214,
+      "title": "fix(safety): harden self-host automation and worker environm",
+      "note": ""
+    },
+    {
+      "row": 56,
+      "pr": 107,
+      "title": "fix(ratchet): close review-debt #72 and #69 \u2014 guarded direct",
+      "note": ""
+    },
+    {
+      "row": 57,
+      "pr": 249,
+      "title": "feat(test): suite classification + vitest projects + two-tie",
+      "note": ""
+    },
+    {
+      "row": 58,
+      "pr": 597,
+      "title": "fix(crq): one required CodeRabbit cycle per PR; operator pri",
+      "note": ""
+    },
+    {
+      "row": 59,
+      "pr": 637,
+      "title": "fix(fix): scope PR residue to its unit branch",
+      "note": ""
+    },
+    {
+      "row": 60,
+      "pr": 312,
+      "title": "fix(config,docs): _URL is not a secret suffix for resolution",
+      "note": ""
+    },
+    {
+      "row": 61,
+      "pr": 629,
+      "title": "fix(fix): preserve final residue rows and task identities",
+      "note": ""
+    },
+    {
+      "row": 62,
+      "pr": 282,
+      "title": "feat(sandbox): default to a digest-pinned container image (o",
+      "note": ""
+    },
+    {
+      "row": 63,
+      "pr": 545,
+      "title": "feat(review): Give partition fallback bounded read-only refe",
+      "note": ""
+    },
+    {
+      "row": 64,
+      "pr": 325,
+      "title": "[protected] Phase 0 E: load fixer prompt from canonical Mark",
+      "note": ""
+    },
+    {
+      "row": 65,
+      "pr": 103,
+      "title": "fix(kernel,cli,review): lossless walks see ALL own keys; fet",
+      "note": ""
+    },
+    {
+      "row": 66,
+      "pr": 662,
+      "title": "fix(review): refuse reuse across an intervening genuine revi",
+      "note": ""
+    },
+    {
+      "row": 67,
+      "pr": 112,
+      "title": "fix(registry): close review-debt #82 \u2014 the strictness gate u",
+      "note": ""
+    },
+    {
+      "row": 68,
+      "pr": 339,
+      "title": "fix(sandbox): resolve host-side tools from PATH on non-FHS h",
+      "note": ""
+    },
+    {
+      "row": 69,
+      "pr": 570,
+      "title": "fix(tasks): preserve raw identity in failed-task refs",
+      "note": ""
+    },
+    {
+      "row": 70,
+      "pr": 97,
+      "title": "fix(acp): close the PR #37 review cluster \u2014 token-count vali",
+      "note": ""
+    },
+    {
+      "row": 71,
+      "pr": 113,
+      "title": "fix(kernel): close review-debt #17 non-frozen items \u2014 mirror",
+      "note": ""
+    },
+    {
+      "row": 72,
+      "pr": 123,
+      "title": "fix: close the PR #114/#118/#119 follow-ups \u2014 index bounds,",
+      "note": ""
+    },
+    {
+      "row": 73,
+      "pr": 106,
+      "title": "fix(cli): close the PR #64 review-debt cluster \u2014 bin mapping",
+      "note": ""
+    },
+    {
+      "row": 74,
+      "pr": 537,
+      "title": "fix(cli): Keep JSON output to one artifact",
+      "note": ""
+    },
+    {
+      "row": 75,
+      "pr": 315,
+      "title": "fix: pin heavy-lock initialization directory identity",
+      "note": ""
+    },
+    {
+      "row": 76,
+      "pr": 124,
+      "title": "fix(ratchet,ops): close review-debt #120 \u2014 exact normalizati",
+      "note": ""
+    },
+    {
+      "row": 77,
+      "pr": 664,
+      "title": "fix(review): accept producer no-content receipt rows beside",
+      "note": ""
+    },
+    {
+      "row": 78,
+      "pr": 682,
+      "title": "feat(selfhost): Expose authenticated R4 acceptance evidence",
+      "note": ""
+    },
+    {
+      "row": 79,
+      "pr": 119,
+      "title": "fix: last two regrowth findings \u2014 quoted cmd.exe argv elemen",
+      "note": ""
+    },
+    {
+      "row": 80,
+      "pr": 303,
+      "title": "docs(policy): recommend the cq-automation App identity for t",
+      "note": ""
+    },
+    {
+      "row": 81,
+      "pr": 516,
+      "title": "fix(review): Record address batches within one entry per rou",
+      "note": ""
+    },
+    {
+      "row": 82,
+      "pr": 115,
+      "title": "fix(acp): close the two PR #97 follow-ups \u2014 malformed report",
+      "note": ""
+    },
+    {
+      "row": 83,
+      "pr": 650,
+      "title": "fix(harness): accept negated includes and charge matcher wor",
+      "note": ""
+    },
+    {
+      "row": 84,
+      "pr": 665,
+      "title": "fix(review): resolve no-fresh reuse against its referenced r",
+      "note": ""
+    },
+    {
+      "row": 85,
+      "pr": 110,
+      "title": "fix(ratchet): close review-debt #87 \u2014 authoritative proposal",
+      "note": ""
+    },
+    {
+      "row": 86,
+      "pr": 630,
+      "title": "fix(review): State the wait and cause when a rate-limit retr",
+      "note": ""
+    },
+    {
+      "row": 87,
+      "pr": 657,
+      "title": "fix(harness): Match ordinary unanchored includes by basename",
+      "note": ""
+    },
+    {
+      "row": 88,
+      "pr": 101,
+      "title": "fix(eval-infra): abort verdict gates the spike exit status;",
+      "note": ""
+    },
+    {
+      "row": 89,
+      "pr": 616,
+      "title": "fix(review): report repair accounting and partial use",
+      "note": ""
+    },
+    {
+      "row": 90,
+      "pr": 111,
+      "title": "fix(acp): close review-debt #54/#55 \u2014 resolved .cmd/.bat shi",
+      "note": ""
+    },
+    {
+      "row": 91,
+      "pr": 635,
+      "title": "fix(review.address): Report recorded outcomes on dispatched",
+      "note": ""
+    },
+    {
+      "row": 92,
+      "pr": 162,
+      "title": "fix(merge): VB3F batch-gate remediation \u2014 propagation-aware",
+      "note": ""
+    },
+    {
+      "row": 93,
+      "pr": 297,
+      "title": "fix(policy): paginate cq-accept commit-to-PR lookup (#280)",
+      "note": ""
+    },
+    {
+      "row": 94,
+      "pr": 619,
+      "title": "fix(pack): harden packed-smoke timeout, temp, and summary",
+      "note": ""
+    },
+    {
+      "row": 95,
+      "pr": 264,
+      "title": "fix(ci): resolve pnpm lockfile config mismatch in install-ma",
+      "note": ""
+    },
+    {
+      "row": 96,
+      "pr": 414,
+      "title": "fix(ci): never supersede merge-queue subject measurements",
+      "note": ""
+    },
+    {
+      "row": 97,
+      "pr": 647,
+      "title": "fix(review.address): Re-derive openBlocking from the overlai",
+      "note": ""
+    },
+    {
+      "row": 98,
+      "pr": 128,
+      "title": "fix: close the PR #124/#126/#127 follow-ups \u2014 template-first",
+      "note": ""
+    },
+    {
+      "row": 99,
+      "pr": 58,
+      "title": "fix(live): the deepseek leg requests the served id \u2014 costUSD",
+      "note": ""
+    },
+    {
+      "row": 100,
+      "pr": 200,
+      "title": "release: v1.0.0",
+      "note": ""
+    },
+    {
+      "row": 101,
+      "pr": 306,
+      "title": "fix(sandbox): Pin seatbelt PATH and close live certification",
+      "note": ""
+    },
+    {
+      "row": 102,
+      "pr": 314,
+      "title": "adversarial-suite: drop invalid permission-* inputs from the",
+      "note": ""
+    },
+    {
+      "row": 103,
+      "pr": 666,
+      "title": "fix(crq): stop search noise and parked rows from stalling qu",
+      "note": ""
+    },
+    {
+      "row": 104,
+      "pr": 206,
+      "title": "feat(driver): WorkerResult.error cause channel (post-freeze",
+      "note": ""
+    },
+    {
+      "row": 105,
+      "pr": 255,
+      "title": "feat(scripts): leaf-scoped fix and build-once ratchet engine",
+      "note": ""
+    },
+    {
+      "row": 106,
+      "pr": 272,
+      "title": "test(sweep): worktreeEffects seam, seeded git template, in-p",
+      "note": ""
+    },
+    {
+      "row": 107,
+      "pr": 654,
+      "title": "fix(review): Report one-step partition tool limitation",
+      "note": ""
+    },
+    {
+      "row": 108,
+      "pr": 178,
+      "title": "feat(plans): export merge-prs and analyze plan builders thro",
+      "note": ""
+    },
+    {
+      "row": 109,
+      "pr": 126,
+      "title": "fix(ratchet): land the property-position key anchors for rea",
+      "note": ""
+    },
+    {
+      "row": 110,
+      "pr": 658,
+      "title": "fix(review): Classify a malformed queue SSH alias as failed",
+      "note": ""
+    },
+    {
+      "row": 111,
+      "pr": 215,
+      "title": "test: Split unit and e2e workflows",
+      "note": ""
+    },
+    {
+      "row": 112,
+      "pr": 672,
+      "title": "fix(crq): Limit minute collection hints to detached runs",
+      "note": ""
+    },
+    {
+      "row": 113,
+      "pr": 677,
+      "title": "fix(queue): Preserve merged state on PR-only bind replay",
+      "note": ""
+    },
+    {
+      "row": 114,
+      "pr": 59,
+      "title": "fix(live): the deepseek eval cell requests the served id (co",
+      "note": ""
+    },
+    {
+      "row": 115,
+      "pr": 271,
+      "title": "test: build dist once per Vitest run; mandatory demo spawn t",
+      "note": ""
+    },
+    {
+      "row": 116,
+      "pr": 127,
+      "title": "fix(coverage): broaden the coverage ratchet basis \u2014 all src/",
+      "note": ""
+    },
+    {
+      "row": 117,
+      "pr": 301,
+      "title": "fix(driver): bound retryAfterMs to nonnegative in ProviderSi",
+      "note": ""
+    },
+    {
+      "row": 118,
+      "pr": 617,
+      "title": "fix(review): Reject nonexistent terminal EOF anchor lines",
+      "note": ""
+    },
+    {
+      "row": 119,
+      "pr": 57,
+      "title": "fix(live): the deepseek leg requests the served id \u2014 costUSD",
+      "note": ""
+    },
+    {
+      "row": 120,
+      "pr": 198,
+      "title": "chore(ratchet): tighten baselines (1 metric)",
+      "note": ""
+    },
+    {
+      "row": 121,
+      "pr": 337,
+      "title": "chore(ratchet): tighten baselines (1 metric)",
+      "note": ""
+    },
+    {
+      "row": 122,
+      "pr": 375,
+      "title": "chore(ratchet): tighten baselines (1 metric)",
+      "note": ""
+    },
+    {
+      "row": 123,
+      "pr": 678,
+      "title": "fix(crq): Bound generic promotion error retries",
+      "note": ""
+    },
+    {
+      "row": 124,
+      "pr": 309,
+      "title": "chore(gitignore): ignore .vitest/ test runtime state",
+      "note": ""
+    },
+    {
+      "row": 125,
+      "pr": 213,
+      "title": "fix(driver): populate WorkerResult.error on the subprocess e",
+      "note": "mostly gone from main \u2014 review only surviving files"
+    },
+    {
+      "row": 126,
+      "pr": 95,
+      "title": "fix(ledger): PR #93 review follow-ups \u2014 ancestor walk for ne",
+      "note": "mostly gone from main \u2014 review only surviving files"
+    },
+    {
+      "row": 127,
+      "pr": 180,
+      "title": "fix(merge): scope the realMergeEffects gh spawn to repoRoot,",
+      "note": "mostly gone from main \u2014 review only surviving files"
+    },
+    {
+      "row": 128,
+      "pr": 281,
+      "title": "fix(pricing): address post-merge #248 review findings",
+      "note": "mostly gone from main \u2014 review only surviving files"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "inventory_mode": "timer",
+  "operational_ruling": null,
+  "no_live_run_verification": null,
+  "owner_branch_ruleset_evidence": null,
+  "durable_artifact_root": null,
+  "runner_identity": "crq-runner-app"
+}

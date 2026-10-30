@@ -6,6 +6,7 @@ runtime services. All returned structures are JSON serializable.
 import datetime as dt
 import hashlib
 from pathlib import PurePosixPath
+from backfill_jobs import is_execution_owner
 
 
 COVERAGE_RANK = 4
@@ -97,9 +98,11 @@ def coverage_candidate(queue, ledger, *, merge_queue_sha, ordinary_eligible,
     for item in repair_debt:
         excluded.update(_path(p) for p in item.get("coverage_paths", []))
         excluded.update(_path(p) for p in (item.get("measure") or {}).get("synthetic_paths", []))
-    active = [i for i in outstanding if i not in repair_debt]
-    # One outstanding coverage item prevents repeated enrollment and respects
-    # backoff/blocked work. Completed repair debt is retained, not resolved here.
+    active = [i for i in outstanding if i not in repair_debt
+              and (i.get("state") not in ("blocked", "failed", "quarantined")
+                   or is_execution_owner(i))]
+    # Spec 2026-10-30 §7: terminal blocked/failed debt releases execution
+    # capacity. Unknown/live vendor ownership remains held independently.
     if active:
         return None
     choices = []

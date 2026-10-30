@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "construction_version": "current-scoped-v1",
+  "scoring_version": "uncovered-churn-findings-v1",
+  "max_files": 8,
+  "max_file_bytes": 262144,
+  "max_total_bytes": 2097152,
+  "reviewer": {
+    "verified": false,
+    "max_files": null,
+    "max_diff_bytes": null,
+    "evidence": null
+  },
+  "blame_options": ["--line-porcelain", "--encoding=UTF-8"]
+}
