@@ -12,8 +12,5 @@
     "max_diff_bytes": 262144,
     "evidence": "docs/backfill-protocol/reviewer-verification-20261031.json"
   },
-  "blame_options": [
-    "--line-porcelain",
-    "--encoding=UTF-8"
-  ]
+  "blame_options": ["--line-porcelain", "--encoding=UTF-8"]
 }
