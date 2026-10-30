@@ -36,6 +36,7 @@ export function createAreaReviewPlan(input: CreateReviewPlanInput): ReviewPlan {
         changedFiles: areas.changedFiles,
         areas: areas.areas,
       }),
+      ...included.map((component) => `--- ${component.path} ---\n${component.text}`),
       'Return ONLY JSON: {"findings":[{"file":"path","line":1,"severity":"high|medium|low","text":"evidence-based defect"}]}. Return {"findings":[]} if clean.',
     ].join('\n');
     if (prompt.length > (input.session?.maxInputChars ?? REVIEW_SESSION_DEFAULTS.maxInputChars)) {

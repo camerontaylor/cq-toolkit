@@ -133,10 +133,13 @@ describe('runAgentReviewer v3 session engine', () => {
   it('executes opt-in areas and a scanned cross-area pass without double-counting bytes', async () => {
     const fake = fakeDrivers();
     const components = [
-      { component: 'diff:a', path: 'a/a.ts', text: 'export const a = 1;' },
-      { component: 'diff:b', path: 'b/b.ts', text: 'export const b = 2;' },
+      { component: 'diff:a', path: 'a/a.ts', text: 'const a = 1;' },
+      { component: 'diff:b', path: 'b/b.ts', text: 'const b = 2;' },
     ];
-    const result = await runAgentReviewer(fake.drivers, reviewerInput({ areas: true, components }));
+    const result = await runAgentReviewer(
+      fake.drivers,
+      reviewerInput({ areas: true, components, session: { maxSteps: 1 } }),
+    );
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
     expect(fake.invocations).toHaveLength(3);
@@ -145,6 +148,10 @@ describe('runAgentReviewer v3 session engine', () => {
       'completed',
     ]);
     const cross = result.value.coverage.sessions.find((session) => session.id === 'cross-area')!;
+    const crossPrompt = fake.invocations.find((invocation) =>
+      invocation.prompt.includes('Review cross-area contracts'),
+    )!.prompt;
+    for (const component of components) expect(crossPrompt).toContain(component.text);
     expect(cross.status).toBe('complete');
     expect(cross.deliveries).toEqual([]);
     expect(cross.contextSha256).toMatch(/^[a-f0-9]{64}$/);
