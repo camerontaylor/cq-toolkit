@@ -751,7 +751,7 @@ describe('the mutation lock is held THROUGH the write', () => {
 
 describe('the durable operator ledger (ADR-0003 §5)', () => {
   test('an append-lock failure identifies the artifact and retains its filesystem cause', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cq-ledger-lock-error-'));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cq-ledger-lock-error-')));
     // The ledger name fits a normal filesystem component; adding the lock
     // suffix exceeds it and produces an immediate non-EEXIST mkdir failure.
     const ledgerPath = join(dir, 'a'.repeat(250));
