@@ -1046,7 +1046,7 @@ const hasAllClear = (snapshot: PrSnapshot, policy: TrustPolicy, nowMs: number): 
       review.state !== null &&
       acceptStates.has(review.state),
   );
-  return [...reviews, ...evidence.comments].some((evidence) => {
+  const qualifies = (evidence: BoundReview): boolean => {
     const at = Date.parse(evidence.submittedAt ?? '');
     return (
       isTrusted(evidence, snapshot.authorLogin, policy) &&
@@ -1055,7 +1055,30 @@ const hasAllClear = (snapshot: PrSnapshot, policy: TrustPolicy, nowMs: number): 
       at <= nowMs &&
       defaultClassifyPrConfig.allClearPattern.test(evidence.body)
     );
-  });
+  };
+  if (reviews.some(qualifies)) return true;
+  // Conversation comments carry no SHA. Anchor them after the current
+  // exact-head acceptance's forge-issued timestamp, so a backdated commit
+  // cannot reuse an all-clear from an earlier head. The latest statement
+  // per commenter supersedes their earlier all-clear, even when it is blank.
+  const agent = sameAccountAgentAccepted(snapshot, snapshot.headRefOid ?? '', policy);
+  const acceptedAt = Math.max(
+    ...reviews.map(submittedMs),
+    agent === null ? -Infinity : Date.parse(agent.submittedAt),
+  );
+  if (!Number.isFinite(acceptedAt)) return false;
+  const comments = evidence.comments.filter((comment) =>
+    isTrusted(comment, snapshot.authorLogin, policy),
+  );
+  const unorderable = new Set(
+    comments
+      .filter((comment) => !Number.isFinite(submittedMs(comment)))
+      .map((comment) => comment.actorKey),
+  );
+  return [...foldLatestOpinionated(comments, new Set(['COMMENTED'])).values()].some(
+    (comment) =>
+      !unorderable.has(comment.actorKey) && submittedMs(comment) > acceptedAt && qualifies(comment),
+  );
 };
 
 /** recheckBeforeMerge's injected seams. */

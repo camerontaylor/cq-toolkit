@@ -1383,6 +1383,51 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     });
   });
 
+  test.each(['before', 'same-time', 'after'] as const)(
+    'comment all-clear %s exact-head acceptance with a backdated commit',
+    async (ordering) => {
+      const forge = makeForge({
+        7: prSpec({
+          committedDate: new Date(T0 - 60_000).toISOString(),
+          reviews: [review({ submittedAt: new Date(T0 + 200).toISOString() })],
+          issueComments: [
+            {
+              ...allClearComment(),
+              createdAt: new Date(
+                T0 + (ordering === 'before' ? 100 : ordering === 'same-time' ? 200 : 300),
+              ).toISOString(),
+            },
+          ],
+        }),
+      });
+      const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME);
+      expect(result.ok).toBe(ordering === 'after');
+    },
+  );
+
+  test.each(['later', 'unorderable'] as const)(
+    'a %s comment cannot revive an earlier all-clear',
+    async (kind) => {
+      const forge = makeForge({
+        7: prSpec({
+          reviews: [review()],
+          issueComments: [
+            allClearComment(),
+            {
+              ...allClearComment(),
+              body: 'Please wait for my follow-up',
+              createdAt: kind === 'later' ? new Date(T0 + 200).toISOString() : null,
+            },
+          ],
+        }),
+      });
+      expect(await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME)).toEqual({
+        ok: false,
+        reason: 'settle: single_observation',
+      });
+    },
+  );
+
   test.each(['self', 'untrusted', 'unknown', 'old', 'missing', 'future'] as const)(
     'invalid %s comment all-clear cannot bypass settle',
     async (kind) => {
