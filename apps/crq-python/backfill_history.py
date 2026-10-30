@@ -11,6 +11,7 @@ import math
 import subprocess
 
 import review_ledger as ledger
+from backfill_accounting import ranges
 
 CLASSES = ("crq-counted-cycle", "merged-current-receipt", "promotion-range", "github-app-review")
 
@@ -63,6 +64,43 @@ def terminal_scope(raw, expected_head):
     ledger.canonical(rows)  # Credit-bearing fields remain in the strict ledger domain.
     ledger.scope(rows)
     return rows
+
+
+def submitted_scope(repo, base, head):
+    """Describe only head-side hunks in the immutable submitted diff."""
+    entries = repo.entries(head)
+    return [{"path": name, "blob": entries[name]["blob"], "intervals": ranges(lines)}
+            for name, lines in sorted(repo.changed_intervals(base, head).items()) if lines and name in entries]
+
+
+def adapted_terminal_scope(repo, raw, item, meta, proof):
+    """CLI 0.8.2: vendor-confirmed submitted hunks, never requested whole files."""
+    if proof.get("cli_version") != "0.8.2" or proof.get("format") != "coderabbit-agent-0.8.2":
+        raise ledger.IntegrityError("unknown reviewer version/output format")
+    for key, expected in (("run_id", meta["run_id"]), ("head", item["head"]), ("base", item["base"]),
+                          ("attempt_id", item["attempt_id"])):
+        if proof.get(key) != expected:
+            raise ledger.IntegrityError("submission identity mismatch")
+    if meta.get("head") != item["head"] or meta.get("base") != item["base"]:
+        raise ledger.IntegrityError("run metadata subject mismatch")
+    submitted = submitted_scope(repo, item["base"], item["head"])
+    if proof.get("submitted_scope") != submitted:
+        raise ledger.IntegrityError("submitted diff scope mismatch")
+    events = vendor_events(raw)
+    if not events or any(e.get("type") in ("error", "action_required") for e in events):
+        raise ledger.IntegrityError("vendor error or missing terminal")
+    terminal = events[-1]
+    if terminal.get("type") != "complete" or terminal.get("status") != "review_completed" or terminal.get("outcome") != "completed":
+        raise ledger.IntegrityError("unknown or incomplete vendor output")
+    contexts = [e for e in events if e.get("type") == "review_context"]
+    if len(contexts) != 1 or contexts[0].get("baseCommit") != item["base"]:
+        raise ledger.IntegrityError("vendor context does not bind submitted base")
+    names = terminal.get("reviewedFiles")
+    if not isinstance(names, list) or not names or any(not isinstance(n, str) for n in names) or len(names) != len(set(names)):
+        raise ledger.IntegrityError("unknown reviewedFiles format")
+    if set(names) - {row["path"] for row in submitted}:
+        raise ledger.IntegrityError("vendor listed unsubmitted path")
+    return [row for row in submitted if row["path"] in names]
 
 
 def import_source(repo, store, source_class, source_id, raw, envelope, at, existing):

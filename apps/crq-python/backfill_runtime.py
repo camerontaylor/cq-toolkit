@@ -174,12 +174,17 @@ def select(c, queue, log, dry, only):
     return None, available
 
 
-def completion_event(repo, store, item, raw, exit_code, meta, ended_at):
+def completion_event(repo, store, item, raw, exit_code, meta, ended_at, submission=None):
     """Retain raw terminal bytes before local completion; explicit scope required."""
     raw_ref = store.put(raw)
     meta_ref = store.put(ledger.canonical(meta))
     git_ref = repo.retain(store, [item["base"], item["head"], item["target"]])
-    terminal_rows = history.terminal_scope(raw, item["head"])
+    if submission is None:
+        terminal_rows = history.terminal_scope(raw, item["head"])
+        submission_refs = []
+    else:
+        terminal_rows = history.adapted_terminal_scope(repo, raw, item, meta, submission)
+        submission_refs = [store.put(ledger.canonical(submission))]
     terminal_scope = ledger.scope(terminal_rows)
     requested_scope = ledger.scope(item["scope"])
     reviewed = [{"path": name, "blob": blob, "intervals": accounting.ranges(lines & terminal_scope.get((name, blob), set()))}
@@ -211,7 +216,7 @@ def completion_event(repo, store, item, raw, exit_code, meta, ended_at):
                "policy_digest": item["construction_policy_digest"], "scope_digest": item["scope_digest"], "paths": item["paths"],
                "requested_scope": item["scope"], "input_scope": terminal_rows, "reviewed_scope": reviewed,
                "completion": {"terminal": True, "skipped": False, "scope_verified": True, "exit_code": exit_code, "errors": []},
-               "outcome": "completed", "artifacts": [raw_ref, meta_ref, git_ref], "findings": findings}
+               "outcome": "completed", "artifacts": [raw_ref, meta_ref, git_ref, *submission_refs], "findings": findings}
     value = ledger.event("review", f"{ledger.REPO}:crq-runner-app:{meta['run_id']}", ended_at, payload)
     repo.verify_review(value)
     return value
@@ -229,7 +234,9 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_v
     store.put(raw); exit_ref = store.put((rdir / "exit.json").read_bytes())
     if classification["counted"]:
         try:
-            value = completion_event(repo, store, item, raw, exit_code, meta, ended_at)
+            submission_file = rdir / "submission.json"
+            submission = ledger.loads(submission_file.read_bytes()) if submission_file.exists() else None
+            value = completion_event(repo, store, item, raw, exit_code, meta, ended_at, submission)
         except (ValueError, KeyError) as exc:
             jobs.terminal(queue, item, ended_at, "unsupported", vendor_terminal=True, reason="unverified scope: " + str(exc))
             state_event(c, queue, item, ended_at, "terminal scope unverified")

@@ -29,6 +29,28 @@ class HistoryTest(unittest.TestCase):
         return ledger.canonical({"type": "complete", "status": "review_completed", "head": head or self.value["payload"]["head"],
                                  "reviewedFiles": files if files is not None else self.value["payload"]["input_scope"]})
 
+    def test_names_adapter_credits_only_confirmed_submitted_hunks(self):
+        base = self.f.commit({"a": b"before\n", "b": b"before\n"})
+        head = self.f.commit({"a": b"after\n", "b": b"after\n"})
+        item = {"head": head, "base": base, "attempt_id": "attempt"}
+        meta = {"head": head, "base": base, "run_id": "run"}
+        proof = {"cli_version": "0.8.2", "format": "coderabbit-agent-0.8.2", **item,
+                 "run_id": "run", "submitted_scope": history.submitted_scope(self.f.repo, base, head)}
+        def stream(names, **changes):
+            return (json.dumps({"type": "review_context", "baseCommit": base}) + "\n" + json.dumps({
+                "type": "complete", "status": "review_completed", "outcome": "completed",
+                "reviewedFiles": names, **changes})).encode()
+        rows = history.adapted_terminal_scope(self.f.repo, stream(["a"]), item, meta, proof)
+        self.assertEqual([r["path"] for r in rows], ["a"])
+        self.assertEqual(rows[0]["intervals"], [[1, 1]])
+        for raw, evidence in ((stream(["unexpected"]), proof), (stream(["a", "a"]), proof),
+                              (stream(["a"], status="skipped"), proof),
+                              (stream(["a"]), {**proof, "cli_version": "next"}),
+                              (stream(["a"]), {**proof, "attempt_id": "wrong"}),
+                              (stream(["a"]), {**proof, "submitted_scope": []})):
+            with self.assertRaises(ledger.IntegrityError):
+                history.adapted_terminal_scope(self.f.repo, raw, item, meta, evidence)
+
     def test_positive_credit_duplicate_cross_class_and_repeat_idempotence(self):
         raw, envelope = self.stream(), self.envelope()
         first, result = history.import_source(self.f.repo, self.f.store, history.CLASSES[0], "vendor-1", raw, envelope, AT, [])

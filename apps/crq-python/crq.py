@@ -1366,6 +1366,23 @@ def cmd_review_child(run_id: str) -> int:
     identity = {"run_id": run_id, "pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(),
                 "sid": os.getsid(0), "group_owner": author_quota.GROUP_OWNER_MARKER}
     repair_tick.atomic(pidfile, identity)
+    try:
+        if meta.get("kind") == backfill_jobs.KIND:
+            version = subprocess.run([meta["cmd"][0], "--version"], capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+            if version != "0.8.2":
+                raise RuntimeError("backfill scope adapter refuses unknown CodeRabbit version")
+            repository = backfill_runtime.accounting.Repository(meta["worktree"])
+            if repository.git("rev-parse", "HEAD^{commit}").decode().strip() != meta["head"] or repository.git("status", "--porcelain").strip():
+                raise RuntimeError("backfill submission must match clean pinned head")
+            proof = {"cli_version": version, "format": "coderabbit-agent-0.8.2", "run_id": run_id,
+                     "head": meta["head"], "base": meta["base"], "attempt_id": meta["backfill"]["attempt_id"],
+                     "submitted_scope": backfill_runtime.history.submitted_scope(repository, meta["base"], meta["head"])}
+            repair_tick.atomic(rdir / "submission.json", proof)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        (rdir / "review.ndjson").write_text(json.dumps({"type": "error", "message": str(exc)}) + "\n")
+        repair_tick.atomic(rdir / "exit.json", {"exit": 3, "ended_at": iso(), "timed_out": False,
+                                               "pre_vendor_refusal": True})
+        return 3
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
         proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
         repair_tick.atomic(pidfile, {**identity, "cli_pid": proc.pid})
