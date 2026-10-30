@@ -642,11 +642,12 @@ def is_doc(path: str) -> bool:
     return path.endswith((".md", ".mdx", ".txt")) or path.startswith("docs/")
 
 
-def measure_merged(item: Dict[str, Any]) -> Dict[str, Any]:
+def measure_merged(item: Dict[str, Any], target: Optional[str] = None) -> Dict[str, Any]:
     """Blame-based survival: of the lines the PR added, how many are still
-    attributed (git blame -w -M) to the PR's own commits in origin/merge-queue."""
+    attributed (git blame -w -M) to the PR's own commits at the selected target.
+    Without an explicit target, use origin/merge-queue as before."""
     merge = item["merge_commit"]
-    mq = git("rev-parse", "origin/merge-queue")
+    mq = target if target is not None else git("rev-parse", "origin/merge-queue")
     commits = pr_commit_set(merge)
     renames = rename_map(merge, mq)
     files = []
@@ -2998,7 +2999,7 @@ def coverage_fallback(q, log, dry, only):
         for i in q["items"]:
             if i["kind"] == "merged" and i.get("merge_commit"):
                 try:
-                    i["measure"] = measure_merged(i)
+                    i["measure"] = measure_merged(i, mq)
                 except Exception as exc:
                     log.append("coverage measurement failed: " + str(exc)[:150])
         candidate = coverage.coverage_candidate(q, q.get("coverage") or coverage.new_ledger(),

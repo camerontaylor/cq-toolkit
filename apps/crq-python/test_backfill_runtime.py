@@ -104,6 +104,49 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(covered, {"a": {1, 2}}); self.assertFalse(gaps)
         self.assertEqual(len(launches), 1)
 
+    def test_publication_error_after_bound_launch_remains_harvestable(self):
+        runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
+        self.q["backfill_starts_at_observation"] = 0
+        launches = []
+        def launch(queue, item, plan):
+            launches.append(plan)
+            item.update(state="reviewing", run={"run_id": "vendor-1", "started_at": AT})
+            queue["starts"].append(AT)
+            return "vendor-1"
+        self.c.launch = launch
+        original_event = runtime.state_event
+        def failing_event(c, queue, item, at, reason):
+            if reason == "vendor identity bound":
+                raise OSError("publication unavailable")
+            return original_event(c, queue, item, at, reason)
+        with mock.patch.object(runtime, "state_event", side_effect=failing_event):
+            with self.assertRaisesRegex(OSError, "publication unavailable"):
+                runtime.select(self.c, self.q, [], False, None)
+        self.assertEqual(self.item["state"], "reviewing")
+        self.assertEqual(self.item["vendor_state"], "live")
+        self.assertEqual(self.item["run"]["run_id"], "vendor-1")
+        self.assertTrue(jobs.is_execution_owner(self.item))
+        runtime.select(self.c, self.q, [], False, None)
+        self.assertEqual(len(launches), 1)
+        rdir = self.root / "run"; rdir.mkdir()
+        raw = ledger.canonical({"type": "complete", "status": "review_completed", "head": self.item["head"], "reviewedFiles": self.item["scope"]})
+        (rdir / "review.ndjson").write_bytes(raw)
+        (rdir / "exit.json").write_bytes(ledger.canonical({"exit": 0, "ended_at": AT}))
+        runtime.harvest(self.c, self.q, self.item, rdir, {"run_id": "vendor-1", "head": self.item["head"]}, {"counted": True, "outcome": "completed"}, 0)
+        self.assertEqual(self.item["state"], "publication-pending")
+
+    def test_exception_before_run_binding_still_holds_unknown_launch(self):
+        runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
+        self.q["backfill_starts_at_observation"] = 0
+        self.c.launch = mock.Mock(side_effect=OSError("launch outcome unknown"))
+        with self.assertRaisesRegex(OSError, "launch outcome unknown"):
+            runtime.select(self.c, self.q, [], False, None)
+        self.assertEqual(self.item["state"], "launch-unknown")
+        self.assertEqual(self.item["vendor_state"], "unknown")
+        self.assertTrue(jobs.is_execution_owner(self.item))
+        runtime.select(self.c, self.q, [], False, None)
+        self.c.launch.assert_called_once()
+
     def test_completed_path_only_vendor_output_is_visible_unverified_debt(self):
         self.item.update(attempt_id="attempt-1", run={"run_id": "vendor-1"}, state="reviewing", vendor_state="live")
         rdir = self.root / "run"; rdir.mkdir()

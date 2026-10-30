@@ -94,6 +94,18 @@ class BoundedRepairTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ceiling'):
             self.prepare()
 
+    def test_backfill_round_limit_is_per_finding_not_shared_placeholder_pr(self):
+        self.old.update(pr=0, canonical_finding_id='finding-a')
+        self.queue['items'][0]['pr'] = 0
+        self.queue['items'][0]['repair_runs']['old-run']['pin'] = SOURCE
+        self.queue['items'].append({'id': 'backfill-finding-b', 'pr': 0, 'repair_runs': {
+            'b1': {'pin': SOURCE}, 'b2': {'pin': SOURCE}}})
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        self.prepare()
+        new_evidence = {**self.evidence, 'reason': 'Independent revalidation of the same finding.'}
+        with self.assertRaisesRegex(ValueError, 'ceiling'):
+            repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, new_evidence)
+
     def test_historical_job_requires_tick_owned_lineage(self):
         self.queue['items'][0]['repair_runs'] = {}
         with self.assertRaisesRegex(ValueError, 'tick-owned'):

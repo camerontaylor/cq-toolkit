@@ -149,10 +149,12 @@ def select(c, queue, log, dry, only):
             return None, True
         plan = {"base": item["base"], "head": item["head"], "target": item["target"], "cycle": None,
                 "branch": None, "notes": [], "label": "pinned scoped backfill", "range_policy": "backfill-current-scoped-v1"}
+        run_bound = False
         try:
             run_id = c.launch(queue, item, plan)
             if item.get("state") == "reviewing":
                 jobs.bind_run(queue, item, run_id)
+                run_bound = True
                 state_event(c, queue, item, c.iso(), "vendor identity bound")
                 c.save_queue(queue)
                 return run_id, True
@@ -160,7 +162,8 @@ def select(c, queue, log, dry, only):
                 jobs.cancel_before_vendor(queue, item)
             jobs.terminal(queue, item, c.iso(), "secret-scan", vendor_terminal=not bool(item.get("run")), reason=item.get("last_error", "launch refused"))
         except Exception:
-            item.update(state="launch-unknown", vendor_state="unknown")
+            if not run_bound:
+                item.update(state="launch-unknown", vendor_state="unknown")
             c.save_queue(queue)
             raise
     return None, available

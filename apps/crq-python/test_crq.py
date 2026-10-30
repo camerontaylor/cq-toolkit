@@ -2218,6 +2218,35 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
         self.assertEqual(launch.call_args.args[1]["id"], "pr9")
 
 
+class CoverageFallbackTargetTest(unittest.TestCase):
+    def test_measurement_uses_supplied_immutable_target(self):
+        target = 'a' * 40
+        item = {'merge_commit': 'b' * 40}
+        with mock.patch.object(crq, 'git', return_value='') as git, \
+             mock.patch.object(crq, 'pr_commit_set', return_value=set()), \
+             mock.patch.object(crq, 'rename_map', return_value={}) as renames, \
+             mock.patch.object(crq, 'synth_paths', return_value=[]) as paths:
+            result = crq.measure_merged(item, target)
+        self.assertEqual(result['merge_queue'], target)
+        renames.assert_called_once_with(item['merge_commit'], target)
+        paths.assert_called_once_with(item['merge_commit'], target)
+        self.assertNotIn(mock.call('rev-parse', 'origin/merge-queue'), git.call_args_list)
+
+    def test_measurement_and_coverage_use_same_selected_main_commit(self):
+        target = 'a' * 40
+        item = {'id': 'merged-1', 'kind': 'merged', 'state': 'done', 'merge_commit': 'b' * 40}
+        q = {'items': [item]}
+        with mock.patch.object(crq.backfill_runtime, 'select', return_value=(None, False)), \
+             mock.patch.object(crq.backfill_runtime, 'settings', return_value=None), \
+             mock.patch.object(crq, 'git', return_value=target), \
+             mock.patch.object(crq, 'measure_merged', return_value={'merge_queue': target}) as measure, \
+             mock.patch.object(crq.coverage, 'coverage_candidate', return_value=None) as candidate:
+            crq.coverage_fallback(q, [], False, None)
+        measure.assert_called_once_with(item, target)
+        self.assertEqual(candidate.call_args.kwargs['merge_queue_sha'], target)
+        self.assertEqual(item['measure']['merge_queue'], target)
+
+
 class ConfiguredBranchTargetTest(unittest.TestCase):
     """CR major on PR #668 (r4400294081): a configured branch target must verify.
 
