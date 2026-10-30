@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -94,6 +96,42 @@ const reportOf = (
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
 describe('review.address composition', () => {
+  test('CLI closure fixture preserves an uncertain finding as open with exit 3', async () => {
+    const f = await fixture();
+    try {
+      await f.repo.write('a.ts', 'throw new Error("BAD");\n');
+      f.repo.commitAll('closure CLI trigger');
+      const child = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../../fixtures/review-closure-cli/entry.mjs', import.meta.url)),
+          'review.address',
+          '--source=local',
+          `--repoRoot=${f.repo.root}`,
+          '--verifyClosure',
+          '--rounds=1',
+          `--journalDir=${f.input.journalDir}`,
+          '--json',
+        ],
+        { encoding: 'utf8', timeout: 30_000 },
+      );
+      expect(child.status, child.stderr).toBe(3);
+      expect(JSON.parse(child.stdout)).toMatchObject({
+        status: 'needs-human',
+        report: {
+          findings: [{ id: 'demo', status: 'open' }],
+          closureVerifications: [
+            {
+              verification: { verdict: 'uncertain', reason: 'omitted-consumer-or-dependency' },
+            },
+          ],
+        },
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   test.each([true, false])(
     'closure verification opt-in=%s uses pinned evidence',
     async (verifyClosure) => {
