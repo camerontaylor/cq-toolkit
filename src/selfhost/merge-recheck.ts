@@ -617,7 +617,8 @@ export async function fetchPrSnapshot(
       '-F',
       `pr=${String(pr)}`,
     ];
-    if (includeAllClear) args.push('-F', 'allClear=true');
+    // Q37 transport contract: bind exactly one typed Boolean matching the mode on every page.
+    args.push('-F', `allClear=${String(includeAllClear)}`);
     if (commentsPaging.cursor !== null) args.push('-f', `commentsAfter=${commentsPaging.cursor}`);
     if (reviewsPaging.cursor !== null) args.push('-f', `reviewsAfter=${reviewsPaging.cursor}`);
     if (threadsPaging.cursor !== null) args.push('-f', `threadsAfter=${threadsPaging.cursor}`);

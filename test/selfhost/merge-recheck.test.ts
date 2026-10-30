@@ -547,6 +547,8 @@ describe('fetchPrSnapshot', () => {
       `name=${REPO}`,
       '-F',
       'pr=7',
+      '-F',
+      'allClear=false',
     ]);
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/\$query\b/);
     expect(PR_SNAPSHOT_QUERY).toMatch(
@@ -556,6 +558,34 @@ describe('fetchPrSnapshot', () => {
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/totalCount/);
     expect(calls).toHaveLength(1); // one page: no cursor flag ever sent
   });
+
+  test.each([false, true])(
+    'sends a typed allClear=%s on every snapshot page',
+    async (includeAllClear) => {
+      const reviews = Array.from({ length: 101 }, () => review());
+      const forge = makeForge({ 7: prSpec({ reviews }) });
+      const calls: string[][] = [];
+      const snapshot = await fetchPrSnapshot(
+        {
+          ...forgeDeps(forge),
+          gh: (args) => {
+            calls.push(args);
+            return forge.gh(args);
+          },
+        },
+        7,
+        includeAllClear,
+      );
+      expect(calls).toHaveLength(2);
+      for (const args of calls) {
+        const binding = `allClear=${String(includeAllClear)}`;
+        expect(args.filter((arg) => arg.startsWith('allClear='))).toEqual([binding]);
+        expect(args[args.indexOf(binding) - 1]).toBe('-F');
+      }
+      expect(snapshot.truncated).toBe(false);
+      expect(snapshot.allClear === undefined).toBe(!includeAllClear);
+    },
+  );
 
   test('>100 reviews page across 2 requests; a trusted approval on page 2 is accepted', async () => {
     const crowd = Array.from({ length: 140 }, (_, i) =>
