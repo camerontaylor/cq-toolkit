@@ -992,6 +992,47 @@ describe('subprocess worktree-effects (real git smoke)', () => {
     }
   }, 120_000);
 
+  test.each([':(literal)cache', 'cache[1]'])(
+    'refuses eviction of tracked cache contents under the literal path %s',
+    async (cacheDir) => {
+      const dir = mkdtempSync(join(tmpdir(), 'worktree-literal-cache-'));
+      try {
+        await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
+        await resilient(() => run(['config', 'user.email', 't@example.invalid'], dir));
+        await resilient(() => run(['config', 'user.name', 'T'], dir));
+        mkdirSync(join(dir, cacheDir));
+        writeFileSync(join(dir, cacheDir, 'tracked.data'), 'tracked cache content');
+        await resilient(() => run(['add', '.'], dir));
+        await resilient(() => run(['commit', '-m', 'seed literal cache path'], dir));
+        const effects = makeSubprocessWorktreeEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
+        const op = makeWorktreeFor(effects);
+        const input: WorktreeForInput = {
+          repoRoot: dir,
+          worktreesDir: join(dir, 'wt'),
+          runPrefix: 'cq/x',
+          kind: 'fix',
+          slug: 'core',
+          base: 'main',
+        };
+        const first = await resilient(() => okWorkspace(op, input));
+        expect(await effects.trackedFilesUnder(first.path, cacheDir)).toEqual([
+          `${cacheDir}/tracked.data`,
+        ]);
+        const refused = await op({ ...input, baselineCacheDirs: [cacheDir] });
+        expect(refused.status).toBe('failed');
+        if (refused.status === 'failed') {
+          expect(refused.error).toContain('holds tracked files');
+          expect(refused.error).toContain(cacheDir);
+        }
+        expect(existsSync(join(first.path, cacheDir, 'tracked.data'))).toBe(true);
+        expect(await effects.isStrictClean(first.path)).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
   test('REAL-git create→reuse round trip through makeWorktreeFor: second call REUSES (canonicalized paths)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'worktree-roundtrip-'));
     try {
