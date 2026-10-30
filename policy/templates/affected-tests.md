@@ -4,13 +4,16 @@ Pattern: available for instantiation from phase 1. In this repo, the
 unfiltered push/pull_request CI workflow's static job is the current test
 enforcer and runs the `test:unit` and `test:e2e` lanes on every PR and
 push (except the machine-written `cq-state` ledger branch); the retired `merge-queue-gate` template's workflow ran no tests. Affected-test
-selection remains a proposal for a later policy decision. The measured
-suite is minutes-sized on the recorded host, so selection is useful as an
-advisory developer optimization.
+selection is required locally through `pnpm test:narrow`, alongside
+`pnpm run check:static` and `pnpm run format:check`, under the canonical
+[focused-checks contract](../../docs/focused-checks-contract.md). Full-suite
+checks run only in CI; green required CI on the exact candidate SHA is the
+sole full-gate authority. The optional CI job below is an adoption example,
+not the repository's local test command.
 
 ## The idea
 
-Per-PR reduced test selection: detect the PR's changed files, map them to
+Focused local test selection: detect the diff's changed files, map them to
 the tests that own or import them, and run only that reduced set. On a
 repo where the full suite takes minutes, this turns every docs-only PR
 into a seconds-sized verification and every scoped change into a partial
@@ -25,7 +28,8 @@ mean a change can break a test that no file-graph mapping would select.
 That is why the unfiltered push/pull_request CI static job is the safety net:
 it runs the full suite on merge-queue pushes (and on every PR head), and it,
 not the reduced-selection job, enforces completeness. The retired `merge-queue-gate`
-template's workflow ran no tests. Reduced selection is a per-PR convenience.
+template's workflow ran no tests. Required local selection provides focused
+feedback; it does not establish full candidate correctness.
 
 ## The I4 interplay
 
@@ -38,7 +42,7 @@ its job body always report — running zero selected tests to a green
 conclusion when nothing maps — and keep an unfiltered full-suite workflow
 as the actual required check.
 
-## Worked example — single-package TypeScript repo
+## Worked example — optional CI job for a single-package TypeScript repo
 
 Changed-file detection via `git diff --name-only` against the PR base,
 `vitest related --run` for the reduction, and the full-suite fallback step
