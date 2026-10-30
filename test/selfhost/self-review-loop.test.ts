@@ -1058,32 +1058,50 @@ describe('main — usage reporting', () => {
     expect(readFileSync(stepSummary, 'utf8')).toBe(sweepUsageMarkdown(usage));
   });
 
-  test('a stdout error still writes the available usage and propagates the error', async () => {
-    const { out } = setup();
-    vi.spyOn(process.stdout, 'write').mockImplementation(
-      (
-        _chunk: string | Uint8Array,
-        encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
-        callback?: (error?: Error | null) => void,
-      ) => {
-        const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
-        done?.(new Error('stdout failed'));
-        return false;
-      },
-    );
-    await expect(
-      main(
+  // Q32: the CLI's whole-run error contract and the table's post-effect
+  // best-effort contract also apply to stdout after the sweep has completed.
+  test.each(['callback', 'throw', 'callback with broken stderr'])(
+    'a stdout %s error preserves the completed sweep and remaining reports',
+    async (mode) => {
+      const { out, stepSummary } = setup();
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+        if (mode === 'callback with broken stderr') throw new Error('stderr failed');
+        return true;
+      });
+      let finishWrite: ((error?: Error | null) => void) | undefined;
+      vi.spyOn(process.stdout, 'write').mockImplementation(
+        (
+          _chunk: string | Uint8Array,
+          encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+          callback?: (error?: Error | null) => void,
+        ) => {
+          if (mode === 'throw') throw new Error('stdout failed');
+          const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+          finishWrite = done;
+          return false;
+        },
+      );
+      const pending = main(
         baseDeps(
           fakeGh([]),
           fakeLoop([], async () => fakeOutcome(1)),
         ),
-      ),
-    ).rejects.toThrow('stdout failed');
-    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({
-      sweepUsage: buildSweepUsage(SelfhostDefaults.maxTokens, []),
-      error: 'stdout failed',
-    });
-  });
+      );
+      if (mode !== 'throw') {
+        await vi.waitFor(() => expect(finishWrite).toBeTypeOf('function'));
+        expect(existsSync(stepSummary)).toBe(false);
+        expect(existsSync(out)).toBe(false);
+        finishWrite?.(new Error('stdout failed'));
+      }
+      await expect(pending).resolves.toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith('sweep-usage: could not write stdout: stdout failed\n');
+      const usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
+      expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({
+        sweepUsage: usage,
+      });
+      expect(readFileSync(stepSummary, 'utf8')).toBe(sweepUsageMarkdown(usage));
+    },
+  );
 });
 
 describe('main — peak-aware driver credential (fail closed)', () => {

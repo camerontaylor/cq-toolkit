@@ -921,15 +921,25 @@ export async function main(
     // write callback completes before the step-summary append. This drains
     // Node's buffered output; a downstream tee must still finish separately
     // before its own writes to the same summary file are known to be complete.
-    await new Promise<void>((resolve, reject) => {
-      process.stdout.write(
-        `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`,
-        (error) => {
+    const stdoutPayload = `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        process.stdout.write(stdoutPayload, (error) => {
           if (error !== null && error !== undefined) reject(error);
           else resolve();
-        },
-      );
-    });
+        });
+      });
+    } catch (error) {
+      // The sweep's effects are already committed. A reporting failure must
+      // not turn that completed work into a whole-run failure or skip the table.
+      try {
+        process.stderr.write(
+          `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
+        );
+      } catch {
+        // Continue the remaining reports even when stderr is unavailable too.
+      }
+    }
     appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
