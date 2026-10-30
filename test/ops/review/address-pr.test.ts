@@ -22,6 +22,7 @@ async function world(
   human = false,
   options: {
     runBudget?: number;
+    verifyClosure?: boolean;
     refuseAdmissionAt?: number;
     postFixSnapshotFailure?: boolean;
     sameFile?: boolean;
@@ -525,6 +526,7 @@ async function world(
       const result = await op({
         repoRoot: root,
         source: 'pr:7',
+        ...(options.verifyClosure ? { verifyClosure: true } : {}),
         push,
         ...(target ? { target } : {}),
         ...(options.recoverResolution ? {} : { journalDir: join(root, 'journal') }),
@@ -540,6 +542,21 @@ async function world(
   };
 }
 describe('review.address PR phase-one orchestration', () => {
+  test('opt-in closure uncertainty refuses PR-thread resolution', async () => {
+    const w = await world(false, { verifyClosure: true });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(report.closureVerifications?.[0]?.verification.verdict).toBe('uncertain');
+      expect(w.resolved.has('T1')).toBe(false);
+      expect(w.actions).not.toContain('resolve:T1');
+      expect(w.reviewerCalls()).toBe(0);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
   test.each(['initial-refusal', 'sibling-refusal', 'snapshot-failure'] as const)(
     'settled PR run retention survives %s',
     async (mode) => {

@@ -95,6 +95,58 @@ const reportOf = (
 
 describe('review.address composition', () => {
   test.each([true, false])(
+    'closure verification opt-in=%s uses pinned evidence',
+    async (verifyClosure) => {
+      const f = await fixture([finding('a')]);
+      try {
+        let committed = '';
+        const before = f.repo.git('show', 'HEAD:src/a.ts');
+        const result = await makeReviewAddress({
+          ...f.deps,
+          workerFactory: () => ({
+            escalation: createEscalationState,
+            fix: async (item) => {
+              const observedHead = f.record().head;
+              await f.repo.write('src/a.ts', 'export const a = 2;\n');
+              committed = f.repo.commitAll('fix a');
+              // The packet must read the committed snapshot, never this live file.
+              await f.repo.write('src/a.ts', 'uncommitted drift\n');
+              return {
+                finding: { ...item, status: 'fixed' },
+                observedHead,
+                commit: committed,
+                reason: 'fixed',
+                validation: [],
+              };
+            },
+          }),
+        })({ ...f.input, verifyClosure, rounds: 1 });
+        const report = reportOf(result);
+        if (verifyClosure) {
+          expect(result.status).toBe('needs-human');
+          expect(f.calls).not.toContain('disposition:fixed');
+          expect(f.calls).not.toContain('review');
+          expect(report.findings[0]?.status).toBe('open');
+          const evidence = report.closureVerifications?.[0];
+          expect(evidence?.packet.before).toBe(before);
+          expect(evidence?.packet.after).toBe('export const a = 2;\n');
+          expect(evidence?.packet.metadata.revision.head).toBe(committed);
+          expect(evidence?.packet.patch).toContain('+export const a = 2;');
+          expect(evidence?.packet.relevantDependenciesComplete).toBe(false);
+          expect(evidence?.verification.verdict).toBe('uncertain');
+          expect(JSON.parse(await readFile(report.reportPath, 'utf8')).closureVerifications)
+            .toEqual(report.closureVerifications);
+        } else {
+          expect(report.closureVerifications).toBeUndefined();
+          expect(f.calls).toContain('disposition:fixed');
+        }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+
+  test.each([true, false])(
     'portable cq.json parsing gates clean record acceptance: valid=%s',
     async (valid) => {
       const f = await fixture([]);

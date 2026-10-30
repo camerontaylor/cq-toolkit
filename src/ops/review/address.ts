@@ -40,6 +40,11 @@ import {
   type AddressFix,
   type AddressWorker,
 } from './addressWorker.js';
+import {
+  verifyClosureEvidence,
+  type ClosurePacket,
+  type ClosureVerification,
+} from './internal/addressVerification.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
 import { parseQueueReceipt } from './internal/queueEvidence.js';
 import type { DeferredQueueClient } from './internal/queueProtocol.js';
@@ -76,6 +81,8 @@ export interface ReviewAddressInput {
   concurrency?: number;
   journalDir?: string;
   push?: boolean;
+  /** Require deterministic closure evidence before persisting a fixed disposition. */
+  verifyClosure?: boolean;
 }
 export interface ReviewAddressReport {
   source: string;
@@ -87,6 +94,11 @@ export interface ReviewAddressReport {
   advisories?: string[];
   openBlocking: Finding[];
   fixes: AddressFix[];
+  closureVerifications?: Array<{
+    finding: string;
+    packet: ClosurePacket;
+    verification: ClosureVerification;
+  }>;
   attempts: AddressAttempt[];
   failed: AddressFailedAttempt[];
   fixesPerRun: number;
@@ -1197,6 +1209,69 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (run) entry.runs.push(run);
             return entry;
           };
+          let closureRefused: string | undefined;
+          const verifyFix = async (root: string, fix: AddressFix) => {
+            if (!input.verifyClosure || fix.finding.status !== 'fixed') return;
+            const packet: ClosurePacket = {
+              finding: { ...fix.finding },
+              task: fix.finding.text,
+              patch: '',
+              before: '',
+              after: '',
+              dependencies: [],
+              // Neither a fixer claim nor a file list proves dependency completeness.
+              relevantDependenciesComplete: false,
+              metadata: { revision: { head: fix.commit ?? '', parent: fix.observedHead } },
+            };
+            let unavailable: string | undefined;
+            const read = async (args: string[]) => {
+              const result = await git(['-C', root, ...args]);
+              if (result.code !== 0) throw new Error('pinned closure evidence unavailable');
+              return result.stdout;
+            };
+            try {
+              if (
+                !fix.commit ||
+                !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(fix.commit) ||
+                !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(fix.observedHead) ||
+                !fix.finding.file
+              )
+                throw new Error('pinned closure identity or file unavailable');
+              if ((await read(['rev-parse', `${fix.commit}^`])).trim() !== fix.observedHead)
+                throw new Error('closure parent differs from admitted head');
+              packet.before = await read(['show', `${fix.observedHead}:${fix.finding.file}`]);
+              packet.after = await read(['show', `${fix.commit}:${fix.finding.file}`]);
+              packet.patch = await read([
+                'diff',
+                '--no-ext-diff',
+                '--no-textconv',
+                '--no-color',
+                fix.observedHead,
+                fix.commit,
+                '--',
+                `:(literal)${fix.finding.file}`,
+              ]);
+            } catch (error) {
+              unavailable = error instanceof Error ? error.message : 'closure evidence unavailable';
+            }
+            const verification = verifyClosureEvidence(packet, {
+              admit: () => {
+                const reason = stop() ?? unavailable;
+                if (reason) throw new Error(reason);
+              },
+            });
+            (report.closureVerifications ??= []).push({
+              finding: fix.finding.id,
+              packet,
+              verification,
+            });
+            if (verification.verdict !== 'resolved') {
+              closureRefused = `closure ${fix.finding.id}: ${verification.verdict}: ${verification.reason}`;
+              fix.finding.status = 'open';
+              fix.finding.reason = closureRefused;
+              fix.reason = closureRefused;
+            }
+          };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
             rowsDispatchedAt.set(record.findings, {
               fixes: report.fixes.length,
@@ -1236,6 +1311,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 importer: async () => async (raw: unknown) => {
                   const request = raw as FindingReviewItemInput;
                   const fix = await bindWorker(root).fix(request.item.finding, round);
+                  await verifyFix(root, fix);
                   remember(fix);
                   return { status: 'ok', value: fix };
                 },
@@ -1274,11 +1350,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   continue;
                 }
                 const fix = row.result.value as AddressFix;
+                if (fix.finding.status === 'open') continue;
                 if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
               }
               noteRound(round, record, run);
             }
-            return pathless.length > 0 ? unresolvedReason : undefined;
+            return closureRefused ?? (pathless.length > 0 ? unresolvedReason : undefined);
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
             const findings = record.findings.map((finding) => {
@@ -1518,6 +1595,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
+                  await verifyFix(root, fix);
+                  if (fix.finding.status === 'open') {
+                    remember(fix);
+                    return { status: 'needs-human', reason: fix.reason };
+                  }
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
                   remember(fix);
@@ -1639,6 +1721,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   'needs-human',
                   'PR worker admission refused; persisted/caller bytes retained',
                 );
+              if (closureRefused) return await finish('needs-human', closureRefused);
               const fetched = await fetchReviewState(
                 { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                 undefined,
