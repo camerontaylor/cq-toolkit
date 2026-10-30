@@ -54,6 +54,13 @@ class OperatorTest(unittest.TestCase):
                 with self.assertRaises(ledger.IntegrityError):
                     backfill.execute(c, args)
                 item.pop("vendor_state")
+                for state in ("reviewing", "launch-unknown"):
+                    item["state"] = state
+                    evidence["queue_digest"] = backfill.queue_digest_v1(q); evidence_file.write_bytes(ledger.canonical(evidence))
+                    with self.assertRaises(ledger.IntegrityError):
+                        backfill.execute(c, args)
+                    self.assertNotIn("legacy_coverage_releases", q)
+                item["state"] = "blocked"
                 evidence["queue_digest"] = backfill.queue_digest_v1(q); evidence_file.write_bytes(ledger.canonical(evidence))
                 self.assertTrue(backfill.execute(c, args)["released"])
                 self.assertTrue(coverage_policy.legacy_retry_view(q, 7, "a.py", AT)["allowed"])
@@ -61,6 +68,12 @@ class OperatorTest(unittest.TestCase):
                 self.assertEqual(ledger.canonical(q["backfill_families"][family]), before_family)
                 self.assertEqual(q["legacy_coverage_releases"][0]["reason"], "terminal scope investigated")
                 self.assertEqual(q["backfill_families"][sibling]["failures"], 4)
+                with self.assertRaises(ledger.IntegrityError):
+                    backfill.execute(c, args)  # old evidence binds the pre-release queue
+                evidence["queue_digest"] = backfill.queue_digest_v1(q); evidence_file.write_bytes(ledger.canonical(evidence))
+                with self.assertRaises(ledger.IntegrityError):
+                    backfill.execute(c, args)  # a fresh assertion cannot release an already released epoch
+                self.assertEqual(len(q["legacy_coverage_releases"]), 1)
                 item["attempts"].append({"run_id": "new-run", "outcome": "error", "counted": False,
                                          "at": AT, "head": "a" * 40, "base": "b" * 40})
                 item["failures"] = 7
@@ -68,6 +81,22 @@ class OperatorTest(unittest.TestCase):
                 later = coverage_policy.legacy_retry_view(q, 7, "a.py", "2026-11-01T00:00:00Z")
                 self.assertEqual(later["failures"], 1)
                 self.assertTrue(later["allowed"])
+                for index in range(5):
+                    stamp = f"2026-11-{index+1:02d}T00:00:00Z"; run = f"later-{index}"
+                    item["attempts"].append({"run_id": run, "outcome": "error", "counted": False,
+                                             "at": stamp, "head": "a" * 40, "base": "b" * 40})
+                    item["failures"] += 1
+                    coverage_policy.record_legacy_failure(q, item, stamp, "error", run)
+                second_at = "2026-11-10T00:00:00Z"
+                self.assertFalse(coverage_policy.legacy_retry_view(q, 7, "a.py", second_at)["allowed"])
+                c.iso = lambda: second_at
+                evidence.update(checked_at=second_at, queue_digest=backfill.queue_digest_v1(q),
+                                checked_runs=["new-run"] + [f"later-{i}" for i in range(5)])
+                evidence_file.write_bytes(ledger.canonical(evidence))
+                self.assertTrue(backfill.execute(c, args)["released"])
+                self.assertTrue(coverage_policy.legacy_retry_view(q, 7, "a.py", second_at)["allowed"])
+                self.assertEqual(len(q["legacy_coverage_releases"]), 2)
+                self.assertEqual(q["backfill_families"][family]["failures"], 12)
                 args.family = "nonexistent"
                 with self.assertRaises(ledger.IntegrityError):
                     backfill.execute(c, args)

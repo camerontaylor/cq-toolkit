@@ -2219,6 +2219,68 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
 
 
 class CoverageFallbackTargetTest(unittest.TestCase):
+    def test_success_after_released_legacy_failure_preserves_counter_audit(self):
+        import datetime as dt
+        import backfill
+        at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
+        source = {"id": "source", "pr": 42, "kind": "merged",
+                  "measure": {"files": [{"path": "old.py", "now": "new.py"}]}}
+        item = {"id": "legacy", "kind": "coverage", "state": "blocked", "pr": 42,
+                "coverage_source": "source", "coverage_paths": ["new.py"], "failures": 6, "attempts": [], "cycles": []}
+        q = {"items": [source, item]}
+        for n in range(6):
+            stamp = f"2026-10-{20+n:02d}T00:00:00Z"; run = f"old-{n}"
+            item["attempts"].append({"run_id": run, "outcome": "error", "counted": False,
+                                     "at": stamp, "head": "a" * 40, "base": "b" * 40})
+            crq.coverage.record_legacy_failure(q, item, stamp, "error", run)
+        release_at = "2026-10-28T00:00:00Z"
+        family = crq.coverage._legacy_family(42, "old.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            evidence = {"family": family, "checked_at": release_at, "exact_no_live_run": True,
+                        "checked_runs": [f"old-{n}" for n in range(6)], "queue_digest": backfill.queue_digest_v1(q)}
+            evidence_file = root / "release.json"; evidence_file.write_bytes(backfill.ledger.canonical(evidence))
+            operator = SimpleNamespace(STATE=root, load_queue=lambda: q, iso=lambda: release_at, save_queue=lambda q: None)
+            args = SimpleNamespace(command="quarantine-release", family=family, evidence=str(evidence_file),
+                                   operator="operator", reason="investigated")
+            with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
+                 mock.patch.object(backfill.runtime, "services", return_value=(None, None, None, None)):
+                self.assertTrue(backfill.execute(operator, args)["released"])
+        stamp = "2026-10-30T10:00:00Z"
+        item["attempts"].append({"run_id": "new-failure", "outcome": "error", "counted": False,
+                                 "at": stamp, "head": "a" * 40, "base": "b" * 40})
+        item.update(failures=7, state="reviewing", run={"run_id": "success"})
+        crq.coverage.record_legacy_failure(q, item, stamp, "error", "new-failure")
+        counter = copy.deepcopy(q["backfill_families"][family])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rdir = root / "runs" / "success"; rdir.mkdir(parents=True)
+            (rdir / "exit.json").write_text(json.dumps({"exit": 0}))
+            (rdir / "meta.json").write_text(json.dumps({"run_id": "success", "head": "c" * 40,
+                "base": "d" * 40, "cycle": 1, "worktree": str(root / "wt"), "wt_branch": "fixture",
+                "coverage_paths": ["new.py"]}))
+            (rdir / "review.ndjson").write_text(json.dumps({"type": "complete", "reviewedFiles": ["new.py"]}) + "\n")
+            cls = {"outcome": "completed", "counted": True, "findings": 0, "severity_counts": {}}
+            with mock.patch.object(crq, "RUNS", root / "runs"), mock.patch.object(crq, "STATE", root), \
+                 mock.patch.object(crq, "run_liveness", return_value="harvest"), mock.patch.object(crq, "now", return_value=at), \
+                 mock.patch.object(crq, "classify", return_value=cls), mock.patch.object(crq, "findings_md", return_value=""), \
+                 mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                 mock.patch.object(crq.usage_slots, "write_next"), mock.patch.object(crq.repair_tick, "enqueue", return_value=False):
+                crq.harvest_review(q, item, False)
+        view = crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(days=2))
+        self.assertTrue(view["allowed"], view)
+        self.assertEqual(view["failures"], 0)
+        self.assertEqual(q["backfill_families"][family], counter)
+        self.assertEqual(len(q["legacy_coverage_releases"]), 1)
+        self.assertEqual(len(item["attempts"]), 8)
+        later_at = "2026-10-30T13:00:00Z"
+        item["attempts"].append({"run_id": "after-success", "outcome": "error", "counted": False,
+                                 "at": later_at, "head": "a" * 40, "base": "b" * 40})
+        item.update(failures=1, state="blocked")
+        crq.coverage.record_legacy_failure(q, item, later_at, "error", "after-success")
+        view = crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(days=2))
+        self.assertEqual(view["failures"], 1)
+        self.assertTrue(view["allowed"], view)
+
     def test_harvested_scope_success_resets_only_matching_legacy_streak(self):
         import datetime as dt
         at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
@@ -2249,6 +2311,13 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "sibling.py", at)["allowed"])
         self.assertEqual(len(item["attempts"]), 2)
         self.assertIn("old-run", q["legacy_coverage_failure_runs"])
+        later_at = "2026-10-30T13:00:00Z"
+        item["attempts"].append({"run_id": "after-success", "outcome": "error", "counted": False,
+                                 "at": later_at, "head": "a" * 40, "base": "b" * 40})
+        item.update(failures=1, state="blocked")
+        crq.coverage.record_legacy_failure(q, item, later_at, "error", "after-success")
+        self.assertEqual(crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(days=2))["failures"], 1)
+        self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "sibling.py", at + dt.timedelta(days=2))["allowed"])
 
     def test_pending_candidate_obeys_real_historical_family_deadline(self):
         import datetime as dt

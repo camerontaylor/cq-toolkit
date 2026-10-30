@@ -171,7 +171,7 @@ def legacy_retry_view(queue, pr, original_path, at):
                     item_resets.append(completed)
             except (KeyError, TypeError, ValueError):
                 reasons.append("success scope or ordering unresolved")
-        if item.get("run") or item.get("vendor_state") in ("live", "unknown"):
+        if is_execution_owner(item):
             reasons.append("live or unknown legacy ownership")
         for attempt in failures:
             run_id, timestamp = attempt.get("run_id"), attempt.get("at")
@@ -236,6 +236,14 @@ def legacy_retry_view(queue, pr, original_path, at):
     if reset:
         if any(value[2] == reset for value in runs.values()):
             reasons.append("failure and success chronology ambiguous")
+        if released:
+            # The persisted counters intentionally retain pre-release and
+            # subsequent failures. A proven scoped success starts a new
+            # effective streak, without changing those historical counters.
+            consumed = sum(key in seen and value[2] < reset for key, value in runs.items())
+            baseline = [min(h.get("failures", 0), floor + consumed)
+                        if type(h.get("failures", 0)) is int else floor
+                        for h, floor in zip(histories, baseline)]
         runs = {key: value for key, value in runs.items() if value[2] > reset}
     ordered = sorted(runs.values(), key=lambda value: value[2])
     for index, (_, _, when) in enumerate(ordered, 1):
