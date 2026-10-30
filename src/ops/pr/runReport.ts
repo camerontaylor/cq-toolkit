@@ -20,7 +20,9 @@
 //     `mergeStateStatus` unknown mean GitHub has not computed mergeability,
 //     and an `unknown` lifecycle state is unreadable evidence — `ready`
 //     there would be a verdict ahead of evidence, and `blocked` would be
-//     one fabricated the other way.
+//     one fabricated the other way. Independently failing checks or a
+//     changes-requested review still establish blocked with an unknown
+//     merge state; unknown metadata cannot turn those failures green.
 //   - DRAFT DOMINATES: a draft PR is `blocked` regardless of checks/review
 //     — GitHub cannot merge a draft, however green its evidence.
 //   - REVIEW_REQUIRED is not `none`: a demanded-but-absent review is
@@ -156,8 +158,8 @@ export function makeRunReport(
       // `mergeStateStatus: 'unknown'` mean GitHub has not determined
       // mergeability — calling that ready would be a verdict ahead of
       // evidence, so both are `unknown` (jNf_h, jOEDe), NOT tolerated;
-      // only a settled CLEAN merge state continues to the checks/review
-      // halves.
+      // an unknown merge state still allows independent checks/review
+      // evidence to establish a block, but can never establish ready.
       if (meta.isDraft) {
         rows.push({
           name: pkg.name,
@@ -226,7 +228,8 @@ export function makeRunReport(
         });
         continue;
       }
-      if (meta.mergeStateStatus === 'unknown') {
+      const verdict = readinessOf(checks, review);
+      if (meta.mergeStateStatus === 'unknown' && verdict.readiness !== 'blocked') {
         // jOEDe: an undetermined merge state cannot support a merge-ready
         // verdict either — fail closed exactly like `mergeable: 'unknown'`.
         rows.push({
@@ -239,7 +242,6 @@ export function makeRunReport(
         });
         continue;
       }
-      const verdict = readinessOf(checks, review);
       rows.push({
         name: pkg.name,
         number: pkg.number,

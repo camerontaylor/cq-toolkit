@@ -242,11 +242,11 @@ const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
  * Refname hardening on top of SEGMENT_RE (the sweep family's rule, kept
- * verbatim): a '..' run walks refs and a '.lock' suffix collides with the
- * loose-ref lock file — every branch this op feeds gh is a git refname.
+ * verbatim): reject '..' runs, '.lock' suffixes, and trailing dots. Every
+ * branch this op feeds gh must remain a safe git refname.
  */
 function refnameUnsafeSegment(segment: string): boolean {
-  return segment.includes('..') || segment.endsWith('.lock');
+  return segment.includes('..') || segment.endsWith('.lock') || segment.endsWith('.');
 }
 
 /**
@@ -727,13 +727,13 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
  * THE RUN-PREFIX RULE (round-3 boundary parity): both family ops label
  * tracker bodies and reports with the run prefix, and it feeds git
  * refnames — so it must be '/'-joined safe segments (${SEGMENT_RE.source}
- * per segment), never a '..' run or a '.lock' suffix. ONE definition,
+ * per segment), never a '..' run, a '.lock' suffix or a trailing dot. ONE definition,
  * shared by assemblePrs and runReport, so the boundary cannot drift.
  */
 export function runPrefixFault(prefix: string): string | null {
   for (const segment of prefix.split('/')) {
     if (!SEGMENT_RE.test(segment) || refnameUnsafeSegment(segment)) {
-      return `pr: runPrefix '${prefix}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — no separators beyond the '/', no leading dash, never a '..' run or a '.lock' suffix (it feeds a git refname)`;
+      return `pr: runPrefix '${prefix}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — no separators beyond the '/', no leading dash, never a '..' run, a '.lock' suffix or a trailing dot (it feeds a git refname)`;
     }
   }
   return null;
@@ -758,7 +758,7 @@ export function prBranchFaultOf(branch: string, runPrefix: string, field: string
   }
   for (const segment of branch.split('/')) {
     if (!SEGMENT_RE.test(segment) || refnameUnsafeSegment(segment)) {
-      return `pr: ${field} '${branch}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — no leading dash, never a '..' run or a '.lock' suffix (it feeds a git refname)`;
+      return `pr: ${field} '${branch}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — no leading dash, never a '..' run, a '.lock' suffix or a trailing dot (it feeds a git refname)`;
     }
   }
   return null;

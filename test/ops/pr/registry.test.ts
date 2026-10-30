@@ -917,6 +917,34 @@ describe('createPr carries the body over stdin, never argv', () => {
 });
 
 describe('searchPrByHead argv pins (r1#3 + r1#4/I11)', () => {
+  test.each([199, 200, 201])(
+    'refuses potentially truncated results at the ceiling (%i rows)',
+    async (count) => {
+      const scratch = await mkdtemp(join(tmpdir(), 'cq-pr-list-cap-'));
+      const bin = join(scratch, 'gh');
+      const rows = Array.from({ length: count }, (_, i) => ({ number: i + 1, state: 'OPEN' }));
+      await writeFile(bin, `#!/bin/sh\nprintf '%s' '${JSON.stringify(rows)}'\n`);
+      await chmod(bin, 0o755);
+      const originalBin = process.env['CQ_GH_BIN'];
+      process.env['CQ_GH_BIN'] = bin;
+      try {
+        const search = makeSubprocessPrEffects(scratch).searchPrByHead(
+          'cq/run/core',
+          'merge-queue',
+        );
+        if (count < 200) {
+          await expect(search).resolves.toMatchObject({ number: 1, state: 'open' });
+        } else {
+          await expect(search).rejects.toThrow('results may be incomplete');
+        }
+      } finally {
+        if (originalBin === undefined) delete process.env['CQ_GH_BIN'];
+        else process.env['CQ_GH_BIN'] = originalBin;
+        await rm(scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
   test('the search passes --base, and an explicit generous --limit (gh would default to 30)', async () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-pr-list-'));
     const binDir = join(scratch, 'bin');
