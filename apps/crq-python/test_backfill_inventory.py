@@ -83,8 +83,14 @@ class InventoryTest(unittest.TestCase):
         self.assertTrue(result["candidates"][-1]["retry"])
 
     def test_unknown_reviewer_limits_block_live_and_policy_tamper_is_rejected(self):
+        unknown = copy.deepcopy(self.limits)
+        unknown["reviewer"]["verified"] = False
         with self.assertRaisesRegex(ledger.IntegrityError, "not verified"):
-            inventory.effective_limits(self.limits)
+            inventory.effective_limits(unknown)
+        unknown["reviewer"]["verified"] = True
+        unknown["reviewer"]["evidence"] = None
+        with self.assertRaisesRegex(ledger.IntegrityError, "not verified"):
+            inventory.effective_limits(unknown)
         t = self.f.commit({"a": b"a\n"})
         self.tiers["protected_policy_sha256"] = "0" * 64
         with self.assertRaisesRegex(ledger.IntegrityError, "protected-path"):
