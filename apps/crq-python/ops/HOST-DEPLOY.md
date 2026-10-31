@@ -331,3 +331,8 @@ remote acknowledgement. The timer scans pending records even without a request
 marker. `backfill_publication_error` reports a failed attempt; retry clears it only
 after verified remote reconciliation. Pending/live jobs retain ownership. The
 45-minute worker limit bounds each invocation without deleting pending evidence.
+Publication failures also retain `publication-failure.json`, which blocks new
+rank-4 admissions even when the queue lock is busy. Only successful validated
+queue reconciliation clears it. Operation-tagged inventory/request halts recover
+only after that operation succeeds; unrelated or unclassified legacy halts remain
+for operator reconciliation. A busy queue lock never reports publication reconciled.

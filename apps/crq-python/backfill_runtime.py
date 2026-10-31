@@ -119,7 +119,7 @@ def rank4_gate(c, queue, item, dry=False):
 
 
 def select(c, queue, log, dry, only):
-    if queue.get("backfill_halted"):
+    if queue.get("backfill_halted") or (c.STATE / "backfill/publication-failure.json").exists():
         return None, False
     config = settings(c.STATE, dispatch=True)
     if not config:
@@ -325,12 +325,19 @@ def harvest(c, queue, item, rdir, meta, classification, exit_code, *, terminal_v
     return "backfill " + item["state"]
 
 
+def clear_operation_halt(queue, operation):
+    if queue.get("backfill_halt_operation") == operation:
+        queue.pop("backfill_halted", None)
+        queue.pop("backfill_halt_operation", None)
+
+
 def publish(c, queue):
     """Queue a durable background request; safe under tick.lock, no Git/network."""
     if settings(c.STATE):
         import uuid
         ledger.atomic(c.STATE / "backfill/publish-request.json",
                       ledger.canonical({"request": uuid.uuid4().hex}))
+        clear_operation_halt(queue, "publication-request")
 
 
 def reconcile_publication(c, queue, head, ids):
@@ -427,5 +434,6 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
         return {"queue": queue, "manifest": manifest, "ranked": ranked, "report": report, "event_items": event_items}
     ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(ranked))
     ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(report))
+    clear_operation_halt(queue, "inventory")
     c.save_queue(queue)
     return manifest, ranked, report

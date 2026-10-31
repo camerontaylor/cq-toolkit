@@ -85,6 +85,42 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(len(self.pushes), 1)
         self.assertEqual(self.q["review_ledger_head"], self.pushes[0])
 
+    def test_busy_queue_lock_never_claims_reconciled_and_retries(self):
+        outbox = self.prepare()
+        lock = self.c.with_lock
+        self.c.with_lock = lambda fn, **kwargs: None
+        with self.assertRaisesRegex(ledger.IntegrityError, "queue lock busy"):
+            worker.run(self.c)
+        self.assertFalse(outbox.pending())  # Remote ack is not queue reconciliation.
+        self.assertTrue((self.state / "backfill/publish-request.json").exists())
+        self.assertTrue((self.state / "backfill/publication-failure.json").exists())
+        with mock.patch.object(runtime, "services", side_effect=AssertionError("admission passed halt")):
+            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        self.c.with_lock = lock
+        self.q["backfill_halted"] = "unrelated operator halt"
+        worker.run(self.c)
+        self.assertEqual(len(self.pushes), 1)
+        self.assertFalse((self.state / "backfill/publication-failure.json").exists())
+        self.assertEqual(self.q["backfill_halted"], "unrelated operator halt")
+
+    def test_integrity_failure_blocks_admission_without_releasing_owner(self):
+        self.prepare()
+        with mock.patch.object(ledger.GitLedger, "fetch", side_effect=ledger.IntegrityError("tampered ledger")):
+            with self.assertRaisesRegex(ledger.IntegrityError, "tampered ledger"):
+                worker.run(self.c)
+        self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        self.assertEqual(self.q["items"][0]["state"], "pending")
+
+    def test_only_successful_operation_clears_its_owned_halt(self):
+        queue = {"backfill_halted": "inventory transient", "backfill_halt_operation": "inventory"}
+        runtime.clear_operation_halt(queue, "publication-request")
+        self.assertIn("backfill_halted", queue)
+        runtime.clear_operation_halt(queue, "inventory")
+        self.assertNotIn("backfill_halted", queue)
+        queue["backfill_halted"] = "unclassified legacy halt"
+        runtime.clear_operation_halt(queue, "inventory")
+        self.assertIn("backfill_halted", queue)
+
     def test_templates_render_worker_outside_tick_entrypoint(self):
         from pathlib import Path
         root = Path(__file__).parent / "ops/systemd"

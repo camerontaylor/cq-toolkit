@@ -26,11 +26,12 @@ def run(c):
     if not config:
         return {"publication": "disabled"}
     request = c.STATE / "backfill/publish-request.json"
+    failure = c.STATE / "backfill/publication-failure.json"
     # Independent of tick.lock. Every worker/manual invocation shares this lock.
     with ledger.locked(c.STATE / "backfill/publisher.lock"):
         _, _, outbox, publisher = worker_services(c, config)
         requested = request.read_bytes() if request.exists() else None
-        if requested is None and not outbox.pending():
+        if requested is None and not outbox.pending() and not failure.exists():
             return {"publication": "idle"}
         if requested is None:
             # Persist reconciliation intent even when only the periodic pending
@@ -52,14 +53,21 @@ def run(c):
                     raise ledger.IntegrityError("publication configuration changed; retry reconciliation")
                 queue = c.load_queue()
                 runtime.reconcile_publication(c, queue, head, ids)
+                if failure.exists():
+                    failure.unlink()
+                    ledger.fsync_dir(failure.parent)
                 # A concurrent tick request must survive. Pending records are also
                 # scanned by every timer invocation, including post-merge events.
                 if requested is not None and request.exists() and request.read_bytes() == requested:
                     request.unlink()
                     ledger.fsync_dir(request.parent)
-            c.with_lock(merge, lock_wait=30)
+                return True
+            if c.with_lock(merge, lock_wait=30) is not True:
+                raise ledger.IntegrityError("publication queue lock busy; reconciliation pending")
             return {"ledger_head": head, "publication": "reconciled"}
         except Exception as exc:
+            # Persist fail-closed admission state even if tick.lock is unavailable.
+            ledger.atomic(failure, ledger.canonical({"error": str(exc)[:300]}))
             def record_failure():
                 queue = c.load_queue()
                 queue["backfill_publication_error"] = str(exc)[:300]

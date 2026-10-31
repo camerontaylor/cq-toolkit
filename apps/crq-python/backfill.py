@@ -168,6 +168,7 @@ def inventory_unlocked(c, args):
             runtime.state_event(c, current, item, item["created_at"], "inventory enqueue")
         ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(prepared["ranked"]))
         ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(prepared["report"]))
+        runtime.clear_operation_halt(current, "inventory")
         c.save_queue(current)
         return prepared["report"]
     return c.with_lock(merge, lock_wait=30)
