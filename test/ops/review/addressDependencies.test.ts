@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   mkdtemp,
   mkdir,
@@ -109,3 +111,30 @@ test('candidate relinking and metadata writes leave caller dependencies intact',
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.skipIf(process.platform === 'win32')(
+  'relocated candidate keeps executable shims private',
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-dependency-shim-'));
+    try {
+      const installed = join(root, "caller'quoted", 'node_modules');
+      const candidate = join(root, 'deeper', 'candidate', 'node_modules');
+      const store = join(root, 'store');
+      await mkdir(join(installed, '.bin'), { recursive: true });
+      await mkdir(store);
+      await writeFile(join(store, 'data.cjs'), "module.exports = 'installed tool';");
+      const source = join(installed, '.bin', 'check.cjs');
+      const content =
+        "#!/usr/bin/env node\nconsole.log(require('../../../store/data.cjs'), process.argv[2]);";
+      await writeFile(source, content, { mode: 0o755 });
+      await snapshotAddressDependencies(installed, candidate, () => {});
+      const shim = join(candidate, '.bin', 'check.cjs');
+      const result = await promisify(execFile)(shim, ['argument with spaces']);
+      expect(result.stdout.trim()).toBe('installed tool argument with spaces');
+      await writeFile(shim, 'candidate replacement');
+      expect(await readFile(source, 'utf8')).toBe(content);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
