@@ -138,12 +138,16 @@ def summarize(status, queue, heartbeat, config, events, now):
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
     # Freshness must follow completed ticks, never status-file writes or probes.
     timestamp(last_tick)
+    # The configured cap is a conservative scheduler fallback, not an account quota.
+    usage = queue.get("usage") or {}
+    limit = usage.get("limit") if isinstance(usage, dict) else None
+    starts_cap = limit if type(limit) is int and limit > 0 else config["max_starts_per_hour"]
     return {
         "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
         "starts_60m": sum(now - 3600 <= timestamp(s) <= now for s in queue.get("starts", [])),
-        "starts_cap": config["max_starts_per_hour"],
+        "starts_cap": starts_cap,
         "in_flight": sum(i["state"] == "reviewing" or
                          (i["kind"] == "promotion" and i["state"] in
                           ("requested", "signer_running")) for i in items),
@@ -256,7 +260,7 @@ def publish(root, queue, config, schedule, home=None, now=None, *, promotion_mod
     data["merged_current"] = merged_current(queue, root / "state/receipts")
     data["repair"] = repair_tick.digest(root, queue)
     data["utilization"] = coverage.utilization_digest(queue, queue.get("coverage") or coverage.new_ledger(),
-        now=now, max_starts_per_hour=config["max_starts_per_hour"])
+        now=now, max_starts_per_hour=data["starts_cap"])
     data["schedule"] = {"id": config.get("schedule_id", "crq-tick.timer"), "state": schedule.get("status") or "systemd"}
     if data["schedule"]["state"] == "unknown":
         data["schedule"]["error"] = "schedule probe unavailable"
