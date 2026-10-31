@@ -49,6 +49,9 @@ describe('observation-only runner', () => {
     const observer = readFileSync('policy/templates/observe-prs.yml', 'utf8');
     const wake = readFileSync('policy/templates/observe-prs-wake.yml', 'utf8');
     expect(wake).toContain('actions: write');
+    expect(wake).toContain('workflows: [cq-signal]');
+    expect(wake).toContain('workflow_run:');
+    expect(wake).not.toContain('pull_request_target');
     expect(wake).not.toContain('secrets.');
     expect(wake).not.toContain('actions/checkout');
     expect(observer).not.toContain('pull_request_target');

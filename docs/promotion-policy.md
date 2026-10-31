@@ -198,10 +198,12 @@ fail-closed).
 
 ### Durable observations for future D11 records
 
-`observe-prs.yml` records the full open merge-queue PR set using the existing
+`observe-prs.yml` attempts to observe the full open merge-queue PR set using the existing
 `observeOpenPrs` writer on `cq-state`. It runs every five minutes and on default-branch
-dispatches. The separate `observe-prs-wake.yml` handles PR target events and only dispatches that default-branch observer: they do not
-check out PR code or receive the automation App key. The writer job checks out only
+dispatches. The separate `observe-prs-wake.yml` listens for completed `cq-signal` runs (the existing default-branch carrier also used
+by `cq-accept`) and dispatches that default-branch observer. It never checks out PR code
+or receives the automation App key. Failed PR snapshots are isolated: valid siblings
+can be persisted, but any skipped PR makes the run red. The writer job checks out only
 the default branch and uses the existing `automation` environment credential after
 building trusted code. It never merges a PR and does not enable `self-merge-prs`.
 
