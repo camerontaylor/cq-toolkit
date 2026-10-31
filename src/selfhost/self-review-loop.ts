@@ -826,7 +826,12 @@ function runStartInstant(deps: SelfReviewLoopDeps): number {
  * artifact upload, both best-effort. Exit 0 even with failures — honest
  * outcomes are the contract (they are mirrored to stderr, prominently, for
  * the workflow log); only a whole-run throw (bad args, a failed listing)
- * exits 1.
+ * exits 1. Q34 adds a scoped policy: after a successful sweep and usage
+ * capture, ordinary stdout transport failures are best-effort. Await write
+ * callback settlement, attempt one bounded warning, and continue the table,
+ * per-PR diagnostics and usage artifact without a whole-run transport error.
+ * This does not establish successful stdout delivery. Payload construction
+ * and serialization, and all pre-sweep failure boundaries, still throw.
  */
 export async function main(
   deps: SelfReviewLoopDeps = {
@@ -917,24 +922,62 @@ export async function main(
       excluded: summary.excluded ?? [],
     };
 
-    // The sweep token-usage emission (D11b). ORDER MATTERS: every stdout
-    // write callback completes before the step-summary append. This drains
-    // Node's buffered output; a downstream tee must still finish separately
-    // before its own writes to the same summary file are known to be complete.
-    await new Promise<void>((resolve, reject) => {
-      process.stdout.write(
-        `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`,
-        (error) => {
-          if (error !== null && error !== undefined) reject(error);
-          else resolve();
-        },
-      );
-    });
-    appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    // The sweep token-usage emission (D11b; scoped transport policy Q34).
+    // Await callback success/failure before appending the step summary; a
+    // callback does not establish delivery through a downstream tee. Keep
+    // serialization outside transport suppression so serialization still fails.
+    const stdoutPayload = `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const stdout = process.stdout;
+        const onError = (error: Error): void => {
+          reject(error);
+          // A failed write can call its callback before emitting its error.
+          // Keep the listener through that event turn, then remove it.
+          setImmediate(() => stdout.removeListener('error', onError));
+        };
+        stdout.on('error', onError);
+        try {
+          stdout.write(stdoutPayload, (error) => {
+            if (error !== null && error !== undefined) onError(error);
+            else {
+              stdout.removeListener('error', onError);
+              resolve();
+            }
+          });
+        } catch (error) {
+          stdout.removeListener('error', onError);
+          reject(error);
+        }
+      });
+    } catch (error) {
+      // Q34 newly classifies only this post-sweep transport failure as
+      // best-effort; oneLine bounds the warning detail to 500 characters.
+      try {
+        process.stderr.write(
+          `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
+        );
+      } catch {
+        // Continue the remaining reports even when stderr is unavailable too.
+      }
+    }
+    // Best-effort tail after a completed sweep: stderr may be the same
+    // broken transport that took out stdout, so every remaining diagnostic
+    // write is guarded — a failed diagnostic (step summary, per-PR failure
+    // echo) must not record a whole-run error against finished work.
+    try {
+      appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    } catch {
+      // Continue the remaining reports even when stderr is unavailable too.
+    }
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
-      process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+      try {
+        process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+      } catch {
+        // Continue the remaining reports even when stderr is unavailable too.
+      }
     }
   } catch (error) {
     runError = oneLine(error instanceof Error ? error.message : String(error));
