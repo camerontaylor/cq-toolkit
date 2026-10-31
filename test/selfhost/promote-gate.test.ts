@@ -774,7 +774,11 @@ function fakeGh(world: World, calls: string[][]): GhFn {
     }
     if (q === 'repos/o/r') return Promise.resolve(ok({ owner: { id: 1 } }));
     if (world.settle !== undefined && q === 'repos/o/r/commits') {
-      return Promise.resolve(ok(world.settle.map((v) => ({ sha: v.sha }))));
+      const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? '1');
+      const size = Number(/[?&]per_page=(\d+)/.exec(path)?.[1] ?? '50');
+      return Promise.resolve(
+        ok(world.settle.slice((page - 1) * size, page * size).map((v) => ({ sha: v.sha }))),
+      );
     }
     if (world.settle !== undefined && q === 'repos/o/r/contents/.cq/settle-state.json') {
       const ref = /[?&]ref=([0-9a-f]{40})/.exec(path)?.[1];
@@ -2077,6 +2081,20 @@ function d11Harness(
 }
 
 describe('runGate — decisive D11 authorization', () => {
+  test('honours an admitted PR whose genuine observation is older than the first 50 commits', async () => {
+    const settle = Array.from({ length: 51 }, (_, n) => ({
+      sha: (n + 100).toString(16).padStart(40, '0'),
+      ledger: ledger({}),
+    }));
+    settle.push({ sha: 'f'.repeat(40), ledger: ledger({ '7': H1 }) });
+    const { h } = d11Harness({ settle, timeline: () => [ownerLabel()] });
+    const result = await runGate(h.deps, cfg());
+    expect(result.verdict).toBe('would-promote');
+    expect(result.report.join('\n')).toContain('settle ledger — 52 version(s) read');
+    expect(result.report.join('\n')).toContain('verdict: honoured');
+    expect(h.calls.some((args) => args.some((arg) => arg.includes('&page=2')))).toBe(true);
+  });
+
   test('valid record + C3 attested at the trust ref → the definition change promotes', async () => {
     const { h, inputs } = d11Harness({ timeline: () => [ownerLabel()] });
     const r = await runGate(h.deps, cfg());

@@ -216,10 +216,12 @@ Rollout requires this workflow and observer module to reach `main` before PR wak
 can dispatch it successfully. Until then, a bootstrap observation must use the existing
 trusted main writer at the real current time, before the owner applies a label.
 
-The gate currently reads at most 50 ledger commits. During sustained PR churn and a
-long promotion stall, an older merged PR observation can fall outside that window and
-its override will fail closed. Paging farther back is tracked separately; a label alone
-does not replace missing history.
+The gate reads ledger history lazily in 50-commit pages, pinned to the first listed
+commit so concurrent observations cannot shift later pages. It stops once every admitted
+PR has a record, at genuine history exhaustion, or at a malformed-history barrier. A
+20-page budget bounds API work (at most 1,000 ledger versions); hitting that budget is
+reported distinctly and any PR still missing an observation remains unauthorized. No
+label-only or backdated-history fallback is permitted.
 
 ### Exact procedural audit acknowledgement
 

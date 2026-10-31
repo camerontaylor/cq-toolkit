@@ -212,8 +212,11 @@ async function readLedgerAt(
   return parseSettleState(raw, fullName);
 }
 
+/** Maximum metadata pages per history lookup. */
+export const SETTLE_HISTORY_MAX_PAGES = 20;
+
 /**
- * The ledger's recent versions, newest first: up to `limit` cq-state commits
+ * The ledger's versions, newest first, in pages of `pageSize` commits
  * that touched the ledger file, read lazily until `enough` holds for the
  * versions read so far. The observer prunes merged PRs from the tip, so a
  * merged PR's last record lives only in this history (the D11 epoch reads
@@ -225,48 +228,71 @@ async function readLedgerAt(
  * never falls through to an older, possibly stale observation — the PR gets
  * no epoch and its D11 record is invalid (fail closed). THROWS on any
  * non-404 transport failure or a listed commit that is not a 40-hex sha.
+ * Page 2 onward is pinned to the first listed commit, so concurrent ledger
+ * writes cannot shift the pagination. The fixed page budget bounds API work;
+ * `limited` distinguishes that stop from genuine history exhaustion.
  */
 export async function readSettleHistory(
   deps: StateBranchDeps,
-  limit: number,
+  pageSize: number,
   enough: (versions: readonly SettleState[]) => boolean,
 ): Promise<{
   versions: SettleState[];
   discarded: string[];
   exhausted: boolean;
   barrier: boolean;
+  limited: boolean;
 }> {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    throw new Error('settle history page size must be an integer from 1 to 100');
+  }
   const base = repoPath(deps);
   const fullName = `${deps.owner}/${deps.repo}`;
-  let listWire: unknown;
-  try {
-    listWire = await ghJson<unknown>(deps.gh, [
-      'api',
-      `${base}/commits?sha=${STATE_BRANCH}&path=${SETTLE_STATE_PATH}&per_page=${String(limit)}`,
-    ]);
-  } catch (err) {
-    if (isNotFound(err)) return { versions: [], discarded: [], exhausted: true, barrier: false };
-    throw err;
-  }
-  if (!Array.isArray(listWire)) {
-    throw new Error(`selfhost state-branch: ${STATE_BRANCH} history is not a JSON array`);
-  }
-  const commits = (listWire as unknown[]).slice(0, limit).map((c) => asString(asRecord(c)['sha']));
   const versions: SettleState[] = [];
   const discarded: string[] = [];
-  for (const commit of commits) {
-    if (enough(versions)) return { versions, discarded, exhausted: false, barrier: false };
-    if (!SHA_RE.test(commit)) {
-      throw new Error(
-        `selfhost state-branch: ${STATE_BRANCH} history listed a non-sha commit ${JSON.stringify(commit.slice(0, 80))}`,
-      );
+  const result = (exhausted: boolean, barrier = false, limited = false) => ({
+    versions,
+    discarded,
+    exhausted,
+    barrier,
+    limited,
+  });
+  let anchor = STATE_BRANCH;
+  for (let page = 1; page <= SETTLE_HISTORY_MAX_PAGES; page += 1) {
+    if (enough(versions)) return result(false);
+    let listWire: unknown;
+    try {
+      listWire = await ghJson<unknown>(deps.gh, [
+        'api',
+        `${base}/commits?sha=${anchor}&path=${SETTLE_STATE_PATH}&per_page=${String(pageSize)}&page=${String(page)}`,
+      ]);
+    } catch (err) {
+      // Only an absent initial branch is an empty history. A pinned page
+      // disappearing is a transport/integrity fault, never exhaustion.
+      if (page === 1 && isNotFound(err)) return result(true);
+      throw err;
     }
-    const read = await readLedgerAt(deps, base, fullName, commit, true);
-    versions.push(read.state);
-    discarded.push(...read.discarded);
-    if (read.discarded.length > 0) return { versions, discarded, exhausted: false, barrier: true };
+    if (!Array.isArray(listWire) || listWire.length > pageSize) {
+      throw new Error(`selfhost state-branch: ${STATE_BRANCH} history is not a valid page`);
+    }
+    const commits = (listWire as unknown[]).map((c) => asString(asRecord(c)['sha']));
+    for (const commit of commits) {
+      if (enough(versions)) return result(false);
+      if (!SHA_RE.test(commit)) {
+        throw new Error(
+          `selfhost state-branch: ${STATE_BRANCH} history listed a non-sha commit ${JSON.stringify(commit.slice(0, 80))}`,
+        );
+      }
+      if (page === 1 && versions.length === 0) anchor = commit;
+      const read = await readLedgerAt(deps, base, fullName, commit, true);
+      versions.push(read.state);
+      discarded.push(...read.discarded);
+      if (read.discarded.length > 0) return result(false, true);
+    }
+    if (enough(versions)) return result(false);
+    if (commits.length < pageSize) return result(true);
   }
-  return { versions, discarded, exhausted: !enough(versions), barrier: false };
+  return result(false, false, true);
 }
 
 /**
