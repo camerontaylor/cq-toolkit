@@ -20,6 +20,16 @@ import shutil
 REPO = "camerontaylor/cq-toolkit"
 SCHEMA = Path(__file__).resolve().parents[2] / "policy/review-ledger.schema.json"
 
+IMPORT_BATCH_LIMIT = 64
+IMPORT_BATCH_BYTES = 4 * 1024 * 1024
+
+
+def independent_import(value):
+    payload = value["payload"]
+    return (value["event_type"] == "import-result"
+            and payload["result"] in ("unverified", "rejected")
+            and payload["review_id"] is None and payload["duplicate_id"] is None)
+
 
 class IntegrityError(ValueError):
     """Stop publication and credit advancement; operator reconciliation required."""
@@ -395,30 +405,65 @@ class GitLedger:
             self.git("update-ref", "-d", ref, head)
 
     def read(self, head):
-        values = []
-        commits = self.git("rev-list", "--reverse", head).decode().splitlines()
-        for commit in commits:
-            parents = self.git("rev-list", "--parents", "-n", "1", commit).decode().split()[1:]
-            if len(parents) > 1:
+        # Inspect every commit, including empty commits and merges, on every read.
+        # Batch plumbing removes per-record process launches without trusting a cache.
+        commits = self.git("rev-list", "--reverse", "--parents", head).decode().splitlines()
+        ordered = []
+        for line in commits:
+            fields = line.split()
+            if len(fields) > 2:
                 raise IntegrityError("ledger merge history unsupported")
-            changes = self.git("diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-z", commit).split(b"\0")
-            batch = []
-            for i in range(0, len(changes) - 1, 2):
-                status, filename = changes[i].decode(), changes[i + 1].decode()
-                if status != "A":
-                    raise IntegrityError("ledger history modifies/deletes existing records")
-                mode = self.git("ls-tree", commit, "--", filename).split(b" ", 1)[0]
-                if mode != b"100644":
-                    raise IntegrityError("ledger records must be regular non-executable blobs")
-                raw = self.git("show", commit + ":" + filename)
-                value = loads(raw)
+            ordered.append(fields[0])
+        changes = self.git("diff-tree", "--stdin", "--root", "-r", "--raw", "-z",
+                           "--no-renames", "--no-abbrev",
+                           input=("\n".join(ordered) + "\n").encode()).split(b"\0")
+        commit_ids = set(ordered)
+        entries, commit = [], None
+        i = 0
+        while i < len(changes) - 1:
+            token = changes[i]; i += 1
+            if not token.startswith(b":"):
+                commit = token.decode()
+                if commit not in commit_ids:
+                    raise IntegrityError("unexpected ledger history commit")
+                continue
+            fields = token[1:].split()
+            if len(fields) != 5 or fields[4] != b"A" or fields[0] != b"000000":
+                raise IntegrityError("ledger history modifies/deletes existing records")
+            if fields[1] != b"100644":
+                raise IntegrityError("ledger records must be regular non-executable blobs")
+            if commit is None or i >= len(changes) - 1:
+                raise IntegrityError("malformed ledger history")
+            entries.append((commit, changes[i].decode(), fields[3].decode()))
+            i += 1
+        batches = {}
+        # Bound each plumbing response to a small group of records. Objects are
+        # addressed by immutable IDs from the raw diff, never caller path syntax.
+        for offset in range(0, len(entries), 64):
+            group = entries[offset:offset + 64]
+            raw = self.git("cat-file", "--batch", input=("\n".join(e[2] for e in group) + "\n").encode())
+            cursor = 0
+            for commit, filename, oid in group:
+                end = raw.find(b"\n", cursor)
+                fields = raw[cursor:end].split()
+                if end < 0 or len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit():
+                    raise IntegrityError("malformed ledger blob response")
+                size = int(fields[2]); cursor = end + 1
+                payload = raw[cursor:cursor + size]
+                cursor += size
+                if len(payload) != size or raw[cursor:cursor + 1] != b"\n":
+                    raise IntegrityError("truncated ledger blob response")
+                cursor += 1
+                value = loads(payload)
                 validate(value)
                 if filename != record_path(value):
                     raise IntegrityError("incorrect event location")
-                batch.append(value)
-            # A writer serializes transitions in separate commits. Reviews precede
-            # imports; predecessor chains must already exist in earlier commits.
-            values.extend(sorted(batch, key=lambda v: (v["event_type"] != "review", v["id"])))
+                batches.setdefault(commit, []).append(value)
+            if cursor != len(raw):
+                raise IntegrityError("unexpected ledger blob response")
+        values = []
+        for commit in ordered:
+            values.extend(sorted(batches.get(commit, []), key=lambda v: (v["event_type"] != "review", v["id"])))
         validate_sequence(values)
         return values
 
@@ -458,36 +503,50 @@ class GitLedger:
                         raise IntegrityError("outbox has missing/forked causal dependencies")
                     for value in ready:
                         ordered.append(value); available.add(value["id"]); pending.remove(value)
-                pending = ordered
-                for value in pending:
+                groups = []
+                for value in ordered:
                     if value["id"] in ids:
                         outbox.acknowledge(value, ids)
                         continue
-                    for reference in value["payload"].get("artifacts", []):
-                        outbox.artifacts.verify(reference)
-                    if creditable(value):
-                        from backfill_accounting import Repository
-                        repository = Repository(self.repo)
-                        repository.restore(value["payload"].get("artifacts", []), outbox.artifacts)
-                        repository.verify_review(value)
-                    validate_sequence(values + [value])
+                    size = len(canonical(value))
+                    if size > 1024 * 1024:
+                        raise IntegrityError("ledger record exceeds validation bound")
+                    if (groups and independent_import(value)
+                            and all(independent_import(v) for v in groups[-1])
+                            and len(groups[-1]) < IMPORT_BATCH_LIMIT
+                            and sum(len(canonical(v)) for v in groups[-1]) + size <= IMPORT_BATCH_BYTES):
+                        groups[-1].append(value)
+                    else:
+                        groups.append([value])
+                for batch in groups:
+                    for value in batch:
+                        for reference in value["payload"].get("artifacts", []):
+                            outbox.artifacts.verify(reference)
+                        if creditable(value):
+                            from backfill_accounting import Repository
+                            repository = Repository(self.repo)
+                            repository.restore(value["payload"].get("artifacts", []), outbox.artifacts)
+                            repository.verify_review(value)
+                    validate_sequence(values + batch)
                     with tempfile.TemporaryDirectory() as directory:
                         env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"),
                                    GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
                                    GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost",
-                                   GIT_AUTHOR_DATE=value["occurred_at"], GIT_COMMITTER_DATE=value["occurred_at"])
+                                   GIT_AUTHOR_DATE=batch[0]["occurred_at"], GIT_COMMITTER_DATE=batch[0]["occurred_at"])
                         self.git("read-tree", head, env=env)
-                        blob = self.git("hash-object", "-w", "--stdin", input=canonical(value)).decode().strip()
-                        self.git("update-index", "--add", "--cacheinfo", "100644," + blob + "," + record_path(value), env=env)
+                        for value in batch:
+                            blob = self.git("hash-object", "-w", "--stdin", input=canonical(value)).decode().strip()
+                            self.git("update-index", "--add", "--cacheinfo", "100644," + blob + "," + record_path(value), env=env)
                         tree = self.git("write-tree", env=env).decode().strip()
-                        commit = self.git("commit-tree", tree, "-p", head, "-m", "Append review event " + value["id"], env=env).decode().strip()
+                        commit = self.git("commit-tree", tree, "-p", head, "-m", "Append review events " + str(len(batch)), env=env).decode().strip()
                     try:
                         self.push(head, commit)
                     except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
                         break  # Includes timeout after push: next fetch reconciles.
                     head, values = self.fetch()
                     ids = validate_sequence(values)
-                    outbox.acknowledge(value, ids)
+                    for value in batch:
+                        outbox.acknowledge(value, ids)
                 if not outbox.pending():
                     return head
             raise IntegrityError("publication pending; retain scope ownership and reconcile")

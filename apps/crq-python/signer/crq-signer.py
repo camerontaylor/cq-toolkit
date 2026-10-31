@@ -406,7 +406,8 @@ def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
                    "GIT_CONFIG_VALUE_2": "Authorization: Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()}
             def git(*args, **kwargs):
                 return subprocess.run(["/usr/bin/git", *args], cwd=root, env=env,
-                                      capture_output=True, check=kwargs.get("check", True), timeout=300).stdout
+                                      capture_output=True, input=kwargs.get("input"),
+                                      check=kwargs.get("check", True), timeout=300).stdout
             git("init", "--bare", "--quiet")
             remote = "https://github.com/" + REPO + ".git"
             git("fetch", "--no-tags", remote, LEDGER_REF)
@@ -424,18 +425,41 @@ def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
             git("bundle", "unbundle", str(filename))
             if git("rev-list", "--parents", "-n", "1", head).decode().strip().split() != [head, base]:
                 raise ValueError("ledger commit must append directly to the observed base")
-            changes = git("diff-tree", "-r", "--no-commit-id", "--no-renames", "--name-status", "-z", base, head).split(b"\0")
-            if len(changes) != 3 or changes[0] != b"A" or changes[-1] != b"" or not re.fullmatch(rb"records/[0-9]{4}/[0-9]{2}/[0-9a-f]{64}\.json", changes[1]):
-                raise ValueError("ledger publication must add one record only")
-            mode = git("ls-tree", head, "--", changes[1].decode()).split(b" ", 1)[0]
-            if mode != b"100644":
-                raise ValueError("ledger record must be a regular file")
-            if int(git("cat-file", "-s", head + ":" + changes[1].decode())) > 1024 * 1024:
-                raise ValueError("ledger record exceeds validation bound")
             validator = ledger_validator()
+            changes = git("diff-tree", "-r", "--no-commit-id", "--no-renames", "--raw", "--no-abbrev", "-z", base, head).split(b"\0")
+            count = (len(changes) - 1) // 2
+            if not 1 <= count <= validator.IMPORT_BATCH_LIMIT or len(changes) != 2 * count + 1 or changes[-1] != b"":
+                raise ValueError("ledger publication exceeds record count bound")
+            names, blobs = [], []
+            for i in range(0, len(changes) - 1, 2):
+                fields, name = changes[i].split(), changes[i + 1]
+                if len(fields) != 5 or fields[0] != b":000000" or fields[4] != b"A" or not re.fullmatch(rb"records/[0-9]{4}/[0-9]{2}/[0-9a-f]{64}\.json", name):
+                    raise ValueError("ledger publication must add records only")
+                if fields[1] != b"100644":
+                    raise ValueError("ledger record must be a regular file")
+                names.append(name.decode())
+                blobs.append(fields[3])
+            sizes = git("cat-file", "--batch-check", input=b"\n".join(blobs) + b"\n").splitlines()
+            total = 0
+            if len(sizes) != count:
+                raise ValueError("ledger blob size response mismatch")
+            for oid, row in zip(blobs, sizes):
+                fields = row.split()
+                if len(fields) != 3 or fields[0] != oid or fields[1] != b"blob":
+                    raise ValueError("ledger record must be a blob")
+                size = int(fields[2])
+                if size > 1024 * 1024:
+                    raise ValueError("ledger record exceeds validation bound")
+                total += size
+            if total > validator.IMPORT_BATCH_BYTES:
+                raise ValueError("ledger publication exceeds aggregate size bound")
             reader = validator.GitLedger(root)
             reader.git = git  # Every read retains the isolated root Git environment.
-            reader.read(head)  # Schema, content hash, path identity and sequence.
+            values = reader.read(head)  # Schema, content hash, path identity and sequence.
+            if count > 1:
+                added = {validator.record_path(value): value for value in values}
+                if not all(validator.independent_import(added[name]) for name in names):
+                    raise ValueError("ledger batch requires independent unverified/rejected imports")
             git("merge-base", "--is-ancestor", base, head)
             # No force, no caller ref/remote, and no token in argv or output.
             git("push", "--porcelain", remote, head + ":" + LEDGER_REF)
