@@ -29,6 +29,38 @@ class HistoryTest(unittest.TestCase):
         return ledger.canonical({"type": "complete", "status": "review_completed", "head": head or self.value["payload"]["head"],
                                  "reviewedFiles": files if files is not None else self.value["payload"]["input_scope"]})
 
+    def test_real_092_terminal_keeps_string_names_and_exact_hunk_intersection(self):
+        root = Path(__file__).resolve().parents[2]
+        raw = (Path(__file__).parent / "fixtures/coderabbit-0.9.2-terminal.json").read_bytes()
+        witness = json.loads((root / "docs/backfill-protocol/reviewer-verification-092-20261031.json").read_text())
+        import hashlib
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), witness["terminal_fixture_sha256"])
+        terminal = json.loads(raw)
+        names = terminal["reviewedFiles"]
+        self.assertEqual(len(names), 51)
+        self.assertTrue(all(isinstance(n, str) for n in names))
+        self.assertNotIn("head", terminal)
+        self.assertNotIn("version", terminal)
+        # Bind the exact real terminal shape to a controlled Git fixture. This
+        # tests parsing/intersection, not historical credit for the witnessed run.
+        files = {name: b"before\n" for name in names + ["unconfirmed.txt"]}
+        base = self.f.commit(files)
+        head = self.f.commit({name: b"after\n" for name in files})
+        item = {"head": head, "base": base, "attempt_id": "fixture-attempt"}
+        meta = {"head": head, "base": base, "run_id": "fixture-run"}
+        scope = history.submitted_scope(self.f.repo, base, head)
+        proof = {**item, "run_id": meta["run_id"], "cli_version": "0.9.2",
+                 "format": "coderabbit-agent-0.9.2", "submitted_scope": scope}
+        stream = json.dumps({"type": "review_context", "baseCommit": base}).encode() + b"\n" + raw
+        rows = history.adapted_terminal_scope(self.f.repo, stream, item, meta, proof)
+        self.assertEqual({row["path"] for row in rows}, set(names))
+        self.assertTrue(all(row["intervals"] == [[1, 1]] for row in rows))
+        policy = json.loads((root / "policy/review-limits.json").read_text())
+        self.assertEqual(policy["reviewer"]["max_files"], witness["verified_bounds"]["max_files"])
+        self.assertEqual(policy["reviewer"]["max_diff_bytes"], witness["verified_bounds"]["max_diff_bytes"])
+        for key in ("max_file_bytes", "max_total_bytes"):
+            self.assertEqual(policy[key], witness["verified_bounds"][key])
+
     def test_names_adapter_credits_only_confirmed_submitted_hunks(self):
         base = self.f.commit({"a": b"before\n", "b": b"before\n", "deleted": b"old\n"})
         head = self.f.commit({"a": b"after\n", "b": b"after\n", "deleted": None})
@@ -40,12 +72,18 @@ class HistoryTest(unittest.TestCase):
             return (json.dumps({"type": "review_context", "baseCommit": base}) + "\n" + json.dumps({
                 "type": "complete", "status": "review_completed", "outcome": "completed",
                 "reviewedFiles": names, **changes})).encode()
+        for version in ("0.8.2", "0.9.2"):
+            evidence = {**proof, "cli_version": version, "format": "coderabbit-agent-" + version}
+            rows = history.adapted_terminal_scope(self.f.repo, stream(["a", "deleted"]), item, meta, evidence)
+            self.assertEqual([r["path"] for r in rows], ["a"])
         rows = history.adapted_terminal_scope(self.f.repo, stream(["a", "deleted"]), item, meta, proof)
         self.assertEqual([r["path"] for r in rows], ["a"])
         self.assertEqual(rows[0]["intervals"], [[1, 1]])
         for raw, evidence in ((stream(["unexpected"]), proof), (stream(["a", "a"]), proof),
                               (stream(["a"], status="skipped"), proof),
                               (stream(["a"]), {**proof, "cli_version": "next"}),
+                              (stream(["a"]), {**proof, "cli_version": "0.9.2"}),
+                              (stream(["a"]), {**proof, "cli_version": "0.9.1", "format": "coderabbit-agent-0.9.1"}),
                               (stream(["a"]), {**proof, "attempt_id": "wrong"}),
                               (stream(["a"]), {**proof, "submitted_scope": []})):
             with self.assertRaises(ledger.IntegrityError):
