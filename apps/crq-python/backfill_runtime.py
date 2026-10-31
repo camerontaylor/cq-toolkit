@@ -119,7 +119,8 @@ def rank4_gate(c, queue, item, dry=False):
 
 
 def select(c, queue, log, dry, only):
-    if queue.get("backfill_halted") or (c.STATE / "backfill/publication-failure.json").exists():
+    if (queue.get("backfill_halted") or queue.get("backfill_publication_error")
+            or (c.STATE / "backfill/publication-failure.json").exists()):
         return None, False
     config = settings(c.STATE, dispatch=True)
     if not config:
@@ -353,6 +354,7 @@ def reconcile_publication(c, queue, head, ids):
             state_event(c, queue, item, value["occurred_at"], "remote publication acknowledged")
     queue["review_ledger_head"] = head
     queue.pop("backfill_publication_error", None)
+    clear_operation_halt(queue, "publication")
     c.save_queue(queue)
 
 

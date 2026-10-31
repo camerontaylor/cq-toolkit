@@ -66,13 +66,25 @@ def run(c):
                 raise ledger.IntegrityError("publication queue lock busy; reconciliation pending")
             return {"ledger_head": head, "publication": "reconciled"}
         except Exception as exc:
-            # Persist fail-closed admission state even if tick.lock is unavailable.
-            ledger.atomic(failure, ledger.canonical({"error": str(exc)[:300]}))
+            # These are independent persistence paths. A marker failure must not
+            # skip the queue halt or replace the original publication exception.
+            try:
+                ledger.atomic(failure, ledger.canonical({"error": str(exc)[:300]}))
+            except Exception as marker_error:
+                exc.add_note("publication failure marker could not be persisted: " + str(marker_error)[:300])
             def record_failure():
                 queue = c.load_queue()
                 queue["backfill_publication_error"] = str(exc)[:300]
+                if not queue.get("backfill_halted") or queue.get("backfill_halt_operation") == "publication":
+                    queue["backfill_halted"] = str(exc)[:300]
+                    queue["backfill_halt_operation"] = "publication"
                 c.save_queue(queue)
-            c.with_lock(record_failure, lock_wait=30)
+                return True
+            try:
+                if c.with_lock(record_failure, lock_wait=30) is not True:
+                    exc.add_note("publication queue halt remains pending: queue lock unavailable")
+            except Exception as queue_error:
+                exc.add_note("publication queue halt could not be persisted: " + str(queue_error)[:300])
             raise
 
 

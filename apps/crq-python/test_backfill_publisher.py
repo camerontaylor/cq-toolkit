@@ -111,6 +111,69 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
         self.assertEqual(self.q["items"][0]["state"], "pending")
 
+    def test_marker_write_failure_records_queue_halt_and_preserves_original(self):
+        self.prepare()
+        original = ledger.IntegrityError("original tampered ledger")
+        atomic = ledger.atomic
+        def marker_fault(filename, data):
+            if filename.name == "publication-failure.json":
+                raise OSError("marker volume unavailable")
+            return atomic(filename, data)
+        with mock.patch.object(ledger.GitLedger, "fetch", side_effect=original), \
+             mock.patch.object(ledger, "atomic", side_effect=marker_fault):
+            with self.assertRaises(ledger.IntegrityError) as raised:
+                worker.run(self.c)
+        self.assertIs(raised.exception, original)
+        self.assertFalse((self.state / "backfill/publication-failure.json").exists())
+        self.assertEqual(self.q["backfill_halt_operation"], "publication")
+        self.assertEqual(self.q["backfill_halted"], str(original))
+        self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        self.assertEqual(self.q["items"][0]["state"], "pending")
+        self.c.with_lock(lambda: runtime.publish(self.c, self.q))
+        self.assertIn("backfill_halted", self.q)  # Requesting is not recovery.
+        worker.run(self.c)
+        self.assertNotIn("backfill_halted", self.q)
+        self.assertNotIn("backfill_halt_operation", self.q)
+        self.assertNotIn("backfill_publication_error", self.q)
+
+    def test_marker_fault_preserves_unrelated_halt_through_recovery(self):
+        self.prepare()
+        self.q.update(backfill_halted="inventory failure", backfill_halt_operation="inventory")
+        atomic = ledger.atomic
+        def marker_fault(filename, data):
+            if filename.name == "publication-failure.json":
+                raise OSError("marker failure")
+            return atomic(filename, data)
+        with mock.patch.object(ledger.GitLedger, "fetch", side_effect=ledger.IntegrityError("bad ledger")), \
+             mock.patch.object(ledger, "atomic", side_effect=marker_fault):
+            with self.assertRaises(ledger.IntegrityError):
+                worker.run(self.c)
+        current = copy.deepcopy(self.q)
+        runtime.clear_operation_halt(current, "inventory")
+        self.assertEqual(runtime.select(self.c, current, [], False, None), (None, False))
+        worker.run(self.c)
+        self.assertEqual(self.q["backfill_halted"], "inventory failure")
+        self.assertEqual(self.q["backfill_halt_operation"], "inventory")
+
+    def test_failure_reporting_errors_never_replace_publication_exception(self):
+        for busy in (False, True):
+            with self.subTest(busy=busy):
+                self.prepare()
+                original = ledger.IntegrityError("original integrity failure")
+                atomic = ledger.atomic
+                def marker_fault(filename, data):
+                    if filename.name == "publication-failure.json":
+                        raise OSError("marker failure")
+                    return atomic(filename, data)
+                with mock.patch.object(ledger.GitLedger, "fetch", side_effect=original), \
+                     mock.patch.object(ledger, "atomic", side_effect=marker_fault), \
+                     mock.patch.object(self.c, "with_lock", return_value=None, side_effect=None if busy else OSError("queue failure")):
+                    with self.assertRaises(ledger.IntegrityError) as raised:
+                        worker.run(self.c)
+                self.assertIs(raised.exception, original)
+                self.assertEqual(len(original.__notes__), 2)
+                self.assertTrue((self.state / "backfill/publish-request.json").exists())
+
     def test_only_successful_operation_clears_its_owned_halt(self):
         queue = {"backfill_halted": "inventory transient", "backfill_halt_operation": "inventory"}
         runtime.clear_operation_halt(queue, "publication-request")
