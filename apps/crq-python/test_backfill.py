@@ -1,6 +1,7 @@
 """Operator commands require fresh exact evidence and never dispatch reviews."""
 from pathlib import Path
 import tempfile
+import copy
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -15,6 +16,47 @@ AT = "2026-10-30T00:00:00Z"
 
 
 class OperatorTest(unittest.TestCase):
+    def test_inventory_prepares_unlocked_and_merges_current_queue(self):
+        for stale in (None, "items", "backfill_scope_failures", "backfill_path_lineages", "config"):
+            with self.subTest(stale=stale), tempfile.TemporaryDirectory() as td:
+                q = {"items": [], "diagnostic": "before"}
+                held = [False]
+                config = {"enabled": True}
+                saved = []
+                def lock(fn, **kwargs):
+                    self.assertFalse(held[0])
+                    held[0] = True
+                    try:
+                        return fn()
+                    finally:
+                        held[0] = False
+                def load():
+                    self.assertTrue(held[0])
+                    return copy.deepcopy(q)
+                def prepare(c, snapshot, **kwargs):
+                    self.assertFalse(held[0])  # Git/GitHub/construction live here.
+                    self.assertTrue(kwargs["prepare_only"])
+                    self.assertFalse(kwargs["enqueue"])
+                    q["diagnostic"] = "tick progressed"
+                    if stale == "config":
+                        config["enabled"] = False
+                    elif stale:
+                        q[stale] = [{"vendor_state": "live"}] if stale == "items" else {"changed": True}
+                    snapshot["backfill_last_manifest"] = {"target": "a" * 40}
+                    return {"queue": snapshot, "manifest": {}, "ranked": {}, "report": {}, "event_items": []}
+                c = SimpleNamespace(STATE=Path(td), with_lock=lock, load_queue=load, save_queue=saved.append)
+                with mock.patch.object(backfill.runtime, "settings", side_effect=lambda _: copy.deepcopy(config)), \
+                     mock.patch.object(backfill.runtime, "run_inventory", side_effect=prepare):
+                    if stale:
+                        with self.assertRaisesRegex(ledger.IntegrityError, "snapshot stale"):
+                            backfill.inventory_unlocked(c, SimpleNamespace(report_only=True))
+                        self.assertFalse(saved)
+                        self.assertFalse((Path(td) / "backfill/latest-report.json").exists())
+                    else:
+                        backfill.inventory_unlocked(c, SimpleNamespace(report_only=True))
+                        self.assertEqual(saved[0]["diagnostic"], "tick progressed")
+                        self.assertEqual(saved[0]["backfill_last_manifest"]["target"], "a" * 40)
+
     def test_legacy_quarantine_release_binds_scope_history_and_ownership(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

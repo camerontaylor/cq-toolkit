@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic inventory/operator CLI. Never launches a vendor review."""
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -127,6 +128,39 @@ def execute(c, args):
     raise ledger.IntegrityError("unknown command")
 
 
+def inventory_guard(queue):
+    # Any item transition can change ownership or required-list lineage. Reject
+    # conservatively; unrelated scheduler diagnostics remain mergeable.
+    return {k: v for k, v in queue.items()
+            if k == "items" or k.startswith("backfill_") or k.startswith("legacy_coverage")
+            or k == "review_ledger_head"}
+
+
+def inventory_unlocked(c, args):
+    def snapshot():
+        return copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)
+    original, config = c.with_lock(snapshot, lock_wait=30)
+    prepared = runtime.run_inventory(c, copy.deepcopy(original), enqueue=not args.report_only, prepare_only=True)
+
+    def merge():
+        current = c.load_queue()
+        if inventory_guard(current) != inventory_guard(original) or runtime.settings(c.STATE) != config:
+            raise ledger.IntegrityError("inventory snapshot stale; retry inventory")
+        # Apply only inventory's delta to the freshly loaded queue. Never save
+        # the snapshot over scheduler changes made during slow Git/provider I/O.
+        for key, value in prepared["queue"].items():
+            if key not in original or value != original[key]:
+                current[key] = value
+        for ident in prepared["event_items"]:
+            item = next(i for i in current["items"] if i["id"] == ident)
+            runtime.state_event(c, current, item, item["created_at"], "inventory enqueue")
+        ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(prepared["ranked"]))
+        ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(prepared["report"]))
+        c.save_queue(current)
+        return prepared["report"]
+    return c.with_lock(merge, lock_wait=30)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -148,7 +182,8 @@ def main():
     args = parser.parse_args()
     import crq
     try:
-        result = crq.with_lock(execute, crq, args, lock_wait=30)
+        result = (inventory_unlocked(crq, args) if args.command == "inventory"
+                  else crq.with_lock(execute, crq, args, lock_wait=30))
         print(json.dumps(result, sort_keys=True))
     except (ValueError, OSError, KeyError) as exc:
         print(json.dumps({"error": str(exc)}))
