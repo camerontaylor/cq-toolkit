@@ -311,3 +311,23 @@ spool probes, and makes repair credentials optional for model-free handover.
 Under the proposed deployed-system protection narrowing (#328), P2 still touches
 protected `ops/prepare-host.py`, `ops/systemd/*` and `config.json`. The renderer
 and switch guard stay within the protected helper. No signer byte changes.
+
+## Background ledger publication
+
+Render/install `crq-publisher.service` and `crq-publisher.timer` through the same
+immutable-target unit renderer. The timer retries every minute after completion;
+activation remains part of the owner-controlled deployment. Stop/drain this worker
+with the other `crq-*` units before a checkout switch.
+
+Ticks only write `state/backfill/publish-request.json`. The worker uses its own
+`state/backfill/publisher.git` bare clone and `publisher.lock`, but retains the
+normal `state/backfill/publication` outbox and durable artifact locations. It
+performs network publication and finding recovery outside `tick.lock`, then reloads
+the current queue for local acknowledgement bookkeeping. `backfill.py publish`
+invokes this same worker and lock. No queue snapshot is restored.
+
+Pending records and reconciliation intent survive failed pushes and crashes after
+remote acknowledgement. The timer scans pending records even without a request
+marker. `backfill_publication_error` reports a failed attempt; retry clears it only
+after verified remote reconciliation. Pending/live jobs retain ownership. The
+45-minute worker limit bounds each invocation without deleting pending evidence.

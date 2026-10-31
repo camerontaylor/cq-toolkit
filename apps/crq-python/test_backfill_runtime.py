@@ -251,6 +251,17 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.item["state"], "publication-pending")
         self.assertFalse(jobs.is_execution_owner(self.item))
         runtime.publish(self.c, self.q)
+        self.assertEqual(self.item["state"], "publication-pending")
+        import backfill_publisher
+        self.c.load_queue = lambda: self.q
+        self.c.with_lock = lambda fn, **kwargs: fn()
+        def root_publish(base, head, bundle):
+            filename = self.root / "submission.bundle"
+            filename.write_bytes(bundle)
+            self.f.git("bundle", "unbundle", str(filename))
+            self.f.git("push", "origin", head + ":refs/heads/cq/review-ledger")
+        self.c.SPOOL.publish_ledger = root_publish
+        backfill_publisher.run(self.c)
         self.assertEqual(self.item["state"], "done")
         repo, store, _, publisher = runtime.services(self.c, self.config)
         head, records = publisher.fetch()

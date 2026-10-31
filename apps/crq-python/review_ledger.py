@@ -32,6 +32,26 @@ def independent_import(value):
             and payload["review_id"] is None and payload["duplicate_id"] is None)
 
 
+def initial_inventory_enrollment(value):
+    p = value["payload"]
+    return (value["event_type"] == "job-state" and p["reason"] == "inventory enqueue"
+            and p["state"] == "pending" and p["attempt"] == 0 and p["failures"] == 0
+            and p["generation"] == 0 and p["next_eligible_at"] is None and "operator" not in p
+            and value["source_key"] == "job:" + p["job_id"] + ":" + digest(p))
+
+
+def independent_batch(values, previous):
+    """Only homogeneous imports or first-ever, distinct initial enrollments."""
+    if all(independent_import(v) for v in values):
+        return True
+    seen = {v["payload"]["job_id"] for v in previous if v["event_type"] == "job-state"}
+    for value in values:
+        if not initial_inventory_enrollment(value) or value["payload"]["job_id"] in seen:
+            return False
+        seen.add(value["payload"]["job_id"])
+    return True
+
+
 class IntegrityError(ValueError):
     """Stop publication and credit advancement; operator reconciliation required."""
 
@@ -516,7 +536,8 @@ class GitLedger:
                         raise IntegrityError("outbox has missing/forked causal dependencies")
                     for value in ready:
                         ordered.append(value); available.add(value["id"]); pending.remove(value)
-                groups = []
+                groups, kinds = [], []
+                seen_jobs = {v["payload"]["job_id"] for v in values if v["event_type"] == "job-state"}
                 for value in ordered:
                     if value["id"] in ids:
                         outbox.acknowledge(value, ids)
@@ -524,13 +545,18 @@ class GitLedger:
                     size = len(canonical(value))
                     if size > 1024 * 1024:
                         raise IntegrityError("ledger record exceeds validation bound")
-                    if (groups and independent_import(value)
-                            and all(independent_import(v) for v in groups[-1])
+                    kind = "import" if independent_import(value) else None
+                    if initial_inventory_enrollment(value) and value["payload"]["job_id"] not in seen_jobs:
+                        kind = "enrollment"
+                    if value["event_type"] == "job-state":
+                        seen_jobs.add(value["payload"]["job_id"])
+                    if (groups and kind is not None and kinds[-1] == kind
                             and len(groups[-1]) < IMPORT_BATCH_LIMIT
                             and sum(len(canonical(v)) for v in groups[-1]) + size <= IMPORT_BATCH_BYTES):
                         groups[-1].append(value)
                     else:
                         groups.append([value])
+                        kinds.append(kind)
                 for batch in groups:
                     for value in batch:
                         for reference in value["payload"].get("artifacts", []):
