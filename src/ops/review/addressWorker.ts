@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
-import { assertAddressDependenciesIsolated } from './internal/addressDependencies.js';
-import { readFile, writeFile, lstat, realpath, symlink } from 'node:fs/promises';
+import {
+  assertAddressDependenciesIsolated,
+  snapshotAddressDependencies,
+} from './internal/addressDependencies.js';
+import { readFile, writeFile, lstat, realpath } from 'node:fs/promises';
 import { relative, resolve, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -505,7 +508,14 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       });
       // Cancellation is classified only after the actual child has settled.
       stop();
-      if (result.status !== 'ok') throw new Error(`configured check was ${result.status}`);
+      if (result.status !== 'ok') {
+        let detail: string = result.status;
+        if (result.status === 'indeterminate') detail = result.detail;
+        else if (result.status === 'failed') detail = result.error;
+        throw new Error(
+          `configured check was ${result.status} (${check.adapter}): ${detail.slice(0, 1000)}`,
+        );
+      }
       results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
     }
     return results;
@@ -771,12 +781,16 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               output.disposition === 'fixed' ? parent : observedHead,
             ]);
             try {
-              // Reuse installed dependencies as a trusted local runtime input.
-              // Workers cannot edit this path; the candidate still owns all
-              // tracked source/config and has no sibling uncommitted edits.
+              // Candidate checks may invoke a package manager. Keep their
+              // node_modules metadata private so relinking cannot corrupt the
+              // caller's dependencies. Package links retain absolute targets.
               const dependencies = await dependencyDirectory(admitMutation);
               if (dependencies)
-                await symlink(dependencies, resolve(candidate, 'node_modules'), 'dir');
+                await snapshotAddressDependencies(
+                  dependencies,
+                  resolve(candidate, 'node_modules'),
+                  admitMutation,
+                );
               const baseline =
                 output.disposition === 'fixed' ? await runChecks(candidate, finding, false) : [];
 
@@ -916,7 +930,13 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 (await git(candidate, ['diff', '--name-only', '-z'])) ||
                 zList(
                   await git(candidate, ['ls-files', '-z', '--others', '--exclude-standard']),
-                ).filter((path) => path !== 'node_modules').length > 0
+                ).filter(
+                  (path) =>
+                    !(
+                      dependencies &&
+                      (path === 'node_modules' || path.startsWith('node_modules/'))
+                    ),
+                ).length > 0
               )
                 throw new AddressRefusal('check or feedback mutated candidate', true);
               if ((await git(root, ['rev-parse', 'HEAD'])) !== parent)

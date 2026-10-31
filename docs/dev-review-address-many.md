@@ -14,6 +14,12 @@ head, branch, repository and eligibility are rechecked before dispatch. Existing
 `review.address` owns worktree isolation, verified fixes, publication and replies.
 Bulk dispatch forces agent review; it never starts inline CodeRabbit.
 
+Candidate checks use a private copy of dependency-directory metadata, preserving
+absolute links to installed packages. With a global virtual store this copies
+only the small link/metadata directory. Installs containing real package files
+copy those files for each candidate; copy admission is cancellable but has no
+byte budget.
+
 Execution is serial because the address engine holds a common-directory lock.
 Each admitted PR reserves `tokensPerPr` from the shared `maxTokens` allocation.
 Known usage settles the reservation; unknown usage retains it and stops further
