@@ -212,7 +212,7 @@ async function readLedgerAt(
   return parseSettleState(raw, fullName);
 }
 
-/** Bound API cost to four metadata pages plus at most 200 ledger reads (50/page). */
+/** Bound API cost to four metadata pages plus at most 400 ledger reads (100/page). */
 export const SETTLE_HISTORY_MAX_PAGES = 4;
 
 /**
