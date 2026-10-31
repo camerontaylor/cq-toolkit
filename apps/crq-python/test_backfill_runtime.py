@@ -64,7 +64,8 @@ class RuntimeTest(unittest.TestCase):
         self.t = self.f.commit({"a": b"one\ntwo\n"})
         self.state = self.root / "state"; self.state.mkdir()
         self.config = {"enabled": True, "durable_artifact_root": str(self.root / "durable"), "runner_identity": "crq-runner-app",
-                       "operational_ruling": "offline-fixture", "no_live_run_verification": "fixture", "owner_branch_ruleset_evidence": "fixture"}
+                       "operational_ruling": "offline-fixture", "no_live_run_verification": "fixture", "owner_branch_ruleset_evidence": "fixture",
+                       "publisher_spool": {"ssh_alias": "publisher@127.0.0.1", "ssh_key": "/fixture/publisher-key"}}
         ledger.atomic(self.state / "backfill-rollout.json", ledger.canonical(self.config))
         self.policy = {"max_files": 8, "max_file_bytes": 262144, "max_total_bytes": 2097152,
                        "reviewer": {"verified": True, "evidence": "fixture", "max_files": 8, "max_diff_bytes": 2097152}}
@@ -86,6 +87,7 @@ class RuntimeTest(unittest.TestCase):
                                  save_queue=lambda q: self.saved.append(ledger.canonical(q)), ordinary_review_eligible=lambda q: False)
         self.c.SPOOL = SimpleNamespace(publish_ledger=lambda base, head, bundle:
                                       self.f.git("push", "origin", head + ":refs/heads/cq/review-ledger"))
+        self.c.Spool = lambda config: self.c.SPOOL
 
     def test_missing_rollout_and_unknown_deployed_limits_never_enable_dispatch(self):
         self.assertIsNone(runtime.settings(self.root / "absent", dispatch=True))

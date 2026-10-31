@@ -2259,7 +2259,10 @@ class Spool:
             raise SpoolUnreachable("ledger publication requires the dedicated signer transport")
         if not bundle or len(bundle) > 64 * 1024 * 1024:
             raise SpoolUnreachable("invalid ledger bundle size")
-        reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
+        try:
+            reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
+        except SpoolUnreachable as exc:
+            raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
         if json.loads(reply) != {"published": head}:
             raise SpoolUnreachable("signer did not acknowledge the exact ledger commit")
 

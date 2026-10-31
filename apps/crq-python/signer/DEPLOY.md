@@ -12,7 +12,18 @@ under `/opt/cq-reviewer/`. The root operation refuses caller-writable validators
 Run `systemd-analyze verify` on both units before `daemon-reload`, then enable
 and start only `crq-ledger-publish.socket`. The existing promotion daemon keeps
 its dedicated `crq` user; each ledger connection starts the separate root
-entrypoint with private temporary storage. Its socket is root:crq-spool 0660.
+entrypoint with private temporary storage. Its socket is root:crq-ledger-publish
+0660. Owner provisioning creates a dedicated publisher SSH principal in that
+group and a separate runner-only key, whose forced command is
+`/opt/cq-reviewer/spool-shell ledger-only` with the existing SSH restrictions.
+The ordinary promotion key retains its existing forced command and cannot
+invoke ledger publication; the ledger-only key cannot invoke promotion verbs.
+Do not add the ordinary spool account to the publisher socket group.
+
+Provision `publisher_spool` in the private `state/backfill-rollout.json` with
+the dedicated `ssh_alias` (literal `user@host`) and `ssh_key` path. This is an
+owner credential action, separate from code installation. The publisher refuses
+missing transport configuration and never falls back to the promotion key.
 
 The forced SSH transport accepts `ledger-publish <base> <head>` and a bounded
 Git bundle, never a repository path, token, remote or ref. The root entrypoint

@@ -31,7 +31,7 @@ def settings(state, *, dispatch=False):
     if not filename.exists():
         return None
     value = ledger.loads(filename.read_bytes())
-    required = ("operational_ruling", "no_live_run_verification", "owner_branch_ruleset_evidence", "durable_artifact_root", "runner_identity")
+    required = ("operational_ruling", "no_live_run_verification", "owner_branch_ruleset_evidence", "durable_artifact_root", "runner_identity", "publisher_spool")
     if any(not value.get(k) for k in required) or value["runner_identity"] != "crq-runner-app":
         raise ledger.IntegrityError("backfill rollout prerequisites incomplete")
     if dispatch and value.get("enabled") is not True:
@@ -45,7 +45,8 @@ def services(c, config):
     store = ledger.ArtifactStore(config["durable_artifact_root"])
     outbox = ledger.Outbox(c.STATE / "backfill/publication", store)
     repo = accounting.Repository(c.CLONE)
-    publisher = ledger.GitLedger(c.CLONE, push_commit=c.SPOOL.publish_ledger)
+    publisher_spool = c.Spool(config["publisher_spool"])
+    publisher = ledger.GitLedger(c.CLONE, push_commit=publisher_spool.publish_ledger)
     return repo, store, outbox, publisher
 
 

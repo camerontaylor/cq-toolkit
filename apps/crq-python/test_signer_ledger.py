@@ -1,5 +1,6 @@
 """Root ledger capability: real Git objects, local remote, mocked token API."""
 import importlib.util
+from importlib.machinery import SourceFileLoader
 import hashlib
 import io
 import resource
@@ -17,6 +18,9 @@ import review_ledger as ledger
 spec = importlib.util.spec_from_file_location("ledger_signer_test", Path(__file__).parent / "signer/crq-signer.py")
 signer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(signer)
+loader = SourceFileLoader("ledger_spool_test", str(Path(__file__).parent / "signer/spool-shell"))
+spool = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(spool)
 
 
 class LedgerSignerTest(unittest.TestCase):
@@ -168,3 +172,13 @@ class LedgerSignerTest(unittest.TestCase):
                 self.assertEqual(signer.ledger_publish_entry(), 2)
                 mint.assert_not_called()
                 self.assertNotIn("token", output.getvalue())
+
+    def test_promotion_and_ledger_credentials_have_disjoint_commands(self):
+        for argv, command in ((["spool-shell"], "ledger-publish " + "a" * 40 + " " + "b" * 40),
+                              (["spool-shell", "ledger-only"], "put promo-0123456789")):
+            with mock.patch.object(spool.sys, "argv", argv), \
+                 mock.patch.dict(spool.os.environ, {"SSH_ORIGINAL_COMMAND": command}), \
+                 mock.patch.object(spool.socket, "socket") as connect:
+                with self.assertRaisesRegex(ValueError, "outside transport capability"):
+                    spool.main()
+                connect.assert_not_called()
