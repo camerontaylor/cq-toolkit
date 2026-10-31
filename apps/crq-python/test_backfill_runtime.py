@@ -95,6 +95,16 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaises(ledger.IntegrityError):
             runtime.settings(self.state, dispatch=True)
 
+    def test_malformed_publisher_transport_refuses_before_dispatch(self):
+        for spool in ("truthy", ["truthy"], {"ssh_alias": "publisher@127.0.0.1"},
+                      {"ssh_alias": "bad host", "ssh_key": "/fixture/key"},
+                      {"ssh_alias": "publisher@127.0.0.1", "ssh_key": "\n"},
+                      {"ssh_alias": "publisher@127.0.0.1", "ssh_key": "/fixture/key", "legacy_shell": True}):
+            with self.subTest(spool=spool):
+                ledger.atomic(self.state / "backfill-rollout.json", ledger.canonical({**self.config, "publisher_spool": spool}))
+                with self.assertRaisesRegex(ledger.IntegrityError, "publisher_spool"):
+                    runtime.settings(self.state, dispatch=True)
+
     def test_select_reuses_coverage_only_within_one_ledger_snapshot(self):
         first = copy.deepcopy(self.item)
         second = copy.deepcopy(self.item); second["id"] += "-second"
