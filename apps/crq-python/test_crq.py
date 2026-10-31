@@ -2422,8 +2422,15 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         build.assert_not_called()
         self.assertIn("cooldown unresolved", item["wait_reason"])
 
+    def test_tick_slot_templates_pin_managed_cli_updates(self):
+        root = Path(__file__).parent / "ops/systemd"
+        for name in ("crq-tick.service", "crq-slot.service"):
+            text = (root / name).read_text()
+            self.assertIn("Environment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true", text)
+            self.assertIn("Environment=CODERABBIT_CLI_UPDATE_MANAGED=true", text)
+
     def test_backfill_child_records_scope_and_preflight_refusal(self):
-        for version in ("0.8.2", "unknown"):
+        for version in ("0.8.2", "0.9.2", "0.9.1", "unknown"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as td:
                 root = Path(td); run_dir = root / "run"; run_dir.mkdir()
                 meta = {"cmd": ["coderabbit", "review"], "kind": "backfill", "worktree": td,
@@ -2433,7 +2440,7 @@ class CoverageFallbackTargetTest(unittest.TestCase):
                 repository.git.side_effect = lambda *args: ("a" * 40).encode() if args[0] == "rev-parse" else b""
                 process = mock.Mock(pid=999); process.wait.return_value = 0
                 with mock.patch.object(crq, "RUNS", root), mock.patch.object(crq.signal, "signal"), \
-                     mock.patch.object(crq.subprocess, "run", return_value=SimpleNamespace(stdout=version)), \
+                     mock.patch.object(crq.subprocess, "run", return_value=SimpleNamespace(stdout=version)) as preflight, \
                      mock.patch.object(crq.subprocess, "Popen", return_value=process) as spawn, \
                      mock.patch.object(crq.backfill_runtime.accounting, "Repository", return_value=repository), \
                      mock.patch.object(crq.backfill_runtime.history, "submitted_scope", return_value=[]), \
@@ -2441,9 +2448,15 @@ class CoverageFallbackTargetTest(unittest.TestCase):
                     result = crq.cmd_review_child("run")
                 self.assertTrue((run_dir / "review.pid").exists())
                 self.assertTrue((run_dir / "exit.json").exists())
-                if version == "0.8.2":
+                self.assertEqual(preflight.call_args.kwargs["env"]["CODERABBIT_CLI_DISABLE_AUTO_UPDATE"], "true")
+                self.assertEqual(preflight.call_args.kwargs["env"]["CODERABBIT_CLI_UPDATE_MANAGED"], "true")
+                if version in ("0.8.2", "0.9.2"):
                     self.assertEqual(result, 0); spawn.assert_called_once()
-                    self.assertEqual(json.loads((run_dir / "submission.json").read_text())["attempt_id"], "attempt")
+                    proof = json.loads((run_dir / "submission.json").read_text())
+                    self.assertEqual(proof["attempt_id"], "attempt")
+                    self.assertEqual(proof["cli_version"], version)
+                    self.assertEqual(proof["format"], "coderabbit-agent-" + version)
+                    self.assertEqual(spawn.call_args.kwargs["env"], preflight.call_args.kwargs["env"])
                 else:
                     self.assertEqual(result, 3); spawn.assert_not_called()
                     self.assertTrue(json.loads((run_dir / "exit.json").read_text())["pre_vendor_refusal"])

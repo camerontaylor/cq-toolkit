@@ -1366,19 +1366,21 @@ def cmd_review_child(run_id: str) -> int:
     rdir = RUNS / run_id
     meta = json.loads((rdir / "meta.json").read_text())
     cmd = review_wrapper_argv(meta["cmd"], CONFIG["review_timeout_min"])
+    reviewer_env = dict(os.environ, CODERABBIT_CLI_DISABLE_AUTO_UPDATE="true",
+                        CODERABBIT_CLI_UPDATE_MANAGED="true")
     pidfile = rdir / "review.pid"
     identity = {"run_id": run_id, "pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(),
                 "sid": os.getsid(0), "group_owner": author_quota.GROUP_OWNER_MARKER}
     repair_tick.atomic(pidfile, identity)
     try:
         if meta.get("kind") == backfill_jobs.KIND:
-            version = subprocess.run([meta["cmd"][0], "--version"], capture_output=True, text=True, check=True, timeout=30).stdout.strip()
-            if version != "0.8.2":
+            version = subprocess.run([meta["cmd"][0], "--version"], capture_output=True, text=True, check=True, timeout=30, env=reviewer_env).stdout.strip()
+            if version not in backfill_runtime.history.REVIEWER_FORMATS:
                 raise RuntimeError("backfill scope adapter refuses unknown CodeRabbit version")
             repository = backfill_runtime.accounting.Repository(meta["worktree"])
             if repository.git("rev-parse", "HEAD^{commit}").decode().strip() != meta["head"] or repository.git("status", "--porcelain").strip():
                 raise RuntimeError("backfill submission must match clean pinned head")
-            proof = {"cli_version": version, "format": "coderabbit-agent-0.8.2", "run_id": run_id,
+            proof = {"cli_version": version, "format": backfill_runtime.history.REVIEWER_FORMATS[version], "run_id": run_id,
                      "head": meta["head"], "base": meta["base"], "attempt_id": meta["backfill"]["attempt_id"],
                      "submitted_scope": backfill_runtime.history.submitted_scope(repository, meta["base"], meta["head"])}
             repair_tick.atomic(rdir / "submission.json", proof)
@@ -1388,7 +1390,7 @@ def cmd_review_child(run_id: str) -> int:
                                                "pre_vendor_refusal": True})
         return 3
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
-        proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL, env=reviewer_env)
         repair_tick.atomic(pidfile, {**identity, "cli_pid": proc.pid})
         rc = proc.wait()
     # GNU timeout exits 124 when it sends TERM at the deadline; a `--kill-after`

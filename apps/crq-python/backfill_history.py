@@ -13,6 +13,8 @@ import subprocess
 import review_ledger as ledger
 from backfill_accounting import ranges
 
+REVIEWER_FORMATS = {"0.8.2": "coderabbit-agent-0.8.2", "0.9.2": "coderabbit-agent-0.9.2"}
+
 CLASSES = ("crq-counted-cycle", "merged-current-receipt", "promotion-range", "github-app-review")
 
 
@@ -74,8 +76,9 @@ def submitted_scope(repo, base, head):
 
 
 def adapted_terminal_scope(repo, raw, item, meta, proof):
-    """CLI 0.8.2: vendor-confirmed submitted hunks, never requested whole files."""
-    if proof.get("cli_version") != "0.8.2" or proof.get("format") != "coderabbit-agent-0.8.2":
+    """Known CLI formats: vendor-confirmed hunks, never requested whole files."""
+    version = proof.get("cli_version")
+    if not isinstance(version, str) or version not in REVIEWER_FORMATS or proof.get("format") != REVIEWER_FORMATS[version]:
         raise ledger.IntegrityError("unknown reviewer version/output format")
     for key, expected in (("run_id", meta["run_id"]), ("head", item["head"]), ("base", item["base"]),
                           ("attempt_id", item["attempt_id"])):
