@@ -168,6 +168,7 @@ def inventory_unlocked(c, args):
             runtime.state_event(c, current, item, item["created_at"], "inventory enqueue")
         ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(prepared["ranked"]))
         ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(prepared["report"]))
+        runtime.clear_operation_halt(current, "inventory")
         c.save_queue(current)
         return prepared["report"]
     return c.with_lock(merge, lock_wait=30)
@@ -194,8 +195,12 @@ def main():
     args = parser.parse_args()
     import crq
     try:
-        result = (inventory_unlocked(crq, args) if args.command == "inventory"
-                  else crq.with_lock(execute, crq, args, lock_wait=30))
+        if args.command == "publish":
+            from backfill_publisher import run
+            result = run(crq)
+        else:
+            result = (inventory_unlocked(crq, args) if args.command == "inventory"
+                      else crq.with_lock(execute, crq, args, lock_wait=30))
         print(json.dumps(result, sort_keys=True))
     except (ValueError, OSError, KeyError) as exc:
         print(json.dumps({"error": str(exc)}))

@@ -34,6 +34,12 @@ class LedgerBatchTest(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.repo, capture_output=True,
                               check=True, **kwargs).stdout.decode().strip()
 
+    def enrollment(self, index, **overrides):
+        payload = {"family": "fixture", "subject_id": str(index), "job_id": "fixture:" + str(index),
+                   "generation": 0, "attempt": 0, "state": "pending", "failures": 0,
+                   "next_eligible_at": None, "reason": "inventory enqueue", **overrides}
+        return ledger.event("job-state", "job:" + payload["job_id"] + ":" + ledger.digest(payload), AT, payload)
+
     def imported(self, ident, reason="No authenticated scope", **overrides):
         return ledger.event("import-result", "import:" + str(ident), AT, {
             "source": {"repo": ledger.REPO, "producer": "fixture", "type": "author-cli",
@@ -47,6 +53,46 @@ class LedgerBatchTest(unittest.TestCase):
     def counts(self, head):
         return [len(self.git("diff-tree", "--no-commit-id", "--name-only", "-r", c).splitlines())
                 for c in self.commits(head)]
+
+    def test_initial_inventory_enrollment_batches_and_observed_acks(self):
+        for i in range(65):
+            self.out.spool(self.enrollment(i))
+        head = self.publisher.publish(self.out)
+        self.assertEqual(self.counts(head), [64, 1])
+        self.assertFalse(self.out.pending())
+        self.assertEqual(len(self.publisher.read(head)), 65)
+        # A later event for an already enrolled job cannot join new enrollments.
+        prior = self.enrollment(0, subject_id="different")
+        self.out.spool(prior)
+        head = self.publisher.publish(self.out)
+        self.assertEqual(self.counts(head), [64, 1, 1])
+
+    def test_enrollment_batch_response_loss_recovery_and_transitions_serial(self):
+        for i in range(3):
+            self.out.spool(self.enrollment(i))
+        push = self.publisher.push
+        def lose_response(base, head):
+            push(base, head)
+            raise OSError("accepted but response lost")
+        with mock.patch.object(self.publisher, "push", side_effect=lose_response) as calls:
+            head = self.publisher.publish(self.out)
+        self.assertEqual(calls.call_count, 1)
+        self.assertEqual(self.counts(head), [3])
+        self.assertFalse(self.out.pending())
+        for i in range(2):
+            self.out.spool(self.enrollment(i, attempt=1, reason="transition"))
+        head = self.publisher.publish(self.out)
+        self.assertEqual(self.counts(head), [3, 1, 1])
+
+    def test_transition_and_repeated_job_are_not_independent(self):
+        initial = self.enrollment(0)
+        later = self.enrollment(0, subject_id="later")
+        self.assertFalse(ledger.independent_batch([initial, later], []))
+        self.assertFalse(ledger.independent_batch([initial, self.enrollment(1)], [later]))
+        for changes in ({"attempt": 1}, {"generation": 1}, {"failures": 1}, {"state": "quarantined"},
+                        {"reason": "remote publication acknowledged"}, {"next_eligible_at": AT}):
+            self.assertFalse(ledger.independent_batch([initial, self.enrollment(1, **changes)], []))
+        self.assertFalse(ledger.independent_batch([initial, self.imported(1)], []))
 
     def test_65_records_use_two_commits_and_ack_every_observed_id(self):
         values = [self.imported(i, result="rejected" if i % 2 else "unverified") for i in range(65)]

@@ -19,7 +19,8 @@ class OperatorTest(unittest.TestCase):
     def test_inventory_prepares_unlocked_and_merges_current_queue(self):
         for stale in (None, "items", "backfill_scope_failures", "backfill_path_lineages", "config"):
             with self.subTest(stale=stale), tempfile.TemporaryDirectory() as td:
-                q = {"items": [{"id": "ordinary", "kind": "merged", "state": "pending"}], "diagnostic": "before"}
+                q = {"items": [{"id": "ordinary", "kind": "merged", "state": "pending"}], "diagnostic": "before",
+                     "backfill_halted": "inventory failed", "backfill_halt_operation": "inventory"}
                 held = [False]
                 config = {"enabled": True}
                 saved = []
@@ -56,6 +57,7 @@ class OperatorTest(unittest.TestCase):
                         self.assertFalse((Path(td) / "backfill/latest-report.json").exists())
                     else:
                         backfill.inventory_unlocked(c, SimpleNamespace(report_only=True))
+                        self.assertNotIn("backfill_halted", saved[0])
                         self.assertEqual(saved[0]["diagnostic"], "tick progressed")
                         self.assertEqual(saved[0]["items"][0]["state"], "done")
                         self.assertEqual(saved[0]["backfill_idle_with_candidate"], 3)

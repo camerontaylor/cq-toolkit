@@ -458,8 +458,11 @@ def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
             values = reader.read(head)  # Schema, content hash, path identity and sequence.
             if count > 1:
                 added = {validator.record_path(value): value for value in values}
-                if not all(validator.independent_import(added[name]) for name in names):
-                    raise ValueError("ledger batch requires independent unverified/rejected imports")
+                batch = [added[name] for name in names]
+                new_ids = {value["id"] for value in batch}
+                previous = [value for value in values if value["id"] not in new_ids]
+                if not validator.independent_batch(batch, previous):
+                    raise ValueError("ledger batch requires independent imports or initial inventory enrollments")
             git("merge-base", "--is-ancestor", base, head)
             # No force, no caller ref/remote, and no token in argv or output.
             git("push", "--porcelain", remote, head + ":" + LEDGER_REF)

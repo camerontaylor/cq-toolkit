@@ -40,6 +40,12 @@ class LedgerSignerTest(unittest.TestCase):
     def git(self, *args, input=None):
         return self.original_run(["git", *args], cwd=self.repo, input=input, check=True, capture_output=True).stdout.decode().strip()
 
+    def enrollment(self, index, **overrides):
+        payload = {"family": "fixture", "subject_id": str(index), "job_id": "fixture:" + str(index),
+                   "generation": 0, "attempt": 0, "state": "pending", "failures": 0,
+                   "next_eligible_at": None, "reason": "inventory enqueue", **overrides}
+        return ledger.event("job-state", "job:" + payload["job_id"] + ":" + ledger.digest(payload), "2026-10-31T00:00:00Z", payload)
+
     def candidate(self, *, name=None, mode=None, raw=None, reason="fixture"):
         value = ledger.event("job-state", "fixture", "2026-10-31T00:00:00Z", {
             "family": "fixture", "subject_id": "fixture", "job_id": "fixture:0",
@@ -78,6 +84,35 @@ class LedgerSignerTest(unittest.TestCase):
         transport = ledger.GitLedger(self.repo, push_commit=mock.Mock())
         transport.push(self.base, head)
         return head, transport.push_commit.call_args.args[2]
+
+    def test_initial_enrollment_batch_and_replay(self):
+        head, bundle = self.batch_candidate([self.enrollment(i) for i in range(64)])
+        self.run_publication(head, bundle)
+        self.run_publication(head, bundle)
+        self.base = head
+        repeated, body = self.batch_candidate([self.enrollment(0, subject_id="later"), self.enrollment(65)])
+        with self.assertRaisesRegex(ValueError, "independent"):
+            self.run_publication(repeated, body)
+        self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], head)
+
+    def test_enrollment_transitions_duplicates_mixed_and_count_refused(self):
+        cases = [([self.enrollment(i) for i in range(65)], "count bound"),
+                 ([self.enrollment(i, subject_id="x" * 900000) for i in range(5)], "aggregate size"),
+                 ([self.enrollment(0), self.enrollment(1, subject_id="x" * (1024 * 1024))], "validation bound"),
+                 ([self.enrollment(0), self.enrollment(0, subject_id="later")], "independent"),
+                 ([self.enrollment(0), self.import_value(1)], "independent")]
+        for changes in ({"attempt": 1}, {"generation": 1}, {"failures": 1}, {"state": "quarantined"},
+                        {"reason": "remote publication acknowledged"}):
+            cases.append(([self.enrollment(0), self.enrollment(1, **changes)], "independent"))
+        forged = ledger.event("job-state", "forged-source", "2026-10-31T00:00:00Z", self.enrollment(1)["payload"])
+        cases.append(([self.enrollment(0), forged], "independent"))
+        for values, error in cases:
+            with self.subTest(error=error, values=len(values)):
+                self.git("checkout", "--detach", self.base)
+                head, bundle = self.batch_candidate(values)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.run_publication(head, bundle)
+                self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], self.base)
 
     def test_independent_import_batch_and_replay(self):
         values = [self.import_value(i, result="rejected" if i % 2 else "unverified") for i in range(64)]

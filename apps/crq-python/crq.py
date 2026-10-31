@@ -3457,14 +3457,18 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     q = load_queue()
     fetch()
     if not dry:
+        operation = "publication-request"
         try:
             backfill_runtime.publish(sys.modules[__name__], q)
+            operation = "inventory"
             rollout = backfill_runtime.settings(STATE)
             if rollout and rollout.get("inventory_mode") == "integrated" and not only:
                 backfill_runtime.run_inventory(sys.modules[__name__], q)
         except Exception as exc:
             # Fail closed for rank4 while retaining ordinary scheduler progress.
-            q["backfill_halted"] = str(exc)[:300]
+            if not q.get("backfill_halted") or q.get("backfill_halt_operation") == operation:
+                q["backfill_halted"] = str(exc)[:300]
+                q["backfill_halt_operation"] = operation
             log.append("backfill halted: " + str(exc)[:300])
     if not dry and only is None:
         budget = ForgeBudget()
