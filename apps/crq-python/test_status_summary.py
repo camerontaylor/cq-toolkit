@@ -25,6 +25,16 @@ def setUpModule():
 
 
 class SummaryTest(unittest.TestCase):
+    def test_account_limit_overrides_fallback_cap(self):
+        for usage, expected in [({"limit": 8}, 8), ({"limit": 12}, 12),
+                                (None, 5), ({"remaining": 2}, 5),
+                                ({"limit": 0}, 5), ({"limit": True}, 5),
+                                ({"limit": "8"}, 5)]:
+            with self.subTest(usage=usage):
+                data = adapter.summarize({"generated_at": "2026-10-31T00:00:00Z"},
+                    {"items": [], "usage": usage}, {}, {"max_starts_per_hour": 5}, [], 0)
+                self.assertEqual(data["starts_cap"], expected)
+
     def test_optional_open_cycles_are_not_pending_review_debt(self):
         queue = {"items": [
             {"kind": "open", "state": "pending", "cycles": [{}]},

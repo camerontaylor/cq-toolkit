@@ -212,8 +212,8 @@ async function readLedgerAt(
   return parseSettleState(raw, fullName);
 }
 
-/** Maximum metadata pages per history lookup. */
-export const SETTLE_HISTORY_MAX_PAGES = 20;
+/** Bound API cost to four metadata pages plus at most 400 ledger reads (100/page). */
+export const SETTLE_HISTORY_MAX_PAGES = 4;
 
 /**
  * The ledger's versions, newest first, in pages of `pageSize` commits
