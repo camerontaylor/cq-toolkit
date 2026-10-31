@@ -210,6 +210,15 @@ A new head requires a new observation and a later label. Failed observations are
 no backdated anchors are created. Already-merged heads with no recorded observation
 cannot be repaired by this workflow.
 
+Rollout requires this workflow and observer module to reach `main` before PR wake jobs
+can dispatch it successfully. Until then, a bootstrap observation must use the existing
+trusted main writer at the real current time, before the owner applies a label.
+
+The gate currently reads at most 50 ledger commits. During sustained PR churn and a
+long promotion stall, an older merged PR observation can fall outside that window and
+its override will fail closed. Paging farther back is tracked separately; a label alone
+does not replace missing history.
+
 ### Exact procedural audit acknowledgement
 
 New unverified-promotion alerts carry the full previous and new main SHAs and the audit

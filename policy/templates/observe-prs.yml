@@ -11,9 +11,6 @@ on:
 permissions: {}
 env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
-concurrency:
-  group: observe-prs
-  cancel-in-progress: false
 jobs:
   # automation's environment admits main only. PR events carry merge-queue
   # as their ref, so dispatch the trusted default-branch observer instead.
@@ -35,6 +32,9 @@ jobs:
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: automation
+    concurrency:
+      group: observe-prs-writer
+      cancel-in-progress: false
     timeout-minutes: 15
     permissions:
       contents: read
