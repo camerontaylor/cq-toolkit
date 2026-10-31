@@ -584,6 +584,16 @@ class OrdinaryGateAuditTest(unittest.TestCase):
         with self.evidence(head=mid, base=BASE), mock.patch.object(crq, "is_ancestor", return_value=True):
             self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
 
+    def test_current_main_or_out_of_range_run_fetches_no_job_logs(self):
+        with self.evidence(head=TIP, base=TIP) as api:
+            self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+            self.assertEqual(api.call_count, 1)
+        mid = "c" * 40
+        with self.evidence(head=mid, base=mid) as api, \
+             mock.patch.object(crq, "is_ancestor", return_value=False):
+            self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+            self.assertEqual(api.call_count, 1)
+
     def test_unavailable_evidence_retains_signer_requirement(self):
         with mock.patch.object(crq, "ordinary_gate_evidence", side_effect=RuntimeError("gh api exit 1: HTTP 404")), \
              mock.patch.object(crq, "is_ancestor", return_value=True), \

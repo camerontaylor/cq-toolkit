@@ -2729,6 +2729,9 @@ def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
                 or candidate.get("event") not in ("schedule", "workflow_dispatch", "workflow_run", "push")
                 or candidate.get("status") != "completed" or candidate.get("conclusion") != "success"):
             continue
+        # Reject unrelated trust refs before fetching job lists or log bodies.
+        if trust != last and (not is_ancestor(last, trust) or not is_ancestor(trust, main)):
+            continue
         try:
             jobs = json.loads(run(["gh", "api", f"{prefix}/runs/{candidate['id']}/jobs?per_page=100"],
                                   timeout=120).stdout)["jobs"]
@@ -2765,8 +2768,6 @@ def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
                 # The audit can miss several promotions between ticks. An ordinary
                 # tail may start at an intermediate main, never outside the observed
                 # range. Its prefix must be verified separately by the caller.
-                if trust != last and (not is_ancestor(last, trust) or not is_ancestor(trust, main)):
-                    continue
                 return {"run_id": candidate["id"], "job_id": job["id"], "signer": value["signer"],
                         "from": trust, "to": main}
     return None
