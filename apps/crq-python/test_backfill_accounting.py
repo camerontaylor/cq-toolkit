@@ -63,6 +63,57 @@ class Fixture:
 
 
 class ImmutableCacheTest(unittest.TestCase):
+    def test_long_lineage_reuses_parsed_trees_without_public_copies(self):
+        # Exceeds both former 128-tree and 100k-row eviction thresholds.
+        commits = [format(i + 1, "040x") for i in range(140)]
+        raw = b"".join(("100644 blob " + "a" * 40 + "\tfile" + str(i) + "\0").encode() for i in range(800))
+        repo = accounting.Repository("unused")
+        repo.immutable_cache = {}
+        def git(*args, **kwargs):
+            if args[0] == "ls-tree":
+                return raw
+            if args[:2] == ("rev-list", "--first-parent"):
+                return ("\n".join(reversed(commits)) + "\n").encode()
+            if args[0] == "rev-parse":
+                return commits[commits.index(args[1][:-2]) - 1].encode()
+            if args[0] == "diff":
+                return b""
+            self.fail(str(args))
+        with mock.patch.object(repo, "resolve", side_effect=lambda c: c), \
+             mock.patch.object(repo, "git", side_effect=git), \
+             mock.patch.object(repo, "entries", side_effect=AssertionError("internal tree copied")), \
+             mock.patch.object(ledger, "path", wraps=ledger.path) as parse:
+            self.assertEqual(repo.lineage(commits[0], commits[-1], "file0"), "file0")
+            parsed = parse.call_count
+            self.assertEqual(parsed, 140 * 800)
+            self.assertEqual(repo.lineage(commits[0], commits[-1], "file1"), "file1")
+            self.assertEqual(parse.call_count, parsed)
+            self.assertEqual(len(repo._entry_cache), 140)
+
+    def test_private_trees_are_immutable_and_lru_bounds_evict_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(Path(td) / "repo")
+            commits = [fixture.commit({"a.py": str(i).encode()}) for i in range(3)]
+            repo = fixture.repo
+            repo.immutable_cache = {}
+            with mock.patch.object(accounting, "ENTRY_CACHE_TREES", 2):
+                tree = repo._entries(commits[0])
+                with self.assertRaises(TypeError):
+                    tree["a.py"]["blob"] = "poison"
+                with self.assertRaises(TypeError):
+                    tree["injected"] = {}
+                repo._entries(commits[1])
+                repo._entries(commits[0])  # Refresh the oldest entry.
+                repo._entries(commits[2])
+                self.assertEqual(list(repo._entry_cache), [commits[0], commits[2]])
+                self.assertEqual(repo._entry_bytes, sum(v[1] for v in repo._entry_cache.values()))
+            fresh = accounting.Repository(fixture.root)
+            fresh.immutable_cache = {}
+            with mock.patch.object(accounting, "ENTRY_CACHE_BYTES", 1):
+                self.assertIn("a.py", fresh._entries(commits[0]))
+                self.assertFalse(fresh._entry_cache)
+                self.assertEqual(fresh._entry_bytes, 0)
+
     def test_cache_is_per_instance_and_only_immutable_reads(self):
         with tempfile.TemporaryDirectory() as td:
             fixture = Fixture(Path(td) / "repo")

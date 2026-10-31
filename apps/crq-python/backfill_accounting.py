@@ -1,13 +1,17 @@
 """Explicit scope accounting; Git provenance carries credit, never creates it."""
 import collections
-import copy
 import datetime as dt
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import sys
+from types import MappingProxyType
 
 import review_ledger as ledger
+
+ENTRY_CACHE_TREES = 1024
+ENTRY_CACHE_BYTES = 256 * 1024 * 1024
 
 BLAME_OPTIONS = ["--line-porcelain", "--encoding=UTF-8"]
 
@@ -31,8 +35,8 @@ class Repository:
         self.root = Path(root)
         self.immutable_cache = None
         self._cache_bytes = 0
-        self._entry_cache = {}
-        self._entry_rows = 0
+        self._entry_cache = collections.OrderedDict()
+        self._entry_bytes = 0
 
     def git(self, *args, check=True, env=None, input=None):
         cacheable = (self.immutable_cache is not None and check and env is None and input is None
@@ -89,10 +93,17 @@ class Repository:
         return self.git("rev-parse", self.resolve(commit) + "^{tree}").decode().strip()
 
     def entries(self, commit):
+        # Public callers own their dictionaries; string leaves are immutable.
+        return {name: dict(entry) for name, entry in self._entries(commit).items()}
+
+    def _entries(self, commit):
+        """Read-only tree shared by trusted internal loops for this invocation."""
         commit = self.resolve(commit)
         if self.immutable_cache is not None and commit in self._entry_cache:
-            return copy.deepcopy(self._entry_cache[commit])
+            self._entry_cache.move_to_end(commit)
+            return self._entry_cache[commit][0]
         result = {}
+        size = 0
         for raw in self.git("ls-tree", "-r", "-z", commit).split(b"\0"):
             if not raw:
                 continue
@@ -101,20 +112,28 @@ class Repository:
             try:
                 name = ledger.path(name.decode("utf-8"))
             except (UnicodeError, ValueError):
-                # Keep an explicit reversible representation for unencodable paths.
                 name = "git-path-bytes:" + name.hex()
-            result[name] = {"path": name, "mode": mode, "kind": kind, "blob": blob}
-        if self.immutable_cache is not None and len(result) <= 100000:
-            if len(self._entry_cache) >= 128 or self._entry_rows + len(result) > 100000:
-                self._entry_cache.clear()
-                self._entry_rows = 0
-            self._entry_cache[commit] = copy.deepcopy(result)
-            self._entry_rows += len(result)
-        return result
+            entry = {"path": name, "mode": mode, "kind": kind, "blob": blob}
+            frozen = MappingProxyType(entry)
+            # Conservative retained-size accounting includes dicts, proxies,
+            # string leaves; the four literal field keys are shared.
+            size += sys.getsizeof(name) + sys.getsizeof(entry) + sys.getsizeof(frozen)
+            size += sum(sys.getsizeof(v) for v in entry.values())
+            result[name] = frozen
+        frozen = MappingProxyType(result)
+        size += sys.getsizeof(result) + sys.getsizeof(frozen) + sys.getsizeof(commit) + 256
+        if self.immutable_cache is not None and size <= ENTRY_CACHE_BYTES:
+            while self._entry_cache and (len(self._entry_cache) >= ENTRY_CACHE_TREES
+                                         or self._entry_bytes + size > ENTRY_CACHE_BYTES):
+                _, (_, evicted_size) = self._entry_cache.popitem(last=False)
+                self._entry_bytes -= evicted_size
+            self._entry_cache[commit] = (frozen, size)
+            self._entry_bytes += size
+        return frozen
 
     def inventory(self, target, max_file_bytes):
         rows = []
-        for name, entry in sorted(self.entries(target).items(), key=lambda v: v[0].encode()):
+        for name, entry in sorted(self._entries(target).items(), key=lambda v: v[0].encode()):
             row = {**entry, "lines": None, "bytes": None, "disposition": "unsupported", "reason": "non-regular object"}
             if name.startswith("git-path-bytes:"):
                 row["reason"] = "non-canonical or non-UTF8 path"
@@ -192,7 +211,7 @@ class Repository:
         p = value["payload"]
         if self.tree(p["target"]) != p["target_tree"] or self.tree(p["head"]) != p["head_tree"]:
             raise ledger.IntegrityError("review tree mismatch")
-        target, head = self.entries(p["target"]), self.entries(p["head"])
+        target, head = self._entries(p["target"]), self._entries(p["head"])
         changed = self.changed_intervals(p["base"], p["head"])
         result = {}
         for (name, blob), lines in ledger.scope(p["reviewed_scope"]).items():
@@ -226,7 +245,7 @@ class Repository:
         ends inherited coverage. Explicit verified nonancestor mappings may be
         supplied by a later evidence importer; ancestry alone cannot provide one.
         """
-        if name not in self.entries(old):
+        if name not in self._entries(old):
             return None
         chain = self.git("rev-list", "--first-parent", new).decode().splitlines()
         if old not in chain:
@@ -234,8 +253,8 @@ class Repository:
         current = name
         for commit in reversed(chain[:chain.index(old)]):
             parent = self.git("rev-parse", commit + "^1").decode().strip()
-            entries = self.entries(commit)
-            before = self.entries(parent)
+            entries = self._entries(commit)
+            before = self._entries(parent)
             changes = self.git("diff", "--name-status", "-z", "--find-renames=100%", parent, commit).split(b"\0")
             i = 0
             while i < len(changes) - 1:
@@ -259,7 +278,7 @@ class Repository:
 
     def proven_deleted(self, old, new, name):
         """Recognize only an unambiguous deletion; other missing lineage is unknown."""
-        old_entries, new_entries = self.entries(old), self.entries(new)
+        old_entries, new_entries = self._entries(old), self._entries(new)
         if name not in old_entries or name in new_entries:
             return False
         if old not in self.git("rev-list", "--first-parent", new).decode().splitlines():
