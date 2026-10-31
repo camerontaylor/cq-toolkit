@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "repo": "camerontaylor/cq-toolkit",
+  "prs": {
+    "530": {
+      "tuple": {
+        "head": "cd3f75b753a5e79fb4b62f3edc0f784ed35c780e",
+        "base": "6c3620efed11de47536d5757a32490948d01fdc4",
+        "forcePushEpoch": 46
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "680": {
+      "tuple": {
+        "head": "04319533a8a7677489ae74de53c73a2e7d5254ad",
+        "base": "f184d6d16ef187aeaa58e981bd5ab98dcf701394",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "681": {
+      "tuple": {
+        "head": "4dc7d5c95d1d90750f9e35a87e0d668155029d71",
+        "base": "9be8c5c05689a83d7c78edd4f26e26e4b7aafcc4",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "684": {
+      "tuple": {
+        "head": "ee09195cd49c431cdd741273abe105ca0aa08634",
+        "base": "d9f4444cff986056b1d8909b4bc840ab013ff929",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "704": {
+      "tuple": {
+        "head": "ae7517982ed622a769144efd67d5b9e5d12aeed7",
+        "base": "5dd1b34a357f2ce687fed264eeeb9564241ed34e",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "730": {
+      "tuple": {
+        "head": "1fd6adfc935cd3f1ff4e001b583d24734b1e7fb0",
+        "base": "ad9af76189855faecef6073b7db1f24b63902940",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    },
+    "731": {
+      "tuple": {
+        "head": "f343a34455fd878c148546efc51a4e5d794d4c02",
+        "base": "ad9af76189855faecef6073b7db1f24b63902940",
+        "forcePushEpoch": 0
+      },
+      "observations": [
+        {
+          "observedAt": "2026-10-31T03:16:22.681Z",
+          "by": "self-merge-prs:observe"
+        }
+      ]
+    }
+  }
+}
