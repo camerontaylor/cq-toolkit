@@ -1,4 +1,4 @@
-import { cp, lstat, readdir, realpath, symlink } from 'node:fs/promises';
+import { cp, lstat, readdir, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 const within = (root: string, path: string) => {
@@ -79,12 +79,16 @@ export async function snapshotAddressDependencies(
     force: false,
     filter: async (source, target) => {
       admit();
-      // Generated bin shims can embed paths relative to their original
-      // directory. Keep that trusted entrypoint location; the candidate
-      // still owns the directory and can replace its links independently.
-      if (dirname(source) === resolve(installed, '.bin') && (await lstat(source)).isFile()) {
-        await symlink(resolve(source), target, 'file');
-        return false;
+      // POSIX bin shims can embed paths relative to their original
+      // directory. A private launcher preserves that location without
+      // exposing the original shim to in-place writes through a link.
+      if (process.platform !== 'win32' && dirname(source) === resolve(installed, '.bin')) {
+        const stat = await lstat(source);
+        if (stat.isFile() && (stat.mode & 0o111) !== 0) {
+          const quoted = "'" + resolve(source).replaceAll("'", "'\\''") + "'";
+          await writeFile(target, `#!/bin/sh\nexec ${quoted} "$@"\n`, { mode: stat.mode & 0o777 });
+          return false;
+        }
       }
       return true;
     },
