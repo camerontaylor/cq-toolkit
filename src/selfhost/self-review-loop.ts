@@ -961,11 +961,23 @@ export async function main(
         // Continue the remaining reports even when stderr is unavailable too.
       }
     }
-    appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    // Best-effort tail after a completed sweep: stderr may be the same
+    // broken transport that took out stdout, so every remaining diagnostic
+    // write is guarded — a failed diagnostic (step summary, per-PR failure
+    // echo) must not record a whole-run error against finished work.
+    try {
+      appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    } catch {
+      // Continue the remaining reports even when stderr is unavailable too.
+    }
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
-      process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+      try {
+        process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+      } catch {
+        // Continue the remaining reports even when stderr is unavailable too.
+      }
     }
   } catch (error) {
     runError = oneLine(error instanceof Error ? error.message : String(error));
