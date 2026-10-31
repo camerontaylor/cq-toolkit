@@ -6,6 +6,9 @@ After the owner grants the runner App Contents write permission and approves the
 installation update, install the reviewed `crq-signer.py` and `spool-shell` by
 the pinned artifact process below. Install `crq-ledger-publish.socket` and
 `crq-ledger-publish@.service` root-owned mode 0644 in `/etc/systemd/system`.
+Also install `apps/crq-python/review_ledger.py` and
+`policy/review-ledger.schema.json` as root-owned mode 0644 beside the signer
+under `/opt/cq-reviewer/`. The root operation refuses caller-writable validators.
 Run `systemd-analyze verify` on both units before `daemon-reload`, then enable
 and start only `crq-ledger-publish.socket`. The existing promotion daemon keeps
 its dedicated `crq` user; each ledger connection starts the separate root
@@ -15,7 +18,12 @@ The forced SSH transport accepts `ledger-publish <base> <head>` and a bounded
 Git bundle, never a repository path, token, remote or ref. The root entrypoint
 mints a repository-scoped Contents-write token, fetches only the ledger, checks
 the exact advertised commit, its single parent and one add-only regular record,
-and uses a normal fast-forward push to the fixed ledger branch. It revokes the
+validates record schema, hashes and complete ledger sequence, and uses a normal
+fast-forward push to the fixed ledger branch. The service bounds memory to
+256 MiB without swap, temporary storage to 128 MiB, individual files to 64 MiB,
+address space to 512 MiB and execution to 330 seconds before unpacking any
+caller bundle. These limits contain compressed or unreachable object abuse.
+It revokes the
 token after use. Tokens remain in the root process environment and API headers;
 neither tokens nor the PEM reach the caller, command arguments or response.
 

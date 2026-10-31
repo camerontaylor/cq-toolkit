@@ -367,6 +367,26 @@ LEDGER_REF = "refs/heads/cq/review-ledger"
 LEDGER_BUNDLE_LIMIT = 64 * 1024 * 1024
 
 
+def ledger_validator():
+    """Load only installed root-owned validation artifacts (source layout in tests)."""
+    directory = Path(__file__).resolve().parent
+    module = directory / "review_ledger.py"
+    schema = directory / "review-ledger.schema.json"
+    if not module.exists() and directory.name == "signer":
+        module = directory.parent / "review_ledger.py"
+        schema = directory.parents[2] / "policy/review-ledger.schema.json"
+    if os.geteuid() == 0:
+        for path in (module, schema):
+            info = path.stat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError("ledger validation artifacts must be root-owned and immutable to callers")
+    spec = importlib.util.spec_from_file_location("signer_review_ledger", module)
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    validator.SCHEMA = schema
+    return validator
+
+
 def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
     """Root-only exact-commit ledger capability. No checkout or caller Git config."""
     if not SHA40.fullmatch(base) or not SHA40.fullmatch(head) or base == head:
@@ -384,9 +404,9 @@ def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
                    "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/dev/null",
                    "GIT_CONFIG_KEY_2": "http.https://github.com/.extraHeader",
                    "GIT_CONFIG_VALUE_2": "Authorization: Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()}
-            def git(*args):
+            def git(*args, **kwargs):
                 return subprocess.run(["/usr/bin/git", *args], cwd=root, env=env,
-                                      capture_output=True, check=True, timeout=300).stdout
+                                      capture_output=True, check=kwargs.get("check", True), timeout=300).stdout
             git("init", "--bare", "--quiet")
             remote = "https://github.com/" + REPO + ".git"
             git("fetch", "--no-tags", remote, LEDGER_REF)
@@ -410,6 +430,12 @@ def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
             mode = git("ls-tree", head, "--", changes[1].decode()).split(b" ", 1)[0]
             if mode != b"100644":
                 raise ValueError("ledger record must be a regular file")
+            if int(git("cat-file", "-s", head + ":" + changes[1].decode())) > 1024 * 1024:
+                raise ValueError("ledger record exceeds validation bound")
+            validator = ledger_validator()
+            reader = validator.GitLedger(root)
+            reader.git = git  # Every read retains the isolated root Git environment.
+            reader.read(head)  # Schema, content hash, path identity and sequence.
             git("merge-base", "--is-ancestor", base, head)
             # No force, no caller ref/remote, and no token in argv or output.
             git("push", "--porcelain", remote, head + ":" + LEDGER_REF)

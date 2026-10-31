@@ -1,6 +1,10 @@
 """Root ledger capability: real Git objects, local remote, mocked token API."""
 import importlib.util
+import hashlib
 import io
+import resource
+import struct
+import zlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -32,9 +36,15 @@ class LedgerSignerTest(unittest.TestCase):
     def git(self, *args, input=None):
         return self.original_run(["git", *args], cwd=self.repo, input=input, check=True, capture_output=True).stdout.decode().strip()
 
-    def candidate(self, *, name=None, mode=None):
-        name = name or "records/2026/10/" + "a" * 64 + ".json"
-        p = self.repo / name; p.parent.mkdir(parents=True, exist_ok=True); p.write_text("{}\n")
+    def candidate(self, *, name=None, mode=None, raw=None, reason="fixture"):
+        value = ledger.event("job-state", "fixture", "2026-10-31T00:00:00Z", {
+            "family": "fixture", "subject_id": "fixture", "job_id": "fixture:0",
+            "generation": 0, "attempt": 1, "state": "pending", "failures": 0,
+            "next_eligible_at": None, "reason": reason})
+        name = name or ledger.record_path(value)
+        self.record_name = name
+        p = self.repo / name; p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(raw if raw is not None else ledger.canonical(value))
         if mode:
             p.unlink(); p.symlink_to("/etc/passwd")
         self.git("add", "-A"); self.git("commit", "-qm", "Append")
@@ -90,7 +100,7 @@ class LedgerSignerTest(unittest.TestCase):
         self.git("checkout", "--detach", self.base)
         head, bundle = self.candidate()
         self.run_publication(head, bundle)
-        (self.repo / "records/2026/10" / ("a" * 64 + ".json")).write_text("changed\n")
+        (self.repo / self.record_name).write_text("changed\n")
         self.git("commit", "-am", "Modify existing record")
         changed = self.git("rev-parse", "HEAD")
         transport = ledger.GitLedger(self.repo, push_commit=mock.Mock())
@@ -98,6 +108,45 @@ class LedgerSignerTest(unittest.TestCase):
         self.base = head
         with self.assertRaises(ValueError):
             self.run_publication(changed, transport.push_commit.call_args.args[2])
+
+    def test_malformed_record_and_source_conflict_cannot_poison_ledger(self):
+        head, bundle = self.candidate(raw=b"{}\n")
+        with self.assertRaises(ValueError):
+            self.run_publication(head, bundle)
+        self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], self.base)
+        self.git("checkout", "--detach", self.base)
+        head, bundle = self.candidate()
+        self.run_publication(head, bundle)
+        self.base = head
+        conflict, body = self.candidate(reason="conflicting source evidence")
+        with self.assertRaisesRegex(ValueError, "source evidence conflict"):
+            self.run_publication(conflict, body)
+        self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], head)
+
+    def test_compressed_object_abuse_has_kernel_resource_bounds_before_unpack(self):
+        unit = (Path(__file__).parent / "signer/crq-ledger-publish@.service").read_text()
+        for bound in ("MemoryMax=256M", "MemorySwapMax=0", "LimitAS=512M", "LimitFSIZE=64M",
+                      "TemporaryFileSystem=/tmp:rw,nodev,nosuid,size=128M", "RuntimeMaxSec=330"):
+            self.assertIn(bound, unit)
+        # A tiny pack declares a multi-GiB blob. Run the real parser with an
+        # address-space ceiling already applied, not after trusting its header.
+        size = 4 * 1024**3
+        encoded = bytearray()
+        while size:
+            encoded.append((size & 127) | (128 if size >> 7 else 0)); size >>= 7
+        delta = b"\x01" + bytes(encoded) + b"\x90\x01"
+        base_object = b"\x31" + zlib.compress(b"x")
+        base_id = hashlib.sha1(b"blob 1\0x").digest()
+        delta_object = bytes([(7 << 4) | len(delta)]) + base_id + zlib.compress(delta)
+        pack = b"PACK" + struct.pack(">II", 2, 2) + base_object + delta_object
+        pack += hashlib.sha1(pack).digest()
+        def limit():
+            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024**2, 64 * 1024**2))
+        result = self.original_run(["git", "index-pack", "--stdin"], cwd=self.repo, input=pack,
+                                   capture_output=True, timeout=10, preexec_fn=limit)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stderr.decode(), r"(?i)(out of memory|cannot allocate memory)")
+        self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], self.base)
 
     def test_write_token_endpoint_is_pinned_and_minimal(self):
         def endpoint(method, path, **kwargs):

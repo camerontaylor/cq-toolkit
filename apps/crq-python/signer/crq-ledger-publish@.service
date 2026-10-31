@@ -11,6 +11,13 @@ StandardError=journal
 Environment=PATH=/usr/bin:/bin
 UMask=077
 PrivateTmp=true
+TemporaryFileSystem=/tmp:rw,nodev,nosuid,size=128M
+MemoryMax=256M
+MemorySwapMax=0
+LimitAS=512M
+LimitFSIZE=64M
+TasksMax=16
+LimitNOFILE=128
 ProtectSystem=strict
 ProtectHome=read-only
 NoNewPrivileges=true
