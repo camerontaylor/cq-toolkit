@@ -196,6 +196,20 @@ fail-closed).
   retain that requirement. The audit scans at most 30 recent successful gate runs at the previous main, so delayed observations
   can remain unverified. Procedural acknowledgement never certifies review, CI or promotion.
 
+### Durable observations for future D11 records
+
+`observe-prs.yml` records the full open merge-queue PR set using the existing
+`observeOpenPrs` writer on `cq-state`. It runs every five minutes and on default-branch
+dispatches. PR target events only dispatch that default-branch observer: they do not
+check out PR code or receive the automation App key. The writer job checks out only
+the default branch and uses the existing `automation` environment credential after
+building trusted code. It never merges a PR and does not enable `self-merge-prs`.
+
+Apply an owner `cq-override` label only after the final head has a durable observation.
+A new head requires a new observation and a later label. Failed observations are red;
+no backdated anchors are created. Already-merged heads with no recorded observation
+cannot be repaired by this workflow.
+
 ### Exact procedural audit acknowledgement
 
 New unverified-promotion alerts carry the full previous and new main SHAs and the audit

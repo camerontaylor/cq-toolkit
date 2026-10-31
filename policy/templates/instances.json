@@ -88,6 +88,11 @@
       "workflow": "sync-merge-queue.yml",
       "template": "sync-merge-queue.yml",
       "tokens": {}
+    },
+    {
+      "workflow": "observe-prs.yml",
+      "template": "observe-prs.yml",
+      "tokens": {}
     }
   ],
   "nonTemplated": [

@@ -1,0 +1,76 @@
+# instantiated from policy/templates/observe-prs.yml — edit the template, not this file
+# Observation-only D11 anchors, independent of self-merge-prs.
+# PR heads are API data only. Never check out or execute PR code.
+name: observe-prs
+on:
+  schedule:
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+  pull_request_target:
+    branches: [merge-queue]
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+permissions: {}
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+concurrency:
+  group: observe-prs
+  cancel-in-progress: false
+jobs:
+  # automation's environment admits main only. PR events carry merge-queue
+  # as their ref, so dispatch the trusted default-branch observer instead.
+  wake:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch default-branch observation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run observe-prs.yml --ref "$DEFAULT_BRANCH"
+  observe:
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: automation
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out default branch only
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+      - name: Build trusted observer before minting write credential
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
+      - name: Require registered automation App
+        env:
+          CLIENT_ID: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
+        run: test -n "$CLIENT_ID"
+      - name: Mint observation token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
+          permission-pull-requests: read
+          permission-contents: write
+          permission-issues: read
+      - name: Observe open heads (never merge)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: node dist/selfhost/observe-prs.js
