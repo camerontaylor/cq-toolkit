@@ -212,6 +212,9 @@ async function readLedgerAt(
   return parseSettleState(raw, fullName);
 }
 
+/** Maximum metadata pages per history lookup. */
+export const SETTLE_HISTORY_MAX_PAGES = 20;
+
 /**
  * The ledger's versions, newest first, in pages of `pageSize` commits
  * that touched the ledger file, read lazily until `enough` holds for the
@@ -229,8 +232,6 @@ async function readLedgerAt(
  * writes cannot shift the pagination. The fixed page budget bounds API work;
  * `limited` distinguishes that stop from genuine history exhaustion.
  */
-export const SETTLE_HISTORY_MAX_PAGES = 20;
-
 export async function readSettleHistory(
   deps: StateBranchDeps,
   pageSize: number,
