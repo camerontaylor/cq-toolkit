@@ -2472,10 +2472,13 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": head})) as ssh:
             spool.publish_ledger(base, head, b"bundle")
             ssh.assert_called_once_with("ledger-publish " + base + " " + head, b"bundle", timeout=330)
-            with self.assertRaises(crq.SpoolUnreachable):
+            with self.assertRaises(OSError):
                 spool.publish_ledger(base, "--force", b"bundle")
             self.assertEqual(ssh.call_count, 1)
         with mock.patch.object(spool, "_ssh", side_effect=crq.SpoolUnreachable("connection lost")):
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, head, b"bundle")
+        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": base})):
             with self.assertRaises(OSError):
                 spool.publish_ledger(base, head, b"bundle")
 

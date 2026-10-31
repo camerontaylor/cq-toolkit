@@ -2256,15 +2256,15 @@ class Spool:
 
     def publish_ledger(self, base: str, head: str, bundle: bytes) -> None:
         if not self.host or not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
-            raise SpoolUnreachable("ledger publication requires the dedicated signer transport")
+            raise OSError("ledger publication requires the dedicated signer transport")
         if not bundle or len(bundle) > 64 * 1024 * 1024:
-            raise SpoolUnreachable("invalid ledger bundle size")
+            raise OSError("invalid ledger bundle size")
         try:
             reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
         except SpoolUnreachable as exc:
             raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
         if json.loads(reply) != {"published": head}:
-            raise SpoolUnreachable("signer did not acknowledge the exact ledger commit")
+            raise OSError("signer did not acknowledge the exact ledger commit")
 
     def snapshot(self, iid: str) -> Dict[str, Any]:
         """One round trip: {claimed, request, result: text|None} for one id."""
