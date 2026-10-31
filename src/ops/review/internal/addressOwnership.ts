@@ -659,16 +659,27 @@ export class AddressOwnership {
 
   private async assertIdentity(): Promise<void> {
     if (!this.active || this.compromised) throw new Error('address ownership: owner inactive');
-    await this.writeTail;
+    // Joining the write tail only orders mutations enqueued at that instant; a
+    // claim or persist enqueued later can publish this owner's legitimate
+    // successor record while this read is in flight, and identityNow() — which
+    // captures this.snapshot before its asynchronous store read — would reject
+    // the changed tail as ownership loss, driving lose() and a durable refusal
+    // barrier for an otherwise healthy owner. Enqueue the read itself so chain
+    // mutations and identity checks serialize: claims cannot write during the
+    // read, and the read always observes a settled chain. Safe because
+    // assertIdentity is only entered outside the queue; queued mutations call
+    // identityNow() directly and never re-enqueue through this method.
     try {
-      const current = await this.identityNow();
-      if (
-        current.guard?.epoch !== this.epoch ||
-        current.guard.state !== 'active' ||
-        !this.active ||
-        this.compromised
-      )
-        throw new Error('owner no longer active');
+      await this.enqueue(async () => {
+        const current = await this.identityNow();
+        if (
+          current.guard?.epoch !== this.epoch ||
+          current.guard.state !== 'active' ||
+          !this.active ||
+          this.compromised
+        )
+          throw new Error('owner no longer active');
+      });
     } catch (error) {
       await this.lose(error);
     }
