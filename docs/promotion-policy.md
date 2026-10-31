@@ -196,6 +196,31 @@ fail-closed).
   retain that requirement. The audit scans at most 30 recent successful gate runs at the previous main, so delayed observations
   can remain unverified. Procedural acknowledgement never certifies review, CI or promotion.
 
+### Durable observations for future D11 records
+
+`observe-prs.yml` attempts to observe the full open merge-queue PR set using the existing
+`observeOpenPrs` writer on `cq-state`. It runs every five minutes and on default-branch
+dispatches. The separate `observe-prs-wake.yml` listens for completed `cq-signal` runs (the existing default-branch carrier also used
+by `cq-accept`) and dispatches that default-branch observer. It never checks out PR code
+or receives the automation App key. Failed PR snapshots are isolated: valid siblings
+can be persisted, but any skipped PR makes the run red. The writer job checks out only
+the default branch and uses the existing `automation` environment credential after
+building trusted code. It never merges a PR and does not enable `self-merge-prs`.
+
+Apply an owner `cq-override` label only after the final head has a durable observation.
+A new head requires a new observation and a later label. Failed observations are red;
+no backdated anchors are created. Already-merged heads with no recorded observation
+cannot be repaired by this workflow.
+
+Rollout requires this workflow and observer module to reach `main` before PR wake jobs
+can dispatch it successfully. Until then, a bootstrap observation must use the existing
+trusted main writer at the real current time, before the owner applies a label.
+
+The gate currently reads at most 50 ledger commits. During sustained PR churn and a
+long promotion stall, an older merged PR observation can fall outside that window and
+its override will fail closed. Paging farther back is tracked separately; a label alone
+does not replace missing history.
+
 ### Exact procedural audit acknowledgement
 
 New unverified-promotion alerts carry the full previous and new main SHAs and the audit
