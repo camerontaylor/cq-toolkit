@@ -5,31 +5,13 @@ name: observe-prs
 on:
   schedule:
     - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
-  pull_request_target:
-    branches: [merge-queue]
-    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
 permissions: {}
 env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 jobs:
-  # automation's environment admits main only. PR events carry merge-queue
-  # as their ref, so dispatch the trusted default-branch observer instead.
-  wake:
-    if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Dispatch default-branch observation
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: gh workflow run observe-prs.yml --ref "$DEFAULT_BRANCH"
   observe:
     if: >-
-      github.event_name != 'pull_request_target' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: automation

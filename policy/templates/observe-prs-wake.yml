@@ -1,0 +1,22 @@
+# No checkout, environment or secret: only dispatch the default-branch observer.
+name: observe-prs-wake
+on:
+  pull_request_target:
+    branches: [merge-queue]
+    types: [opened, reopened, synchronize, ready_for_review]
+permissions: {}
+jobs:
+  # automation's environment admits main only. PR events carry merge-queue
+  # as their ref, so dispatch the trusted default-branch observer instead.
+  wake:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch default-branch observation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run observe-prs.yml --ref "$DEFAULT_BRANCH"

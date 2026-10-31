@@ -93,6 +93,11 @@
       "workflow": "observe-prs.yml",
       "template": "observe-prs.yml",
       "tokens": {}
+    },
+    {
+      "workflow": "observe-prs-wake.yml",
+      "template": "observe-prs-wake.yml",
+      "tokens": {}
     }
   ],
   "nonTemplated": [

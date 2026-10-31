@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test, vi } from 'vitest';
 import type { GhFn } from '../../src/adapters/forge-github/gh.js';
+import { lintWorkflow, scanWorkflow } from '../../src/ops/gates/workflowScan.js';
 import { observeRepository } from '../../src/selfhost/observe-prs.js';
 
 describe('observation-only runner', () => {
@@ -45,12 +46,21 @@ describe('observation-only runner', () => {
   });
 
   test('workflow isolates PR wakes from the main-only write environment', () => {
-    const workflow = readFileSync('policy/templates/observe-prs.yml', 'utf8');
-    const [wake = '', observer = ''] = workflow.split('  observe:');
+    const observer = readFileSync('policy/templates/observe-prs.yml', 'utf8');
+    const wake = readFileSync('policy/templates/observe-prs-wake.yml', 'utf8');
     expect(wake).toContain('actions: write');
     expect(wake).not.toContain('secrets.');
     expect(wake).not.toContain('actions/checkout');
-    expect(observer).toContain("github.event_name != 'pull_request_target'");
+    expect(observer).not.toContain('pull_request_target');
+    expect(wake).not.toContain('environment:');
+    for (const [name, text] of [
+      ['observe-prs.yml', observer],
+      ['observe-prs-wake.yml', wake],
+    ]) {
+      const scan = scanWorkflow(text ?? '');
+      expect(scan.ok).toBe(true);
+      if (scan.ok) expect(lintWorkflow(`.github/workflows/${name}`, scan)).toEqual([]);
+    }
     expect(observer).toContain('ref: ${{ github.event.repository.default_branch }}');
     expect(observer).toContain('environment: automation');
     expect(observer).toContain('permission-pull-requests: read');

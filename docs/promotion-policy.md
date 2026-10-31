@@ -200,7 +200,7 @@ fail-closed).
 
 `observe-prs.yml` records the full open merge-queue PR set using the existing
 `observeOpenPrs` writer on `cq-state`. It runs every five minutes and on default-branch
-dispatches. PR target events only dispatch that default-branch observer: they do not
+dispatches. The separate `observe-prs-wake.yml` handles PR target events and only dispatches that default-branch observer: they do not
 check out PR code or receive the automation App key. The writer job checks out only
 the default branch and uses the existing `automation` environment credential after
 building trusted code. It never merges a PR and does not enable `self-merge-prs`.
