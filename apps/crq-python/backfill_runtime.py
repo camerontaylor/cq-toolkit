@@ -45,7 +45,7 @@ def services(c, config):
     store = ledger.ArtifactStore(config["durable_artifact_root"])
     outbox = ledger.Outbox(c.STATE / "backfill/publication", store)
     repo = accounting.Repository(c.CLONE)
-    publisher = ledger.GitLedger(c.CLONE)
+    publisher = ledger.GitLedger(c.CLONE, push_commit=c.SPOOL.publish_ledger)
     return repo, store, outbox, publisher
 
 

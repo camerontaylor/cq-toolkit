@@ -1,0 +1,13 @@
+[Unit]
+Description=CRQ ledger-only publication capability
+
+[Socket]
+ListenStream=/run/crq-ledger-publish.sock
+SocketUser=root
+SocketGroup=crq-spool
+SocketMode=0660
+Accept=yes
+MaxConnections=2
+
+[Install]
+WantedBy=sockets.target

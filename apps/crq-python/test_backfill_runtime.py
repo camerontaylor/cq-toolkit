@@ -84,6 +84,8 @@ class RuntimeTest(unittest.TestCase):
         self.saved = []
         self.c = SimpleNamespace(STATE=self.state, CLONE=self.f.root, ROOT=self.root, iso=lambda: AT,
                                  save_queue=lambda q: self.saved.append(ledger.canonical(q)), ordinary_review_eligible=lambda q: False)
+        self.c.SPOOL = SimpleNamespace(publish_ledger=lambda base, head, bundle:
+                                      self.f.git("push", "origin", head + ":refs/heads/cq/review-ledger"))
 
     def test_missing_rollout_and_unknown_deployed_limits_never_enable_dispatch(self):
         self.assertIsNone(runtime.settings(self.root / "absent", dispatch=True))
