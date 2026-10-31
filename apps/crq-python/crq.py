@@ -2713,19 +2713,24 @@ def notify_owner(text: str) -> Dict[str, Any]:
 def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
     """Read the trusted gate's own result, not PR comments or subject code.
 
-    A successful decide job built at the previous main already checked closure,
+    A successful decide job built at its recorded base already checked closure,
     independent exact-head acceptance, policy and exact-subject CI. Its result
     also uses the canonical privileged-path predicate. Keep this bounded; a
     missing/expired log remains unverified, never inferred from green alone.
     """
     prefix = f"repos/{REPO}/actions"
-    runs = json.loads(run(["gh", "api", f"{prefix}/workflows/gate.yml/runs?per_page=30&head_sha={last}&status=success"],
+    runs = json.loads(run(["gh", "api", f"{prefix}/workflows/gate.yml/runs?per_page=30&status=success"],
                           timeout=120).stdout)["workflow_runs"]
     for candidate in runs:
-        if (candidate.get("head_sha") != last or candidate.get("head_branch") != "main"
+        trust = candidate.get("head_sha")
+        if (not isinstance(trust, str) or not re.fullmatch(r"[0-9a-f]{40}", trust)
+                or trust == main or candidate.get("head_branch") != "main"
                 or candidate.get("path") != ".github/workflows/gate.yml"
                 or candidate.get("event") not in ("schedule", "workflow_dispatch", "workflow_run", "push")
                 or candidate.get("status") != "completed" or candidate.get("conclusion") != "success"):
+            continue
+        # Reject unrelated trust refs before fetching job lists or log bodies.
+        if trust != last and (not is_ancestor(last, trust) or not is_ancestor(trust, main)):
             continue
         try:
             jobs = json.loads(run(["gh", "api", f"{prefix}/runs/{candidate['id']}/jobs?per_page=100"],
@@ -2757,21 +2762,29 @@ def ordinary_gate_evidence(last: str, main: str) -> Optional[Dict[str, Any]]:
             value = result.get("value")
             if not isinstance(value, dict):
                 continue
-            if (value.get("verdict") == "promoted" and value.get("main") == last
+            if (value.get("verdict") == "promoted" and value.get("main") == trust
                     and value.get("subject") == main
                     and value.get("signer") in ("present", "advisory-missing", "advisory-failed")):
-                return {"run_id": candidate["id"], "job_id": job["id"], "signer": value["signer"]}
+                # The audit can miss several promotions between ticks. An ordinary
+                # tail may start at an intermediate main, never outside the observed
+                # range. Its prefix must be verified separately by the caller.
+                return {"run_id": candidate["id"], "job_id": job["id"], "signer": value["signer"],
+                        "from": trust, "to": main}
     return None
 
 
-def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str, Any],
+                         depth: int = 0) -> Tuple[List[str], List[str]]:
     """Verify ordinary gate evidence, or require the pinned signer success.
-    Privileged ranges never qualify for the ordinary gate evidence path.
+    Every ordinary tail is bound to its actual base; any unobserved prefix
+    is independently verified. Privileged prefixes still require the pinned signer.
     Corroboration against crq's own requests is informational."""
     reasons: List[str] = []
     notes: List[str] = []
     if not is_ancestor(last, main):
         reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
+    if depth >= 8:
+        return reasons + ["promotion audit chain exceeds 8 segments"], notes
     if not reasons:
         try:
             evidence = ordinary_gate_evidence(last, main)
@@ -2779,6 +2792,16 @@ def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str,
             evidence = None
             notes.append(f"ordinary gate evidence unavailable ({type(exc).__name__})")
         if evidence:
+            base = evidence.get("from", last)
+            if base != last:
+                prefix: Dict[str, Any] = {"from": last, "to": base}
+                prefix_reasons, prefix_notes = audit_signer_advance(q, last, base, prefix, depth + 1)
+                prefix["reasons"], prefix["notes"] = prefix_reasons, prefix_notes
+                rec["prefix"] = prefix
+                if prefix_reasons:
+                    return [f"unverified promotion prefix {last[:10]}..{base[:10]}: {r}"
+                            for r in prefix_reasons], notes + prefix_notes
+                notes.extend(prefix_notes)
             rec["ordinary_gate"] = evidence
             return reasons, notes
     sts = promotion_statuses(main)

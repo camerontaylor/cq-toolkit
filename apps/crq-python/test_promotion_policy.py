@@ -516,11 +516,11 @@ class PromotionAuditAckTest(unittest.TestCase):
 
 class OrdinaryGateAuditTest(unittest.TestCase):
     def evidence(self, *, signer="advisory-missing", verdict="promoted", subject=TIP,
-                 head=BASE, conclusion="success", event="workflow_dispatch", review=True, duplicate=False, marker=True, expired=False):
+                 head=BASE, conclusion="success", event="workflow_dispatch", review=True, duplicate=False, marker=True, expired=False, base=BASE):
         candidate = {"id": 123, "head_sha": head, "head_branch": "main",
                      "path": ".github/workflows/gate.yml", "event": event,
                      "status": "completed", "conclusion": conclusion}
-        result = {"status": "ok", "value": {"verdict": verdict, "main": BASE,
+        result = {"status": "ok", "value": {"verdict": verdict, "main": base,
                   "subject": subject, "signer": signer}}
         if not review:
             result["value"]["verdict"] = "refused"
@@ -549,7 +549,7 @@ class OrdinaryGateAuditTest(unittest.TestCase):
     def test_workflow_run_promotion_qualifies(self):
         with self.evidence(event="workflow_run") as api:
             self.assertIsNotNone(crq.ordinary_gate_evidence(BASE, TIP))
-        self.assertIn(f"head_sha={BASE}&status=success", api.call_args_list[0].args[0][-1])
+        self.assertIn("status=success", api.call_args_list[0].args[0][-1])
 
     def test_expired_logs_remain_unverified_without_error_loop(self):
         with self.evidence(expired=True), \
@@ -575,6 +575,25 @@ class OrdinaryGateAuditTest(unittest.TestCase):
             with self.subTest(args=args), self.evidence(**args):
                 self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
 
+    def test_intermediate_base_must_bind_run_and_stay_inside_observed_range(self):
+        mid = "c" * 40
+        with self.evidence(head=mid, base=mid), mock.patch.object(crq, "is_ancestor", return_value=True):
+            self.assertEqual(crq.ordinary_gate_evidence(BASE, TIP)["from"], mid)
+        with self.evidence(head=mid, base=mid), mock.patch.object(crq, "is_ancestor", return_value=False):
+            self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+        with self.evidence(head=mid, base=BASE), mock.patch.object(crq, "is_ancestor", return_value=True):
+            self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+
+    def test_current_main_or_out_of_range_run_fetches_no_job_logs(self):
+        with self.evidence(head=TIP, base=TIP) as api:
+            self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+            self.assertEqual(api.call_count, 1)
+        mid = "c" * 40
+        with self.evidence(head=mid, base=mid) as api, \
+             mock.patch.object(crq, "is_ancestor", return_value=False):
+            self.assertIsNone(crq.ordinary_gate_evidence(BASE, TIP))
+            self.assertEqual(api.call_count, 1)
+
     def test_unavailable_evidence_retains_signer_requirement(self):
         with mock.patch.object(crq, "ordinary_gate_evidence", side_effect=RuntimeError("gh api exit 1: HTTP 404")), \
              mock.patch.object(crq, "is_ancestor", return_value=True), \
@@ -583,3 +602,49 @@ class OrdinaryGateAuditTest(unittest.TestCase):
             reasons, notes = crq.audit_signer_advance({"items": []}, BASE, TIP, {})
             self.assertTrue(reasons)
             self.assertIn("unavailable", notes[0])
+
+
+class PromotionChainAuditTest(unittest.TestCase):
+    MID = "c" * 40
+
+    def test_signed_prefix_then_ordinary_tail_between_ticks(self):
+        tail = {"from": self.MID, "to": TIP, "run_id": 123, "job_id": 456,
+                "signer": "advisory-missing"}
+        status = {"type": "Bot", "login": "reviewer[bot]", "creator_id": 1,
+                  "state": "success", "created_at": "2026-10-31T00:00:00Z", "id": 789,
+                  "description": f"reviewed main={BASE} crq#prefix"}
+        with mock.patch.object(crq, "is_ancestor", return_value=True), \
+             mock.patch.object(crq, "ordinary_gate_evidence", side_effect=[tail, None]), \
+             mock.patch.object(crq, "promotion_statuses", return_value=[status]) as statuses, \
+             mock.patch.object(crq, "reviewer_identity", return_value=("reviewer[bot]", 1)):
+            rec = {}
+            reasons, _ = crq.audit_signer_advance({"items": []}, BASE, TIP, rec)
+        self.assertEqual(reasons, [])
+        statuses.assert_called_once_with(self.MID)
+        self.assertEqual(rec["prefix"]["status"]["id"], 789)
+        self.assertEqual(rec["ordinary_gate"], tail)
+
+    def test_ordinary_tail_cannot_cover_unsigned_prefix(self):
+        tail = {"from": self.MID, "to": TIP, "run_id": 123, "signer": "advisory-missing"}
+        with mock.patch.object(crq, "is_ancestor", return_value=True), \
+             mock.patch.object(crq, "ordinary_gate_evidence", side_effect=[tail, None]), \
+             mock.patch.object(crq, "promotion_statuses", return_value=[]), \
+             mock.patch.object(crq, "reviewer_identity", return_value=("reviewer[bot]", 1)):
+            reasons, _ = crq.audit_signer_advance({"items": []}, BASE, TIP, {})
+        self.assertIn("unverified promotion prefix", reasons[0])
+
+    def test_multiple_ordinary_segments_are_verified_without_gaps(self):
+        tail = {"from": self.MID, "to": TIP, "signer": "advisory-missing"}
+        prefix = {"from": BASE, "to": self.MID, "signer": "advisory-failed"}
+        with mock.patch.object(crq, "is_ancestor", return_value=True), \
+             mock.patch.object(crq, "ordinary_gate_evidence", side_effect=[tail, prefix]), \
+             mock.patch.object(crq, "promotion_statuses") as statuses:
+            rec = {}
+            self.assertEqual(crq.audit_signer_advance({"items": []}, BASE, TIP, rec), ([], []))
+        statuses.assert_not_called()
+        self.assertEqual(rec["prefix"]["ordinary_gate"], prefix)
+
+    def test_chain_budget_stays_unverified(self):
+        with mock.patch.object(crq, "is_ancestor", return_value=True):
+            reasons, _ = crq.audit_signer_advance({"items": []}, BASE, TIP, {}, depth=8)
+        self.assertIn("exceeds 8 segments", reasons[0])

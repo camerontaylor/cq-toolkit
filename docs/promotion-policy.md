@@ -183,18 +183,22 @@ fail-closed).
   §Deviations 4) a root-capable agent can reach the signer's key, so the signal is T1-proof (no
   overeager-agent forgery), not yet T2-proof; and P1 (the owner's PAT becoming interactive-only)
   is what makes the repository as a whole, not just the signal, agent-proof.
-- The crq-side audit stays **detective**. Ordinary advances qualify through the successful
-  `gate.yml` run built at the previous main: its `decide` job must record a single `promoted`
-  `cq-promotion-result-v1` result binding that previous main and the exact new main, with an ordinary signer disposition.
-  crq reads Actions API run/job metadata and job logs, never PR comment text. Runs must
-  name `.github/workflows/gate.yml` on `main`, at the exact previous main SHA, from
-  schedule, workflow_run, push or workflow_dispatch; PR workflow runs never qualify. The gate itself
-  already verifies independent head-bound acceptance for every admitted PR, exact-subject CI,
-  closure and policy using the canonical privileged-path predicate. A green run alone, a noop,
-  a dry run, another head or a privileged (`required`) disposition does not qualify.
-  Missing or expired evidence falls back to the pinned signer requirement; privileged advances
-  retain that requirement. The audit scans at most 30 recent successful gate runs at the previous main, so delayed observations
-  can remain unverified. Procedural acknowledgement never certifies review, CI or promotion.
+- The crq-side audit stays **detective**. Ordinary advances qualify through a successful
+  `gate.yml` run built at that promotion's exact base: its `decide` job must record a single
+  `cq-promotion-result-v1` result binding that base and the exact promoted SHA, with an
+  ordinary signer disposition. crq reads Actions metadata and job logs, never PR comment text.
+  Runs must name `.github/workflows/gate.yml` on `main`, with `head_sha` equal to the
+  recorded base, from schedule, workflow_run, push or workflow_dispatch.
+  The gate already checks closure, independent exact-head acceptance and candidate CI.
+  A noop, dry run, mismatched trust head or privileged (`required`) result does not qualify.
+
+  Several promotions can occur between audit ticks. An ordinary tail may begin at an
+  intermediate main within the observed range; the audit recursively verifies the exact
+  prefix before accepting that tail. Privileged prefixes still need the pinned signer
+  success bound to their base. A missing prefix never inherits the tail's authority.
+  The audit retains both prefix evidence and ordinary run/job IDs. At most eight segments
+  and 30 recent successful gate runs per lookup are examined; absent, expired or out-of-window
+  evidence stays unverified. Procedural acknowledgement never certifies review, CI or promotion.
 
 ### Durable observations for future D11 records
 
