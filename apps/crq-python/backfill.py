@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic inventory/operator CLI. Never launches a vendor review."""
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -127,6 +128,51 @@ def execute(c, args):
     raise ledger.IntegrityError("unknown command")
 
 
+def inventory_guard(queue):
+    # Scope owners, generation and failure lineage affect planning. Ordinary
+    # review diagnostics and harvests without scoped ownership do not.
+    fields = ("id", "kind", "target", "scope", "scope_digest", "path_lineages", "state",
+              "vendor_state", "run", "job_id", "inventory_subject_id", "subject_id", "generation")
+    guarded = {k: queue.get(k) for k in ("backfill_families", "backfill_scope_failures",
+               "backfill_path_lineages", "backfill_last_manifest", "legacy_coverage_releases")}
+    guarded["items"] = [{k: item[k] for k in fields if k in item}
+                        for item in queue.get("items", [])
+                        if item.get("scope") or item.get("subject_id") or item.get("kind") == "backfill"]
+    return guarded
+
+
+def inventory_unlocked(c, args):
+    def snapshot():
+        return copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)
+    original, config = c.with_lock(snapshot, lock_wait=30)
+    prepared = runtime.run_inventory(c, copy.deepcopy(original), enqueue=not args.report_only, prepare_only=True)
+
+    def merge():
+        current = c.load_queue()
+        if inventory_guard(current) != inventory_guard(original) or runtime.settings(c.STATE) != config:
+            raise ledger.IntegrityError("inventory snapshot stale; retry inventory")
+        # Apply only inventory's delta to the freshly loaded queue. Never save
+        # the snapshot over scheduler changes made during slow Git/provider I/O.
+        for key, value in prepared["queue"].items():
+            if key == "items":
+                old_ids = {i["id"] for i in original.get("items", [])}
+                current_ids = {i["id"] for i in current.get("items", [])}
+                additions = [i for i in value if i["id"] not in old_ids]
+                if any(i["id"] in current_ids for i in additions):
+                    raise ledger.IntegrityError("inventory job identity collision; retry inventory")
+                current.setdefault("items", []).extend(additions)
+            elif key not in original or value != original[key]:
+                current[key] = value
+        for ident in prepared["event_items"]:
+            item = next(i for i in current["items"] if i["id"] == ident)
+            runtime.state_event(c, current, item, item["created_at"], "inventory enqueue")
+        ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(prepared["ranked"]))
+        ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(prepared["report"]))
+        c.save_queue(current)
+        return prepared["report"]
+    return c.with_lock(merge, lock_wait=30)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -148,7 +194,8 @@ def main():
     args = parser.parse_args()
     import crq
     try:
-        result = crq.with_lock(execute, crq, args, lock_wait=30)
+        result = (inventory_unlocked(crq, args) if args.command == "inventory"
+                  else crq.with_lock(execute, crq, args, lock_wait=30))
         print(json.dumps(result, sort_keys=True))
     except (ValueError, OSError, KeyError) as exc:
         print(json.dumps({"error": str(exc)}))

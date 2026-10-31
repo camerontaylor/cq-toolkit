@@ -170,6 +170,36 @@ class LedgerTest(unittest.TestCase):
         genesis = git("commit-tree", tree, "-m", "Empty owner-created ledger")
         git("push", "origin", genesis + ":refs/heads/cq/review-ledger")
         publisher = ledger.GitLedger(repo)
+        actual_git = publisher.git
+        def overwrite_fetch_head(*args, **kwargs):
+            result = actual_git(*args, **kwargs)
+            if args[0] == "fetch":
+                # Concurrent unrelated fetch corrupts the shared pseudo-ref.
+                (repo / ".git/FETCH_HEAD").write_text("f" * 40 + "\n")
+            return result
+        with mock.patch.object(publisher, "git", side_effect=overwrite_fetch_head):
+            self.assertEqual(publisher.fetch(), (genesis, []))
+        self.assertEqual(git("for-each-ref", "refs/crq/ledger-fetch"), "")
+        def concurrent_checkpoint(*args, **kwargs):
+            result = actual_git(*args, **kwargs)
+            if args[:2] == ("update-ref", "refs/crq/review-ledger-validated"):
+                raise subprocess.CalledProcessError(128, ["git", *args])
+            return result
+        with mock.patch.object(publisher, "git", side_effect=concurrent_checkpoint):
+            self.assertEqual(publisher.fetch(), (genesis, []))
+        advanced = git("commit-tree", tree, "-p", genesis, "-m", "Concurrent validation")
+        def advance_during_fetch(*args, **kwargs):
+            result = actual_git(*args, **kwargs)
+            if args[0] == "fetch":
+                actual_git("update-ref", "refs/crq/review-ledger-validated", advanced)
+            return result
+        with mock.patch.object(publisher, "git", side_effect=advance_during_fetch):
+            self.assertEqual(publisher.fetch(), (genesis, []))
+        self.assertEqual(git("rev-parse", "refs/crq/review-ledger-validated"), advanced)
+        # An older remote on the next invocation is still a rollback.
+        with self.assertRaisesRegex(ledger.IntegrityError, "not a descendant"):
+            publisher.fetch()
+        git("push", "origin", advanced + ":refs/heads/cq/review-ledger")
         out = ledger.Outbox(self.root / "outbox", self.store)
         from test_backfill_accounting import Fixture
         # A publisher verifies actual Git scope as well as event schema.

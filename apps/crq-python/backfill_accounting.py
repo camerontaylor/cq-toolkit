@@ -1,5 +1,6 @@
 """Explicit scope accounting; Git provenance carries credit, never creates it."""
 import collections
+import copy
 import datetime as dt
 from pathlib import Path
 import re
@@ -28,10 +29,29 @@ def ranges(lines):
 class Repository:
     def __init__(self, root):
         self.root = Path(root)
+        self.immutable_cache = None
+        self._cache_bytes = 0
+        self._entry_cache = {}
+        self._entry_rows = 0
 
     def git(self, *args, check=True, env=None, input=None):
-        return subprocess.run(["git", *args], cwd=self.root, capture_output=True,
-                              check=check, env=env, input=input).stdout
+        cacheable = (self.immutable_cache is not None and check and env is None and input is None
+                     and ((len(args) == 3 and args[:2] == ("rev-list", "--first-parent") and re.fullmatch(r"[0-9a-f]{40,64}", args[2]))
+                          or (len(args) == 2 and args[0] == "rev-parse" and re.fullmatch(r"[0-9a-f]{40,64}(?:\^1|\^\{commit\}|\^\{tree\})", args[1]))
+                          or (len(args) == 4 and args[:3] == ("ls-tree", "-r", "-z") and re.fullmatch(r"[0-9a-f]{40,64}", args[3]))
+                          or (len(args) == 6 and args[:4] == ("diff", "--name-status", "-z", "--find-renames=100%") and all(re.fullmatch(r"[0-9a-f]{40,64}", a) for a in args[4:]))))
+        if cacheable and args in self.immutable_cache:
+            return self.immutable_cache[args]
+        result = subprocess.run(["git", *args], cwd=self.root, capture_output=True,
+                                check=check, env=env, input=input).stdout
+        if cacheable and len(result) <= 256 * 1024 * 1024:
+            if self._cache_bytes + len(result) > 256 * 1024 * 1024 or len(self.immutable_cache) >= 100000:
+                self.immutable_cache.clear()
+                self._cache_bytes = 0
+            self.immutable_cache[args] = result
+            self._cache_bytes += len(result)
+        return result
+
 
     def resolve(self, value):
         if not re.fullmatch(r"[0-9a-f]{40,64}", value):
@@ -47,7 +67,11 @@ class Repository:
             if existing and existing != commit:
                 raise ledger.IntegrityError("retained object ref conflict")
             if not existing:
-                self.git("update-ref", ref, commit, "0" * len(commit))
+                try:
+                    self.git("update-ref", ref, commit, "0" * len(commit))
+                except subprocess.CalledProcessError:
+                    if self.git("rev-parse", "--verify", ref).decode().strip() != commit:
+                        raise
             refs.append(ref)
         with tempfile.TemporaryDirectory() as directory:
             filename = Path(directory) / "evidence.bundle"
@@ -65,8 +89,11 @@ class Repository:
         return self.git("rev-parse", self.resolve(commit) + "^{tree}").decode().strip()
 
     def entries(self, commit):
+        commit = self.resolve(commit)
+        if self.immutable_cache is not None and commit in self._entry_cache:
+            return copy.deepcopy(self._entry_cache[commit])
         result = {}
-        for raw in self.git("ls-tree", "-r", "-z", self.resolve(commit)).split(b"\0"):
+        for raw in self.git("ls-tree", "-r", "-z", commit).split(b"\0"):
             if not raw:
                 continue
             meta, name = raw.split(b"\t", 1)
@@ -77,6 +104,12 @@ class Repository:
                 # Keep an explicit reversible representation for unencodable paths.
                 name = "git-path-bytes:" + name.hex()
             result[name] = {"path": name, "mode": mode, "kind": kind, "blob": blob}
+        if self.immutable_cache is not None and len(result) <= 100000:
+            if len(self._entry_cache) >= 128 or self._entry_rows + len(result) > 100000:
+                self._entry_cache.clear()
+                self._entry_rows = 0
+            self._entry_cache[commit] = copy.deepcopy(result)
+            self._entry_rows += len(result)
         return result
 
     def inventory(self, target, max_file_bytes):

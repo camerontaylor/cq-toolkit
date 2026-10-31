@@ -381,14 +381,16 @@ def collect_required(repo, target, required, store):
     return paths, members
 
 
-def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, enqueue=True):
+def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, enqueue=True, prepare_only=False):
     config = settings(c.STATE)
     if not config:
         raise ledger.IntegrityError("operator rollout configuration required for inventory publication")
     repo, store, outbox, publisher = services(c, config)
+    repo.immutable_cache = {}  # This invocation only; keys contain immutable object IDs.
+    event_items = []
     tiers, limits, required = policies()
     if fetch:
-        repo.git("fetch", "--no-tags", "origin", "refs/heads/main:refs/remotes/origin/main")
+        repo.git("fetch", "--no-tags", "--no-write-fetch-head", "origin", "refs/heads/main:refs/remotes/origin/main")
     target = repo.git("rev-parse", "origin/main^{commit}").decode().strip()
     ledger_head, events = publisher.fetch()
     if required_paths is None:
@@ -406,7 +408,9 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
             for partition in construction["partitions"]:
                 partition.update(tier_importance=partition["tier"], subject_kind=partition["kind"])
                 item = jobs.enqueue(queue, partition, c.iso())
-                state_event(c, queue, item, item["created_at"], "inventory enqueue")
+                event_items.append(item["id"])
+                if not prepare_only:
+                    state_event(c, queue, item, item["created_at"], "inventory enqueue")
             debt.extend(construction["debt"])
     queue["backfill_last_manifest"] = manifest
     queue["backfill_unsupported_construction"] = debt
@@ -418,6 +422,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     original = ledger.loads(baseline_file.read_bytes()) if baseline_file.exists() else None
     report = reporting.summary(repo, ranked, queue, original)
     report["construction_debt"] = debt
+    if prepare_only:
+        return {"queue": queue, "manifest": manifest, "ranked": ranked, "report": report, "event_items": event_items}
     ledger.atomic(c.STATE / "backfill/latest-ranked.json", ledger.canonical(ranked))
     ledger.atomic(c.STATE / "backfill/latest-report.json", ledger.canonical(report))
     c.save_queue(queue)

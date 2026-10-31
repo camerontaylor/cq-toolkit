@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import backfill_accounting as accounting
 import review_ledger as ledger
@@ -59,6 +60,33 @@ class Fixture:
         base, head = self.projection(target, [name])
         scope = [{"path": name, "blob": self.repo.entries(target)[name]["blob"], "intervals": lines}]
         return self.evidence(target, base, head, scope)
+
+
+class ImmutableCacheTest(unittest.TestCase):
+    def test_cache_is_per_instance_and_only_immutable_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = Fixture(Path(td) / "repo")
+            old = fixture.commit({"a.py": b"one\n"})
+            new = fixture.commit({"a.py": b"two\n"})
+            repo = fixture.repo
+            repo.immutable_cache = {}
+            with mock.patch.object(accounting.subprocess, "run", wraps=subprocess.run) as calls:
+                first = repo.entries(old)
+                count = calls.call_count
+                self.assertEqual(repo.entries(old), first)
+                self.assertEqual(calls.call_count, count)
+                first["a.py"]["blob"] = "poison"
+                self.assertNotEqual(repo.entries(old)["a.py"]["blob"], "poison")
+                self.assertNotEqual(repo.entries(new), first)
+                repo.git("rev-parse", "HEAD")
+                count = calls.call_count
+                repo.git("rev-parse", "HEAD")
+                self.assertEqual(calls.call_count, count + 1)
+                fresh = accounting.Repository(fixture.root)
+                count = calls.call_count
+                fresh.entries(old)
+                self.assertGreater(calls.call_count, count)
+            self.assertEqual(repo.lineage(old, new, "a.py"), "a.py")
 
 
 class AccountingTest(unittest.TestCase):
