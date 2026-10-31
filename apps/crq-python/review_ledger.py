@@ -368,7 +368,8 @@ class Outbox:
 
 class GitLedger:
     """Single publisher, isolated Git index; retries fetch/rebuild after push races."""
-    def __init__(self, repo, remote="origin", branch="cq/review-ledger"):
+    def __init__(self, repo, remote="origin", branch="cq/review-ledger", push_commit=None):
+        self.push_commit = push_commit
         self.repo, self.remote, self.branch = Path(repo), remote, branch
         if remote.startswith("-") or branch != "cq/review-ledger":
             raise IntegrityError("invalid publication destination")
@@ -376,6 +377,22 @@ class GitLedger:
     def git(self, *args, env=None, input=None, check=True, timeout=300):
         return subprocess.run(["git", *args], cwd=self.repo, env=env, input=input,
                               capture_output=True, check=check, timeout=timeout).stdout
+
+    def push(self, base, head):
+        if self.push_commit is None:
+            self.git("push", self.remote, head + ":refs/heads/" + self.branch)
+            return
+        ref = "refs/crq/ledger-publish/" + head
+        self.git("update-ref", ref, head)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                bundle = Path(directory) / "publication.bundle"
+                self.git("bundle", "create", str(bundle), ref, "--not", base)
+                if bundle.stat().st_size > 64 * 1024 * 1024:
+                    raise IntegrityError("ledger bundle exceeds signer transport bound")
+                self.push_commit(base, head, bundle.read_bytes())
+        finally:
+            self.git("update-ref", "-d", ref, head)
 
     def read(self, head):
         values = []
@@ -465,8 +482,8 @@ class GitLedger:
                         tree = self.git("write-tree", env=env).decode().strip()
                         commit = self.git("commit-tree", tree, "-p", head, "-m", "Append review event " + value["id"], env=env).decode().strip()
                     try:
-                        self.git("push", self.remote, commit + ":refs/heads/" + self.branch)
-                    except (subprocess.SubprocessError, OSError):
+                        self.push(head, commit)
+                    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError):
                         break  # Includes timeout after push: next fetch reconciles.
                     head, values = self.fetch()
                     ids = validate_sequence(values)

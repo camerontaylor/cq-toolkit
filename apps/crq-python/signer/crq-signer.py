@@ -330,7 +330,8 @@ def api(method: str, path: str, token: Optional[str] = None, body: Optional[Dict
         req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode())
+            raw = r.read()
+            return json.loads(raw.decode()) if raw else None
     except urllib.error.HTTPError as e:
         e.read()
         if e.code >= 500 or e.code in (403, 429):
@@ -340,10 +341,12 @@ def api(method: str, path: str, token: Optional[str] = None, body: Optional[Dict
         raise Transient(f"github api unreachable: {cap(e)}") from None
 
 
-def install_token(repo_full: str) -> str:
+def install_token(repo_full: str, *, ledger_write: bool = False) -> str:
     """Fresh installation token scoped to one repository. Per use. The
     access_tokens endpoint takes repository NAMES (not owner/name slugs) —
     split here so no caller can get that wrong."""
+    if ledger_write and repo_full != REPO:
+        raise Fatal("ledger token repository refused")
     jwt = app_jwt()
     installs = api("GET", "app/installations", token=jwt)
     inst = next((i for i in installs
@@ -355,8 +358,115 @@ def install_token(repo_full: str) -> str:
                     "check the registration record")
     out = api("POST", f"app/installations/{inst['id']}/access_tokens", token=jwt,
               body={"repositories": [repo_full.split("/")[1]],
-                    "permissions": {"statuses": "write", "checks": "read", "contents": "read"}})
+                    "permissions": {"contents": "write"} if ledger_write else
+                                   {"statuses": "write", "checks": "read", "contents": "read"}})
     return out["token"]
+
+
+LEDGER_REF = "refs/heads/cq/review-ledger"
+LEDGER_BUNDLE_LIMIT = 64 * 1024 * 1024
+
+
+def ledger_validator():
+    """Load only installed root-owned validation artifacts (source layout in tests)."""
+    directory = Path(__file__).resolve().parent
+    module = directory / "review_ledger.py"
+    schema = directory / "review-ledger.schema.json"
+    if not module.exists() and directory.name == "signer":
+        module = directory.parent / "review_ledger.py"
+        schema = directory.parents[2] / "policy/review-ledger.schema.json"
+    if os.geteuid() == 0:
+        for path in (module, schema):
+            info = path.stat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError("ledger validation artifacts must be root-owned and immutable to callers")
+    spec = importlib.util.spec_from_file_location("signer_review_ledger", module)
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    validator.SCHEMA = schema
+    return validator
+
+
+def publish_ledger_commit(base: str, head: str, bundle: bytes) -> None:
+    """Root-only exact-commit ledger capability. No checkout or caller Git config."""
+    if not SHA40.fullmatch(base) or not SHA40.fullmatch(head) or base == head:
+        raise ValueError("invalid ledger commit identity")
+    if not bundle or len(bundle) > LEDGER_BUNDLE_LIMIT:
+        raise ValueError("invalid ledger bundle size")
+    token = install_token(REPO, ledger_write=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="crq-ledger-") as directory:
+            root = Path(directory)
+            env = {"PATH": "/usr/bin:/bin", "HOME": directory,
+                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                   "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "3",
+                   "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+                   "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/dev/null",
+                   "GIT_CONFIG_KEY_2": "http.https://github.com/.extraHeader",
+                   "GIT_CONFIG_VALUE_2": "Authorization: Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()}
+            def git(*args, **kwargs):
+                return subprocess.run(["/usr/bin/git", *args], cwd=root, env=env,
+                                      capture_output=True, check=kwargs.get("check", True), timeout=300).stdout
+            git("init", "--bare", "--quiet")
+            remote = "https://github.com/" + REPO + ".git"
+            git("fetch", "--no-tags", remote, LEDGER_REF)
+            current = git("rev-parse", "FETCH_HEAD").decode().strip()
+            if current == head:
+                return  # Push succeeded before an earlier response was lost.
+            if current != base:
+                raise ValueError("ledger base moved; refetch and rebuild")
+            filename = root / "submission.bundle"
+            filename.write_bytes(bundle)
+            advertised = git("bundle", "list-heads", str(filename)).decode().splitlines()
+            if advertised != [head + " refs/crq/ledger-publish/" + head]:
+                raise ValueError("bundle does not advertise the exact ledger commit")
+            git("bundle", "verify", str(filename))
+            git("bundle", "unbundle", str(filename))
+            if git("rev-list", "--parents", "-n", "1", head).decode().strip().split() != [head, base]:
+                raise ValueError("ledger commit must append directly to the observed base")
+            changes = git("diff-tree", "-r", "--no-commit-id", "--no-renames", "--name-status", "-z", base, head).split(b"\0")
+            if len(changes) != 3 or changes[0] != b"A" or changes[-1] != b"" or not re.fullmatch(rb"records/[0-9]{4}/[0-9]{2}/[0-9a-f]{64}\.json", changes[1]):
+                raise ValueError("ledger publication must add one record only")
+            mode = git("ls-tree", head, "--", changes[1].decode()).split(b" ", 1)[0]
+            if mode != b"100644":
+                raise ValueError("ledger record must be a regular file")
+            if int(git("cat-file", "-s", head + ":" + changes[1].decode())) > 1024 * 1024:
+                raise ValueError("ledger record exceeds validation bound")
+            validator = ledger_validator()
+            reader = validator.GitLedger(root)
+            reader.git = git  # Every read retains the isolated root Git environment.
+            reader.read(head)  # Schema, content hash, path identity and sequence.
+            git("merge-base", "--is-ancestor", base, head)
+            # No force, no caller ref/remote, and no token in argv or output.
+            git("push", "--porcelain", remote, head + ":" + LEDGER_REF)
+    finally:
+        api("DELETE", "installation/token", token=token)
+
+
+def ledger_publish_entry() -> int:
+    """Bounded socket frame; return only public commit identity or a generic error."""
+    try:
+        if os.geteuid() != 0:
+            raise ValueError("root ledger service required")
+        header = sys.stdin.buffer.readline(4097)
+        if len(header) > 4096 or not header.endswith(b"\n"):
+            raise ValueError("invalid ledger frame")
+        obj = json.loads(header)
+        if not isinstance(obj, dict) or set(obj) != {"base", "head", "bytes"}:
+            raise ValueError("invalid ledger header")
+        size = obj["bytes"]
+        if type(size) is not int or not 1 <= size <= LEDGER_BUNDLE_LIMIT:
+            raise ValueError("invalid ledger frame size")
+        body = sys.stdin.buffer.read(size + 1)
+        if len(body) != size:
+            raise ValueError("ledger frame length mismatch")
+        publish_ledger_commit(obj["base"], obj["head"], body)
+        print(json.dumps({"published": obj["head"]}))
+        return 0
+    except Exception:
+        # HTTP/Git exceptions may contain transport diagnostics. Never relay them.
+        print(json.dumps({"error": "ledger publication refused"}))
+        return 2
 
 
 def get_main_sha(token: str) -> str:
@@ -1786,10 +1896,14 @@ def probe(sha: str) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="crq signer daemon (promotion items only)")
-    p.add_argument("command", nargs="?", default="run", choices=["run", "probe"],
+    p.add_argument("command", nargs="?", default="run", choices=["run", "probe", "ledger-publish"],
                    help="run the daemon (default) or the S2 probe")
     p.add_argument("sha", nargs="?", help="40-hex commit sha (probe only)")
     args = p.parse_args()
+    if args.command == "ledger-publish":
+        if args.sha:
+            p.error("ledger publication accepts only its bounded stdin frame")
+        return ledger_publish_entry()
     if args.command == "probe":
         if not args.sha:
             print("probe: a commit sha is required", file=sys.stderr)

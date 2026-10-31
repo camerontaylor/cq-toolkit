@@ -2466,6 +2466,22 @@ class CoverageFallbackTargetTest(unittest.TestCase):
             crq.start_one(queue, [], False, "backfill-only", False)
         self.assertEqual(observed, [True])
 
+    def test_ledger_spool_transport_binds_only_base_and_head(self):
+        spool = crq.Spool({"host": "operator@127.0.0.1", "key": "/fixture/key"})
+        base, head = "a" * 40, "b" * 40
+        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": head})) as ssh:
+            spool.publish_ledger(base, head, b"bundle")
+            ssh.assert_called_once_with("ledger-publish " + base + " " + head, b"bundle", timeout=330)
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, "--force", b"bundle")
+            self.assertEqual(ssh.call_count, 1)
+        with mock.patch.object(spool, "_ssh", side_effect=crq.SpoolUnreachable("connection lost")):
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, head, b"bundle")
+        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": base})):
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, head, b"bundle")
+
     def test_measure_skips_repair_only_merged_item(self):
         repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}
         queue = {"items": [repair]}

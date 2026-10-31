@@ -7,6 +7,7 @@ import collections
 import copy
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -31,9 +32,16 @@ def settings(state, *, dispatch=False):
     if not filename.exists():
         return None
     value = ledger.loads(filename.read_bytes())
-    required = ("operational_ruling", "no_live_run_verification", "owner_branch_ruleset_evidence", "durable_artifact_root", "runner_identity")
+    required = ("operational_ruling", "no_live_run_verification", "owner_branch_ruleset_evidence", "durable_artifact_root", "runner_identity", "publisher_spool")
     if any(not value.get(k) for k in required) or value["runner_identity"] != "crq-runner-app":
         raise ledger.IntegrityError("backfill rollout prerequisites incomplete")
+    spool = value["publisher_spool"]
+    key = (spool.get("ssh_key") or spool.get("key")) if isinstance(spool, dict) else None
+    alias = spool.get("ssh_alias") if isinstance(spool, dict) else None
+    if (not isinstance(spool, dict) or set(spool) - {"ssh_alias", "ssh_key", "key"}
+            or not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*", alias)
+            or not isinstance(key, str) or not key.strip() or any(c in key for c in "\n\r\x00")):
+        raise ledger.IntegrityError("backfill rollout publisher_spool incomplete or invalid")
     if dispatch and value.get("enabled") is not True:
         return None
     if dispatch:
@@ -45,7 +53,8 @@ def services(c, config):
     store = ledger.ArtifactStore(config["durable_artifact_root"])
     outbox = ledger.Outbox(c.STATE / "backfill/publication", store)
     repo = accounting.Repository(c.CLONE)
-    publisher = ledger.GitLedger(c.CLONE)
+    publisher_spool = c.Spool(config["publisher_spool"])
+    publisher = ledger.GitLedger(c.CLONE, push_commit=publisher_spool.publish_ledger)
     return repo, store, outbox, publisher
 
 

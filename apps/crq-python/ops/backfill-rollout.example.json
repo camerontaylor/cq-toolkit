@@ -5,5 +5,6 @@
   "no_live_run_verification": null,
   "owner_branch_ruleset_evidence": null,
   "durable_artifact_root": null,
-  "runner_identity": "crq-runner-app"
+  "runner_identity": "crq-runner-app",
+  "publisher_spool": null
 }

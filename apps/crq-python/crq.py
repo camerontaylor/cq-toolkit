@@ -2228,7 +2228,7 @@ class Spool:
     def _path(self, rel: str) -> Path:
         return Path(self.dir) / rel
 
-    def _ssh(self, remote: str, data: Optional[bytes] = None) -> str:
+    def _ssh(self, remote: str, data: Optional[bytes] = None, *, timeout: int = 45) -> str:
         if self.refused:
             raise SpoolUnreachable(self.refused)
         if self.key:
@@ -2242,7 +2242,7 @@ class Spool:
         cmd = ["/usr/bin/ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
                "-o", "ServerAliveCountMax=2", self.host, remote]
         try:
-            p = subprocess.run(cmd, input=data if data is not None else b"", capture_output=True, timeout=45)
+            p = subprocess.run(cmd, input=data if data is not None else b"", capture_output=True, timeout=timeout)
         except (subprocess.TimeoutExpired, OSError) as exc:
             raise SpoolUnreachable(f"ssh {self.host}: {exc}"[:200])
         if p.returncode != 0:
@@ -2253,6 +2253,18 @@ class Spool:
         """`<verb> <args>` becomes SSH_ORIGINAL_COMMAND for spool-shell (word-split
         there with globbing off, never eval)."""
         return self._ssh(" ".join([verb, *args]), data)
+
+    def publish_ledger(self, base: str, head: str, bundle: bytes) -> None:
+        if not self.host or not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
+            raise OSError("ledger publication requires the dedicated signer transport")
+        if not bundle or len(bundle) > 64 * 1024 * 1024:
+            raise OSError("invalid ledger bundle size")
+        try:
+            reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
+        except SpoolUnreachable as exc:
+            raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
+        if json.loads(reply) != {"published": head}:
+            raise OSError("signer did not acknowledge the exact ledger commit")
 
     def snapshot(self, iid: str) -> Dict[str, Any]:
         """One round trip: {claimed, request, result: text|None} for one id."""

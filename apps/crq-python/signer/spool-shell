@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import socket
 import sys
 import tempfile
 ROOT = Path('/var/lib/crq-spool')
@@ -30,11 +31,34 @@ def read(path, limit=1048576):
         return body
 
 def main():
+    if sys.argv[1:] not in ([], ['ledger-only']):
+        raise ValueError('invalid transport mode')
+    ledger_only = sys.argv[1:] == ['ledger-only']
     args = os.environ.get('SSH_ORIGINAL_COMMAND', '').split()
     if not args:
         raise ValueError('no command')
     verb, args = args[0], args[1:]
-    if verb in ('put', 'snapshot', 'withdraw'):
+    if ledger_only != (verb == 'ledger-publish'):
+        raise ValueError('operation outside transport capability')
+    if verb == 'ledger-publish':
+        if len(args) != 2 or any(not re.fullmatch(r'[0-9a-f]{40}', value) for value in args):
+            raise ValueError('ledger base and head required')
+        body = sys.stdin.buffer.read(64 * 1024 * 1024 + 1)
+        if not body or len(body) > 64 * 1024 * 1024:
+            raise ValueError('invalid ledger bundle size')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(330)
+            connection.connect('/run/crq-ledger-publish.sock')
+            connection.sendall(json.dumps({'base': args[0], 'head': args[1], 'bytes': len(body)}).encode() + b'\n' + body)
+            connection.shutdown(socket.SHUT_WR)
+            reply = connection.makefile('rb').read(4097)
+            if len(reply) > 4096:
+                raise ValueError('oversized ledger response')
+            value = json.loads(reply)
+            if value != {'published': args[1]}:
+                raise ValueError('ledger publication refused')
+            print(json.dumps(value))
+    elif verb in ('put', 'snapshot', 'withdraw'):
         if len(args) != 1:
             raise ValueError('one id required')
         iid = valid(args[0])
