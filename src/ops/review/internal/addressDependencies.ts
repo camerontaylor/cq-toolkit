@@ -1,4 +1,4 @@
-import { cp, lstat, readdir, realpath } from 'node:fs/promises';
+import { cp, lstat, readdir, realpath, symlink } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 const within = (root: string, path: string) => {
@@ -77,8 +77,15 @@ export async function snapshotAddressDependencies(
     verbatimSymlinks: false,
     errorOnExist: true,
     force: false,
-    filter: () => {
+    filter: async (source, target) => {
       admit();
+      // Generated bin shims can embed paths relative to their original
+      // directory. Keep that trusted entrypoint location; the candidate
+      // still owns the directory and can replace its links independently.
+      if (dirname(source) === resolve(installed, '.bin') && (await lstat(source)).isFile()) {
+        await symlink(resolve(source), target, 'file');
+        return false;
+      }
       return true;
     },
   });

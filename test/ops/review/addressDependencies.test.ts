@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   mkdtemp,
   mkdir,
@@ -105,6 +107,31 @@ test('candidate relinking and metadata writes leave caller dependencies intact',
     expect(await readlink(join(installed, 'package'))).toBe('../../store');
     expect(await readFile(join(installed, '.modules.yaml'), 'utf8')).toBe('caller metadata');
     expect(await readFile(join(installed, 'package', 'index.js'), 'utf8')).toBe('installed bytes');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('relocated candidate runs installed bin shims from their original directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-dependency-shim-'));
+  try {
+    const installed = join(root, 'caller', 'node_modules');
+    const candidate = join(root, 'deeper', 'candidate', 'node_modules');
+    const store = join(root, 'store');
+    await mkdir(join(installed, '.bin'), { recursive: true });
+    await mkdir(store);
+    await writeFile(join(store, 'data.cjs'), "module.exports = 'installed tool';");
+    const source = join(installed, '.bin', 'check.cjs');
+    const content = "console.log(require('../../../store/data.cjs'));";
+    await writeFile(source, content);
+    await snapshotAddressDependencies(installed, candidate, () => {});
+    const shim = join(candidate, '.bin', 'check.cjs');
+    const result = await promisify(execFile)(process.execPath, [shim]);
+    expect(result.stdout.trim()).toBe('installed tool');
+    expect(await readlink(shim)).toBe(source);
+    await unlink(shim);
+    await writeFile(shim, 'candidate replacement');
+    expect(await readFile(source, 'utf8')).toBe(content);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
