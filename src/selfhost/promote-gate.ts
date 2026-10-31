@@ -134,7 +134,7 @@ import {
   type AcceptanceResult,
 } from './acceptance.js';
 import type { SettleState } from '../policy/queue/settle-state.js';
-import { readSettleHistory } from './state-branch.js';
+import { readSettleHistory, SETTLE_HISTORY_MAX_PAGES } from './state-branch.js';
 import { SETTLE_STATE_PATH } from './config.js';
 
 /** The branch promotion advances. */
@@ -187,8 +187,8 @@ export const POLL_MS = 30_000;
 /** Default wait budget, minutes. */
 export const DEFAULT_TIMEOUT_MIN = 20;
 
-/** Most cq-state ledger versions the D11 epoch read walks (newest first). */
-export const SETTLE_HISTORY_MAX = 50;
+/** cq-state commit page size; history is scanned lazily across pages. */
+export const SETTLE_HISTORY_PAGE_SIZE = 50;
 
 const WORKFLOWS_DIR = '.github/workflows';
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -1451,12 +1451,12 @@ async function bindAdmitted(
   try {
     const read = await readSettleHistory(
       { gh: deps.gh, owner: cfg.owner, repo: cfg.name },
-      SETTLE_HISTORY_MAX,
+      SETTLE_HISTORY_PAGE_SIZE,
       (versions) => admitted.every((a) => versions.some((v) => Object.hasOwn(v.prs, String(a.pr)))),
     );
     history = read.versions;
     report.push(
-      `  d11: settle ledger — ${String(read.versions.length)} version(s) read${read.exhausted ? ` (history exhausted, at most ${String(SETTLE_HISTORY_MAX)})` : ''}`,
+      `  d11: settle ledger — ${String(read.versions.length)} version(s) read${read.exhausted ? ' (history exhausted)' : read.limited ? ` (scan budget reached: ${String(SETTLE_HISTORY_MAX_PAGES)} pages)` : ''}`,
     );
     for (const why of read.discarded) report.push(`  d11: settle ledger discarded — ${clean(why)}`);
     if (read.barrier) {
