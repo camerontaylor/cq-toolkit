@@ -69,6 +69,8 @@ export interface AddressAttempt {
 export interface AddressFix {
   finding: Finding;
   observedHead: string;
+  /** Exact parent whose candidate tree passed the worker gates. */
+  validatedParent?: string;
   commit?: string;
   evidence?: Array<{ path: string; line: number }>;
   reason: string;
@@ -947,6 +949,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   evidence: commit,
                 },
                 observedHead,
+                validatedParent: parent,
                 commit,
                 reason: closure.reason,
                 validation: gates,

@@ -544,6 +544,7 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
     concurrency: z.number().int().positive().exactOptional(),
     journalDir: z.string().min(1).exactOptional(),
     push: z.boolean().exactOptional(),
+    verifyClosure: z.boolean().exactOptional(),
   })
   .strict();
 

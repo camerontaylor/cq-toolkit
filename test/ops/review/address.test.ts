@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -94,6 +96,101 @@ const reportOf = (
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
 describe('review.address composition', () => {
+  test('CLI closure fixture preserves an uncertain finding as open with exit 3', async () => {
+    const f = await fixture();
+    try {
+      await f.repo.write('a.ts', 'throw new Error("BAD");\n');
+      f.repo.commitAll('closure CLI trigger');
+      const child = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../../fixtures/review-closure-cli/entry.mjs', import.meta.url)),
+          'review.address',
+          '--source=local',
+          `--repoRoot=${f.repo.root}`,
+          '--verifyClosure',
+          '--rounds=1',
+          `--journalDir=${f.input.journalDir}`,
+          '--json',
+        ],
+        { encoding: 'utf8', timeout: 30_000 },
+      );
+      expect(child.status, child.stderr).toBe(3);
+      expect(JSON.parse(child.stdout)).toMatchObject({
+        status: 'needs-human',
+        report: {
+          findings: [{ id: 'demo', status: 'open' }],
+          closureVerifications: [
+            {
+              verification: { verdict: 'uncertain', reason: 'omitted-consumer-or-dependency' },
+            },
+          ],
+        },
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test.each([true, false])(
+    'closure verification opt-in=%s uses pinned evidence',
+    async (verifyClosure) => {
+      const f = await fixture([{ ...finding('a'), text: 'Replace `a = 1`' }]);
+      try {
+        let committed = '';
+        const before = f.repo.git('show', 'HEAD:src/a.ts');
+        const result = await makeReviewAddress({
+          ...f.deps,
+          workerFactory: () => ({
+            escalation: createEscalationState,
+            fix: async (item) => {
+              const observedHead = f.record().head;
+              await f.repo.write('sibling.txt', 'concurrent sibling\n');
+              const validatedParent = f.repo.commitAll('sibling fix');
+              await f.repo.write('src/a.ts', 'export const fixedA = 2;\n');
+              committed = f.repo.commitAll('fix a');
+              // The packet must read the committed snapshot, never this live file.
+              await f.repo.write('src/a.ts', 'uncommitted drift\n');
+              return {
+                finding: { ...item, status: 'fixed' },
+                observedHead,
+                commit: committed,
+                validatedParent,
+                reason: 'fixed',
+                validation: [],
+              };
+            },
+          }),
+        })({ ...f.input, verifyClosure, rounds: 1 });
+        const report = reportOf(result);
+        if (verifyClosure) {
+          expect(result.status).toBe('needs-human');
+          expect(f.calls).not.toContain('disposition:fixed');
+          expect(f.calls).not.toContain('review');
+          expect(report.findings[0]?.status).toBe('open');
+          const evidence = report.closureVerifications?.[0];
+          expect(evidence?.packet.before).toBe(before);
+          expect(evidence?.packet.after).toBe('export const fixedA = 2;\n');
+          expect(evidence?.packet.metadata.revision.head).toBe(committed);
+          expect(evidence?.packet.metadata.revision.parent).toBe(
+            f.repo.git('rev-parse', `${committed}^`).trim(),
+          );
+          expect(evidence?.packet.patch).toContain('+export const fixedA = 2;');
+          expect(evidence?.packet.relevantDependenciesComplete).toBe(false);
+          expect(evidence?.verification.verdict).toBe('uncertain');
+          expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toMatchObject({
+            closureVerifications: report.closureVerifications,
+          });
+        } else {
+          expect(report.closureVerifications).toBeUndefined();
+          expect(f.calls).toContain('disposition:fixed');
+        }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+
   test.each([true, false])(
     'portable cq.json parsing gates clean record acceptance: valid=%s',
     async (valid) => {
