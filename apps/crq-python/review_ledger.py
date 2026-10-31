@@ -469,14 +469,16 @@ class GitLedger:
         return values
 
     def fetch(self):
+        # Bind rollback protection before network I/O; another validator may
+        # advance the checkpoint while this invocation obtains its snapshot.
+        checkpoint = "refs/crq/review-ledger-validated"
+        previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
         ref = "refs/crq/ledger-fetch/" + uuid.uuid4().hex
         try:
             self.git("fetch", "--no-tags", "--no-write-fetch-head", self.remote, "refs/heads/" + self.branch + ":" + ref)
             head = self.git("rev-parse", ref).decode().strip()
         finally:
             self.git("update-ref", "-d", ref)
-        checkpoint = "refs/crq/review-ledger-validated"
-        previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
         if previous and subprocess.run(["git", "merge-base", "--is-ancestor", previous, head], cwd=self.repo, capture_output=True).returncode:
             raise IntegrityError("ledger head is not a descendant of validated history")
         values = self.read(head)

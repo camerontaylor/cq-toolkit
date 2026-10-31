@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-import subprocess
 
 import review_ledger as ledger
 from backfill_accounting import ranges
