@@ -83,6 +83,38 @@ function scriptedDrivers(
 }
 
 describe('review.run', () => {
+  it('forwards opt-in area execution through the public op', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('a/api.ts', 'export const a = 1;');
+      await repo.write('b/client.ts', 'export const b = 2;');
+      repo.commitAll('two areas');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => (components) =>
+          components.map(({ component }) => ({ component, hits: [] })),
+      })({ repoRoot: repo.root, areas: true });
+      expect(result.status).toBe('ok');
+      expect(prompts.some((prompt) => prompt.includes('Review cross-area contracts'))).toBe(true);
+      const record = result.status === 'ok' ? result.value : result.report;
+      const coverage = record?.sources.find((source) => source.kind === 'agent')?.coverage;
+      expect(coverage && 'version' in coverage).toBe(true);
+      if (coverage && 'version' in coverage && coverage.version === 2) {
+        expect(coverage.modeReason).toContain('area review:');
+        expect(coverage.sessions.find((session) => session.id === 'cross-area')).toMatchObject({
+          id: 'cross-area',
+          status: 'complete',
+          deliveries: [],
+        });
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it.each([
     'valid',
     'repaired',

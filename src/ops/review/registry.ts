@@ -405,6 +405,7 @@ export const VerifyReviewOutcomeOpInputSchema = z
 
 export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
   .object({
+    areas: z.boolean().exactOptional(),
     repoRoot: z.string().min(1),
     maxTokens: z.number().int().positive().exactOptional(),
     wallMs: z.number().int().positive().exactOptional(),
