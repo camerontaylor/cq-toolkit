@@ -390,7 +390,7 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     event_items = []
     tiers, limits, required = policies()
     if fetch:
-        repo.git("fetch", "--no-tags", "origin", "refs/heads/main:refs/remotes/origin/main")
+        repo.git("fetch", "--no-tags", "--no-write-fetch-head", "origin", "refs/heads/main:refs/remotes/origin/main")
     target = repo.git("rev-parse", "origin/main^{commit}").decode().strip()
     ledger_head, events = publisher.fetch()
     if required_paths is None:

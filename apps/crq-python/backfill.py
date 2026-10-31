@@ -129,11 +129,16 @@ def execute(c, args):
 
 
 def inventory_guard(queue):
-    # Any item transition can change ownership or required-list lineage. Reject
-    # conservatively; unrelated scheduler diagnostics remain mergeable.
-    return {k: v for k, v in queue.items()
-            if k == "items" or k.startswith("backfill_") or k.startswith("legacy_coverage")
-            or k == "review_ledger_head"}
+    # Scope owners, generation and failure lineage affect planning. Ordinary
+    # review diagnostics and harvests without scoped ownership do not.
+    fields = ("id", "kind", "target", "scope", "scope_digest", "path_lineages", "state",
+              "vendor_state", "run", "job_id", "inventory_subject_id", "subject_id", "generation")
+    guarded = {k: queue.get(k) for k in ("backfill_families", "backfill_scope_failures",
+               "backfill_path_lineages", "backfill_last_manifest", "legacy_coverage_releases")}
+    guarded["items"] = [{k: item[k] for k in fields if k in item}
+                        for item in queue.get("items", [])
+                        if item.get("scope") or item.get("subject_id") or item.get("kind") == "backfill"]
+    return guarded
 
 
 def inventory_unlocked(c, args):
@@ -149,7 +154,14 @@ def inventory_unlocked(c, args):
         # Apply only inventory's delta to the freshly loaded queue. Never save
         # the snapshot over scheduler changes made during slow Git/provider I/O.
         for key, value in prepared["queue"].items():
-            if key not in original or value != original[key]:
+            if key == "items":
+                old_ids = {i["id"] for i in original.get("items", [])}
+                current_ids = {i["id"] for i in current.get("items", [])}
+                additions = [i for i in value if i["id"] not in old_ids]
+                if any(i["id"] in current_ids for i in additions):
+                    raise ledger.IntegrityError("inventory job identity collision; retry inventory")
+                current.setdefault("items", []).extend(additions)
+            elif key not in original or value != original[key]:
                 current[key] = value
         for ident in prepared["event_items"]:
             item = next(i for i in current["items"] if i["id"] == ident)

@@ -19,7 +19,7 @@ class OperatorTest(unittest.TestCase):
     def test_inventory_prepares_unlocked_and_merges_current_queue(self):
         for stale in (None, "items", "backfill_scope_failures", "backfill_path_lineages", "config"):
             with self.subTest(stale=stale), tempfile.TemporaryDirectory() as td:
-                q = {"items": [], "diagnostic": "before"}
+                q = {"items": [{"id": "ordinary", "kind": "merged", "state": "pending"}], "diagnostic": "before"}
                 held = [False]
                 config = {"enabled": True}
                 saved = []
@@ -38,10 +38,12 @@ class OperatorTest(unittest.TestCase):
                     self.assertTrue(kwargs["prepare_only"])
                     self.assertFalse(kwargs["enqueue"])
                     q["diagnostic"] = "tick progressed"
+                    q["items"][0]["state"] = "done"
+                    q["backfill_idle_with_candidate"] = 3
                     if stale == "config":
                         config["enabled"] = False
                     elif stale:
-                        q[stale] = [{"vendor_state": "live"}] if stale == "items" else {"changed": True}
+                        q[stale] = [{"kind": "backfill", "vendor_state": "live"}] if stale == "items" else {"changed": True}
                     snapshot["backfill_last_manifest"] = {"target": "a" * 40}
                     return {"queue": snapshot, "manifest": {}, "ranked": {}, "report": {}, "event_items": []}
                 c = SimpleNamespace(STATE=Path(td), with_lock=lock, load_queue=load, save_queue=saved.append)
@@ -55,6 +57,8 @@ class OperatorTest(unittest.TestCase):
                     else:
                         backfill.inventory_unlocked(c, SimpleNamespace(report_only=True))
                         self.assertEqual(saved[0]["diagnostic"], "tick progressed")
+                        self.assertEqual(saved[0]["items"][0]["state"], "done")
+                        self.assertEqual(saved[0]["backfill_idle_with_candidate"], 3)
                         self.assertEqual(saved[0]["backfill_last_manifest"]["target"], "a" * 40)
 
     def test_legacy_quarantine_release_binds_scope_history_and_ownership(self):

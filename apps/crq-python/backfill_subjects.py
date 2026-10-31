@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import subprocess
 
 import review_ledger as ledger
 from backfill_accounting import ranges
@@ -92,7 +93,11 @@ def pin(repo, identity, generation, partition, base, head, target):
         if existing and existing != sha:
             raise ledger.IntegrityError("immutable subject pin conflict")
         if not existing:
-            repo.git("update-ref", ref, sha, "0" * len(sha))
+            try:
+                repo.git("update-ref", ref, sha, "0" * len(sha))
+            except subprocess.CalledProcessError:
+                if repo.git("rev-parse", "--verify", ref).decode().strip() != sha:
+                    raise
     return prefix
 
 

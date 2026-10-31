@@ -16,6 +16,7 @@ import re
 import subprocess
 import tempfile
 import shutil
+import uuid
 
 REPO = "camerontaylor/cq-toolkit"
 SCHEMA = Path(__file__).resolve().parents[2] / "policy/review-ledger.schema.json"
@@ -468,14 +469,24 @@ class GitLedger:
         return values
 
     def fetch(self):
-        self.git("fetch", "--no-tags", self.remote, "refs/heads/" + self.branch)
-        head = self.git("rev-parse", "FETCH_HEAD").decode().strip()
+        ref = "refs/crq/ledger-fetch/" + uuid.uuid4().hex
+        try:
+            self.git("fetch", "--no-tags", "--no-write-fetch-head", self.remote, "refs/heads/" + self.branch + ":" + ref)
+            head = self.git("rev-parse", ref).decode().strip()
+        finally:
+            self.git("update-ref", "-d", ref)
         checkpoint = "refs/crq/review-ledger-validated"
         previous = self.git("rev-parse", "--verify", "--quiet", checkpoint, check=False).decode().strip()
         if previous and subprocess.run(["git", "merge-base", "--is-ancestor", previous, head], cwd=self.repo, capture_output=True).returncode:
             raise IntegrityError("ledger head is not a descendant of validated history")
         values = self.read(head)
-        self.git("update-ref", checkpoint, head, previous or "0" * len(head))
+        try:
+            self.git("update-ref", checkpoint, head, previous or "0" * len(head))
+        except subprocess.CalledProcessError:
+            latest = self.git("rev-parse", "--verify", checkpoint).decode().strip()
+            # Another full validation may have advanced the shared checkpoint.
+            # Accept only an equal/descendant checkpoint, never move it backward.
+            self.git("merge-base", "--is-ancestor", head, latest)
         return head, values
 
     def publish(self, outbox, attempts=3):

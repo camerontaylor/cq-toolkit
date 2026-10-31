@@ -67,7 +67,11 @@ class Repository:
             if existing and existing != commit:
                 raise ledger.IntegrityError("retained object ref conflict")
             if not existing:
-                self.git("update-ref", ref, commit, "0" * len(commit))
+                try:
+                    self.git("update-ref", ref, commit, "0" * len(commit))
+                except subprocess.CalledProcessError:
+                    if self.git("rev-parse", "--verify", ref).decode().strip() != commit:
+                        raise
             refs.append(ref)
         with tempfile.TemporaryDirectory() as directory:
             filename = Path(directory) / "evidence.bundle"
