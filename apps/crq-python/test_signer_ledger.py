@@ -57,6 +57,77 @@ class LedgerSignerTest(unittest.TestCase):
         transport.push(self.base, head)
         return head, transport.push_commit.call_args.args[2]
 
+    def import_value(self, index, **overrides):
+        payload = {
+            "source": {"repo": ledger.REPO, "producer": "fixture", "type": "author-cli", "id": str(index), "authenticated": False},
+            "source_digest": "b" * 64, "result": "unverified", "reason": "fixture",
+            "review_id": None, "duplicate_id": None,
+            "artifacts": [{"sha256": "c" * 64, "location": "fixture"}]}
+        payload.update(overrides)
+        return ledger.event("import-result", "import:" + str(index), "2026-10-31T00:00:00Z", payload)
+
+    def batch_candidate(self, values, *, tamper=None):
+        for index, value in enumerate(values):
+            p = self.repo / ledger.record_path(value)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(ledger.canonical(value))
+            if index == 0 and tamper:
+                tamper(p)
+        self.git("add", "-A"); self.git("commit", "-qm", "Append batch")
+        head = self.git("rev-parse", "HEAD")
+        transport = ledger.GitLedger(self.repo, push_commit=mock.Mock())
+        transport.push(self.base, head)
+        return head, transport.push_commit.call_args.args[2]
+
+    def test_independent_import_batch_and_replay(self):
+        values = [self.import_value(i, result="rejected" if i % 2 else "unverified") for i in range(64)]
+        head, bundle = self.batch_candidate(values)
+        self.run_publication(head, bundle)
+        self.run_publication(head, bundle)
+        self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], head)
+        self.assertEqual(len(ledger.GitLedger(self.repo).read(head)), 64)
+
+    def test_batch_count_aggregate_dependency_and_source_conflict_refused(self):
+        cases = [
+            ([self.import_value(i) for i in range(65)], "count bound"),
+            ([self.import_value(i, reason="x" * 900000) for i in range(5)], "aggregate size"),
+            ([self.import_value(0), self.import_value(1, reason="x" * (1024 * 1024))], "validation bound"),
+            ([self.import_value(0), self.import_value(1, duplicate_id="missing")], "missing review"),
+            ([self.import_value(0), self.import_value(0, reason="conflict")], "source evidence conflict"),
+        ]
+        for values, error in cases:
+            with self.subTest(error=error):
+                self.git("checkout", "--detach", self.base)
+                head, bundle = self.batch_candidate(values)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.run_publication(head, bundle)
+                self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], self.base)
+
+    def test_batch_cannot_include_job_state(self):
+        state = ledger.event("job-state", "fixture", "2026-10-31T00:00:00Z", {
+            "family": "fixture", "subject_id": "fixture", "job_id": "fixture:0",
+            "generation": 0, "attempt": 1, "state": "pending", "failures": 0,
+            "next_eligible_at": None, "reason": "fixture"})
+        head, bundle = self.batch_candidate([self.import_value(0), state])
+        with self.assertRaisesRegex(ValueError, "independent"):
+            self.run_publication(head, bundle)
+        self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], self.base)
+
+    def test_batch_tamper_mode_and_path_refused(self):
+        def wrong_path(p):
+            p.rename(self.repo / "outside.json")
+        def executable(p):
+            p.chmod(0o755)
+        def tamper(p):
+            p.write_bytes(p.read_bytes().replace(b'"reason":"fixture"', b'"reason":"tampered"'))
+        for mutation in (wrong_path, executable, tamper):
+            with self.subTest(mutation=mutation.__name__):
+                self.git("checkout", "--detach", self.base)
+                head, bundle = self.batch_candidate([self.import_value(0), self.import_value(1)], tamper=mutation)
+                with self.assertRaises(ValueError):
+                    self.run_publication(head, bundle)
+                self.assertEqual(self.git("ls-remote", str(self.remote), signer.LEDGER_REF).split()[0], self.base)
+
     def run_publication(self, head, bundle):
         def offline_git(args, **kwargs):
             self.assertNotIn("secret-fixture-token", " ".join(args))

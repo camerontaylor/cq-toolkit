@@ -121,6 +121,43 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaisesRegex(ledger.IntegrityError, "fixing"):
             ledger.event("finding-event", "fix:1", AT, {**p, "action": "fixed", "evidence": {"acknowledgement": "delivered"}})
 
+    def test_batched_reader_checks_all_history_without_cached_trust(self):
+        repo = self.root / "reader"; repo.mkdir()
+        reader = ledger.GitLedger(repo)
+        reader.git("init", "-q")
+        reader.git("config", "user.name", "fixture")
+        reader.git("config", "user.email", "fixture@localhost")
+        reader.git("commit", "--allow-empty", "-qm", "Genesis")
+        values = []
+        for n in range(6):
+            value = ledger.event("job-state", "reader:" + str(n), AT, {
+                "family": "fixture", "subject_id": "fixture", "job_id": "fixture:0",
+                "generation": 0, "attempt": 1, "state": "pending", "failures": 0,
+                "next_eligible_at": None, "reason": "fixture"})
+            values.append(value)
+            filename = repo / ledger.record_path(value)
+            filename.parent.mkdir(parents=True, exist_ok=True)
+            filename.write_bytes(ledger.canonical(value))
+            reader.git("add", "--", ledger.record_path(value))
+            reader.git("commit", "-qm", "Append")
+        head = reader.git("rev-parse", "HEAD").decode().strip()
+        with mock.patch.object(reader, "git", wraps=reader.git) as calls:
+            self.assertEqual(reader.read(head), values)
+            self.assertEqual([c.args[0] for c in calls.call_args_list], ["rev-list", "diff-tree", "cat-file"])
+        # A modification that is later restored must still be rejected.
+        filename.write_bytes(b"{}")
+        reader.git("commit", "-am", "Tamper")
+        filename.write_bytes(ledger.canonical(values[-1]))
+        reader.git("commit", "-am", "Restore")
+        with self.assertRaisesRegex(ledger.IntegrityError, "modifies/deletes"):
+            reader.read("HEAD")
+        reader.git("checkout", "--detach", head)
+        filename.chmod(0o755)
+        reader.git("add", "--", ledger.record_path(values[-1]))
+        reader.git("commit", "-qm", "Mode tamper")
+        with self.assertRaises(ledger.IntegrityError):
+            reader.read("HEAD")
+
     def test_real_git_publication_recovery_and_forward_tamper(self):
         repo = self.root / "repo"; repo.mkdir()
         def git(*args, **kwargs):
