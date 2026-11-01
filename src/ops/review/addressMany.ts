@@ -112,7 +112,8 @@ export function makeReviewAddressMany(
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
     const valid = ReviewAddressManyInputSchema.safeParse(input);
     if (!valid.success) return { status: 'failed', error: valid.error.message };
-    const gh = deps.gh ?? makeGhRunner({ cwd: input.repoRoot, timeoutMs: 30_000 });
+    const gh =
+      deps.gh ?? makeGhRunner({ cwd: input.repoRoot, unsetEnv: ['GH_REPO'], timeoutMs: 30_000 });
     const facts = async (number: number): Promise<AddressManyPrFacts> => {
       const response = await gh(['api', `repos/${input.repo}/pulls/${number}`]);
       if (response.code !== 0) throw new Error(`cannot read PR #${number}: ${response.stderr}`);
@@ -315,12 +316,11 @@ export function makeReviewAddressMany(
               : await isolateAddressMany(input.repoRoot, candidate.number, { cloneRoot });
             isolatedRoot = root;
             if (!deps.isolate) {
-              const checked = await makeGhRunner({ cwd: root, timeoutMs: 30_000 })([
-                'repo',
-                'view',
-                '--json',
-                'nameWithOwner',
-              ]);
+              const checked = await makeGhRunner({
+                cwd: root,
+                unsetEnv: ['GH_REPO'],
+                timeoutMs: 30_000,
+              })(['repo', 'view', '--json', 'nameWithOwner']);
               if (
                 checked.code !== 0 ||
                 RepositoryMetadata.parse(
