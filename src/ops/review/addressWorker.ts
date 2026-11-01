@@ -68,6 +68,12 @@ export interface AddressPrecondition {
   reason: string;
   finding?: string;
   cleanupError?: string;
+  checkDiagnostics?: {
+    exitCode: number | null;
+    signal: string | null;
+    stdoutTail: string;
+    stderrTail: string;
+  };
 }
 export interface AddressAttempt {
   finding: string;
@@ -142,6 +148,7 @@ class CheckFailure extends Error {
     message: string,
     readonly transient: boolean,
     readonly scoped: boolean,
+    readonly diagnostics?: AddressPrecondition['checkDiagnostics'],
   ) {
     super(message);
   }
@@ -556,10 +563,52 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             let detail: string = result.status;
             if (result.status === 'indeterminate') detail = result.detail;
             else if (result.status === 'failed') detail = result.error;
+            // Scan the full capture before retaining bounded tails: a secret may
+            // straddle the tail boundary. Missing/failed scans suppress output.
+            let safe = false;
+            if (capture) {
+              try {
+                const scans = await scanner([
+                  {
+                    component: 'check-stdout',
+                    path: 'check-output.txt',
+                    unattributed: true,
+                    text: capture.stdout,
+                  },
+                  {
+                    component: 'check-stderr',
+                    path: 'check-output.txt',
+                    unattributed: true,
+                    text: capture.stderr,
+                  },
+                ]);
+                safe =
+                  scans.length === 2 &&
+                  ['check-stdout', 'check-stderr'].every((component) =>
+                    scans.some((row) => row.component === component && row.hits.length === 0),
+                  ) &&
+                  scans.every((row) => row.hits.length === 0);
+              } catch {
+                /* Suppress output when scanning is unavailable. */
+              }
+            }
+            const diagnostics = capture
+              ? {
+                  exitCode: capture.exitCode,
+                  signal: capture.signal ?? null,
+                  stdoutTail: safe
+                    ? capture.stdout.slice(-4096)
+                    : '[output withheld by secret scan]',
+                  stderrTail: safe
+                    ? capture.stderr.slice(-4096)
+                    : '[output withheld by secret scan]',
+                }
+              : undefined;
             throw new CheckFailure(
               `configured check was ${result.status} (${check.adapter}): ${detail.slice(0, 1000)}${transient ? '; transient check exit ' + String(capture?.exitCode) : ''}`,
               transient,
               findingScoped(check),
+              diagnostics,
             );
           }
           results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
@@ -614,6 +663,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       kind: transient ? 'transient' : 'deterministic',
       scope: scoped ? 'finding' : 'leg',
       stage,
+      ...(error instanceof CheckFailure && error.diagnostics
+        ? { checkDiagnostics: error.diagnostics }
+        : {}),
       reason: error instanceof Error ? error.message : String(error),
       ...(scoped && finding ? { finding: finding.id } : {}),
       ...(cleanupError ? { cleanupError } : {}),

@@ -393,6 +393,73 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
       await rm(external, { recursive: true, force: true });
     }
   });
+  test('indeterminate baseline retains bounded child diagnostics', async () => {
+    const f = await fixture(
+      undefined,
+      `console.log('x'.repeat(5000)); console.error('refused selection'); process.exitCode=2;`,
+    );
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
+        exitCode: 2,
+        signal: null,
+        stdoutTail: 'x'.repeat(4095) + '\n',
+        stderrTail: 'refused selection\n',
+      });
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('indeterminate baseline with unavailable secret scan withholds output', async () => {
+    const f = await fixture(undefined, `console.log('private output'); process.exitCode=2;`, {
+      scanner: async () => {
+        throw new Error('scanner unavailable');
+      },
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
+        exitCode: 2,
+        signal: null,
+        stdoutTail: '[output withheld by secret scan]',
+        stderrTail: '[output withheld by secret scan]',
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('indeterminate baseline retains signal after transient retry', async () => {
+    const f = await fixture(undefined, `process.kill(process.pid, 'SIGTERM');`);
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toMatchObject({
+        exitCode: null,
+        signal: 'SIGTERM',
+        stdoutTail: '',
+        stderrTail: '',
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('positive secret scan withholds indeterminate child output', async () => {
+    const f = await fixture(undefined, `console.log('sensitive output'); process.exitCode=2;`, {
+      scanner: async (components) =>
+        components.map((c) => ({
+          component: c.component,
+          hits: [{ ruleId: 'test', lines: [1] }],
+        })),
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+        '[output withheld by secret scan]',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('baseline cleanup failure preserves the original typed cause', async () => {
     const f = await fixture(undefined, 'process.exitCode=1;', {
       gitHook: (args, run) =>

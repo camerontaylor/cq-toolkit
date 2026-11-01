@@ -524,13 +524,13 @@ describe('subprocessRunCheck (real runner over process.execPath, no external bin
   test('captures stdout and a zero exit', async () => {
     await expect(
       subprocessRunCheck({ command: process.execPath, args: ['-e', "console.log('hello')"] }),
-    ).resolves.toEqual({ stdout: 'hello\n', stderr: '', exitCode: 0 });
+    ).resolves.toEqual({ stdout: 'hello\n', stderr: '', exitCode: 0, signal: null });
   });
 
   test('maps a real exit code through', async () => {
     await expect(
       subprocessRunCheck({ command: process.execPath, args: ['-e', 'process.exit(3)'] }),
-    ).resolves.toEqual({ stdout: '', stderr: '', exitCode: 3 });
+    ).resolves.toEqual({ stdout: '', stderr: '', exitCode: 3, signal: null });
   });
 
   test('a check past timeoutMs resolves quickly with exitCode null (SIGKILL, never clean)', async () => {
@@ -540,6 +540,7 @@ describe('subprocessRunCheck (real runner over process.execPath, no external bin
       timeoutMs: 300,
     });
     expect(result.exitCode).toBeNull();
+    expect(result.signal).toBe('SIGKILL');
   });
 
   test('a spawn failure yields exitCode null, not a rejection', async () => {

@@ -285,6 +285,8 @@ export interface ScanComponentInput {
   component: string;
   text: string;
   path: string;
+  /** Output without source provenance must apply every path-scoped rule. */
+  unattributed?: boolean;
 }
 
 /**
@@ -298,6 +300,7 @@ export function scanText(
   text: string,
   rules: readonly DenylistRule[],
   path: string | undefined,
+  unattributed = false,
 ): DenylistHit[] {
   const lines = text.split('\n');
   const hits: DenylistHit[] = [];
@@ -312,7 +315,8 @@ export function scanText(
         `denylist: rule '${rule.id}' does not compile — ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    if (pathRe !== undefined && (path === undefined || !pathRe.test(path))) continue;
+    if (!unattributed && pathRe !== undefined && (path === undefined || !pathRe.test(path)))
+      continue;
     const matched: number[] = [];
     for (const [index, line] of lines.entries()) {
       if (re.test(line)) matched.push(index + 1);
@@ -327,9 +331,9 @@ export function scanComponents(
   components: readonly ScanComponentInput[],
   rules: readonly DenylistRule[],
 ): ComponentScan[] {
-  return components.map(({ component, text, path }) => ({
+  return components.map(({ component, text, path, unattributed }) => ({
     component,
-    hits: scanText(text, rules, path),
+    hits: scanText(text, rules, path, unattributed),
   }));
 }
 

@@ -37,3 +37,23 @@ caller wanting bounded tests must supply explicit files via relatedArgs.
 The format, typed-lint and bounded-test adapters are verification-only: fix.run
 excludes them as sources. They do not implement fix.run's static clustering or
 its related-test discovery contract; they still gate review.address candidates.
+
+Issue #767 was reproduced at PR #681 head `4dc7d5c9` in a fresh local clone
+with a detached baseline worktree. The baseline runs
+`node scripts/check-related-tests.mjs src/ops/review/address.ts` from that
+worktree root, inheriting the check runner environment. At that revision the
+related mapping selected 22 files and threw before spawning pnpm:
+`related test selection exceeds cap 10: 22 files`. Observed child exit was 2,
+signal null, stderr empty, stdout the single terminal refused line. Thus
+`INIT_CWD` and `CQ_TEST_NARROW_REPORT` (set only for the pnpm child) played no
+part in this refusal. The historical bulk capture is unavailable; this is a
+reproduction, not a recovered raw exit. The two-file standalone test bypassed
+this selection. Commit `c9e3f364` already removed the cap on main.
+
+Configured baseline check refusals retain `checkDiagnostics` in their typed
+preconditions: child exit code, termination signal, and the last 4096 characters
+of each output stream. The full streams are secret-scanned before slicing;
+positive, incomplete or unavailable scans withhold both tails. Output has no
+source provenance, so every path-scoped repository rule applies; catch-all
+protected-path rules therefore withhold nonempty tails. No environment
+values are recorded.
