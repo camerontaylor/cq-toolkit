@@ -25,6 +25,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "maximum": 9007199254740991,
       "type": "integer"
     },
+    "expectedHead": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
     "journalDir": {
       "minLength": 1,
       "type": "string"

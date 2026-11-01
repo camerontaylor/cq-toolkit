@@ -25,15 +25,29 @@ The executor pages through the search results and checks the reported total,
 repository identities, duplicate numbers and incomplete-results flag. Truncation
 (including GitHub's 1,000-result ceiling), failed pages or changing totals refuse
 the run with `needs-human` before any leg starts. Search is not a transactional
-snapshot; every admitted head and its eligibility are revalidated before dispatch.
+snapshot; PR facts reads are capped at eight, and a failed read refuses the run.
+Every admitted head and its eligibility are revalidated after isolation and
+enrollment, immediately before dispatch. The fetched PR head is then checked
+against the admitted head inside the address loop before any action or worker.
 
 `--concurrency=3` is the default. Each production leg uses an independent local
-clone with a separate Git common directory, preserving the address ownership
-lock. Linked worktrees alone cannot provide this isolation. Clones under the
-system temporary directory (`cq-address-many-<PR>-*`) are retained with their
-reports and unpublished work for inspection. Dependencies link to the caller's
+clone with a separate Git common directory. Each checkout retains its ownership
+lock; plain and bulk calls additionally share a per-PR lock under the caller's
+common directory, preventing overlapping writers to that PR. Linked worktrees
+alone cannot provide concurrent checkout isolation. Durable dispatch receipts,
+bookkeeping, pending re-requests and run journals stay under the caller's common
+directory across bulk invocations.
+
+Clones default to `<caller-common-dir>/cq-address-many-clones`; `--cloneRoot`
+sets another disk location. Clone setup failures remove their partial directory.
+Successful legs with no fixes remove their clone after the report is written;
+legs with fixes or non-success results retain it for inspection and recovery. Dependencies link to the caller's
 installed packages; the address engine still creates private candidate metadata.
 The clone's origin points to the caller's origin for fetching and publication.
+Its remote target ref is freshly fetched, and its resolved GitHub repository
+must match `repo` before dispatch. The caller’s effective Git author and
+committer identities are copied into the clone, including repository-local
+identity settings.
 Dirty caller files are not copied; use a committed configuration.
 
 Each admitted PR reserves `tokensPerPr` from the shared `maxTokens` allocation.
@@ -50,7 +64,9 @@ uses the existing `review.enqueue` input (`requestId` and deferred-author
 are accepted. Queue configuration uses `CQ_QUEUE_SSH_ALIAS`. Missing capability,
 rejection or transport failure records `unavailable` on that row and the address
 leg continues. Enrollment never establishes fixing or review completion. Rows
-without a request remain `not-requested`. No inline vendor review is started.
+without a request remain `not-requested`. Duplicate and out-of-selection
+enrollment rows are refused. A requested row that cannot dispatch records
+`unavailable` rather than `not-requested`. No inline vendor review is started.
 
 A head or eligibility change before dispatch records `needs-human` and returns
 the unused reservation. Live acceptance remains a separate post-merge step.

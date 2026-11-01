@@ -536,6 +536,10 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
   .object({
     repoRoot: z.string().min(1),
     source: z.string().regex(/^(local|pr:[1-9]\d*)$/),
+    expectedHead: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .exactOptional(),
     record: z.string().min(1).exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: z.string().min(1).exactOptional(),
@@ -556,6 +560,7 @@ export const ReviewAddressManyInputSchema = z
     pulls: z.array(z.number().int().positive()).min(1).exactOptional(),
     query: z.string().min(1).exactOptional(),
     concurrency: z.number().int().positive().exactOptional(),
+    cloneRoot: z.string().min(1).exactOptional(),
     enrollments: z
       .array(z.object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema }))
       .exactOptional(),
@@ -570,6 +575,14 @@ export const ReviewAddressManyInputSchema = z
   .refine(
     (i) => (i.pulls !== undefined) !== (i.query !== undefined),
     'Provide pulls or query exclusively',
+  )
+  .refine(
+    (i) => new Set(i.enrollments?.map((r) => r.number)).size === (i.enrollments?.length ?? 0),
+    'Duplicate enrollment rows',
+  )
+  .refine(
+    (i) => !i.pulls || !i.enrollments?.some((r) => !i.pulls!.includes(r.number)),
+    'Enrollment outside selection',
   );
 
 export const registry: OpRegistryEntry[] = [

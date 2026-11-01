@@ -1,11 +1,10 @@
 import { z } from 'zod';
-import { mkdtemp, symlink, access, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdtemp, symlink, access, readFile, mkdir, rm, realpath } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { makeQueueOps } from './queue.js';
 import type { QueueEnqueueInput } from './internal/queueProtocol.js';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { ReviewAddressManyInputSchema } from './registry.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -44,6 +43,7 @@ export interface ReviewAddressManyInput {
   pulls?: number[];
   query?: string;
   concurrency?: number;
+  cloneRoot?: string;
   enrollments?: Array<{ number: number; request: QueueEnqueueInput }>;
   owner: string;
   maxTokens: number;
@@ -56,28 +56,55 @@ export type ReviewAddressManyResult = OpResult<AddressManyAggregate> & {
   report?: AddressManyAggregate;
 };
 
-/** Each production leg has its own Git common directory; the ownership lock stays intact. */
-export async function isolateAddressMany(repoRoot: string, number: number): Promise<string> {
+/** Independent object store and common directory; caller receipts remain durable. */
+export async function isolateAddressMany(
+  repoRoot: string,
+  number: number,
+  options: { cloneRoot: string; target?: string },
+): Promise<string> {
   const git = promisify(execFile);
-  const parent = await mkdtemp(resolve(tmpdir(), `cq-address-many-${number}-`));
+  await mkdir(options.cloneRoot, { recursive: true });
+  const parent = await mkdtemp(resolve(options.cloneRoot, `pr-${number}-`));
   const root = resolve(parent, 'repo');
-  const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
-  await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
-  await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
-  // Dependencies are read-only inputs to address's private candidate copies.
-  const modules = resolve(repoRoot, 'node_modules');
   try {
-    await access(modules);
-  } catch {
+    const origin = await git('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']);
+    await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
+    await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
+    for (const role of ['author', 'committer']) {
+      const ident = (
+        await git('git', ['-C', repoRoot, 'var', `GIT_${role.toUpperCase()}_IDENT`])
+      ).stdout.trim();
+      const parsed = /^(.*) <([^<>]+)> [0-9]+ [+-][0-9]{4}$/.exec(ident);
+      if (!parsed) throw new Error(`Cannot resolve caller ${role} identity`);
+      await git('git', ['-C', root, 'config', `${role}.name`, parsed[1]!]);
+      await git('git', ['-C', root, 'config', `${role}.email`, parsed[2]!]);
+    }
+    const target = options.target ?? 'main';
+    await git('git', [
+      '-C',
+      root,
+      'fetch',
+      'origin',
+      `+refs/heads/${target}:refs/remotes/origin/${target}`,
+    ]);
+    const modules = resolve(repoRoot, 'node_modules');
+    try {
+      await access(modules);
+    } catch {
+      return root;
+    }
+    await symlink(modules, resolve(root, 'node_modules'), 'dir');
     return root;
+  } catch (error) {
+    await rm(parent, { recursive: true, force: true });
+    throw error;
   }
-  await symlink(modules, resolve(root, 'node_modules'), 'dir');
-  return root;
 }
 export function makeReviewAddressMany(
   deps: {
     gh?: GhFn;
     isolate?: typeof isolateAddressMany;
+    coordinationRoot?: string;
     enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
   } = {},
@@ -170,14 +197,46 @@ export function makeReviewAddressMany(
           return { status: 'needs-human', reason: `PR discovery failed: ${String(error)}` };
         }
       }
+      if (input.enrollments?.some((row) => !numbers.includes(row.number)))
+        return { status: 'needs-human', reason: 'Enrollment outside selection' };
+      const listed: AddressManyPrFacts[] = [];
+      let cursor = 0;
+      const reads = await Promise.allSettled(
+        Array.from({ length: Math.min(8, numbers.length) }, async () => {
+          while (cursor < numbers.length) listed.push(await facts(numbers[cursor++]!));
+        }),
+      );
+      if (reads.some((r) => r.status === 'rejected'))
+        return { status: 'needs-human', reason: 'PR facts enumeration failed; no legs dispatched' };
       const selection = selectAddressMany(
-        { repo: input.repo, complete: true, pulls: await Promise.all(numbers.map(facts)) },
+        { repo: input.repo, complete: true, pulls: listed },
         { repo: input.repo, owner: input.owner },
       );
       if (!selection.ok)
         return { status: 'needs-human', reason: JSON.stringify(selection.refusal) };
+      if (
+        input.enrollments?.some(
+          (row) => !selection.candidates.some((candidate) => candidate.number === row.number),
+        )
+      )
+        return { status: 'needs-human', reason: 'Enrollment PR is not eligible' };
       if (!selection.candidates.length)
         return { status: 'needs-human', reason: 'No eligible PRs in selection' };
+      const git = promisify(execFile);
+      const coordinationRoot =
+        deps.coordinationRoot ??
+        (await realpath(
+          (
+            await git('git', [
+              '-C',
+              input.repoRoot,
+              'rev-parse',
+              '--path-format=absolute',
+              '--git-common-dir',
+            ])
+          ).stdout.trim(),
+        ));
+      const cloneRoot = input.cloneRoot ?? resolve(coordinationRoot, 'cq-address-many-clones');
       let address = deps.address;
       if (!address) {
         const parsed = parseCqConfig(
@@ -188,11 +247,16 @@ export function makeReviewAddressMany(
         const config = parsed.config;
         // Bulk fixes use agent review and existing threads; vendor debt is advisory.
         config.review = { ...config.review, reviewers: ['agent'] };
-        address = makeReviewAddress({ config });
+        address = makeReviewAddress({ config, coordinationRoot });
       }
       let budget = initialAddressManyBudget({ limitTokens: input.maxTokens });
       const outcomes: AddressManyOutcomeInput[] = [];
       const pending = [...selection.candidates];
+      const faults: string[] = [];
+      const requestedEnrollment = (number: number): AddressManyEnrollment =>
+        input.enrollments?.some((r) => r.number === number)
+          ? { state: 'unavailable', reason: 'Requested but leg not dispatched' }
+          : { state: 'not-requested' };
       const worker = async () => {
         while (pending.length) {
           const candidate = pending.shift()!;
@@ -212,37 +276,16 @@ export function makeReviewAddressMany(
               number: candidate.number,
               headOid: candidate.headOid,
               notAdmitted: 'budget',
+              enrollment: requestedEnrollment(candidate.number),
             });
             continue;
           }
           budget = admission.state;
           let result: ReviewAddressResult | undefined;
           let dispatched = false;
-          let enrollment: AddressManyEnrollment = { state: 'not-requested' };
+          let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
+          let isolatedRoot: string | undefined;
           try {
-            const current = await facts(candidate.number);
-            const revalidated = selectAddressMany(
-              { repo: input.repo, complete: true, pulls: [current] },
-              { repo: input.repo, owner: input.owner },
-            );
-            if (
-              !revalidated.ok ||
-              !revalidated.candidates.length ||
-              current.headOid !== candidate.headOid ||
-              current.headRepository !== candidate.headRepository ||
-              current.headRefName !== candidate.headRefName
-            ) {
-              result = {
-                status: 'needs-human',
-                reason: 'PR eligibility or head changed before dispatch',
-              };
-              outcomes.push({ number: candidate.number, headOid: candidate.headOid, result });
-              budget = settleAddressMany(budget, {
-                ...identity,
-                usage: { kind: 'known', tokens: 0 },
-              }).state;
-              continue;
-            }
             const request = input.enrollments?.find(
               (row) => row.number === candidate.number,
             )?.request;
@@ -268,17 +311,58 @@ export function makeReviewAddressMany(
               }
             }
             const root = deps.isolate
-              ? await deps.isolate(input.repoRoot, candidate.number)
-              : await isolateAddressMany(input.repoRoot, candidate.number);
-            dispatched = true;
-            result = await address({
-              repoRoot: root,
-              source: `pr:${candidate.number}`,
-              maxTokens: input.tokensPerPr,
-              ...(input.rounds === undefined ? {} : { rounds: input.rounds }),
-              ...(input.wallMs === undefined ? {} : { wallMs: input.wallMs }),
-              ...(input.push === undefined ? {} : { push: input.push }),
-            });
+              ? await deps.isolate(input.repoRoot, candidate.number, { cloneRoot })
+              : await isolateAddressMany(input.repoRoot, candidate.number, { cloneRoot });
+            isolatedRoot = root;
+            if (!deps.isolate) {
+              const checked = await makeGhRunner({ cwd: root, timeoutMs: 30_000 })([
+                'repo',
+                'view',
+                '--json',
+                'nameWithOwner',
+              ]);
+              if (
+                checked.code !== 0 ||
+                RepositoryMetadata.parse(
+                  JSON.parse(checked.stdout) as unknown,
+                ).nameWithOwner.toLowerCase() !== input.repo.toLowerCase()
+              )
+                throw new Error('Isolated repository does not match requested repo');
+            }
+            const current = await facts(candidate.number);
+            const revalidated = selectAddressMany(
+              { repo: input.repo, complete: true, pulls: [current] },
+              { repo: input.repo, owner: input.owner },
+            );
+            if (
+              !revalidated.ok ||
+              !revalidated.candidates.length ||
+              current.headOid !== candidate.headOid ||
+              current.headRepository !== candidate.headRepository ||
+              current.headRefName !== candidate.headRefName
+            ) {
+              result = {
+                status: 'needs-human',
+                reason: 'PR eligibility or head changed before dispatch',
+              };
+            } else {
+              dispatched = true;
+              result = await address({
+                repoRoot: root,
+                source: `pr:${candidate.number}`,
+                expectedHead: candidate.headOid,
+                maxTokens: input.tokensPerPr,
+                ...(input.rounds === undefined ? {} : { rounds: input.rounds }),
+                ...(input.wallMs === undefined ? {} : { wallMs: input.wallMs }),
+                ...(input.push === undefined ? {} : { push: input.push }),
+                journalDir: resolve(
+                  coordinationRoot,
+                  'cq-address-many-reports',
+                  root.split('/').at(-2)!,
+                  String(candidate.number),
+                ),
+              });
+            }
             outcomes.push({
               number: candidate.number,
               headOid: candidate.headOid,
@@ -307,9 +391,23 @@ export function makeReviewAddressMany(
               ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
               : settleAddressMany(budget, { ...identity, usage: { kind: 'known', tokens: 0 } });
           budget = settled.state;
+          if (settled.kind === 'refused')
+            faults.push(`PR #${candidate.number} settlement refused: ${JSON.stringify(settled)}`);
+          if (
+            isolatedRoot &&
+            !deps.isolate &&
+            result?.status === 'ok' &&
+            result.value.fixes.length === 0
+          ) {
+            try {
+              await rm(dirname(isolatedRoot), { recursive: true, force: true });
+            } catch (error) {
+              faults.push(`PR #${candidate.number} cleanup failed: ${String(error)}`);
+            }
+          }
         }
       };
-      await Promise.all(
+      const workers = await Promise.allSettled(
         Array.from(
           {
             length: Math.min(
@@ -320,6 +418,17 @@ export function makeReviewAddressMany(
           worker,
         ),
       );
+      for (const item of workers)
+        if (item.status === 'rejected') faults.push(`Worker rejected: ${String(item.reason)}`);
+      for (const candidate of selection.candidates) {
+        if (!outcomes.some((row) => row.number === candidate.number))
+          outcomes.push({
+            number: candidate.number,
+            headOid: candidate.headOid,
+            exception: 'Worker failed before producing outcome',
+            enrollment: requestedEnrollment(candidate.number),
+          });
+      }
       const rolled = aggregateAddressMany({
         repo: input.repo,
         budget,
@@ -329,8 +438,12 @@ export function makeReviewAddressMany(
       if (!rolled.ok) return { status: 'failed', error: JSON.stringify(rolled.refusal) };
       const report = {
         ...rolled.aggregate,
+        ...(faults.length && !['failed', 'indeterminate'].includes(rolled.aggregate.status)
+          ? { status: 'needs-human' as const }
+          : {}),
         reasons: [
           ...rolled.aggregate.reasons,
+          ...faults,
           ...rolled.aggregate.rows
             .filter((row) => row.status !== 'settled-ok')
             .map((row) => {

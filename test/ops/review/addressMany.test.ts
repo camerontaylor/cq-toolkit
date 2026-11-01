@@ -54,7 +54,12 @@ test('registry exposes strict bulk schema for generic CLI dispatch', async () =>
 
 test('addresses two independently attributed heads and preserves reports', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
-  const result = await makeReviewAddressMany({ isolate: async (root) => root, gh, address })(input);
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
   expect(result.status).toBe('ok');
   if (result.status !== 'ok') throw new Error('expected success');
   expect(result.value.rows.map((row) => row.scope.number)).toEqual([1, 2]);
@@ -69,7 +74,12 @@ test('known failed leg does not discard a successful sibling', async () => {
       ? { status: 'failed' as const, error: 'verification failed', report: report() }
       : { status: 'ok' as const, value: report() },
   );
-  const result = await makeReviewAddressMany({ isolate: async (root) => root, gh, address })(input);
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
   expect(result.status).toBe('failed');
   expect(result.report?.rows).toHaveLength(2);
   expect(address).toHaveBeenCalledTimes(2);
@@ -79,7 +89,12 @@ test('unknown usage stops admission and retains held allocation', async () => {
   const address = vi.fn(async () => {
     throw new Error('worker lost');
   });
-  const result = await makeReviewAddressMany({ isolate: async (root) => root, gh, address })(input);
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
   expect(address).toHaveBeenCalledTimes(1);
   expect(result.report?.accounting.stop).toBe('unknown-usage');
   expect(result.report?.rows[1]?.status).toBe('not-admitted');
@@ -100,6 +115,7 @@ test('changed head before dispatch refuses and never invokes the address engine'
   });
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
     isolate: async (root) => root,
     gh: changingGh,
     address,
@@ -117,6 +133,7 @@ test('refuses a repository mismatch without dispatching', async () => {
   });
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
   const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
     isolate: async (root) => root,
     gh: otherGh,
     address,
@@ -127,7 +144,12 @@ test('refuses a repository mismatch without dispatching', async () => {
 
 test('oversized reservation never dispatches either PR', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
-  const result = await makeReviewAddressMany({ isolate: async (root) => root, gh, address })({
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })({
     ...input,
     maxTokens: 10,
   });
@@ -142,7 +164,12 @@ test('unclean summaries retain each PR reason when aggregate accounting is clean
     reason: 'reviewer unavailable',
     report: report(),
   }));
-  const result = await makeReviewAddressMany({ isolate: async (root) => root, gh, address })(input);
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
   expect(result.status).toBe('needs-human');
   if (result.status !== 'needs-human') throw new Error('expected needs-human');
   expect(result.reason).toContain('PR #1: reviewer unavailable');
@@ -167,7 +194,12 @@ test('bounded workers overlap and settle shared allocation without oversubscript
     active--;
     return { status: 'ok' as const, value: report() };
   });
-  const result = await makeReviewAddressMany({ gh, address, isolate: async (root) => root })({
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address,
+    isolate: async (root) => root,
+  })({
     ...input,
     concurrency: 2,
   });
@@ -199,7 +231,11 @@ test.each([true, false])(
           }
         : gh(args);
     const { pulls: _, ...queryInput } = input;
-    const result = await makeReviewAddressMany({ gh: searchGh, address })({
+    const result = await makeReviewAddressMany({
+      coordinationRoot: '/unused-test-coordination',
+      gh: searchGh,
+      address,
+    })({
       ...queryInput,
       query: 'label:fix',
     });
@@ -230,6 +266,7 @@ test('complete query dispatches eligible PRs', async () => {
       : gh(args);
   const { pulls: _, ...queryInput } = input;
   const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
     gh: searchGh,
     address,
     isolate: async (root) => root,
@@ -244,6 +281,7 @@ test('enrollment transport failure remains advisory on the attributed row', asyn
     throw new Error('transport unavailable');
   });
   const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
     gh,
     address,
     enqueue,
@@ -280,7 +318,12 @@ test('enrollment transport failure remains advisory on the attributed row', asyn
 
 test('temporary sibling reservations defer candidates until known usage releases allocation', async () => {
   const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
-  const result = await makeReviewAddressMany({ gh, address, isolate: async (root) => root })({
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address,
+    isolate: async (root) => root,
+  })({
     ...input,
     pulls: [1, 2, 3, 4],
     concurrency: 3,
@@ -321,6 +364,7 @@ test('query walks every page before dispatching', async () => {
   };
   const { pulls: _, ...queryInput } = input;
   const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
     gh: pagedGh,
     address,
     isolate: async (root) => root,
@@ -328,4 +372,168 @@ test('query walks every page before dispatching', async () => {
   expect(pages).toEqual([1, 2]);
   expect(result.status).toBe('ok');
   expect(address).toHaveBeenCalledTimes(1);
+});
+
+const enrollmentRequest = {
+  requestId: 'm4-test',
+  binding: {
+    kind: 'deferred-author' as const,
+    repo: input.repo,
+    head,
+    producer: 'm4',
+    target: 'main',
+    targetSelector: 'promoted-main' as const,
+  },
+};
+test('duplicate and out-of-selection enrollments are refused', async () => {
+  expect(
+    ReviewAddressManyInputSchema.safeParse({
+      ...input,
+      enrollments: [1, 1].map((number) => ({ number, request: enrollmentRequest })),
+    }).success,
+  ).toBe(false);
+  expect(
+    ReviewAddressManyInputSchema.safeParse({
+      ...input,
+      enrollments: [{ number: 3, request: enrollmentRequest }],
+    }).success,
+  ).toBe(false);
+});
+
+test('budget refusal retains the advisory request', async () => {
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address: vi.fn(),
+  })({ ...input, maxTokens: 1, enrollments: [{ number: 1, request: enrollmentRequest }] });
+  expect(result.report?.rows[0]?.enrollment.state).toBe('unavailable');
+});
+
+test.each(['cap', 'changing-total', 'foreign', 'duplicate', 'exit', 'facts'])(
+  'discovery refuses %s before dispatch',
+  async (mode) => {
+    const address = vi.fn();
+    let page = 0;
+    const queryGh = async (args: string[]) => {
+      if (args[0] === 'repo') return gh(args);
+      if (!args.includes('search/issues'))
+        return { code: 1, stderr: 'facts unavailable', stdout: '' };
+      page++;
+      const total =
+        mode === 'cap'
+          ? 1001
+          : mode === 'facts'
+            ? 1
+            : mode === 'changing-total' && page === 2
+              ? 102
+              : 101;
+      const count = mode === 'facts' || page === 2 ? 1 : 100;
+      return {
+        code: mode === 'exit' ? 1 : 0,
+        stderr: '',
+        stdout: JSON.stringify({
+          total_count: total,
+          incomplete_results: false,
+          items: Array.from({ length: count }, (_, i) => ({
+            number: mode === 'duplicate' && page === 2 ? 1 : (page - 1) * 100 + i + 1,
+            repository_url: `https://api.github.com/repos/${mode === 'foreign' ? 'other/repo' : input.repo}`,
+            pull_request: { url: 'url' },
+          })),
+        }),
+      };
+    };
+    const { pulls: _, ...rest } = input;
+    const result = await makeReviewAddressMany({
+      coordinationRoot: '/unused-test-coordination',
+      gh: queryGh,
+      address,
+    })({ ...rest, query: 'is:open' });
+    expect(result.status).toBe('needs-human');
+    expect(address).not.toHaveBeenCalled();
+  },
+);
+
+test('facts reads are bounded', async () => {
+  let active = 0;
+  let peak = 0;
+  const boundedGh = async (args: string[]) => {
+    if (args[0] === 'repo') return gh(args);
+    peak = Math.max(peak, ++active);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    const result = await gh(args);
+    active--;
+    return result;
+  };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh: boundedGh,
+    address,
+    isolate: async (root) => root,
+  })({ ...input, pulls: Array.from({ length: 20 }, (_, i) => i + 1), maxTokens: 1000 });
+  expect(peak).toBeLessThanOrEqual(8);
+  expect(address).toHaveBeenCalledTimes(20);
+});
+
+test('head movement during clone is refused after isolation', async () => {
+  let moved = false;
+  const changingGh = async (args: string[]) => {
+    const result = await gh(args);
+    if (args[0] !== 'repo' && moved)
+      result.stdout = JSON.stringify({
+        ...metadata(1),
+        head: { ...metadata(1).head, sha: 'b'.repeat(40) },
+      });
+    return result;
+  };
+  const address = vi.fn();
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh: changingGh,
+    address,
+    isolate: async (root) => {
+      moved = true;
+      return root;
+    },
+  })({ ...input, pulls: [1] });
+  expect(result.status).toBe('needs-human');
+  expect(address).not.toHaveBeenCalled();
+});
+
+test('refused usage settlement retains sibling reports and names the accounting fault', async () => {
+  const address = vi.fn(async () => ({
+    status: 'ok' as const,
+    value: {
+      ...report(),
+      usage: { input: Number.MAX_SAFE_INTEGER, output: 1, cacheRead: 0, cacheWrite: 0 },
+    },
+  }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address,
+    isolate: async (root) => root,
+  })({ ...input, concurrency: 2 });
+  expect(result.status).toBe('needs-human');
+  expect(result.report?.rows).toHaveLength(2);
+  expect(result.report?.reasons.join(';')).toContain('settlement refused');
+});
+
+test('a throwing settlement waits for siblings and preserves their individual results', async () => {
+  const address = vi.fn(async () => ({
+    status: 'ok' as const,
+    value: {
+      ...report(),
+      usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address,
+    isolate: async (root) => root,
+  })({ ...input, concurrency: 2 });
+  expect(result.report?.rows).toHaveLength(2);
+  expect(result.report?.rows.every((row) => row.result?.status === 'ok')).toBe(true);
+  expect(result.report?.reasons.join(';')).toContain('Worker rejected');
 });

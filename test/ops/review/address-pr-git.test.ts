@@ -525,6 +525,7 @@ test.each([
         );
       };
       const result = await makeReviewAddress({
+        ...(reuse ? { coordinationRoot: join(journal, 'shared-state') } : {}),
         gh,
         drivers,
         git,
@@ -775,8 +776,8 @@ test.each([
           )
           .digest('hex');
         const receiptPath = join(
-          repo.root,
-          '.git/cq-review-address',
+          journal,
+          'shared-state/cq-review-address',
           namespace,
           'bookkeeping.json',
         );
@@ -843,7 +844,12 @@ test.each([
         if (mode === 'publish-reuse-alias') await symlink(repo.root, callerAlias, 'dir');
         reuseRound = true;
         // A fresh default invocation must discover and reuse the same no-ignore checkout.
-        const second = await makeReviewAddress({ gh, git, drivers })({
+        const second = await makeReviewAddress({
+          gh,
+          git,
+          drivers,
+          coordinationRoot: join(journal, 'shared-state'),
+        })({
           repoRoot: mode === 'publish-reuse-alias' ? callerAlias : repo.root,
           source: 'pr:7',
           rounds: 1,

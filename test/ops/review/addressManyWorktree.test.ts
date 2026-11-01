@@ -1,4 +1,4 @@
-import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test } from 'vitest';
 import { isolateAddressMany } from '../../../src/ops/review/addressMany.js';
@@ -150,8 +150,14 @@ test('bulk clone isolation gives sibling legs independent common directories and
   const repo = await makeTestRepo();
   try {
     const roots = await Promise.all([
-      isolateAddressMany(repo.root, 7),
-      isolateAddressMany(repo.root, 9),
+      isolateAddressMany(repo.root, 7, {
+        cloneRoot: join(dirname(repo.root), 'clones'),
+        target: 'merge-queue',
+      }),
+      isolateAddressMany(repo.root, 9, {
+        cloneRoot: join(dirname(repo.root), 'clones'),
+        target: 'merge-queue',
+      }),
     ]);
     const common = roots.map((root) =>
       repo.git('-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
@@ -164,6 +170,55 @@ test('bulk clone isolation gives sibling legs independent common directories and
       expect(repo.git('-C', root, 'remote', 'get-url', 'origin')).toBe(
         repo.git('remote', 'get-url', 'origin'),
       );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('bulk clones refresh the remote target even when the caller local main is stale', async () => {
+  const repo = await makeTestRepo();
+  try {
+    const old = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const current = repo.git('rev-parse', 'HEAD').trim();
+    repo.git('branch', '-f', 'main', old);
+    repo.git('push', 'origin', `${current}:refs/heads/main`);
+    const root = await isolateAddressMany(repo.root, 7, {
+      cloneRoot: join(dirname(repo.root), 'clones'),
+    });
+    expect(repo.git('-C', root, 'rev-parse', 'origin/main').trim()).toBe(current);
+    expect(repo.git('rev-parse', 'main').trim()).toBe(old);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('clone retains effective author and committer identity configured only in the caller', async () => {
+  const repo = await makeTestRepo();
+  try {
+    repo.git('config', 'user.name', 'Repository User');
+    repo.git('config', 'user.email', 'repo@example.invalid');
+    repo.git('config', 'author.name', 'Repository Author');
+    const root = await isolateAddressMany(repo.root, 7, {
+      cloneRoot: join(dirname(repo.root), 'clones'),
+      target: 'merge-queue',
+    });
+    // TestRepo supplies an environment identity; inspect the copied configuration itself.
+    expect(repo.git('-C', root, 'config', 'author.name').trim()).toBe('Repository Author');
+    expect(repo.git('-C', root, 'config', 'author.email').trim()).toBe('repo@example.invalid');
+    expect(repo.git('-C', root, 'config', 'committer.name').trim()).toBe('Repository User');
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('failed isolation removes its partial clone directory', async () => {
+  const repo = await makeTestRepo();
+  try {
+    const cloneRoot = join(dirname(repo.root), 'clones');
+    await expect(
+      isolateAddressMany(repo.root, 7, { cloneRoot, target: 'missing-target' }),
+    ).rejects.toThrow();
+    expect(await readdir(cloneRoot)).toEqual([]);
   } finally {
     await repo.cleanup();
   }
