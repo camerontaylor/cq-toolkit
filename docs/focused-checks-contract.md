@@ -83,31 +83,20 @@ obligations with a named owner.
 
 `pnpm test:narrow` (`scripts/test-narrow.mjs`) performs this selection; do not
 make it by hand. `pnpm test:narrow --dry-run` prints it without running it.
-The runner checks its ownership token immediately before each build or test
-spawn; exit 75 means a busy lock or lost ownership, and requires retrying later.
-An owner that dies with `childPending` and no recorded `childPgid` leaves the
-lock busy **indefinitely**, even beyond `MAX_HOLD_MS`: the child cannot be
-identified. The waiter reports: "owner <pid> died between spawning a child and
-recording it; the child cannot be identified, so the lock is kept". To recover
-manually, pause all `test:narrow` callers, read
-`/tmp/cq-toolkit-heavy.lock/owner.json`, and inspect the host process list
-(`ps -axo pid,ppid,pgid,command` on macOS/Linux) for stray runners, builds and
-test workers. Stop any such processes and verify they have exited. **Only
-then** explicitly run `rm -rf /tmp/cq-toolkit-heavy.lock` and resume callers.
-On Windows the directory is `<os.tmpdir()>/cq-toolkit-heavy.lock`; inspect the
-host process list and remove that directory with your shell after the same
-checks. `pnpm test:narrow --help` prints the host's actual lock path.
-
-Every process-group signal (interrupt, timeout, exit cleanup and orphan reclaim)
-requires a live leader at the recorded pgid whose start time matches
-`childStartedAt` within two seconds. A gone or reused leader makes a still-live
-group unverifiable: it is never signalled, and the lock stays busy until that
-group exits. Waiting is safe.
+The runner re-execs under `nice -n 5`. Before work it reads Linux
+`MemAvailable`; below 2 GB it exits 75 immediately and names the top three
+memory users. Move to another host; there is no lock or waiting loop.
+When systemd user scopes support the requested properties, tests and builds
+run with MemoryMax=3G, MemorySwapMax=0, CPUWeight=50 and OOMScoreAdjust=500.
+Otherwise they run directly. Node uses a 2048 MB heap and Vitest at most two
+workers. Cancellation kills the runner's own child process group.
+Only selected tests referencing `dist/` require a fresh build; other tests
+skip dist preparation. Builds run only when dist is stale.
 
 Live drills also use this runner: export credentials first, then run
 `LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`.
 This drill is classified `integration`; suites classified `live` require
-`--include-live`. Neither class bypasses the host lock or bounded runtime.
+`--include-live`. Both classes retain bounded runtime.
 
 1. Start from the files the diff actually touches: by default the changes
    since the merge-base with `origin/merge-queue` plus the working tree
@@ -121,7 +110,7 @@ This drill is classified `integration`; suites classified `live` require
    reviewed map is `NON_IMPORT_MAP` in `scripts/lib/affected-tests.mjs`.
 4. **Escalate anything you cannot classify.** `test:narrow` refuses (exit 2)
    when a changed file has no mapping, a source file was deleted, the
-   import-graph query failed, or the selection exceeds its file cap. That
+   import-graph query failed. That
    refusal is the escalation trigger: name the files you can justify
    explicitly, or escalate shared interfaces, dependency/tooling and
    cross-cutting config changes to the coordinator with the required check
@@ -236,11 +225,11 @@ are the machinery that makes required CI trustworthy as the sole authority. The
 per-file spawn work and the required-contexts reconciliation are separate slices
 with their own change, their own review and their own records.
 
-Python modules in `apps/crq-python` use this same runner and host lock:
+Python modules in `apps/crq-python` use this same runner:
 `pnpm test:narrow apps/crq-python/test_status_summary.py`. Source modules map
 only to their matching `test_<module>.py`; unmapped changes and discovery-sized
 selections are refused. Named modules run in one `python3 -m unittest`
 invocation, serially with any selected TypeScript tests, under the same total
-10-file cap, nice priority, timeout and process-group cleanup. Local bare
+nice priority, timeout and process-group cleanup. Local bare
 unittest and discovery are prohibited; full Python discovery runs only in CI
 on Python 3.14, the production minor reported by the owner.

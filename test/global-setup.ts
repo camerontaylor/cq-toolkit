@@ -1,3 +1,5 @@
+import type { TestProject } from 'vitest/node';
+import { needsDist } from '../scripts/lib/dist-tests.mjs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { scrubbedBuildEnv } from '../scripts/lib/build-env.mjs';
@@ -95,7 +97,15 @@ function build(): Promise<void> {
  * Vitest runs global setup once per invocation, including watch mode; watch-mode
  * reruns reuse this build and do not rebuild after a source edit.
  */
-export default function globalSetup(): Promise<void> {
+export default async function globalSetup(project: TestProject): Promise<void> {
+  const specs = await project.vitest.getRelevantTestSpecifications();
+  if (
+    !needsDist(
+      specs.map((spec) => spec.moduleId),
+      ROOT,
+    )
+  )
+    return;
   if (distPrepared(process.env)) return Promise.resolve();
   const shared = globalThis as typeof globalThis & { [BUILD_KEY]?: Promise<void> };
   shared[BUILD_KEY] ??= build();

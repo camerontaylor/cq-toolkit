@@ -17,14 +17,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
-  INTERRUPT_GRACE_MS,
-  MAX_FILES,
-  MAX_WAIT_CEILING_S,
   classOf,
-  interruptAction,
   loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
@@ -37,7 +32,6 @@ import {
   runVerdict,
   signalExit,
   summaryLine,
-  spawnLocked,
 } from '../../scripts/lib/test-narrow.mjs';
 
 const options = (argv: string[]) => {
@@ -60,7 +54,6 @@ describe('parseArgs', () => {
       dryRun: false,
       include: [],
       testNamePattern: null,
-      maxWaitS: MAX_WAIT_CEILING_S,
     });
   });
 
@@ -73,7 +66,6 @@ describe('parseArgs', () => {
     expect(options(['--base=origin/main']).base).toBe('origin/main');
     expect(options(['--range', 'a..b', '--list']).dryRun).toBe(true);
     expect(options(['-t', 'name', 'x.test.ts']).testNamePattern).toBe('name');
-    expect(options(['--max-wait=0']).maxWaitS).toBe(0);
     expect(options(['--include-integration', '--include-live']).include).toEqual([
       'integration',
       'live',
@@ -95,8 +87,6 @@ describe('parseArgs', () => {
     expect(refusal(['--base', '--dry-run'])).toBe('--base requires a value, got --dry-run');
     expect(refusal(['--range=--output=x..y'])).toBe('--range requires a value, got --output=x..y');
     expect(refusal(['--base=--fork-point'])).toContain('requires a value');
-    expect(refusal(['--max-wait', String(MAX_WAIT_CEILING_S + 1)])).toContain('0..');
-    expect(refusal(['--max-wait', '1.5'])).toContain('whole seconds');
     expect(refusal(['--range', 'HEAD'])).toContain('<a>..<b>');
   });
 
@@ -181,16 +171,9 @@ describe('planRun', () => {
     });
   });
 
-  it('caps the file count and lists the candidates', () => {
-    const files = Array.from({ length: MAX_FILES + 1 }, (_, i) => `test/f${i}.test.ts`);
-    const plan = planRun({ selection: selection(files), manifest, include: [] });
-    expect(plan).toMatchObject({ ok: false, candidates: files });
-    const atCap = planRun({
-      selection: selection(files.slice(0, MAX_FILES)),
-      manifest,
-      include: [],
-    });
-    expect(atCap.ok).toBe(true);
+  it('accepts more than ten named files', () => {
+    const files = Array.from({ length: 12 }, (_, i) => `test/f${i}.test.ts`);
+    expect(planRun({ selection: selection(files), manifest, include: [] }).ok).toBe(true);
   });
 
   it('plans an empty run for an empty selection (the caller then runs nothing)', () => {
@@ -516,156 +499,6 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
   });
 });
 
-describe('interruptAction', () => {
-  it.each([3_600_000, -3_600_000])(
-    'keeps the runner grace window monotonic across a %i ms wall-clock jump',
-    (wallJump) => {
-      // Exercise the runner's wiring as well as the pure decision: supplying
-      // monotonic values only to interruptAction would miss a Date.now caller.
-      const source = readFileSync(
-        new URL('../../scripts/test-narrow.mjs', import.meta.url),
-        'utf8',
-      );
-      const start = source.indexOf('for (const signal of SIGNALS) {');
-      const end = source.indexOf('// 2. Arguments', start);
-      expect(start).toBeGreaterThan(-1);
-      expect(end).toBeGreaterThan(start);
-      const handlers: Record<string, () => void> = {};
-      const relayedAt: Record<string, number> = {};
-      const events: string[] = [];
-      let monotonic = 5_000;
-      let wall = 1_800_000_000_000;
-      runInNewContext(source.slice(start, end), {
-        SIGNALS: ['SIGINT'],
-        process: { on: (signal: string, handler: () => void) => (handlers[signal] = handler) },
-        performance: { now: () => monotonic },
-        Date: { now: () => wall },
-        interruptAction,
-        child: { pid: 123 },
-        childDone: false,
-        relayedAt,
-        interruptedBy: null,
-        signalChild: (signal: string) => events.push(signal),
-        sweepChild: () => events.push('sweep'),
-        say: () => {},
-        finish: () => {
-          throw new Error('live child must not finish');
-        },
-        signalExit,
-      });
-      handlers.SIGINT!();
-      expect(relayedAt.SIGINT).toBe(5_000);
-      expect(events).toEqual(['SIGINT']);
-      wall += wallJump;
-      monotonic += INTERRUPT_GRACE_MS - 1;
-      handlers.SIGINT!();
-      expect(events).toEqual(['SIGINT']);
-      monotonic += 1;
-      handlers.SIGINT!();
-      expect(events).toEqual(['SIGINT', 'sweep']);
-    },
-  );
-
-  it('relays the first copy of a signal to the child group', () => {
-    expect(interruptAction({ childLive: true, signal: 'SIGINT', relayedAt: {}, now: 5_000 })).toBe(
-      'relay',
-    );
-  });
-
-  it('absorbs the immediate duplicate inside the grace window', () => {
-    // One terminal interrupt reaches the niced runner twice — the terminal
-    // signals the whole foreground group, and the un-niced parent relays —
-    // a few milliseconds apart. That duplicate must never escalate.
-    expect(
-      interruptAction({
-        childLive: true,
-        signal: 'SIGINT',
-        relayedAt: { SIGINT: 5_000 },
-        now: 5_000 + INTERRUPT_GRACE_MS - 1,
-      }),
-    ).toBe('absorb');
-  });
-
-  it('escalates a repeat after the grace window to the group sweep', () => {
-    // The graceful relay went unheeded: a second Ctrl-C escalates instead
-    // of waiting out the run/build timeout (#283).
-    expect(
-      interruptAction({
-        childLive: true,
-        signal: 'SIGINT',
-        relayedAt: { SIGINT: 5_000 },
-        now: 5_000 + INTERRUPT_GRACE_MS,
-      }),
-    ).toBe('escalate');
-  });
-
-  it('grants each signal its own graceful relay', () => {
-    expect(
-      interruptAction({
-        childLive: true,
-        signal: 'SIGTERM',
-        relayedAt: { SIGINT: 5_000 },
-        now: 9_000,
-      }),
-    ).toBe('relay');
-  });
-
-  it('finishes at once when no child group is live', () => {
-    expect(interruptAction({ childLive: false, signal: 'SIGINT', relayedAt: {}, now: 0 })).toBe(
-      'finish',
-    );
-  });
-});
-
-describe('spawnLocked', () => {
-  it.each(['build', 'vitest'])('refuses a %s spawn after ownership was lost', () => {
-    const events: string[] = [];
-    const lock = {
-      annotate: (record: { childPending?: boolean }) => {
-        expect(record).toEqual({ childPending: true });
-        events.push('pending');
-      },
-      stillHeld: () => {
-        events.push('fence');
-        return false;
-      },
-    };
-    try {
-      spawnLocked(lock, () => {
-        events.push('spawn');
-        return { pid: 9 };
-      });
-      throw new Error('expected lock-lost refusal');
-    } catch (error) {
-      expect(error).toMatchObject({ code: 75 });
-    }
-    expect(events).toEqual(['pending', 'fence']);
-  });
-
-  it('records pending before spawning and replaces it with the group identity immediately after', () => {
-    const events: string[] = [];
-    const identity = { childPgid: 9, childStartedAt: '2026-10-08T01:02:03.000Z' };
-    const lock = {
-      annotate: (record: { childPending?: boolean; childPgid?: number | null }) => {
-        events.push(record.childPending ? 'pending' : 'identity');
-        return identity;
-      },
-      stillHeld: () => {
-        events.push('fence');
-        return true;
-      },
-    };
-    const child = { pid: 9 };
-    expect(
-      spawnLocked(lock, () => {
-        events.push('spawn');
-        return child;
-      }),
-    ).toEqual({ child, identity });
-    expect(events).toEqual(['pending', 'fence', 'spawn', 'identity']);
-  });
-});
-
 describe('operator records', () => {
   it('omits the worker-count control from logs while preserving execution arguments', () => {
     const args = ['vitest.mjs', 'run', '--maxWorkers=1', '--no-file-parallelism', 'test/a.test.ts'];
@@ -712,7 +545,6 @@ describe('Python execution outcomes', () => {
     run: { code: 0, signal: null, timedOut: false },
     counts,
     interruptedBy: null,
-    lockPinned: false,
   };
   it('preserves timeout and signal exits even with a valid report', () => {
     expect(
@@ -740,10 +572,6 @@ describe('Python execution outcomes', () => {
       result: 'fail',
       exit: 1,
     });
-    expect(pythonRunVerdict({ ...base, lockPinned: true })).toMatchObject({
-      result: 'error',
-      exit: 1,
-    });
     expect(
       pythonRunVerdict({ ...base, run: { ...base.run, error: new Error('ENOENT') } }),
     ).toMatchObject({ result: 'error', exit: 1 });
@@ -763,7 +591,7 @@ describe('Python narrow selection and evidence', () => {
     expect(selectPython(['apps/crq-python/crq.py'], [a, b]).fallback).toBe(true);
     expect(selectPython([a, b], [a, b]).fallback).toBe(true);
   });
-  it('shares the total file cap across languages', () => {
+  it('accepts named files across languages without a cap', () => {
     const files = Array.from({ length: 10 }, (_, i) => `test/${i}.test.ts`);
     expect(
       planRun({
@@ -771,7 +599,7 @@ describe('Python narrow selection and evidence', () => {
         manifest: {},
         include: [],
       }).ok,
-    ).toBe(false);
+    ).toBe(true);
   });
   it('reads Python 3.14 coloured pass and failure reports', () => {
     expect(readPythonReport('Ran 2 tests in 0.01s\n\n\x1b[32mOK\x1b[0m (skipped=1)\n')).toEqual({

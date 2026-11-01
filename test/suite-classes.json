@@ -157,7 +157,6 @@
   "test/scripts/affected-tests.test.ts": "pure",
   "test/scripts/demo-eval-axes.test.ts": "process",
   "test/scripts/github-settings.test.ts": "process",
-  "test/scripts/heavy-lock.test.ts": "pure",
   "test/scripts/knip.test.ts": "process",
   "test/scripts/oxlint-boundaries.test.ts": "process",
   "test/scripts/ratchet-baseline.test.ts": "process",

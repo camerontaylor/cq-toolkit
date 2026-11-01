@@ -9,7 +9,7 @@
     "scripts/lib/affected-tests.d.mts",
     "scripts/lib/build-env.d.mts",
     "scripts/lib/eval-axes-select.d.mts",
-    "scripts/lib/heavy-lock.d.mts",
+    "scripts/lib/dist-tests.d.mts",
     "scripts/lib/render-templates.d.mts",
     "scripts/lib/test-narrow.d.mts",
     "scripts/lib/related-tests.d.mts",

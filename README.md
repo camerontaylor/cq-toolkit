@@ -179,7 +179,7 @@ coverage deliveries describe only the final attempt.
 
 This repository's root config declares the compiler check as argv.
 Lint is omitted: Oxlint 1.83 has no ESLint-format output; an `oxlint-json` adapter is a follow-up.
-Tests are omitted until a config check can honour the `test:narrow` host-wide lock and file selection.
+Tests are omitted until a config check can honour the `test:narrow` resource preflight and file selection.
 Consequently `cq analyze` / `analyze.run --dir=.`
 here runs the compiler; local development still follows `pnpm test:narrow`
 and the focused-check policy below. The root role choices are experiment configuration,

@@ -65,9 +65,8 @@ const e2eGlob = 'test/e2e/**/*.test.ts';
 export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, '**/dist/**'],
-    // Build once before collection (root-level, so it runs once per
-    // invocation whatever --project selection is made). Skipped when the
-    // caller sets CQ_DIST_PREPARED=1 after making dist fresh itself.
+    // Prepare dist only for selected tests referencing dist/; source-only
+    // selections skip the build. The narrow runner prepares it first.
     globalSetup: ['./test/global-setup.ts'],
     projects: [
       {

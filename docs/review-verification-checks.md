@@ -12,11 +12,10 @@ test files, and unions the existing reviewed `NON_IMPORT_MAP`, including the
 shared adapter owner suite `test/ops/gates/adapters.test.ts`. This deliberately
 bounded mapping does not claim the complete import closure or full-suite coverage;
 the final dev.check and CI still cover broader impact. No mapping is a passing
-advisory stored in the FailureSet; more than the wrapper's ten-file cap is a
-refusal, never a truncated selection.
+advisory stored in the FailureSet. Named selections have no file-count cap.
 
-All execution goes through `pnpm test:narrow`: the host lock, nice priority,
-class gates, cap and refusal rules remain authoritative. The launcher requests
+All execution goes through `pnpm test:narrow`: the memory preflight, optional systemd scope, nice priority,
+class gates and full-suite refusal rules remain authoritative. The launcher requests
 an opt-in machine report with `CQ_TEST_NARROW_REPORT=1`. The adapter accepts only
 a single terminal wrapper pass/fail result and a matching report whose assertion
 statuses and counts agree. The no-map advisory requires the exact zero-file,

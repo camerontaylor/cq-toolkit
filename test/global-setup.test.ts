@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { needsDist } from '../scripts/lib/dist-tests.mjs';
 
 import { distPrepared, scrubbedBuildEnv } from './global-setup.js';
 
@@ -39,6 +43,21 @@ describe('distPrepared', () => {
     expect(distPrepared({})).toBe(false);
     for (const value of ['0', '', 'true', ' 1', '1 ', 'yes']) {
       expect(distPrepared({ CQ_DIST_PREPARED: value })).toBe(false);
+    }
+  });
+});
+
+describe('selected dist dependencies', () => {
+  it('requires dist only when a selected test references it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dist-tests-'));
+    try {
+      writeFileSync(join(root, 'source.test.ts'), "import '../src/index.js';");
+      writeFileSync(join(root, 'built.test.ts'), "import '../dist/index.js';");
+      expect(needsDist(['source.test.ts'], root)).toBe(false);
+      expect(needsDist(['source.test.ts', 'built.test.ts'], root)).toBe(true);
+      expect(needsDist([], root)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

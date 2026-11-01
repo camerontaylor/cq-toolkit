@@ -6,22 +6,16 @@ import { stripVTControlCharacters } from 'node:util';
 // test/scripts/test-narrow.test.ts covers the policy without spawning.
 //
 // The policy, in one place:
-//   - one vitest invocation per call, files serial, under `nice -n 5` and
-//     the host-wide lock (the entry script enforces both);
-//   - at most MAX_FILES test files; a selection that fell back to "every
-//     test" is refused, never truncated;
+//   - named files under nice; full-suite fallback is refused;
 //   - integration and live suites run only when a flag names their class;
 //   - no watch mode, no coverage, no passthrough of arbitrary vitest flags;
 //   - zero selected files means zero runs (a bare `vitest run` would be the
 //     FULL suite, which is CI-only).
 
 import { constants } from 'node:os';
-import { EX_TEMPFAIL, LOCK_PATH } from './heavy-lock.mjs';
 
-export const MAX_FILES = 10;
 export const NICE_INCREMENT = 5;
-export const MAX_WAIT_CEILING_S = 1800;
-/** A narrow run that is still going after this is killed (frees the host lock). */
+/** A narrow run that is still going after this is killed. */
 export const RUN_TIMEOUT_MS = 20 * 60 * 1000;
 export const DEFAULT_BASE = 'origin/merge-queue';
 export const GATED_CLASSES = ['integration', 'live'];
@@ -38,34 +32,25 @@ Selection (pick one):
   --range <a>..<b>           changed files in a commit range (no working tree)
 
 Options:
-  --dry-run, --list          take the lock, print the plan, run nothing
+  --dry-run, --list          print the plan, run nothing
   --include-integration      allow suites classified integration
   --include-live             allow suites classified live
   -t <pattern>               diagnostic only: match full test names; successful
                              runs report result="filtered", never gate evidence
-  --max-wait <seconds>       bound the wait for the host lock (default and
-                             ceiling ${MAX_WAIT_CEILING_S})
   -h, --help                 this text
 
-Refused: --watch, --coverage, --ui and any other vitest flag; more than
-${MAX_FILES} test files; selections that fall back to every test; selections
-that include integration or live suites without their --include flag.
-Exit 75: host lock busy or ownership lost before a child spawn; retry later.
-Manual recovery for a dead owner with an unrecorded pending child:
-  This lock is NEVER auto-reclaimed: the child cannot be identified.
-  Pause all test:narrow callers. Read ${LOCK_PATH}/owner.json and inspect
-  the host process list for stray runners, builds and test workers; stop
-  them and verify they have exited. Only then remove the lock explicitly:
-    rm -rf ${LOCK_PATH}
-  On Windows remove that directory using your shell. Resume callers afterward.
+Refused: watch, coverage, arbitrary vitest flags and full-suite selections.
+Exit 75: MemAvailable below 2 GB; move to another host. No lock or waiting.
+Runs under nice with two workers and a 2 GB Node heap; where supported,
+a systemd user scope caps memory at 3 GB with no swap.
 Live drill (classified integration):
   LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`;
 
 const REFUSED_FLAGS = {
-  '--watch': 'watch mode never terminates and holds the host lock',
-  '-w': 'watch mode never terminates and holds the host lock',
+  '--watch': 'watch mode never terminates',
+  '-w': 'watch mode never terminates',
   '--coverage': 'coverage instruments all of src/ (the coverage ratchet runs in CI)',
-  '--ui': 'the UI server never terminates and holds the host lock',
+  '--ui': 'the UI server never terminates',
 };
 
 /**
@@ -79,7 +64,6 @@ export function parseArgs(argv) {
     dryRun: false,
     include: [],
     testNamePattern: null,
-    maxWaitS: MAX_WAIT_CEILING_S,
   };
   const args = argv[0] === '--' ? argv.slice(1) : [...argv];
   try {
@@ -108,13 +92,7 @@ export function parseArgs(argv) {
       else if (flag === '--base') options.base = value();
       else if (flag === '--range') options.range = value();
       else if (flag === '-t' || flag === '--testNamePattern') options.testNamePattern = value();
-      else if (flag === '--max-wait') {
-        const raw = value();
-        if (!/^\d+$/.test(raw) || Number(raw) > MAX_WAIT_CEILING_S) {
-          throw new Error(`--max-wait takes whole seconds 0..${MAX_WAIT_CEILING_S}, got ${raw}`);
-        }
-        options.maxWaitS = Number(raw);
-      } else if (flag.startsWith('-')) {
+      else if (flag.startsWith('-')) {
         throw new Error(`unknown option ${flag} (vitest flags are not passed through)`);
       } else options.files.push(arg);
       if (inline !== undefined) throw new Error(`${flag} takes no value`);
@@ -153,9 +131,7 @@ export function planRun({ selection, manifest, include }) {
   if (selection.fallback) {
     return {
       ok: false,
-      reason:
-        `selection is unbounded (${selection.reason}); ` +
-        `name at most ${MAX_FILES} test files explicitly`,
+      reason: `selection is unbounded (${selection.reason}); ` + `name test files explicitly`,
       candidates: [],
     };
   }
@@ -181,15 +157,6 @@ export function planRun({ selection, manifest, include }) {
         `gated test files cover the change: ${listed}; pass ${flags.join(' ')} to run them ` +
         `(an opt-in gate, not a refusal — re-run with ${flags.join(' ')})`,
       candidates: [],
-    };
-  }
-  if (run.length > MAX_FILES) {
-    return {
-      ok: false,
-      reason:
-        `${run.length} test files selected, the cap is ${MAX_FILES}; ` +
-        'name the files that cover your change explicitly',
-      candidates: run.map((r) => r.file),
     };
   }
   return { ok: true, run };
@@ -245,13 +212,7 @@ export function readPythonReport(stderr) {
 }
 
 /** Python uses the same cancellation outcomes as Vitest, before report validation. */
-export function pythonRunVerdict({ run, counts, interruptedBy, lockPinned }) {
-  if (lockPinned)
-    return {
-      result: 'error',
-      exit: 1,
-      reason: 'the Python run left processes that could not be safely swept',
-    };
+export function pythonRunVerdict({ run, counts, interruptedBy }) {
   if (run.error)
     return { result: 'error', exit: 1, reason: `cannot start Python: ${run.error.message}` };
   const exit = run.code ?? (run.signal ? signalExit(run.signal) : 1);
@@ -343,39 +304,6 @@ export const signalExit = (signal) => 128 + (constants.signals[signal] ?? 1);
 const EXIT_TIMEOUT = 124;
 
 /**
- * How long a repeat of a terminal signal is still the immediate duplicate:
- * one terminal interrupt reaches the niced runner twice (the terminal
- * signals the whole foreground group, and the un-niced parent relays), a
- * few milliseconds apart. Only a repeat arriving after this window is a
- * human's second Ctrl-C.
- */
-export const INTERRUPT_GRACE_MS = 1_000;
-
-/**
- * The response to one received terminal signal while the runner holds the
- * lock, from the per-signal time its first copy was relayed. The first copy
- * of a signal is relayed to the child group gracefully; a repeat inside the
- * grace window is the parent relay's duplicate and is absorbed. A repeat
- * AFTER the window means the graceful relay went unheeded: it escalates to
- * the group sweep (SIGKILL of the verified identity, bounded wait) instead
- * of waiting out the run/build timeout (#283). With no live child the
- * runner finishes at once.
- * @param {{
- *   childLive: boolean,
- *   signal: string,
- *   relayedAt: Record<string, number | undefined>,
- *   now: number,
- * }} input
- * @returns {'relay' | 'absorb' | 'escalate' | 'finish'}
- */
-export function interruptAction({ childLive, signal, relayedAt, now }) {
-  if (!childLive) return 'finish';
-  const first = relayedAt[signal];
-  if (first === undefined) return 'relay';
-  return now - first >= INTERRUPT_GRACE_MS ? 'escalate' : 'absorb';
-}
-
-/**
  * The verdict on a finished vitest run. A pass must prove itself: a report,
  * every selected file in it, nothing unselected, and in EVERY selected file
  * at least one executed test — skipped and todo tests (all of a file's,
@@ -419,18 +347,4 @@ export function runVerdict({
     };
   }
   return { result: 'pass', exit };
-}
-
-/** Fence each heavy spawn and cover a crash between spawn and child annotation. */
-export function spawnLocked(lock, spawnChild, recordGroup = true) {
-  lock.annotate({ childPending: true });
-  if (!lock.stillHeld()) {
-    throw Object.assign(new Error('host lock ownership lost before child spawn'), {
-      code: EX_TEMPFAIL,
-    });
-  }
-  const child = spawnChild();
-  const identity =
-    recordGroup && child.pid !== undefined ? lock.annotate({ childPgid: child.pid }) : undefined;
-  return { child, identity };
 }
