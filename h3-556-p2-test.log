@@ -1,0 +1,24 @@
+$ node scripts/test-narrow.mjs test/driver/claude-code/sdk-wrapper.test.ts
+heavy-lock: waiting for the host lock /tmp/cq-toolkit-heavy.lock, held by pid 3882825 since 2026-10-27T23:57:14.470Z (cwd /home/ctaylor/repos/worktrees/s7-dogfood-469-n3; test:narrow --include-integration test/plans/review-loop.test.ts test/ops/review/address-pr.test.ts test/ops/review/address.test.ts test/e2e/review/review-address.e2e.test.ts test/ops/dev/check.test.ts test/ops/dev/cycle.test.ts test/ops/dev/registry.test.ts test/cli/registry.test.ts test/scripts/test-narrow.test.ts test/driver/process-inventory.test.ts); waited 0s of at most 1800s
+heavy-lock: waiting for the host lock /tmp/cq-toolkit-heavy.lock, held by pid 3884155 since 2026-10-27T23:58:09.856Z (cwd /tmp/cq-e1-followups-f6f858a2-review; test:narrow --include-integration test/cli/registry.test.ts test/ops/fix/registry.test.ts test/ops/fix/runFix.test.ts test/e2e/fix/fix-run.e2e.test.ts); waited 33s of at most 1800s
+heavy-lock: waiting for the host lock /tmp/cq-toolkit-heavy.lock, held by pid 3884155 since 2026-10-27T23:58:09.856Z (cwd /tmp/cq-e1-followups-f6f858a2-review; test:narrow --include-integration test/cli/registry.test.ts test/ops/fix/registry.test.ts test/ops/fix/runFix.test.ts test/e2e/fix/fix-run.e2e.test.ts); waited 63s of at most 1800s
+heavy-lock: waiting for the host lock /tmp/cq-toolkit-heavy.lock, held by pid 3884155 since 2026-10-27T23:58:09.856Z (cwd /tmp/cq-e1-followups-f6f858a2-review; test:narrow --include-integration test/cli/registry.test.ts test/ops/fix/registry.test.ts test/ops/fix/runFix.test.ts test/e2e/fix/fix-run.e2e.test.ts); waited 93s of at most 1800s
+test:narrow: 1 changed file(s) -> 2 test file(s)
+test:narrow:   process     test/driver/claude-code/sdk-wrapper.test.ts
+test:narrow:   pure        test/driver/process-inventory.test.ts
+test:narrow: exec nice(5) node node_modules/vitest/vitest.mjs run --project pure --project process --no-file-parallelism --reporter=default --reporter=json --outputFile.json=/home/ctaylor/.tmp/cq-test-narrow-uwkzoX/report.json test/driver/claude-code/sdk-wrapper.test.ts test/driver/process-inventory.test.ts
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.0 [39m[90m/home/ctaylor/repos/worktrees/h3-verify[39m
+
+ [32m✓[39m [30m[43m process [49m[39m test/driver/claude-code/sdk-wrapper.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 273[2mms[22m[39m
+ [32m✓[39m [30m[42m pure [49m[39m test/driver/process-inventory.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 175[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m3 passed[39m[22m[90m (3)[39m
+[2m   Start at [22m 10:59:17
+[2m   Duration [22m 1.53s[2m (tests 39%, import 31%, transform 29%, worker 1%)[22m
+
+JSON report written to /home/ctaylor/.tmp/cq-test-narrow-uwkzoX/report.json
+test:narrow: skipping SIGKILL for process group 3901935: gone or leader identity unverified
+test:narrow result="pass" exit=0 files=2 projects="pure,process" tests="3/3" failed=0 skipped=0 wait="98.4s" duration="2.1s" nice=5 load="9.6" uptime="861549s" source="explicit" ran="test/driver/claude-code/sdk-wrapper.test.ts,test/driver/process-inventory.test.ts"
+terminal_exit=0

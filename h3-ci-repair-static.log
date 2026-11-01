@@ -1,0 +1,5 @@
+$ node scripts/ratchet-typecheck.mjs
+ratchet-typecheck: pass — 0 error(s) <= baseline 0 (baselines/typecheck--typecheck-count--7caef1e76077.json)
+Found 0 warnings and 0 errors.
+Finished in 15.6s on 573 files with 81 rules using 6 threads.
+terminal_exit=0

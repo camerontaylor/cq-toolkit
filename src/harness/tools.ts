@@ -141,6 +141,7 @@ import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
+import { stripMetaSchema } from '../shared/json-schema.js';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { buildChildEnv } from '../shared/proc.js';
 import { messageOf } from '../shared/messageOf.js';
@@ -467,6 +468,64 @@ export const AdvertisedToolInputSchemas = {
     })
     .strict(),
 };
+
+/** Model-facing data shared by the SDK, native and stdio MCP adapters. */
+export interface CanonicalToolDescriptor {
+  name: ToolkitToolName;
+  description: string;
+  inputSchema: (typeof AdvertisedToolInputSchemas)[ToolkitToolName];
+  aliases: readonly string[];
+  inputJsonSchema: Record<string, unknown>;
+}
+
+/** The six canonical names and schemas; descriptions retain their build-time cap. */
+export const CANONICAL_TOOL_DESCRIPTORS = {
+  read: {
+    name: 'read',
+    inputSchema: AdvertisedToolInputSchemas.read,
+    aliases: toolAliases('read'),
+  },
+  edit: {
+    name: 'edit',
+    inputSchema: AdvertisedToolInputSchemas.edit,
+    aliases: toolAliases('edit'),
+  },
+  write: {
+    name: 'write',
+    inputSchema: AdvertisedToolInputSchemas.write,
+    aliases: toolAliases('write'),
+  },
+  bash: {
+    name: 'bash',
+    inputSchema: AdvertisedToolInputSchemas.bash,
+    aliases: toolAliases('bash'),
+  },
+  grep: {
+    name: 'grep',
+    inputSchema: AdvertisedToolInputSchemas.grep,
+    aliases: toolAliases('grep'),
+  },
+  glob: {
+    name: 'glob',
+    inputSchema: AdvertisedToolInputSchemas.glob,
+    aliases: toolAliases('glob'),
+  },
+} as const satisfies Record<
+  ToolkitToolName,
+  Pick<CanonicalToolDescriptor, 'name' | 'inputSchema' | 'aliases'>
+>;
+
+/** Preserve each built tool's capped description and enabled-tool selection. */
+export function canonicalToolDescriptor(tool: ToolkitTool): CanonicalToolDescriptor {
+  const { inputSchema, aliases } = CANONICAL_TOOL_DESCRIPTORS[tool.name];
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema,
+    aliases,
+    inputJsonSchema: stripMetaSchema(z.toJSONSchema(inputSchema)) as Record<string, unknown>,
+  };
+}
 
 /** Validate the strict compatibility surface before removing any alias keys. */
 export function normalizeToolInput(tool: ToolkitTool, value: unknown): Record<string, unknown> {

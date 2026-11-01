@@ -1,0 +1,21 @@
+$ node scripts/test-narrow.mjs test/driver/claude-code/sdk-wrapper.test.ts
+test:narrow: 1 changed file(s) -> 2 test file(s)
+test:narrow:   process     test/driver/claude-code/sdk-wrapper.test.ts
+test:narrow:   pure        test/driver/process-inventory.test.ts
+test:narrow: exec nice(5) node node_modules/vitest/vitest.mjs run --project pure --project process --no-file-parallelism --reporter=default --reporter=json --outputFile.json=/home/ctaylor/.tmp/cq-test-narrow-1HAiI5/report.json test/driver/claude-code/sdk-wrapper.test.ts test/driver/process-inventory.test.ts
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.0 [39m[90m/home/ctaylor/repos/worktrees/h3-verify[39m
+
+ [32m✓[39m [30m[43m process [49m[39m test/driver/claude-code/sdk-wrapper.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 302[2mms[22m[39m
+   [33m[2m✓[22m[39m real Agent SDK wrapper preserves canonical list and strict legacy calls[33m 301[2mms[22m[39m
+ [32m✓[39m [30m[42m pure [49m[39m test/driver/process-inventory.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 205[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m3 passed[39m[22m[90m (3)[39m
+[2m   Start at [22m 10:50:44
+[2m   Duration [22m 1.67s[2m (tests 39%, transform 33%, import 26%, worker 2%)[22m
+
+JSON report written to /home/ctaylor/.tmp/cq-test-narrow-1HAiI5/report.json
+test:narrow: skipping SIGKILL for process group 3844664: gone or leader identity unverified
+test:narrow result="pass" exit=0 files=2 projects="pure,process" tests="3/3" failed=0 skipped=0 wait="0.0s" duration="2.2s" nice=5 load="18.4" uptime="861035s" source="explicit" ran="test/driver/claude-code/sdk-wrapper.test.ts,test/driver/process-inventory.test.ts"
+terminal_exit=0

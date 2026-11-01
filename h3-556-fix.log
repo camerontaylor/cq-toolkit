@@ -1,0 +1,5 @@
+$ node scripts/fix.mjs test/driver/claude-code/sdk-wrapper.test.ts
+Found 0 warnings and 0 errors.
+Finished in 82ms on 1 file with 72 rules using 6 threads.
+Finished in 2ms on 1 files using 6 threads.
+terminal_exit=0

@@ -1,0 +1,24 @@
+$ node scripts/test-narrow.mjs test/driver/claude-code/sdk.test.ts test/harness/tool-parity.test.ts test/driver/process-inventory.test.ts
+test:narrow: 3 changed file(s) -> 3 test file(s)
+test:narrow:   process     test/driver/claude-code/sdk.test.ts
+test:narrow:   pure        test/driver/process-inventory.test.ts
+test:narrow:   process     test/harness/tool-parity.test.ts
+test:narrow: exec nice(5) node node_modules/vitest/vitest.mjs run --project pure --project process --no-file-parallelism --reporter=default --reporter=json --outputFile.json=/home/ctaylor/.tmp/cq-test-narrow-UvZGQc/report.json test/driver/claude-code/sdk.test.ts test/driver/process-inventory.test.ts test/harness/tool-parity.test.ts
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.0 [39m[90m/home/ctaylor/repos/worktrees/h3-verify[39m
+
+ [32m✓[39m [30m[43m process [49m[39m test/driver/claude-code/sdk.test.ts [2m([22m[2m101 tests[22m[2m)[22m[33m 1573[2mms[22m[39m
+   [32m✓[39m claude-agent harness calls are cancellable (W1.4 review cycle 1) [2m(1)[22m
+     [33m[2m✓[22m[39m runHarnessTool forwards the signal: an abort kills a running `run` command group[33m 311[2mms[22m[39m
+ [32m✓[39m [30m[43m process [49m[39m test/harness/tool-parity.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 212[2mms[22m[39m
+ [32m✓[39m [30m[42m pure [49m[39m test/driver/process-inventory.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 222[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m3 passed[39m[22m[90m (3)[39m
+[2m      Tests [22m [1m[32m110 passed[39m[22m[90m (110)[39m
+[2m   Start at [22m 09:14:53
+[2m   Duration [22m 3.52s[2m (tests 66%, transform 17%, import 16%, worker 1%)[22m
+
+JSON report written to /home/ctaylor/.tmp/cq-test-narrow-UvZGQc/report.json
+test:narrow: skipping SIGKILL for process group 3620156: gone or leader identity unverified
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="110/110" failed=0 skipped=0 wait="0.0s" duration="4.1s" nice=5 load="12.9" uptime="855284s" source="explicit" ran="test/driver/claude-code/sdk.test.ts,test/driver/process-inventory.test.ts,test/harness/tool-parity.test.ts"
+terminal_exit=0

@@ -1,0 +1,31 @@
+$ node scripts/test-narrow.mjs test/driver/harness-parity.test.ts
+heavy-lock: waiting for the host lock /tmp/cq-toolkit-heavy.lock, held by pid 3603811 since 2026-10-27T22:12:40.487Z (cwd /home/ctaylor/.paseo/worktrees/2crnl0ga/queue-q6-outage-policy; test:narrow test/ops/review/run.test.ts test/ops/dev/review.test.ts); waited 0s of at most 1800s
+heavy-lock: waiting for the host lock /tmp/cq-toolkit-heavy.lock, held by pid 3603811 since 2026-10-27T22:12:40.487Z (cwd /home/ctaylor/.paseo/worktrees/2crnl0ga/queue-q6-outage-policy; test:narrow test/ops/review/run.test.ts test/ops/dev/review.test.ts); waited 33s of at most 1800s
+test:narrow: 1 changed file(s) -> 2 test file(s)
+test:narrow:   process     test/driver/harness-parity.test.ts
+test:narrow:   pure        test/driver/process-inventory.test.ts
+test:narrow: exec nice(5) node node_modules/vitest/vitest.mjs run --project pure --project process --no-file-parallelism --reporter=default --reporter=json --outputFile.json=/home/ctaylor/.tmp/cq-test-narrow-WeWzmF/report.json test/driver/harness-parity.test.ts test/driver/process-inventory.test.ts
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.0 [39m[90m/home/ctaylor/repos/worktrees/h3-verify[39m
+
+ [32m✓[39m [30m[43m process [49m[39m test/driver/harness-parity.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 3804[2mms[22m[39m
+   [32m✓[39m harness parity — Level 1: CallToolResult (stdio ≡ claude-agent handler ≡ core) [2m(2)[22m
+     [33m[2m✓[22m[39m byte-identical results across the three paths — sandbox workspace-write[33m 778[2mms[22m[39m
+     [33m[2m✓[22m[39m byte-identical results across the three paths — sandbox read-only[33m 496[2mms[22m[39m
+   [32m✓[39m harness parity — schema-invalid input (per transport) [2m(3)[22m
+     [33m[2m✓[22m[39m stdio server: isError "INPUT_INVALID: invalid input:", nothing executed[33m 511[2mms[22m[39m
+   [32m✓[39m harness parity — run child environment [2m(3)[22m
+     [33m[2m✓[22m[39m default allowlist: named env probe matches core, stdio and claude-agent callbacks[33m 683[2mms[22m[39m
+     [33m[2m✓[22m[39m explicit allowlist: named env probe matches core, stdio and claude-agent callbacks[33m 596[2mms[22m[39m
+     [33m[2m✓[22m[39m configured allowlist: named env probe matches core, stdio and claude-agent callbacks[33m 602[2mms[22m[39m
+ [32m✓[39m [30m[42m pure [49m[39m test/driver/process-inventory.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 304[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m11 passed[39m[22m[90m (11)[39m
+[2m   Start at [22m 09:14:43
+[2m   Duration [22m 5.49s[2m (tests 80%, transform 11%, import 8%)[22m
+
+JSON report written to /home/ctaylor/.tmp/cq-test-narrow-WeWzmF/report.json
+test:narrow: skipping SIGKILL for process group 3619533: gone or leader identity unverified
+test:narrow result="pass" exit=0 files=2 projects="pure,process" tests="11/11" failed=0 skipped=0 wait="48.1s" duration="6.5s" nice=5 load="14.8" uptime="855274s" source="explicit" ran="test/driver/harness-parity.test.ts,test/driver/process-inventory.test.ts"
+terminal_exit=0

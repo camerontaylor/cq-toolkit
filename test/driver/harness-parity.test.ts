@@ -21,12 +21,9 @@
 //   Results carry workspace-RELATIVE text only, which is what makes
 //   different workspace directories comparable — asserted below.
 //
-//   Schema-invalid input is asserted PER TRANSPORT (the one scoped
-//   difference): stdio and core deny with 'INPUT_INVALID: invalid input:' and execute
-//   nothing; on claude-agent the REAL SDK pre-validates the handler's
-//   non-strict declared shape, which a mock cannot reproduce — so the test
-//   pins what the handler itself does with raw invalid input (the core
-//   denies it) and states the exception.
+//   Schema-invalid input is asserted across the transports: the native
+//   tools/call adapter receives raw arguments before the SDK's canonical
+//   schema parse and routes them to the shared strict validator.
 //
 //   LEVEL 2 — WorkerResult.denials parity. The same sequence folded by each
 //   lane: claude-agent runs the driver with the mock SDK executing the
@@ -58,7 +55,6 @@ import {
   createHarnessSurface,
   qualifiedToolName,
 } from '../../src/harness/surface.js';
-import { canonicalToolName, toolAliases } from '../../src/harness/tools.js';
 import type { HarnessManifest, McpCallToolResult } from '../../src/harness/surface.js';
 import { CONFORMANCE_MODEL, CONFORMANCE_PROVIDER } from '../../src/driver/conformance.js';
 
@@ -82,11 +78,31 @@ const HARNESS: HarnessConfig = {
   },
 };
 
+const ENV_BLOCKED_FIELDS = [
+  'GH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'OPENAI_API_KEY',
+  'ZAI_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'CONFORMANCE_API_KEY',
+  'CQ_SANDBOX',
+  'CQ_RUN_ENV_PASSTHROUGH',
+] as const;
+/** Print one named benign value and Boolean presence for named blocked fields. */
+const ENV_PROBE_CHECKS = ENV_BLOCKED_FIELDS.map((name) => `Boolean(process.env.${name})`).join(',');
+const ENV_PROBE_COMMAND = [
+  "node -p 'JSON.stringify({",
+  'canary:process.env.CQ_PARITY_BENIGN_CANARY??null,',
+  `blocked:[${ENV_PROBE_CHECKS}]})'`,
+].join('');
+const ENV_PROBE_PATTERN = `re:^${ENV_PROBE_COMMAND.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
+
 const ENV_HARNESS: HarnessConfig = {
   ...HARNESS,
   tools: {
     ...HARNESS.tools,
-    bash: { ...HARNESS.tools.bash, commandPatterns: ['env'] },
+    bash: { ...HARNESS.tools.bash, commandPatterns: [ENV_PROBE_PATTERN] },
   },
 };
 
@@ -248,7 +264,7 @@ async function stdioPhase(
 }
 
 // ---------------------------------------------------------------------------
-// Path (b): the claude-agent registered handler via a mock SDK module
+// Path (b): the claude-agent native MCP callback via a mock SDK module
 // ---------------------------------------------------------------------------
 
 /** What the mock's `tool()` captured from the driver. */
@@ -256,20 +272,27 @@ interface CapturedTool {
   name: string;
   description: string;
   shape: unknown;
+  inputSchema?: unknown;
   handler: (args: unknown, extra: unknown) => Promise<unknown>;
 }
+
+type RawToolCall = (
+  request: { method: 'tools/call'; params: { name: string; arguments: unknown } },
+  extra: unknown,
+) => Promise<unknown>;
 
 /**
  * A mock SDK module whose `query()` reports an HONEST init surface (derived
  * from the registered servers/tools and outputFormat), then invokes the
- * CAPTURED handlers with the scripted inputs — each preceded by the
- * assistant tool_use frame the real SDK would emit — and records every
+ * INTERCEPTED tools/call callback with the scripted inputs. Each is preceded
+ * by the assistant tool_use frame the real SDK would emit. It records each
  * returned value verbatim, then yields a success result.
  */
 function scriptedSdk(
   steps: ReadonlyArray<{ tool: string; input: unknown }>,
   sink: { tools: CapturedTool[]; results: unknown[] },
 ): Record<string, unknown> {
+  let rawToolCall: RawToolCall | undefined;
   return {
     tool: (
       name: string,
@@ -278,13 +301,24 @@ function scriptedSdk(
       handler: CapturedTool['handler'],
     ): CapturedTool => {
       const captured = { name, description, shape, handler };
-      sink.tools.push(captured);
       return captured;
     },
-    createSdkMcpServer: (opts: { name: string; tools?: CapturedTool[] }) => ({
-      type: 'sdk',
-      ...opts,
-    }),
+    createSdkMcpServer: (opts: { name: string; tools?: CapturedTool[] }) => {
+      sink.tools = opts.tools ?? [];
+      return {
+        type: 'sdk',
+        ...opts,
+        // The actual SDK returns an McpServer instance. Its public server
+        // installs the raw tools/call callback before query() starts.
+        instance: {
+          server: {
+            setRequestHandler: (_schema: unknown, handler: RawToolCall): void => {
+              rawToolCall = handler;
+            },
+          },
+        },
+      };
+    },
     query: ({ options }: { prompt: string; options: Record<string, unknown> }) =>
       (async function* () {
         const servers = (options['mcpServers'] ?? {}) as Record<string, { tools?: CapturedTool[] }>;
@@ -304,12 +338,10 @@ function scriptedSdk(
           tools,
           mcp_servers: Object.keys(servers).map((name) => ({ name, status: 'connected' })),
         };
-        const registered = servers['cq-harness']?.tools ?? [];
         let n = 0;
         for (const step of steps) {
           n += 1;
-          const handlerTool = registered.find((t) => t.name === step.tool);
-          if (handlerTool === undefined) throw new Error(`mock: '${step.tool}' not registered`);
+          if (rawToolCall === undefined) throw new Error('mock: tools/call adapter not installed');
           yield {
             type: 'assistant',
             session_id: sessionId,
@@ -326,7 +358,12 @@ function scriptedSdk(
               usage: { input_tokens: 1, output_tokens: 1 },
             },
           };
-          sink.results.push(await handlerTool.handler(step.input, {}));
+          sink.results.push(
+            await rawToolCall(
+              { method: 'tools/call', params: { name: step.tool, arguments: step.input } },
+              {},
+            ),
+          );
         }
         yield {
           type: 'result',
@@ -592,24 +629,20 @@ describe('harness parity — Level 1: CallToolResult (stdio ≡ claude-agent han
       // The claude-agent run itself was a clean, verified run.
       expect(agent.verdict.stopReason).toBe('complete');
       expect(agent.verdict.error).toBeUndefined();
-      // The registered surface IS the core surface: same names, descriptions,
-      // and the declared shape covers exactly the strict schema's keys. The
-      // one-release `run` alias is registered alongside `bash`.
+      // The registered surface IS the core surface: only canonical names,
+      // unchanged descriptions, and strict canonical schemas. Legacy `run`
+      // reaches the raw tools/call adapter without being advertised.
       const coreSurface = createHarnessSurface(await manifestFor(core.workspace, phase.sandbox));
-      const expectedNames = coreSurface.tools.flatMap((tool) => [
-        tool.name,
-        ...toolAliases(tool.name),
-      ]);
+      const expectedNames = coreSurface.tools.map((tool) => tool.name);
       expect(agent.tools.map((t) => t.name)).toEqual(expectedNames);
       for (const tool of agent.tools) {
-        const coreTool = coreSurface.tools.find(
-          (candidate) => candidate.name === canonicalToolName(tool.name),
-        );
+        const coreTool = coreSurface.tools.find((candidate) => candidate.name === tool.name);
         if (coreTool === undefined) throw new Error(`no core tool for '${tool.name}'`);
         expect(tool.description, tool.name).toBe(coreTool.description);
         expect(Object.keys(tool.shape as object), tool.name).toEqual(
           Object.keys(coreTool.inputSchema.shape),
         );
+        expect(tool.inputSchema).toBe(coreTool.inputSchema);
       }
 
       expect(core.results).toHaveLength(phase.steps.length);
@@ -722,16 +755,7 @@ describe('harness parity — schema-invalid input (per transport)', () => {
     expect(core.denials.map((d) => d.tool)).toEqual(['read', 'read', 'edit']);
   });
 
-  test('claude-agent handler: raw invalid input is denied by the core (SCOPED EXCEPTION: the real SDK pre-validates)', async () => {
-    // SCOPED EXCEPTION (ADR-0002 Annex A.2): the claude-agent lane registers
-    // the NON-strict zod shape with the SDK, and the REAL SDK validates
-    // tool arguments against it before the handler runs — a type-invalid
-    // call never reaches the handler, and extra keys are stripped. That
-    // SDK-side validation cannot be reproduced with a mock, so this lane's
-    // assertion is scoped to what the HANDLER does if raw invalid input does
-    // reach it: the shared core denies it with 'INPUT_INVALID: invalid input:' and
-    // executes nothing — the same outcome as the other transports, and
-    // nothing executes on either side of the exception.
+  test('claude-agent callback: raw invalid input is denied by the core', async () => {
     const agent = await claudeAgentPhase('workspace-write', INVALID_STEPS);
     expect(agent.verdict.stopReason).toBe('complete');
     await expectInvalidDenials(agent.results, agent.workspace);
@@ -791,18 +815,11 @@ describe('harness parity — Level 2: WorkerResult.denials (claude-agent fold �
 
 describe('harness parity — run child environment', () => {
   test.each(['default', 'explicit', 'configured'] as const)(
-    '%s allowlist: real env output matches core, stdio and claude-agent handlers',
+    '%s allowlist: named env probe matches core, stdio and claude-agent callbacks',
     async (mode) => {
       const canaryName = 'CQ_PARITY_BENIGN_CANARY';
       const canaryValue = 'parity-benign-value';
-      const secretNames = [
-        'GH_TOKEN',
-        'ANTHROPIC_API_KEY',
-        'ANTHROPIC_AUTH_TOKEN',
-        'OPENAI_API_KEY',
-        'ZAI_API_KEY',
-        'DEEPSEEK_API_KEY',
-      ];
+      const secretNames = ENV_BLOCKED_FIELDS.slice(0, 6);
       for (const name of secretNames) vi.stubEnv(name, `parity-fake-${name}`);
       vi.stubEnv(canaryName, canaryValue);
       vi.stubEnv('CQ_SANDBOX', 'off'); // These env legs explicitly exercise host run policy.
@@ -819,7 +836,9 @@ describe('harness parity — run child environment', () => {
           envNames: envAllowlist,
         });
         if (manifest === undefined) throw new Error('run env manifest missing');
-        const core = await createHarnessSurface(manifest).call('run', { command: 'env' });
+        const core = await createHarnessSurface(manifest).call('run', {
+          command: ENV_PROBE_COMMAND,
+        });
         // The real MCP server starts with the same host values, including
         // canary credentials; its startup and run executor must scrub them.
         const parentEnv = Object.fromEntries(
@@ -829,11 +848,11 @@ describe('harness parity — run child environment', () => {
         );
         client = await stdioClient(manifest, parentEnv);
         const stdio = projectSdkResult(
-          await client.callTool({ name: 'run', arguments: { command: 'env' } }),
+          await client.callTool({ name: 'run', arguments: { command: ENV_PROBE_COMMAND } }),
         );
         const agent = await claudeAgentPhase(
           'workspace-write',
-          [{ tool: 'run', input: { command: 'env' } }],
+          [{ tool: 'run', input: { command: ENV_PROBE_COMMAND } }],
           { harnessConfig: ENV_HARNESS, envAllowlist, workspace },
         );
         expect(agent.verdict.stopReason, agent.verdict.error).toBe('complete');
@@ -843,25 +862,17 @@ describe('harness parity — run child environment', () => {
             expect(result.isError).toBeUndefined();
             const text = result.content.map((block) => block.text).join('');
             expect(text.startsWith('exit 0\n--- stdout ---\n')).toBe(true);
-            // env enumeration order is immaterial; compare the complete set.
-            return text.slice('exit 0\n--- stdout ---\n'.length).trim().split('\n').sort();
+            return JSON.parse(text.slice('exit 0\n--- stdout ---\n'.length).trim()) as {
+              canary: string | null;
+              blocked: boolean[];
+            };
           },
         );
         expect(outputs[1]).toEqual(outputs[0]);
         expect(outputs[2]).toEqual(outputs[0]);
         for (const output of outputs) {
-          for (const name of [
-            ...secretNames,
-            'CONFORMANCE_API_KEY',
-            'CQ_SANDBOX',
-            'CQ_RUN_ENV_PASSTHROUGH',
-          ]) {
-            expect(
-              output.some((line) => line.startsWith(`${name}=`)),
-              name,
-            ).toBe(false);
-          }
-          expect(output.includes(`${canaryName}=${canaryValue}`)).toBe(mode !== 'default');
+          expect(output.blocked).toEqual(ENV_BLOCKED_FIELDS.map(() => false));
+          expect(output.canary).toBe(mode === 'default' ? null : canaryValue);
         }
       } finally {
         await client?.close();
