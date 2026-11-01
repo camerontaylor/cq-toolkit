@@ -615,3 +615,20 @@ test('bulk caller forwards only the selected PR prepared dependency root', async
     ReviewAddressManyInputSchema.safeParse({ ...input, dependencyRoots: { bad: '/path' } }).success,
   ).toBe(false);
 });
+
+test('refuses prepared roots outside the PR selection before dispatch', async () => {
+  const address = vi.fn();
+  const isolate = vi.fn();
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate,
+    gh,
+    address,
+  })({ ...input, dependencyRoots: { '123': '/prepared' } });
+  expect(result).toEqual({
+    status: 'needs-human',
+    reason: 'Prepared dependency root outside PR selection',
+  });
+  expect(address).not.toHaveBeenCalled();
+  expect(isolate).not.toHaveBeenCalled();
+});

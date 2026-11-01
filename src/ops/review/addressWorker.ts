@@ -367,7 +367,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         throw new Error('prepared dependency root has no node_modules');
       return undefined;
     }
-    await assertAddressDependencyMetadata(metadataRoot, deps.dependencyRoot, admit);
+    await assertAddressDependencyMetadata(
+      metadataRoot,
+      deps.dependencyRoot,
+      admit,
+      deps.preferDependencyRoot,
+    );
     await assertAddressDependenciesIsolated(caller, [root, deps.dependencyRoot], admit);
     return caller;
   };

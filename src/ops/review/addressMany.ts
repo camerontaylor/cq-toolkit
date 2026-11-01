@@ -250,6 +250,10 @@ export function makeReviewAddressMany(
       }
       if (input.enrollments?.some((row) => !numbers.includes(row.number)))
         return { status: 'needs-human', reason: 'Enrollment outside selection' };
+      if (
+        Object.keys(input.dependencyRoots ?? {}).some((number) => !numbers.includes(Number(number)))
+      )
+        return { status: 'needs-human', reason: 'Prepared dependency root outside PR selection' };
       const listed: AddressManyPrFacts[] = [];
       let cursor = 0;
       const reads = await Promise.allSettled(

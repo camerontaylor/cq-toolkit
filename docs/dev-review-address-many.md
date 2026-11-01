@@ -61,7 +61,9 @@ separately prepared checkout whose metadata matches that PR. Plain
 bulk addressing accepts
 `'--dependencyRoots={"123":"/path/to/prepared-123","124":"/path/to/prepared-124"}'`.
 Paths resolve relative to the original `repoRoot`, before bulk isolation.
-Unmapped PRs keep the caller dependency default. The prepared root supplies
+Unmapped PRs keep the caller dependency default. A map entry outside the selected
+PR list refuses before dispatch. Each leg report records its selected
+`dependencySource` kind (`caller` or `prepared`) and resolved root. The prepared root supplies
 `node_modules` and matching manifests, locks and package-manager configuration;
 all existing metadata and link-isolation checks still apply. Candidate metadata
 is copied privately, and the prepared tree is never installed into or modified.

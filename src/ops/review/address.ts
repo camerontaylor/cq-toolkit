@@ -90,6 +90,8 @@ export interface ReviewAddressInput {
 }
 export interface ReviewAddressReport {
   source: string;
+  /** Selected dependency source; prerequisite checks may still refuse it. */
+  dependencySource?: { kind: 'caller' | 'prepared'; root: string };
   reportPath: string;
   /** One entry per round; the latest reviewed record and all settled batch runs. */
   rounds: Array<{ round: number; record: FindingsRecord; runs: RunReport[] }>;
@@ -234,6 +236,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     );
     const report: ReviewAddressReport = {
       source: input.source,
+      dependencySource: {
+        kind: input.dependencyRoot === undefined ? 'caller' : 'prepared',
+        root: resolve(input.repoRoot, input.dependencyRoot ?? '.'),
+      },
       reportPath: resolve(journalDir, 'review-address-report.json'),
       rounds: [],
       findings: [],

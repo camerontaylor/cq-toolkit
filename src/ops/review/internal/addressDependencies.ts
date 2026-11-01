@@ -148,6 +148,7 @@ export async function assertAddressDependencyMetadata(
   root: string,
   caller: string,
   admit: () => void,
+  prepared = false,
 ): Promise<void> {
   const read = async (cwd: string, path: string) => {
     admit();
@@ -176,7 +177,9 @@ export async function assertAddressDependencyMetadata(
     const b = await read(caller, path);
     if (!isDeepStrictEqual(manifest ? relevant(a) : a, manifest ? relevant(b) : b))
       throw new Error(
-        'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
+        prepared
+          ? 'prepared dependency root manifests/locks differ; provide a prepared root matching the PR metadata'
+          : 'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
       );
   };
   await compare('package.json', true);

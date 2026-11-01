@@ -1359,6 +1359,36 @@ describe('review.address candidate isolation', () => {
       await f.cleanup();
     }
   });
+  test.each(['mismatched', 'missing'] as const)(
+    'explicit prepared root refusal: %s',
+    async (mode) => {
+      const f = await fixture(undefined, '', {
+        installedDependencies: mode === 'mismatched' ? 'mismatched' : 'matching',
+        preferDependencyRoot: true,
+      });
+      try {
+        if (mode === 'missing')
+          await rm(join(f.dependencyRoot, 'node_modules'), { recursive: true });
+        const result = await f.engine.fix(finding(), 1);
+        const reason =
+          mode === 'missing'
+            ? 'prepared dependency root has no node_modules'
+            : 'prepared dependency root manifests/locks differ';
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain(reason);
+        expect(result.reason).not.toContain('install dependencies in the PR worktree');
+        expect(f.engine.preconditions?.()[0]).toMatchObject({
+          kind: 'deterministic',
+          scope: 'leg',
+          stage: 'dependencies',
+        });
+        expect(f.engine.preconditions?.()[0]?.reason).toContain(reason);
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('prepared dependencies retain dev yaml for a PR predating its runtime move', async () => {
     const f = await fixture(undefined, '', {
       installedDependencies: 'matching',
