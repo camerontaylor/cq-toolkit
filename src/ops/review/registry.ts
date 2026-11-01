@@ -553,7 +553,12 @@ export const ReviewAddressManyInputSchema = z
   .object({
     repoRoot: z.string().min(1),
     repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
-    pulls: z.array(z.number().int().positive()).min(1),
+    pulls: z.array(z.number().int().positive()).min(1).exactOptional(),
+    query: z.string().min(1).exactOptional(),
+    concurrency: z.number().int().positive().exactOptional(),
+    enrollments: z
+      .array(z.object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema }))
+      .exactOptional(),
     owner: z.string().min(1),
     maxTokens: z.number().int().positive(),
     tokensPerPr: z.number().int().positive(),
@@ -561,7 +566,11 @@ export const ReviewAddressManyInputSchema = z
     wallMs: z.number().int().positive().exactOptional(),
     push: z.boolean().exactOptional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (i) => (i.pulls !== undefined) !== (i.query !== undefined),
+    'Provide pulls or query exclusively',
+  );
 
 export const registry: OpRegistryEntry[] = [
   {

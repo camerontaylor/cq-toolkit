@@ -1,6 +1,7 @@
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { expect, test } from 'vitest';
+import { isolateAddressMany } from '../../../src/ops/review/addressMany.js';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeTestRepo, type TestRepo } from '../dev/repo.js';
@@ -142,5 +143,28 @@ test('a dirty stale PR refuses while its sibling resolves without changing calle
     expect(await checkoutSnapshot(f.repo, foreign)).toEqual(foreignBefore);
   } finally {
     await f.repo.cleanup();
+  }
+});
+
+test('bulk clone isolation gives sibling legs independent common directories and preserves origin', async () => {
+  const repo = await makeTestRepo();
+  try {
+    const roots = await Promise.all([
+      isolateAddressMany(repo.root, 7),
+      isolateAddressMany(repo.root, 9),
+    ]);
+    const common = roots.map((root) =>
+      repo.git('-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
+    expect(new Set(common).size).toBe(2);
+    expect(common).not.toContain(
+      repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim(),
+    );
+    for (const root of roots)
+      expect(repo.git('-C', root, 'remote', 'get-url', 'origin')).toBe(
+        repo.git('remote', 'get-url', 'origin'),
+      );
+  } finally {
+    await repo.cleanup();
   }
 });
