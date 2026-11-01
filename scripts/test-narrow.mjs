@@ -558,7 +558,9 @@ const run = await runGroup(process.execPath, vitestArgs, {
 const durationMs = Date.now() - started;
 let report = null;
 try {
-  report = readReport(JSON.parse(readFileSync(reportPath, 'utf8')), repoRelative);
+  const json = JSON.parse(readFileSync(reportPath, 'utf8'));
+  report = readReport(json, repoRelative);
+  if (process.env.CQ_TEST_NARROW_REPORT === '1') writeSync(1, `test:narrow report=${JSON.stringify(json)}\n`);
 } catch {
   // no report (vitest died early, or never started): counts stay '-'
 }
