@@ -103,22 +103,23 @@ const signalChild = (signal) => {
   }
 };
 const sweepChild = () => signalChild('SIGKILL');
-const awaitExit = () => process.stdout.write('', () => process.exit(process.exitCode));
-const finish = (fields) => {
+const awaitExit = () =>
+  new Promise(() => process.stdout.write('', () => process.exit(process.exitCode)));
+const finish = async (fields) => {
   Object.assign(summary, fields);
   if (!printed) {
     printed = true;
     emit(summary);
   }
   process.exitCode = summary.exit;
-  awaitExit();
+  await awaitExit();
 };
 process.on('exit', () => sweepChild());
 for (const signal of SIGNALS) {
-  process.on(signal, () => {
+  process.on(signal, async () => {
     interruptedBy = signal;
     sweepChild();
-    finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
+    await finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
   });
 }
 
@@ -126,16 +127,16 @@ for (const signal of SIGNALS) {
 const parsed = parseArgs(argv);
 if (!parsed.ok && parsed.help) {
   process.stderr.write(`${USAGE}\n`);
-  finish({ result: 'help', exit: 0 });
+  await finish({ result: 'help', exit: 0 });
 }
-if (!parsed.ok) finish({ result: 'refused', exit: 2, reason: parsed.reason });
+if (!parsed.ok) await finish({ result: 'refused', exit: 2, reason: parsed.reason });
 const opts = parsed.options;
 
 if (!opts.dryRun) {
   try {
     await enterResourceScope(SCRIPT, argv);
   } catch (error) {
-    finish({ result: 'refused', exit: error.code === 75 ? 75 : 1, reason: error.message });
+    await finish({ result: 'refused', exit: error.code === 75 ? 75 : 1, reason: error.message });
   }
 }
 
@@ -178,7 +179,7 @@ try {
     ];
   }
 } catch (error) {
-  finish({ result: 'refused', exit: 2, reason: error.message });
+  await finish({ result: 'refused', exit: 2, reason: error.message });
 }
 changed = [...new Set(changed)].sort();
 const missing = changed.filter((f) => !existsSync(f));
@@ -187,7 +188,7 @@ const manifest = JSON.parse(readFileSync(join(ROOT, 'test/suite-classes.json'), 
 const staleEntries = missingManifestEntries(manifest, existsSync);
 if (staleEntries.length > 0) {
   const reason = `test/suite-classes.json lists missing files: ${staleEntries.join(',')}`;
-  finish({ result: 'refused', exit: 2, reason });
+  await finish({ result: 'refused', exit: 2, reason });
 }
 // Every test file on disk, classified or not (unclassified ones run in the
 // conservative `process` project), so the class gate sees all of them.
@@ -248,23 +249,27 @@ if (!plan.ok) {
     for (const file of plan.candidates) say(`  ${file}`);
   }
   const files = plan.candidates.length > 0 ? plan.candidates : undefined;
-  finish({ result: 'refused', exit: 2, files, reason: plan.reason });
+  await finish({ result: 'refused', exit: 2, files, reason: plan.reason });
 }
 const projects = projectsOf(plan.run);
 const files = plan.run.map((r) => r.file);
 const pythonFiles = plan.run.filter((r) => r.project === 'python').map((r) => r.file);
 const tsFiles = files.filter((f) => !pythonFiles.includes(f));
 if (pythonFiles.length > 0 && opts.testNamePattern !== null) {
-  finish({ result: 'refused', exit: 2, reason: 'test-name filtering is unavailable for Python' });
+  await finish({
+    result: 'refused',
+    exit: 2,
+    reason: 'test-name filtering is unavailable for Python',
+  });
 }
 Object.assign(summary, { files, projects });
 say(`${changed.length} changed file(s) -> ${files.length} test file(s)`);
 for (const r of plan.run) say(`  ${r.project.padEnd(11)} ${r.file}`);
 
-if (opts.dryRun) finish({ result: 'dry-run', exit: 0 });
+if (opts.dryRun) await finish({ result: 'dry-run', exit: 0 });
 if (files.length === 0) {
   // Never start vitest with no file filter: that would be the full suite.
-  finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
+  await finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
 }
 
 // Run each child in a group owned only by this invocation.
@@ -314,10 +319,15 @@ if (pythonFiles.length > 0) {
   pythonCounts = readPythonReport(run.stderr);
   const verdict = pythonRunVerdict({ run, counts: pythonCounts, interruptedBy });
   if (verdict.result !== 'pass') {
-    finish({ ...verdict, tests: pythonCounts, ran: pythonFiles, durationMs: Date.now() - started });
+    await finish({
+      ...verdict,
+      tests: pythonCounts,
+      ran: pythonFiles,
+      durationMs: Date.now() - started,
+    });
   }
   if (tsFiles.length === 0)
-    finish({
+    await finish({
       result: 'pass',
       exit: 0,
       tests: pythonCounts,
@@ -338,7 +348,7 @@ if (needsDist(tsFiles, ROOT) && !distIsFresh()) {
     shell: !POSIX, // pnpm is a .cmd shim on win32
   });
   if (interruptedBy !== null) {
-    finish({ result: 'interrupted', exit: signalExit(interruptedBy), reason: interruptedBy });
+    await finish({ result: 'interrupted', exit: signalExit(interruptedBy), reason: interruptedBy });
   }
   if (build.error !== undefined || build.timedOut || build.code !== 0) {
     const why =
@@ -348,7 +358,11 @@ if (needsDist(tsFiles, ROOT) && !distIsFresh()) {
         : build.signal
           ? `killed by ${build.signal}`
           : `exit ${build.code}`);
-    finish({ result: 'error', exit: 1, reason: `dist build failed (pnpm run build): ${why}` });
+    await finish({
+      result: 'error',
+      exit: 1,
+      reason: `dist build failed (pnpm run build): ${why}`,
+    });
   }
 }
 
@@ -398,7 +412,7 @@ try {
 }
 rmSync(reportDir, { recursive: true, force: true });
 if (run.error !== undefined) {
-  finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
+  await finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
 }
 const exit = run.code ?? signalExit(run.signal);
 const verdict = runVerdict({
@@ -414,4 +428,4 @@ if (report !== null && pythonCounts !== null) {
   for (const key of ['total', 'passed', 'failed', 'skipped'])
     report.tests[key] += pythonCounts[key];
 }
-finish({ durationMs, ...report, ...verdict });
+await finish({ durationMs, ...report, ...verdict });
