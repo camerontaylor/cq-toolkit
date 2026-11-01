@@ -953,13 +953,27 @@ export async function main(
     } catch (error) {
       // Q34 newly classifies only this post-sweep transport failure as
       // best-effort; oneLine bounds the warning detail to 500 characters.
+      // The fallback write itself can fail on the same closed pipes: not
+      // only by throwing synchronously, but by emitting an *asynchronous*
+      // 'error' event (EPIPE) on stderr after this turn — unhandled, that
+      // event terminates the process despite the completed sweep. Swallow
+      // both like the surrounding best-effort policy requires.
+      const stderr = process.stderr;
+      const onStderrError = (): void => {
+        // Best-effort: a stderr transport failure is ignored, not fatal.
+      };
+      stderr.on('error', onStderrError);
       try {
-        process.stderr.write(
+        stderr.write(
           `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
         );
       } catch {
         // Continue the remaining reports even when stderr is unavailable too.
       }
+      // The stream can only emit the failed write's error event after this
+      // synchronous call returns; keep the listener through that event turn,
+      // then remove it so later stderr failures still surface.
+      setImmediate(() => stderr.removeListener('error', onStderrError));
     }
     // Best-effort tail after a completed sweep: stderr may be the same
     // broken transport that took out stdout, so every remaining diagnostic
