@@ -70,21 +70,18 @@ and the same JSON written to `$SWEEP_USAGE_OUT` for the workflow's artifact
 upload. The workflow uses the visible `${{ runner.temp }}/sweep-usage.json`
 path so the upload action does not exclude it as hidden; missing files warn.
 
-I2 acceptance normally requires a non-author review. When author and reviewer
-agents must share one GitHub account, set repository variable
-`CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true` in the adopting repo; blank or
-false keeps author reviews ineligible. The independent reviewer must submit a
-`COMMENTED` review containing exactly one marker in this form, with distinct
-agent IDs and the exact reviewed head SHA:
+I2 independence is procedural: a fresh reviewer agent reviews the final head.
+The reviewer may share the author's GitHub account. Automation accepts a human
+PR comment or review containing the exact head SHA and `PASS`, for example:
 
-```html
-<!-- cq-agent-review: {"version":1,"reviewerAgentId":"reviewer-agent","authorAgentId":"author-agent","headSha":"0123456789abcdef0123456789abcdef01234567","verdict":"PASS","independent":true} -->
+```text
+reviewer-agent: 0123456789abcdef0123456789abcdef01234567 PASS
 ```
 
-`HOLD`, `RETRACT`, malformed markers, stale heads, and later marked reviews
-supersede earlier author-agent passes. An ordinary author comment does not
-count. The marker records the independent review procedure; it does not
-cryptographically authenticate the agent IDs.
+Bot authors (Bot type or `[bot]` login suffix) do not count. No HTML marker or
+opt-in is required. `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW` is retained for
+configuration compatibility but no longer controls this match. The merging
+agent judges independence and the verdict; automation only matches the text.
 
 ## Required credentials
 

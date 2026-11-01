@@ -178,6 +178,12 @@ afterEach(() => {
 });
 
 describe('buildRunInput (the pure input builder)', () => {
+  test('plans direct main PRs while preserving merge-queue as the default', () => {
+    expect(buildRunInput([], { repoRoot: '/checkout', baseBranch: 'main' }, 0).baseBranch).toBe(
+      'main',
+    );
+    expect(buildRunInput([], { repoRoot: '/checkout' }, 0).baseBranch).toBe('merge-queue');
+  });
   test('every field rides the frozen defaults or the cfg — nothing invented', () => {
     const input = buildRunInput([], { repoRoot: '/checkout', journalRoot: '/j' }, 1234);
     expect(input).toEqual({

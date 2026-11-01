@@ -146,108 +146,63 @@ const candidate = (extra?: Partial<PrCandidate>): PrCandidate => ({
 const settleCandidate = (extra?: Partial<PrCandidate>): PrCandidate =>
   candidate({ reviews: [approved()], ...extra });
 
-describe('same-account independent-agent acceptance', () => {
-  const authorReview = (body: string, extra?: Partial<ReviewSummary>): ReviewSummary => ({
-    id: 'PRR_author',
-    authorLogin: 'pr-author',
-    authorType: 'User',
-    authorAssociation: 'MEMBER',
-    state: 'COMMENTED',
-    body,
-    submittedAt: AFTER_COMMIT,
-    commitOid: 'a'.repeat(40),
-    ...extra,
-  });
-  const enabled: ClassifyPrConfig = {
-    ...defaultClassifyPrConfig,
-    allowSameAccountAgentReview: true,
-  };
-  const reviewed = (reviews: ReviewSummary[], config = enabled) =>
-    classifyPr(
-      candidate({ authorLogin: 'pr-author', headRefOid: 'a'.repeat(40), reviews }),
-      PENDING_MS,
-      config,
-    );
+describe('plain independent review acceptance', () => {
+  test.each([{ authorType: 'Bot' }, { authorLogin: 'reviewer[bot]' }])(
+    'ignores bot review signals: %j',
+    (author) => {
+      expect(
+        classifyPr(
+          candidate({
+            headRefOid: 'a'.repeat(40),
+            issueComments: [
+              comment({
+                body: `${'a'.repeat(40)} PASS`,
+                ...author,
+              }),
+            ],
+          }),
+          PENDING_MS,
+        ).reason,
+      ).toBe('no_acceptable_review');
+    },
+  );
 
-  test('valid author-account PASS is accepted only with explicit opt-in', () => {
-    const review = authorReview(agentMarker('PASS'));
-    expect(reviewed([review]).reason).toBe('settle_window_pending');
-    expect(reviewed([review], defaultClassifyPrConfig).reason).toBe('no_acceptable_review');
-  });
-
-  test('plain author comments, stale heads, retractions, and explicit exclusions do not accept', () => {
-    expect(reviewed([authorReview('I reviewed this separately.')]).reason).toBe(
-      'no_acceptable_review',
-    );
-    expect(reviewed([authorReview(agentMarker('PASS', 'b'.repeat(40)))]).reason).toBe(
-      'no_acceptable_review',
-    );
-    expect(
-      reviewed([
-        authorReview(agentMarker('PASS'), { submittedAt: AFTER_COMMIT }),
-        authorReview(agentMarker('RETRACT'), { submittedAt: '2026-01-01T00:00:01Z' }),
-      ]).reason,
-    ).toBe('no_acceptable_review');
-    expect(
-      reviewed([authorReview(agentMarker('PASS'))], {
-        ...enabled,
-        excludedLogins: ['pr-author'],
-        automationLogin: 'pr-author',
-      }).reason,
-    ).toBe('no_acceptable_review');
-  });
-
-  test('attestations normalize bot suffixes for structural and explicit exclusions', () => {
-    const automationReview = authorReview(agentMarker('PASS'), { authorLogin: 'cq-automation' });
+  test('accepts a plain top-level PR comment with the exact head and PASS', () => {
     expect(
       classifyPr(
         candidate({
-          authorLogin: 'cq-automation',
           headRefOid: 'a'.repeat(40),
-          reviews: [automationReview],
+          issueComments: [comment({ body: `opus ${'a'.repeat(40)} PASS` })],
         }),
         PENDING_MS,
-        enabled,
       ).reason,
-    ).toBe('no_acceptable_review');
-
-    // The promotion reviewer App posts commit statuses only (PR-B); its bot
-    // login is structurally excluded, so its attestation never counts.
-    const reviewerReview = authorReview(agentMarker('PASS'), {
-      authorLogin: 'cq-promotion-reviewer[bot]',
-    });
-    expect(
-      classifyPr(
-        candidate({
-          authorLogin: 'cq-promotion-reviewer[bot]',
-          headRefOid: 'a'.repeat(40),
-          reviews: [reviewerReview],
-        }),
-        PENDING_MS,
-        enabled,
-      ).reason,
-    ).toBe('no_acceptable_review');
-
-    expect(
-      reviewed([authorReview(agentMarker('PASS'))], {
-        ...enabled,
-        excludedLogins: ['PR-AUTHOR[bot]'],
-      }).reason,
-    ).toBe('no_acceptable_review');
-    expect(reviewed([authorReview(agentMarker('PASS'))]).reason).toBe('settle_window_pending');
+    ).toBe('settle_window_pending');
   });
-
-  test('a later same-login non-User reserved marker retracts an earlier PASS', () => {
-    expect(
-      reviewed([
-        authorReview(agentMarker('PASS')),
-        authorReview(agentMarker('PASS'), {
-          authorType: 'Bot',
-          submittedAt: '2026-01-01T00:00:01Z',
-        }),
-      ]).reason,
-    ).toBe('no_acceptable_review');
-  });
+  test.each([`Reviewer opus: ${'a'.repeat(40)} PASS`, agentMarker('PASS')])(
+    'accepts a shared-account exact-head PASS without opt-in: %s',
+    (body) => {
+      const pr = candidate({
+        authorLogin: 'pr-author',
+        headRefOid: 'a'.repeat(40),
+        reviews: [approved({ authorLogin: 'pr-author', state: 'COMMENTED', body })],
+      });
+      expect(classifyPr(pr, PENDING_MS).reason).toBe('settle_window_pending');
+    },
+  );
+  test.each(['PASS', `${'b'.repeat(40)} PASS`, `${'a'.repeat(40)} HOLD`])(
+    'ignores evidence missing the current head and PASS: %s',
+    (body) => {
+      expect(
+        classifyPr(
+          candidate({
+            headRefOid: 'a'.repeat(40),
+            reviews: [approved({ state: 'COMMENTED', body })],
+          }),
+          PENDING_MS,
+        ).reason,
+      ).toBe('no_acceptable_review');
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

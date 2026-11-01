@@ -65,6 +65,7 @@
 name: cq-verify
 
 on:
+  pull_request:
   workflow_run:
     workflows:
       - cq-measure
@@ -89,14 +90,23 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  main-advisory:
+    name: cq/ratchet (advisory)
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Report advisory policy
+        run: echo 'Direct main PRs use CI and denylist; this verdict is advisory.'
   resolve:
     name: resolve
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
     # dispatch on any other ref would run that ref's copy of this file.
     if: >-
+      github.event_name != 'pull_request' && (
       github.event_name == 'workflow_run' ||
       github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
+      format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -211,6 +221,7 @@ jobs:
   fetch:
     name: fetch trust and subject objects
     needs: resolve
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # An empty subject is resolve's "nothing to judge" (no verdict owed);
     # `compute` needs this job, so it skips with it.
     if: needs.resolve.outputs.subject != ''
@@ -270,6 +281,7 @@ jobs:
   compute:
     name: compute
     needs: [resolve, fetch]
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Runs the trust-ref tsc over HEAD CONTENT (a head tsconfig can point tsc
@@ -341,9 +353,8 @@ jobs:
   measurement:
     name: measurement
     needs: [resolve]
-    if: >-
-      ${{ !cancelled() && needs.resolve.result == 'success'
-      && needs.resolve.outputs.subject != '' }}
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
+    if: github.event_name != 'pull_request' && !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # F5: this artifact is HEAD-AUTHORED bytes — cq-measure runs head code
@@ -411,11 +422,10 @@ jobs:
   judge:
     name: judge
     needs: [resolve, compute, measurement]
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # A failed recompute still yields a (failing) verdict; only an
     # unresolved subject, or resolve's "nothing to judge", yields none.
-    if: >-
-      ${{ !cancelled() && needs.resolve.result == 'success'
-      && needs.resolve.outputs.subject != '' }}
+    if: github.event_name != 'pull_request' && !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The verdict signer's environment (Decision 6): its only secret is the
@@ -559,13 +569,14 @@ jobs:
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
+          ADVISORY: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
           TYPECHECK_COUNT: ${{ needs.compute.outputs.typecheck_count }}
         run: |
           set -euo pipefail
           # Anything but an ok op result with verdict "pass" is a failure;
           # needs-human is a failure whose summary names D11.
           jq -n --slurpfile v "${RUNNER_TEMP}/verdict.json" \
-            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" '
+            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" --arg advisory "$ADVISORY" '
             ($v[0] // {}) as $r
             | ($r.value.verdict // "fail") as $verdict
             | {
@@ -573,7 +584,7 @@ jobs:
                 head_sha: $sha,
                 external_id: $ext,
                 status: "completed",
-                conclusion: (if $r.status == "ok" and $verdict == "pass"
+                conclusion: (if $advisory == "true" then "neutral" elif $r.status == "ok" and $verdict == "pass"
                   then "success" else "failure" end),
                 output: {
                   title: ("ratchet: " + (if $r.status == "ok"

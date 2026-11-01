@@ -15,8 +15,9 @@ owner rulings as context. DEC1 (2026-10-27) additionally approves the durable
 vendor-debt path in §6, including continued ready/merge progress before
 vendor recovery. This does not change what counts as vendor completion.
 Non-author means an independent reviewer agent or human. Reviewer and author
-agents may use the same GitHub account; the enabled same-account path records
-distinct agent identities and a review attestation bound to the exact PR head.
+agents may use the same GitHub account. Post a plain PR comment with the reviewer
+agent identity, exact head SHA and `PASS`; no marker syntax or opt-in is required.
+Automation ignores Bot authors and logins ending in `[bot]`.
 
 Configuration lives in `.coderabbit.yaml` (chill profile, repo path
 invariants, low-noise settings). Sources current as of 2026-09-16 —

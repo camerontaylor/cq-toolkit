@@ -170,6 +170,7 @@ interface PrFixture {
   approvedOid: string;
   /** The snapshot's live baseRefName; default 'merge-queue' (what readBaseRef says). */
   liveBaseName?: string;
+  baseName?: string;
 }
 
 const APPROVER = 'maintainer';
@@ -267,7 +268,7 @@ const forgeGh = (
             sha: HEAD(fixture.pr),
             repo: { full_name: REPO_PATH },
           },
-          base: { ref: 'merge-queue' },
+          base: { ref: fixture.baseName ?? 'merge-queue' },
         })),
       );
     }
@@ -286,7 +287,7 @@ const forgeGh = (
         mergeable_state: 'clean',
         user: { login: `pr-author-${String(pr)}` },
         head: { ref: `pr-${String(pr)}`, sha: HEAD(pr), repo: { full_name: REPO_PATH } },
-        base: { ref: 'merge-queue' },
+        base: { ref: fixtures.find((fixture) => fixture.pr === pr)?.baseName ?? 'merge-queue' },
       });
     }
     if (path === 'graphql') {
@@ -310,6 +311,7 @@ const forgeGh = (
 
 /** A recording in-memory MergeEffects: every ref resolves to the PR's head; merges succeed. */
 class RecordingMergeEffects implements MergeEffects {
+  constructor(private readonly baseName = 'merge-queue') {}
   readonly merges: Array<{ pr: number; matchHeadCommit?: string }> = [];
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
@@ -320,7 +322,7 @@ class RecordingMergeEffects implements MergeEffects {
     return { code: 0, stdout: '', stderr: '' };
   }
   async readBaseRef(): Promise<{ ok: boolean; baseRefName?: string }> {
-    return { ok: true, baseRefName: 'merge-queue' };
+    return { ok: true, baseRefName: this.baseName };
   }
   async worktreePrepare(pr: number): Promise<{ path: string }> {
     return { path: `/wt/${String(pr)}` };
@@ -601,6 +603,25 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
     expect(row?.reason).toContain('cq merge-time recheck refused pr 7');
     expect(row?.reason).toContain('settle: settle_pending');
+  });
+
+  test('the configured main pass merges an exact-head reviewed main PR', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects('main');
+    await runSelfMergePrs(
+      {
+        gh: forgeGh(
+          forge,
+          [{ pr: 7, approvedOid: HEAD(7), liveBaseName: 'main', baseName: 'main' }],
+          [],
+        ),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      { ...cfg(tmpJournalRoot()), baseBranch: 'main' },
+    );
+    expect(effects.merges).toEqual([{ pr: 7, matchHeadCommit: HEAD(7) }]);
   });
 
   test('a live base of the protected branch (main) is refused: protectedBranch is wired', async () => {

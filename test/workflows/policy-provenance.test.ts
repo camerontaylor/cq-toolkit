@@ -155,9 +155,16 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(on).toMatch(/^ {2}workflow_run:\n {4}workflows:\n {6}- cq-signal\n/m);
       expect(on).toMatch(/^ {4}types:\n {6}- completed$/m);
       expect(on).toMatch(/^ {2}workflow_dispatch:$/m);
-      expect(on).not.toMatch(/pull_request|push:/);
+      expect(on).toMatch(/^ {2}pull_request:$/m);
+      expect(on).not.toMatch(/branches:/);
+      expect(on).not.toMatch(/pull_request_target|push:/);
       expect(body).toMatch(/^permissions: \{\}$/m);
-      expect([...jobBlocks(body).keys()]).toEqual(['resolve', 'judge']);
+      expect([...jobBlocks(body).keys()]).toEqual(['main-advisory', 'resolve', 'judge']);
+      const advisory = jobBlocks(body).get('main-advisory') ?? '';
+      expect(advisory).toContain("if: github.event_name == 'pull_request'");
+      expect(advisory).toContain('permissions: {}');
+      expect(advisory).not.toMatch(/uses:|secrets\./);
+      expect(jobBlocks(body).get('resolve')).toContain("github.event_name != 'pull_request'");
       // Only the signing job has an environment (Decision 6).
       expect([...body.matchAll(/^\s*environment: (.*)$/gm)].map((m) => m[1])).toEqual([
         'cq-verdict',
@@ -481,7 +488,7 @@ ${resolveScript(text)}`;
       const dir = mkdtempSync(join(tmpdir(), 'cq-policy-post-'));
       const shell = `gh() { cp "$6" "$RUNNER_TEMP/posted.json"; echo https://example.test; }
 ${script}`;
-      const post = (verdict: string) => {
+      const post = (verdict: string, advisory = false) => {
         writeFileSync(join(dir, 'verdict.json'), verdict);
         rmSync(join(dir, 'posted.json'), { force: true });
         rmSync(join(dir, 'summary.md'), { force: true });
@@ -494,6 +501,7 @@ ${script}`;
             REPO: 'owner/repo',
             TRUST: 'a'.repeat(40),
             SUBJECT: SHA,
+            ADVISORY: String(advisory),
           },
         });
         const posted = existsSync(join(dir, 'posted.json'))
@@ -534,6 +542,10 @@ ${script}`;
           'protected-path policy/x\noverride: dormant',
         );
         expect(human.summary).toContain('override: dormant');
+        const mainHuman = post(ok('needs-human', ['advisory finding']), true);
+        expect(mainHuman.status, mainHuman.stderr).toBe(0);
+        expect(mainHuman.posted?.conclusion).toBe('neutral');
+        expect(mainHuman.posted?.output.summary).toContain('advisory finding');
         const fail = post(ok('fail', ['lint']));
         expect(fail.status, fail.stderr).toBe(0);
         expect(fail.posted?.conclusion).toBe('failure');

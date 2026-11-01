@@ -296,71 +296,16 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
-const STRUCTURAL_EXCLUDED = new Set([
-  'github-actions[bot]',
-  'cq-automation[bot]',
-  'cq-verdict[bot]',
-  'cq-promoter[bot]',
-  'cq-promotion-reviewer[bot]',
-]);
-const attestationLogin = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
-
-/** Latest marked PR-author review supersedes earlier markers before validation. */
-const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
-  if (ctx.config.allowSameAccountAgentReview !== true) return false;
-  const author = candidate.authorLogin?.toLowerCase();
-  const head = candidate.headRefOid?.toLowerCase();
-  if (author === undefined || author === '' || head === undefined || !/^[0-9a-f]{40}$/.test(head))
-    return false;
-  const marked = candidate.reviews.filter((review) => {
-    if (review.authorLogin?.toLowerCase() !== author) return false;
-    if (review.state === null && review.submittedAt === null) return false;
-    return parseIndependentReview(review.body).kind !== 'absent';
-  });
-  if (marked.length === 0) return false;
-  let latest: ReviewSummary | undefined;
-  let latestMs = -Infinity;
-  for (const review of marked) {
-    const submittedMs = parseMs(review.submittedAt);
-    if (submittedMs === null) return false;
-    if (latest === undefined || submittedMs >= latestMs) {
-      latest = review;
-      latestMs = submittedMs;
-    }
-  }
-  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
-    return false;
-  const parsed = parseIndependentReview(latest.body);
-  const attestation = parsed.kind === 'valid' ? parsed.attestation : null;
-  if (
-    attestation === null ||
-    attestation.verdict !== 'PASS' ||
-    attestation.headSha.toLowerCase() !== head ||
-    latest.commitOid?.toLowerCase() !== head ||
-    latestMs <= (ctx.lastCommitMs ?? Infinity)
-  )
-    return false;
-  const associations = ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR'];
-  if (
-    latest.authorAssociation === null ||
-    latest.authorAssociation === undefined ||
-    !associations.some(
-      (association) => association.toUpperCase() === latest.authorAssociation?.toUpperCase(),
-    )
-  )
-    return false;
-  if (latest.authorLogin == null) return false;
-  const login = latest.authorLogin.toLowerCase();
-  const normalizedLogin = attestationLogin(login);
-  if ([...STRUCTURAL_EXCLUDED].some((excluded) => attestationLogin(excluded) === normalizedLogin))
-    return false;
-  if (
-    ctx.config.excludedLogins?.some(
-      (excluded) => attestationLogin(excluded) === normalizedLogin,
-    ) === true
-  )
-    return false;
-  return true;
+/** Review independence is judged by the merging agent, including shared accounts. */
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, _ctx: ReviewContext): boolean => {
+  const head = candidate.headRefOid;
+  if (head == null || !/^[0-9a-f]{40}$/i.test(head)) return false;
+  return [...candidate.reviews, ...candidate.issueComments].some(
+    (comment) =>
+      comment.authorType !== 'Bot' &&
+      !comment.authorLogin?.toLowerCase().endsWith('[bot]') &&
+      parseIndependentReview(comment.body, head).kind === 'valid',
+  );
 };
 
 /**

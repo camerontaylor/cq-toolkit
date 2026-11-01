@@ -208,7 +208,7 @@ describe('fetchReviewState', () => {
           {
             id: 500,
             node_id: 'IC_500',
-            user: { login: 'bystander' },
+            user: { login: 'bystander', type: 'Bot' },
             body: 'issue comment',
             created_at: '2026-01-01T02:00:00Z',
           },
@@ -229,6 +229,7 @@ describe('fetchReviewState', () => {
     expect(state.restReviewComments).toHaveLength(2);
     expect(state.restIssueComments).toHaveLength(1);
     expect(state.restIssueComments[0]?.inReplyToId).toBeNull();
+    expect(state.restIssueComments[0]?.authorType).toBe('Bot');
     expect(state.truncated).toBe(false);
     expect(state.truncatedBecause).toEqual([]);
   });
@@ -728,6 +729,7 @@ describe('fetchReviewState', () => {
       id: 42,
       nodeId: 'PRRC_42',
       authorLogin: 'carol',
+      authorType: null,
       body: 'mapped',
       createdAt: '2026-01-01T03:00:00Z',
       inReplyToId: 41,

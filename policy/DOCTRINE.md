@@ -42,20 +42,22 @@ Truncated pagination reads as "no blocking threads" — absence never passes.
 **Enforcement.** The decision table is built and tested in phase 3 as specified, on
 top of `src/ops/review` (phases 1–2). Independence is procedural: a fresh reviewer
 agent must review the final head separately from the author agent. The reviewer may
-share the author's GitHub account when `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true`
-is explicitly enabled. The review must be a `COMMENTED` review with exactly one
-`cq-agent-review` HTML marker carrying version 1, distinct nonempty reviewer and
-author agent IDs, the exact 40-hex head SHA, `verdict: "PASS"`, and
-`independent: true`. `HOLD`, `RETRACT`, malformed markers, and later marked reviews
-supersede earlier author-agent attestations. The setting defaults to false for
-adopters; ordinary author comments and reviews never count as acceptance.
+share the author's GitHub account. Automation matches any PR comment containing
+both the exact current head SHA and `PASS`, ignoring bot authors (Bot type or
+`[bot]` login suffix); no HTML marker syntax, separate
+GitHub identity or opt-in is required. The merging agent judges independence.
 
 ## I3 — merge commits only; promotion to main is a pure fast-forward
 
 **Rule.** History advances only by merge commits; `merge-queue` promotes to `main`
 as a pure ff-push behind merge-base guards. Never squash-merge, never push no-ff
 to `main`, never rewrite history, never force-push — the policy invariant, not just
-a repo setting — and `main` is advanced by the gate alone.
+a repo setting — and the queue path advances `main` through the gate.
+
+During the one-branch compatibility trial, direct PRs to `main` also use merge
+commits. Their cq verdicts and ratchet proposals are advisory. The existing
+`merge-queue` promotion path remains available until the trial and settings
+transition are complete.
 
 **Why.** Squashing breaks the mapping between the commits that were checked and the
 commits that land; rewrite or force-push moves `main` past commits whose check
