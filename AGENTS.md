@@ -80,15 +80,18 @@ concurrency yourself (contract §2 is the selection it automates):
   their tests. `--range <a>..<b>` selects a commit range; `--dry-run` prints
   the plan and runs nothing; `--help` lists the rest.
 
-It re-execs under `nice -n 5`, waits (bounded, visibly) for the host-wide
-lock, so there is one run per host, rebuilds dist only when stale, and runs
-one serial vitest invocation. It refuses more than 10 files, selections that
-fall back to every test, `integration`/`live` suites without
-`--include-integration`/`--include-live`, `--watch`, `--coverage` and every
-other vitest flag. A refusal is the answer: name a narrower set of files,
-never work around it. Quote the final `test:narrow result=…` line as
-evidence. Exit 75 means the lock stayed busy or ownership was lost before a child spawn:
-retry later, never bypass.
+It re-execs under `nice -n 5`, checks MemAvailable and exits 75 immediately
+below 2 GB, naming the top three memory users. Move to another host; no lock
+or waiting. Tests and builds try a systemd user scope (3 GB memory, no swap,
+CPUWeight50), retry without unsupported OOMScoreAdjust, and run directly
+with a visible warning if scopes are unavailable. Linux children inherit
+oom_score_adj500 where writable; Node uses a 2048 MB heap.
+Selected dist-dependent tests rebuild dist only when stale; source-only tests
+skip preparation. One serial Vitest invocation uses --maxWorkers=2 (Vitest
+currently reduces serial file runs to one worker). There is no file-count cap.
+Full-suite selections, watch, coverage and arbitrary Vitest flags remain
+refused; integration/live suites require their include flags. Quote the final
+`test:narrow result=…` line as evidence.
 
 ## GLM peak-hour blackout
 
@@ -163,11 +166,11 @@ enabled exact-head attestation path documented in the policy templates.
 invariants. Workflow files under `.github/workflows/` are instantiated from
 `policy/templates/` — never edit them directly.
 
-Python modules in `apps/crq-python` use this same runner and host lock:
+Python modules in `apps/crq-python` use this same runner:
 `pnpm test:narrow apps/crq-python/test_status_summary.py`. Source modules map
 only to their matching `test_<module>.py`; unmapped changes and discovery-sized
 selections are refused. Named modules run in one `python3 -m unittest`
-invocation, serially with any selected TypeScript tests, under the same total
-10-file cap, nice priority, timeout and process-group cleanup. Local bare
+invocation, serially with any selected TypeScript tests, under the same
+nice priority, timeout and process-group cleanup. Local bare
 unittest and discovery are prohibited; full Python discovery runs only in CI
 on Python 3.14, the production minor reported by the owner.

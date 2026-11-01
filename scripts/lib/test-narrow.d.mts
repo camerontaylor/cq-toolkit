@@ -53,7 +53,6 @@ export interface Summary {
   files?: readonly string[];
   projects?: readonly string[];
   tests?: TestCounts;
-  waitMs?: number;
   durationMs?: number;
   nice?: number;
   load?: string;

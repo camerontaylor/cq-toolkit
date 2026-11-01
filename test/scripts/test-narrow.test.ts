@@ -205,7 +205,7 @@ describe('summaryLine', () => {
   it('prints every key in a fixed order with dashes for absent values', () => {
     expect(summaryLine({ result: 'refused', exit: 2, reason: 'say "no"' })).toBe(
       'test:narrow result="refused" exit=2 files=- projects=- tests=- failed=- skipped=- ' +
-        'wait="-" duration="-" nice=- load=- uptime=- source=- ran=- reason="say \\"no\\""',
+        'duration="-" nice=- load=- uptime=- source=- ran=- reason="say \\"no\\""',
     );
   });
 
@@ -217,7 +217,6 @@ describe('summaryLine', () => {
         files: ['test/a.test.ts', 'test/b.test.ts'],
         projects: ['pure', 'process'],
         tests: { total: 7, passed: 6, failed: 0, skipped: 1 },
-        waitMs: 1234,
         durationMs: 5000,
         nice: 5,
         load: '3.2',
@@ -227,7 +226,7 @@ describe('summaryLine', () => {
       }),
     ).toBe(
       'test:narrow result="pass" exit=0 files=2 projects="pure,process" tests="6/7" failed=0 ' +
-        'skipped=1 wait="1.2s" duration="5.0s" nice=5 load="3.2" uptime="86400s" ' +
+        'skipped=1 duration="5.0s" nice=5 load="3.2" uptime="86400s" ' +
         'source="base:origin/merge-queue@0123456789" ran="test/a.test.ts,test/b.test.ts"',
     );
   });

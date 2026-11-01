@@ -41,7 +41,7 @@ Options:
 
 Refused: watch, coverage, arbitrary vitest flags and full-suite selections.
 Exit 75: MemAvailable below 2 GB; move to another host. No lock or waiting.
-Runs under nice with two workers and a 2 GB Node heap; where supported,
+Runs under nice with --maxWorkers=2 (serial files currently use one worker) and a 2 GB Node heap; where supported,
 a systemd user scope caps memory at 3 GB with no swap.
 Live drill (classified integration):
   LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`;
@@ -250,7 +250,6 @@ export function summaryLine(s) {
     ['tests', s.tests ? `${s.tests.passed}/${s.tests.total}` : undefined],
     ['failed', s.tests?.failed],
     ['skipped', s.tests?.skipped],
-    ['wait', secs(s.waitMs)],
     ['duration', secs(s.durationMs)],
     ['nice', s.nice],
     ['load', s.load],

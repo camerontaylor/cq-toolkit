@@ -4,7 +4,8 @@ import { enterResourceScope } from './lib/resource-scope.mjs';
 import { invalidateBuild, markBuildComplete } from './ratchet-lib.mjs';
 
 try {
-  await enterResourceScope(fileURLToPath(import.meta.url), []);
+  const scoped = await enterResourceScope(fileURLToPath(import.meta.url), []);
+  if (scoped) process.exit(scoped.exit);
   invalidateBuild();
   for (const [command, args] of [
     ['tsc', ['-p', 'tsconfig.build.json']],

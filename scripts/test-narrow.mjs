@@ -115,14 +115,6 @@ const finish = async (fields) => {
   await awaitExit();
 };
 process.on('exit', () => sweepChild());
-for (const signal of SIGNALS) {
-  process.on(signal, async () => {
-    interruptedBy = signal;
-    sweepChild();
-    await finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
-  });
-}
-
 // 2. Arguments --------------------------------------------------------------
 const parsed = parseArgs(argv);
 if (!parsed.ok && parsed.help) {
@@ -134,10 +126,30 @@ const opts = parsed.options;
 
 if (!opts.dryRun) {
   try {
-    await enterResourceScope(SCRIPT, argv);
+    const scoped = await enterResourceScope(SCRIPT, argv, {
+      onSignalExit: (signal, exit) =>
+        emit({
+          ...summary,
+          result: signal === 'SIGKILL' ? 'error' : 'interrupted',
+          exit,
+          reason: `scope runner killed by ${signal}`,
+        }),
+    });
+    if (scoped) {
+      process.exitCode = scoped.exit;
+      await awaitExit();
+    }
   } catch (error) {
     await finish({ result: 'refused', exit: error.code === 75 ? 75 : 1, reason: error.message });
   }
+}
+
+for (const signal of SIGNALS) {
+  process.on(signal, async () => {
+    interruptedBy = signal;
+    sweepChild();
+    await finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
+  });
 }
 
 // 4. Selection --------------------------------------------------------------
@@ -395,7 +407,7 @@ const run = await runGroup(process.execPath, vitestArgs, {
   label: 'run',
   timeoutMs: RUN_TIMEOUT_MS,
   stdio: 'inherit',
-  env: { ...process.env, CQ_DIST_PREPARED: '1', NODE_OPTIONS: '--max-old-space-size=2048' },
+  env: { ...process.env, CQ_DIST_PREPARED: '1', NODE_OPTIONS: process.env.NODE_OPTIONS },
 });
 const durationMs = Date.now() - started;
 let report = null;

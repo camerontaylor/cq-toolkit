@@ -89,11 +89,11 @@ memory users. Move to another host; there is no lock or waiting loop.
 When systemd user scopes support the requested properties, tests and builds
 run with MemoryMax=3G, MemorySwapMax=0, CPUWeight=50 and OOMScoreAdjust=500.
 If the scope rejects OOMScoreAdjust, they retry with the memory and CPU
-limits and set their own Linux OOM score to 500 (children inherit it). Only
-a missing systemd-run permits a direct run; an installed but unusable scope
-fails immediately. Node uses a 2048 MB heap and Vitest at most two
-workers. Cancellation kills the runner's own child process group.
-Only selected tests referencing `dist/` require a fresh build; other tests
+limits and set their own Linux OOM score to 500 (children inherit it). If neither scope works for any reason, the runner prints one warning and
+runs directly with the available OOM score and heap protection. Node uses a 2048 MB heap and Vitest --maxWorkers=2; serial file execution currently reduces this to
+one worker. Cancellation kills the runner's own child process group.
+Only selected tests referencing dist or in the reviewed indirect-dependency
+list require a fresh build; other tests
 skip dist preparation. Builds run only when dist is stale.
 
 Live drills also use this runner: export credentials first, then run

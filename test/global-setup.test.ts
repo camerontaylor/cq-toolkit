@@ -61,3 +61,17 @@ describe('selected dist dependencies', () => {
     }
   });
 });
+
+it('recognizes reviewed indirect dist consumers via relative and absolute paths', () => {
+  const root = new URL('..', import.meta.url).pathname;
+  for (const file of [
+    'test/e2e/review/review-address.e2e.test.ts',
+    'test/e2e/fix/fix-run.e2e.test.ts',
+    'test/scripts/static-conformance.test.ts',
+    'test/scripts/tooling-commands.test.ts',
+    'test/scripts/ratchet-propose.test.ts',
+  ]) {
+    expect(needsDist([file], root)).toBe(true);
+    expect(needsDist([join(root, file)], root)).toBe(true);
+  }
+});

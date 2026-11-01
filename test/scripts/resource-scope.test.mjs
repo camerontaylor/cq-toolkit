@@ -25,6 +25,7 @@ describe('resource scope', () => {
     );
     vi.resetAllMocks();
     vi.stubEnv('CQ_RESOURCE_SCOPED', '');
+    vi.stubEnv('NODE_OPTIONS', process.env.NODE_OPTIONS ?? '');
     mocks.readFileSync.mockReturnValue('MemAvailable: 4194304 kB\n');
     mocks.spawnSync.mockReturnValue({ status: 0 });
     mocks.spawn.mockImplementation(() => {
@@ -70,17 +71,45 @@ describe('resource scope', () => {
       expect(mocks.writeFileSync).toHaveBeenCalledWith('/proc/self/oom_score_adj', '500');
   });
 
-  it('runs directly only when systemd-run is missing', async () => {
+  it('runs directly when systemd-run is missing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     mocks.spawnSync.mockReturnValue({ error: { code: 'ENOENT' } });
     await enterResourceScope('/runner.mjs', []);
     expect(mocks.spawn).not.toHaveBeenCalled();
   });
 
-  it('fails when installed systemd cannot enforce a scope', async () => {
+  it('warns and runs directly when installed systemd cannot enforce a scope', async () => {
+    const warning = vi.spyOn(console, 'error').mockImplementation(() => {});
     mocks.spawnSync.mockReturnValue({ status: 1 });
-    await expect(enterResourceScope('/runner.mjs', [])).rejects.toThrow(
-      'cannot apply the memory scope',
-    );
+    await enterResourceScope('/runner.mjs', []);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('running uncapped'));
     expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it('retains caller Node options while enforcing the heap cap', async () => {
+    vi.stubEnv('CQ_RESOURCE_SCOPED', '1');
+    vi.stubEnv('NODE_OPTIONS', '--trace-warnings --max-old-space-size=4096');
+    mocks.readFileSync.mockReturnValue('MemAvailable: 4194304 kB\n');
+    await enterResourceScope('/runner.mjs', []);
+    expect(process.env.NODE_OPTIONS).toBe('--trace-warnings --max-old-space-size=2048');
+    vi.unstubAllEnvs();
+  });
+
+  it('reports the actual signal exit for a killed scoped runner', async () => {
+    vi.stubEnv('CQ_RESOURCE_SCOPED', '');
+    mocks.readFileSync.mockReturnValue('MemAvailable: 4194304 kB\n');
+    mocks.spawnSync.mockReturnValue({ status: 0 });
+    mocks.spawn.mockImplementation(() => {
+      const child = new EventEmitter();
+      child.kill = vi.fn();
+      queueMicrotask(() => child.emit('exit', null, 'SIGKILL'));
+      return child;
+    });
+    const report = vi.fn();
+    expect(await enterResourceScope('/runner.mjs', [], { onSignalExit: report })).toEqual({
+      exit: 137,
+    });
+    expect(report).toHaveBeenCalledWith('SIGKILL', 137);
+    vi.unstubAllEnvs();
   });
 });
