@@ -59,6 +59,9 @@ jobs:
               base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
             fi
           fi
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
+          fi
           ./scripts/denylist-scan --base "$base"
       - name: Denylist self-test
         run: ./scripts/denylist-scan --self-test

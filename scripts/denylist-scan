@@ -1578,6 +1578,8 @@ function main(argv) {
   }
   console.error('usage: scripts/denylist-scan [--base REV | --tree | --self-test]');
   console.error('  (no flags)   scan origin/main..HEAD (or DENYLIST_BASE..HEAD)');
+  console.error('  --base REV   scan REV..HEAD, every commit tree and message');
+  console.error('  --tree       scan an unpacked package tree explicitly');
   console.error('  --self-test  dirty fixture, clean probes, tree config, workflow I4, no-dist-allowlist, and parser-guards legs');
   return 2;
 }
