@@ -98,24 +98,30 @@
       "workflow": "observe-prs-wake.yml",
       "template": "observe-prs-wake.yml",
       "tokens": {}
+    },
+    {
+      "workflow": "denylist.yml",
+      "template": "denylist.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "pack-audit.yml",
+      "template": "pack-audit.yml",
+      "tokens": {}
     }
   ],
   "nonTemplated": [
     {
       "workflow": "ci.yml",
-      "reason": "Hand-carried from policy/templates/required-check.md (a documentation template, not a renderable .yml): the static job's HAND-REPLACED {COMMANDS...} slot is filled by the repo-owned composite action .github/actions/static-gate (not a workflow, not templated) — see README \"The bootstrap rule\"."
-    },
-    {
-      "workflow": "denylist.yml",
-      "reason": "Hand-carried from policy/templates/required-check.md: predates the templates; carries the required-check trigger shape with the denylist job body — see README \"The bootstrap rule\"."
+      "reason": "Hand-carried from policy/templates/required-check.md (a documentation template, not a renderable .yml): the static job's HAND-REPLACED {COMMANDS...} slot is filled by the repo-owned composite action .github/actions/static-gate (not a workflow, not templated) \u2014 see README \"The bootstrap rule\"."
     },
     {
       "workflow": "install-matrix.yml",
-      "reason": "Repo-owned CI with no template today: proves this package's optional agent-SDK peer dependency (with and without the peer) — specific to this package, not an adoptable pattern."
+      "reason": "Repo-owned CI with no template today: proves this package's optional agent-SDK peer dependency (with and without the peer) \u2014 specific to this package, not an adoptable pattern."
     },
     {
       "workflow": "live-drivers.yml",
-      "reason": "Repo-owned CI with no template today: the manual-dispatch live provider legs for this toolkit's drivers — specific to this package, not an adoptable pattern."
+      "reason": "Repo-owned CI with no template today: the manual-dispatch live provider legs for this toolkit's drivers \u2014 specific to this package, not an adoptable pattern."
     },
     {
       "workflow": "live-review.yml",
@@ -123,11 +129,7 @@
     },
     {
       "workflow": "macos-venue.yml",
-      "reason": "Repo-owned CI with no template today: the non-required macOS full-gate mirror (static-macos), running the static job's command steps from the same .github/actions/static-gate composite action. Kept outside ci.yml so the promotion gate's verified-workflow wait never keys on it — see policy/templates/required-check.md."
-    },
-    {
-      "workflow": "pack-audit.yml",
-      "reason": "Repo-owned CI with no template today: audits this package's npm tarball (files allowlist + denylist scan) — specific to this package, not an adoptable pattern."
+      "reason": "Repo-owned CI with no template today: the non-required macOS full-gate mirror (static-macos), running the static job's command steps from the same .github/actions/static-gate composite action. Kept outside ci.yml so the promotion gate's verified-workflow wait never keys on it \u2014 see policy/templates/required-check.md."
     }
   ],
   "adopterOnly": []

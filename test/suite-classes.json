@@ -1,4 +1,5 @@
 {
+  "test/scripts/publication-scan.test.ts": "process",
   "test/adapters/forge-github/forge.test.ts": "pure",
   "test/adversarial/a14-privileged-workflow.test.ts": "process",
   "test/adversarial/a4-empty-commit-real-git.test.ts": "process",

@@ -1,0 +1,192 @@
+# The pack audit — T1.7 (ws-k stage 1 + the "Tarball audit" acceptance check;
+# the release-time run of the same mechanism is T5.1's publication checklist).
+#
+# `pnpm pack` the package, untar the tarball into a temp dir OUTSIDE the
+# checkout, and audit it two ways:
+#   1. PATH ALLOWLIST: every tarball path hangs off exactly the `files`
+#      allowlist roots of package.json (dist, policy, LICENSE, README.md —
+#      package.json itself always rides along). The shipped artifacts must
+#      include dist/index.js (the exports main) and policy/denylist/
+#      patterns.yml (the denylist config the scan consumes); test/, scripts/,
+#      and src/ must appear NOWHERE in the tarball.
+#   2. DENYLIST SCAN over the unpacked tree: the repo's scripts/denylist-scan
+#      resolves its root from its own location (<root>/scripts/denylist-scan),
+#      so the audit copies it into the unpacked tree at that relative path
+#      and runs it FROM the unpacked root — the scan then consumes the
+#      TARBALL'S OWN policy/denylist/patterns.yml (its absence or corruption
+#      fails the audit too) and gitleaks-scans the shipped bytes.
+#   3. PACKED-CONSUMER SMOKE (#394, P4): the same tarball is installed into
+#      a fresh temporary consumer prefix (npm, from the exact file — no
+#      registry), the installed SDK root export is imported, and both bins
+#      are smoked over their documented contracts — the `cq` usage artifact
+#      (exit 2 + one JSON error object) and a bounded `cq-harness-mcp`
+#      initialize → tools/list → EOF-0 round trip. scripts/packed-smoke.mjs
+#      owns the bounded orchestration, failure reporting, artifact scan and
+#      cleanup; test/scripts/packed-smoke.test.ts mocks/fixture-tests it
+#      locally (the real install smoke runs HERE, never on a dev host).
+#
+# Trigger note (development posture, 2026-10-20): this workflow is not a
+# required check, so invariant I4 does not bind it; it is path-filtered to
+# the files that shape the tarball's path set or its scan — package.json and
+# the lockfile, the shipped policy/ tree, README.md and LICENSE, the build
+# configs, the scripts (denylist-scan, the build helpers), and this file —
+# plus workflow_dispatch, which the release runbooks use on the exact
+# release SHA. The repository-tree denylist (required) still scans every PR.
+name: pack-audit
+
+on:
+  pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - 'policy/**'
+      - 'src/**'
+      - README.md
+      - LICENSE
+      - 'tsconfig*.json'
+      - 'scripts/**'
+      - .github/workflows/pack-audit.yml
+  workflow_dispatch:
+
+# Superseded PR audits cancel: a newer commit on the same ref makes an
+# older run's verdict moot, and the audit is free to re-run. Per-ref group —
+# different PRs never cancel each other. Note this is run serialization, not
+# the trigger filter above.
+concurrency:
+  group: pack-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
+jobs:
+  pack-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # pnpm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm run build
+      # The tarball + the unpacked tree live in RUNNER_TEMP, never inside
+      # the checkout, so the audit cannot mistake workspace state for
+      # tarball content.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pack"
+          pnpm pack --pack-destination "${RUNNER_TEMP}/pack"
+          echo "TARBALL=$(ls "${RUNNER_TEMP}/pack"/*.tgz)" >> "${GITHUB_ENV}"
+      - name: Untar
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/unpacked"
+          tar -xzf "${TARBALL}" -C "${RUNNER_TEMP}/unpacked"
+      - name: Assert the tarball carries only the files-allowlisted paths
+        run: |
+          set -euo pipefail
+          # Every path (the npm `package/` root stripped) must hang off one
+          # of the package.json `files` roots (+ package.json itself, which
+          # npm always includes). Anything else — test/, scripts/, src/, a
+          # stray dotfile — is a violation.
+          allowlist='^(package\.json|README\.md|LICENSE|dist|policy)(/.*)?$'
+          # The listing is captured ONCE: a `tar | grep -qx` pipeline closes
+          # the pipe on grep's first match, SIGPIPEs tar (exit 141), and
+          # pipefail then fails the assertion even on a match.
+          listing="$(mktemp)"
+          tar -tzf "${TARBALL}" > "${listing}"
+          violations="$(sed 's|^package/||' "${listing}" | sed '/^$/d' | grep -vE "${allowlist}" || true)"
+          if [ -n "${violations}" ]; then
+            echo "tarball carries paths outside the package.json files allowlist:"
+            echo "${violations}"
+            exit 1
+          fi
+          # The two load-bearing artifacts must actually ship.
+          grep -qx 'package/dist/index.js' "${listing}" \
+            || { echo 'dist/index.js (the exports main) is missing from the tarball'; exit 1; }
+          grep -qx 'package/policy/denylist/patterns.yml' "${listing}" \
+            || { echo 'policy/denylist/patterns.yml is missing from the tarball'; exit 1; }
+          rm -f "${listing}"
+          echo 'tarball paths: only dist/, policy/, LICENSE, README.md, package.json'
+      - name: Packed-consumer smoke (install from THIS tarball, SDK + bins) # P4, #394
+        run: |
+          set -euo pipefail
+          # The smoke installs the EXACT audited tarball into a fresh temp
+          # prefix (no registry, no source checkout on the resolution path),
+          # imports the installed SDK root export, drives both bins over
+          # their documented contracts (the cq usage artifact; one bounded
+          # initialize → tools/list → EOF-0 MCP round trip), scans the
+          # installed tree for the required artifacts, and records the
+          # tarball identity. Bounded orchestration + guaranteed cleanup
+          # live in the script; the summary lands in RUNNER_TEMP, never in
+          # the checkout.
+          node scripts/packed-smoke.mjs \
+            --tarball="${TARBALL}" \
+            --out="${RUNNER_TEMP}/packed-smoke-summary.json"
+          echo '--- packed smoke summary ---'
+          cat "${RUNNER_TEMP}/packed-smoke-summary.json"
+      # Retain the smoke's JSON summary as a workflow artifact (docs/
+      # 0.2-release-runbook.md asks the release operator to retain it). The
+      # step's own failure still fails the job with its named-leg stderr;
+      # this upload only runs on success, so a failed smoke never produces a
+      # summary artifact that could be mistaken for evidence of a pass.
+      - name: Retain packed-smoke summary artifact
+        if: success()
+        # v4.6.2, immutable commit pin (repo convention in this file)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: packed-smoke-summary
+          path: ${{ runner.temp }}/packed-smoke-summary.json
+          if-no-files-found: error
+      - name: Install pinned gitleaks v8.30.1 (digest-pinned)
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP:-/tmp}"
+          tarball="gitleaks_8.30.1_linux_x64.tar.gz"
+          # sha256 of the v8.30.1 linux_x64 release tarball, pinned here so a
+          # replaced release asset cannot substitute a different binary; the
+          # version is pinned the same way.
+          digest="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          curl -fsSL -o "${tarball}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/${tarball}"
+          echo "${digest}  ${tarball}" | sha256sum -c -
+          tar -xzf "${tarball}" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Denylist scan over the unpacked tree (the tarball's own patterns.yml)
+        env:
+          # The scanner's tree allowlist exempts dist/ as repo-tree build
+          # output; here the unpacked dist/ IS the payload, so this opt-in
+          # drops that entry from the generated config and gitleaks-scans
+          # the shipped bytes — the audit's whole point.
+          DENYLIST_SCAN_NO_DIST_ALLOWLIST: '1'
+        run: |
+          set -euo pipefail
+          # The scanner resolves its root from its own location; the tarball
+          # does not ship scripts/, so the copy lands it at the expected
+          # relative path and the scan runs FROM the unpacked root. The
+          # `type: commonjs` marker rides along: the scanner is require-based,
+          # and the tarball root's own package.json is `type: module`.
+          mkdir -p "${RUNNER_TEMP}/unpacked/package/scripts"
+          cp scripts/denylist-scan scripts/package.json "${RUNNER_TEMP}/unpacked/package/scripts/"
+          cd "${RUNNER_TEMP}/unpacked/package"
+          ./scripts/denylist-scan --tree

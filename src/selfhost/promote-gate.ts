@@ -49,8 +49,8 @@
 //   4. clean merges: each first-parent merge's tree equals `git merge-tree
 //      --write-tree` of its parents (no evil or conflict-resolving merge).
 //   5. I2's EVIDENCE rows recomputed per admitted PR at its merged head
-//      (head-bound trusted acceptance, no outstanding trusted objection, no
-//      unresolved external threads, the I11 lag cross-check). I2's SETTLE
+//      (head-bound trusted acceptance, no outstanding trusted objection,
+//      the I11 lag cross-check; open threads are advisory). I2's SETTLE
 //      half (≥10 min since the head, or an all-clear postdating it) is NOT
 //      judged here: only the merger's recheck (self-merge-prs,
 //      merge-recheck.ts) enforces it, so a PR hand-merged into
@@ -73,8 +73,8 @@
 //   9. the block-only head-defined runs (checkVerifiedRun, D-F.2) green: the
 //      newest `merge-queue` push run of each on the tip, carrying every job
 //      the trust ref's policy list names in `requiredJobs` for that file.
-//  10. promote: step 5 re-run first (a dismissal, new objection or newly
-//      unresolved thread during the wait moves no ref, so the leases would
+//  10. promote: step 5 re-run first (a dismissal or new objection
+//      during the wait moves no ref, so the leases would
 //      not catch it; any change refuses), steps 6–7 re-run when the policy
 //      pass relied on D11 records (an unlabel moves no ref either), then
 //      one no-wait re-read of steps 8–9 (pass 2 can itself take minutes),

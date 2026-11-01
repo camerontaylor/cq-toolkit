@@ -65,7 +65,7 @@
 // non-retryable merge failure and the inner mergePr is never invoked. The
 // base branch NAME the executor's readBaseRef saw right before the call is
 // pinned too: the recheck refuses a changed, unverified, or protected base.
-// Unresolved external review threads (classify row 5's count) refuse.
+// Open threads are advisory; the merging agent triages them.
 //
 // I11 LAG. GraphQL reviews/reviewThreads lag REST: before judging, the
 // recheck cross-checks the REST reviews and review-comments collections
@@ -79,7 +79,7 @@
 import { GhError, ghJson, ghNameOk, slurpedComments } from '../adapters/forge-github/gh.js';
 import type { GhFn, GhResult } from '../adapters/forge-github/gh.js';
 import type { MergeEffects } from '../adapters/forge-github/mergeEffects.js';
-import { attachRestReplies, countUnresolvedThreads } from '../ops/review/threads.js';
+import { attachRestReplies } from '../ops/review/threads.js';
 import type { RestComment, ReviewThread } from '../ops/review/threads.js';
 import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/settle-state.js';
 import type { SettleTuple } from '../policy/queue/settle-state.js';
@@ -1170,15 +1170,7 @@ const recheckOrThrow = async (
   // (best effort) and an unchanged tuple writes nothing.
   const lag = await checkReviewDataLag(deps, pr, snapshot);
   if (lag !== null) return refuseAfterObserving(lag);
-  // (g) Unresolved external threads (the I2 thread rule, classify row 5's
-  // exact count: root author ≠ PR author; a null root author is external),
-  // judged before any review.
-  const unresolved = countUnresolvedThreads(snapshot.threads.map(asReviewThread), {
-    excludeAuthorLogin: snapshot.authorLogin,
-  });
-  if (unresolved > 0) {
-    return refuseAfterObserving(`unresolved external threads: ${String(unresolved)}`);
-  }
+  // Open threads are triaged by the merging agent, never an automatic refusal.
   // (h) Head-bound acceptance.
   const judgment = judgeAtHead(snapshot, expected, deps.policy);
   if (!judgment.accepted) {
@@ -1224,7 +1216,7 @@ const recheckOrThrow = async (
  * durable) and observe the tuple in memory; (g0) the I11 REST cross-check:
  * refuse `review data lag: …` when a submitted REST review or a REST thread
  * root is missing from the snapshot, or a REST read fails/is capped (see
- * checkReviewDataLag); (g) refuse unresolved external review threads; (h) refuse without head-bound trusted acceptance or with
+ * checkReviewDataLag); (g) report open review threads; (h) refuse without head-bound trusted acceptance or with
  * an outstanding objection; (i) refuse unless settled per the observed
  * ledger or a freshly validated trusted all-clear postdates the pinned
  * commit; (j) WRITE the observation (compare-and-swap) and answer ok — a

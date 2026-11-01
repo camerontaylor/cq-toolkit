@@ -36,7 +36,7 @@
 // re-fetched IMMEDIATELY before every merge call: gateMergeEffects wraps the
 // executor's mergePr, so there is no classify→merge window. Acceptance comes
 // only from a trusted actor's CURRENT review whose commit.oid equals the
-// live headRefOid; unresolved external threads refuse; the base branch name
+// live headRefOid; open threads are advisory; the base branch name
 // the executor's readBaseRef saw right before the call must still be the
 // live base, and a live base of SelfhostDefaults.protectedBranch refuses.
 // Settle comes from >= 2 durable observations of the identical (head, base,

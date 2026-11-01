@@ -4,13 +4,13 @@
 // Pinned here, in table order:
 //   1. Every ROW of the I2 table (first match wins): draft → never, DIRTY →
 //      conflicting, truncated → awaiting (fail closed), unknown last-commit
-//      → awaiting (fail closed), unresolved external threads → has-issues,
+//      → awaiting (fail closed), unresolved external threads → advisory count,
 //      no acceptable review → awaiting, explicit all-clear postdating the
 //      last commit → eligible, settle window elapsed/pending →
 //      eligible/awaiting.
 //   2. PRECEDENCE — the rows are an order, not a menu: draft beats
 //      everything, conflicting beats truncated, truncated beats has-issues,
-//      has-issues beats no-review.
+//      open threads do not replace review evidence.
 //   3. THE SETTLE BOUNDARY — exactly at the window is eligible, one ms
 //      short is awaiting, and the flip comes from the INJECTED nowMs (same
 //      candidate, different clock reading → different verdict; the table
@@ -252,13 +252,12 @@ describe('classifyPr — one test per I2 row', () => {
     });
   });
 
-  test('row 5: unresolved external threads → has-issues, count surfaced on the result', () => {
+  test('unresolved threads are advisory, count surfaced on the result', () => {
     const result = classifyPr(
       settleCandidate({ threads: [thread(), thread({ id: 'T2', rootDatabaseId: 200 })] }),
       SETTLED_MS,
     );
-    expect(result.verdict).toBe('has-issues');
-    expect(result.reason).toBe('unresolved_external_threads');
+    expect(result.verdict).toBe('eligible');
     expect(result.unresolvedExternalThreads).toBe(2);
   });
 
@@ -337,10 +336,10 @@ describe('classifyPr — precedence (first match wins)', () => {
     expect(result.unresolvedExternalThreads).toBe(1);
   });
 
-  test('has-issues beats no-review (an unresolved thread blocks before the first look)', () => {
+  test('open threads do not substitute for review', () => {
     const result = classifyPr(candidate({ threads: [thread()] }), SETTLED_MS);
-    expect(result.verdict).toBe('has-issues');
-    expect(result.reason).toBe('unresolved_external_threads');
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
   });
 
   test('unknown last commit beats has-issues (row 4 fails closed ahead of row 5)', () => {
