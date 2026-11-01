@@ -148,3 +148,29 @@ still refused earlier. For full rollback, revoke server authorization first by
 commenting out the `authorized_keys` line, keep managed backups, then retire the
 client key and alias. Queue requests and receipts are never deleted; deferred
 debt stays inspectable and can be cancelled with `review.enqueue --action=cancel`.
+
+## Reading reconciled inventory
+
+An operator may authorize adoption of one existing merged-current request by adding
+an exact grant to the server policy's `reconciled_reads` array:
+
+```json
+{"principal":"developer","requestId":"reconcile-<subject-digest>","binding":{"kind":"merged-current","repo":"owner/repo","pr":506,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}}
+```
+
+Use the inventory's request ID and immutable source binding with the existing SDK
+`status` / `report` methods or `review.queueStatus` / `review.report` commands.
+No enqueue alias is needed. The principal must also have ordinary read authority;
+acknowledgement still requires write authority. The first successful read validates
+forge source and allowed base branch, the exact stored mapping and unique item,
+and capacity before persisting the principal-bound client entry. Adoption neither
+enrolls debt nor starts a review. Existing client entries retain their original
+principal binding. Removing the grant prevents new adoption; revoke ordinary read
+or write access to revoke an already adopted client's corresponding capability.
+
+Deployment requires this transport and compatible receipt storage on the queue
+runner, an operator-owned exact grant, and the existing activated queue-v1 boundary.
+No deployment is performed by this source change. Live D2 inventory/adoption
+acceptance must be recorded separately from quota discharge: pending inventory,
+a completed report, consumption acknowledgement and remediation remain distinct;
+adoption alone supplies no review, fixed-state or full-quota credit.
