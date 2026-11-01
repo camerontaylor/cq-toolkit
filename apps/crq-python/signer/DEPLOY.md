@@ -1,7 +1,7 @@
 # Review-ledger publisher deployment
 
 The promotion daemon is retired. Follow the normal drained runner switch in
-[HOST-DEPLOY.md](../ops/HOST-DEPLOY.md) as ctaylor on ceres, only after the
+[HOST-DEPLOY.md](../ops/HOST-DEPLOY.md) as the runner user on queue-host, only after the
 coordinator confirms direct-main merges. Stop and disable the system
 `crq-signer.service` and drain its review child before installing the reviewed,
 root-owned `/opt/cq-reviewer/crq-signer.py`. Verify its hash against the reviewed
