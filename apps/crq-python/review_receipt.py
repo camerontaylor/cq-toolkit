@@ -4,7 +4,7 @@ Caller owns the existing tick lock and queue persistence. No network or dispatch
 Receipt chunks encode canonical UTF-8 JSON bytes, including arbitrarily large
 individual findings; consumers verify the whole SHA256 before acknowledging.
 """
-from runtime_target import DEFAULT_BRANCH, DEFAULT_REF, LEGACY_BRANCH
+from runtime_target import DEFAULT_REF, LEGACY_BRANCH
 import base64
 import hashlib
 import json
@@ -17,7 +17,7 @@ VERSION = 1
 KIND = "merged-current"
 POLICY = "affected-current-additions-v1"
 CHUNK_BYTES = 3072
-SELECTORS = {"promoted-main": DEFAULT_REF, DEFAULT_BRANCH: DEFAULT_REF, LEGACY_BRANCH: DEFAULT_REF}
+SELECTORS = {"promoted-main": DEFAULT_REF, LEGACY_BRANCH: DEFAULT_REF}
 
 
 def canonical(value):

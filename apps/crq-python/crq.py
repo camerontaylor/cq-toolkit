@@ -2037,9 +2037,8 @@ def coverage_fallback(q, log, dry, only):
             if not git("diff", "--name-only", base, head):
                 item.update(state="skipped", last_error="empty coverage range")
                 continue
-            plan = dict(base=base, head=head, target=DEFAULT_REF, cycle=None,
+            plan = dict(base=base, head=head, target=item["coverage_sha"], cycle=None,
                         branch=None, notes=[], label="lowest-priority coverage review")
-            plan["target"] = item["coverage_sha"]
             if not backfill_runtime.rank4_gate(sys.modules[__name__], q, item, dry):
                 continue
             run_id = launch(q, item, plan)
