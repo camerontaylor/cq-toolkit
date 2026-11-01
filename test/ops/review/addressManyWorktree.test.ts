@@ -1,15 +1,22 @@
 import { readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { expect, test } from 'vitest';
-import { isolateAddressMany } from '../../../src/ops/review/addressMany.js';
+import { expect, test, vi } from 'vitest';
+import { isolateAddressMany, makeReviewAddressMany } from '../../../src/ops/review/addressMany.js';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { fileWorktreeRegistry, resolvePrWorktree } from '../../../src/adapters/git/prWorktree.js';
 import { makeTestRepo, type TestRepo } from '../dev/repo.js';
 
 const NOW = 1_793_145_600_000;
 
-async function fixture() {
+async function identityRepo() {
   const repo = await makeTestRepo();
+  repo.git('config', 'user.name', 'Fixture User');
+  repo.git('config', 'user.email', 'fixture@example.invalid');
+  return repo;
+}
+
+async function fixture() {
+  const repo = await identityRepo();
   try {
     const first = repo.git('rev-parse', 'HEAD').trim();
     await repo.write('src/sibling.ts', 'export const sibling = 2;\n');
@@ -147,7 +154,7 @@ test('a dirty stale PR refuses while its sibling resolves without changing calle
 });
 
 test('bulk clone isolation gives sibling legs independent common directories and preserves origin', async () => {
-  const repo = await makeTestRepo();
+  const repo = await identityRepo();
   try {
     const roots = await Promise.all([
       isolateAddressMany(repo.root, 7, {
@@ -176,7 +183,7 @@ test('bulk clone isolation gives sibling legs independent common directories and
 });
 
 test('bulk clones refresh the remote target even when the caller local main is stale', async () => {
-  const repo = await makeTestRepo();
+  const repo = await identityRepo();
   try {
     const old = repo.git('rev-parse', 'origin/merge-queue').trim();
     const current = repo.git('rev-parse', 'HEAD').trim();
@@ -193,7 +200,7 @@ test('bulk clones refresh the remote target even when the caller local main is s
 });
 
 test('clone retains effective author and committer identity configured only in the caller', async () => {
-  const repo = await makeTestRepo();
+  const repo = await identityRepo();
   try {
     repo.git('config', 'user.name', 'Repository User');
     repo.git('config', 'user.email', 'repo@example.invalid');
@@ -212,7 +219,7 @@ test('clone retains effective author and committer identity configured only in t
 });
 
 test('failed isolation removes its partial clone directory', async () => {
-  const repo = await makeTestRepo();
+  const repo = await identityRepo();
   try {
     const cloneRoot = join(dirname(repo.root), 'clones');
     await expect(
@@ -227,7 +234,7 @@ test('failed isolation removes its partial clone directory', async () => {
 test.each(['credential.helper', 'commit.gpgsign', 'gpg.format', 'user.signingkey'])(
   'bulk explicitly refuses repository-local %s without copying its value',
   async (key) => {
-    const repo = await makeTestRepo();
+    const repo = await identityRepo();
     try {
       repo.git('config', key, 'local-sensitive-setting');
       await expect(
@@ -242,7 +249,7 @@ test.each(['credential.helper', 'commit.gpgsign', 'gpg.format', 'user.signingkey
 test.each(['--local', '--worktree'])(
   'bulk refuses URL-scoped HTTP auth in %s config without copying its value',
   async (scope) => {
-    const repo = await makeTestRepo();
+    const repo = await identityRepo();
     try {
       repo.git('config', 'extensions.worktreeConfig', 'true');
       repo.git('config', scope, 'http.https://github.com/.extraheader', 'auth-fixture-value');
@@ -254,3 +261,58 @@ test.each(['--local', '--worktree'])(
     }
   },
 );
+
+test('ordinary repositories with linked worktrees do not require worktree config support', async () => {
+  const repo = await identityRepo();
+  try {
+    repo.git('worktree', 'add', '--detach', join(dirname(repo.root), 'linked'), 'HEAD');
+    const root = await isolateAddressMany(repo.root, 7, {
+      cloneRoot: join(dirname(repo.root), 'clones'),
+    });
+    expect(repo.git('-C', root, 'rev-parse', 'origin/main')).toBe(
+      repo.git('rev-parse', 'origin/main'),
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('missing effective caller identity is a needs-human leg with no dispatch', async () => {
+  const repo = await identityRepo();
+  try {
+    vi.stubEnv('GIT_AUTHOR_NAME', '');
+    const address = vi.fn();
+    const gh = async (args: string[]) => ({
+      code: 0,
+      stderr: '',
+      stdout: JSON.stringify(
+        args[0] === 'repo'
+          ? { nameWithOwner: 'owner/repo' }
+          : {
+              number: 1,
+              state: 'open',
+              merged: false,
+              draft: false,
+              user: { login: 'owner', type: 'User' },
+              head: { sha: 'a'.repeat(40), ref: 'feature/x', repo: { full_name: 'owner/repo' } },
+            },
+      ),
+    });
+    const result = await makeReviewAddressMany({ gh, address })({
+      repoRoot: repo.root,
+      repo: 'owner/repo',
+      owner: 'owner',
+      pulls: [1],
+      maxTokens: 100,
+      tokensPerPr: 50,
+    });
+    expect(result.status).toBe('needs-human');
+    const leg = result.report?.rows[0]?.result;
+    expect(leg?.status).toBe('needs-human');
+    if (leg?.status === 'needs-human') expect(leg.reason).toContain('caller author identity');
+    expect(address).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllEnvs();
+    await repo.cleanup();
+  }
+});

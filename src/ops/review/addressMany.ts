@@ -66,7 +66,22 @@ export async function isolateAddressMany(
 ): Promise<string> {
   const git = promisify(execFile);
   // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
-  for (const scope of ['--local', '--worktree']) {
+  const scopes = ['--local'];
+  try {
+    const extension = await git('git', [
+      '-C',
+      repoRoot,
+      'config',
+      '--bool',
+      '--get',
+      'extensions.worktreeConfig',
+    ]);
+    if (extension.stdout.trim() === 'true') scopes.push('--worktree');
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 1)
+      throw new IsolationRefusal('Cannot inspect worktree configuration capability');
+  }
+  for (const scope of scopes) {
     try {
       const local = await git('git', [
         '-C',
@@ -97,11 +112,18 @@ export async function isolateAddressMany(
     await git('git', ['clone', '--no-hardlinks', '--', repoRoot, root]);
     await git('git', ['-C', root, 'remote', 'set-url', 'origin', origin.stdout.trim()]);
     for (const role of ['author', 'committer']) {
-      const ident = (
-        await git('git', ['-C', repoRoot, 'var', `GIT_${role.toUpperCase()}_IDENT`])
-      ).stdout.trim();
+      let ident: string;
+      try {
+        ident = (
+          await git('git', ['-C', repoRoot, 'var', `GIT_${role.toUpperCase()}_IDENT`])
+        ).stdout.trim();
+      } catch {
+        throw new IsolationRefusal(
+          `Cannot resolve caller ${role} identity; configure Git identity before bulk addressing`,
+        );
+      }
       const parsed = /^(.*) <([^<>]+)> [0-9]+ [+-][0-9]{4}$/.exec(ident);
-      if (!parsed) throw new Error(`Cannot resolve caller ${role} identity`);
+      if (!parsed) throw new IsolationRefusal(`Cannot resolve caller ${role} identity`);
       await git('git', ['-C', root, 'config', `${role}.name`, parsed[1]!]);
       await git('git', ['-C', root, 'config', `${role}.email`, parsed[2]!]);
     }
