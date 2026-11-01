@@ -422,9 +422,82 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
       expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
         exitCode: 2,
         signal: null,
-        stdoutTail: '[output withheld by secret scan]',
-        stderrTail: '[output withheld by secret scan]',
+        stdoutTail: '[withheld: scanner unavailable/failed]',
+        stderrTail: '[withheld: scanner unavailable/failed]',
       });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([false, true])(
+    'real repository rules retain benign output and withhold secrets (%s)',
+    async (secret) => {
+      const text = secret
+        ? '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
+        : 'related test selection exceeds cap 10: 22 files';
+      const f = await fixture(
+        undefined,
+        `console.log(${JSON.stringify(text)});process.exitCode=2;`,
+        {
+          scanner: makeRepoDiffScanner(process.cwd()),
+        },
+      );
+      try {
+        await f.engine.fix(finding(), 1);
+        expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+          secret ? '[withheld: secret matched]' : text + '\n',
+        );
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('candidate check failures do not scan discarded diagnostics', async () => {
+    let scans = 0;
+    const f = await fixture(
+      undefined,
+      `if(require('node:fs').readFileSync('src/a.ts','utf8').includes('GOOD'))process.exitCode=2;`,
+      {
+        scanner: async (components) => {
+          if (components.some((c) => c.component === 'check-stdout')) scans++;
+          return components.map((c) => ({ component: c.component, hits: [] }));
+        },
+      },
+    );
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.calls()).toBeGreaterThan(0);
+      expect(scans).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('diagnostic scan observes cancellation', async () => {
+    const controller = new AbortController();
+    const f = await fixture(undefined, `process.exitCode=2;`, {
+      parentSignal: controller.signal,
+      scanner: () => {
+        controller.abort();
+        return new Promise(() => {});
+      },
+    });
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(f.engine.preconditions?.()).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('unresponsive diagnostic scan is bounded', async () => {
+    const f = await fixture(undefined, `process.exitCode=2;`, {
+      scanner: () => new Promise(() => {}),
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+        '[withheld: scanner unavailable/failed]',
+      );
     } finally {
       await f.cleanup();
     }
@@ -454,7 +527,7 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
     try {
       await f.engine.fix(finding(), 1);
       expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
-        '[output withheld by secret scan]',
+        '[withheld: secret matched]',
       );
     } finally {
       await f.cleanup();

@@ -53,7 +53,9 @@ this selection. Commit `c9e3f364` already removed the cap on main.
 Configured baseline check refusals retain `checkDiagnostics` in their typed
 preconditions: child exit code, termination signal, and the last 4096 characters
 of each output stream. The full streams are secret-scanned before slicing;
-positive, incomplete or unavailable scans withhold both tails. Output has no
-source provenance, so every path-scoped repository rule applies; catch-all
-protected-path rules therefore withhold nonempty tails. No environment
-values are recorded.
+positive, incomplete or unavailable scans withhold both tails. Output uses a
+synthetic `check-output.txt` path for content scanning;
+protected-file path rules do not apply. Labels distinguish secret matches from
+scanner failure or unavailability. Only retained baseline diagnostics are scanned,
+with a one-second cap shortened by the remaining operation budgets and
+cancellation. No environment values are recorded.

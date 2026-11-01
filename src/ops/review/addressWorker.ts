@@ -566,21 +566,46 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             // Scan the full capture before retaining bounded tails: a secret may
             // straddle the tail boundary. Missing/failed scans suppress output.
             let safe = false;
-            if (capture) {
+            let withheld = '[withheld: scanner unavailable/failed]';
+            if (baseline && capture) {
+              const output = capture;
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              let onAbort: (() => void) | undefined;
               try {
-                const scans = await scanner([
-                  {
-                    component: 'check-stdout',
-                    path: 'check-output.txt',
-                    unattributed: true,
-                    text: capture.stdout,
-                  },
-                  {
-                    component: 'check-stderr',
-                    path: 'check-output.txt',
-                    unattributed: true,
-                    text: capture.stderr,
-                  },
+                const limit = Math.max(
+                  0,
+                  Math.min(
+                    1000,
+                    deps.remainingWallMs(),
+                    policy.budgets.step.wallMs,
+                    remainingUnit(finding),
+                  ),
+                );
+                const expired = new Promise<never>((_resolve, reject) => {
+                  onAbort = () => reject(new Error('diagnostic scan cancelled'));
+                  signal?.addEventListener('abort', onAbort, { once: true });
+                  timer = setTimeout(() => reject(new Error('diagnostic scan timeout')), limit);
+                  if (signal?.aborted || limit === 0) onAbort();
+                });
+                const scans = await Promise.race([
+                  expired,
+                  Promise.resolve().then(() =>
+                    scanner(
+                      [
+                        {
+                          component: 'check-stdout',
+                          path: 'check-output.txt',
+                          text: output.stdout,
+                        },
+                        {
+                          component: 'check-stderr',
+                          path: 'check-output.txt',
+                          text: output.stderr,
+                        },
+                      ],
+                      { timeoutMs: Math.max(1, limit) },
+                    ),
+                  ),
                 ]);
                 safe =
                   scans.length === 2 &&
@@ -588,22 +613,25 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                     scans.some((row) => row.component === component && row.hits.length === 0),
                   ) &&
                   scans.every((row) => row.hits.length === 0);
+                if (scans.some((row) => row.hits.length > 0))
+                  withheld = '[withheld: secret matched]';
               } catch {
                 /* Suppress output when scanning is unavailable. */
+              } finally {
+                clearTimeout(timer);
+                if (onAbort) signal?.removeEventListener('abort', onAbort);
               }
+              stop();
             }
-            const diagnostics = capture
-              ? {
-                  exitCode: capture.exitCode,
-                  signal: capture.signal ?? null,
-                  stdoutTail: safe
-                    ? capture.stdout.slice(-4096)
-                    : '[output withheld by secret scan]',
-                  stderrTail: safe
-                    ? capture.stderr.slice(-4096)
-                    : '[output withheld by secret scan]',
-                }
-              : undefined;
+            const diagnostics =
+              baseline && capture
+                ? {
+                    exitCode: capture.exitCode,
+                    signal: capture.signal ?? null,
+                    stdoutTail: safe ? capture.stdout.slice(-4096) : withheld,
+                    stderrTail: safe ? capture.stderr.slice(-4096) : withheld,
+                  }
+                : undefined;
             throw new CheckFailure(
               `configured check was ${result.status} (${check.adapter}): ${detail.slice(0, 1000)}${transient ? '; transient check exit ' + String(capture?.exitCode) : ''}`,
               transient,
