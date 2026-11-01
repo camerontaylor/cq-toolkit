@@ -705,12 +705,11 @@ class CurrentTest(unittest.TestCase):
                 return SimpleNamespace(pid=919191)
             return real_popen(argv, **kw)
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(crq, "promotion_mode", return_value="user"))
             if not discovery:
                 stack.enter_context(mock.patch.object(crq, "discover_merged", return_value=[]))
             for name in ("fetch", "write_status", "write_heartbeat", "notify_owner"):
                 stack.enter_context(mock.patch.object(crq, name))
-            for name in ("enroll", "promotion_audit", "promotion_tick"):
+            for name in ("enroll",):
                 stack.enter_context(mock.patch.object(crq, name, return_value=[]))
             stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs"))
             stack.enter_context(mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")))
@@ -980,9 +979,6 @@ class CurrentTest(unittest.TestCase):
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \
              mock.patch.object(crq, "discover_merged", return_value=[]), \
              mock.patch.object(crq, "write_status"), mock.patch.object(crq, "write_heartbeat"), \
-             mock.patch.object(crq, "promotion_mode", return_value="user"), \
-             mock.patch.object(crq, "promotion_tick", return_value=[]), \
-             mock.patch.object(crq, "promotion_audit", return_value=[]), \
              mock.patch.object(crq.repair_tick, "reconcile_fix_prs"), \
              mock.patch.object(crq, "prepare_current") as planner:
             log = crq.with_lock(crq.tick, False, item["id"])
@@ -1204,56 +1200,6 @@ class CurrentTest(unittest.TestCase):
         self.assertIsNone(crq._FORGE_BUDGET)
 
 
-    def test_auth_classification_pauses_current_ordinary_and_promotion_harvest(self):
-        initial = copy.deepcopy(self.q)
-        auth = {"type": "error", "errorType": "auth", "recoverable": True}
-        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
-        mixed = [{"type": "error", "errorType": code}
-                 for code in ("unknown", "scan", "budget", "cancel")] + [vendor]
-        streams = [[auth]] + [events for other in mixed
-                              for events in ([auth, other], [other, auth])]
-        n = 0
-        for kind in (review_receipt.KIND, "pr", "promotion"):
-            for events in streams:
-                with self.subTest(kind=kind, events=events), \
-                     mock.patch.object(crq, "RUNS", self.state / f"auth-runs-{n}"):
-                    n += 1
-                    self.q = copy.deepcopy(initial)
-                    crq.save_queue(self.q)
-                    item = self.enroll(f"auth-{n}")
-                    rdir = self.launch_item(item)
-                    self.terminal_artifacts(item, events)
-                    (rdir / "exit.json").write_text(json.dumps({"exit": 1}))
-                    # A real detached run, stream and classifier feed each harvest route.
-                    item["kind"] = kind
-                    result = self.harvest(item)
-                    cls = json.loads((rdir / "classification.json").read_text())
-                    self.assertEqual(cls["outcome"], "auth")
-                    self.assertFalse(cls["counted"])
-                    self.assertEqual(cls["failure_provenance"]["causes"][:len(events)], [
-                        {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
-                        if e["errorType"] == "rate_limit" else
-                        {"source": "queue", "category": "unknown", "code": e["errorType"]}
-                        for e in events])
-                    self.assertTrue(self.q["paused"])
-                    self.assertIn("auth", self.q["pause_reason"])
-                    self.assertIsNone(item["run"])
-                    self.assertNotIn("not_before", item)
-                    self.assertEqual(item.get("cycles", []), [])
-                    self.assertNotIn("coverage", self.q)
-                    if kind == review_receipt.KIND:
-                        document = self.document(item)
-                        self.assertEqual(document["outcome"], "auth")
-                        self.assertFalse(document["counted"])
-                        self.assertEqual(document["classification"], cls)
-                        self.assertFalse(queue_transport._vendor_rate_limit(document))
-                    else:
-                        self.assertIn("PAUSED", result)
-                        self.assertEqual(item["state"], "pending")
-                    crq.save_queue(self.q)
-                    self.assertEqual(self.tick(), 0)
-                    self.assertTrue(crq.load_queue()["paused"])
-
     def test_prose_auth_and_unknown_mixed_causes_do_not_pause_or_gain_vendor_authority(self):
         initial = copy.deepcopy(self.q)
         vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
@@ -1334,6 +1280,28 @@ class CurrentTest(unittest.TestCase):
                     {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
                     if n == 0 else {"source": "queue", "category": "unknown", "code": "unclassified"})
 
+
+    def test_discovery_enrolls_direct_main_and_queue_merges_with_legacy_records(self):
+        legacy = {"id": "promo-old", "kind": "promotion", "state": "reviewing"}
+        self.q["items"].append(legacy)
+        crq.save_queue(self.q)
+        forge = self.forge_inventory(count=2)
+        def both_branches(args):
+            response = forge(args)
+            node = response["data"]["repository"].get("n1")
+            if node:
+                node["baseRefName"] = "main"
+            return response
+        interval = {"after": "2026-10-01T00:00:00Z", "before": "2026-10-03T00:00:00Z"}
+        with mock.patch.object(crq, "gh_json", side_effect=both_branches):
+            crq.discover_merged(self.q, crq.ForgeBudget(), interval=interval)
+        saved = crq.load_queue()
+        self.assertEqual(saved["items"][0], legacy)
+        self.assertEqual({i["pr"] for i in crq.live_items(saved)}, {1, 2})
+        self.assertTrue(all(i["state"] == "pending" for i in crq.live_items(saved)))
+        self.assertEqual(crq.inflight(saved), [])
+        self.assertFalse(crq.has_collectable_runs(saved))
+        self.assertEqual(saved["merged_watermark"], interval["before"])
 
     def forge_inventory(self, count=125):
         def forge(args):
@@ -1597,7 +1565,6 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual(sum(item["kind"] == "delta" and item["pr"] == 43 for item in self.q["items"]), 1)
 
 
-
 class DiscoveryFailureBoundaryTest(unittest.TestCase):
     """Real discovery/persistence; temporary files and counter-only tick effects."""
 
@@ -1627,7 +1594,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.q = {"created_at": self.AFTER, "items": [], "starts": [],
                   "merged_watermark": self.AFTER,
                   "merged_discovery": {"after": self.AFTER, "before": self.BEFORE, "complete": False}}
-        key = review_receipt.digest({"repo": crq.REPO, "base": "merge-queue",
+        key = review_receipt.digest({"repo": crq.REPO, "base": "main-or-merge-queue",
                                      "after": self.AFTER, "before": self.BEFORE})
         self.path = self.root / "reconcile" / (key + ".json")
         self.path.parent.mkdir(exist_ok=True)
@@ -1654,7 +1621,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
 
     def wrapper(self, checkpoint=None):
         value = {"source": {"version": 1, "method": "all-number-slots-v1", "repo": crq.REPO,
-            "base": "merge-queue", "repository_id": "fixture-repository", "ceiling": self.count,
+            "base": "main-or-merge-queue", "repository_id": "fixture-repository", "ceiling": self.count,
             "window": crq.merged_reconcile.NUMBER_WINDOW}, "checkpoint": checkpoint}
         value["digest"] = review_receipt.digest(value)
         return value
@@ -1796,8 +1763,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                             lambda *a, **k: order.append("refresh") or [])
                                         crq.tick()
                                         self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
-                                        for name in ("harvest_review", "harvest", "enroll", "promotion_audit",
-                                                     "promotion_tick", "read_slot_usage", "admit_available",
+                                        for name in ("harvest_review", "harvest", "enroll",
+                                                      "read_slot_usage", "admit_available",
                                                      "write_status", "write_heartbeat"):
                                             effects[name].assert_called_once()
                                 else:
@@ -1933,11 +1900,10 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                 effects[name] = stack.enter_context(mock.patch.object(obj, name, return_value=result))
             counter(crq, "load_queue", self.q)
             counter(crq, "fetch")
-            counter(crq, "promotion_mode", "user")
-            for name in ("harvest_signer", "harvest_review", "apply_signer_backoff", "refresh_slot_deadline",
+            for name in ("harvest_review", "refresh_slot_deadline",
                          "write_status", "write_heartbeat", "event", "notify_owner"):
                 counter(crq, name)
-            for name in ("enroll", "promotion_audit", "promotion_tick"):
+            for name in ("enroll",):
                 counter(crq, name, [])
             for name in ("harvest", "backfill", "archive_legacy", "reconcile_fix_prs"):
                 counter(crq.repair_tick, name, [])
@@ -1977,7 +1943,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
             effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
             crq.tick()
             self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
-            for name in ("harvest_review", "harvest", "enroll", "promotion_audit", "promotion_tick",
+            for name in ("harvest_review", "harvest", "enroll",
                          "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
                 effects[name].assert_called_once()
         self.assertEqual(crq.load_queue()["merged_watermark"], self.AFTER)
@@ -2186,13 +2152,13 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
                 ("load_queue", lambda: self.q), ("fetch", mock.Mock()),
                 ("gh_json", mock.Mock(side_effect=AssertionError("unmocked forge in admission fixture"))),
                 ("enroll", lambda q, dry: []), ("discover_merged", lambda q, budget: []),
-                ("promotion_audit", lambda q, dry: []),
-                ("promotion_tick", lambda q, dry: []), ("save_queue", mock.Mock()),
+
+                 ("save_queue", mock.Mock()),
                 ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
                 ("notify_owner", mock.Mock()), ("event", mock.Mock()),
                 ("coverage_fallback", lambda *a: (None, False)),
-                ("promotion_mode", lambda: "user"), ("apply_signer_backoff", mock.Mock()),
-                ("STATE", self.root), ("PROMO", {"enabled": False}),
+
+                ("STATE", self.root),
                 ("CONFIG", {"max_starts_per_hour": 5, "max_inflight": 2,
                             "stale_alarm_min": 36, "repair": {}})):
             patch = mock.patch.object(crq, name, value)
@@ -2478,6 +2444,7 @@ class CoverageFallbackTargetTest(unittest.TestCase):
         with mock.patch.object(crq, "coverage_fallback", side_effect=fallback):
             crq.start_one(queue, [], False, "backfill-only", False)
         self.assertEqual(observed, [True])
+
 
     def test_ledger_spool_transport_binds_only_base_and_head(self):
         spool = crq.Spool({"host": "operator@127.0.0.1", "key": "/fixture/key"})

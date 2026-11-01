@@ -2,11 +2,12 @@
 
 crq is the single consumer of the CodeRabbit CLI quota for cq-toolkit. The
 script schedules, reviews, verifies and publishes; models only judge and repair.
-Local ops tooling: changes are committed locally rather than opened as PRs.
-
-The implementation branch is staged for queue-host. worker-host remains the live runner
-until the single-runner handover in [ops/CUTOVER.md](ops/CUTOVER.md) is executed.
-[ops/IMPLEMENTATION.md](ops/IMPLEMENTATION.md) records leases and deployment state.
+PRs merge directly to `main`; crq records post-merge review as visible debt.
+Merged discovery accepts `main` and the retiring `merge-queue` branch, retaining
+#710's frozen interval and restarting partial scans with the combined query.
+Historical promotion queue records load unchanged but are ignored by scheduling,
+slot reservations and summaries. Legacy private overlay keys remain accepted
+while host deployments lag. No promotion status, audit or admin commands run.
 
 ## Runtime ownership
 
@@ -15,16 +16,13 @@ until the single-runner handover in [ops/CUTOVER.md](ops/CUTOVER.md) is executed
 server waitTime cooldown and usage-driven slots, and writes repair inbox jobs.
 Before admission it runs `coderabbit usage --agent` in the repository clone.
 Team included reviews are a count in a rolling 60-minute window (10 slots).
-Each tick fills free slots in promotion → operator priority → rank order, bounded
+Each tick fills free slots in operator priority → rank order, bounded
 by `max_starts_per_tick` and `max_inflight` (both default 10). The legacy
 `max_starts_per_hour` (5) applies only when usage is unavailable or has no valid
 remaining count. Partial usage with a valid remaining count is usable.
 Outstanding local reservations are subtracted from vendor remaining slots.
 A detached run's hold clears only after structured vendor progress precedes a
-valid usage probe; context/launch alone is insufficient. Signer requests retain
-their hold through claiming until result harvest, including requests deferred
-past their local rolling hour. This can conservatively hold one extra slot for
-a running signer. The local fallback counts recent reservations once.
+valid usage probe; context/launch alone is insufficient. The local fallback counts recent reservations once.
 
 The oldest unexpired local start plus 60 minutes predicts the next slot. Vendor
 `rollingWindowMs` refines the window; `fullCapacityInMs` describes full recovery,
@@ -35,25 +33,21 @@ short retry. Each wake rechecks usage before spending.
 `AccuracySec=1s`. Its first step reads `state/next-review-at` (UTC); a future
 hint exits before runner imports, locking or network calls. A due entry takes
 the tick lock non-blocking, collects only terminal detached reviews through the
-existing ownership-aware harvest path, applies published signer cooldown, then
+existing ownership-aware harvest path, then
 refreshes usage and fills eligible free slots. Live or unverifiable runs retain
 capacity. Uncaptured merged-current items wait for the fetching maintenance
-tick; minute admission can reuse an existing capture. Unknown signer delivery
-retains its journaled admission and cannot fall through to another launch.
-If a dated next slot is less than 60 seconds away it sleeps once and
+tick; minute admission can reuse an existing capture. If a dated next slot is less than 60 seconds away it sleeps once and
 rechecks; undated one-minute retries never sleep under the lock. In-flight runs
 cap the timestamp hint at the next minute boundary, including while admission
 is paused or cooling down, so completed detached review results are collected
-within a minute. Promotion signer results are collected by the full tick and
-may wait up to twelve minutes.
-Without in-flight runs, idle admission backs off twelve minutes. The twelve-minute
-full tick retains enrollment, harvest, status and audits, refreshes the hint, and
+within a minute. Without in-flight runs, idle admission backs off twelve minutes. The twelve-minute
+full tick retains enrollment, harvest, status, refreshes the hint, and
 waits up to 90 seconds for the lock so a sleeping admission cannot skip maintenance. Harvest
 clears the hint; detached completion also requests a full harvest tick. Both
 entries serialize queue writes; detached runs own individual worktrees and run
 artifacts. No transient wake units are created.
 
-Every review, including the promotion signer, passes `--deep`; review deadlines
+Every review passes `--deep`; review deadlines
 are 120 minutes with the existing TERM/KILL grace and ownership-aware harvest.
 Ambiguous ownership still retains capacity for operator reconciliation.
 Vendor rate-limit waitTime is preserved to the second, without minute padding;
@@ -71,8 +65,8 @@ Never enable them merely because code or units have been installed.
 
 `crq-watchdog.timer` checks completed tick heartbeat age and alerts at 36 minutes.
 Heartbeat and summary are atomic under `${XDG_STATE_HOME:-~/.local/state}/crq`.
-The additive schema-2 summary includes `promotion.mode` from the status.md resolver,
-and `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`, and
+The schema-2 summary retains queue, backfill, slot and health evidence, omits
+promotion fields, and includes `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`, and
 `crq-records.timer`. Each observation has `active` (boolean, or null if unknown),
 `active_state`, `load_state`, `last_trigger`, and `next_elapse` (UTC ISO timestamps,
 or null when unavailable/never), with `error` when observation fails or the unit
@@ -106,7 +100,7 @@ when no item at rank 0–3 is pending. A prior `boost` is ignored and removed on
 load. Merged-current catch-up ranks alongside newly merged follow-ups (rank 2).
 
 `crq.py prioritize <pending-item> [reason]` gives any pending item operator
-priority after promotion and before normal rank; `deprioritize` clears it.
+priority before normal rank; `deprioritize` clears it.
 Both append admin events and preserve natural-tick admission, backoff and quota
 gates. Optional cycles still wait for rank 0–3 work even when prioritized.
 Selective starts for author and merged-current items remain refused. Explicit
@@ -129,16 +123,10 @@ verification before publication and scans the final publication range for secret
 
 Open PR repairs are replayed onto the current head only if it moved forward;
 normal pushes never force. Restacked heads become stale, awaiting a new review.
-Merged, post-merge delta, coverage and promotion fixes become one
+Merged, post-merge delta, coverage fixes become one
 `crq/fix-<run>` PR into merge-queue containing the verdict table. No finding
 comments, reviews or issues are posted. PR creation is the only repair GitHub
 write. The normal non-author I2 gate still applies to fix PRs.
-
-Promotion NOT-FIXED is advice; it never resolves a blocker. Owner override
-remains authoritative. Verified fix PR merges resolve their corresponding
-blockers and enter the existing promotion re-review path. Signer transport
-remains the dedicated forced-command SSH key with spool-shell verbs; there is
-no plain-shell fallback. No signer identity is inferred from a bot name.
 
 ## Drivers and deployment prerequisites
 
@@ -147,10 +135,6 @@ harness, removes CQ_SANDBOX* and CQ_RUN_TOOL, and never uses promptOverride.
 Codex uses ephemeral structured output with workspace-write for fixing and
 read-only for judgement; remote pushurl is overridden to /dev/null in children.
 The cq read-only judge bridge uses the toolkit AI SDK driver with tools disabled.
-`crq-records.service` exposes only tick-generated promotion metadata/rationale on
-queue-host's private mesh address. User-mode promotion statuses link this record with
-`target_url`; signer statuses require the separate signer's matching integration.
-`state/status.md` also displays the rationale for owner override decisions.
 Its dist module layout must exist in the deployed merge-queue build. Paseo judges
 require a verified queue-host endpoint and read-only mode; absent configuration fails
 closed. No dry model dispatch is part of provisioning.
@@ -182,22 +166,10 @@ rate deferrals, in-flight jobs, fix PR links and utilization. They are the diges
 Use `python3 crq.py --help` for administration. `status` reads queue status and
 refreshes the digest; `summary` refreshes only the fleet summary. `tick` is reserved
 for the sole installed runner. `pause`/`resume` control queue starts;
-`promotion-resolve` and `promotion-ack` retain the owner override/audit workflow.
-If main has not reached a reviewed promotion within 60 minutes, crq raises one
-persisted gate escalation through status and the configured owner notification.
-Failed notification deliveries retry at most once per 15 minutes until delivered
-or acknowledged; these retries never dispatch the promotion gate.
-The promotion stays in its slot, visible as `needs-human` in the fleet summary;
-crq stops dispatching its gate and continues observing main. Inspect cq-gate for
-`refused`/`needs-human` verdicts and resolve the underlying refusal through the
-normal owner workflow. `promotion-ack` acknowledges the alert; it does not retry
-the gate, authorize promotion, or clear the stalled item. An eventual authorized
-promotion closes the item normally. This timeout is an observation of stalled
-progress, not proof of a particular gate verdict.
-If main advances strictly inside an escalated range, crq retires the old item and
-requests a fresh full review of the remaining range from current main. The old
-review success and stall latch are not reused for that replacement.
-Do not execute dry ticks, model jobs or test-bearing gates during the suspension.
+`prioritize`, `deprioritize`, `requeue`, `skip` and `block` manage ordinary work.
+The signer executable now serves only `ledger-publish`, preserving the root-owned
+CodeRabbit backfill publication capability. See [signer/DEPLOY.md](signer/DEPLOY.md)
+for retiring the old daemon during the normal runner switch.
 
 Runtime activation also requires verified hard-budget launchers for Codex and
 Paseo. Codex exec exposes no verified hard token cap in the inspected interface;

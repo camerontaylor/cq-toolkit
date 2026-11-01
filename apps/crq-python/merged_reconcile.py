@@ -459,7 +459,7 @@ def number_page(forge, source, cursor, *, repo, base):
         if node["__typename"] == "PullRequest":
             if not isinstance(node.get("baseRefName"), str) or "mergedAt" not in node:
                 raise ReconcileRefused("PR state metadata incomplete")
-            if node["mergedAt"] is not None and node["baseRefName"] == base:
+            if node["mergedAt"] is not None and node["baseRefName"] in (("main", "merge-queue") if base == "main-or-merge-queue" else (base,)):
                 records.append(node)
     following = stop + 1 if stop < source["ceiling"] else None
     return {"records": records, "has_next_page": following is not None,
