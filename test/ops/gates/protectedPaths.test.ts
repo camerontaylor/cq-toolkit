@@ -141,9 +141,11 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '^src\\/ops\\/gates\\/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
   '^scripts\\/denylist-scan$': ['scripts/denylist-scan'],
   '^scripts\\/ratchet-[^/]+\\.mjs$': ['scripts/ratchet-typecheck.mjs'],
-  '^scripts\\/(?:gen-op-docs|copy-prompt-assets)\\.mjs$': [
+  '^scripts\\/(?:build|gen-op-docs|copy-prompt-assets|lib\\/resource-scope)\\.mjs$': [
     'scripts/gen-op-docs.mjs',
     'scripts/copy-prompt-assets.mjs',
+    'scripts/build.mjs',
+    'scripts/lib/resource-scope.mjs',
   ],
   '(?:^|\\/)knip\\.jsonc?$': ['knip.json', 'packages/a/knip.jsonc'],
   '^policy(?:\\/|$)': ['policy/DOCTRINE.md', 'policy/templates/ratchet.yml'],
