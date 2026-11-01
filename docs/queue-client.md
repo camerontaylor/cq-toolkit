@@ -158,14 +158,24 @@ an exact grant to the server policy's `reconciled_reads` array:
 {"principal":"developer","requestId":"reconcile-<subject-digest>","binding":{"kind":"merged-current","repo":"owner/repo","pr":506,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}}
 ```
 
-Use the inventory's request ID and immutable source binding with the existing SDK
+Grant and use a request ID actually present in `merged_current_requests`, with its
+exact immutable source binding. Reconciliation enrolls only `intent` entries.
+For `already-enrolled` subjects, the inventory's proposed `reconcile-…` ID may have
+no stored mapping: use the existing mapped request ID for that exact subject,
+which the operator must identify from queue state. Do not grant the proposed ID
+unless it has a stored mapping. The client uses the existing SDK
 `status` / `report` methods or `review.queueStatus` / `review.report` commands.
 No enqueue alias is needed. The principal must also have ordinary read authority;
 acknowledgement still requires write authority. The first successful read validates
 forge source and allowed base branch, the exact stored mapping and unique item,
 and capacity before persisting the principal-bound client entry. Adoption neither
 enrolls debt nor starts a review. Existing client entries retain their original
-principal binding. Removing the grant prevents new adoption; revoke ordinary read
+principal binding: if another client principal already holds the mapped ID,
+adoption by a new principal is refused even with an exact grant. The existing
+principal must consume it, or an authorized writer must explicitly enqueue a new
+alias using its own ID and exact source binding; this seam does not transfer
+ownership or create that alias. Each request ID may appear only once in the grant
+array. Removing the grant prevents new adoption; revoke ordinary read
 or write access to revoke an already adopted client's corresponding capability.
 
 Deployment requires this transport and compatible receipt storage on the queue

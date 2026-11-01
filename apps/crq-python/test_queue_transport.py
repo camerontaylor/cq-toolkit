@@ -157,11 +157,9 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(self.call("status")["state"], "pending")
         with self.assertRaises(ValueError):
             self.call("ack", receiptId="a" * 64, sha256="a" * 64, chunks=1, bytes=1)
-        adopted = copy.deepcopy(self.q)
         self.q["queue_client_requests"][self.request_id]["principal"] = "other"
         with self.assertRaisesRegex(ValueError, "principal mismatch"):
             self.call("status")
-        self.q = adopted
 
     def test_reconciled_policy_and_missing_or_duplicate_items_refuse(self):
         self.reconciled_fixture()
@@ -176,6 +174,59 @@ class QueueTransportTests(unittest.TestCase):
             self.q = {**copy.deepcopy(valid), "items": items}
             before = copy.deepcopy(self.q)
             with self.assertRaises(ValueError):
+                self.call("status")
+            self.assertEqual(self.q, before)
+
+    def test_duplicate_reconciled_grant_ids_refuse_before_queue_access(self):
+        self.reconciled_fixture()
+        grant = self.policy["reconciled_reads"][0]
+        for principal in ("developer", "other"):
+            self.policy["reconciled_reads"] = [grant, {**grant, "principal": principal}]
+            with self.subTest(principal=principal), mock.patch.object(
+                    self.runner, "load_queue", side_effect=AssertionError("no queue access")):
+                with self.assertRaisesRegex(ValueError, "duplicate reconciled"):
+                    self.call("status")
+
+    def test_reconciled_adoption_requires_exact_stored_mapping(self):
+        self.reconciled_fixture()
+        valid = copy.deepcopy(self.q)
+        original = valid["merged_current_requests"][self.request_id]
+        for mapping in (None, {**original, "item": "wrong-item"},
+                        {**original, "binding": {**original["binding"], "pr": 507}}):
+            self.q = copy.deepcopy(valid)
+            if mapping is None:
+                del self.q["merged_current_requests"][self.request_id]
+            else:
+                self.q["merged_current_requests"][self.request_id] = mapping
+            before = copy.deepcopy(self.q)
+            with self.subTest(mapping=mapping), self.assertRaisesRegex(ValueError, "source mismatch"):
+                self.call("status")
+            self.assertEqual(self.q, before)
+
+    def test_reconciled_adoption_revalidates_merge_identity(self):
+        self.reconciled_fixture()
+        before = copy.deepcopy(self.q)
+        forge = copy.deepcopy(self.forge)
+        for key, value in (("mergeSha", "e" * 40), ("state", "OPEN")):
+            self.forge = {**forge, key: value}
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "forge merge mismatch"):
+                self.call("status")
+            self.assertEqual(self.q, before)
+
+    def test_reconciled_adoption_malformed_queue_raises_value_error(self):
+        self.reconciled_fixture()
+        valid = copy.deepcopy(self.q)
+        malformed = [None, [], {k: v for k, v in valid.items() if k != "items"}]
+        for key, values in (("items", (None, {}, [None], ["invalid"])),
+                            ("merged_current_requests", (None, [])),
+                            ("queue_client_requests", (None, []))):
+            malformed.extend({**valid, key: value} for value in values)
+        for entry in (None, [], "invalid"):
+            malformed.append({**valid, "queue_client_requests": {self.request_id: entry}})
+        for queue in malformed:
+            self.q = copy.deepcopy(queue)
+            before = copy.deepcopy(self.q)
+            with self.subTest(queue=queue), self.assertRaises(ValueError):
                 self.call("status")
             self.assertEqual(self.q, before)
 

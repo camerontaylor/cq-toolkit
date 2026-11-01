@@ -101,11 +101,15 @@ def validate_policy(policy):
     grants = policy.get("reconciled_reads", [])
     if type(grants) is not list:
         raise ValueError("invalid reconciled read grants")
+    granted_ids = set()
     for grant in grants:
         if (type(grant) is not dict or set(grant) != {"principal", "requestId", "binding"}
                 or not isinstance(grant["principal"], str) or not grant["principal"]
                 or not _match(TOKEN, grant["requestId"])):
             raise ValueError("invalid reconciled read grant")
+        if grant["requestId"] in granted_ids:
+            raise ValueError("duplicate reconciled read request id")
+        granted_ids.add(grant["requestId"])
         b = binding(grant["binding"])
         if b["kind"] != "merged-current" or b["repo"] != policy["repo"]:
             raise ValueError("invalid reconciled read binding")
@@ -301,9 +305,15 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     def locked():
         # Work on a copy so rejected requests cannot leak partial mutations to test runners.
         q = copy.deepcopy(runner.load_queue())
+        if type(q) is not dict:
+            raise ValueError("invalid queue object")
         entries = q.setdefault("queue_client_requests", {})
+        if type(entries) is not dict:
+            raise ValueError("invalid queue client requests")
         entry = entries.get(rid)
-        if entry is not None and (entry["binding"] != b or entry["principal"] != principal):
+        if rid in entries and type(entry) is not dict:
+            raise ValueError("invalid queue client entry")
+        if entry is not None and (entry.get("binding") != b or entry.get("principal") != principal):
             raise ValueError("request binding or principal mismatch")
         if op in READ and entry is None and any(
                 grant == {"principal": principal, "requestId": rid, "binding": b}
@@ -311,9 +321,14 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             # Adopt only an existing exact subject; never call enroll or dispatch.
             subject = {"repo": b["repo"], "pr": b["pr"], "merge_sha": b["mergeSha"],
                        "target_selector": b["targetSelector"], "policy": receipts.POLICY}
-            mapping = q.get("merged_current_requests", {}).get(rid)
+            mappings = q.get("merged_current_requests", {})
+            queue_items = q.get("items")
+            if (type(mappings) is not dict or type(queue_items) is not list
+                    or any(type(item) is not dict for item in queue_items)):
+                raise ValueError("invalid reconciled queue mappings/items")
+            mapping = mappings.get(rid)
             item_id = "current-" + receipts.digest(subject)[:32]
-            items = [item for item in q["items"] if item.get("id") == item_id]
+            items = [item for item in queue_items if item.get("id") == item_id]
             if (mapping != {"binding": subject, "item": item_id} or len(items) != 1
                     or items[0].get("subject") != subject or items[0].get("kind") != receipts.KIND
                     or items[0].get("pr") != b["pr"] or items[0].get("merge_commit") != b["mergeSha"]):
