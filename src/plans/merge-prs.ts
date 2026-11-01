@@ -15,15 +15,15 @@
 // naming that op.
 //
 // THE DEFAULT ENTRY'S INPUT IS THE SCHEMA-VALID EMPTY RUN: repoRoot '.',
-// baseBranch 'merge-queue', prs [] — discovery lists the plan, and run-plan
+// baseBranch 'main', prs [] — discovery lists the plan, and run-plan
 // executes it as a harmless empty pass (no candidates → no effect call can
 // reach git; the composition completes with empty totals). Real callers
 // author the plan for their run via makeMergePrsPlan (the SDK seam) or a
 // plan JSON file naming op 'merge.runPrs' (the CLI run-plan seam) — the
 // shipped entry is a discoverable floor, not the workflow's configuration.
 //
-// THE 'merge-queue' DEFAULT is the queue-branch convention of THIS repo's
-// own merge flow (the documented merge-queue policy) — a presentation
+// THE 'main' DEFAULT is the queue-branch convention of THIS repo's
+// own merge flow (the documented main policy) — a presentation
 // default for the shipped entry only. The merge.runPrs op itself hardcodes
 // no branch name: baseBranch is configuration arriving on the input, and
 // every other caller passes its own trunk.
@@ -54,5 +54,5 @@ export function makeMergePrsPlan(input: RunMergePrsInput): Plan {
  */
 export const plan: PlanRegistryEntry = {
   name: MERGE_PRS_PLAN_ID,
-  importer: async () => makeMergePrsPlan({ repoRoot: '.', baseBranch: 'merge-queue', prs: [] }),
+  importer: async () => makeMergePrsPlan({ repoRoot: '.', baseBranch: 'main', prs: [] }),
 };

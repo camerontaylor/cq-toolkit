@@ -21,7 +21,6 @@ import {
 } from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
 import { scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
-import { VERDICT_CHECK } from '../../../src/selfhost/promote-gate.js';
 import { scanModuleLoads, type ModuleScan } from '../../helpers/import-closure.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
@@ -214,7 +213,6 @@ describe('the privileged list (advisory development posture)', () => {
     'policy/promotion-reviewer.json',
     'policy/denylist/patterns.yml',
     'scripts/denylist-scan',
-    'src/selfhost/promote-gate.ts',
     'scripts/github-settings-drift.mjs',
     'scripts/lib/github-settings.mjs',
     'policy/templates/github-settings.json',
@@ -399,7 +397,6 @@ describe('every trusted job runs a selfhost entry point with a classified closur
       'cq-policy.yml:judge': ['policy-diff'],
       'cq-verify.yml:compute': ['recompute-typecheck'],
       'cq-verify.yml:judge': ['verify-ratchet'],
-      'gate.yml:decide': ['promote-gate'],
     });
   });
 
@@ -498,11 +495,6 @@ describe('every trusted job runs a selfhost entry point with a classified closur
     return { files: [...seen].sort(), problems };
   }
 
-  const POLICY = JSON.parse(
-    readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
-  ) as { protectedPaths: string[] };
-  const REGEXES = POLICY.protectedPaths.map((source) => new RegExp(source));
-
   test('the closure walk refuses what it cannot classify', () => {
     const scan = (text: string): ModuleScan => scanModuleLoads(text);
     expect(
@@ -572,7 +564,6 @@ describe('every trusted job runs a selfhost entry point with a classified closur
     // required to match the project list — only the promotion gate itself is
     // privileged. The fail-closed walk above still refuses any edge it
     // cannot classify.
-    expect(REGEXES.some((re) => re.test('src/selfhost/promote-gate.ts'))).toBe(true);
   });
 });
 
@@ -585,61 +576,3 @@ describe('every trusted job runs a selfhost entry point with a classified closur
 // target and is a SUPERSET modulo one recorded supersession: the classic
 // `ratchet` context becomes the verdict-App `cq/ratchet` (methods note,
 // Residuals). This pins the mapping so the supersession stays documented.
-describe('requiredChecks are enforced at merge (R2) or at promotion (the gate)', () => {
-  const POLICY = JSON.parse(
-    readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
-  ) as { requiredChecks: string[]; requiredJobs?: Record<string, string[]> };
-  const SETTINGS = JSON.parse(
-    readFileSync(join(REPO_ROOT, 'policy', 'templates', 'github-settings.json'), 'utf8'),
-  ) as {
-    rulesets: Array<{
-      name: string;
-      rules: Array<{
-        parameters?: { required_status_checks?: Array<{ context: string }> };
-      }>;
-    }>;
-  };
-
-  /** Classic context → its verdict-App successor. Every key must stay recorded in the methods Residuals. */
-  const SUPERSEDED: Readonly<Record<string, string>> = {
-    ratchet: 'cq/ratchet',
-  };
-
-  const r2 = SETTINGS.rulesets.find((r) => r.name === 'cq-r2-merge-queue');
-  const r2Contexts = new Set(
-    r2?.rules
-      .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
-      .map((check) => check.context) ?? [],
-  );
-  // The minimal merge-time set (docs/protected-scope.md): what the gate
-  // enforces on the queue tip is not required again at merge.
-  const gateContexts = new Set([...Object.values(POLICY.requiredJobs ?? {}).flat(), VERDICT_CHECK]);
-
-  test('R2 exists and carries required status checks', () => {
-    expect(r2Contexts.size).toBeGreaterThan(0);
-  });
-
-  test.each(POLICY.requiredChecks)('requiredChecks entry %s is enforced somewhere', (context) => {
-    const enforced = SUPERSEDED[context] ?? context;
-    expect(
-      r2Contexts.has(enforced) || gateContexts.has(enforced),
-      `${context} (as ${enforced}) is enforced neither by R2 nor by the gate`,
-    ).toBe(true);
-  });
-
-  test('no gate-enforced CI job is also required at merge', () => {
-    const doubled = [...r2Contexts].filter(
-      (context) => gateContexts.has(context) && !['denylist'].includes(context),
-    );
-    // denylist stays at merge too: merge-queue history is append-only (R0),
-    // so a leak the gate refuses to promote could not be un-merged.
-    expect(doubled).toEqual([]);
-  });
-
-  test('every recorded supersession is documented in the methods note Residuals', () => {
-    const methods = readFileSync(join(REPO_ROOT, 'docs', 'methods-w1-10.md'), 'utf8');
-    for (const [from, to] of Object.entries(SUPERSEDED)) {
-      expect(methods).toContain(`replaces \`${from}\` with the verdict-App \`${to}\``);
-    }
-  });
-});

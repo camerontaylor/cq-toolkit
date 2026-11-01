@@ -35,7 +35,7 @@ function cycle(over: Partial<DevCycleRecord> = {}): DevCycleRecord {
     cycleId: 'c001-aaaaaaaa',
     reviewer: 'coderabbit',
     scope: 'full',
-    target: 'merge-queue',
+    target: 'main',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',

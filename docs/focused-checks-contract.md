@@ -42,33 +42,11 @@ suite; they do not revisit this contract.
   (doctrine I4 — no path, branch or tag filter; the sole sanctioned skip is the
   job-level `cq-state` settle-ledger exclusion in `.github/workflows/ci.yml`),
   and the `static` job runs `test:unit` + `test:e2e`. The `ratchet` job re-runs
-  the suite with coverage. The required set is split by where it is enforced
-  ([`protected-scope.md`](protected-scope.md), owner 2026-10-16). **At merge**
-  (ruleset R2 in `policy/templates/github-settings.json`): `cq/policy`,
-  `cq/acceptance` and `denylist`. **At promotion** (the gate, on the exact queue
-  tip): every job of `ci.yml` and `denylist.yml` green, by name the
-  `requiredJobs` in `policy/protected-paths.json` (`static`, `crq-python`,
-  `from-source`, `denylist`), plus the `cq/ratchet` verdict. `pack-audit` is
-  enforced at publication. `scripts/denylist-scan`'s `REQUIRED_WORKFLOW_CHECKS`
-  polices the I4 trigger shape of the required workflows, and
-  `protected-paths.json` `requiredChecks` names the D11-protected producers.
-- **Candidate evidence is green required CI on the exact candidate SHA.** On the
-  queue route — the sanctioned one (doctrine I3: `main` advances only by the
-  promotion gate's pure fast-forward) — the candidate is the `merge-queue`
-  commit the gate resolves. The protocol still permits a direct-to-`main` PR
-  when that is a task's actual target; there the candidate is the merge commit
-  (never a squash or a rewrite, per I3) that the merge would produce, and it
-  must be created and checked **before** `main` advances — for example a
-  throwaway merge branch carrying that merge commit. Required CI is read on
-  that exact SHA against the gate's own check list, failing closed on a skipped
-  or missing result. No gate workflow resolves such a commit today, so a
-  direct-to-`main` PR cannot claim readiness until that evidence exists; this
-  contract states the rule and does not add the mechanism. Either way the PR head is not the
-  candidate.
-- **A green PR head is not candidate evidence.**
-  `strict_required_status_checks_policy` is `false`
-  (`policy/templates/github-settings.json`), so a PR head can be green while
-  stale against its base. Only CI on the resolved candidate SHA counts.
+  the suite with coverage as an advisory measurement. Required merge checks
+  are `static` and `denylist` on the exact PR head. PRs target `main` and
+  merge with a merge commit after one independent head-bound PASS comment.
+  There is no separate queue candidate, throwaway merge branch or promotion
+  gate. See [merge policy](promotion-policy.md).
 
 **No local full run exists (owner rule, 2026-10-04).** The full suite is
 CI-only on the shared host, for workers and coordinators alike. The two
@@ -102,7 +80,7 @@ This drill is classified `integration`; suites classified `live` require
 `--include-live`. Both classes retain bounded runtime.
 
 1. Start from the files the diff actually touches: by default the changes
-   since the merge-base with `origin/merge-queue` plus the working tree
+   since the merge-base with `origin/main` plus the working tree
    (`--base <ref>` and `--range <a>..<b>` change the range); explicit file
    arguments replace the range.
 2. Add the test files that statically import, or are imported by, the changed

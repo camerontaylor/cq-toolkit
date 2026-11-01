@@ -31,9 +31,8 @@ thrown config errors and 127 for a missing binary — binding from phase 1.
 
 **Rule.** A change is acceptable when an independent review of the last commit's exact
 head state exists — evidence covering an earlier commit never qualifies, no matter
-how long the settle, and no matter when it was resubmitted — plus either a settle
-of ≥10 minutes since that commit or an explicit all-clear that also postdates it.
-Unresolved external threads block; truncated review data fails closed.
+when it was resubmitted.
+Unresolved bot threads are reported rather than blocking; truncated review data fails closed.
 
 **Why.** Requiring a privileged reviewer deadlocks a queue when that reviewer is
 unavailable; evidence predating the last commit accepts code nobody looked at.
@@ -47,48 +46,22 @@ both the exact current head SHA and `PASS`, ignoring bot authors (Bot type or
 `[bot]` login suffix); no HTML marker syntax, separate
 GitHub identity or opt-in is required. The merging agent judges independence.
 
-## I3 — merge commits only; promotion to main is a pure fast-forward
+## I3 — merge commits directly to main
 
-**Rule.** History advances only by merge commits; `merge-queue` promotes to `main`
-as a pure ff-push behind merge-base guards. Never squash-merge, never push no-ff
-to `main`, never rewrite history, never force-push — the policy invariant, not just
-a repo setting — and the queue path advances `main` through the gate.
+**Rule.** PRs target `main` and merge with merge commits after required `static`
+and `denylist` checks pass on the exact head and an independent reviewer posts
+an exact-head PASS comment. Never squash, rewrite shared history or force-push
+`main`. CRQ reviews merged PRs after merge as visible debt.
 
-During the one-branch compatibility trial, direct PRs to `main` also use merge
-commits. Their cq verdicts and ratchet proposals are advisory. The existing
-`merge-queue` promotion path remains available until the trial and settings
-transition are complete.
+**Why.** One integration branch removes duplicate checks and promotion waits while
+keeping CI and independent review bound to the code being merged.
 
-**Why.** Squashing breaks the mapping between the commits that were checked and the
-commits that land; rewrite or force-push moves `main` past commits whose check
-evidence was collected for a different history — upstream gates stop describing
-reality.
-
-**Enforcement (today).** `policy/templates/gate.yml`, instantiated as
-`.github/workflows/gate.yml` (armed — `CQ_GATE_PROMOTES: 'true'`), is the only component that advances
-`main`, behind merge-base guards: an already-contained queue tip is a logged
-no-op; divergence refuses and a human merges `main` into `merge-queue`.
-After subject selection and all admission checks, the CLI uses one atomic leased
-push with three refspecs: `<subject>:refs/heads/main`,
-`<subject>:refs/heads/cq/promoted`, and `<tip>:refs/heads/merge-queue`.
-`main` advances only by fast-forward; the queue ref retains the observed tip.
-Each ref must still equal its leased value; rejection prevents every update.
-The old `merge-queue-gate.yml` is retired at the C2 cutover
-(2026-10-11): its instance entry and rendered workflow are deleted, and (Phase 0.2) so is its template. The repo's merge settings allow merge commits
-only. Adopting repos: disable squash and rebase merges in repo settings —
-nothing in the templates configures it for you.
-
-### Entitlement facts
-
-Personal accounts get merge-queue 422 — why this queue is branch-based; the refs
-PATCH `force=false` is the server-side ff invariant for sync's merge-queue advance,
-while the gate selects the newest eligible subject on the `main..tip` first-parent
-line of `merge-queue`; the subject may precede the queue tip. Merge-base guards
-make already-contained history a no-op and refuse divergence. Promotion is an
-atomic leased push: `main` and the `cq/promoted` replay marker advance to the
-selected subject, while `merge-queue` stays at the observed tip. Leases reject
-concurrent movement of any of those refs. Dated API facts live once:
-`policy/templates/README.md`.
+**Enforcement (today).** The main ruleset requires `static` and `denylist`.
+The merging agent reads the independent review and uses
+`gh pr merge --merge --match-head-commit <sha>`. There is no promotion workflow,
+signer status, replay-marker advancement or settle-ledger promotion receipt.
+See [merge policy](../docs/promotion-policy.md). Repository settings disable
+squash and rebase merges; workflow templates do not configure settings.
 
 ## I4 — required checks never filter triggers
 
@@ -104,8 +77,7 @@ only skip because it still reports a conclusion.
 
 **Enforcement (today).** The unfiltered `on: push / pull_request` triggers of
 `.github/workflows/ci.yml` (instantiated from `policy/templates/required-check.md`),
-of `.github/workflows/ratchet.yml` (a required check since H4 — review-debt #120
-updated this enumeration), and of `.github/workflows/denylist.yml`, which predates the templates and carries
+and `.github/workflows/denylist.yml`, which predates the templates and carries
 only their trigger shape (its steps are the scan itself — not regenerable from
 the template; `policy/templates/README.md`), policed by the denylist-scan
 self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_CHECKS` (each entry pairing

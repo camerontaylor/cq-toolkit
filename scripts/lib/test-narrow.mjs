@@ -17,7 +17,7 @@ import { constants } from 'node:os';
 export const NICE_INCREMENT = 5;
 /** A narrow run that is still going after this is killed. */
 export const RUN_TIMEOUT_MS = 20 * 60 * 1000;
-export const DEFAULT_BASE = 'origin/merge-queue';
+export const DEFAULT_BASE = 'origin/main';
 export const GATED_CLASSES = ['integration', 'live'];
 
 export const USAGE = `usage: pnpm test:narrow [options] [<file>...]

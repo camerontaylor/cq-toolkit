@@ -36,7 +36,7 @@ function reuseRecord(overrides: Partial<DevReuseRecord> = {}): DevReuseRecord {
     reuseId: 'r001-aaaaaaaa',
     cycleId: 'c001-aaaaaaaa',
     basis: 'exact-terminal',
-    target: 'merge-queue',
+    target: 'main',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',
@@ -401,7 +401,7 @@ function assemble(
 ) {
   return assembleReadiness({
     branch: BRANCH,
-    target: 'merge-queue',
+    target: 'main',
     identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
     ledger: { version: DEV_LEDGER_VERSION, branch: BRANCH, records: ledgerRecords },
     untracked,
@@ -648,7 +648,7 @@ describe('assembleReadiness', () => {
     const currentReviewer = cycleRecord({ findings: [] });
     const result = assembleReadiness({
       branch: BRANCH,
-      target: 'merge-queue',
+      target: 'main',
       identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
       ledger: {
         version: DEV_LEDGER_VERSION,
@@ -701,7 +701,7 @@ test('a blocked attempt keeps its major findings open after a later terminal cyc
 // ---------------------------------------------------------------------------
 
 const REQUEST = {
-  target: 'merge-queue',
+  target: 'main',
   base: BASE,
   head: HEAD,
   dirtySha256: 'dirty',
@@ -736,7 +736,7 @@ describe('findReusableCycle', () => {
   });
 
   test('changed target at the same merge-base never reuses', () => {
-    expect(findReusableCycle([cycleRecord()], { ...REQUEST, target: 'main' })).toBeNull();
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, target: 'release' })).toBeNull();
   });
 
   test('changed head or base never reuses', () => {
@@ -1314,7 +1314,7 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
     // no reuse resolution attributed to the unrelated unconfigured tail.
     const result = assembleReadiness({
       branch: BRANCH,
-      target: 'merge-queue',
+      target: 'main',
       identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
       ledger: {
         version: DEV_LEDGER_VERSION,

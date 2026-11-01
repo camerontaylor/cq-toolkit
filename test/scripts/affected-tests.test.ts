@@ -79,10 +79,6 @@ describe('selectAffected', () => {
     ];
     const pick = (changed: string) =>
       selectAffected({ changed: [changed], allTests: suites, related: [] }).files;
-    expect(pick('src/selfhost/promote-gate.ts')).toEqual([
-      'test/ops/gates/protectedPaths.test.ts',
-      'test/workflows/default-ref-guards.test.ts',
-    ]);
     // The protected closure crosses directories: any source may join it.
     expect(pick('src/shared/independent-review.ts')).toEqual([
       'test/ops/gates/protectedPaths.test.ts',

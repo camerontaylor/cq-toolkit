@@ -58,7 +58,7 @@ async function fixture() {
       };
     return undefined;
   });
-  const read = await readWorkState(effects, { target: 'merge-queue' });
+  const read = await readWorkState(effects, { target: 'main' });
   if (!read.ok) throw Error(read.reason);
   const state = read.state;
   const status: QueueStatus = {
@@ -99,7 +99,7 @@ async function fixture() {
         repo: 'owner/repo',
         producer: 'author',
         head: state.head,
-        target: 'merge-queue',
+        target: 'main',
         targetSelector: 'promoted-main',
       },
     },
@@ -109,7 +109,7 @@ async function fixture() {
       cycleId: origin.cycleId,
       head: state.head,
       base: state.base,
-      target: 'merge-queue',
+      target: 'main',
       scope: 'full',
       dirtySha256: 'clean-tree',
       failure,
@@ -310,7 +310,7 @@ test.each(['major', 'clean'] as const)(
       });
       const ready = assembleReadiness({
         branch: f.state.branch,
-        target: 'merge-queue',
+        target: 'main',
         identity: { head: result.value.head, base: f.state.base, dirtySha256: 'clean-tree' },
         ledger,
         untracked: [],
@@ -372,10 +372,10 @@ test.each(['fixed', 'rejected'] as const)(
     ]);
     await f.repo.write('src/a.ts', 'export const a = 2;\n');
     f.repo.commitAll('changed head');
-    const current = await readWorkState(f.effects, { target: 'merge-queue' });
+    const current = await readWorkState(f.effects, { target: 'main' });
     if (!current.ok) throw Error(current.reason);
     expect(
-      await prepareDeferredVendorReview(f.effects, 'merge-queue', current.state, terminal.client),
+      await prepareDeferredVendorReview(f.effects, 'main', current.state, terminal.client),
     ).toBeUndefined();
     const ledger = f.effects.openLedger(f.state.branch).load();
     const finding = retainedReceiptFindings(ledger)[0]!;
@@ -644,7 +644,7 @@ test('a superseded older-head predecessor permits a clean run and stays an outst
   const predecessor = f.debt;
   await f.repo.write('src/a.ts', 'export const a = 2;\n');
   f.repo.commitAll('new head');
-  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  const read = await readWorkState(f.effects, { target: 'main' });
   if (!read.ok) throw new Error(read.reason);
   const head = read.state.head;
   const evidence = await successorReceipt(f, 'successor', head);
@@ -701,7 +701,7 @@ test('a superseded older-head predecessor permits a clean run and stays an outst
   // DURABLE readiness still reports the outstanding obligation.
   const readiness = assembleReadiness({
     branch: f.state.branch,
-    target: 'merge-queue',
+    target: 'main',
     identity: { head, base: read.state.base, dirtySha256: 'clean-tree' },
     ledger: f.effects.openLedger(f.state.branch).load(),
     untracked: [],

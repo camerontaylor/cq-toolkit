@@ -1,5 +1,8 @@
 # Architecture decision records
 
+Promotion and queue procedures in these historical records are superseded by
+[merge to main](../promotion-policy.md).
+
 The owner accepted ADR-0001 through ADR-0004 at the G1 gate on 2026-09-26.
 They were drafted and reviewed outside this repository. The texts here are
 edited for publication: review history, internal process notes and private

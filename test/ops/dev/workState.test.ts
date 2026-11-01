@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 async function state(): Promise<WorkState> {
-  const read = await readWorkState(repoEffects(repo), { target: 'merge-queue' });
+  const read = await readWorkState(repoEffects(repo), { target: 'main' });
   if (!read.ok) throw new Error(read.reason);
   return read.state;
 }
@@ -29,7 +29,7 @@ describe('readWorkState', () => {
     const s = await state();
     expect(s.branch).toBe('feature/x');
     expect(s.head).toBe(repo.git('rev-parse', 'HEAD').trim());
-    expect(s.base).toBe(repo.git('rev-parse', 'origin/merge-queue').trim());
+    expect(s.base).toBe(repo.git('rev-parse', 'origin/main').trim());
     expect(s.dirtySha256).toBe(CLEAN_TREE);
     expect(s.untracked).toEqual([]);
   });
@@ -65,7 +65,7 @@ describe('readWorkState', () => {
 
   test('a detached HEAD and a missing target are reasons, never guessed values', async () => {
     repo.git('checkout', '-q', '--detach');
-    const detached = await readWorkState(repoEffects(repo), { target: 'merge-queue' });
+    const detached = await readWorkState(repoEffects(repo), { target: 'main' });
     expect(detached.ok).toBe(false);
     if (!detached.ok) expect(detached.reason).toContain('detached');
     repo.git('checkout', '-q', 'feature/x');
@@ -80,7 +80,7 @@ describe('readWorkState', () => {
         ? { exitCode: 128, stdout: '', stderr: 'boom', timedOut: false }
         : undefined,
     );
-    const read = await readWorkState(effects, { target: 'merge-queue' });
+    const read = await readWorkState(effects, { target: 'main' });
     expect(read.ok).toBe(false);
     if (!read.ok) expect(read.reason).toContain('boom');
   });

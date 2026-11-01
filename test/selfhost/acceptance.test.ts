@@ -40,7 +40,7 @@ const REPO = 'widget';
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const BASE = 'c'.repeat(40);
-const BASE_NAME = 'merge-queue';
+const BASE_NAME = 'main';
 const PR = 7;
 
 // ---------------------------------------------------------------------------
@@ -397,9 +397,9 @@ describe('judgeAcceptance', () => {
     ],
     [
       'wrong base',
-      { baseName: 'main' },
+      { baseName: 'release' },
       {},
-      /^fail \(base\): wrong base: required merge-queue but the forge reports main$/,
+      /^fail \(base\): wrong base: required main but the forge reports release$/,
     ],
     ['truncated', { reviewsHasNext: true }, {}, /^fail \(truncated\): snapshot truncated/],
     [
@@ -584,7 +584,7 @@ describe('parseAcceptanceArgs', () => {
     expect(parseAcceptanceArgs(required)).toEqual({
       owner: 'octo',
       repo: 'widget',
-      input: { pr: 7, subject: SHA_B, base: 'merge-queue', state: 'open' },
+      input: { pr: 7, subject: SHA_B, base: 'main', state: 'open' },
     });
   });
 

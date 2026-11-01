@@ -49,7 +49,7 @@ async function fixture(findings: Finding[] = [finding('a')]) {
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch: 'feature/x',
-    reviewed: { base: repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(), scope: 'full' },
+    reviewed: { base: repo.git('merge-base', 'origin/main', 'HEAD').trim(), scope: 'full' },
     head: repo.git('rev-parse', 'HEAD').trim(),
     sources: [{ kind: 'agent', status: 'terminal' }],
     findings,
@@ -707,7 +707,7 @@ test.each([
               head:
                 mode === 'latest-unknown-head'
                   ? 'a'.repeat(40)
-                  : f.repo.git('rev-parse', 'origin/merge-queue').trim(),
+                  : f.repo.git('rev-parse', 'origin/main').trim(),
               ...(mode === 'latest-other-branch' ? { branch: 'other' } : {}),
             }),
       );
@@ -793,7 +793,7 @@ test('re-review keeps the original full comparison when a mutable target ref mov
           const observedHead = f.record().head;
           await f.repo.write('src/a.ts', 'verified fixture fix\n');
           const commit = f.repo.commitAll('scripted verified fix');
-          f.repo.git('update-ref', 'refs/remotes/origin/merge-queue', commit);
+          f.repo.git('update-ref', 'refs/remotes/origin/main', commit);
           return {
             finding: { ...item, status: 'fixed' },
             commit,
@@ -813,7 +813,7 @@ test('re-review keeps the original full comparison when a mutable target ref mov
     })(f.input);
     expect(result.status).toBe('ok');
     expect(reviewedBase).toBe(originalBase);
-    expect(f.repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim()).not.toBe(originalBase);
+    expect(f.repo.git('merge-base', 'origin/main', 'HEAD').trim()).not.toBe(originalBase);
   } finally {
     await f.cleanup();
   }
@@ -1026,7 +1026,7 @@ async function vendorAddressFixture() {
   repo.commitAll('configure both reviewers');
   const branch = 'feature/x';
   const head = repo.git('rev-parse', 'HEAD').trim();
-  const base = repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim();
+  const base = repo.git('merge-base', 'origin/main', 'HEAD').trim();
   makeSubprocessDevEffects(repo.root)
     .openLedger(branch)
     .save({
@@ -1216,7 +1216,7 @@ describe('review.address vendor preparation boundary', () => {
         kind: 'deferred-author',
         repo: 'owner/repo',
         producer: 'author',
-        target: 'merge-queue',
+        target: 'main',
         head: f.head,
       });
       expect(debt.deferral).toMatchObject({
@@ -1228,7 +1228,7 @@ describe('review.address vendor preparation boundary', () => {
         cycleId: 'c001-origin',
         head: f.head,
         base: f.base,
-        target: 'merge-queue',
+        target: 'main',
       });
       // The real durable enrollment is the engine's own request on disk.
       const onDisk = JSON.parse(

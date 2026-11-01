@@ -16,7 +16,7 @@ const reference: QueueReference = {
     repo: 'owner/repo',
     producer: 'cycle-1',
     head: 'a'.repeat(40),
-    target: 'merge-queue',
+    target: 'main',
     targetSelector: 'promoted-main',
   },
 };

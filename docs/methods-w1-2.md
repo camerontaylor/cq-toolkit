@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W1.2 methods note (run=v11, tier O)
 
 SHA-bound acceptance at merge time and durable settle state, per the RS-3

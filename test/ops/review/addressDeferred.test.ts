@@ -44,7 +44,7 @@ async function fixture(ignoreState = true) {
   const effects = repoEffects(repo, (command, args) =>
     command === 'gh' ? (args[0] === 'api' ? 'author' : 'owner/repo') : undefined,
   );
-  const read = await readWorkState(effects, { target: 'merge-queue' });
+  const read = await readWorkState(effects, { target: 'main' });
   if (!read.ok) throw new Error(read.reason);
   const state = read.state;
   const status: QueueStatus = {
@@ -78,7 +78,7 @@ async function fixture(ignoreState = true) {
     vendorFailure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },
   });
   effects.openLedger(state.branch).save({ version: 2, branch: state.branch, records: [origin] });
-  const debt = await prepareDeferredVendorReview(effects, 'merge-queue', state, client);
+  const debt = await prepareDeferredVendorReview(effects, 'main', state, client);
   if (!debt) throw new Error('fixture debt missing');
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
@@ -269,11 +269,11 @@ test('known substantive finding reaches fixing; changed head requires durable su
       }),
       review: async () => {
         reviews++;
-        const read = await readWorkState(f.effects, { target: 'merge-queue', base: f.state.base });
+        const read = await readWorkState(f.effects, { target: 'main', base: f.state.base });
         if (!read.ok) throw new Error(read.reason);
         const successor = await prepareDeferredVendorReview(
           f.effects,
-          'merge-queue',
+          'main',
           read.state,
           f.client,
         );
@@ -335,7 +335,7 @@ test('cached clean record cannot erase findings from original outage or an uncon
     }));
     const context = await f.resolver({
       repoRoot: f.repo.root,
-      target: 'merge-queue',
+      target: 'main',
       base: f.state.base,
       record: f.record(),
     });
@@ -652,16 +652,7 @@ test.each(['ack-interrupted', 'persist-refused', 'changed-known'] as const)(
       f.repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
       const namespace = createHash('sha256')
         .update(
-          JSON.stringify([
-            'owner',
-            'repo',
-            7,
-            'merge-queue',
-            null,
-            'owner/repo',
-            'feature/x',
-            'author',
-          ]),
+          JSON.stringify(['owner', 'repo', 7, 'main', null, 'owner/repo', 'feature/x', 'author']),
         )
         .digest('hex');
       const ownershipPath = join(
@@ -823,7 +814,7 @@ test('P1: an imported-cycle disposition cannot lend status to a later original f
     }));
     const context = await f.resolver({
       repoRoot: f.repo.root,
-      target: 'merge-queue',
+      target: 'main',
       base: f.state.base,
       record: f.record(),
     });
@@ -883,7 +874,7 @@ test('P1: the same imported-cycle sequence with CHANGED later content also stays
     }));
     const context = await f.resolver({
       repoRoot: f.repo.root,
-      target: 'merge-queue',
+      target: 'main',
       base: f.state.base,
       record: f.record(),
     });
@@ -1086,7 +1077,7 @@ test.each([false, true])(
       ).toBe(false);
       const readiness = assembleReadiness({
         branch: f.state.branch,
-        target: 'merge-queue',
+        target: 'main',
         identity: { base: f.state.base, head: f.state.head, dirtySha256: 'clean-tree' },
         ledger,
         untracked: [],

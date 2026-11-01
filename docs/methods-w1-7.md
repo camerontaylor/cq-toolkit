@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W1.7 methods note
 
 W1.7 restructures the ratchet's provenance per ADR-0004 (reconciled at G1, `bf5f540`):

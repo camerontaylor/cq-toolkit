@@ -5,7 +5,7 @@ boundary for the planned `review.addressMany` operation. It does not add that
 operation or establish runtime acceptance.
 
 The source baseline is `8fc58c222a6ef018e64427a4509c38f5d96ec8e4`, targeting
-`merge-queue`. The fixtures in `test/ops/review/addressManyWorktree.test.ts` reuse
+`main`. The fixtures in `test/ops/review/addressManyWorktree.test.ts` reuse
 `makeTestRepo`, `resolvePrWorktree` and `fileWorktreeRegistry`. Forge metadata is
 scripted; real temporary Git repositories and a local bare origin supply two
 different pull-ref commits with the same advertised head branch. Resolver clocks

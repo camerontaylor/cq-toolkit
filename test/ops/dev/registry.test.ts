@@ -109,7 +109,7 @@ describe('dev family registry entries', () => {
   test('dev.review: the explicit base must be a commit sha (an immutable pin)', () => {
     const schema = entryByName('dev.review').inputSchema;
     expect(schema.safeParse({ repoRoot: '/repo', base: '1234567abcdef0' }).success).toBe(true);
-    expect(schema.safeParse({ repoRoot: '/repo', base: 'origin/merge-queue' }).success).toBe(false);
+    expect(schema.safeParse({ repoRoot: '/repo', base: 'origin/main' }).success).toBe(false);
   });
 
   test('dev.check: a range is <ref>..<ref>, never option-shaped', () => {
