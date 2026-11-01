@@ -238,3 +238,19 @@ test.each(['credential.helper', 'commit.gpgsign', 'gpg.format', 'user.signingkey
     }
   },
 );
+
+test.each(['--local', '--worktree'])(
+  'bulk refuses URL-scoped HTTP auth in %s config without copying its value',
+  async (scope) => {
+    const repo = await makeTestRepo();
+    try {
+      repo.git('config', 'extensions.worktreeConfig', 'true');
+      repo.git('config', scope, 'http.https://github.com/.extraheader', 'auth-fixture-value');
+      await expect(
+        isolateAddressMany(repo.root, 7, { cloneRoot: join(dirname(repo.root), 'clones') }),
+      ).rejects.toThrow('require plain review.address');
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);

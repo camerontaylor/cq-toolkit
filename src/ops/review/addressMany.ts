@@ -65,27 +65,29 @@ export async function isolateAddressMany(
   options: { cloneRoot: string; target?: string },
 ): Promise<string> {
   const git = promisify(execFile);
-  // Inspect key names only: helpers and signing values may contain credentials.
-  try {
-    const local = await git('git', [
-      '-C',
-      repoRoot,
-      'config',
-      '--local',
-      '--name-only',
-      '--get-regexp',
-      '^(credential\\..*helper|commit\\.gpgsign|gpg\\.format|user\\.signingkey)$',
-    ]);
-    if (local.stdout.trim())
-      throw new IsolationRefusal(
-        'Repository-local credential-helper or signing settings require plain review.address; bulk isolation refuses to copy sensitive configuration',
-      );
-  } catch (error) {
-    if (error instanceof IsolationRefusal) throw error;
-    if ((error as { code?: unknown }).code !== 1)
-      throw new IsolationRefusal(
-        'Cannot inspect repository-local credential and signing configuration',
-      );
+  // Inspect key names only: helpers, HTTP headers and signing values may contain credentials.
+  for (const scope of ['--local', '--worktree']) {
+    try {
+      const local = await git('git', [
+        '-C',
+        repoRoot,
+        'config',
+        scope,
+        '--name-only',
+        '--get-regexp',
+        '^(http\\..*extraheader|credential\\..*helper|commit\\.gpgsign|gpg\\.format|user\\.signingkey)$',
+      ]);
+      if (local.stdout.trim())
+        throw new IsolationRefusal(
+          'Repository-local or worktree credential-helper, HTTP header or signing settings require plain review.address; bulk isolation refuses to copy sensitive configuration',
+        );
+    } catch (error) {
+      if (error instanceof IsolationRefusal) throw error;
+      if ((error as { code?: unknown }).code !== 1)
+        throw new IsolationRefusal(
+          'Cannot inspect repository-local or worktree credential and signing configuration',
+        );
+    }
   }
   await mkdir(options.cloneRoot, { recursive: true });
   const parent = await mkdtemp(resolve(options.cloneRoot, `pr-${number}-`));

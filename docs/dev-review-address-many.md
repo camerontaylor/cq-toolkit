@@ -50,7 +50,8 @@ The clone's origin points to the caller's origin for fetching and publication.
 Its remote target ref is freshly fetched, and its resolved GitHub repository
 must match `repo` before dispatch. The caller’s effective Git author and
 committer identities are copied into the clone, including repository-local
-identity settings. Repository-local credential-helper or signing configuration
+identity settings. Repository-local or worktree credential-helper, HTTP
+extraheader or signing configuration
 causes an explicit `needs-human` refusal directing the caller to plain
 `review.address`; bulk isolation inspects key names only and does not copy
 helper commands, keys or other potentially sensitive values.
