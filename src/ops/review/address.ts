@@ -72,6 +72,7 @@ import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/r
 export interface ReviewAddressInput {
   repoRoot: string;
   source: string;
+  expectedHead?: string;
   record?: string;
   target?: string;
   base?: string;
@@ -139,6 +140,8 @@ export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
 };
 export interface ReviewAddressDeps {
+  /** Durable receipts and per-PR exclusion domain for isolated bulk checkouts. */
+  coordinationRoot?: string;
   drivers?: DriverFactory;
   git?: GhFn;
   gh?: GhFn;
@@ -625,7 +628,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         lockPath: resolve(await realpath(commonPath), 'cq-review-address-ownership'),
         failFast: true,
       });
-      return await ownership.withLock(async () => {
+      const runOwned = async () => {
         try {
           await mkdir(journalDir, { recursive: true });
           const bookkeepingKey = async (root: string, path: string) =>
@@ -704,7 +707,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 if (!(await untrackedAllowed(root, path))) throw new Error('bookkeeping mismatch');
             } catch (error) {
               bookkeepingTampered = true;
-              throw new Error('engine bookkeeping changed; worker tree is dirty', { cause: error });
+              throw new Error('engine bookkeeping changed; worker tree is dirty', {
+                cause: error,
+              });
             }
           };
           // Parallel PR workers share the ledger. Keep the fingerprint check,
@@ -1488,10 +1493,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 ]),
               )
               .digest('hex');
-            const receiptDir = resolve(root, commonDir, 'cq-review-address', namespace);
+            const receiptDir = resolve(
+              deps.coordinationRoot ?? resolve(root, commonDir),
+              'cq-review-address',
+              namespace,
+            );
             await mkdir(receiptDir, { recursive: true });
             dispatchLogPath = resolve(receiptDir, 'dispatch.jsonl');
-            bookkeepingReceiptPath = resolve(await realpath(receiptDir), 'bookkeeping.json');
+            const checkoutReceipts = resolve(root, commonDir, 'cq-review-address', namespace);
+            await mkdir(checkoutReceipts, { recursive: true });
+            bookkeepingReceiptPath = resolve(await realpath(checkoutReceipts), 'bookkeeping.json');
             pendingRerequestPath = resolve(await realpath(receiptDir), 'pending-rerequests.json');
             persistedBookkeeping = makeAddressBookkeepingReceipt({
               path: bookkeepingReceiptPath,
@@ -1625,7 +1636,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       } satisfies FixReviewItemResult,
                     };
                   if (!fix.commit)
-                    return { status: 'needs-human', reason: `${NO_OUTCOME_REASON}: ${fix.reason}` };
+                    return {
+                      status: 'needs-human',
+                      reason: `${NO_OUTCOME_REASON}: ${fix.reason}`,
+                    };
                   const value: FixReviewItemResult = {
                     observedHead: fix.observedHead,
                     disposition: 'fixed',
@@ -1645,6 +1659,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 headRefName: meta.headRefName,
                 ...(meta.headRepo ? { headRepo: meta.headRepo } : {}),
                 repoRoot: input.repoRoot,
+                ...(round === 1 && input.expectedHead ? { expectedHead: input.expectedHead } : {}),
                 gh,
                 git,
                 registry:
@@ -1718,6 +1733,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 publishedBase = await gitText(root, ['rev-parse', 'HEAD']);
               }
               if (loop.status !== 'ok') report.reasons.push(...loop.reasons);
+              if (loop.headRefused)
+                return await finish('needs-human', 'PR head changed before dispatch');
               if (admissionRefused)
                 return await finish(
                   'needs-human',
@@ -2009,7 +2026,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             error instanceof Error ? error.message : String(error),
           );
         }
-      }, parent);
+      };
+      if (input.source !== 'local') {
+        const domain = deps.coordinationRoot ?? (await realpath(commonPath));
+        await mkdir(domain, { recursive: true });
+        return await makeGitMutex({
+          lockPath: resolve(domain, `cq-review-address-pr-${input.source.slice(3)}`),
+          failFast: true,
+        }).withLock(() => ownership.withLock(runOwned, parent), parent);
+      }
+      return await ownership.withLock(runOwned, parent);
     } catch (error) {
       return await finish('needs-human', error instanceof Error ? error.message : String(error));
     }

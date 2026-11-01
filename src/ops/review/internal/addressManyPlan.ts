@@ -5,7 +5,7 @@
 // out and settled (admission), and how independent per-PR results roll up
 // truthfully (aggregate). It performs no I/O, has no runtime imports, reads no
 // configuration, dispatches no driver, queue, provider or provider CLI, and is
-// consumed by addressMany.ts for serial explicit-PR dispatch. Worktree and
+// consumed by addressMany.ts for bounded isolated-PR dispatch. Worktree and
 // publication behavior remains owned by review.address; enrollment transport
 // and parallel scheduling are outside this planning module.
 //
@@ -17,10 +17,6 @@
 //     actual usage, provider concurrency or a scheduler;
 //     `DEFAULT_ADDRESS_MANY_CONCURRENCY` / `resolveAddressManyConcurrency` are
 //     planning data for a caller that still has to enforce them.
-//   - The current runtime is SERIAL per Git common directory: `review.address`
-//     takes the common-dir `cq-review-address-ownership` lock for a whole
-//     invocation. Resolving linked worktrees is not concurrent address
-//     execution, and this module introduces none.
 //   - Publication is UNKNOWABLE from a settled address report today. There is no
 //     exported structured per-range publication witness, and report `reasons`
 //     are prose that must never be parsed. Every aggregate row therefore says
@@ -659,6 +655,8 @@ export type AddressManyRowStatus =
   | 'exception';
 
 export interface AddressManyRow {
+  /** Runtime failure context for a skipped leg; never allocation authority. */
+  detail?: string;
   scope: { repo: string; number: number; headOid: string };
   status: AddressManyRowStatus;
   /** `trusted` only when the report's first reviewed head equals the admitted head. */
@@ -696,6 +694,10 @@ export interface AddressManyTotals {
 }
 
 export interface AddressManyAggregate {
+  /** Runtime isolation evidence; omitted by the pure planner. */
+  preservedClones?: ReadonlyArray<{ number: number; path: string }>;
+  /** Selection exclusions with advisory enrollment dispositions. */
+  excluded?: ReadonlyArray<{ number: number; reason: string; enrollment: AddressManyEnrollment }>;
   repo: string;
   accounting: AddressManyAccounting;
   rows: readonly AddressManyRow[];

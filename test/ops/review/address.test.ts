@@ -1,3 +1,4 @@
+import { makeGitMutex } from '../../../src/shared/gitMutex.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { WorkerResult } from '../../../src/driver/types.js';
@@ -1247,4 +1248,25 @@ describe('review.address vendor preparation boundary', () => {
       await f.cleanup();
     }
   });
+});
+
+test('plain and isolated address calls share the caller per-PR lock', async () => {
+  const f = await fixture();
+  try {
+    const domain = f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim();
+    const result = await makeGitMutex({
+      lockPath: join(domain, 'cq-review-address-pr-7'),
+      failFast: true,
+    }).withLock(async () => {
+      return makeReviewAddress({ ...f.deps, coordinationRoot: domain })({
+        ...f.input,
+        source: 'pr:7',
+      });
+    });
+    expect(result.status).toBe('needs-human');
+    expect(f.calls).toEqual([]);
+    expect(result.status === 'needs-human' && result.reason).toMatch(/lock|locked/i);
+  } finally {
+    await f.cleanup();
+  }
 });

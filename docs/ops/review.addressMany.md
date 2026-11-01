@@ -16,6 +16,144 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "cloneRoot": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "concurrency": {
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
+    },
+    "enrollments": {
+      "items": {
+        "properties": {
+          "number": {
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "request": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "enum": [
+                  "enqueue",
+                  "bind",
+                  "cancel"
+                ],
+                "type": "string"
+              },
+              "binding": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "head": {
+                        "pattern": "^[0-9a-f]{40}$",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "const": "deferred-author",
+                        "type": "string"
+                      },
+                      "producer": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+                        "type": "string"
+                      },
+                      "repo": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "string"
+                      },
+                      "targetSelector": {
+                        "enum": [
+                          "promoted-main",
+                          "merge-queue"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "repo",
+                      "producer",
+                      "head",
+                      "target",
+                      "targetSelector"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "merged-current",
+                        "type": "string"
+                      },
+                      "mergeSha": {
+                        "pattern": "^[0-9a-f]{40}$",
+                        "type": "string"
+                      },
+                      "pr": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "repo": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+                        "type": "string"
+                      },
+                      "targetSelector": {
+                        "enum": [
+                          "promoted-main",
+                          "merge-queue"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "repo",
+                      "pr",
+                      "mergeSha",
+                      "targetSelector"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "mergeSha": {
+                "pattern": "^[0-9a-f]{40}$",
+                "type": "string"
+              },
+              "pr": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "requestId": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "requestId",
+              "binding"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "number",
+          "request"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "maxTokens": {
       "exclusiveMinimum": 0,
       "maximum": 9007199254740991,
@@ -36,6 +174,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     },
     "push": {
       "type": "boolean"
+    },
+    "query": {
+      "minLength": 1,
+      "type": "string"
     },
     "repo": {
       "pattern": "^[^/\\s]+\\/[^/\\s]+$",
@@ -64,7 +206,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "required": [
     "repoRoot",
     "repo",
-    "pulls",
     "owner",
     "maxTokens",
     "tokensPerPr"
