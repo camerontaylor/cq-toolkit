@@ -1,6 +1,9 @@
 import {
   recordAddressTerminalAttempt,
   deferAddressTerminalAttempt,
+  addressWorkerEvidence,
+  addressCandidateCheckSettled,
+  deferAddressCandidateCleanup,
 } from './internal/addressOwnership.js';
 import { randomUUID } from 'node:crypto';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
@@ -44,6 +47,7 @@ import type { Finding } from './findings.js';
 import {
   pinAddressFailure,
   addressFailureFeedback,
+  isAddressTerminalCapacityRefusal,
   type AddressFailedAttempt,
 } from './internal/addressEvidence.js';
 import type { FailedAttemptGate } from '../sweep/taskLoop.js';
@@ -501,12 +505,22 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         (signal): signal is AbortSignal => signal !== undefined,
       );
       const signal = signals.length ? AbortSignal.any(signals) : undefined;
-      const result = await makeCheckRunner((cmd) =>
-        subprocessRunCheck(cmd, signal ? { signal } : undefined),
-      )({
-        adapter: check.adapter,
-        command,
-      });
+      const phase = deps.terminalBinding
+        ? ((await addressWorkerEvidence(deps.terminalBinding, {
+            kind: 'candidate-check',
+            root: cwd,
+          })) as object)
+        : undefined;
+      let known = false;
+      let result;
+      try {
+        result = await makeCheckRunner((cmd) =>
+          subprocessRunCheck(cmd, signal ? { signal } : undefined),
+        )({ adapter: check.adapter, command });
+        known = result.status !== 'failed';
+      } finally {
+        if (phase) addressCandidateCheckSettled(deps.terminalBinding!, phase, known);
+      }
       // Cancellation is classified only after the actual child has settled.
       stop();
       if (result.status !== 'ok') throw new Error(`configured check was ${result.status}`);
@@ -609,8 +623,22 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           if (!dispatch) throw new Error('failed attempt has no dispatch identity');
           const content = await readFile(await safeFile(root, file));
           const candidate = resolve(deps.journalDir, `failed-candidate-${randomUUID()}`);
-          await git(root, ['worktree', 'add', '--detach', candidate, head]);
+          const candidateReceipt = deps.terminalBinding
+            ? ((await addressWorkerEvidence(deps.terminalBinding, {
+                kind: 'candidate-intent',
+                root,
+                path: candidate,
+                parent: head,
+                file,
+              })) as object)
+            : undefined;
           try {
+            await git(root, ['worktree', 'add', '--detach', candidate, head]);
+            if (candidateReceipt)
+              await addressWorkerEvidence(deps.terminalBinding!, {
+                kind: 'candidate-created',
+                handle: candidateReceipt,
+              });
             await writeFile(await safeFile(candidate, file), content);
             await git(candidate, ['add', '--', file]);
             const lastGate = validations
@@ -659,6 +687,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             failures.push(retained);
             ordinals.set(finding.id, ordinal);
             if (editingRow) editingRow.failedAttempt = retained;
+            if (candidateReceipt)
+              await addressWorkerEvidence(deps.terminalBinding!, {
+                kind: 'candidate-stage',
+                handle: candidateReceipt,
+                content,
+              });
             if (
               (await git(root, ['rev-parse', 'HEAD'])) !== head ||
               !(await readFile(await safeFile(root, file))).equals(content)
@@ -666,7 +700,22 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               throw new Error('failed-attempt source changed before owned restore');
             await git(root, ['restore', `--source=${head}`, '--staged', '--worktree', '--', file]);
           } finally {
-            await git(root, ['worktree', 'remove', '--force', candidate]);
+            if (
+              !candidateReceipt ||
+              !deferAddressCandidateCleanup(deps.terminalBinding!, candidateReceipt)
+            ) {
+              if (candidateReceipt)
+                await addressWorkerEvidence(deps.terminalBinding!, {
+                  kind: 'candidate-removal-admit',
+                  handle: candidateReceipt,
+                });
+              await git(root, ['worktree', 'remove', '--force', candidate]);
+              if (candidateReceipt)
+                await addressWorkerEvidence(deps.terminalBinding!, {
+                  kind: 'candidate-removed',
+                  handle: candidateReceipt,
+                });
+            }
           }
           touched = false;
         }).catch((error: unknown) => {
@@ -770,6 +819,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           } catch (error) {
             reason = error instanceof Error ? error.message : String(error);
             await restore();
+            if (isAddressTerminalCapacityRefusal(error)) {
+              fatal = reason;
+              return failed(reason);
+            }
             if (error instanceof AddressRefusal) {
               if (error.fatal) fatal = reason;
               return failed(reason);
@@ -795,27 +848,53 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             )
               throw new AddressRefusal('protected worker edits', true);
             const candidate = resolve(deps.journalDir, `candidate-${randomUUID()}`);
-            await git(root, [
-              'worktree',
-              'add',
-              '--detach',
-              candidate,
-              output.disposition === 'fixed' ? parent : observedHead,
-            ]);
+            const candidateReceipt = deps.terminalBinding
+              ? ((await addressWorkerEvidence(deps.terminalBinding, {
+                  kind: 'candidate-intent',
+                  root,
+                  path: candidate,
+                  parent: output.disposition === 'fixed' ? parent : observedHead,
+                  file,
+                })) as object)
+              : undefined;
             try {
+              await git(root, [
+                'worktree',
+                'add',
+                '--detach',
+                candidate,
+                output.disposition === 'fixed' ? parent : observedHead,
+              ]);
               // Reuse installed dependencies as a trusted local runtime input.
               // Workers cannot edit this path; the candidate still owns all
               // tracked source/config and has no sibling uncommitted edits.
               const dependencies = await dependencyDirectory(admitMutation);
               if (dependencies)
                 await symlink(dependencies, resolve(candidate, 'node_modules'), 'dir');
+              if (candidateReceipt)
+                await addressWorkerEvidence(deps.terminalBinding!, {
+                  kind: 'candidate-created',
+                  handle: candidateReceipt,
+                  ...(dependencies ? { dependency: dependencies } : {}),
+                });
               const baseline =
                 output.disposition === 'fixed' ? await runChecks(candidate, finding, false) : [];
+              if (candidateReceipt)
+                await addressWorkerEvidence(deps.terminalBinding!, {
+                  kind: 'candidate-baseline',
+                  handle: candidateReceipt,
+                });
 
               const content = await readFile(await safeFile(root, file));
               await writeFile(await safeFile(candidate, file), content);
               await git(candidate, ['add', '--', file]);
               const tree = await git(candidate, ['write-tree']);
+              if (candidateReceipt)
+                await addressWorkerEvidence(deps.terminalBinding!, {
+                  kind: 'candidate-stage',
+                  handle: candidateReceipt,
+                  content,
+                });
               const diff = await git(candidate, [
                 'diff',
                 '--cached',
@@ -987,10 +1066,29 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 failedAttempts: history,
               };
             } finally {
-              await git(root, ['worktree', 'remove', '--force', candidate]);
+              if (
+                !candidateReceipt ||
+                !deferAddressCandidateCleanup(deps.terminalBinding!, candidateReceipt)
+              ) {
+                if (candidateReceipt)
+                  await addressWorkerEvidence(deps.terminalBinding!, {
+                    kind: 'candidate-removal-admit',
+                    handle: candidateReceipt,
+                  });
+                await git(root, ['worktree', 'remove', '--force', candidate]);
+                if (candidateReceipt)
+                  await addressWorkerEvidence(deps.terminalBinding!, {
+                    kind: 'candidate-removed',
+                    handle: candidateReceipt,
+                  });
+              }
             }
           }, admitMutation).catch(async (error: unknown) => {
             reason = error instanceof Error ? error.message : String(error);
+            if (isAddressTerminalCapacityRefusal(error)) {
+              fatal = reason;
+              refusal = new AddressRefusal(reason, true);
+            }
             if (error instanceof AddressRefusal) {
               refusal = error;
               if (error.fatal) fatal = reason;

@@ -14,6 +14,8 @@ import { makeRepoDiffScanner, type DiffSecretScanner } from '../../../src/ops/de
 import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
+import * as ownership from '../../../src/ops/review/internal/addressOwnership.js';
+import type { ReviewAddressReport } from '../../../src/ops/review/address.js';
 
 const role = { provider: 'mock', model: 'worker' };
 const finding = (file = 'src/a.ts'): Finding => ({
@@ -169,7 +171,7 @@ async function fixture(
   options.configure?.(config);
   const git = makeGhRunner({ bin: 'git', cwd: repo.root });
   let identityRequests = 0;
-  const engine = makeAddressWorker({
+  const engineDeps: Parameters<typeof makeAddressWorker>[0] = {
     git: async (args) => {
       if (args.includes('--absolute-git-dir')) {
         identityRequests++;
@@ -199,10 +201,21 @@ async function fixture(
       }),
     ...(options.parentSignal ? { parentSignal: options.parentSignal } : {}),
     ...(options.terminalBinding ? { terminalBinding: options.terminalBinding } : {}),
-  });
+  };
+  const engine = makeAddressWorker(engineDeps);
   return {
     repo,
     engine,
+    ownedEngine: (lease: ownership.AddressLease, binding: object) =>
+      makeAddressWorker({
+        ...engineDeps,
+        terminalBinding: binding,
+        parentSignal: lease.signal,
+        git: async (args) => {
+          await lease.assertOwned();
+          return engineDeps.git(args);
+        },
+      }),
     attempts,
     initial,
     calls: () => calls,
@@ -1917,6 +1930,248 @@ test('a structural terminal binding never dispatches a driver or edits a file', 
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
     expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
     expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+function ownedWorkerReport(path: string): ReviewAddressReport {
+  return {
+    source: 'local',
+    reportPath: path,
+    rounds: [],
+    findings: [],
+    openBlocking: [],
+    fixes: [],
+    attempts: [],
+    failed: [],
+    fixesPerRun: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    wallMs: 0,
+    reasons: [],
+  };
+}
+
+test.each(['baseline', 'related', 'broader'] as const)(
+  'owned candidate cancellation drains actual %s close before authenticated cleanup',
+  async (phase) => {
+    const parent = new AbortController();
+    const external = await mkdtemp(join(tmpdir(), 'cq-owned-check-'));
+    const marker = join(external, 'ready'),
+      countFile = join(external, 'count');
+    const wanted = { baseline: 1, related: 2, broader: 3 }[phase];
+    // Only the external fixture directory changes. Candidate tracked/index and
+    // untracked state remain exactly engine-owned, including baseline checks.
+    const check = `
+const fs = require('node:fs');
+const path = ${JSON.stringify(countFile)};
+const n = fs.existsSync(path) ? Number(fs.readFileSync(path, 'utf8')) + 1 : 1;
+fs.writeFileSync(path, String(n));
+if (n === ${wanted}) {
+  fs.writeFileSync(${JSON.stringify(marker + '.tmp')}, String(process.pid));
+  fs.renameSync(${JSON.stringify(marker + '.tmp')}, ${JSON.stringify(marker)});
+  setInterval(() => {}, 1000);
+}
+`;
+    const f = await fixture(undefined, check, { parentSignal: parent.signal });
+    const report = ownedWorkerReport(join(external, 'report.json'));
+    const observer = observeRunningCheck(external);
+    let running: ReturnType<typeof f.engine.fix> | undefined,
+      work: Promise<unknown> | undefined,
+      pid: number | undefined;
+    try {
+      work = ownership.withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: makeGhRunner({ bin: 'git', cwd: f.repo.root }),
+          signal: parent.signal,
+          source: 'local',
+          production: false,
+        },
+        async (lease) => {
+          await ownership.bindAddressTerminalReport(lease, report);
+          const worker = f.ownedEngine(lease, ownership.addressTerminalWorkerBinding(lease));
+          running = lease.track(() => worker.fix(finding(), 1));
+          pid = await observer.wait(running);
+          parent.abort();
+          const result = await running;
+          expect(result.commit).toBeUndefined();
+          expect(() => process.kill(pid!, 0)).toThrow();
+          expect(f.repo.git('worktree', 'list', '--porcelain')).toContain('candidate-');
+          return ownership.addressCancelledResult(lease);
+        },
+      );
+      const result = (await work) as { status: string };
+      expect(result.status).toBe('needs-human');
+      expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain('candidate-');
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(f.repo.git('diff', '--cached', '--name-only', '-z')).toBe('');
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+      expect(report.failed).toHaveLength(1);
+      expect(f.repo.git('show', `${report.failed[0]!.branch}:src/a.ts`)).toBe('GOOD\n');
+      const persistedReport: unknown = JSON.parse(await readFile(report.reportPath, 'utf8'));
+      if (
+        typeof persistedReport !== 'object' ||
+        persistedReport === null ||
+        !('failed' in persistedReport)
+      )
+        throw new Error('persisted report missing failed');
+      expect(persistedReport.failed).toEqual(report.failed);
+    } finally {
+      parent.abort();
+      observer.close();
+      await running?.catch(() => undefined);
+      await work?.catch(() => undefined);
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(['complete', 'partial-create'] as const)(
+  'failed-candidate cancellation requires actual creation and staged phase receipts: %s',
+  async (mode) => {
+    const parent = new AbortController();
+    let candidate = '';
+    let pinObserved = false;
+    const f = await fixture(
+      async (input) => {
+        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'PARTIAL failed edit\n');
+        return { disposition: 'deferred', reason: 'retain partial edit', evidence: [] };
+      },
+      '',
+      {
+        parentSignal: parent.signal,
+        workerAttempts: 1,
+        rescueBase: 0,
+        gitHook: async (args, run) => {
+          const result = await run(args);
+          const add = args.indexOf('add');
+          if (args.includes('worktree') && add >= 0 && args[add + 1] === '--detach') {
+            candidate = args[add + 2]!;
+            if (mode === 'partial-create') parent.abort();
+          }
+          if (args.includes('update-ref') && candidate) {
+            expect(args[args.indexOf('-C') + 1]).toBe(candidate);
+            expect(result.code).toBe(0);
+            pinObserved = true;
+          }
+          if (mode === 'complete' && pinObserved && args.slice(-2).join(' ') === 'rev-parse HEAD') {
+            expect(args[args.indexOf('-C') + 1]).toBe(f.repo.root);
+            expect(result.code).toBe(0);
+            expect(result.stdout.trim()).toBe(f.initial);
+            parent.abort();
+          }
+          return result;
+        },
+      },
+    );
+    const external = await mkdtemp(join(tmpdir(), 'cq-failed-candidate-'));
+    const report = ownedWorkerReport(join(external, 'report.json'));
+    // This handler edits the root itself just like a default editing driver.
+    // Its returned disposition triggers the ordinary failed-evidence path.
+    const originalHead = f.initial;
+    let work: Promise<unknown> | undefined;
+    try {
+      work = ownership.withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: makeGhRunner({ bin: 'git', cwd: f.repo.root }),
+          signal: parent.signal,
+          source: 'local',
+          production: false,
+        },
+        async (lease) => {
+          await ownership.bindAddressTerminalReport(lease, report);
+          const binding = ownership.addressTerminalWorkerBinding(lease);
+          const worker = f.ownedEngine(lease, binding);
+          await lease.track(() => worker.fix(finding(), 1));
+          expect(parent.signal.aborted).toBe(true);
+          expect(candidate).toContain('failed-candidate-');
+          return ownership.addressCancelledResult(lease);
+        },
+      );
+      if (mode === 'complete') {
+        expect(((await work) as { status: string }).status).toBe('needs-human');
+        expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain(candidate);
+      } else {
+        await expect(work).rejects.toThrow(/candidate|receipt/);
+        expect(f.repo.git('worktree', 'list', '--porcelain')).toContain(candidate);
+        await expect(readFile(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(originalHead);
+    } finally {
+      parent.abort();
+      await work?.catch(() => undefined);
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  },
+);
+
+test('cumulative authenticated attempt capacity stops rescue and every subsequent model dispatch', async () => {
+  const f = await fixture();
+  const report = ownedWorkerReport(join(f.repo.root, '..', 'capacity-report.json'));
+  try {
+    let innerError: Error | undefined;
+    let secondCallbackEntries = 0;
+    let callbackCompleted = false;
+    const ownershipRun = ownership.withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: makeGhRunner({ bin: 'git', cwd: f.repo.root }),
+        source: 'local',
+        production: false,
+      },
+      async (lease) => {
+        await ownership.bindAddressTerminalReport(lease, report);
+        const binding = ownership.addressTerminalWorkerBinding(lease);
+        for (let index = 0; index < 64; index++)
+          await ownership.recordAddressTerminalAttempt(binding, {
+            root: f.repo.root,
+            file: 'src/a.ts',
+            parent: f.initial,
+            executionHead: f.initial,
+            runPrefix: 'capacity-test',
+            finding: `reserved-${index}`,
+            slug: 'capacity',
+            ordinal: index + 1,
+            tier: 'worker',
+            model: role,
+          });
+        const worker = f.ownedEngine(lease, binding);
+        const first = await lease.track(() => worker.fix(finding(), 1));
+        expect(first.commit).toBeUndefined();
+        expect(first.reason).toContain('capacity');
+        expect(f.calls()).toBe(0);
+        try {
+          await lease.track(() => {
+            secondCallbackEntries++;
+            return worker.fix(finding('src/b.ts'), 1);
+          });
+        } catch (error) {
+          expect(error).toBeInstanceOf(Error);
+          innerError = error as Error;
+        }
+        expect(innerError).toBeInstanceOf(Error);
+        expect(innerError!.message).toContain('capacity');
+        expect(secondCallbackEntries).toBe(0);
+        expect(f.calls()).toBe(0);
+        callbackCompleted = true;
+      },
+    );
+    let outerRejected = false;
+    let outerError: unknown;
+    try {
+      await ownershipRun;
+    } catch (error) {
+      outerRejected = true;
+      outerError = error;
+    }
+    expect(callbackCompleted).toBe(true);
+    expect(innerError).toBeInstanceOf(Error);
+    expect(outerRejected).toBe(true);
+    expect(outerError).toBe(innerError);
   } finally {
     await f.cleanup();
   }

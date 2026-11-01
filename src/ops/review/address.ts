@@ -67,6 +67,7 @@ import {
   noteAddressOpaqueInvocation,
   bindAddressTerminalReport,
   addressTerminalWorkerBinding,
+  addressOwnedEvidence,
   isAddressOwnershipAdmissionRefusal,
   runAddressReviewLoop,
   withAddressOwnership,
@@ -252,16 +253,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       report.advisories = [...new Set([...(report.advisories ?? []), ...record.advisories])];
     };
     const noteBookkeeping = async (path: string) => {
+      if (!addressLease) throw new Error('bookkeeping before ownership');
       const canonical = await realpath(path);
-      const stat = await lstat(canonical);
-      if (!stat.isFile() || stat.nlink !== 1)
-        throw new Error('bookkeeping is not an ordinary owned file');
-      bookkeeping.set(
-        canonical,
-        createHash('sha256')
-          .update(await readFile(canonical))
-          .digest('hex'),
-      );
+      const hash = await addressOwnedEvidence(addressLease, { kind: 'hash', path: canonical });
+      bookkeeping.set(canonical, hash as string);
       bookkeepingRevision++;
     };
     let worker: AddressWorker | undefined;
@@ -337,6 +332,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (!addressLease) return { status: 'needs-human', reason: 'parent cancelled', report };
         if (worker) report.escalation = worker.escalation();
         return addressCancelledResult(addressLease);
+      }
+      if (!addressLease) {
+        return withOwnership(async (lease) => {
+          addressLease = lease;
+          await bindAddressTerminalReport(lease, report);
+          return finish(status, reason, structuredStop);
+        });
       }
       if (reason) report.reasons.push(reason);
       let publicationFailed = false;
@@ -493,7 +495,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         await mkdir(journalDir, { recursive: true });
         if (parent?.aborted) return finish('needs-human', 'parent cancelled');
         if (addressLease) await addressLease.assertOwned();
-        await writeFile(report.reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+        if (!addressLease) throw new Error('report before ownership');
+        await addressOwnedEvidence(addressLease, {
+          kind: 'report',
+          path: report.reportPath,
+          report,
+        });
       } catch (error) {
         return {
           status: 'failed',
@@ -507,6 +514,57 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       return status === 'failed'
         ? { status, error: detail, report }
         : { status, reason: detail, report };
+    };
+    const withOwnership = async (action: (lease: AddressLease) => Promise<ReviewAddressResult>) => {
+      let entered = false;
+      try {
+        return await withAddressOwnership(
+          {
+            repoRoot: input.repoRoot,
+            git: deps.git ?? makeGhRunner({ bin: 'git', cwd: input.repoRoot, timeoutMs: 60_000 }),
+            source: input.source,
+            production: Object.keys(deps).length === 0,
+            controller: ownershipAbort,
+            signal: parent,
+          },
+          (lease) => {
+            entered = true;
+            return action(lease);
+          },
+        );
+      } catch (cause) {
+        let detail = 'unprintable ownership error';
+        try {
+          detail = String(cause instanceof Error ? cause.message : cause);
+        } catch {
+          // Error formatting cannot reenter effectful finalization.
+        }
+        if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
+          const { stop: _stop, ...observed } = report;
+          return {
+            status: 'needs-human' as const,
+            reason: detail,
+            report: {
+              ...observed,
+              reasons: observed.reasons.includes(detail)
+                ? [...observed.reasons]
+                : [...observed.reasons, detail],
+            },
+          };
+        }
+        const error = `address lifetime finalization failed; durability unconfirmed: ${detail}`;
+        const { stop: _stop, ...observed } = report;
+        return {
+          status: 'failed' as const,
+          error,
+          report: {
+            ...observed,
+            reasons: observed.reasons.includes(error)
+              ? [...observed.reasons]
+              : [...observed.reasons, error],
+          },
+        };
+      }
     };
     try {
       if (parent?.aborted) return await finish('needs-human', 'parent cancelled');
@@ -661,59 +719,6 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // Ownership spans worker edits as well as index mutation, restoration and
       // publication. Linked worktrees share this conservative exclusion domain;
       // UUID journal paths and lexical checkout aliases cannot split it.
-      const withOwnership = async (
-        action: (lease: AddressLease) => Promise<ReviewAddressResult>,
-      ) => {
-        let entered = false;
-        try {
-          return await withAddressOwnership(
-            {
-              repoRoot: input.repoRoot,
-              git: rawGit,
-              source: input.source,
-              production: Object.keys(deps).length === 0,
-              controller: ownershipAbort,
-              signal: parent,
-            },
-            (lease) => {
-              entered = true;
-              return action(lease);
-            },
-          );
-        } catch (cause) {
-          let detail = 'unprintable ownership error';
-          try {
-            detail = String(cause instanceof Error ? cause.message : cause);
-          } catch {
-            // Error formatting cannot reenter effectful finalization.
-          }
-          if (!entered && isAddressOwnershipAdmissionRefusal(cause)) {
-            const { stop: _stop, ...observed } = report;
-            return {
-              status: 'needs-human' as const,
-              reason: detail,
-              report: {
-                ...observed,
-                reasons: observed.reasons.includes(detail)
-                  ? [...observed.reasons]
-                  : [...observed.reasons, detail],
-              },
-            };
-          }
-          const error = `address lifetime finalization failed; durability unconfirmed: ${detail}`;
-          const { stop: _stop, ...observed } = report;
-          return {
-            status: 'failed' as const,
-            error,
-            report: {
-              ...observed,
-              reasons: observed.reasons.includes(error)
-                ? [...observed.reasons]
-                : [...observed.reasons, error],
-            },
-          };
-        }
-      };
       return await withOwnership(async (lease) => {
         addressLease = lease;
         await bindAddressTerminalReport(lease, report);
@@ -726,14 +731,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const key = await bookkeepingKey(root, path);
             const expected = bookkeeping.get(key);
             if (!expected) return false;
-            const stat = await lstat(key);
             const unchanged =
-              stat.isFile() &&
-              stat.nlink === 1 &&
-              (await realpath(key)) === key &&
-              createHash('sha256')
-                .update(await readFile(key))
-                .digest('hex') === expected;
+              (await addressOwnedEvidence(lease, { kind: 'hash', path: key })) === expected;
             if (!unchanged) bookkeepingTampered = true;
             return unchanged;
           };
@@ -826,20 +825,36 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 }
               }
               if (!outcome.ok) throw outcome.error;
+              await addressOwnedEvidence(lease, {
+                kind: 'bookkeeping',
+                root,
+                entries: [...bookkeeping],
+              });
               return outcome.value;
             });
             bookkeepingWrites = pending.catch(() => undefined);
             return pending;
           };
-          const reviewOnce = (request: ReviewRunInput) =>
-            withBookkeepingAccess(request.repoRoot, async () => {
-              // Review.run legitimately appends to the same ledger. Check ownership
-              // before its write, then register only that engine-produced revision.
-              const result = await reviewImplementation(request);
-              if (!deps.review && result.status === 'ok')
-                await noteBookkeeping(devLedgerPath(request.repoRoot, result.value.branch));
-              return result;
-            });
+          const reviewOnce = async (request: ReviewRunInput) => {
+            let observed: Awaited<ReturnType<typeof reviewImplementation>> | undefined;
+            try {
+              return await withBookkeepingAccess(request.repoRoot, async () => {
+                // Review.run legitimately appends to the same ledger. Check ownership
+                // before its write, then register only that engine-produced revision.
+                const result = await reviewImplementation(request);
+                observed = result;
+                if (!deps.review && result.status === 'ok')
+                  await noteBookkeeping(devLedgerPath(request.repoRoot, result.value.branch));
+                return result;
+              });
+            } catch (cause) {
+              if (observed === undefined || observed.status === 'ok') throw cause;
+              throw new Error(
+                `${cause instanceof Error ? cause.message : 'review acknowledgement/persistence refused'}; observed review: ${issue(observed).slice(0, 2048)}`,
+                { cause },
+              );
+            }
+          };
           // #509 (owner, 2026-10-27): a re-review blocked on the network/
           // transient class (review.run's structured `blockedTransient`) is
           // retried ONCE within the remaining budgets. If the retry is still

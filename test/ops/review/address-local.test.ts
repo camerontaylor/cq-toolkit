@@ -580,61 +580,71 @@ test('adopted no-ignore repository can re-review ledger revisions and commit a s
   }
 });
 
-test('cancelled edit reports an ordinary local branch and finding pointer without publication', async () => {
-  const f = await fixture();
-  const parent = new AbortController();
-  const drivers: DriverFactory = {
-    resolve: (request) => {
-      const resolved = f.drivers.resolve(request);
-      return {
-        ...resolved,
-        driver: {
-          run: async (input) => {
-            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'CANCELLED PARTIAL\n');
-            parent.abort();
-            return {
-              stopReason: 'aborted',
-              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
-              denials: [],
-            };
+test.each(['ignored', 'unignored'] as const)(
+  'cancelled edit reports an ordinary local branch and finding pointer without publication: %s',
+  async (bookkeeping) => {
+    const f = await fixture();
+    if (bookkeeping === 'unignored') {
+      await f.repo.write('.gitignore', '');
+      f.repo.commitAll('unignored authenticated bookkeeping');
+      f.record.head = f.repo.git('rev-parse', 'HEAD').trim();
+    }
+    const parent = new AbortController();
+    const drivers: DriverFactory = {
+      resolve: (request) => {
+        const resolved = f.drivers.resolve(request);
+        return {
+          ...resolved,
+          driver: {
+            run: async (input) => {
+              await writeFile(join(input.workspace!.path, 'src/a.ts'), 'CANCELLED PARTIAL\n');
+              parent.abort();
+              return {
+                stopReason: 'aborted',
+                usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+              };
+            },
           },
-        },
-      };
-    },
-  };
-  try {
-    const governed = await runLadder(
-      () =>
-        makeReviewAddress({ drivers, initialRecord: f.record })({
-          repoRoot: f.repo.root,
-          source: 'local',
-          journalDir: f.journalDir,
-          push: true,
-        }),
-      {},
-      { op: 'review.address', jobKey: 'cancelled-address', attempt: 1 },
-      { signal: parent.signal },
-    );
-    expect(governed.outcome).toBe('completed');
-    if (governed.outcome !== 'completed') return;
-    const result = governed.value;
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'ok') return;
-    const report = result.report!;
-    expect(report.failed).toHaveLength(1);
-    const retained = report.failed[0]!;
-    expect(retained.gate).toBe('budget');
-    expect(f.repo.git('show', `${retained.branch}:src/a.ts`)).toBe('CANCELLED PARTIAL\n');
-    expect(JSON.parse(report.findings[0]!.evidence!)).toEqual(retained);
-    expect(
-      (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).failed,
-    ).toEqual(report.failed);
-    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = "BAD";\n');
-    expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
-  } finally {
-    await f.cleanup();
-  }
-});
+        };
+      },
+    };
+    try {
+      const governed = await runLadder(
+        () =>
+          makeReviewAddress({ drivers, initialRecord: f.record })({
+            repoRoot: f.repo.root,
+            source: 'local',
+            journalDir: f.journalDir,
+            push: true,
+          }),
+        {},
+        { op: 'review.address', jobKey: 'cancelled-address', attempt: 1 },
+        { signal: parent.signal },
+      );
+      expect(governed.outcome).toBe('completed');
+      if (governed.outcome !== 'completed') return;
+      const result = governed.value;
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'ok') return;
+      const report = result.report!;
+      expect(report.failed).toHaveLength(1);
+      const retained = report.failed[0]!;
+      expect(retained.gate).toBe('budget');
+      expect(f.repo.git('show', `${retained.branch}:src/a.ts`)).toBe('CANCELLED PARTIAL\n');
+      expect(JSON.parse(report.findings[0]!.evidence!)).toEqual(retained);
+      expect(
+        (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).failed,
+      ).toEqual(report.failed);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
+        'export const a = "BAD";\n',
+      );
+      expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
 
 describe('review.address blocked re-review (#509)', () => {
   test('a re-review blocked on the transient class is retried once and the run completes', async () => {

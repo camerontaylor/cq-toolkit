@@ -11,6 +11,13 @@ import {
   recordAddressTerminalEvidence,
   settleAddressTerminalEvidence,
   persistAddressTerminalReport,
+  addressEvidenceAction,
+  finishAddressCandidateCheck,
+  deferAddressCandidate,
+  preflightAddressTerminalArtifacts,
+  removeAddressTerminalCandidates,
+  isAddressTerminalCapacityRefusal,
+  type AddressEvidenceAction,
   type AddressTerminalAttempt,
   type AddressTerminalAttemptInput,
 } from './addressEvidence.js';
@@ -84,6 +91,9 @@ interface TerminalInternals {
   track(promise: Promise<void>): void;
   record(participant: Participant, input: AddressTerminalAttemptInput): Promise<object>;
   defer(participant: Participant, attempt: object): boolean;
+  evidence(lease: AddressLease, action: AddressEvidenceAction): Promise<unknown>;
+  check(lease: AddressLease, handle: object, known: boolean): void;
+  candidate(lease: AddressLease, handle: object): boolean;
 }
 const terminalInternals = new WeakMap<AddressOwnership, TerminalInternals>();
 const terminalAuthorities = new WeakMap<object, AddressOwnership>();
@@ -278,6 +288,7 @@ export class AddressOwnership {
   private readonly terminalProcesses = new Set<Promise<void>>();
   private readonly terminalOperations = new Set<Promise<void>>();
   private stopping = false;
+  private terminalFrozen = false;
   // Refusal blocks terminal IO, but cannot substitute for the actual-task drain.
   private terminalAdmissionRefusal?: Error;
   private terminalFailure?: unknown;
@@ -287,6 +298,7 @@ export class AddressOwnership {
   private used = false;
   private admitting = false;
   private compromised = false;
+  private firstPhysicalLoss?: Error;
   private writeTail: Promise<void> = Promise.resolve();
   private artifact?: { ino: number; dev: number };
 
@@ -310,6 +322,9 @@ export class AddressOwnership {
       track: (promise) => this.registerTerminalProcess(promise),
       record: (participant, input) => this.recordAttempt(participant, input),
       defer: (participant, attempt) => this.deferAttempt(participant, attempt),
+      evidence: (lease, action) => this.evidence(lease, action),
+      check: (lease, handle, known) => this.finishCheck(lease, handle, known),
+      candidate: (lease, handle) => this.deferCandidate(lease, handle),
     });
   }
 
@@ -458,7 +473,8 @@ export class AddressOwnership {
 
   private async identityNow(): Promise<Snapshot> {
     const expected = this.snapshot;
-    if (!expected || this.compromised) throw new Error('owner inactive');
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (!expected) throw new Error('owner inactive');
     const [current, artifact] = await Promise.all([
       this.readSnapshot(expected.sequence === 0),
       lstat(resolve(this.commonDir, 'cq-review-address-ownership.lock')),
@@ -546,7 +562,8 @@ export class AddressOwnership {
   private async prepareCompletion(): Promise<Completion> {
     // Caller closed admission and verified actual descendants, not just an
     // abandoned outer promise. No lease is usable after this preparation.
-    if (!this.active || this.compromised) throw new Error('owner inactive');
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (!this.active) throw new Error('owner inactive');
     this.controller.signal.throwIfAborted();
     const predecessor = await this.identityNow().catch((error: unknown) => this.lose(error));
     const prepared = this.transition(predecessor, 'quiescent', [...this.recorded].sort());
@@ -637,6 +654,10 @@ export class AddressOwnership {
   }
 
   private async lose(error: unknown): Promise<never> {
+    this.firstPhysicalLoss ??= new Error(
+      'address ownership: lost owner; completion failed, durable quarantine unconfirmed; attended recovery/compaction required',
+      { cause: error },
+    );
     this.compromised = true;
     this.admitting = false;
     this.controller.abort(error);
@@ -651,27 +672,21 @@ export class AddressOwnership {
     } catch {
       /* Existing evidence or unavailable storage is never overwritten. */
     }
-    throw new Error(
-      'address ownership: lost owner; completion failed, durable quarantine unconfirmed; attended recovery/compaction required',
-      { cause: error },
-    );
+    throw this.firstPhysicalLoss;
   }
 
   private async assertIdentity(): Promise<void> {
-    if (!this.active || this.compromised) throw new Error('address ownership: owner inactive');
-    await this.writeTail;
-    try {
-      const current = await this.identityNow();
-      if (
-        current.guard?.epoch !== this.epoch ||
-        current.guard.state !== 'active' ||
-        !this.active ||
-        this.compromised
-      )
-        throw new Error('owner no longer active');
-    } catch (error) {
-      await this.lose(error);
-    }
+    return this.enqueue(async () => {
+      if (this.compromised) throw this.firstPhysicalLoss;
+      if (!this.active) throw new Error('address ownership: owner inactive');
+      try {
+        const current = await this.identityNow();
+        if (current.guard?.epoch !== this.epoch || current.guard.state !== 'active')
+          throw new Error('owner no longer active');
+      } catch (error) {
+        await this.lose(error);
+      }
+    });
   }
 
   private stopAdmissions = () => {
@@ -680,7 +695,8 @@ export class AddressOwnership {
   };
 
   private async validateTerminal(): Promise<{ commonDir: string; terminal: boolean }> {
-    if (!this.active || this.compromised || this.terminalFailure)
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (!this.active || this.terminalFailure)
       throw new Error('address terminal: owner inactive/compromised');
     this.controller.signal.throwIfAborted();
     await this.assertIdentity();
@@ -689,7 +705,8 @@ export class AddressOwnership {
   }
 
   private registerTerminalProcess(promise: Promise<void>): void {
-    if (!this.active || this.compromised || this.terminalFailure)
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (!this.active || this.terminalFailure)
       throw new Error('address terminal: process after retirement');
     const set = this.stopping ? this.terminalProcesses : this.tasks;
     set.add(promise);
@@ -702,6 +719,8 @@ export class AddressOwnership {
   private async participant<T>(lease: AddressLease, action: () => Promise<T>): Promise<T> {
     if (liveLeases.get(lease) !== this || participantLeases.has(lease))
       throw new Error('address terminal: forged/reused participant');
+    if (!this.admitting)
+      throw this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed');
     const participant: Participant = {
       lease,
       closed: false,
@@ -767,6 +786,71 @@ export class AddressOwnership {
     participant.report = report;
   }
 
+  private async evidence(lease: AddressLease, action: AddressEvidenceAction): Promise<unknown> {
+    const participant = participantLeases.get(lease);
+    if (liveLeases.get(lease) !== this || !participant || participant.closed || this.terminalFrozen)
+      throw new Error('address terminal: evidence after close/foreign participant');
+    // A completed engine write may acknowledge its bytes after logical parent
+    // cancellation. This admits no new work, and never ignores physical loss.
+    const acknowledgement = action.kind === 'bookkeeping' || action.kind === 'hash';
+    if (acknowledgement) await this.validateTerminal();
+    else await this.assertOwned();
+    if (this.terminalAdmissionRefusal && action.kind !== 'hash' && action.kind !== 'bookkeeping')
+      throw this.terminalAdmissionRefusal;
+    if (
+      action.kind === 'report' &&
+      (action.path !== participant.report?.reportPath || action.report !== participant.report)
+    )
+      throw new Error('address terminal: report materialization target mismatch');
+    if (
+      action.kind === 'candidate-intent' &&
+      !participant.attempts.some(
+        (attempt) => attempt.root === action.root && attempt.file === action.file,
+      )
+    )
+      throw new Error('address terminal: candidate has no authenticated source attempt');
+    const operation = addressEvidenceAction(
+      this.terminalToken,
+      participant,
+      action.kind === 'report' ? { ...action, path: participant.reportTarget! } : action,
+    );
+    this.tasks.add(operation);
+    try {
+      return await operation;
+    } catch (error) {
+      if (action.kind.startsWith('candidate-') || isAddressTerminalCapacityRefusal(error)) {
+        this.terminalAdmissionRefusal ??=
+          error instanceof Error
+            ? error
+            : new Error('address terminal: candidate receipt failed', { cause: error });
+        this.admitting = false;
+      }
+      throw error;
+    } finally {
+      this.tasks.delete(operation);
+    }
+  }
+
+  private finishCheck(lease: AddressLease, handle: object, known: boolean): void {
+    const participant = participantLeases.get(lease);
+    if (!participant || participant.closed || liveLeases.get(lease) !== this)
+      throw new Error('address terminal: check settlement after close');
+    finishAddressCandidateCheck(this.terminalToken, participant, handle, known);
+  }
+
+  private deferCandidate(lease: AddressLease, handle: object): boolean {
+    const participant = participantLeases.get(lease);
+    if (!participant || participant.closed || liveLeases.get(lease) !== this)
+      throw new Error('address terminal: candidate after close');
+    if (!this.signal.aborted) return false;
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (this.controller.signal.aborted)
+      throw new Error('address terminal: candidate owner compromised');
+    this.stopAdmissions();
+    deferAddressCandidate(this.terminalToken, participant, handle);
+    return true;
+  }
+
   private noteOpaqueInvocation(lease: AddressLease): void {
     const participant = participantLeases.get(lease);
     if (
@@ -795,10 +879,24 @@ export class AddressOwnership {
     participant: Participant,
     input: AddressTerminalAttemptInput,
   ): Promise<object> {
-    if (participant.closed || this.stopping)
-      throw new Error('address terminal: attempt after close');
+    if (
+      participant.closed ||
+      this.stopping ||
+      this.terminalFailure ||
+      this.terminalAdmissionRefusal
+    )
+      throw new Error('address terminal: attempt after close/failure');
     await this.assertOwned();
-    const attempt = await recordAddressTerminalEvidence(this.terminalToken, input);
+    let attempt: AddressTerminalAttempt;
+    try {
+      attempt = await recordAddressTerminalEvidence(this.terminalToken, input);
+    } catch (error) {
+      if (isAddressTerminalCapacityRefusal(error)) {
+        this.terminalAdmissionRefusal ??= error as Error;
+        this.admitting = false;
+      }
+      throw error;
+    }
     await this.assertOwned();
     if (participant.closed) {
       this.terminalFailure = new Error('address terminal: late attempt on closed participant');
@@ -810,8 +908,12 @@ export class AddressOwnership {
 
   private deferAttempt(participant: Participant, value: object): boolean {
     if (!this.signal.aborted || this.controller.signal.aborted || this.compromised) return false;
-    if (participant.closed) {
-      this.terminalFailure = new Error('address terminal: closed participant attempted cleanup');
+    if (participant.closed || this.terminalFrozen) {
+      this.terminalFailure = new Error(
+        participant.closed
+          ? 'address terminal: closed participant attempted cleanup'
+          : 'address terminal: frozen participant attempted cleanup',
+      );
       throw this.terminalFailure;
     }
     if (!participant.attempts.includes(value as AddressTerminalAttempt))
@@ -855,6 +957,7 @@ export class AddressOwnership {
         throw new Error(
           'address terminal: opaque invocation write-set unconfirmed; caller bytes retained',
         );
+      this.terminalFrozen = true;
       const open = [...this.participants].filter((entry) => !entry.closed);
       const targets = new Set<string>();
       for (const participant of open)
@@ -881,8 +984,24 @@ export class AddressOwnership {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const work = (async () => {
+          await preflightAddressTerminalArtifacts(
+            this.terminalToken,
+            open.flatMap((entry) =>
+              entry.report
+                ? [
+                    {
+                      path: entry.reportTarget!,
+                      directory: entry.reportDirectory!,
+                      report: entry.report,
+                    },
+                  ]
+                : [],
+            ),
+          );
+
           try {
             await settleAddressTerminalEvidence(this.terminalToken, attempts);
+            await removeAddressTerminalCandidates(this.terminalToken);
           } finally {
             // Real local ref effects survive a later restore/report failure.
             for (const participant of open)
@@ -963,7 +1082,8 @@ export class AddressOwnership {
   }
 
   async assertOwned(): Promise<void> {
-    if (!this.active || this.compromised) throw new Error('address ownership: owner inactive');
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (!this.active) throw new Error('address ownership: owner inactive');
     this.signal.throwIfAborted();
     await this.assertIdentity();
     this.signal.throwIfAborted();
@@ -984,7 +1104,7 @@ export class AddressOwnership {
       this.used = true;
       this.artifact = await lstat(resolve(this.commonDir, 'cq-review-address-ownership.lock'));
       this.snapshot = previous ?? (await this.bootstrap());
-      if (previous) await this.adoptQuiescence(previous);
+      if (previous) await this.enqueue(() => this.adoptQuiescence(previous));
       // Must be durable BEFORE a driver, worktree mutation, or child can start.
       await this.persist('active');
       this.signal.throwIfAborted();
@@ -1067,6 +1187,10 @@ export class AddressOwnership {
         await this.assertOwned();
         return await childContext.run(child, async () => {
           const { makeReviewAddress } = await import('../address.js');
+          if (!this.admitting)
+            throw (
+              this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed')
+            );
           return makeReviewAddress()(input);
         });
       } finally {
@@ -1094,6 +1218,8 @@ export class AddressOwnership {
       const recorded = [...new Set([...this.recorded, ...complete])].sort();
       await this.writeTransition('active', recorded);
       this.signal.throwIfAborted();
+      if (!this.admitting)
+        throw this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed');
       // Install claims only after durable publication and identity post-check.
       for (const key of complete) {
         this.claims.set(key, child);
@@ -1104,13 +1230,16 @@ export class AddressOwnership {
   }
 
   lease(child?: Child): AddressLease {
-    if (!this.active || this.compromised) throw new Error('address ownership: owner inactive');
+    if (this.compromised) throw this.firstPhysicalLoss;
+    if (!this.active) throw new Error('address ownership: owner inactive');
     const lease: AddressLease = {
       signal: this.signal,
       ...(child ? { expectedHead: child.selection.head, registry: this.registry } : {}),
       assertOwned: async () => {
         if (!this.admitting) throw new Error('address ownership: admissions closed');
         await this.assertOwned();
+        if (!this.admitting)
+          throw this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed');
       },
       track: (action) => {
         if (!this.admitting)
@@ -1119,12 +1248,17 @@ export class AddressOwnership {
               ? (this.controller.signal.reason as unknown)
               : this.signal.aborted
                 ? (this.signal.reason as unknown)
-                : new Error('address ownership: admissions closed'),
+                : (this.terminalAdmissionRefusal ??
+                  new Error('address ownership: admissions closed')),
           );
         // Register synchronously, before asynchronous ownership checks: an
         // unawaited caller cannot finish the owner during this admission gap.
         const task = (async () => {
           await this.assertOwned();
+          if (!this.admitting)
+            throw (
+              this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed')
+            );
           return action();
         })();
         this.tasks.add(task);
@@ -1139,6 +1273,8 @@ export class AddressOwnership {
       assertSelection: async (selection) => {
         if (!this.admitting) throw new Error('address ownership: admissions closed');
         await this.assertOwned();
+        if (!this.admitting)
+          throw this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed');
         if (
           child &&
           (selection.pr !== child.selection.pr ||
@@ -1150,6 +1286,8 @@ export class AddressOwnership {
       claimCheckout: async (info) => {
         if (!this.admitting) throw new Error('address ownership: admissions closed');
         await this.assertOwned();
+        if (!this.admitting)
+          throw this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed');
         if (!child) return;
         if (
           info.branch !== reviewBranchFor(child.selection.pr) ||
@@ -1179,6 +1317,8 @@ export class AddressOwnership {
         await this.assertOwned();
         await this.claim(child, [`checkout:${root}`, `git-dir:${gitDir}`]);
         await this.assertOwned();
+        if (!this.admitting)
+          throw this.terminalAdmissionRefusal ?? new Error('address ownership: admissions closed');
       },
     };
     liveLeases.set(lease, this);
@@ -1289,6 +1429,41 @@ export function deferAddressTerminalAttempt(binding: object, attempt: object): b
   const association = terminalWorkers.get(binding);
   if (!association) throw new Error('address terminal: forged worker association');
   return terminalInternals.get(association.owner)!.defer(association.participant, attempt);
+}
+
+export function addressOwnedEvidence(
+  lease: AddressLease,
+  action: AddressEvidenceAction,
+): Promise<unknown> {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: forged evidence lease');
+  if (action.kind !== 'report' && action.kind !== 'hash' && action.kind !== 'bookkeeping')
+    throw new Error('address terminal: composition cannot mint worker receipts');
+  return terminalInternals.get(owner)!.evidence(lease, action);
+}
+export function addressWorkerEvidence(
+  binding: object,
+  action: AddressEvidenceAction,
+): Promise<unknown> {
+  const association = terminalWorkers.get(binding);
+  if (!association) throw new Error('address terminal: forged worker association');
+  if (action.kind === 'report' || action.kind === 'bookkeeping' || action.kind === 'hash')
+    throw new Error('address terminal: worker cannot bind composition evidence');
+  return terminalInternals.get(association.owner)!.evidence(association.participant.lease, action);
+}
+export function addressCandidateCheckSettled(
+  binding: object,
+  handle: object,
+  known: boolean,
+): void {
+  const association = terminalWorkers.get(binding);
+  if (!association) throw new Error('address terminal: forged worker association');
+  terminalInternals.get(association.owner)!.check(association.participant.lease, handle, known);
+}
+export function deferAddressCandidateCleanup(binding: object, handle: object): boolean {
+  const association = terminalWorkers.get(binding);
+  if (!association) throw new Error('address terminal: forged worker association');
+  return terminalInternals.get(association.owner)!.candidate(association.participant.lease, handle);
 }
 export function addressCancelledResult(lease: AddressLease): Promise<ReviewAddressResult> {
   const owner = liveLeases.get(lease);

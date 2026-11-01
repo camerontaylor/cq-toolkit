@@ -57,6 +57,93 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+// Match this fixture's canonical executable/root and the complete private
+// hardened prefix BEFORE consuming a fault. No ordinary runner matches it.
+async function terminalFixtureSelector(repo: TestRepo) {
+  const root = await realpath(repo.root),
+    common = await realpath(join(root, '.git'));
+  let executable: string | undefined;
+  for (const entry of (process.env['PATH'] ?? '').split(':')) {
+    if (!entry.startsWith('/')) continue;
+    try {
+      const candidate = await realpath(join(entry, 'git'));
+      const stat = await lstat(candidate);
+      if (!candidate.startsWith(root + '/') && stat.isFile() && stat.mode & 0o111) {
+        executable = candidate;
+        break;
+      }
+    } catch {
+      /* Missing entries confer no fixture match. */
+    }
+  }
+  if (!executable) throw new Error('fixture canonical Git unavailable');
+  let config: string | undefined;
+  const stages = { selected: 0, handled: 0, closes: 0, stdout: 0, stderr: 0 };
+  const select = (command: string, args: readonly string[], options: SpawnOptions) => {
+    const observed = options.env?.['GIT_CONFIG_GLOBAL'];
+    if (
+      command !== executable ||
+      options.cwd !== root ||
+      typeof observed !== 'string' ||
+      dirname(dirname(observed)) !== common ||
+      !dirname(observed).startsWith(join(common, 'cq-address-terminal-')) ||
+      observed !== join(dirname(observed), 'empty-config') ||
+      options.env?.['GIT_CONFIG_SYSTEM'] !== observed ||
+      options.env?.['HOME'] !== dirname(observed) ||
+      options.env?.['GIT_CONFIG_NOSYSTEM'] !== '1'
+    )
+      return;
+    const prefix = [
+      '--no-pager',
+      '--literal-pathspecs',
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.quotePath=true',
+      ...[
+        'core.hooksPath=' + join(dirname(observed), 'empty-hooks'),
+        'core.attributesFile=' + observed,
+        'core.untrackedCache=false',
+        'credential.helper=',
+        'core.askPass=',
+        'gc.auto=0',
+        'maintenance.auto=false',
+        'protocol.allow=never',
+        'commit.gpgSign=false',
+        'tag.gpgSign=false',
+      ].flatMap((value) => ['-c', value]),
+    ];
+    if (
+      JSON.stringify(args.slice(0, prefix.length)) !== JSON.stringify(prefix) ||
+      (config && config !== observed)
+    )
+      return;
+    config ??= observed;
+    stages.selected++;
+    return args.slice(prefix.length);
+  };
+  return { select, stages };
+}
+
+// Only immutable readonly Git outputs from THIS actual repo may be replayed in
+// the count fixtures. All filesystem/path/hash/authority checks remain real.
+function terminalReadonlyResponses(repo: TestRepo) {
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  const entry = repo.git('ls-files', '--stage', '-z', '--', 'src/a.ts');
+  const blob = /^(?:100644|100755) ([a-f0-9]{40,64}) 0\t/.exec(entry)?.[1];
+  if (!blob) throw new Error('fixture actual baseline index unavailable');
+  const commands = [
+    ['rev-parse', '--absolute-git-dir'],
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    ['rev-parse', 'HEAD'],
+    ['symbolic-ref', 'HEAD'],
+    ['ls-files', '--stage', '-z', '--', 'src/a.ts'],
+    ['cat-file', 'blob', `${head}:src/a.ts`],
+    ['cat-file', 'blob', blob],
+  ];
+  return new Map(commands.map((args) => [JSON.stringify(args), repo.git(...args)]));
+}
+
 // Filesystem fault gates are test-only. Every unaffected operation is real.
 const fsFaults = vi.hoisted(() => ({
   effect: undefined as undefined | (() => void),
@@ -67,6 +154,8 @@ const fsFaults = vi.hoisted(() => ({
     | undefined
     | ((path: string, flags: string | number | undefined) => Promise<void>),
   sync: undefined as undefined | ((path: string) => Promise<void>),
+  write: undefined as undefined | ((path: string) => Promise<void>),
+  close: undefined as undefined | ((path: string) => Promise<void>),
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -90,6 +179,16 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       fsFaults.effect?.();
       await fsFaults.open?.(String(args[0]), args[1]);
       const file = await actual.open(...args);
+      const write = file.writeFile.bind(file),
+        close = file.close.bind(file);
+      file.writeFile = async (...input: Parameters<typeof file.writeFile>) => {
+        await write(...input);
+        await fsFaults.write?.(String(args[0]));
+      };
+      file.close = async () => {
+        await close();
+        await fsFaults.close?.(String(args[0]));
+      };
       const sync = file.sync.bind(file);
       file.sync = async () => {
         fsFaults.effect?.();
@@ -959,6 +1058,379 @@ for (const phase of ['before-head', 'after-head'] as const) {
     },
   );
 }
+
+test.each(['foreground', 'timer', 'parent-abort'] as const)(
+  'first physical compromise remains the same error: %s',
+  async (mode) => {
+    const f = await fixture(),
+      parent = new AbortController();
+    const owner = await makeAddressOwnership({
+      repoRoot: f.repo.root,
+      git: f.run,
+      signal: parent.signal,
+    });
+    const actualInterval = globalThis.setInterval;
+    let tick: (() => void) | undefined, first: unknown;
+    const timer = vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+      callback: () => void,
+      delay?: number,
+    ) => {
+      if (delay === 250) {
+        tick = callback;
+        return actualInterval(() => undefined, delay);
+      }
+      return actualInterval(callback, delay);
+    }) as typeof setInterval);
+    try {
+      const pending = owner.withLock(async () => {
+        await damageGuard(owner.guardPath, 'replace');
+        if (mode !== 'foreground') tick!();
+        first = await owner.assertOwned().then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(first).toBeInstanceOf(Error);
+        expect((first as Error).message).toContain('lost owner');
+        if (mode === 'parent-abort') parent.abort(new Error('ordinary parent cancellation'));
+        await expect(owner.assertOwned()).rejects.toBe(first);
+        expect(() => owner.lease()).toThrow(first as Error);
+        throw first;
+      });
+      const refused = await pending.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refused).toBe(first);
+      await preservedDamage(owner.guardPath, 'replace');
+      await expect(
+        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+          async () => undefined,
+        ),
+      ).rejects.toThrow('attended recovery');
+    } finally {
+      timer.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test('ordinary retired ownership remains inactive without a physical-loss diagnosis', async () => {
+  const f = await fixture();
+  const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+  try {
+    await owner.withLock(async () => undefined);
+    await expect(owner.assertOwned()).rejects.toThrow('owner inactive');
+    expect(() => owner.lease()).toThrow('owner inactive');
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test.each(['track', 'assertOwned', 'assertSelection', 'claimCheckout'] as const)(
+  'capacity caught during queued normal check closes dispatch but drains actual sibling: %s',
+  async (mode) => {
+    const f = await fixture(),
+      parent = new AbortController();
+    const report = terminalReport(join(f.root, 'capacity-barrier.json'));
+    const oversized = join(f.root, 'capacity-file.bin');
+    await writeFile(oversized, Buffer.alloc(8 * 1024 * 1024 + 1));
+    const common = await realpath(join(f.repo.root, '.git'));
+    const checkHeld = deferred(),
+      checkRelease = deferred(),
+      siblingStarted = deferred(),
+      siblingRelease = deferred();
+    let armed = false,
+      actualSiblingSettled = false,
+      terminalSettled = false,
+      capacity: unknown;
+    let sibling: Promise<unknown> | undefined,
+      queued: Promise<unknown> | undefined,
+      terminal: Promise<unknown> | undefined,
+      pending: Promise<unknown> | undefined;
+    const original = ownershipModule.AddressOwnership.prototype.assertOwned;
+    const spy = vi
+      .spyOn(ownershipModule.AddressOwnership.prototype, 'assertOwned')
+      .mockImplementation(async function (this: ownershipModule.AddressOwnership) {
+        await original.call(this);
+        if (armed && this.commonDir === common) {
+          armed = false;
+          checkHeld.resolve();
+          await checkRelease.promise;
+        }
+      });
+    try {
+      pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          sibling = lease.track(async () => {
+            siblingStarted.resolve();
+            await siblingRelease.promise;
+            actualSiblingSettled = true;
+          });
+          await siblingStarted.promise;
+          armed = true;
+          queued =
+            mode === 'track'
+              ? lease.track(async () => {
+                  throw new Error('queued normal callback dispatched');
+                })
+              : mode === 'assertOwned'
+                ? lease.assertOwned()
+                : mode === 'assertSelection'
+                  ? lease.assertSelection({
+                      pr: 7,
+                      headRepo: 'fixture/base',
+                      headRefName: 'feature/x',
+                    })
+                  : lease.claimCheckout({
+                      path: f.repo.root,
+                      branch: 'feature/x',
+                      head: f.prs[0].headRefOid,
+                    });
+          void queued.catch(() => undefined);
+          await checkHeld.promise;
+          capacity = await ownershipModule
+            .addressOwnedEvidence(lease, { kind: 'hash', path: oversized })
+            .then(
+              () => undefined,
+              (error: unknown) => error,
+            );
+          expect((capacity as Error).message).toContain('address terminal capacity:');
+          checkRelease.resolve();
+          await expect(queued).rejects.toBe(capacity);
+          parent.abort();
+          terminal = ownershipModule.addressCancelledResult(lease);
+          void terminal.then(
+            () => {
+              terminalSettled = true;
+            },
+            () => {
+              terminalSettled = true;
+            },
+          );
+          await new Promise<void>((done) => setImmediate(done));
+          expect(terminalSettled).toBe(false);
+          expect(actualSiblingSettled).toBe(false);
+          await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+          siblingRelease.resolve();
+          await sibling;
+          expect(actualSiblingSettled).toBe(true);
+          await expect(terminal).rejects.toBe(capacity);
+          throw capacity;
+        },
+      );
+      const refused = await pending.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refused).toBe(capacity);
+      await expect(
+        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+          async () => undefined,
+        ),
+      ).rejects.toThrow('active or quarantined');
+    } finally {
+      checkRelease.resolve();
+      siblingRelease.resolve();
+      await Promise.allSettled(
+        [sibling, queued, terminal, pending].filter(
+          (value): value is Promise<unknown> => value !== undefined,
+        ),
+      );
+      spy.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
+
+// These are real filesystem/identity gates. Only the production factory's
+// control body is replaced, through its existing private child-context path.
+test.each(['claim-transition', 'import-handoff', 'participant-entry', 'checkout-final'] as const)(
+  'a latched private capacity refusal fences the child phase: %s',
+  async (phase) => {
+    const f = await fixture();
+    const checkout = phase === 'checkout-final' ? await f.resolve(f.prs[0]) : undefined;
+    const common = await realpath(join(f.repo.root, '.git'));
+    const oversized = join(f.root, 'child-capacity-file.bin');
+    await writeFile(oversized, Buffer.alloc(8 * 1024 * 1024 + 1));
+    const held = deferred(),
+      release = deferred(),
+      hashHeld = deferred(),
+      hashRelease = deferred();
+    const observedOwner: { current?: ownershipModule.AddressOwnership } = {};
+    let armed = false,
+      normalChecks = 0,
+      factoryCalls = 0,
+      participantCalls = 0,
+      callbacks = 0;
+    let checkoutChecks = 0,
+      checkoutArmed = false,
+      commonGate = false;
+    let pending: Promise<unknown> | undefined,
+      child: Promise<unknown> | undefined,
+      hash: Promise<unknown> | undefined;
+    let capacity: unknown;
+    const physical = ownershipModule.AddressOwnership.prototype.assertOwned;
+    const spy = vi
+      .spyOn(ownershipModule.AddressOwnership.prototype, 'assertOwned')
+      .mockImplementation(async function (this: ownershipModule.AddressOwnership) {
+        await physical.call(this);
+        if (this.commonDir !== common) return;
+        observedOwner.current = this;
+        if (armed) {
+          normalChecks++;
+          if (phase === 'import-handoff' && normalChecks === 2) {
+            held.resolve();
+            await release.promise;
+          }
+        }
+        if (phase === 'checkout-final' && checkoutArmed && ++checkoutChecks === 2) {
+          checkoutArmed = false;
+          held.resolve();
+          await release.promise;
+        }
+      });
+    const git: typeof f.run = async (args) => {
+      const result = await f.run(args);
+      if (commonGate && args.at(-1) === '--git-common-dir') {
+        commonGate = false;
+        held.resolve();
+        await release.promise;
+      }
+      if (
+        checkout &&
+        args[0] === '-C' &&
+        args[1] === checkout.path &&
+        args.length === 4 &&
+        args[2] === 'rev-parse' &&
+        args[3] === 'HEAD'
+      )
+        checkoutArmed = true;
+      return result;
+    };
+    const factory = vi
+      .spyOn(addressModule, 'makeReviewAddress')
+      .mockImplementation(() => async (input) => {
+        factoryCalls++;
+        if (phase === 'participant-entry') commonGate = true;
+        return withAddressOwnership(
+          { repoRoot: f.repo.root, git, source: input.source, production: true },
+          async (lease) => {
+            participantCalls++;
+            if (checkout) await lease.claimCheckout({ ...checkout, head: f.prs[0].headRefOid });
+            callbacks++;
+            return { status: 'needs-human' as const, reason: 'unexpected child dispatch' };
+          },
+        );
+      });
+    try {
+      pending = withAddressOwnership(
+        { repoRoot: f.repo.root, git, source: 'local', production: false },
+        async (lease) => {
+          const report = terminalReport(join(f.root, 'child-capacity-report.json'));
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          expect(observedOwner.current).toBeDefined();
+          if (phase === 'claim-transition') {
+            fsFaults.open = async (path) => {
+              if (path === oversized) {
+                hashHeld.resolve();
+                await hashRelease.promise;
+              }
+            };
+            hash = ownershipModule.addressOwnedEvidence(lease, { kind: 'hash', path: oversized });
+            void hash.catch(() => undefined);
+            await hashHeld.promise;
+            fsFaults.sync = async (path) => {
+              if (
+                path ===
+                join(authorityStore(observedOwner.current!.guardPath), 'pending-000002.json')
+              ) {
+                held.resolve();
+                await release.promise;
+              }
+            };
+          }
+          armed = true;
+          child = observedOwner.current!.address(
+            {
+              pr: 7,
+              head: f.prs[0].headRefOid,
+              headRepo: 'fixture/base',
+              headRefName: 'feature/x',
+            },
+            { repoRoot: f.repo.root, source: 'pr:7' },
+          );
+          void child.catch(() => undefined);
+          await Promise.race([
+            held.promise,
+            child.then(
+              () => {
+                throw new Error('child completed before fixture gate');
+              },
+              (error: unknown) => {
+                throw error;
+              },
+            ),
+          ]);
+          if (hash) hashRelease.resolve();
+          else
+            hash = ownershipModule.addressOwnedEvidence(lease, { kind: 'hash', path: oversized });
+          capacity = await hash.then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+          expect((capacity as Error).message).toContain('address terminal capacity:');
+          release.resolve();
+          await expect(child).rejects.toBe(capacity);
+          expect(callbacks).toBe(0);
+          if (phase === 'claim-transition') {
+            // A durable ACTIVE claim receipt remains an actual conservative fact.
+            expect(normalChecks).toBe(1);
+            expect(factoryCalls).toBe(0);
+            expect((await authorityState(observedOwner.current!.guardPath)).state).toBe('active');
+          } else if (phase === 'import-handoff') expect(factoryCalls).toBe(0);
+          else if (phase === 'participant-entry') {
+            expect(factoryCalls).toBe(1);
+            expect(participantCalls).toBe(0);
+          } else {
+            expect(participantCalls).toBe(1);
+            expect(checkoutChecks).toBe(2);
+          }
+          await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+          throw capacity;
+        },
+      );
+      const refused = await pending.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refused).toBe(capacity);
+      expect(capacity).toBeInstanceOf(Error);
+      await expect(
+        (await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run })).withLock(
+          async () => undefined,
+        ),
+      ).rejects.toThrow('active or quarantined');
+    } finally {
+      release.resolve();
+      hashRelease.resolve();
+      await Promise.allSettled(
+        [hash, child, pending].filter((value): value is Promise<unknown> => value !== undefined),
+      );
+      fsFaults.open = fsFaults.sync = undefined;
+      spy.mockRestore();
+      factory.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
 
 test.each(['EXDEV', 'EPERM', 'ENOSYS', 'nofollow', 'fsync'] as const)(
   'unsupported authority primitive fails closed: %s',
@@ -2272,6 +2744,10 @@ test.each(['snapshot', 'total', 'receipts', 'report'] as const)(
     const f = await fixture();
     const parent = new AbortController();
     const report = terminalReport(join(f.root, 'terminal-bound-report.json'));
+    const selector = await terminalFixtureSelector(f.repo);
+    const responses = mode === 'receipts' ? terminalReadonlyResponses(f.repo) : undefined;
+    let hook: typeof terminalProcessFaults.spawn, pending: Promise<unknown> | undefined;
+    const progress = { completed: 0, attempted: 0 };
     try {
       if (mode === 'snapshot' || mode === 'total') {
         await f.repo.write(
@@ -2280,33 +2756,54 @@ test.each(['snapshot', 'total', 'receipts', 'report'] as const)(
         );
         f.repo.commitAll('bounded raw baseline');
       }
-      await expect(
-        withAddressOwnership(
-          {
-            repoRoot: f.repo.root,
-            git: f.run,
-            source: 'local',
-            production: false,
-            signal: parent.signal,
-          },
-          async (lease) => {
-            await ownershipModule.bindAddressTerminalReport(lease, report);
-            const binding = ownershipModule.addressTerminalWorkerBinding(lease);
-            if (mode === 'report') {
-              report.reasons.push('x'.repeat(16 * 1024 * 1024 + 1));
-              parent.abort();
-              return ownershipModule.addressCancelledResult(lease);
+      pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          if (mode === 'report') {
+            report.reasons.push('x'.repeat(16 * 1024 * 1024 + 1));
+            parent.abort();
+            return ownershipModule.addressCancelledResult(lease);
+          }
+          const count = mode === 'receipts' ? 65 : mode === 'total' ? 9 : 1;
+          for (let index = 0; index < count; index++) {
+            progress.attempted++;
+            await ownershipModule.recordAddressTerminalAttempt(binding, terminalInput(f.repo));
+            progress.completed++;
+            if (index === 0 && responses) {
+              hook = (command, args, options) => {
+                const fixed = selector.select(command, args, options);
+                if (!fixed) return;
+                const output = responses.get(JSON.stringify(fixed));
+                if (output === undefined) return;
+                selector.stages.handled++;
+                return boundedFixtureProcess(output);
+              };
+              terminalProcessFaults.spawn = hook;
             }
-            const count = mode === 'receipts' ? 65 : mode === 'total' ? 9 : 1;
-            for (let index = 0; index < count; index++)
-              await ownershipModule.recordAddressTerminalAttempt(binding, terminalInput(f.repo));
-            throw new Error('bound failed to refuse');
-          },
-        ),
-      ).rejects.toThrow(/bound/);
+          }
+          throw new Error('bound failed to refuse');
+        },
+      );
+      await expect(pending, JSON.stringify({ progress, stages: selector.stages })).rejects.toThrow(
+        /bound/,
+      );
+      if (mode === 'receipts') {
+        expect(progress).toEqual({ attempted: 65, completed: 64 });
+        expect(selector.stages.handled).toBe(63 * 7);
+      }
       await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
       expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
     } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      if (terminalProcessFaults.spawn === hook) terminalProcessFaults.spawn = undefined;
       await f.repo.cleanup();
     }
   },
@@ -2325,6 +2822,8 @@ test.each([
     const f = await fixture();
     const parent = new AbortController();
     const report = terminalReport(join(f.root, 'terminal-process-report.json'));
+    const selector = await terminalFixtureSelector(f.repo);
+    let hook: typeof terminalProcessFaults.spawn;
     const closeHeld = deferred(),
       releaseClose = deferred();
     const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -2363,9 +2862,16 @@ test.each([
                 longTimers.push(() => handler(...args));
               return actualSetTimeout(handler, delay, ...args);
             }) as unknown as typeof setTimeout);
-          terminalProcessFaults.spawn = (_command, _args, options) => {
-            if (used) return undefined;
+          hook = (command, args, options) => {
+            const fixed = selector.select(command, args, options);
+            if (
+              !fixed ||
+              JSON.stringify(fixed) !== JSON.stringify(['symbolic-ref', 'HEAD']) ||
+              used
+            )
+              return undefined;
             used = true;
+            selector.stages.handled++;
             if (mode === 'spawn-failure') {
               closeHeld.resolve();
               throw new Error('fixed fixture synchronous spawn failure');
@@ -2374,14 +2880,21 @@ test.each([
             // parent test delays observed close, never treats exit as settlement.
             const script =
               mode === 'stdout'
-                ? 'process.stdout.write(Buffer.alloc(8*1024*1024+1,65));'
+                ? 'process.stdout.end(Buffer.alloc(8*1024*1024+1,65));'
                 : mode === 'stderr'
-                  ? 'process.stderr.write(Buffer.alloc(64*1024+1,66));'
+                  ? 'process.stderr.end(Buffer.alloc(64*1024+1,66));'
                   : 'setTimeout(()=>{},10000);';
             child = actual.spawn(process.execPath, ['-e', script], options);
+            child.stdout!.on('data', (bytes: Buffer) => {
+              selector.stages.stdout += bytes.length;
+            });
+            child.stderr!.on('data', (bytes: Buffer) => {
+              selector.stages.stderr += bytes.length;
+            });
             const emit = child.emit;
             child.emit = function (event: string | symbol, ...args: unknown[]): boolean {
               if (event === 'close') {
+                selector.stages.closes++;
                 closeHeld.resolve();
                 void releaseClose.promise.then(
                   () => {
@@ -2402,6 +2915,7 @@ test.each([
               });
             return child;
           };
+          terminalProcessFaults.spawn = hook;
           parent.abort();
           expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
           return ownershipModule.addressCancelledResult(lease);
@@ -2438,6 +2952,10 @@ test.each([
           '',
         );
       }
+      expect(used, JSON.stringify(selector.stages)).toBe(true);
+      expect(selector.stages.handled).toBe(1);
+      if (mode === 'stdout') expect(selector.stages.stdout).toBeGreaterThan(8 * 1024 * 1024);
+      if (mode === 'stderr') expect(selector.stages.stderr).toBeGreaterThan(64 * 1024);
       releaseClose.resolve();
       const result = await outcome;
       expect(result).toHaveProperty('error');
@@ -2447,11 +2965,11 @@ test.each([
       ).not.toBe('quiescent');
       expect(await readFile(join(f.repo.root, 'src/a.ts'))).not.toEqual(baseline);
     } finally {
-      terminalProcessFaults.spawn = undefined;
       releaseClose.resolve();
       timerSpy?.mockRestore();
       child?.kill('SIGKILL');
       await Promise.allSettled(pending ? [pending] : []);
+      if (terminalProcessFaults.spawn === hook) terminalProcessFaults.spawn = undefined;
       await new Promise<void>((done) => setImmediate(done));
       await f.repo.cleanup();
     }
@@ -2804,12 +3322,53 @@ function boundedFixtureProcess(output: string, code = 0): ChildProcess {
   input.resume();
   queueMicrotask(() => {
     child.emit('spawn');
+    let ended = 0;
+    const close = () => {
+      if (++ended === 2) child.emit('close', code, null);
+    };
+    stdout.once('end', close);
+    stderr.once('end', close);
     stdout.end(output);
     stderr.end();
-    child.emit('close', code, null);
   });
   return child;
 }
+
+test('late fixture finally cannot clear the next handler or consume an ordinary spawn', async () => {
+  const f = await fixture(),
+    oldRelease = deferred(),
+    oldStarted = deferred();
+  const selector = await terminalFixtureSelector(f.repo);
+  const oldHook: NonNullable<typeof terminalProcessFaults.spawn> = (command, args, options) => {
+    if (!selector.select(command, args, options)) return;
+    throw new Error('old hook must not be dispatched');
+  };
+  const newHook: NonNullable<typeof terminalProcessFaults.spawn> = () => undefined;
+  const old = (async () => {
+    terminalProcessFaults.spawn = oldHook;
+    oldStarted.resolve();
+    try {
+      await oldRelease.promise;
+    } finally {
+      if (terminalProcessFaults.spawn === oldHook) terminalProcessFaults.spawn = undefined;
+    }
+  })();
+  try {
+    await oldStarted.promise;
+    expect(oldHook('git', ['rev-parse', 'HEAD'], { cwd: f.repo.root })).toBeUndefined();
+    expect(oldHook('/unrelated/git', [], { cwd: '/unrelated' })).toBeUndefined();
+    expect(selector.stages.selected).toBe(0);
+    terminalProcessFaults.spawn = newHook;
+    oldRelease.resolve();
+    await old;
+    expect(terminalProcessFaults.spawn).toBe(newHook);
+  } finally {
+    oldRelease.resolve();
+    await old;
+    if (terminalProcessFaults.spawn === newHook) terminalProcessFaults.spawn = undefined;
+    await f.repo.cleanup();
+  }
+});
 
 test.each(['commands', 'ref-creations'] as const)(
   'terminal helper work has a finite per-receipt bound: %s',
@@ -2817,58 +3376,86 @@ test.each(['commands', 'ref-creations'] as const)(
     const f = await fixture();
     const parent = new AbortController();
     const report = terminalReport(join(f.root, 'terminal-command-bound.json'));
+    const selector = await terminalFixtureSelector(f.repo);
+    let hook: typeof terminalProcessFaults.spawn, pending: Promise<unknown> | undefined;
     let updates = 0,
       shows = 0;
     try {
-      await expect(
-        withAddressOwnership(
-          {
-            repoRoot: f.repo.root,
-            git: f.run,
-            source: 'local',
-            production: false,
-            signal: parent.signal,
-          },
-          async (lease) => {
-            await ownershipModule.bindAddressTerminalReport(lease, report);
-            const binding = ownershipModule.addressTerminalWorkerBinding(lease);
-            const input = terminalInput(f.repo);
-            const attempt = await ownershipModule.recordAddressTerminalAttempt(binding, input);
-            await writeFile(join(f.repo.root, 'src/a.ts'), 'BOUNDED PARTIAL\n');
-            terminalProcessFaults.spawn = (_command, args) => {
-              if (bound === 'commands') {
-                if (args.includes('for-each-ref')) {
-                  const base = args.at(-1)!;
-                  return boundedFixtureProcess(
-                    Array.from({ length: 600 }, (_, index) => `${base}a${index + 1}`).join('\n'),
-                  );
-                }
-                if (args.includes('show')) {
-                  shows++;
-                  const identity = Buffer.from(
-                    JSON.stringify(['review', input.slug, input.finding]),
-                  ).toString('base64url');
-                  return boundedFixtureProcess(`Cq-Ref-Identity: ${identity}\n`);
-                }
-              } else {
-                if (args.includes('update-ref')) {
-                  updates++;
-                  return boundedFixtureProcess('', 1);
-                }
-                if (args.includes('rev-parse') && args.includes('--verify'))
-                  return boundedFixtureProcess(`${input.parent}\n`);
+      pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const input = terminalInput(f.repo);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(binding, input);
+          await writeFile(join(f.repo.root, 'src/a.ts'), 'BOUNDED PARTIAL\n');
+          hook = (command, rawArgs, options) => {
+            const args = selector.select(command, rawArgs, options);
+            if (!args) return;
+            if (bound === 'commands') {
+              if (
+                args.length === 3 &&
+                args[0] === 'for-each-ref' &&
+                args[1] === '--format=%(refname)' &&
+                args[2]!.startsWith('refs/heads/terminal-fixture/failed/')
+              ) {
+                const base = args.at(-1)!;
+                return boundedFixtureProcess(
+                  Array.from({ length: 600 }, (_, index) => `${base}a${index + 1}`).join('\n'),
+                );
               }
-              return undefined;
-            };
-            parent.abort();
-            ownershipModule.deferAddressTerminalAttempt(binding, attempt);
-            return ownershipModule.addressCancelledResult(lease);
-          },
-        ),
+              if (
+                args.length === 4 &&
+                args[0] === 'show' &&
+                args[1] === '-s' &&
+                args[2] === '--format=%B' &&
+                args[3]!.startsWith('refs/heads/terminal-fixture/failed/')
+              ) {
+                shows++;
+                const identity = Buffer.from(
+                  JSON.stringify(['review', input.slug, input.finding]),
+                ).toString('base64url');
+                return boundedFixtureProcess(`Cq-Ref-Identity: ${identity}\n`);
+              }
+            } else {
+              if (
+                args.length === 4 &&
+                args[0] === 'update-ref' &&
+                args[1]!.startsWith('refs/heads/terminal-fixture/failed/')
+              ) {
+                updates++;
+                return boundedFixtureProcess('', 1);
+              }
+              if (
+                args.length === 3 &&
+                args[0] === 'rev-parse' &&
+                args[1] === '--verify' &&
+                args[2]!.startsWith('refs/heads/terminal-fixture/failed/')
+              )
+                return boundedFixtureProcess(`${input.parent}\n`);
+            }
+            return undefined;
+          };
+          terminalProcessFaults.spawn = hook;
+          parent.abort();
+          ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      );
+      await expect(
+        pending,
+        JSON.stringify({ shows, updates, stages: selector.stages }),
       ).rejects.toThrow(bound === 'commands' ? 'command/time bound' : 'branch collision limit');
       if (bound === 'commands') {
         expect(shows).toBeGreaterThan(400);
         expect(shows).toBeLessThan(512);
+        expect(selector.stages.selected).toBe(512);
       } else expect(updates).toBe(32);
       expect(report.failed).toEqual([]);
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BOUNDED PARTIAL\n');
@@ -2877,7 +3464,427 @@ test.each(['commands', 'ref-creations'] as const)(
         f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/terminal-fixture/'),
       ).toBe('');
     } finally {
-      terminalProcessFaults.spawn = undefined;
+      await Promise.allSettled(pending ? [pending] : []);
+      if (terminalProcessFaults.spawn === hook) terminalProcessFaults.spawn = undefined;
+      await f.repo.cleanup();
+    }
+  },
+);
+
+// Real file writes/closes complete before these gates; parent cancellation
+// cannot substitute an outer promise for the registered descriptor lifetime.
+test.each(['write', 'close', 'close-failure', 'preexisting', 'tampered'] as const)(
+  'ordinary report materialization and terminal adoption: %s',
+  async (mode) => {
+    const f = await fixture(),
+      parent = new AbortController();
+    const report = terminalReport(join(f.root, 'materialized-report.json'));
+    const originalBytes = JSON.stringify(report, null, 2) + '\n';
+    const reached = deferred(),
+      release = deferred(),
+      cancelled = deferred();
+    parent.signal.addEventListener('abort', () => cancelled.resolve(), { once: true });
+    let pending: Promise<unknown> | undefined,
+      returned = false;
+    try {
+      if (mode === 'preexisting') await writeFile(report.reportPath, 'ordinary old report');
+      pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          if (mode === 'write' || mode === 'close' || mode === 'close-failure') {
+            let used = false;
+            const gate = async (path: string) => {
+              if (path !== report.reportPath || used) return;
+              used = true;
+              reached.resolve();
+              await release.promise;
+              if (mode === 'close-failure') throw new Error('actual report close rejected');
+            };
+            if (mode === 'write') fsFaults.write = gate;
+            else fsFaults.close = gate;
+          }
+          const normal = ownershipModule.addressOwnedEvidence(lease, {
+            kind: 'report',
+            path: report.reportPath,
+            report,
+          });
+          void normal.catch(() => undefined);
+          if (mode === 'preexisting' || mode === 'tampered') {
+            await normal;
+            if (mode === 'tampered') await writeFile(report.reportPath, 'foreign report bytes');
+            reached.resolve();
+            await release.promise;
+          }
+          // This control is deliberately outside the tracked normal writer.
+          await cancelled.promise;
+          const arrival = ownershipModule.addressCancelledResult(lease);
+          await normal.catch(() => undefined);
+          return arrival;
+        },
+      );
+      void pending.then(
+        () => {
+          returned = true;
+        },
+        () => {
+          returned = true;
+        },
+      );
+      await reached.promise;
+      parent.abort();
+      await Promise.resolve();
+      expect(returned).toBe(false);
+      expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+      release.resolve();
+      if (mode === 'write' || mode === 'close') {
+        const result = (await pending) as { status: string };
+        expect(result.status).toBe('needs-human');
+        const persistedReport: unknown = JSON.parse(await readFile(report.reportPath, 'utf8'));
+        if (
+          typeof persistedReport !== 'object' ||
+          persistedReport === null ||
+          !('reasons' in persistedReport)
+        )
+          throw new Error('persisted report missing reasons');
+        expect(persistedReport.reasons).toContain('parent cancelled');
+      } else {
+        await expect(pending).rejects.toThrow(/report|terminal/);
+        const bytes = await readFile(report.reportPath, 'utf8');
+        expect(bytes).toBe(mode === 'tampered' ? 'foreign report bytes' : originalBytes);
+      }
+    } finally {
+      release.resolve();
+      await pending?.catch(() => undefined);
+      fsFaults.write = undefined;
+      fsFaults.close = undefined;
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test.each(['valid', 'tampered', 'unknown'] as const)(
+  'unignored bookkeeping needs an exact authenticated revision before any restore: %s',
+  async (mode) => {
+    const f = await fixture(),
+      parent = new AbortController();
+    const report = terminalReport(join(f.root, 'bookkeeping-report.json'));
+    const baseline = await readFile(join(f.repo.root, 'src/a.ts'));
+    const artifact = join(f.repo.root, '.cq', 'receipt.json');
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(
+            binding,
+            terminalInput(f.repo),
+          );
+          await mkdir(dirname(artifact), { recursive: true });
+          await writeFile(artifact, 'trusted receipt');
+          if (mode !== 'unknown') {
+            const hash = (await ownershipModule.addressOwnedEvidence(lease, {
+              kind: 'hash',
+              path: artifact,
+            })) as string;
+            await ownershipModule.addressOwnedEvidence(lease, {
+              kind: 'bookkeeping',
+              root: f.repo.root,
+              entries: [[artifact, hash]],
+            });
+          }
+          if (mode === 'tampered') await writeFile(artifact, 'foreign later bytes');
+          await writeFile(join(f.repo.root, 'src/a.ts'), 'CANCELLED raw edit\n');
+          parent.abort();
+          expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      );
+      if (mode === 'valid') {
+        const result = (await pending) as { status: string };
+        expect(result.status).toBe('needs-human');
+        expect(await readFile(join(f.repo.root, 'src/a.ts'))).toEqual(baseline);
+        expect(report.failed).toHaveLength(1);
+        expect(f.repo.git('show', `${report.failed[0]!.branch}:src/a.ts`)).toBe(
+          'CANCELLED raw edit\n',
+        );
+      } else {
+        await expect(pending).rejects.toThrow(/bookkeeping|untracked/);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('CANCELLED raw edit\n');
+        expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe(
+          '',
+        );
+        await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      expect(await readFile(artifact, 'utf8')).toBe(
+        mode === 'tampered' ? 'foreign later bytes' : 'trusted receipt',
+      );
+    } finally {
+      await pending?.catch(() => undefined);
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test.each(['healthy', 'foreign'] as const)(
+  'identity checks serialize with an awaited child claim and fence failed successors: %s',
+  async (mode) => {
+    const f = await fixture();
+    const owner = await makeAddressOwnership({ repoRoot: f.repo.root, git: f.run });
+    const reached = deferred(),
+      release = deferred();
+    let dispatched = 0;
+    const factory = vi
+      .spyOn(addressModule, 'makeReviewAddress')
+      .mockImplementation(() => async () => {
+        dispatched++;
+        return { status: 'needs-human', reason: 'identity FIFO fixture' };
+      });
+    try {
+      const work = owner.withLock(async () => {
+        let used = false;
+        fsFaults.open = async (path) => {
+          if (path !== owner.guardPath || used) return;
+          used = true;
+          reached.resolve();
+          await release.promise;
+        };
+        const checking = owner.assertOwned();
+        void checking.catch(() => undefined);
+        await reached.promise;
+        const child = owner.address(
+          { pr: 7, head: f.prs[0].headRefOid, headRepo: 'fixture/base', headRefName: 'seven' },
+          { repoRoot: f.repo.root, source: 'pr:7' },
+        );
+        void child.catch(() => undefined);
+        if (mode === 'foreign') {
+          await rename(owner.guardPath, `${owner.guardPath}.preserved`);
+          await writeFile(owner.guardPath, 'foreign exact bytes');
+        }
+        expect(dispatched).toBe(0);
+        release.resolve();
+        await checking;
+        await child;
+      });
+      if (mode === 'healthy') {
+        await work;
+        expect(dispatched).toBe(1);
+      } else {
+        await expect(work).rejects.toThrow(/owner|quarantine/);
+        expect(dispatched).toBe(0);
+        expect(await readFile(owner.guardPath, 'utf8')).toBe('foreign exact bytes');
+      }
+    } finally {
+      release.resolve();
+      fsFaults.open = undefined;
+      factory.mockRestore();
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test.each(['candidates', 'bookkeeping-count', 'bookkeeping-file', 'bookkeeping-stream'] as const)(
+  'artifact capacity is cumulative and cannot authorize cleanup: %s',
+  async (mode) => {
+    const f = await fixture();
+    const report = terminalReport(join(f.root, 'artifact-bound.json'));
+    try {
+      await expect(
+        withAddressOwnership(
+          { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+          async (lease) => {
+            await ownershipModule.bindAddressTerminalReport(lease, report);
+            if (mode === 'candidates') {
+              const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+              const input = terminalInput(f.repo);
+              await ownershipModule.recordAddressTerminalAttempt(binding, input);
+              for (let index = 0; index < 129; index++)
+                await ownershipModule.addressWorkerEvidence(binding, {
+                  kind: 'candidate-intent',
+                  root: f.repo.root,
+                  path: join(f.root, `candidate-${randomUUID()}`),
+                  parent: input.parent,
+                  file: input.file,
+                });
+            } else if (mode === 'bookkeeping-count') {
+              await ownershipModule.addressOwnedEvidence(lease, {
+                kind: 'bookkeeping',
+                root: f.repo.root,
+                entries: Array.from(
+                  { length: 257 },
+                  (_, index) => [join(f.repo.root, `artifact-${index}`), 'unused'] as const,
+                ),
+              });
+            } else {
+              const path = join(f.root, 'streamed-bookkeeping');
+              await writeFile(
+                path,
+                Buffer.alloc(mode === 'bookkeeping-file' ? 8 * 1024 * 1024 + 1 : 4 * 1024 * 1024),
+              );
+              // Repeated verification reserves bytes again: no revision refund.
+              for (let index = 0; index < 5; index++)
+                await ownershipModule.addressOwnedEvidence(lease, { kind: 'hash', path });
+            }
+            throw new Error('capacity failed to refuse');
+          },
+        ),
+      ).rejects.toThrow(/capacity/);
+      await expect(lstat(report.reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+      expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain('candidate-');
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+);
+
+test.each(['intact', 'changed-candidate'] as const)(
+  'combined source/candidate/bookkeeping/report admission waits for every actual sibling: %s',
+  async (mode) => {
+    const f = await fixture(),
+      parent = new AbortController();
+    const report = terminalReport(join(f.root, 'combined-report.json'));
+    const candidate = join(f.root, `candidate-${randomUUID()}`);
+    const baseline = await readFile(join(f.repo.root, 'src/a.ts'));
+    const ready = deferred(),
+      release = deferred(),
+      cancelled = deferred();
+    parent.signal.addEventListener('abort', () => cancelled.resolve(), { once: true });
+    let work: Promise<unknown> | undefined,
+      writer: Promise<unknown> | undefined,
+      returned = false;
+    try {
+      work = withAddressOwnership(
+        {
+          repoRoot: f.repo.root,
+          git: f.run,
+          source: 'local',
+          production: false,
+          signal: parent.signal,
+        },
+        async (lease) => {
+          await ownershipModule.bindAddressTerminalReport(lease, report);
+          await ownershipModule.addressOwnedEvidence(lease, {
+            kind: 'report',
+            path: report.reportPath,
+            report,
+          });
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease),
+            input = terminalInput(f.repo);
+          const attempt = await ownershipModule.recordAddressTerminalAttempt(binding, input);
+          const handle = (await ownershipModule.addressWorkerEvidence(binding, {
+            kind: 'candidate-intent',
+            root: f.repo.root,
+            path: candidate,
+            parent: input.parent,
+            file: input.file,
+          })) as object;
+          f.repo.git('worktree', 'add', '--detach', candidate, input.parent);
+          await ownershipModule.addressWorkerEvidence(binding, {
+            kind: 'candidate-created',
+            handle,
+          });
+          await ownershipModule.addressWorkerEvidence(binding, {
+            kind: 'candidate-baseline',
+            handle,
+          });
+          const content = Buffer.from('combined cancelled bytes\n');
+          await writeFile(join(candidate, input.file), content);
+          f.repo.git('-C', candidate, 'add', '--', input.file);
+          await ownershipModule.addressWorkerEvidence(binding, {
+            kind: 'candidate-stage',
+            handle,
+            content,
+          });
+          await writeFile(join(f.repo.root, input.file), content);
+          writer = lease.track(async () => {
+            ready.resolve();
+            try {
+              await release.promise;
+            } finally {
+              // An actual sibling finally produces this engine-owned artifact.
+              const path = join(f.repo.root, '.cq', 'actual-sibling.json');
+              await mkdir(dirname(path), { recursive: true });
+              await writeFile(path, 'actual sibling settled');
+              const hash = (await ownershipModule.addressOwnedEvidence(lease, {
+                kind: 'hash',
+                path,
+              })) as string;
+              await ownershipModule.addressOwnedEvidence(lease, {
+                kind: 'bookkeeping',
+                root: f.repo.root,
+                entries: [[path, hash]],
+              });
+            }
+          });
+          void writer.catch(() => undefined);
+          await cancelled.promise;
+          expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+          expect(ownershipModule.deferAddressCandidateCleanup(binding, handle)).toBe(true);
+          return ownershipModule.addressCancelledResult(lease);
+        },
+      );
+      void work.then(
+        () => {
+          returned = true;
+        },
+        () => {
+          returned = true;
+        },
+      );
+      await ready.promise;
+      if (mode === 'changed-candidate')
+        await writeFile(join(candidate, 'README.md'), 'foreign candidate bytes');
+      parent.abort();
+      await Promise.resolve();
+      expect(returned).toBe(false);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
+        'combined cancelled bytes\n',
+      );
+      expect(f.repo.git('worktree', 'list', '--porcelain')).toContain(candidate);
+      expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+      expect(await readFile(report.reportPath, 'utf8')).not.toContain('parent cancelled');
+      release.resolve();
+      if (mode === 'intact') {
+        expect(((await work) as { status: string }).status).toBe('needs-human');
+        expect(await readFile(join(f.repo.root, 'src/a.ts'))).toEqual(baseline);
+        expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain(candidate);
+        expect(report.failed).toHaveLength(1);
+      } else {
+        await expect(work).rejects.toThrow(/candidate/);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe(
+          'combined cancelled bytes\n',
+        );
+        expect(await readFile(join(candidate, 'README.md'), 'utf8')).toBe(
+          'foreign candidate bytes',
+        );
+        expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe(
+          '',
+        );
+        expect(await readFile(report.reportPath, 'utf8')).not.toContain('parent cancelled');
+      }
+      expect(await readFile(join(f.repo.root, '.cq', 'actual-sibling.json'), 'utf8')).toBe(
+        'actual sibling settled',
+      );
+    } finally {
+      parent.abort();
+      release.resolve();
+      await writer?.catch(() => undefined);
+      await work?.catch(() => undefined);
       await f.repo.cleanup();
     }
   },

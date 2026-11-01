@@ -24,6 +24,8 @@ import type {
 } from '../../../src/ops/review/internal/queueProtocol.js';
 import { cycleRecord } from '../dev/fakes.js';
 import { makeTestRepo } from '../dev/repo.js';
+import * as reviewRunModule from '../../../src/ops/review/run.js';
+import * as bookkeepingModule from '../../../src/ops/review/internal/addressBookkeeping.js';
 
 const finding = (id: string, file: string | undefined = `src/${id}.ts`): Finding => ({
   id,
@@ -646,6 +648,21 @@ test('report storage failure retains the complete non-ok artifact', async () => 
   }
 });
 
+test('ordinary pre-existing report overwrite remains compatible without terminal authority', async () => {
+  const f = await fixture([]);
+  try {
+    const path = join(f.input.journalDir, 'review-address-report.json');
+    await writeFile(path, 'pre-existing ordinary report');
+    const result = await makeReviewAddress(f.deps)(f.input);
+    expect(result.status).toBe('ok');
+    expect(reportOf(result).reportPath).toBe(path);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(reportOf(result));
+    expect(f.calls).toEqual([]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('non-directory report ancestor refuses after entry without report persistence', async () => {
   const f = await fixture([]);
   try {
@@ -1182,4 +1199,402 @@ describe('review.address vendor preparation boundary', () => {
       await f.cleanup();
     }
   });
+});
+
+// Consumer substitution only: the real factories construct their normal objects;
+// the selected review closure does not run default review/model integration.
+// A selected persist rejection is not a real atomic-write fault experiment.
+const consumerReadQueries = [
+  `query ($owner: String!, $name: String!, $pr: Int!, $threadsAfter: String, $reviewsAfter: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      author { login }
+      headRefName
+      headRefOid
+      reviewThreads(first: 100, after: $threadsAfter) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 1) {
+            nodes { databaseId author { login __typename } body createdAt }
+          }
+        }
+      }
+      reviews(first: 100, after: $reviewsAfter) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          author { login __typename }
+          authorAssociation
+          commit { oid }
+          state
+          body
+          submittedAt
+        }
+      }
+    }
+  }
+}`,
+  `query ($owner: String!, $name: String!, $pr: Int!, $threadsCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100, after: $threadsCursor) {
+        nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`,
+];
+
+type ConsumerMode = 'ok-ack' | 'ok-persist' | 'non-ok-persist' | 'throw' | 'throw-persist';
+async function prConsumerFixture(mode: ConsumerMode) {
+  const repo = await makeTestRepo();
+  await repo.write('.gitignore', '/.cq/\n');
+  repo.commitAll('ignore consumer bookkeeping');
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  const base = repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim();
+  // Setup publication is exclusively to this fixture's existing local bare origin.
+  repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head');
+  const origin = repo.git('remote', 'get-url', 'origin').trim();
+  expect(origin).toBe(join(repo.root, '..', 'origin.git'));
+  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-pr-consumer-'));
+  const events: string[] = [];
+  const unexpected: string[] = [];
+  const persistenceFailure = new Error('selected receipt persistence refused');
+  const originalFailure = new Error('selected review original failure');
+  let ledgerPath: string | undefined;
+  let ledgerBytes: string | undefined;
+  let receiptPath: string | undefined;
+  let selectedPersistCalls = 0;
+  let revisionObserved = false;
+  let constructed = 0;
+  let receiptConstructed = 0;
+  let pending: ReturnType<ReturnType<typeof makeReviewAddress>> | undefined;
+  const queueClient: DeferredQueueClient = {
+    enqueue: async () => {
+      throw new Error('unexpected consumer queue enqueue');
+    },
+    bind: async () => {
+      throw new Error('unexpected consumer queue bind');
+    },
+    cancel: async () => {
+      throw new Error('unexpected consumer queue cancel');
+    },
+    status: async () => {
+      throw new Error('unexpected consumer queue status');
+    },
+  };
+  const actualRunFactory = reviewRunModule.makeReviewRun;
+  const actualReceiptFactory = bookkeepingModule.makeAddressBookkeepingReceipt;
+  let callbackDeps: Parameters<typeof actualRunFactory>[0] | undefined;
+  let receiptDeps: Parameters<typeof actualReceiptFactory>[0] | undefined;
+  const runSpy = vi.spyOn(reviewRunModule, 'makeReviewRun').mockImplementation((deps) => {
+    const actual = actualRunFactory(deps);
+    if (deps.queueClient !== queueClient) return actual;
+    constructed++;
+    events.push('construct-review');
+    callbackDeps = deps;
+    return async (input) => {
+      events.push('invoke-review');
+      expect(callbackDeps).toBe(deps);
+      expect(input.repoRoot.startsWith(join(repo.root, '.git', 'cq-review-worktrees') + '/')).toBe(
+        true,
+      );
+      const branch = repo.git('-C', input.repoRoot, 'branch', '--show-current').trim();
+      expect(branch).toBe('cq-review/pr-7');
+      if (mode !== 'throw' && mode !== 'ok-ack') {
+        expect(receiptDeps).toBeDefined();
+        const prior = [...receiptDeps!.fingerprints];
+        makeSubprocessDevEffects(input.repoRoot)
+          .openLedger(branch)
+          .save({
+            version: DEV_LEDGER_VERSION,
+            branch,
+            records: [cycleRecord({ head, base, cycleId: 'c731-consumer' })],
+          });
+        ledgerPath = devLedgerPath(input.repoRoot, branch);
+        ledgerBytes = await readFile(ledgerPath, 'utf8');
+        events.push('write-ledger');
+        expect(deps.noteLedgerWrite).toBeTypeOf('function');
+        await deps.noteLedgerWrite!(branch, input.repoRoot);
+        expect([...receiptDeps!.fingerprints]).not.toEqual(prior);
+        expect(receiptDeps!.fingerprints.has(ledgerPath)).toBe(true);
+        revisionObserved = true;
+        events.push('callback-revision');
+      }
+      if (mode === 'throw' || mode === 'throw-persist') {
+        events.push('throw-review');
+        throw originalFailure;
+      }
+      events.push('return-review');
+      if (mode === 'non-ok-persist')
+        return { status: 'needs-human', reason: 'observed selected review refusal' };
+      return {
+        status: 'ok',
+        value: {
+          schemaVersion: 1,
+          branch,
+          head,
+          reviewed: { base, scope: 'full' },
+          sources: [{ kind: 'agent', status: 'terminal' }],
+          findings: [],
+        },
+      };
+    };
+  });
+  const receiptSpy = vi
+    .spyOn(bookkeepingModule, 'makeAddressBookkeepingReceipt')
+    .mockImplementation((deps) => {
+      const actual = actualReceiptFactory(deps);
+      if (!deps.path.startsWith(join(repo.root, '.git', 'cq-review-address') + '/')) return actual;
+      expect(deps.path).toMatch(/\/[0-9a-f]{64}\/bookkeeping\.json$/);
+      receiptConstructed++;
+      events.push('construct-receipt');
+      receiptDeps = deps;
+      receiptPath = deps.path;
+      return {
+        ...actual,
+        persist: async () => {
+          if (!revisionObserved || selectedPersistCalls !== 0) return actual.persist();
+          selectedPersistCalls++;
+          events.push('persist-reject');
+          expect(events).toContain('callback-revision');
+          expect(events).toContain(mode === 'throw-persist' ? 'throw-review' : 'return-review');
+          throw persistenceFailure;
+        },
+      };
+    });
+  const same = (args: string[], expected: string[]) =>
+    JSON.stringify(args) === JSON.stringify(expected);
+  const response = (value: unknown) => ({ code: 0, stdout: JSON.stringify(value), stderr: '' });
+  const gh: NonNullable<ReviewAddressDeps['gh']> = async (args) => {
+    if (same(args, ['repo', 'view', '--json', 'nameWithOwner']))
+      return response({ nameWithOwner: 'owner/repo' });
+    if (same(args, ['api', 'user', '--jq', '.login']))
+      return { code: 0, stdout: 'author\n', stderr: '' };
+    if (
+      same(args, [
+        'pr',
+        'view',
+        '7',
+        '--repo',
+        'owner/repo',
+        '--json',
+        'headRefName,headRepositoryOwner,headRepository',
+      ])
+    )
+      return response({
+        headRefName: 'feature/x',
+        headRepositoryOwner: { login: 'owner' },
+        headRepository: { name: 'repo' },
+      });
+    if (same(args, ['api', 'repos/owner/repo/pulls/7'])) return response({ head: { sha: head } });
+    for (const path of ['pulls/7/comments', 'pulls/7/reviews', 'issues/7/comments'])
+      if (same(args, ['api', `repos/owner/repo/${path}?per_page=100`, '--paginate', '--slurp']))
+        return response([[]]);
+    for (const query of consumerReadQueries)
+      if (
+        same(args, [
+          'api',
+          'graphql',
+          '-f',
+          `query=${query}`,
+          '-f',
+          'owner=owner',
+          '-f',
+          'name=repo',
+          '-F',
+          'pr=7',
+        ])
+      )
+        return response({
+          data: {
+            repository: {
+              pullRequest: {
+                author: { login: 'author' },
+                headRefName: 'feature/x',
+                headRefOid: head,
+                reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+                reviews: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+              },
+            },
+          },
+        });
+    unexpected.push('forge');
+    throw new Error('unexpected consumer forge request/publication refused');
+  };
+  const git: NonNullable<ReviewAddressDeps['git']> = async (args) => {
+    expect(args.length).toBeLessThanOrEqual(32);
+    expect(args.every((arg) => arg.length <= 4096)).toBe(true);
+    const argv = [...args];
+    if (argv[0] === '-C') {
+      const root = argv[1]!;
+      expect(
+        root === repo.root || root.startsWith(join(repo.root, '.git', 'cq-review-worktrees') + '/'),
+      ).toBe(true);
+      argv.splice(0, 2);
+    }
+    const command = argv[0];
+    const reads = [
+      'rev-parse',
+      'status',
+      'ls-files',
+      'diff',
+      'merge-base',
+      'rev-list',
+      'show',
+      'check-ref-format',
+    ];
+    const branchRead = same(argv, ['branch', '--show-current']);
+    const symbolicRead =
+      same(argv, ['symbolic-ref', 'HEAD']) || same(argv, ['symbolic-ref', '--quiet', 'HEAD']);
+    const fetch = same(argv, ['fetch', 'origin', '+refs/pull/7/head:refs/cq-review/pr-7']);
+    const worktreeList = same(argv, ['worktree', 'list', '--porcelain']);
+    const worktreeAdd = same(argv, [
+      'worktree',
+      'add',
+      '-B',
+      'cq-review/pr-7',
+      join(repo.root, '.git', 'cq-review-worktrees', 'pr-7-feature-x'),
+      head,
+    ]);
+    if (
+      !reads.includes(command!) &&
+      !branchRead &&
+      !symbolicRead &&
+      !fetch &&
+      !worktreeList &&
+      !worktreeAdd
+    ) {
+      unexpected.push('git');
+      throw new Error('unexpected consumer Git command refused');
+    }
+    if (fetch) expect(repo.git('remote', 'get-url', 'origin').trim()).toBe(origin);
+    try {
+      return { code: 0, stdout: repo.git(...args), stderr: '' };
+    } catch (error) {
+      const failed = error as { status?: number; stdout?: Buffer; stderr?: Buffer };
+      if (typeof failed.status !== 'number') throw error;
+      return {
+        code: failed.status,
+        stdout: String(failed.stdout ?? '').slice(0, 65536),
+        stderr: String(failed.stderr ?? '').slice(0, 65536),
+      };
+    }
+  };
+  return {
+    events,
+    unexpected,
+    persistenceFailure,
+    originalFailure,
+    counts: () => ({ constructed, receiptConstructed, selectedPersistCalls, revisionObserved }),
+    run: async () => {
+      pending = makeReviewAddress({
+        config,
+        gh,
+        git,
+        queueClient,
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          fix: async () => {
+            throw new Error('unexpected consumer worker');
+          },
+        }),
+      })({ repoRoot: repo.root, source: 'pr:7', journalDir, rounds: 1, push: false });
+      try {
+        return await pending;
+      } finally {
+        events.push('settled-address');
+      }
+    },
+    assertPreserved: async () => {
+      expect(repo.git('rev-parse', 'HEAD').trim()).toBe(head);
+      expect(repo.git('ls-remote', 'origin', 'refs/pull/7/head').trim().split('\t')[0]).toBe(head);
+      if (ledgerPath) expect(await readFile(ledgerPath, 'utf8')).toBe(ledgerBytes);
+      expect(receiptPath).toBeDefined();
+      await expect(readFile(receiptPath!, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+    cleanup: async () => {
+      if (pending)
+        await pending.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (reviewRunModule.makeReviewRun === runSpy) runSpy.mockRestore();
+      if (bookkeepingModule.makeAddressBookkeepingReceipt === receiptSpy) receiptSpy.mockRestore();
+      await repo.cleanup();
+      await rm(journalDir, { recursive: true, force: true });
+    },
+  };
+}
+
+describe('review.address PR review acknowledgement consumer', () => {
+  for (const mode of [
+    'ok-ack',
+    'ok-persist',
+    'non-ok-persist',
+    'throw',
+    'throw-persist',
+  ] as const) {
+    test(`${mode} preserves actual refusal precedence and observed outcome`, async () => {
+      const f = await prConsumerFixture(mode);
+      try {
+        const result = await f.run();
+        expect(result.status).not.toBe('ok');
+        expect(f.unexpected).toEqual([]);
+        const persists = mode === 'throw' || mode === 'ok-ack' ? 0 : 1;
+        expect(f.counts()).toEqual({
+          constructed: 1,
+          receiptConstructed: 1,
+          selectedPersistCalls: persists,
+          revisionObserved: persists === 1,
+        });
+        const observed =
+          mode === 'throw' || mode === 'throw-persist' ? 'throw-review' : 'return-review';
+        const order = [
+          'construct-review',
+          'construct-receipt',
+          'invoke-review',
+          ...(persists ? ['write-ledger', 'callback-revision'] : []),
+          observed,
+          ...(persists ? ['persist-reject'] : []),
+          'settled-address',
+        ];
+        expect(f.events).toEqual(order);
+        const reasons = reportOf(result).reasons.join(' ');
+        // ok-ack returns a valid current identity without a ledger: the actual
+        // mandatory noteBookkeeping acknowledgement must fail its real file read.
+        expect(reasons).toContain(
+          mode === 'ok-ack'
+            ? 'ENOENT'
+            : persists
+              ? f.persistenceFailure.message
+              : f.originalFailure.message,
+        );
+        if (mode === 'non-ok-persist') {
+          expect(reasons).toContain(
+            `${f.persistenceFailure.message}; observed review: observed selected review refusal`,
+          );
+        } else {
+          expect(reasons).not.toContain('observed review:');
+        }
+        if (mode === 'throw-persist') expect(reasons).not.toContain(f.originalFailure.message);
+        expect(reportOf(result).fixes).toEqual([]);
+        expect(reportOf(result).usage).toEqual({
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        });
+        await f.assertPreserved();
+      } finally {
+        await f.cleanup();
+      }
+    });
+  }
 });
