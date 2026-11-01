@@ -1,3 +1,4 @@
+# instantiated from policy/templates/pack-audit.yml — edit the template, not this file
 # The pack audit — T1.7 (ws-k stage 1 + the "Tarball audit" acceptance check;
 # the release-time run of the same mechanism is T5.1's publication checklist).
 #
@@ -189,4 +190,4 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/unpacked/package/scripts"
           cp scripts/denylist-scan scripts/package.json "${RUNNER_TEMP}/unpacked/package/scripts/"
           cd "${RUNNER_TEMP}/unpacked/package"
-          ./scripts/denylist-scan
+          ./scripts/denylist-scan --tree

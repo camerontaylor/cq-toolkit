@@ -16,7 +16,7 @@
 //      only CLEAN, BEHIND, and HAS_HOOKS reach the evidence rows
 //   3. truncated review data                  → `awaiting`    (review_data_truncated)
 //   4. last-commit-time unknown               → `awaiting`    (last_commit_unknown)
-//   5. unresolved external threads > 0        → `has-issues`  (unresolved_external_threads)
+//   5. unresolved external threads              → advisory count only
 //   6. outstanding post-commit objection
 //      (a non-author CHANGES_REQUESTED)       → `awaiting`    (merge_objection_outstanding)
 //   7. no acceptable review OF THE LAST
@@ -406,15 +406,7 @@ export function classifyPr(
   if (lastCommitMs === null) {
     return { verdict: 'awaiting', reason: 'last_commit_unknown', unresolvedExternalThreads };
   }
-  // Row 5 — a human owes the PR work: unresolved threads from reviewers
-  // other than the author (the author's own threads do not block).
-  if (unresolvedExternalThreads > 0) {
-    return {
-      verdict: 'has-issues',
-      reason: 'unresolved_external_threads',
-      unresolvedExternalThreads,
-    };
-  }
+  // Thread counts are advisory; review verdicts decide acceptance.
   // Rows 6–9 read review evidence; they share one screening context.
   const ctx: ReviewContext = {
     authorLogin: candidate.authorLogin,

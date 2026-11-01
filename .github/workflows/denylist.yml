@@ -1,6 +1,4 @@
-# instantiated from policy/templates/required-check.md (the I4 trigger
-# shape; the steps are the denylist scan itself) — edit the template, not
-# this file
+# instantiated from policy/templates/denylist.yml — edit the template, not this file
 name: denylist
 
 # Invariant I4: this workflow must never filter its triggers — no `paths`, no
@@ -30,6 +28,8 @@ jobs:
           # The scan runs repo code, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install pinned gitleaks v8.30.1 (digest-pinned)
         run: |
           set -euo pipefail
@@ -45,7 +45,15 @@ jobs:
           tar -xzf "${tarball}" gitleaks
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
-      - name: Denylist tree scan
-        run: ./scripts/denylist-scan
+      - name: Denylist outgoing commit scan
+        env:
+          SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$SCAN_BASE"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base=$(git hash-object -t tree /dev/null)
+            base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
+          fi
+          ./scripts/denylist-scan --base "$base"
       - name: Denylist self-test
         run: ./scripts/denylist-scan --self-test

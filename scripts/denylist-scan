@@ -4,7 +4,7 @@
 // Reads policy/denylist/patterns.yml (the single source of truth for denylist
 // classes), converts it into a gitleaks TOML config in a temp directory
 // outside the repo (so the generated regexes themselves are never scanned),
-// and runs gitleaks over the repo working tree.
+// and runs gitleaks over outgoing commit trees and messages.
 //
 // `probe_path` (optional rule key) places a path-scoped rule's probe at a
 // matching relative path (path rules cannot fire on a flat root probe).
@@ -15,7 +15,8 @@
 // UNPACKED TARBALL whose dist/ IS the payload to gitleaks-scan.
 //
 // Modes:
-//   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
+//   scripts/denylist-scan              outgoing commits; exit 0 = clean, 1 = findings
+//   scripts/denylist-scan --tree       explicit unpacked-package scan
 //   scripts/denylist-scan --self-test  four legs + two pure-text config
 //                                      checks, three gitleaks runs; the
 //                                      pure-text legs — (4) and the two
@@ -579,6 +580,56 @@ function treeScan() {
     console.error(`error: gitleaks exited ${describeExit(res)} during tree scan`);
     dumpStderr(res, 'tree scan');
     return 2;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// Publication scans read git objects only. Reuse the same default-secret and
+// denylist configuration as the explicit unpacked-package tree scan.
+function outgoingScan(base, head = 'HEAD') {
+  function git(args, binary = false) {
+    const result = spawnSync('git', args, {
+      cwd: REPO_ROOT, encoding: binary ? null : 'utf8', maxBuffer: 256 * 1024 * 1024,
+    });
+    if (result.error || result.status !== 0) throw new ConfigError(`git ${args[0]} failed`);
+    return result.stdout;
+  }
+  const tip = git(['rev-parse', '--verify', `${head}^{commit}`]).trim();
+  const start = git(['rev-parse', '--verify', `${base}^{commit}`]).trim();
+  const commits = git(['rev-list', '--reverse', `${start}..${tip}`]).trim().split('\n').filter(Boolean);
+  const { rules } = loadPatterns();
+  const tmp = makeTempDir(path.join(os.tmpdir(), 'denylist-outgoing-'));
+  try {
+    for (const commit of commits) {
+      const source = path.join(tmp, commit);
+      fs.mkdirSync(source);
+      // Read blobs directly: archive would honor export-ignore attributes and
+      // omit tracked files. Materialize symlink blobs as text, never follow them.
+      for (const entry of git(['ls-tree', '-rz', '--full-tree', commit]).split('\0').filter(Boolean)) {
+        const match = /^([0-7]+) (blob|commit) ([0-9a-f]+)\t([\s\S]+)$/.exec(entry);
+        if (!match) throw new ConfigError('invalid git tree entry');
+        if (match[2] === 'commit') continue; // gitlinks contain no local blob
+        const target = path.resolve(source, match[4]);
+        if (!target.startsWith(source + path.sep)) throw new ConfigError('invalid git tree path');
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, git(['cat-file', 'blob', match[3]], true));
+      }
+      const messageDir = path.join(tmp, 'message');
+      fs.mkdirSync(messageDir, { recursive: true });
+      fs.writeFileSync(path.join(messageDir, 'commit-message.txt'), git(['show', '-s', '--format=%B', commit]));
+      for (const [label, cwd] of [['tree', source], ['message', messageDir]]) {
+        const { res, findings } = runScan(tmp, `${commit}-${label}`, treeConfigToml(rules), '.', { cwd });
+        if (res.status === 1 && findings.length > 0) {
+          for (const f of findings) console.error(`denylist finding: ${commit} ${label} ${f.File}:${f.StartLine} [${f.RuleID}]`);
+          return 1;
+        }
+        if (res.status !== 0) throw new GitleaksError(`outgoing ${label} scan exited ${describeExit(res)}`);
+      }
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+    console.log(`denylist: outgoing scan clean (${commits.length} commits; trees and messages)`);
+    return 0;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1510,15 +1561,23 @@ function main(argv) {
   // being installed, and the pure-text I4 leg must not be gated on it.
   if (argv.length === 0) {
     checkGitleaksMajorVersion();
+    return outgoingScan(process.env.DENYLIST_BASE || 'origin/main');
+  }
+  if (argv.length === 1 && argv[0] === '--tree') {
+    checkGitleaksMajorVersion();
     return treeScan();
+  }
+  if (argv.length === 2 && argv[0] === '--base') {
+    checkGitleaksMajorVersion();
+    return outgoingScan(argv[1]);
   }
   if (argv.length === 1 && argv[0] === '--self-test') {
     // No version gate here: selfTest() runs the pure-text I4 leg first and
     // gates the gitleaks-major check itself, after that leg.
     return selfTest();
   }
-  console.error('usage: scripts/denylist-scan [--self-test]');
-  console.error('  (no flags)   scan the repo tree with the denylist rules');
+  console.error('usage: scripts/denylist-scan [--base REV | --tree | --self-test]');
+  console.error('  (no flags)   scan origin/main..HEAD (or DENYLIST_BASE..HEAD)');
   console.error('  --self-test  dirty fixture, clean probes, tree config, workflow I4, no-dist-allowlist, and parser-guards legs');
   return 2;
 }

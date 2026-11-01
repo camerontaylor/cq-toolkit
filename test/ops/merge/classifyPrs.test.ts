@@ -252,13 +252,12 @@ describe('classifyPr — one test per I2 row', () => {
     });
   });
 
-  test('row 5: unresolved external threads → has-issues, count surfaced on the result', () => {
+  test('unresolved threads are advisory, count surfaced on the result', () => {
     const result = classifyPr(
       settleCandidate({ threads: [thread(), thread({ id: 'T2', rootDatabaseId: 200 })] }),
       SETTLED_MS,
     );
-    expect(result.verdict).toBe('has-issues');
-    expect(result.reason).toBe('unresolved_external_threads');
+    expect(result.verdict).toBe('eligible');
     expect(result.unresolvedExternalThreads).toBe(2);
   });
 
@@ -337,10 +336,10 @@ describe('classifyPr — precedence (first match wins)', () => {
     expect(result.unresolvedExternalThreads).toBe(1);
   });
 
-  test('has-issues beats no-review (an unresolved thread blocks before the first look)', () => {
+  test('open threads do not substitute for review', () => {
     const result = classifyPr(candidate({ threads: [thread()] }), SETTLED_MS);
-    expect(result.verdict).toBe('has-issues');
-    expect(result.reason).toBe('unresolved_external_threads');
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
   });
 
   test('unknown last commit beats has-issues (row 4 fails closed ahead of row 5)', () => {

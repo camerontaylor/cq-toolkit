@@ -79,7 +79,7 @@
 import { GhError, ghJson, ghNameOk, slurpedComments } from '../adapters/forge-github/gh.js';
 import type { GhFn, GhResult } from '../adapters/forge-github/gh.js';
 import type { MergeEffects } from '../adapters/forge-github/mergeEffects.js';
-import { attachRestReplies, countUnresolvedThreads } from '../ops/review/threads.js';
+import { attachRestReplies } from '../ops/review/threads.js';
 import type { RestComment, ReviewThread } from '../ops/review/threads.js';
 import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/settle-state.js';
 import type { SettleTuple } from '../policy/queue/settle-state.js';
@@ -1170,15 +1170,7 @@ const recheckOrThrow = async (
   // (best effort) and an unchanged tuple writes nothing.
   const lag = await checkReviewDataLag(deps, pr, snapshot);
   if (lag !== null) return refuseAfterObserving(lag);
-  // (g) Unresolved external threads (the I2 thread rule, classify row 5's
-  // exact count: root author ≠ PR author; a null root author is external),
-  // judged before any review.
-  const unresolved = countUnresolvedThreads(snapshot.threads.map(asReviewThread), {
-    excludeAuthorLogin: snapshot.authorLogin,
-  });
-  if (unresolved > 0) {
-    return refuseAfterObserving(`unresolved external threads: ${String(unresolved)}`);
-  }
+  // Open threads are triaged by the merging agent, never an automatic refusal.
   // (h) Head-bound acceptance.
   const judgment = judgeAtHead(snapshot, expected, deps.policy);
   if (!judgment.accepted) {

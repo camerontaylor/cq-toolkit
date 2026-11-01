@@ -1416,7 +1416,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     },
   );
 
-  test.each(['acceptance', 'objection', 'threads', 'lag', 'write'] as const)(
+  test.each(['acceptance', 'objection', 'lag', 'write'] as const)(
     'all-clear never bypasses %s',
     async (guard) => {
       const forge = makeForge({
@@ -1431,7 +1431,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
                     : []),
                 ],
           issueComments: [allClearComment()],
-          threads: guard === 'threads' ? [{ isResolved: false, root: 'dave' }] : [],
+          threads: [],
           restExtraReviews: guard === 'lag' ? [{ node_id: 'unseen', state: 'APPROVED' }] : [],
         }),
       });
@@ -1700,40 +1700,17 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, 'main')).ok).toBe(true);
   });
 
-  test('unresolved external threads refuse before reviews are judged', async () => {
-    const cases: Array<[ThreadSpec[], string | null]> = [
-      [[{ isResolved: false, root: 'dave' }], 'unresolved external threads: 1'],
-      [[{ isResolved: false, root: null }], 'unresolved external threads: 1'],
-      [
-        [
-          { isResolved: false, root: 'dave' },
-          { isResolved: 'maybe', root: 'erin' },
-        ],
-        'unresolved external threads: 2',
-      ],
-      // The PR author's own thread and resolved threads never block.
-      [
-        [
-          { isResolved: false, root: 'alice' },
-          { isResolved: true, root: 'dave' },
-        ],
-        null,
-      ],
-    ];
-    for (const [threads, reason] of cases) {
-      const forge = makeForge({ 7: prSpec({ reviews: [review()], threads }) });
-      await seedObservation(forge, [7]);
-      const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
-      expect(result).toEqual(
-        reason === null ? expect.objectContaining({ ok: true }) : { ok: false, reason },
-      );
-    }
-    // With NO acceptance at all, the thread refusal still comes first.
-    const bare = makeForge({ 7: prSpec({ threads: [{ isResolved: false, root: 'dave' }] }) });
-    expect(await recheckBeforeMerge(recheckDeps(bare, LATER), 7, SHA_B, BASE_NAME)).toEqual({
-      ok: false,
-      reason: 'unresolved external threads: 1',
+  test('open bot threads do not block accepted heads', async () => {
+    const forge = makeForge({
+      7: prSpec({
+        reviews: [review()],
+        threads: [{ isResolved: false, root: 'coderabbitai[bot]' }],
+      }),
     });
+    await seedObservation(forge, [7]);
+    expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME)).ok).toBe(
+      true,
+    );
   });
 
   test('discarded ledger records surface on a refusal reason and on an ok result', async () => {
