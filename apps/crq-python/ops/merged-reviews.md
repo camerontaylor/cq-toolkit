@@ -14,7 +14,7 @@ python3 apps/crq-python/crq.py enqueue-merged --pr=42 --merge-sha=<full-source-m
 python3 apps/crq-python/crq.py report --request-id=outage-pr42
 ```
 
-Enrollment verifies the forge PR is merged into `merge-queue` with exactly that
+Enrollment verifies the forge PR is merged into `main` with exactly that
 merge SHA, binds the stable request ID in the existing queue under `tick.lock`,
 and starts nothing. Repeating the same binding, including through another request
 ID, returns the same intent. Reusing an ID with a different binding refuses.
@@ -25,9 +25,9 @@ work requires an explicit ownership/lineage decision through the coordinator.
 
 The default selector is `promoted-main`: the tick fetches, then captures full
 `origin/main` commit `T` and tree under its dispatch lock. It waits with
-`not-yet-promoted` until the source merge is an ancestor of that target. An explicit
-`--target-selector=merge-queue` chooses the different, potentially unpromoted
-queue target. The captured target never follows later ref movement, including
+`not-yet-promoted` until the source merge is an ancestor of that target.
+The historical `--target-selector=merge-queue` alias now selects the same
+main target without reading the retired branch. The captured target never follows later ref movement, including
 across restart, failed attempts or receipt reads. Request replay cannot repin a
 finished intent; a future fresh-target lineage needs its own explicit contract.
 

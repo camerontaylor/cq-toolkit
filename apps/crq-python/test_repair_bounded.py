@@ -40,7 +40,7 @@ class BoundedRepairTest(unittest.TestCase):
                          'verdict': 'still-valid', 'reviewer': 'independent-test-reviewer',
                          'reason': 'Pinned source retains the unstable initialization metadata comparison.'}
         self.git = mock.patch.object(bounded, 'git', side_effect=lambda clone, *args:
-                                     SOURCE if args == ('rev-parse', 'origin/merge-queue') else BLOB).start()
+                                     SOURCE if args == ('rev-parse', 'origin/main') else BLOB).start()
         self.addCleanup(mock.patch.stopall)
         self.c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG=self.config,
                                  CLONE=Path('/unused'), run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
@@ -86,7 +86,7 @@ class BoundedRepairTest(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, evidence)
         self.git.side_effect = lambda *args: HISTORICAL
-        with self.assertRaisesRegex(ValueError, 'current queue tip'):
+        with self.assertRaisesRegex(ValueError, 'current default-branch tip'):
             self.prepare()
 
     def test_round_ceiling_remains_authoritative(self):

@@ -101,7 +101,7 @@ The reader host has its own private overlay and checkout paths.
 Use a dedicated full cq-toolkit clone, fetched anonymously from
 `https://github.com/camerontaylor/cq-toolkit.git`, never the review runtime clone.
 Never `git pull` the deployment clone. Fetch, verify the full SHA is reachable
-from `origin/main` (= `cq/promoted`), and verify its owner-approved annotated
+from `origin/main`, and verify its owner-approved annotated
 `crq-runner/YYYYMMDD-N` tag peels to that SHA. This tool does not create tags.
 Targets must descend from import C (`f748fd43`); earlier rollback needs the
 separate, recorded old-runner rollback below. Targets must also provide relocated

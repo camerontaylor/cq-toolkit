@@ -3,6 +3,7 @@
 Importing this module never enables dispatch. An operator-provisioned rollout
 record, verified reviewer limits and durable evidence volume are prerequisites.
 """
+from runtime_target import DEFAULT_REF, DEFAULT_FETCH_REFSPEC
 import collections
 import copy
 import hashlib
@@ -400,8 +401,8 @@ def run_inventory(c, queue, *, required_paths=None, members=None, fetch=True, en
     event_items = []
     tiers, limits, required = policies()
     if fetch:
-        repo.git("fetch", "--no-tags", "--no-write-fetch-head", "origin", "refs/heads/main:refs/remotes/origin/main")
-    target = repo.git("rev-parse", "origin/main^{commit}").decode().strip()
+        repo.git("fetch", "--no-tags", "--no-write-fetch-head", "origin", DEFAULT_FETCH_REFSPEC)
+    target = repo.git("rev-parse", DEFAULT_REF + "^{commit}").decode().strip()
     ledger_head, events = publisher.fetch()
     if required_paths is None:
         required_paths, members = collect_required(repo, target, required, store)

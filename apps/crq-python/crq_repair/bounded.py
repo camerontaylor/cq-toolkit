@@ -1,4 +1,5 @@
 """Fail-closed one-job selection and immutable, tool-free source evidence."""
+from runtime_target import DEFAULT_REF
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -38,8 +39,8 @@ def check_sha(value):
 
 def validate_revalidation(config, old, source_sha, evidence):
     check_sha(source_sha)
-    if git(config['clone'], 'rev-parse', 'origin/merge-queue') != source_sha:
-        raise ValueError('source SHA is not the observed current queue tip')
+    if git(config['clone'], 'rev-parse', DEFAULT_REF) != source_sha:
+        raise ValueError('source SHA is not the observed current default-branch tip')
     if old.get('finding', {}).get('severity') not in ('critical', 'major'):
         raise ValueError('only recorded critical/major findings can be prepared')
     blob = git(config['clone'], 'rev-parse', source_sha + ':' + source_path(old['finding']))
