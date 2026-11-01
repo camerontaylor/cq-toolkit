@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import {
   assertAddressDependenciesIsolated,
+  assertAddressDependencyMetadata,
   snapshotAddressDependencies,
 } from './internal/addressDependencies.js';
 import { readFile, writeFile, lstat, realpath } from 'node:fs/promises';
@@ -15,7 +16,12 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import type { GhFn } from '../../adapters/forge-github/gh.js';
 import type { EffectiveCqPolicy } from '../analyze/cqConfigDefaults.js';
-import { makeCheckRunner, subprocessRunCheck, type FailureSet } from '../gates/checkRunner.js';
+import {
+  makeCheckRunner,
+  subprocessRunCheck,
+  type FailureSet,
+  type RawCheckOutput,
+} from '../gates/checkRunner.js';
 import { classifyStagePaths } from '../sweep/stagePaths.js';
 import {
   normalizeFailurePaths,
@@ -55,6 +61,14 @@ const OutcomeSchema = z
   })
   .strict();
 const ClosureSchema = z.object({ closed: z.boolean(), reason: z.string().min(1) }).strict();
+export interface AddressPrecondition {
+  kind: 'deterministic' | 'transient';
+  scope: 'leg' | 'finding';
+  stage: 'dependencies' | 'check' | 'setup' | 'reviewer';
+  reason: string;
+  finding?: string;
+  cleanupError?: string;
+}
 export interface AddressAttempt {
   finding: string;
   tier: 'worker' | 'rescue' | 'reviewer';
@@ -83,6 +97,9 @@ export interface AddressFix {
 export interface AddressWorker {
   fix(finding: Finding, round: number): Promise<AddressFix>;
   escalation(): EscalationState;
+  /** Engine-observed prerequisite failure; the enclosing leg must stop paid work. */
+  preconditionFailure?(): string | undefined;
+  preconditions?(): readonly AddressPrecondition[];
   /** Capture and admit against a verified head without crossing an engine commit. */
   withVerifiedHead?<T>(action: (head: string) => Promise<T>): Promise<T>;
 }
@@ -90,7 +107,7 @@ export interface AddressWorkerDeps {
   git: GhFn;
   drivers: DriverFactory;
   repoRoot: string;
-  /** Installed caller checkout; reused only when package manifests/locks match the worker tree. */
+  /** Installed caller checkout; reused only when dependency metadata matches the worker tree. */
   dependencyRoot?: string;
   journalDir: string;
   policy: EffectiveCqPolicy;
@@ -120,6 +137,37 @@ class AddressRefusal extends Error {
     super(message);
   }
 }
+class CheckFailure extends Error {
+  constructor(
+    message: string,
+    readonly transient: boolean,
+    readonly scoped: boolean,
+  ) {
+    super(message);
+  }
+}
+class PreconditionRefusal extends AddressRefusal {
+  constructor(readonly precondition: AddressPrecondition) {
+    super(
+      `${precondition.kind === 'transient' ? 'transient baseline' : 'baseline precondition'} failed: ${precondition.reason}`,
+      precondition.kind === 'deterministic' && precondition.scope === 'leg',
+    );
+  }
+}
+class BaselineCleanupError extends Error {
+  constructor(
+    readonly original: unknown,
+    readonly cleanup: unknown,
+  ) {
+    super(String(original));
+  }
+}
+const transientSystemFailure = (error: unknown) =>
+  ['ENOMEM', 'EAGAIN', 'EMFILE', 'ENFILE', 'ENOSPC', 'EIO', 'ETIMEDOUT'].includes(
+    String((error as NodeJS.ErrnoException | null)?.code),
+  );
+const findingScoped = (check: EffectiveCqPolicy['checks'][number]) =>
+  check.addressOnly === true || check.adapter === 'test-narrow';
 
 /** One scan component: `diagnostic` marks text derived from a check diagnostic. */
 type ScanContent = { text: string; path?: string; diagnostic?: boolean };
@@ -184,6 +232,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const verifiedHeads = new Set<string>();
   let initialization: Promise<void> | undefined;
   let fatal: string | undefined;
+  let preconditionFailure: string | undefined;
   const unitDeadlines = new Map<string, number>();
   const remainingUnit = (finding: Finding) =>
     (unitDeadlines.get(finding.id) ?? Infinity) - Date.now();
@@ -290,7 +339,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       throw new Error('finding path escapes workspace or is a symlink');
     return canonical;
   };
-  const dependencyDirectory = async (admit: () => void) => {
+  const dependencyDirectory = async (admit: () => void, metadataRoot = root) => {
     const installed = async (cwd: string) => {
       try {
         return await realpath(resolve(cwd, 'node_modules'));
@@ -312,29 +361,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       return undefined;
     const caller = await installed(deps.dependencyRoot);
     if (!caller) return undefined;
-    const manifest = async (cwd: string, path: string) => {
-      try {
-        return await readFile(resolve(cwd, path), 'utf8');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw error;
-      }
-    };
-    for (const path of [
-      'package.json',
-      'pnpm-lock.yaml',
-      'pnpm-workspace.yaml',
-      'package-lock.json',
-      'npm-shrinkwrap.json',
-      'yarn.lock',
-      'bun.lock',
-      'bun.lockb',
-    ]) {
-      if ((await manifest(root, path)) !== (await manifest(deps.dependencyRoot, path)))
-        throw new Error(
-          'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
-        );
-    }
+    await assertAddressDependencyMetadata(metadataRoot, deps.dependencyRoot, admit);
     await assertAddressDependenciesIsolated(caller, [root, deps.dependencyRoot], admit);
     return caller;
   };
@@ -465,58 +492,87 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       deadline.dispose();
     }
   };
-  const runChecks = async (cwd: string, finding: Finding, related: boolean) => {
+  const runChecks = async (
+    cwd: string,
+    finding: Finding,
+    related: boolean,
+    scope: 'all' | 'leg' | 'finding' = 'all',
+    baseline = false,
+  ) => {
     const results: FailureSet[] = [];
     for (const check of policy.checks) {
-      stop();
-      if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
-      const checkRoot = resolve(cwd, check.command.cwd ?? '.');
-      const rel = relative(await realpath(cwd), await realpath(checkRoot));
-      if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
-        throw new Error('check.cwd escapes candidate');
-      let command = {
-        ...check.command,
-        cwd: checkRoot,
-        timeoutMs: Math.min(
-          check.command.timeoutMs ?? Infinity,
-          deps.remainingWallMs(),
-          policy.budgets.step.wallMs,
-          remainingUnit(finding),
-        ),
-      };
-      // The bounded test gate needs the same explicit fix scope at baseline
-      // and candidate: a clean detached baseline has no git diff to discover.
-      if (related || check.addressOnly === true || check.adapter === 'test-narrow') {
-        const files = relatedFilesRelativeToCheck([finding.file!], cwd, checkRoot);
-        command =
-          check.kind === 'static'
-            ? {
-                ...command,
-                ...staticRelatedCheckCommand(command, check.adapter, files, check.relatedArgs),
-              }
-            : { ...command, ...relatedCheckCommand(command, files, check.relatedArgs) };
-      }
-      const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
-        (signal): signal is AbortSignal => signal !== undefined,
-      );
-      const signal = signals.length ? AbortSignal.any(signals) : undefined;
-      const result = await makeCheckRunner((cmd) =>
-        subprocessRunCheck(cmd, signal ? { signal } : undefined),
-      )({
-        adapter: check.adapter,
-        command,
-      });
-      // Cancellation is classified only after the actual child has settled.
-      stop();
-      if (result.status !== 'ok') {
-        let detail: string = result.status;
-        if (result.status === 'indeterminate') detail = result.detail;
-        else if (result.status === 'failed') detail = result.error;
-        throw new Error(
-          `configured check was ${result.status} (${check.adapter}): ${detail.slice(0, 1000)}`,
+      if (scope !== 'all' && findingScoped(check) !== (scope === 'finding')) continue;
+      try {
+        stop();
+        if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+        const checkRoot = resolve(cwd, check.command.cwd ?? '.');
+        const rel = relative(await realpath(cwd), await realpath(checkRoot));
+        if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
+          throw new Error('check.cwd escapes candidate');
+        let command = {
+          ...check.command,
+          cwd: checkRoot,
+          timeoutMs: Math.min(
+            check.command.timeoutMs ?? Infinity,
+            deps.remainingWallMs(),
+            policy.budgets.step.wallMs,
+            remainingUnit(finding),
+          ),
+        };
+        if (related || findingScoped(check)) {
+          const files = relatedFilesRelativeToCheck([finding.file!], cwd, checkRoot);
+          command =
+            check.kind === 'static'
+              ? {
+                  ...command,
+                  ...staticRelatedCheckCommand(command, check.adapter, files, check.relatedArgs),
+                }
+              : { ...command, ...relatedCheckCommand(command, files, check.relatedArgs) };
+        }
+        const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
+          (signal): signal is AbortSignal => signal !== undefined,
+        );
+        const signal = signals.length ? AbortSignal.any(signals) : undefined;
+        for (let attempt = 0; ; attempt++) {
+          stop();
+          if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+          command.timeoutMs = Math.min(
+            command.timeoutMs,
+            deps.remainingWallMs(),
+            remainingUnit(finding),
+          );
+          let capture: RawCheckOutput | undefined;
+          const result = await makeCheckRunner(async (cmd) => {
+            capture = await subprocessRunCheck(cmd, signal ? { signal } : undefined);
+            return capture;
+          })({ adapter: check.adapter, command });
+          stop(); // Classify only after the child settled; cancellation wins.
+          const transient =
+            capture === undefined ||
+            capture.exitCode === null ||
+            [75, 129, 130, 137, 143].includes(capture.exitCode);
+          if (baseline && transient && attempt === 0) continue;
+          if (result.status !== 'ok' || transient) {
+            let detail: string = result.status;
+            if (result.status === 'indeterminate') detail = result.detail;
+            else if (result.status === 'failed') detail = result.error;
+            throw new CheckFailure(
+              `configured check was ${result.status} (${check.adapter}): ${detail.slice(0, 1000)}${transient ? '; transient check exit ' + String(capture?.exitCode) : ''}`,
+              transient,
+              findingScoped(check),
+            );
+          }
+          results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
+          break;
+        }
+      } catch (error) {
+        if (error instanceof AddressRefusal || error instanceof CheckFailure) throw error;
+        throw new CheckFailure(
+          error instanceof Error ? error.message : String(error),
+          transientSystemFailure(error),
+          findingScoped(check),
         );
       }
-      results.push(normalizeFailurePaths(result.value, cwd, checkRoot));
     }
     return results;
   };
@@ -533,8 +589,82 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       if (callerUnknown.length) throw new Error('review.address requires no unknown worker files');
       verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
     }, admit));
+  const preconditions: AddressPrecondition[] = [];
+  const baselineCache = new Map<string, FailureSet[]>();
+  const refusePrecondition = (
+    original: unknown,
+    stage: AddressPrecondition['stage'],
+    finding?: Finding,
+  ): never => {
+    const error = original instanceof BaselineCleanupError ? original.original : original;
+    const cleanupError =
+      original instanceof BaselineCleanupError ? String(original.cleanup) : undefined;
+    if (error instanceof AddressRefusal) {
+      if (cleanupError) {
+        error.message += `; baseline cleanup failed: ${cleanupError}`;
+        if (error instanceof PreconditionRefusal) error.precondition.cleanupError = cleanupError;
+        if (error.fatal && preconditionFailure) preconditionFailure = error.message;
+      }
+      throw error;
+    }
+    const transient =
+      error instanceof CheckFailure ? error.transient : transientSystemFailure(error);
+    const scoped = error instanceof CheckFailure && error.scoped;
+    const cause: AddressPrecondition = {
+      kind: transient ? 'transient' : 'deterministic',
+      scope: scoped ? 'finding' : 'leg',
+      stage,
+      reason: error instanceof Error ? error.message : String(error),
+      ...(scoped && finding ? { finding: finding.id } : {}),
+      ...(cleanupError ? { cleanupError } : {}),
+    };
+    preconditions.push(cause);
+    const refusal = new PreconditionRefusal(cause);
+    if (cleanupError) refusal.message += `; baseline cleanup failed: ${cleanupError}`;
+    if (refusal.fatal) preconditionFailure = refusal.message;
+    throw refusal;
+  };
+  const prepareDependencies = async (cwd: string, finding: Finding, admit: () => void) => {
+    try {
+      const dependencies = await dependencyDirectory(admit, cwd);
+      if (dependencies)
+        await snapshotAddressDependencies(dependencies, resolve(cwd, 'node_modules'), admit);
+      return dependencies;
+    } catch (error) {
+      return refusePrecondition(error, 'dependencies', finding);
+    }
+  };
+  const prepareBaseline = async (
+    cwd: string,
+    parent: string,
+    finding: Finding,
+    admit: () => void,
+    includeFinding = false,
+  ) => {
+    const dependencies = await prepareDependencies(cwd, finding, admit);
+    try {
+      let leg = baselineCache.get(parent);
+      if (!leg) {
+        leg = await runChecks(cwd, finding, false, 'leg', true);
+        baselineCache.set(parent, leg);
+      }
+      const scoped = includeFinding ? await runChecks(cwd, finding, false, 'finding', true) : [];
+      let i = 0,
+        j = 0;
+      return {
+        dependencies,
+        checks: includeFinding
+          ? policy.checks.map((check) => (findingScoped(check) ? scoped[j++]! : leg[i++]!))
+          : leg,
+      };
+    } catch (error) {
+      return refusePrecondition(error, 'check', finding);
+    }
+  };
   return {
     escalation: () => state,
+    preconditionFailure: () => preconditionFailure,
+    preconditions: () => preconditions,
     async withVerifiedHead(action) {
       await initialize();
       return withMutation(async () => {
@@ -675,6 +805,32 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         await safeFile(root, file);
         const classified = classifyStagePaths([file], undefined, false, false);
         if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
+        if (!policy.roles.reviewer)
+          refusePrecondition(
+            new Error('roles.reviewer required for assigned-finding closure'),
+            'reviewer',
+            finding,
+          );
+        await withMutation(async () => {
+          const baselineHead = await git(root, ['rev-parse', 'HEAD']);
+          if (!verifiedHeads.has(baselineHead))
+            throw new AddressRefusal('unexpected baseline head outside engine', true);
+          const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
+          await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
+          let failure: { error: unknown } | undefined;
+          try {
+            await prepareBaseline(candidate, baselineHead, finding, admitMutation);
+          } catch (error) {
+            failure = { error };
+          }
+          try {
+            await git(root, ['worktree', 'remove', '--force', candidate]);
+          } catch (cleanup) {
+            if (failure) throw new BaselineCleanupError(failure.error, cleanup);
+            throw cleanup;
+          }
+          if (failure) throw failure.error;
+        }, admitMutation).catch((error: unknown) => refusePrecondition(error, 'setup', finding));
         while (true) {
           stop();
           if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
@@ -784,15 +940,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               // Candidate checks may invoke a package manager. Keep their
               // node_modules metadata private so relinking cannot corrupt the
               // caller's dependencies. Package links retain absolute targets.
-              const dependencies = await dependencyDirectory(admitMutation);
-              if (dependencies)
-                await snapshotAddressDependencies(
-                  dependencies,
-                  resolve(candidate, 'node_modules'),
-                  admitMutation,
-                );
-              const baseline =
-                output.disposition === 'fixed' ? await runChecks(candidate, finding, false) : [];
+              const prepared =
+                output.disposition === 'fixed'
+                  ? await prepareBaseline(candidate, parent, finding, admitMutation, true)
+                  : undefined;
+              const dependencies = prepared?.dependencies;
+              const baseline = prepared?.checks ?? [];
 
               const content = await readFile(await safeFile(root, file));
               await writeFile(await safeFile(candidate, file), content);

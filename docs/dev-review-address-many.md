@@ -20,6 +20,29 @@ only the small link/metadata directory. Installs containing real package files
 copy those files for each candidate; copy admission is cancellable but has no
 byte budget.
 
+Before a paid repair attempt, a clean-parent preflight checks dependency
+availability and leg-wide baseline checks. Only deterministic, leg-wide
+prerequisite failures stop the leg. Transient baseline exits (including low
+memory, timeout and signal exits) get one bounded check retry without another
+model dispatch; exhausted transient checks and finding-specific refusals stay
+local to their finding. Reports expose typed `preconditions` with kind, scope,
+stage and cause, including a separate cleanup error when present.
+Successful leg-wide baselines are reused while the parent head is unchanged.
+Finding-scoped checks run only for fixed candidates, so a mapping refusal does
+not block recording a verified rejection. Deterministic leg-wide preflight
+failures still stop before asking a model for any disposition. Recognized
+pre-existing check findings remain baseline evidence.
+Installed dependency reuse compares lockfiles and workspace configuration
+exactly, and compares dependency-relevant package settings (including package
+manager and overrides), package-manager rc files and declared workspace-member
+dependency/lifecycle metadata. Workspace discovery is bounded and fails closed
+on ambiguous configuration or an incomplete enumeration. Descriptive metadata
+and scripts may differ when no
+install lifecycle hooks exist. If hooks exist, the full script map is compared,
+including indirect script calls. Unfamiliar settings remain compared
+conservatively. Neither plain nor bulk addressing
+automatically installs dependencies.
+
 Use `--query='is:open label:fix'` instead of `--pulls` for GitHub search discovery.
 The executor pages through the search results and checks the reported total,
 repository identities, duplicate numbers and incomplete-results flag. Truncation

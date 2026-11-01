@@ -97,6 +97,40 @@ const reportOf = (
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
 describe('review.address composition', () => {
+  test('an engine prerequisite refusal stops the leg before paid re-review', async () => {
+    const f = await fixture();
+    const reason = 'baseline precondition failed: dependency metadata differs';
+    let refused = false;
+    try {
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          preconditionFailure: () => (refused ? reason : undefined),
+          preconditions: () =>
+            refused ? [{ kind: 'deterministic', scope: 'leg', stage: 'dependencies', reason }] : [],
+          fix: async (item) => {
+            refused = true;
+            return {
+              finding: { ...item, status: 'deferred', reason },
+              observedHead: f.record().head,
+              reason,
+              validation: [],
+            };
+          },
+        }),
+      })({ ...f.input, rounds: 10 });
+      expect(result.status).toBe('needs-human');
+      expect(result.status === 'needs-human' && result.reason).toContain(reason);
+      expect(f.calls).not.toContain('review');
+      expect(reportOf(result).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(reportOf(result).preconditions).toEqual([
+        { kind: 'deterministic', scope: 'leg', stage: 'dependencies', reason },
+      ]);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('CLI closure fixture preserves an uncertain finding as open with exit 3', async () => {
     const f = await fixture();
     try {

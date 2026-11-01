@@ -24,6 +24,7 @@ async function world(
     runBudget?: number;
     verifyClosure?: boolean;
     refuseAdmissionAt?: number;
+    admissionPrecondition?: string;
     postFixSnapshotFailure?: boolean;
     sameFile?: boolean;
     fileless?: 'first' | 'last';
@@ -481,6 +482,10 @@ async function world(
       });
       return {
         ...worker,
+        preconditionFailure: () =>
+          (admissionCalls >= (options.refuseAdmissionAt ?? Infinity)
+            ? options.admissionPrecondition
+            : undefined) ?? worker.preconditionFailure?.(),
         async withVerifiedHead<T>(action: (head: string) => Promise<T>) {
           if (++admissionCalls === options.refuseAdmissionAt)
             throw new Error('scripted admission ownership changed');
@@ -542,6 +547,18 @@ async function world(
   };
 }
 describe('review.address PR phase-one orchestration', () => {
+  test('PR admission refusal retains an existing prerequisite cause', async () => {
+    const reason = 'baseline precondition failed: dependency metadata differs';
+    const w = await world(false, { refuseAdmissionAt: 1, admissionPrecondition: reason });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      expect(result.status === 'needs-human' && result.reason).toContain(reason);
+      expect(w.reviewerCalls()).toBe(0);
+    } finally {
+      await w.cleanup();
+    }
+  });
   test('opt-in closure uncertainty refuses PR-thread resolution', async () => {
     const w = await world(false, { verifyClosure: true });
     try {

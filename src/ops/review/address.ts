@@ -39,6 +39,7 @@ import {
   type AddressAttempt,
   type AddressFix,
   type AddressWorker,
+  type AddressPrecondition,
 } from './addressWorker.js';
 import {
   verifyClosureEvidence,
@@ -107,6 +108,7 @@ export interface ReviewAddressReport {
   costUSD?: number;
   wallMs: number;
   reasons: string[];
+  preconditions?: AddressPrecondition[];
   escalation?: ReturnType<AddressWorker['escalation']>;
   /**
    * The leg's structured terminal outcome: round cap, run budget, or a
@@ -479,6 +481,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
       ).size;
       if (worker) report.escalation = worker.escalation();
+      const preconditions = worker?.preconditions?.();
+      if (preconditions?.length) report.preconditions = [...preconditions];
       try {
         await mkdir(journalDir, { recursive: true });
         await writeFile(report.reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
@@ -536,7 +540,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           budgetSpent = true;
           return 'token or wall budget exhausted';
         }
-        return undefined;
+        return worker?.preconditionFailure?.();
       };
       cleanStop = stop;
       const account = (result: WorkerResult, governed = true) => {
@@ -1738,7 +1742,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (admissionRefused)
                 return await finish(
                   'needs-human',
-                  'PR worker admission refused; persisted/caller bytes retained',
+                  worker?.preconditionFailure?.() ??
+                    'PR worker admission refused; persisted/caller bytes retained',
                 );
               if (closureRefused) {
                 if (dispatchedRecord) {
