@@ -514,7 +514,7 @@ test('refused usage settlement retains sibling reports and names the accounting 
     address,
     isolate: async (root) => root,
   })({ ...input, concurrency: 2 });
-  expect(result.status).toBe('needs-human');
+  expect(result.status).toBe('budget-exhausted');
   expect(result.report?.rows).toHaveLength(2);
   expect(result.report?.reasons.join(';')).toContain('settlement refused');
 });
@@ -536,4 +536,64 @@ test('a throwing settlement waits for siblings and preserves their individual re
   expect(result.report?.rows).toHaveLength(2);
   expect(result.report?.rows.every((row) => row.result?.status === 'ok')).toBe(true);
   expect(result.report?.reasons.join(';')).toContain('Worker rejected');
+});
+
+test('an ineligible enrolled PR remains advisory while eligible siblings dispatch', async () => {
+  const metadataGh = async (args: string[]) => {
+    if (args[0] === 'repo') return gh(args);
+    const number = Number(args[1]!.split('/').at(-1));
+    return {
+      code: 0,
+      stderr: '',
+      stdout: JSON.stringify({ ...metadata(number), draft: number === 1 }),
+    };
+  };
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh: metadataGh,
+    address,
+    isolate: async (root) => root,
+  })({ ...input, enrollments: [{ number: 1, request: enrollmentRequest }] });
+  expect(result.status).toBe('ok');
+  if (result.status === 'ok')
+    expect(result.value.excluded?.[0]?.enrollment.state).toBe('unavailable');
+  expect(address).toHaveBeenCalledTimes(1);
+});
+
+test('skipped rows name the real worker rejection and held allocation', async () => {
+  const address = vi.fn(async () => ({
+    status: 'ok' as const,
+    value: {
+      ...report(),
+      usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address,
+    isolate: async (root) => root,
+  })({ ...input, pulls: [1, 2, 3], concurrency: 2 });
+  expect(result.report?.rows).toHaveLength(3);
+  // The sticky overrun is an explicit budget refusal, not a generic missing worker result.
+  expect(result.report?.rows[2]?.reason).toBe('budget');
+  expect(result.report?.rows[2]?.detail).toContain('Worker rejected');
+  expect(result.report?.reasons.join(';')).toContain('Worker rejected');
+});
+
+test('aggregate reports the preserved isolation path for each leg', async () => {
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    gh,
+    address,
+    isolate: async (_root, number) => `/isolated/pr-${number}`,
+  })({ ...input });
+  expect(result.status).toBe('ok');
+  if (result.status === 'ok')
+    expect(result.value.preservedClones).toEqual([
+      { number: 1, path: '/isolated/pr-1' },
+      { number: 2, path: '/isolated/pr-2' },
+    ]);
 });

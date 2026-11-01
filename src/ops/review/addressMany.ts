@@ -56,6 +56,8 @@ export type ReviewAddressManyResult = OpResult<AddressManyAggregate> & {
   report?: AddressManyAggregate;
 };
 
+class IsolationRefusal extends Error {}
+
 /** Independent object store and common directory; caller receipts remain durable. */
 export async function isolateAddressMany(
   repoRoot: string,
@@ -63,6 +65,28 @@ export async function isolateAddressMany(
   options: { cloneRoot: string; target?: string },
 ): Promise<string> {
   const git = promisify(execFile);
+  // Inspect key names only: helpers and signing values may contain credentials.
+  try {
+    const local = await git('git', [
+      '-C',
+      repoRoot,
+      'config',
+      '--local',
+      '--name-only',
+      '--get-regexp',
+      '^(credential\\..*helper|commit\\.gpgsign|gpg\\.format|user\\.signingkey)$',
+    ]);
+    if (local.stdout.trim())
+      throw new IsolationRefusal(
+        'Repository-local credential-helper or signing settings require plain review.address; bulk isolation refuses to copy sensitive configuration',
+      );
+  } catch (error) {
+    if (error instanceof IsolationRefusal) throw error;
+    if ((error as { code?: unknown }).code !== 1)
+      throw new IsolationRefusal(
+        'Cannot inspect repository-local credential and signing configuration',
+      );
+  }
   await mkdir(options.cloneRoot, { recursive: true });
   const parent = await mkdtemp(resolve(options.cloneRoot, `pr-${number}-`));
   const root = resolve(parent, 'repo');
@@ -215,12 +239,6 @@ export function makeReviewAddressMany(
       );
       if (!selection.ok)
         return { status: 'needs-human', reason: JSON.stringify(selection.refusal) };
-      if (
-        input.enrollments?.some(
-          (row) => !selection.candidates.some((candidate) => candidate.number === row.number),
-        )
-      )
-        return { status: 'needs-human', reason: 'Enrollment PR is not eligible' };
       if (!selection.candidates.length)
         return { status: 'needs-human', reason: 'No eligible PRs in selection' };
       const git = promisify(execFile);
@@ -254,6 +272,7 @@ export function makeReviewAddressMany(
       const outcomes: AddressManyOutcomeInput[] = [];
       const pending = [...selection.candidates];
       const faults: string[] = [];
+      const preservedClones: Array<{ number: number; path: string }> = [];
       const requestedEnrollment = (number: number): AddressManyEnrollment =>
         input.enrollments?.some((r) => r.number === number)
           ? { state: 'unavailable', reason: 'Requested but leg not dispatched' }
@@ -315,6 +334,7 @@ export function makeReviewAddressMany(
               ? await deps.isolate(input.repoRoot, candidate.number, { cloneRoot })
               : await isolateAddressMany(input.repoRoot, candidate.number, { cloneRoot });
             isolatedRoot = root;
+            preservedClones.push({ number: candidate.number, path: root });
             if (!deps.isolate) {
               const checked = await makeGhRunner({
                 cwd: root,
@@ -370,10 +390,12 @@ export function makeReviewAddressMany(
               enrollment,
             });
           } catch (error) {
+            if (error instanceof IsolationRefusal)
+              result = { status: 'needs-human', reason: error.message };
             outcomes.push({
               number: candidate.number,
               headOid: candidate.headOid,
-              exception: String(error),
+              ...(result ? { result } : { exception: String(error) }),
               enrollment,
             });
           }
@@ -396,11 +418,14 @@ export function makeReviewAddressMany(
           if (
             isolatedRoot &&
             !deps.isolate &&
-            result?.status === 'ok' &&
-            result.value.fixes.length === 0
+            (!dispatched || (result?.status === 'ok' && result.value.fixes.length === 0))
           ) {
             try {
               await rm(dirname(isolatedRoot), { recursive: true, force: true });
+              preservedClones.splice(
+                preservedClones.findIndex((entry) => entry.path === isolatedRoot),
+                1,
+              );
             } catch (error) {
               faults.push(`PR #${candidate.number} cleanup failed: ${String(error)}`);
             }
@@ -425,7 +450,9 @@ export function makeReviewAddressMany(
           outcomes.push({
             number: candidate.number,
             headOid: candidate.headOid,
-            exception: 'Worker failed before producing outcome',
+            exception: faults.length
+              ? `Not dispatched after worker failure: ${faults.join('; ')}`
+              : 'Worker failed before producing outcome',
             enrollment: requestedEnrollment(candidate.number),
           });
       }
@@ -438,7 +465,18 @@ export function makeReviewAddressMany(
       if (!rolled.ok) return { status: 'failed', error: JSON.stringify(rolled.refusal) };
       const report = {
         ...rolled.aggregate,
-        ...(faults.length && !['failed', 'indeterminate'].includes(rolled.aggregate.status)
+        preservedClones,
+        rows: rolled.aggregate.rows.map((row) =>
+          row.status === 'not-admitted' && faults.length
+            ? { ...row, detail: `Runtime faults: ${faults.join('; ')}` }
+            : row,
+        ),
+        excluded: selection.excluded.map((row) => ({
+          number: row.number,
+          reason: row.exclusion.reason,
+          enrollment: requestedEnrollment(row.number),
+        })),
+        ...(faults.length && rolled.aggregate.status === 'ok'
           ? { status: 'needs-human' as const }
           : {}),
         reasons: [

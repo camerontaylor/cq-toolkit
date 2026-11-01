@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
+import { isolateAddressMany } from '../../../src/ops/review/addressMany.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
@@ -87,6 +88,7 @@ test.each([
   'publish',
   'publish-reuse',
   'publish-reuse-alias',
+  'publish-reuse-bulk',
   'publish-reuse-modified-ledger',
   'publish-reuse-modified-history',
   'publish-reuse-caller',
@@ -120,7 +122,11 @@ test.each([
     const siblings =
       mode === 'publish-siblings' || ledgerSnapshot || rejection || admissionTransition;
     const reuse = mode.startsWith('publish-reuse');
-    const refusedReuse = reuse && mode !== 'publish-reuse' && mode !== 'publish-reuse-alias';
+    const refusedReuse =
+      reuse &&
+      mode !== 'publish-reuse' &&
+      mode !== 'publish-reuse-alias' &&
+      mode !== 'publish-reuse-bulk';
     const publish = mode === 'publish' || reuse || siblings;
     const earlyTamper = mode === 'bookkeeping-before-disposition';
     const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
@@ -525,7 +531,9 @@ test.each([
         );
       };
       const result = await makeReviewAddress({
-        ...(reuse ? { coordinationRoot: join(journal, 'shared-state') } : {}),
+        ...(reuse && mode !== 'publish-reuse-bulk'
+          ? { coordinationRoot: join(journal, 'shared-state') }
+          : {}),
         gh,
         drivers,
         git,
@@ -776,12 +784,40 @@ test.each([
           )
           .digest('hex');
         const receiptPath = join(
-          journal,
-          'shared-state/cq-review-address',
+          repo.root,
+          '.git/cq-review-address',
           namespace,
           'bookkeeping.json',
         );
         const receiptBytes = await readFile(receiptPath, 'utf8');
+        if (mode === 'publish-reuse-bulk') {
+          const clone = await isolateAddressMany(repo.root, 7, {
+            cloneRoot: join(journal, 'clones'),
+          });
+          const bulk = await makeReviewAddress({
+            gh,
+            git,
+            drivers,
+            coordinationRoot: repo
+              .git('rev-parse', '--path-format=absolute', '--git-common-dir')
+              .trim(),
+          })({
+            repoRoot: clone,
+            source: 'pr:7',
+            rounds: 1,
+            push: false,
+          });
+          expect(bulk.status, JSON.stringify(bulk)).toBe('ok');
+          expect(await readFile(receiptPath, 'utf8')).toBe(receiptBytes);
+          const cloneReceipt = JSON.parse(
+            await readFile(
+              join(clone, '.git/cq-review-address', namespace, 'bookkeeping.json'),
+              'utf8',
+            ),
+          ) as { root: string };
+          expect(cloneReceipt.root).not.toBe(originalRoot);
+        }
+
         const receipt = JSON.parse(receiptBytes) as {
           files: Array<{ path: string; sha256: string }>;
           branch: string;
@@ -848,7 +884,9 @@ test.each([
           gh,
           git,
           drivers,
-          coordinationRoot: join(journal, 'shared-state'),
+          ...(mode !== 'publish-reuse-bulk'
+            ? { coordinationRoot: join(journal, 'shared-state') }
+            : {}),
         })({
           repoRoot: mode === 'publish-reuse-alias' ? callerAlias : repo.root,
           source: 'pr:7',

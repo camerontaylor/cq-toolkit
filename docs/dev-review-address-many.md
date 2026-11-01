@@ -35,19 +35,25 @@ clone with a separate Git common directory. Each checkout retains its ownership
 lock; plain and bulk calls additionally share a per-PR lock under the caller's
 common directory, preventing overlapping writers to that PR. Linked worktrees
 alone cannot provide concurrent checkout isolation. Durable dispatch receipts,
-bookkeeping, pending re-requests and run journals stay under the caller's common
-directory across bulk invocations.
+pending re-requests and run journals stay under the caller's common directory
+across bulk invocations. Checkout-bound bookkeeping stays in each checkout
+common directory, so an isolated leg cannot overwrite another worktree’s receipt.
 
 Clones default to `<caller-common-dir>/cq-address-many-clones`; `--cloneRoot`
 sets another disk location. Clone setup failures remove their partial directory.
 Successful legs with no fixes remove their clone after the report is written;
-legs with fixes or non-success results retain it for inspection and recovery. Dependencies link to the caller's
-installed packages; the address engine still creates private candidate metadata.
+legs with fixes or post-dispatch non-success results retain it for inspection
+and recovery. Clean clones refused before dispatch are removed. The aggregate
+`preservedClones` array names every retained checkout by PR number and path.
+Dependencies link to the caller's installed packages; the address engine still creates private candidate metadata.
 The clone's origin points to the caller's origin for fetching and publication.
 Its remote target ref is freshly fetched, and its resolved GitHub repository
 must match `repo` before dispatch. The caller’s effective Git author and
 committer identities are copied into the clone, including repository-local
-identity settings.
+identity settings. Repository-local credential-helper or signing configuration
+causes an explicit `needs-human` refusal directing the caller to plain
+`review.address`; bulk isolation inspects key names only and does not copy
+helper commands, keys or other potentially sensitive values.
 Dirty caller files are not copied; use a committed configuration.
 
 Each admitted PR reserves `tokensPerPr` from the shared `maxTokens` allocation.
@@ -64,9 +70,11 @@ uses the existing `review.enqueue` input (`requestId` and deferred-author
 are accepted. Queue configuration uses `CQ_QUEUE_SSH_ALIAS`. Missing capability,
 rejection or transport failure records `unavailable` on that row and the address
 leg continues. Enrollment never establishes fixing or review completion. Rows
-without a request remain `not-requested`. Duplicate and out-of-selection
-enrollment rows are refused. A requested row that cannot dispatch records
-`unavailable` rather than `not-requested`. No inline vendor review is started.
+without a request remain `not-requested`. Duplicate enrollment rows and rows
+outside the requested listing are refused. Ineligible PRs stay
+in the aggregate `excluded` rows with advisory `unavailable` enrollment; they
+do not prevent eligible sibling legs from running. A requested row that cannot
+dispatch records `unavailable` rather than `not-requested`. No inline vendor review is started.
 
 A head or eligibility change before dispatch records `needs-human` and returns
 the unused reservation. Live acceptance remains a separate post-merge step.

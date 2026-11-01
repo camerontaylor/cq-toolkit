@@ -223,3 +223,18 @@ test('failed isolation removes its partial clone directory', async () => {
     await repo.cleanup();
   }
 });
+
+test.each(['credential.helper', 'commit.gpgsign', 'gpg.format', 'user.signingkey'])(
+  'bulk explicitly refuses repository-local %s without copying its value',
+  async (key) => {
+    const repo = await makeTestRepo();
+    try {
+      repo.git('config', key, 'local-sensitive-setting');
+      await expect(
+        isolateAddressMany(repo.root, 7, { cloneRoot: join(dirname(repo.root), 'clones') }),
+      ).rejects.toThrow('require plain review.address');
+    } finally {
+      await repo.cleanup();
+    }
+  },
+);

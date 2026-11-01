@@ -1500,7 +1500,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             );
             await mkdir(receiptDir, { recursive: true });
             dispatchLogPath = resolve(receiptDir, 'dispatch.jsonl');
-            bookkeepingReceiptPath = resolve(await realpath(receiptDir), 'bookkeeping.json');
+            const checkoutReceipts = resolve(root, commonDir, 'cq-review-address', namespace);
+            await mkdir(checkoutReceipts, { recursive: true });
+            bookkeepingReceiptPath = resolve(await realpath(checkoutReceipts), 'bookkeeping.json');
             pendingRerequestPath = resolve(await realpath(receiptDir), 'pending-rerequests.json');
             persistedBookkeeping = makeAddressBookkeepingReceipt({
               path: bookkeepingReceiptPath,

@@ -655,6 +655,8 @@ export type AddressManyRowStatus =
   | 'exception';
 
 export interface AddressManyRow {
+  /** Runtime failure context for a skipped leg; never allocation authority. */
+  detail?: string;
   scope: { repo: string; number: number; headOid: string };
   status: AddressManyRowStatus;
   /** `trusted` only when the report's first reviewed head equals the admitted head. */
@@ -692,6 +694,10 @@ export interface AddressManyTotals {
 }
 
 export interface AddressManyAggregate {
+  /** Runtime isolation evidence; omitted by the pure planner. */
+  preservedClones?: ReadonlyArray<{ number: number; path: string }>;
+  /** Selection exclusions with advisory enrollment dispositions. */
+  excluded?: ReadonlyArray<{ number: number; reason: string; enrollment: AddressManyEnrollment }>;
   repo: string;
   accounting: AddressManyAccounting;
   rows: readonly AddressManyRow[];
