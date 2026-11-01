@@ -81,7 +81,7 @@ import { parseIndependentReview } from '../../shared/independent-review.js';
  * `conflicting`: the branch cannot merge as it stands (dirty merge state);
  * `awaiting`: the PR is fine but not ready — the table is waiting on data,
  * a first look, or quiet time; `has-issues`: a human owes the PR work
- * (unresolved external review threads); `eligible`: the I2 acceptance
+ * (review objections); `eligible`: the I2 acceptance
  * condition holds — dispatch may offer the merge. Changing the vocabulary
  * is a recorded deviation.
  */
@@ -89,7 +89,7 @@ export type PrMergeVerdict = 'never' | 'conflicting' | 'awaiting' | 'has-issues'
 
 /** The decision table's output: the verdict, WHY (stable snake_case, one
  * value per table row — safe to log, group, and assert on), and the
- * unresolved-external-thread count the row-5 decision was made from
+ * advisory unresolved-external-thread count
  * (surfaced on EVERY verdict, whatever row fired, so callers never
  * recount). */
 export interface PrClassification {

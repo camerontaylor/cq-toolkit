@@ -47,11 +47,16 @@ jobs:
       - name: Denylist outgoing commit scan
         env:
           SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           base="$SCAN_BASE"
           if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-            base=$(git hash-object -t tree /dev/null)
-            base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
+            if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+              base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
+            else
+              base=$(git hash-object -t tree /dev/null)
+              base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
+            fi
           fi
           ./scripts/denylist-scan --base "$base"
       - name: Denylist self-test

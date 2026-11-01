@@ -65,7 +65,7 @@
 // non-retryable merge failure and the inner mergePr is never invoked. The
 // base branch NAME the executor's readBaseRef saw right before the call is
 // pinned too: the recheck refuses a changed, unverified, or protected base.
-// Unresolved external review threads (classify row 5's count) refuse.
+// Open threads are advisory; the merging agent triages them.
 //
 // I11 LAG. GraphQL reviews/reviewThreads lag REST: before judging, the
 // recheck cross-checks the REST reviews and review-comments collections
@@ -1216,7 +1216,7 @@ const recheckOrThrow = async (
  * durable) and observe the tuple in memory; (g0) the I11 REST cross-check:
  * refuse `review data lag: …` when a submitted REST review or a REST thread
  * root is missing from the snapshot, or a REST read fails/is capped (see
- * checkReviewDataLag); (g) refuse unresolved external review threads; (h) refuse without head-bound trusted acceptance or with
+ * checkReviewDataLag); (g) report open review threads; (h) refuse without head-bound trusted acceptance or with
  * an outstanding objection; (i) refuse unless settled per the observed
  * ledger or a freshly validated trusted all-clear postdates the pinned
  * commit; (j) WRITE the observation (compare-and-swap) and answer ok — a

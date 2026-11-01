@@ -4,13 +4,13 @@
 // Pinned here, in table order:
 //   1. Every ROW of the I2 table (first match wins): draft → never, DIRTY →
 //      conflicting, truncated → awaiting (fail closed), unknown last-commit
-//      → awaiting (fail closed), unresolved external threads → has-issues,
+//      → awaiting (fail closed), unresolved external threads → advisory count,
 //      no acceptable review → awaiting, explicit all-clear postdating the
 //      last commit → eligible, settle window elapsed/pending →
 //      eligible/awaiting.
 //   2. PRECEDENCE — the rows are an order, not a menu: draft beats
 //      everything, conflicting beats truncated, truncated beats has-issues,
-//      has-issues beats no-review.
+//      open threads do not replace review evidence.
 //   3. THE SETTLE BOUNDARY — exactly at the window is eligible, one ms
 //      short is awaiting, and the flip comes from the INJECTED nowMs (same
 //      candidate, different clock reading → different verdict; the table
