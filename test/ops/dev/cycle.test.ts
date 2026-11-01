@@ -1324,8 +1324,8 @@ describe('dev.cycle', () => {
   });
 
   test('P2 v9bK7: the follow-up command carries a NON-DEFAULT target, quoted; the default is omitted', () => {
-    expect(followUpCommand(7, '/repo', 'main')).toBe(
-      "cq review.address --repoRoot='/repo' --target='main' --source=pr:7",
+    expect(followUpCommand(7, '/repo', 'release')).toBe(
+      "cq review.address --repoRoot='/repo' --target='release' --source=pr:7",
     );
     expect(followUpCommand(7, '/repo', "o'brien-queue")).toBe(
       "cq review.address --repoRoot='/repo' --target='o'\\''brien-queue' --source=pr:7",
@@ -1342,7 +1342,7 @@ describe('dev.cycle', () => {
     repo.git('push', '-q', 'origin', 'origin/main:refs/heads/release');
     repo.git('fetch', '-q', 'origin');
     repo.git('push', '-q', 'origin', 'feature/x');
-    // Records must be pinned to the MAIN target (readiness refuses records
+    // Records must be pinned to the RELEASE target (readiness refuses records
     // recorded for another target). The open leg captures the target it was
     // called with; the clean address leg ends ok, so the READY path runs.
     const opens: PrOpenInput[] = [];
@@ -1366,9 +1366,9 @@ describe('dev.cycle', () => {
     const result = await op({ repoRoot: repo.root, target: 'release' });
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
-      expect(opens[0]?.target).toBe('main');
-      expect(result.value.followUp).toBe(followUpCommand(46, repo.root, 'main'));
-      expect(result.value.followUp).toContain("--target='main'");
+      expect(opens[0]?.target).toBe('release');
+      expect(result.value.followUp).toBe(followUpCommand(46, repo.root, 'release'));
+      expect(result.value.followUp).toContain("--target='release'");
     }
   });
 

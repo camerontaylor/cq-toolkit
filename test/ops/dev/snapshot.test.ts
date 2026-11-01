@@ -47,7 +47,7 @@ function recorder() {
 const input = {
   action: 'enroll' as const,
   requestId: 'tree-wire',
-  target: 'origin/main',
+  target: 'origin/merge-queue',
   cycle: 1,
 };
 

@@ -140,7 +140,7 @@ describe('dev.ready', () => {
       target: 'release',
     });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain("not 'main'");
+    if (result.status === 'needs-human') expect(result.reason).toContain("not 'release'");
   });
 
   test('a same-identity no-fresh tail resolves to ready through its reuse record (#485)', async () => {

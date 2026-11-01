@@ -1446,7 +1446,7 @@ const admissionInput = {
   requestId: 'worker-1',
   base: 'a'.repeat(40),
   head: 'b'.repeat(40),
-  target: 'origin/main',
+  target: 'origin/merge-queue',
   cycle: 1,
 } as const;
 const admissionBinding = {
@@ -1639,7 +1639,7 @@ describe('dev.review — one op discriminated on action', () => {
         requestId: 'branch-cycle-1',
         base: 'a'.repeat(40),
         head: 'b'.repeat(40),
-        target: 'origin/main',
+        target: 'origin/merge-queue',
         cycle: 1,
       }).success,
     ).toBe(true);
