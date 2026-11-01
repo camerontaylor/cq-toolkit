@@ -489,8 +489,38 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
       await f.cleanup();
     }
   });
+  test.each([
+    { remaining: 12_000, step: 20_000, expected: 12_000 },
+    { remaining: 20_000, step: 7000, expected: 7000 },
+    { remaining: 60_000, step: 60_000, expected: 30_000 },
+  ])(
+    'diagnostic scan timeout follows budgets with a 30s ceiling (%j)',
+    async ({ remaining, step, expected }) => {
+      let timeout: number | undefined;
+      const f = await fixture(undefined, `process.exitCode=2;`, {
+        remainingWallMs: () => remaining,
+        unitWallMs: 120_000,
+        configure: (config) => {
+          config.budgets!.step!.wallMs = step;
+        },
+        scanner: async (components, options) => {
+          timeout = options?.timeoutMs;
+          return components.map((c) => ({ component: c.component, hits: [] }));
+        },
+      });
+      try {
+        await f.engine.fix(finding(), 1);
+        expect(timeout).toBe(expected);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('unresponsive diagnostic scan is bounded', async () => {
     const f = await fixture(undefined, `process.exitCode=2;`, {
+      configure: (config) => {
+        config.budgets!.step!.wallMs = 1000;
+      },
       scanner: () => new Promise(() => {}),
     });
     try {

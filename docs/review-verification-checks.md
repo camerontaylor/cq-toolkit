@@ -57,5 +57,5 @@ positive, incomplete or unavailable scans withhold both tails. Output uses a
 synthetic `check-output.txt` path for content scanning;
 protected-file path rules do not apply. Labels distinguish secret matches from
 scanner failure or unavailability. Only retained baseline diagnostics are scanned,
-with a one-second cap shortened by the remaining operation budgets and
+with a 30-second ceiling shortened by the remaining operation budgets and
 cancellation. No environment values are recorded.

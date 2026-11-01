@@ -575,7 +575,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 const limit = Math.max(
                   0,
                   Math.min(
-                    1000,
+                    30_000,
                     deps.remainingWallMs(),
                     policy.budgets.step.wallMs,
                     remainingUnit(finding),
