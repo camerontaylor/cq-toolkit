@@ -29,7 +29,8 @@
 //     forwards the `RunOptions` second parameter unchanged (a dropping wrapper
 //     compiles and silently kills cancellation; conformance leg b-v catches
 //     that).
-//   - SESSION RETENTION: 'keep' (the default) wraps nothing — session
+//   - SESSION RETENTION: 'keep' (the default, absent a configured
+//     `sessionLogs.retention`) wraps nothing — session
 //     records are worker evidence. 'reap-on-settle' deletes, after the run
 //     settles WHATEVER the verdict, ONLY the FRESH record that run created:
 //     the run created a record iff it resolved with a sessionId AND the
@@ -76,9 +77,10 @@ export interface DriverRequest {
   /** Fail-closed gate for each complete ai-sdk request, including tool results. */
   beforeRequest?: AiSdkDriverOptions['beforeRequest'];
   /**
-   * Session-record retention for this run (§2.5): 'keep' (the default) keeps
-   * the record; 'reap-on-settle' deletes the FRESH record this run created
-   * once the run settles, whatever the verdict.
+   * Session-record retention for this run (§2.5): 'keep' keeps the record;
+   * 'reap-on-settle' deletes the FRESH record this run created once the run
+   * settles, whatever the verdict. Unspecified, it falls back to the
+   * deployment's `sessionLogs.retention`, else 'keep'.
    */
   sessionRetention?: 'keep' | 'reap-on-settle';
 }
@@ -457,17 +459,20 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
       const inner = constructLane(lane, request, config);
       // Session-log preservation switch (item 1.6): `CQ_SESSION_LOGS=off`
       // or `sessionLogs.enabled: false` forces the reap wrapper ON for
-      // every resolve — our own records are reaped at settle; retention:
-      // 'reap-on-settle' does the same without disabling recording (the
-      // OFF case additionally skips work-record writes when they land).
-      // The request-level flag (the op's explicit choice) still wins when
-      // it asks for MORE retention than the switch ('keep' beats off only
-      // when the switch is not hard-off).
+      // every resolve — our own records are reaped at settle (the OFF case
+      // additionally skips work-record writes when they land). Retention
+      // precedence, most specific wins: the hard-off switch, then the
+      // request's explicit `sessionRetention` (the op's per-run choice,
+      // either direction), then the deployment's configured
+      // `sessionLogs.retention` — so `sessionLogs: { retention:
+      // 'reap-on-settle' }` reaps without disabling recording even when a
+      // request leaves its retention unspecified. Absent everywhere: the
+      // 'keep' default (records are worker evidence, §2.5). The wrapper
+      // still only reaps a FRESH record (no sessionRef on the invocation).
       const switchOff = sessionLogsOff(config);
-      const retention =
-        switchOff || request.sessionRetention === 'reap-on-settle'
-          ? 'reap-on-settle'
-          : request.sessionRetention;
+      const retention = switchOff
+        ? 'reap-on-settle'
+        : (request.sessionRetention ?? config.sessionLogs?.retention);
       const reaping =
         retention === 'reap-on-settle'
           ? withReapOnSettle(inner, sessionsDirFor(lane, config))
