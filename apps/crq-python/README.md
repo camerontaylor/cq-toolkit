@@ -4,7 +4,9 @@ crq is the single consumer of the CodeRabbit CLI quota for cq-toolkit. The
 script schedules, reviews, verifies and publishes; models only judge and repair.
 PRs merge directly to `main`; crq records post-merge review as visible debt.
 Merged discovery accepts `main` and the retiring `merge-queue` branch, retaining
-#710's frozen interval and restarting partial scans with the combined query.
+#710's history floor. Automatic discovery is enabled from 2026-11-01, with
+a rolling upper bound and resumable recent-PR pages; manual numeric scans
+retain frozen intervals.
 Historical promotion queue records load unchanged but are ignored by scheduling,
 slot reservations and summaries. Legacy private overlay keys remain accepted
 while host deployments lag. No promotion status, audit or admin commands run.

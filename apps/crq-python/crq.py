@@ -173,11 +173,11 @@ class Spool:
         self.host = cfg.get("ssh_alias") or cfg.get("host")
         self.dir = cfg.get("dir") or "/var/lib/crq-spool"
         # removed (owner D4: no fallback): refuse the spool rather than ignore the key
-        self.refused = ("config promotion.signer.spool.legacy_shell is not supported: the dedicated forced-command "
+        self.refused = ("publisher_spool.legacy_shell is not supported: the dedicated forced-command "
                         "key is the only transport (owner decision D4) — remove it") if "legacy_shell" in cfg else None
         if self.host and not self.refused and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*",
                                                                self.host):
-            self.refused = (f"promotion.signer.spool.ssh_alias must be a literal user@host (ssh runs with -F none), "
+            self.refused = (f"publisher_spool.ssh_alias must be a literal user@host (ssh runs with -F none), "
                             f"got {self.host!r}")
 
     def _ssh(self, remote: str, data: Optional[bytes] = None, *, timeout: int = 45) -> str:
@@ -189,7 +189,7 @@ class Spool:
             auth = ["-F", "none", "-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes",
                     "-o", "IdentityAgent=none", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
         else:
-            raise SpoolUnreachable("no dedicated spool key configured (promotion.signer.spool.ssh_key) — refusing "
+            raise SpoolUnreachable("no dedicated spool key configured (publisher_spool.ssh_key) — refusing "
                                    "to use a general-purpose ssh identity")
         cmd = ["/usr/bin/ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
                "-o", "ServerAliveCountMax=2", self.host, remote]
@@ -1012,7 +1012,7 @@ def _save_discovery_queue(q, stage):
                                      "; tick aborted; persisted progress must be revalidated") from None
 
 
-def _read_reconcile_wrapper(path, interval, page_budget):
+def _read_reconcile_wrapper(path, interval, page_budget, recent=False):
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -1031,7 +1031,7 @@ def _read_reconcile_wrapper(path, interval, page_budget):
     source = wrapper["source"]
     if (set(source) != {"version", "method", "repo", "base", "repository_id", "ceiling", "window"} or
             type(source.get("version")) is not int or source["version"] != 1 or
-            source.get("method") != "all-number-slots-v1" or source.get("repo") != REPO or
+            source.get("method") != ("closed-updated-v1" if recent else "all-number-slots-v1") or source.get("repo") != REPO or
             source.get("base") != "main-or-merge-queue" or source.get("window") != merged_reconcile.NUMBER_WINDOW or
             not isinstance(source.get("repository_id"), str) or not source["repository_id"] or
             type(source.get("ceiling")) is not int or
@@ -1045,15 +1045,16 @@ def _read_reconcile_wrapper(path, interval, page_budget):
     return wrapper
 
 
-def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
+def reconcile_merged(q, *, after, before, page_budget, dry_run=False, recent=False):
     """Caller owns tick.lock; persist source/page before reads and Q1 before watermark."""
     interval = merged_reconcile.normalize_interval(after, before)
     if before >= iso():
         raise merged_reconcile.ReconcileRefused("upper bound must precede scan startup")
     merged_reconcile.normalize_page_budget(page_budget)
-    key = review_receipt.digest({"repo": REPO, "base": "main-or-merge-queue", **interval})
+    key = review_receipt.digest({"repo": REPO, "base": "main-or-merge-queue", **interval,
+                                **({"method": "closed-updated-v1"} if recent else {})})
     path = STATE / "reconcile" / (key + ".json")
-    wrapper = _read_reconcile_wrapper(path, interval, page_budget)
+    wrapper = _read_reconcile_wrapper(path, interval, page_budget, recent=recent)
 
     def save_wrapper():
         wrapper["digest"] = review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})
@@ -1069,7 +1070,10 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
             raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
 
     if wrapper is None:
-        source = merged_reconcile.freeze_source(forge, repo=REPO, base="main-or-merge-queue")
+        source = ({"version": 1, "method": "closed-updated-v1", "repo": REPO,
+                   "base": "main-or-merge-queue", "repository_id": REPO, "ceiling": 0,
+                   "window": merged_reconcile.NUMBER_WINDOW} if recent else
+                  merged_reconcile.freeze_source(forge, repo=REPO, base="main-or-merge-queue"))
         wrapper = {"source": source, "checkpoint": None}
         if not dry_run:
             save_wrapper()
@@ -1085,7 +1089,8 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
                                                    base="main-or-merge-queue", allow_complete=True)
     else:
         result = merged_reconcile.reconcile(None,
-            lambda cursor: merged_reconcile.number_page(forge, source, cursor, repo=REPO, base="main-or-merge-queue"),
+            lambda cursor: (recent_merged_page(cursor, after) if recent else
+                merged_reconcile.number_page(forge, source, cursor, repo=REPO, base="main-or-merge-queue")),
             repo=REPO, base="main-or-merge-queue", **interval, page_budget=page_budget, checkpoint_raw=raw,
             checkpoint_save=persist, dry_run=dry_run)
     summary = {**result["summary"], "inventory_digest": result["digest"],
@@ -1116,8 +1121,51 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     return summary
 
 
-def discover_merged(q, budget, *, interval=None):
-    """Natural tick adapter; configured bounds take priority over retained state."""
+def rolling_discovery_interval(q, config):
+    """Keep the configured history floor; freeze only each in-progress scan."""
+    before = iso(now() - dt.timedelta(seconds=1))
+    floor = merged_reconcile.normalize_interval(config.get("after"), before)["after"]
+    active = q.get("merged_discovery") or {}
+    if (not active.get("complete") and active.get("after", "") >= floor
+            and active.get("before", "") < before and active.get("after", "") < active.get("before", "")):
+        return merged_reconcile.normalize_interval(active["after"], active["before"])
+    watermark = q.get("merged_watermark")
+    after = max(floor, iso(parse_iso(watermark) - dt.timedelta(minutes=5))) if watermark else floor
+    return merged_reconcile.normalize_interval(after, before)
+
+
+def recent_merged_page(cursor, after):
+    """Newest closed PRs first; stop at the history floor, with resumable pages."""
+    page = 1 if cursor is None else int(cursor)
+    if page < 1 or (cursor is not None and str(page) != cursor):
+        raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
+    try:
+        rows = gh_json(["api", f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}"])
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, deferred_refresh.RefreshExhausted):
+        raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise merged_reconcile.ReconcileRefused("invalid closed-PR page")
+    records = []
+    older = False
+    for row in rows:
+        if not isinstance(row, dict):
+            raise merged_reconcile.ReconcileRefused("invalid closed-PR record")
+        updated = row.get("updated_at")
+        merged_reconcile.normalize_interval("1970-01-01T00:00:00Z", updated)
+        if updated <= after:
+            older = True
+        if "merged_at" not in row:
+            raise merged_reconcile.ReconcileRefused("missing merge metadata")
+        if row["merged_at"] and (row.get("base") or {}).get("ref") in ("main", "merge-queue"):
+            records.append({"number": row.get("number"), "mergedAt": row["merged_at"],
+                "mergeCommit": {"oid": row.get("merge_commit_sha")},
+                "headRefOid": (row.get("head") or {}).get("sha")})
+    more = len(rows) == 100 and not older
+    return {"records": records, "has_next_page": more, "next_cursor": str(page + 1) if more else None}
+
+
+def discover_merged(q, budget, *, interval=None, recent=False):
+    """Persist a bounded discovery scan; resume it before rolling the next upper."""
     caller = q
     q = json.loads(json.dumps(q))
     active = q.get("merged_discovery") or {}
@@ -1138,7 +1186,7 @@ def discover_merged(q, budget, *, interval=None):
         _save_discovery_queue(q, "bounds-save")
     try:
         with forge_window(budget):
-            result = reconcile_merged(q, after=after, before=before, page_budget=4)
+            result = reconcile_merged(q, after=after, before=before, page_budget=4, recent=recent)
         q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
         _save_discovery_queue(q, "discovery-summary-save")
         if result["complete"]:
@@ -1844,9 +1892,9 @@ def reviewed_head(rec: Dict[str, Any]) -> str:
     return rec.get("pr_head") or rec["head"]
 
 
-def chains_to_merge_queue(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]]) -> bool:
+def chains_to_target(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]]) -> bool:
     for _ in range(8):
-        if p["baseRefName"] == "merge-queue":
+        if p["baseRefName"] in ("main", "merge-queue"):
             return True
         p = by_head.get(p["baseRefName"])
         if p is None:
@@ -1885,11 +1933,11 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
     by_head = {p["headRefName"]: p for p in opened}
     for p in sorted(opened, key=lambda x: x["number"]):
         n, head = p["number"], p["headRefOid"]
-        if p["isDraft"] or not chains_to_merge_queue(p, by_head):
+        if p["isDraft"] or not chains_to_target(p, by_head):
             continue
         mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")]
         if not mine:
-            stacked = "" if p["baseRefName"] == "merge-queue" else f", stacked on {p['baseRefName']}"
+            stacked = "" if p["baseRefName"] in ("main", "merge-queue") else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
                      why=f"open PR not yet enrolled{stacked}")
             continue
@@ -2124,7 +2172,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
         if not started:
             log.append("no eligible item this tick")
     if dry:
-        log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(q["items"], key=sort_key)
+        log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(live_items(q), key=sort_key)
                 if i["state"] == "pending" and i.get("wait_reason")]
     return started, has_coverage
 
@@ -2132,16 +2180,14 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
 def read_slot_usage(q):
     """Subtract reservations lacking vendor evidence BEFORE the usage snapshot.
 
-    Aggregate usage cannot identify an unclaimed signer or a detached child
-    still preparing its CLI session. Never reallocate those promised slots.
-    Signer claims/start journals are pre-admission too: retain their hold until
-    the result is harvested. Local progress may be cached only after a valid
+    Aggregate usage cannot identify a detached child still preparing its CLI
+    session. Never reallocate those promised slots. Local progress may be
+    cached only after a valid
     subsequent usage observation, never from a pid or review_context alone.
     """
     held = []
     observed = []
     for item in live_items(q):
-        request = item.get("request") or {}
         if item["state"] == "reviewing":
             run = item.get("run") or {}
             if run.get("vendor_observed"):
@@ -2272,13 +2318,11 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         discovery = CONFIG.get("merged_discovery")
         if isinstance(discovery, dict) and discovery.get("enabled") is True:
             try:
-                interval = merged_reconcile.normalize_interval(discovery.get("after"), discovery.get("before"))
-                if interval["before"] >= iso():
-                    raise ValueError("interval must end before startup")
+                interval = rolling_discovery_interval(q, discovery)
             except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
                 log.append("merged discovery disabled: invalid configured interval")
             else:
-                log += discover_merged(q, budget, interval=interval)
+                log += discover_merged(q, budget, interval=interval, recent=True)
         with forge_window(budget):
             refreshed = deferred_refresh.refresh_deferred(q,
                 verify_source=verify_deferred_source, find_source=find_deferred_source,

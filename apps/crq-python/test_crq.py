@@ -1303,8 +1303,58 @@ class CurrentTest(unittest.TestCase):
         self.assertFalse(crq.has_collectable_runs(saved))
         self.assertEqual(saved["merged_watermark"], interval["before"])
 
+    def test_next_tick_discovers_main_merge_after_old_upper_bound(self):
+        floor = "2026-10-01T00:00:00Z"
+        old_upper = "2026-10-27T00:00:00Z"
+        self.q.update(created_at=floor, merged_watermark=old_upper,
+                      merged_discovery={"after": floor, "before": old_upper, "complete": True})
+        crq.save_queue(self.q)
+        rows = [{"number": 750, "base": {"ref": "main"},
+                 "updated_at": "2026-10-29T00:00:00Z", "merged_at": "2026-10-29T00:00:00Z",
+                 "merge_commit_sha": self.merge, "head": {"sha": self.merge}}]
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {
+                "enabled": True, "after": floor, "before": old_upper}}), \
+             mock.patch.object(crq, "gh_json", return_value=rows) as forge, \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("fixture")), \
+             mock.patch.object(crq, "now", return_value=crq.parse_iso("2026-10-30T00:00:00Z")):
+            self.tick(discovery=True)
+        saved = crq.load_queue()
+        self.assertEqual([i["pr"] for i in saved["items"]], [750])
+        self.assertEqual(saved["items"][0]["state"], "pending")
+        self.assertGreater(saved["merged_watermark"], old_upper)
+        self.assertGreaterEqual(saved["merged_discovery"]["after"], floor)
+        self.assertEqual(forge.call_count, 1)
+        self.assertIn("sort=updated&direction=desc", forge.call_args.args[0][1])
+
+    def test_open_main_and_stacked_main_prs_enroll(self):
+        opened = [{"number": n, "isDraft": False, "baseRefName": base,
+                   "headRefName": head, "headRefOid": self.merge}
+                  for n, base, head in [(750, "main", "feature"),
+                      (751, "feature", "stacked"), (752, "merge-queue", "legacy")]]
+        with mock.patch.object(crq, "gh_json", return_value=opened):
+            crq.enroll(self.q, False)
+        self.assertEqual({i["pr"] for i in self.q["items"]}, {750, 751, 752})
+
+    def test_recent_pages_stop_at_floor_and_resume(self):
+        row = {"number": 750, "base": {"ref": "main"},
+               "updated_at": "2026-10-29T00:00:00Z", "merged_at": "2026-10-29T00:00:00Z",
+               "merge_commit_sha": self.merge, "head": {"sha": self.merge}}
+        with mock.patch.object(crq, "gh_json", return_value=[row] * 100):
+            page = crq.recent_merged_page(None, "2026-10-27T00:00:00Z")
+        self.assertEqual(page["next_cursor"], "2")
+        with mock.patch.object(crq, "gh_json", return_value=[row] * 100) as forge:
+            page = crq.recent_merged_page("2", "2026-10-30T00:00:00Z")
+        self.assertIsNone(page["next_cursor"])
+        self.assertTrue(forge.call_args.args[0][1].endswith("page=2"))
+
     def forge_inventory(self, count=125):
         def forge(args):
+            if len(args) == 2 and "/pulls?" in args[1]:
+                page = int(args[1].rsplit("page=", 1)[1])
+                return [{"number": n, "base": {"ref": "merge-queue"},
+                         "updated_at": "2026-10-02T00:00:00Z", "merged_at": "2026-10-02T00:00:00Z",
+                         "merge_commit_sha": self.merge, "head": {"sha": self.merge}}
+                        for n in range((page - 1) * 100 + 1, min(page * 100, count) + 1)]
             query = args[-1]
             repository = {"id": "repo-id", "nameWithOwner": crq.REPO}
             if "issues(last:" in query:
@@ -1424,11 +1474,10 @@ class CurrentTest(unittest.TestCase):
             self.tick(only="selection", discovery=True)
             self.assertNotIn("merged_watermark", crq.load_queue())
             self.tick(discovery=True)
-            self.tick(discovery=True)
         q = crq.load_queue()
         self.assertEqual(q["merged_reconcile"]["represented"], 125)
         self.assertEqual(q["merged_reconcile"]["after"], interval["after"])
-        self.assertEqual(q["merged_reconcile"]["before"], interval["before"])
+        self.assertGreater(q["merged_reconcile"]["before"], interval["before"])
         self.assertEqual(len(q["items"]), 125)
 
 
@@ -1483,7 +1532,7 @@ class CurrentTest(unittest.TestCase):
     def test_real_tick_recovery_budget_shared_and_exhausted_debt_untouched(self):
         self.q["created_at"] = "2026-10-01T00:00:00Z"
         entry = self.deferred_entry()
-        self.q["queue_client_requests"] = {f"request-{n:02}": copy.deepcopy(entry) for n in range(3)}
+        self.q["queue_client_requests"] = {f"request-{n:02}": copy.deepcopy(entry) for n in range(5)}
         crq.save_queue(self.q)
         original_run = crq.run
         actual_forge = self.forge_inventory()
@@ -1494,18 +1543,18 @@ class CurrentTest(unittest.TestCase):
                 return original_run(argv, **kwargs)
             calls.append(argv)
             self.assertLessEqual(kwargs["timeout"], 10)
-            value = actual_forge(argv[1:]) if argv[2] == "graphql" else self.forge_data()
+            value = actual_forge(argv[1:]) if argv[2] == "graphql" or "/pulls?" in argv[2] else self.forge_data()
             return SimpleNamespace(stdout=json.dumps(value), returncode=0)
         with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True,
                 "after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}}), \
              mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
-        self.assertEqual(len(calls), 5)  # ceiling + 3 numeric pages + 1 deferred read
+        self.assertEqual(len(calls), 5)  # 2 recent-PR pages + 3 deferred reads
         self.assertEqual(q["merged_reconcile"]["represented"], 125)
-        self.assertEqual(q["deferred_refresh_cursor"], "request-00")
-        self.assertEqual(q["queue_client_requests"]["request-01"], entry)
-        self.assertEqual(q["queue_client_requests"]["request-02"], entry)
+        self.assertEqual(q["deferred_refresh_cursor"], "request-02")
+        self.assertEqual(q["queue_client_requests"]["request-03"], entry)
+        self.assertEqual(q["queue_client_requests"]["request-04"], entry)
 
 
     def test_future_bound_refuses_before_forge_and_full_range_dispatch_is_committed(self):
@@ -1895,6 +1944,10 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
     def tick_effects(self):
         """Every external continuation seam is counter-only; discovery stays real."""
         with contextlib.ExitStack() as stack:
+            discover = crq.discover_merged
+            stack.enter_context(mock.patch.object(crq, "discover_merged", side_effect=
+                lambda q, budget, *, interval, recent: discover(q, budget,
+                    interval={"after": self.AFTER, "before": self.BEFORE})))
             effects = {}
             def counter(obj, name, result=None):
                 effects[name] = stack.enter_context(mock.patch.object(obj, name, return_value=result))
