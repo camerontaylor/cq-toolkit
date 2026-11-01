@@ -19,8 +19,9 @@ Once `0.2.0` is published, the install is the usual one:
 npm install @camerontaylor/cq-toolkit
 ```
 
-The package requires Node 24 or newer and is ESM-only (`"type": "module"`);
-the CI matrix runs Node 24.
+The package is ESM-only (`"type": "module"`); the CI matrix runs Node 24.
+Review addressing requires Node 24 or newer for workspace discovery using
+stable `fs.promises.glob` with array exclusions.
 
 ## SDK first
 

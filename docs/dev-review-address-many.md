@@ -1,7 +1,11 @@
 # Bulk address executor
 
 The runtime exposes `makeReviewAddressMany` through the SDK and
-`review.addressMany` through the registry-driven CLI:
+`review.addressMany` through the registry-driven CLI. SDK and CLI review
+addressing require Node 24 or newer: workspace dependency inspection uses
+[stable `fs.promises.glob` with array exclusions](https://nodejs.org/api/fs.html#fspromisesglobpattern-options).
+
+Example:
 
 ```sh
 cq review.addressMany --repoRoot=. --repo=owner/repo --owner=owner \
