@@ -163,6 +163,50 @@ describe('sameFindingContent — identity complete, absence is not a wildcard', 
     ).toBe(true);
   });
 
+  test.each([
+    ['', '', 'rejected'],
+    ['', undefined, 'open'],
+    [undefined, '', 'open'],
+    [undefined, undefined, 'rejected'],
+  ] as const)('persisted file identity %j restores only against %j', (witness, file, status) => {
+    const { fileName: _fileName, ...original } = cycle().findings[0]!;
+    const { file: _file, ...row } = incoming();
+    const finding = { ...row, ...(file === undefined ? {} : { file }) };
+    const stored = ledger([
+      cycle({
+        findings: [{ ...original, ...(witness === undefined ? {} : { fileName: witness }) }],
+      }),
+      disposition(),
+    ]);
+    const restored = restoreDurableDisposition(finding, stored);
+    expect(restored.status).toBe(status);
+    if (status === 'open') expect(restored).not.toHaveProperty('reason');
+    if (file === undefined) expect(restored).not.toHaveProperty('file');
+    else expect(restored).toHaveProperty('file', '');
+  });
+
+  test.each([
+    ['', '', 'rejected'],
+    ['', undefined, 'open'],
+    [undefined, '', 'open'],
+    [undefined, undefined, 'rejected'],
+  ] as const)('persisted rule identity %j restores only against %j', (witness, rule, status) => {
+    const { rule: _originalRule, ...original } = cycle().findings[0]!;
+    const { rule: _incomingRule, ...row } = incoming();
+    const finding = { ...row, ...(rule === undefined ? {} : { rule }) };
+    const stored = ledger([
+      cycle({
+        findings: [{ ...original, ...(witness === undefined ? {} : { rule: witness }) }],
+      }),
+      disposition(),
+    ]);
+    const restored = restoreDurableDisposition(finding, stored);
+    expect(restored.status).toBe(status);
+    if (status === 'open') expect(restored).not.toHaveProperty('reason');
+    if (rule === undefined) expect(restored).not.toHaveProperty('rule');
+    else expect(restored).toHaveProperty('rule', '');
+  });
+
   test('the only source normalization is agent:reviewer -> agent', () => {
     expect(
       sameFindingContent(incoming({ source: 'agent:reviewer' }), incoming({ source: 'agent' })),

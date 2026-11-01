@@ -507,6 +507,30 @@ describe('assembleReadiness', () => {
     }
   });
 
+  test.each(['', undefined, 'a.ts'])(
+    'open empty-file readiness names the nondispatchable reason without changing other paths: %j',
+    (fileName) => {
+      const result = assemble([
+        cycleRecord({
+          findings: [
+            {
+              id: 'empty-path',
+              severity: 'major',
+              ...(fileName === undefined ? {} : { fileName }),
+            },
+          ],
+        }),
+        checkRecord(),
+      ]);
+      expect(result.ready).toBe(false);
+      if (result.ready) return;
+      const detail = result.gaps.find((gap) => gap.field === 'open-blocking-findings')?.detail;
+      expect(detail).toContain('empty-path');
+      if (fileName === '') expect(detail).toContain('unresolved: finding has no file path');
+      else expect(detail).not.toContain('unresolved: finding has no file path');
+    },
+  );
+
   test('fixed and rejected dispositions close blocking findings; minor never blocks', () => {
     const cycle = cycleRecord({
       findings: [
