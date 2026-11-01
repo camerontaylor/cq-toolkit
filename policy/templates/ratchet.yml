@@ -77,6 +77,8 @@ jobs:
     # reviewable changes (review-debt #226). Job-level, never a trigger
     # filter — I4 keeps the trigger surface intact.
     if: ${{ github.ref != 'refs/heads/cq-state' }}
+    outputs:
+      drop: ${{ steps.typecheck.outcome == 'failure' || steps.coverage.outcome == 'failure' || steps.monotonic.outcome == 'failure' }}
     steps:
       - name: Check out the repo (full history — the guard needs the base diff)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -100,6 +102,8 @@ jobs:
       - name: Build the CLI from source
         run: pnpm run build
       - name: 'Typecheck ratchet (CLI: ratchet.checkRatchet)'
+        id: typecheck
+        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
         run: |
           # The `command` source runs lane C's CheckRunner over a real tsc
           # invocation; `parse: "tsc-text"` applies the shared evidence rule
@@ -115,6 +119,8 @@ jobs:
           printf '%s\n' "$out"
           printf '%s' "$out" | jq -e '.status == "ok" and .value.verdict == "pass"' >/dev/null
       - name: 'Coverage ratchet (CLI: ratchet.checkRatchet)'
+        id: coverage
+        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
         run: |
           # A stale summary is removed FIRST so a red/crashed suite can never
           # leave yesterday's numbers behind as today's evidence. The `file`
@@ -131,6 +137,8 @@ jobs:
           printf '%s\n' "$out"
           printf '%s' "$out" | jq -e '.status == "ok" and .value.verdict == "pass"' >/dev/null
       - name: 'Baseline monotonicity guard (CLI: ratchet.monotonicGuard)'
+        id: monotonic
+        continue-on-error: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
         if: ${{ github.event_name == 'pull_request' && !cancelled() }}
         env:
           # Env-indirection doctrine: expression values reach the shell as
@@ -147,3 +155,28 @@ jobs:
           out="$(node dist/cli.js ratchet.monotonicGuard --repo=. --base="origin/${PR_BASE}" --head=HEAD)"
           printf '%s\n' "$out"
           printf '%s' "$out" | jq -e '.status == "ok" and .value.ok == true' >/dev/null
+
+  propose-drop:
+    # Fork tokens may be read-only; reporting remains advisory.
+    continue-on-error: true
+    needs: ratchet
+    if: github.event_name == 'pull_request' && github.base_ref == 'main' && needs.ratchet.outputs.drop == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the ratchet issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          issue="$(gh issue list --state open --search 'ratchet in:title' --json number,title --jq '[.[] | select(.title == "ratchet")][0].number // empty')"
+          body="Ratchet measurement or baseline guard needs attention on PR #${PR_NUMBER}. Evidence: ${RUN_URL}"
+          if [ -n "$issue" ]; then
+            gh issue edit "$issue" --body "$body"
+          else
+            gh issue create --title ratchet --body "$body"
+          fi

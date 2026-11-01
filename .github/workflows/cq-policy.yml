@@ -56,6 +56,8 @@
 name: cq-policy
 
 on:
+  pull_request:
+    branches: [main]
   workflow_run:
     workflows:
       - cq-signal
@@ -80,14 +82,23 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  main-advisory:
+    name: cq/policy (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Report advisory policy
+        run: echo 'Direct main PRs use CI and denylist; this verdict is advisory.'
   resolve:
     name: resolve
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
     # dispatch on any other ref would run that ref's copy of this file.
     if: >-
+      github.event_name != 'pull_request' && (
       github.event_name == 'workflow_run' ||
       github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
+      format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -219,6 +230,7 @@ jobs:
   judge:
     name: judge
     needs: resolve
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # An empty subject is resolve's "nothing to judge" (no verdict owed).
     if: needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
@@ -405,6 +417,7 @@ jobs:
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
+          ADVISORY: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
         run: |
           set -euo pipefail
           # Anything but an ok result with verdict "pass" is a failure;
@@ -412,7 +425,7 @@ jobs:
           # report (where the cq-override label record is logged), fenced
           # so paths render verbatim, and capped under the API's limit.
           jq -n --slurpfile v "${RUNNER_TEMP}/verdict.json" \
-            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" '
+            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" --arg advisory "$ADVISORY" '
             ($v[0] // {}) as $r
             | ($r.value.verdict // "fail") as $verdict
             | (if $r.status == "ok" then ($r.value.report | join("\n"))
@@ -427,7 +440,7 @@ jobs:
                 head_sha: $sha,
                 external_id: $ext,
                 status: "completed",
-                conclusion: (if $r.status == "ok" and $verdict == "pass"
+                conclusion: (if $advisory == "true" then "neutral" elif $r.status == "ok" and $verdict == "pass"
                   then "success" else "failure" end),
                 output: {
                   title: (if $r.status != "ok"

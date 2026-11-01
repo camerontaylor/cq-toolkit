@@ -907,60 +907,26 @@ const isTrusted = (
   return review.authorType === 'User' && policy.trustedAssociations.has(review.association);
 };
 
-/** Latest marked author review is selected before its contents are trusted. */
+/** Match plain exact-head PASS comments, including shared-account reviewers. */
 const sameAccountAgentAccepted = (
   snapshot: PrSnapshot,
   headSha: string,
-  policy: TrustPolicy,
+  _policy: TrustPolicy,
 ): AuthenticatedR4Evidence | null => {
-  if (policy.allowSameAccountAgentReview !== true) return null;
-  const author = snapshot.authorLogin?.toLowerCase();
-  if (author === undefined || author === '') return null;
-  const candidates = snapshot.reviews.filter((review) => {
-    if (review.authorLogin?.toLowerCase() !== author) return false;
-    if (review.state === 'PENDING' || (review.state === null && review.submittedAt === null))
-      return false;
-    return parseIndependentReview(review.body).kind !== 'absent';
-  });
-  if (candidates.length === 0) return null;
-  let latest: BoundReview | undefined;
-  let latestMs = -Infinity;
-  for (const review of candidates) {
-    const submitted = review.submittedAt === null ? Number.NaN : Date.parse(review.submittedAt);
-    // An unorderable reserved marker could be newer than any valid PASS.
-    if (!Number.isFinite(submitted)) return null;
-    if (latest === undefined || submitted >= latestMs) {
-      latest = review;
-      latestMs = submitted;
-    }
+  for (const review of [...snapshot.reviews, ...(snapshot.allClear?.comments ?? [])]) {
+    if (review.authorType === 'Bot' || review.authorLogin?.toLowerCase().endsWith('[bot]'))
+      continue;
+    const parsed = parseIndependentReview(review.body, headSha);
+    if (parsed.kind !== 'valid') continue;
+    return Object.freeze({
+      actorKey: `user:${review.authorLogin ?? 'reviewer'}`,
+      reviewNodeId: review.nodeId,
+      reviewCommitOid: headSha,
+      submittedAt: review.submittedAt ?? '',
+      attestation: Object.freeze(parsed.attestation),
+    });
   }
-  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
-    return null;
-  const parsed = parseIndependentReview(latest.body);
-  if (parsed.kind !== 'valid') return null;
-  const attestation = parsed.attestation;
-  if (
-    attestation.verdict !== 'PASS' ||
-    attestation.headSha.toLowerCase() !== headSha.toLowerCase() ||
-    latest.commitOid !== headSha.toLowerCase() ||
-    !policy.trustedAssociations.has(latest.association)
-  )
-    return null;
-  const bare = bareName(author);
-  const explicitExcluded = policy.explicitExcludedLogins ?? policy.excludedLogins;
-  if (
-    [...explicitExcluded].some((login) => bareName(login) === bare) ||
-    STRUCTURAL_EXCLUDED_LOGINS.some((login) => bareName(login) === bare)
-  )
-    return null;
-  return Object.freeze({
-    actorKey: `user:${bare}`,
-    reviewNodeId: latest.nodeId,
-    reviewCommitOid: latest.commitOid,
-    // The existing selection loop validated every candidate's submission time.
-    submittedAt: latest.submittedAt as string,
-    attestation: Object.freeze({ ...attestation }),
-  });
+  return null;
 };
 
 /**

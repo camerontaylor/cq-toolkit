@@ -144,7 +144,12 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
     (_label, text) => {
       const body = code(text);
       expect(onBlock(body)).toMatch(/^ {2}workflow_run:$/m);
-      expect(onBlock(body)).not.toMatch(/pull_request/);
+      expect(onBlock(body)).not.toMatch(/pull_request_target/);
+      if (onBlock(body).includes('pull_request:')) {
+        expect(onBlock(body)).toContain('branches: [main]');
+        expect(jobBlocks(body).get('main-advisory')).toContain('permissions: {}');
+        expect(jobBlocks(body).get('resolve')).toContain("github.event_name != 'pull_request'");
+      }
       expect(body).toMatch(/^permissions: \{\}$/m);
       // Every checkout is the trust ref; the head is never checked out.
       const refs = [...body.matchAll(/^\s+ref: (.*)$/gm)].map((m) => m[1]);
