@@ -5,12 +5,12 @@
     "530": {
       "tuple": {
         "head": "63b68c3886a01b2c50e9ad6bcf11eed912f115b1",
-        "base": "1902e4a10f01f004eb6202e8cf503e25c77fbf02",
+        "base": "7a3984261df146341df337857b68599be23caf44",
         "forcePushEpoch": 59
       },
       "observations": [
         {
-          "observedAt": "2026-11-01T10:44:25.743Z",
+          "observedAt": "2026-11-01T11:35:40.406Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -18,12 +18,12 @@
     "681": {
       "tuple": {
         "head": "4dc7d5c95d1d90750f9e35a87e0d668155029d71",
-        "base": "9be8c5c05689a83d7c78edd4f26e26e4b7aafcc4",
+        "base": "7a3984261df146341df337857b68599be23caf44",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-10-31T03:16:22.681Z",
+          "observedAt": "2026-11-01T11:35:40.406Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -31,12 +31,12 @@
     "684": {
       "tuple": {
         "head": "ee09195cd49c431cdd741273abe105ca0aa08634",
-        "base": "d9f4444cff986056b1d8909b4bc840ab013ff929",
+        "base": "7a3984261df146341df337857b68599be23caf44",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-10-31T03:16:22.681Z",
+          "observedAt": "2026-11-01T11:35:40.406Z",
           "by": "self-merge-prs:observe"
         }
       ]
@@ -44,25 +44,12 @@
     "704": {
       "tuple": {
         "head": "d7dedb113e5b52825b3d52f3f90fd100da2b0633",
-        "base": "5dd1b34a357f2ce687fed264eeeb9564241ed34e",
+        "base": "7a3984261df146341df337857b68599be23caf44",
         "forcePushEpoch": 0
       },
       "observations": [
         {
-          "observedAt": "2026-10-31T04:06:34.540Z",
-          "by": "self-merge-prs:observe"
-        }
-      ]
-    },
-    "757": {
-      "tuple": {
-        "head": "7a3984261df146341df337857b68599be23caf44",
-        "base": "1902e4a10f01f004eb6202e8cf503e25c77fbf02",
-        "forcePushEpoch": 0
-      },
-      "observations": [
-        {
-          "observedAt": "2026-11-01T10:33:56.944Z",
+          "observedAt": "2026-11-01T11:35:40.406Z",
           "by": "self-merge-prs:observe"
         }
       ]
