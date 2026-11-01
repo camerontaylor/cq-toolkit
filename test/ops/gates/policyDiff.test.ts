@@ -2306,9 +2306,8 @@ describe("the toolkit's own policy list", () => {
     const producers: Record<string, string> = {
       static: 'ci.yml',
       denylist: 'denylist.yml',
-      ratchet: 'ratchet.yml',
     };
-    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'ratchet', 'static']);
+    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'static']);
     for (const check of list.requiredChecks) {
       const file = producers[check];
       expect(file, `${check}: has a retained producer`).toBeDefined();

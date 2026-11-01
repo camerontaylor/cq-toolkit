@@ -22,8 +22,7 @@
 // plan JSON file naming op 'merge.runPrs' (the CLI run-plan seam) — the
 // shipped entry is a discoverable floor, not the workflow's configuration.
 //
-// THE 'main' DEFAULT is the queue-branch convention of THIS repo's
-// own merge flow (the documented main policy) — a presentation
+// THE 'main' DEFAULT follows this repository's direct-main merge policy — a presentation
 // default for the shipped entry only. The merge.runPrs op itself hardcodes
 // no branch name: baseBranch is configuration arriving on the input, and
 // every other caller passes its own trunk.

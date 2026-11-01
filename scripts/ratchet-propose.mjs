@@ -34,8 +34,7 @@
 // TARGET main: the proposal PR is opened against `main`, cut
 // from the main tip and judged against THAT tip's committed
 // baselines — not the checkout's (the checkout is main, the trust ref for
-// the code that runs here). Proposals previously targeted main and so
-// bypassed the main checks (ADR-0004 D-B). The tip is fetched, pinned
+// the code that runs here). The comparison tip is fetched and pinned
 // to a SHA. A temporary worktree is created with --no-checkout: read-tree
 // loads its index, while only canonical baseline blobs are materialized as
 // data for the op. Proposal bytes enter the index through hash-object

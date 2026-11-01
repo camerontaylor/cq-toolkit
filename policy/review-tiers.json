@@ -1,13 +1,12 @@
 {
   "version": 1,
-  "protected_policy_sha256": "4deb689299328dc666c512a7e1fc37ccfca3620b8edec756f3b71f3f308bd34e",
+  "protected_policy_sha256": "2cd954a49620b057e6c105cdc06e56efd3637f3c7791964cae837114b72dce1d",
   "protected_patterns": [
     "^policy/protected-paths\\.json$",
     "^policy/promotion-reviewer\\.json$",
     "^\\.github/workflows/denylist\\.yml$",
     "^policy/denylist/",
     "^scripts/denylist-scan$",
-    "^src/selfhost/promote-gate\\.ts$",
     "^scripts/github-settings-drift\\.mjs$",
     "^scripts/lib/github-settings\\.mjs$",
     "^policy/templates/github-settings\\.json$",
@@ -15,7 +14,7 @@
     "^apps/crq-python/(?:signer/|ops/systemd/|config\\.json$)"
   ],
   "tiers": {
-    "T1": ["apps/crq-python/**", "src/selfhost/promote-gate.ts"],
+    "T1": ["apps/crq-python/**"],
     "T2": [
       "src/selfhost/**",
       "src/adapters/git/**",

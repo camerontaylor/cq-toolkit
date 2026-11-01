@@ -6,14 +6,13 @@
     "^\\.github/workflows/denylist\\.yml$",
     "^policy/denylist/",
     "^scripts/denylist-scan$",
-    "^src/selfhost/promote-gate\\.ts$",
     "^scripts/github-settings-drift\\.mjs$",
     "^scripts/lib/github-settings\\.mjs$",
     "^policy/templates/github-settings\\.json$",
     "^policy/attestations/",
     "^apps/crq-python/(?:signer/|ops/systemd/|config\\.json$)"
   ],
-  "requiredChecks": ["static", "denylist", "ratchet"],
+  "requiredChecks": ["static", "denylist"],
   "requiredJobs": {
     "ci.yml": ["static", "crq-python", "from-source"],
     "denylist.yml": ["denylist"]

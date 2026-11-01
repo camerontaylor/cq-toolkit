@@ -10,10 +10,7 @@ on:
 permissions:
   contents: read
 
-# Every main push is a promotion subject that needs its own verdict,
-# so a main push run is keyed by its SHA and never superseded: a
-# cancelled measurement concludes 'cancelled' and becomes a failure verdict
-# the gate refuses on. PR and other branch runs still supersede by ref.
+# Supersede older diagnostics for the same event and ref.
 concurrency:
   group: ratchet-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
