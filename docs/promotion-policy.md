@@ -45,3 +45,8 @@ are deleted branches. `cq-c2-replay-marker` (24868640) still protects `cq/*`
 except the retired `cq/promoted` ref; `cq/review-ledger` remains. Environment
 deployment branch policies name only `main`. The saved target is
 [github-settings.json](../policy/templates/github-settings.json).
+
+The retained review-ledger rulesets (26246984 and 26246985) protect its
+immutable history and restrict writes to Integration 5230901. These existing
+protections and the live Actions allowed-events policy are also saved in the
+settings template.

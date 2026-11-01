@@ -1,5 +1,5 @@
 {
-  "_doc": "Settings-as-code for direct-main PRs (live rulesets verified 2026-11-02). cq-r0-history protects only main against deletion and non-fast-forward updates. cq-r1-main requires a PR, merge commits, zero native approvals, no thread resolution, and static plus denylist from GitHub Actions (integration 15368), without strict status checks or an update rule. Its RepositoryRole 5 and Integration 5230844 bypass actors both use always. Independent exact-head review is procedural; CRQ reviews after merge. cq-r2-merge-queue is retired. The merge-queue and cq/promoted branches are deleted. cq-c2-replay-marker still protects cq/* except the retired cq/promoted ref; cq/review-ledger remains. Environments admit only main by custom branch policies; retained promote environment credentials are legacy configuration, not a promotion workflow. Environment secrets and variables list names only; reviewers any means not compared. scripts/github-settings-drift.mjs reports drift without writing settings. Environment variable names are checked against the recorded allowlist. See docs/promotion-policy.md. Historical cutover records and attestations do not describe current live settings.",
+  "_doc": "Settings-as-code for direct-main PRs (live rulesets verified 2026-11-02). cq-r0-history protects only main against deletion and non-fast-forward updates. cq-r1-main requires a PR, merge commits, zero native approvals, no thread resolution, and static plus denylist from GitHub Actions (integration 15368), without strict status checks or an update rule. Its RepositoryRole 5 and Integration 5230844 bypass actors both use always. Independent exact-head review is procedural; CRQ reviews after merge. cq-r2-merge-queue is retired. The merge-queue and cq/promoted branches are deleted. cq-c2-replay-marker still protects cq/* except the retired cq/promoted ref; cq/review-ledger remains. Environments admit only main by custom branch policies; retained promote environment credentials are legacy configuration, not a promotion workflow. Environment secrets and variables list names only; reviewers any means not compared. scripts/github-settings-drift.mjs reports drift without writing settings. Environment variable names are checked against the recorded allowlist. See docs/promotion-policy.md. Historical cutover records and attestations do not describe current live settings. The two retained cq/review-ledger rulesets record existing immutable history and App-writer restrictions (Integration 5230901); no new restrictions are introduced. The live allowed-events policy retains pull_request_review_comment even though no current workflow uses it.",
   "schemaVersion": 1,
   "rulesets": [
     {
@@ -102,6 +102,52 @@
         }
       ],
       "bypass_actors": []
+    },
+    {
+      "name": "cq review ledger immutable history",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": ["refs/heads/cq/review-ledger"]
+        }
+      },
+      "rules": [
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "non_fast_forward"
+        }
+      ],
+      "bypass_actors": []
+    },
+    {
+      "name": "cq review ledger App writer only",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": ["refs/heads/cq/review-ledger"]
+        }
+      },
+      "rules": [
+        {
+          "type": "update"
+        },
+        {
+          "type": "creation"
+        }
+      ],
+      "bypass_actors": [
+        {
+          "actor_id": 5230901,
+          "actor_type": "Integration",
+          "bypass_mode": "always"
+        }
+      ]
     }
   ],
   "classicBranchProtection": {
@@ -227,6 +273,7 @@
           "allowed_events": [
             "pull_request",
             "pull_request_review",
+            "pull_request_review_comment",
             "push",
             "schedule",
             "workflow_dispatch",

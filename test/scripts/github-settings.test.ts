@@ -107,12 +107,14 @@ describe('github-settings.json: the committed D13 target', () => {
     expect(TEMPLATE).not.toContain('{{');
   });
 
-  it('names exactly the three rulesets and five environments', () => {
+  it('names exactly the five rulesets and five environments', () => {
     const settings = target();
     expect(settings.rulesets.map((r) => r.name)).toEqual([
       'cq-r0-history',
       'cq-r1-main',
       'cq-c2-replay-marker',
+      'cq review ledger immutable history',
+      'cq review ledger App writer only',
     ]);
     // Pin the retained replay-marker payload, including its retired-ref exclusion.
     const marker = settings.rulesets.find((r) => r.name === 'cq-c2-replay-marker') as RuleObject;
@@ -195,7 +197,7 @@ describe('github-settings.json: the committed D13 target', () => {
     );
   });
 
-  it("allows exactly the trigger events this repo's workflows use", () => {
+  it('allows every workflow trigger and the retained live review-comment event', () => {
     const dir = join(ROOT, '.github', 'workflows');
     const used = new Set<string>();
     for (const file of readdirSync(dir).filter((f) => /\.ya?ml$/.test(f))) {
@@ -206,7 +208,8 @@ describe('github-settings.json: the committed D13 target', () => {
     const allowed = params(target().actionsEventPolicy, 'restrict_action_events')[
       'allowed_events'
     ] as string[];
-    expect([...used].sort()).toEqual([...allowed].sort());
+    expect([...used].filter((event) => !allowed.includes(event))).toEqual([]);
+    expect(allowed.filter((event) => !used.has(event))).toEqual(['pull_request_review_comment']);
   });
 });
 
