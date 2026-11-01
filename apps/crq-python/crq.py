@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from runtime_target import DEFAULT_REF, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
 import status_summary
 import repair_tick
 import coverage
@@ -293,8 +294,8 @@ def _unquote(v: str) -> str:
 
 
 def denylist_rules() -> List[Dict[str, str]]:
-    """Parse policy/denylist/patterns.yml (constrained format) from origin/merge-queue."""
-    text = git("show", "origin/merge-queue:policy/denylist/patterns.yml")
+    """Parse policy/denylist/patterns.yml (constrained format) from the default branch."""
+    text = git("show", f"{DEFAULT_REF}:policy/denylist/patterns.yml")
     rules: List[Dict[str, str]] = []
     cur: Optional[Dict[str, str]] = None
     in_rules = False
@@ -703,9 +704,9 @@ def is_doc(path: str) -> bool:
 def measure_merged(item: Dict[str, Any], target: Optional[str] = None) -> Dict[str, Any]:
     """Blame-based survival: of the lines the PR added, how many are still
     attributed (git blame -w -M) to the PR's own commits at the selected target.
-    Without an explicit target, use origin/merge-queue as before."""
+    Without an explicit target, use the shared default branch."""
     merge = item["merge_commit"]
-    mq = target if target is not None else git("rev-parse", "origin/merge-queue")
+    mq = target if target is not None else git("rev-parse", DEFAULT_REF)
     commits = pr_commit_set(merge)
     renames = rename_map(merge, mq)
     files = []
@@ -731,7 +732,7 @@ def measure_merged(item: Dict[str, Any], target: Optional[str] = None) -> Dict[s
         if not is_doc(path):
             nondoc_surv += surv
         files.append({"path": path, "now": cur, "added": added, "surviving": surv})
-    # Per-file synthetic delta (pre-merge → merge-queue). A path joins the
+    # Per-file synthetic delta (pre-merge → default branch). A path joins the
     # synthetic review only when the PR's surviving lines are a meaningful
     # share of that path's later churn; otherwise the review would mostly
     # re-review other PRs' work on a hot file.
@@ -978,8 +979,8 @@ def enqueue_merged(pr: int, merge_sha: str, request_id: str, target_selector: st
     # Verify before touching the queue. PR number alone is never scope authority.
     info = pr_info(pr)
     if (info.get("number") != pr or info.get("state") != "MERGED" or
-            (info.get("mergeCommit") or {}).get("oid") != merge_sha or info.get("baseRefName") not in ("main", "merge-queue")):
-        raise ValueError("source must be a verified merged PR into main or merge-queue with matching merge SHA")
+            (info.get("mergeCommit") or {}).get("oid") != merge_sha or info.get("baseRefName") not in DISCOVERY_BRANCHES):
+        raise ValueError("source must be a verified merged PR into an accepted target branch with matching merge SHA")
     q = load_queue()
     result = review_receipt.enroll(q, repo=REPO, pr=pr, merge_sha=merge_sha, request_id=request_id,
                                    at=iso(), target_selector=target_selector)
@@ -1032,7 +1033,7 @@ def _read_reconcile_wrapper(path, interval, page_budget, recent=False):
     if (set(source) != {"version", "method", "repo", "base", "repository_id", "ceiling", "window"} or
             type(source.get("version")) is not int or source["version"] != 1 or
             source.get("method") != ("closed-updated-v1" if recent else "all-number-slots-v1") or source.get("repo") != REPO or
-            source.get("base") != "main-or-merge-queue" or source.get("window") != merged_reconcile.NUMBER_WINDOW or
+            source.get("base") != DISCOVERY_SELECTOR or source.get("window") != merged_reconcile.NUMBER_WINDOW or
             not isinstance(source.get("repository_id"), str) or not source["repository_id"] or
             type(source.get("ceiling")) is not int or
             not 0 <= source["ceiling"] <= merged_reconcile.MAX_REPOSITORY_NUMBER):
@@ -1041,7 +1042,7 @@ def _read_reconcile_wrapper(path, interval, page_budget, recent=False):
         raise merged_reconcile.ReconcileRefused("source/checkpoint wrapper digest mismatch")
     if wrapper["checkpoint"] is not None:
         wrapper["checkpoint"] = merged_reconcile.load_checkpoint(wrapper["checkpoint"], interval, page_budget,
-            repo=REPO, base="main-or-merge-queue", allow_complete=True)
+            repo=REPO, base=DISCOVERY_SELECTOR, allow_complete=True)
     return wrapper
 
 
@@ -1051,7 +1052,7 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False, recent=Fal
     if before >= iso():
         raise merged_reconcile.ReconcileRefused("upper bound must precede scan startup")
     merged_reconcile.normalize_page_budget(page_budget)
-    key = review_receipt.digest({"repo": REPO, "base": "main-or-merge-queue", **interval,
+    key = review_receipt.digest({"repo": REPO, "base": DISCOVERY_SELECTOR, **interval,
                                 **({"method": "closed-updated-v1"} if recent else {})})
     path = STATE / "reconcile" / (key + ".json")
     wrapper = _read_reconcile_wrapper(path, interval, page_budget, recent=recent)
@@ -1071,9 +1072,9 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False, recent=Fal
 
     if wrapper is None:
         source = ({"version": 1, "method": "closed-updated-v1", "repo": REPO,
-                   "base": "main-or-merge-queue", "repository_id": REPO, "ceiling": 0,
+                   "base": DISCOVERY_SELECTOR, "repository_id": REPO, "ceiling": 0,
                    "window": merged_reconcile.NUMBER_WINDOW} if recent else
-                  merged_reconcile.freeze_source(forge, repo=REPO, base="main-or-merge-queue"))
+                  merged_reconcile.freeze_source(forge, repo=REPO, base=DISCOVERY_SELECTOR))
         wrapper = {"source": source, "checkpoint": None}
         if not dry_run:
             save_wrapper()
@@ -1086,12 +1087,12 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False, recent=Fal
     raw = wrapper["checkpoint"]
     if raw and raw.get("complete"):
         result = merged_reconcile.load_checkpoint(raw, interval, page_budget, repo=REPO,
-                                                   base="main-or-merge-queue", allow_complete=True)
+                                                   base=DISCOVERY_SELECTOR, allow_complete=True)
     else:
         result = merged_reconcile.reconcile(None,
             lambda cursor: (recent_merged_page(cursor, after) if recent else
-                merged_reconcile.number_page(forge, source, cursor, repo=REPO, base="main-or-merge-queue")),
-            repo=REPO, base="main-or-merge-queue", **interval, page_budget=page_budget, checkpoint_raw=raw,
+                merged_reconcile.number_page(forge, source, cursor, repo=REPO, base=DISCOVERY_SELECTOR)),
+            repo=REPO, base=DISCOVERY_SELECTOR, **interval, page_budget=page_budget, checkpoint_raw=raw,
             checkpoint_save=persist, dry_run=dry_run)
     summary = {**result["summary"], "inventory_digest": result["digest"],
                "source": source, "checkpoint_key": key}
@@ -1156,7 +1157,7 @@ def recent_merged_page(cursor, after):
             older = True
         if "merged_at" not in row:
             raise merged_reconcile.ReconcileRefused("missing merge metadata")
-        if row["merged_at"] and (row.get("base") or {}).get("ref") in ("main", "merge-queue"):
+        if row["merged_at"] and (row.get("base") or {}).get("ref") in DISCOVERY_BRANCHES:
             records.append({"number": row.get("number"), "mergedAt": row["merged_at"],
                 "mergeCommit": {"oid": row.get("merge_commit_sha")},
                 "headRefOid": (row.get("head") or {}).get("sha")})
@@ -1269,9 +1270,9 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
     if dry:
-        return {"base": "(synthetic)", "head": "(synthetic)", "target": "origin/main",
+        return {"base": "(synthetic)", "head": "(synthetic)", "target": DEFAULT_REF,
                 "label": "post-merge synthetic review", "cycle": None, "notes": [], "branch": None}
-    target = git("rev-parse", "origin/main^{commit}")
+    target = git("rev-parse", DEFAULT_REF + "^{commit}")
     if not is_ancestor(item["merge_commit"], target):
         raise NotReady("not-yet-promoted: merge commit is not an ancestor of origin/main")
     base, head, n = build_synthetic(item, target)
@@ -1894,7 +1895,7 @@ def reviewed_head(rec: Dict[str, Any]) -> str:
 
 def chains_to_target(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]]) -> bool:
     for _ in range(8):
-        if p["baseRefName"] in ("main", "merge-queue"):
+        if p["baseRefName"] in DISCOVERY_BRANCHES:
             return True
         p = by_head.get(p["baseRefName"])
         if p is None:
@@ -1937,7 +1938,7 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
             continue
         mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")]
         if not mine:
-            stacked = "" if p["baseRefName"] in ("main", "merge-queue") else f", stacked on {p['baseRefName']}"
+            stacked = "" if p["baseRefName"] in DISCOVERY_BRANCHES else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
                      why=f"open PR not yet enrolled{stacked}")
             continue
@@ -1993,7 +1994,7 @@ def coverage_fallback(q, log, dry, only):
         return None, False
     if only:
         return None, False
-    mq = git("rev-parse", "origin/main^{commit}")
+    mq = git("rev-parse", DEFAULT_REF + "^{commit}")
     candidates = [i for i in live_items(q) if i["kind"] == "coverage" and i["state"] == "pending"]
     for i in candidates:
         # A captured coverage target is immutable across tip moves.
@@ -2036,7 +2037,7 @@ def coverage_fallback(q, log, dry, only):
             if not git("diff", "--name-only", base, head):
                 item.update(state="skipped", last_error="empty coverage range")
                 continue
-            plan = dict(base=base, head=head, target="origin/merge-queue", cycle=None,
+            plan = dict(base=base, head=head, target=DEFAULT_REF, cycle=None,
                         branch=None, notes=[], label="lowest-priority coverage review")
             plan["target"] = item["coverage_sha"]
             if not backfill_runtime.rank4_gate(sys.modules[__name__], q, item, dry):
@@ -2699,7 +2700,7 @@ def main() -> int:
     p.add_argument("--request-id", required=True)
     p.add_argument("--base", required=True, help="immutable base commit sha")
     p.add_argument("--head", required=True, help="immutable reviewed head commit sha")
-    p.add_argument("--target", required=True, help="target ref, e.g. origin/merge-queue")
+    p.add_argument("--target", required=True, help=f"target ref, e.g. {DEFAULT_REF}")
     p.add_argument("--cycle", type=int, required=True, help="author cycle number (1 or 2)")
     p.add_argument("--review-policy", help="opt into leases using review.reviewerTimeoutMin from this JSON file")
     p.add_argument("--fallback-reviewer", help="configured agent reviewer identity; requires --review-policy")
@@ -2799,7 +2800,7 @@ def main() -> int:
         q = load_queue()
         fetch()
         item = next(i for i in live_items(q) if i["kind"] == "merged" and i["pr"] == args.pr)
-        base, head, n = build_synthetic(item, git("rev-parse", "origin/main^{commit}"))
+        base, head, n = build_synthetic(item, git("rev-parse", DEFAULT_REF + "^{commit}"))
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
     elif args.cmd == "author-enroll":

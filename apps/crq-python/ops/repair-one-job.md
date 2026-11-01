@@ -11,7 +11,7 @@ After independent source review and desk approval, the sole tick owner may run:
 
 ```sh
 python3 crq.py repair-prepare <historical-job-id> \
-  --source-sha <full-current-merge-queue-sha> \
+  --source-sha <full-current-main-sha> \
   --revalidation <private-reviewed-evidence-json>
 ```
 

@@ -9,7 +9,7 @@ P5 itself never stages files, changes HEAD/the real index, or checks out content
 It reads `CQ_AUTHOR_REPO` (default cwd). No model/provider choice is built in.
 
 ```sh
-cq dev.review --action=enroll --requestId=tree-cycle-1 --base=<40hex> --tree=<40hex> --target=origin/merge-queue --cycle=1 --json
+cq dev.review --action=enroll --requestId=tree-cycle-1 --base=<40hex> --tree=<40hex> --target=origin/main --cycle=1 --json
 ```
 
 The operator must configure `CQ_AUTHOR_SNAPSHOT_SCANNER` as an absolute path to

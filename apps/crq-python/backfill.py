@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic inventory/operator CLI. Never launches a vendor review."""
+from runtime_target import DEFAULT_REF, DEFAULT_FETCH_REFSPEC
 import argparse
 import copy
 import hashlib
@@ -115,8 +116,8 @@ def execute(c, args):
         return {"catalog": args.output, "sources": len(value["sources"]), "acquisition": value["acquisition"]}
     inbox = finding_delivery.Inbox(c.STATE / "backfill/findings", outbox)
     if args.command == "triage":
-        repo.git("fetch", "--no-tags", "origin", "refs/heads/main:refs/remotes/origin/main")
-        tip = repo.git("rev-parse", "origin/main^{commit}").decode().strip()
+        repo.git("fetch", "--no-tags", "origin", DEFAULT_FETCH_REFSPEC)
+        tip = repo.git("rev-parse", DEFAULT_REF + "^{commit}").decode().strip()
         return inbox.triage(args.finding, repo, tip, args.action, args.operator, args.reason, c.iso(),
                             fixing_commit=args.fixing_commit, canonical_id=args.canonical_id)
     if args.command == "deliver":

@@ -100,7 +100,7 @@ python3 crq.py author-enroll \
   --request-id <stable-id> \
   --base <full-immutable-base-sha> \
   --head <full-immutable-reviewed-head-sha> \
-  --target origin/merge-queue \
+  --target origin/main \
   --cycle <1|2>
 ```
 

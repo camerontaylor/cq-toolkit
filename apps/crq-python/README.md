@@ -126,7 +126,7 @@ verification before publication and scans the final publication range for secret
 Open PR repairs are replayed onto the current head only if it moved forward;
 normal pushes never force. Restacked heads become stale, awaiting a new review.
 Merged, post-merge delta, coverage fixes become one
-`crq/fix-<run>` PR into merge-queue containing the verdict table. No finding
+`crq/fix-<run>` PR into main containing the verdict table. No finding
 comments, reviews or issues are posted. PR creation is the only repair GitHub
 write. The normal non-author I2 gate still applies to fix PRs.
 
@@ -137,11 +137,11 @@ harness, removes CQ_SANDBOX* and CQ_RUN_TOOL, and never uses promptOverride.
 Codex uses ephemeral structured output with workspace-write for fixing and
 read-only for judgement; remote pushurl is overridden to /dev/null in children.
 The cq read-only judge bridge uses the toolkit AI SDK driver with tools disabled.
-Its dist module layout must exist in the deployed merge-queue build. Paseo judges
+Its dist module layout must exist in the deployed main build. Paseo judges
 require a verified queue-host endpoint and read-only mode; absent configuration fails
 closed. No dry model dispatch is part of provisioning.
 
-Build cq from origin/merge-queue on queue-host without tests. Provision required keys
+Build cq from origin/main on queue-host without tests. Provision required keys
 privately through ~/.local/secrets. Check presence without printing values.
 Configure clone/worktree paths and both daemon endpoints. Install the prepared
 units from `ops/systemd/` but leave them stopped until handover readiness is
