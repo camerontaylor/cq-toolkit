@@ -60,30 +60,37 @@ describe.skipIf(!available)('publication scans of outgoing git objects', () => {
     },
   );
 
-  test('a force-push whose previous tip is unavailable still publishes', () => {
-    replay((root, git) => {
-      git('update-ref', 'refs/remotes/origin/main', git('rev-list', '--max-parents=0', 'HEAD'));
-      const template = readFileSync(resolve('policy/templates/denylist.yml'), 'utf8');
-      const step = template.slice(template.indexOf('      - name: Denylist outgoing commit scan'));
-      const script = step
-        .split('        run: |\n')[1]
-        ?.split('      - name:')[0]
-        ?.replace(/^ {10}/gm, '');
-      if (!script) throw new Error('outgoing scan workflow step missing');
-      const result = spawnSync('bash', ['-e', '-c', script], {
-        cwd: root,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          SCAN_BASE: 'f'.repeat(40),
-          DEFAULT_BRANCH: 'main',
-          GITHUB_REF: 'refs/heads/feature',
-        },
+  test.each(['feature', 'main'])(
+    'a force-push to %s whose previous tip is unavailable still publishes',
+    (branch) => {
+      replay((root, git) => {
+        git('update-ref', 'refs/remotes/origin/main', git('rev-list', '--max-parents=0', 'HEAD'));
+        const template = readFileSync(resolve('policy/templates/denylist.yml'), 'utf8');
+        const step = template.slice(
+          template.indexOf('      - name: Denylist outgoing commit scan'),
+        );
+        const script = step
+          .split('        run: |\n')[1]
+          ?.split('      - name:')[0]
+          ?.replace(/^ {10}/gm, '');
+        if (!script) throw new Error('outgoing scan workflow step missing');
+        const result = spawnSync('bash', ['-e', '-c', script], {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            SCAN_BASE: 'f'.repeat(40),
+            DEFAULT_BRANCH: 'main',
+            GITHUB_REF: `refs/heads/${branch}`,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          `outgoing scan clean (${branch === 'main' ? 2 : 1} commits; trees and messages)`,
+        );
       });
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('outgoing scan clean (1 commits; trees and messages)');
-    });
-  });
+    },
+  );
 
   test('an intermediate secret removed from the final tree still refuses publication', () => {
     replay((root, git, scan) => {

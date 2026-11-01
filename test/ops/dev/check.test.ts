@@ -555,6 +555,7 @@ describe('dev.check', () => {
     const seen: string[] = [];
     const effects = effectsFor(async (command, args) => {
       if (command !== 'node') return undefined;
+      expect(args[1]).toBe('--tree');
       const tree = (args[0] ?? '').replace(/\/scripts\/denylist-scan$/, '');
       seen.push(await readFile(`${tree}/src/staged.ts`, 'utf8'));
       seen.push(await readFile(`${tree}/README.md`, 'utf8'));

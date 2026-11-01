@@ -59,7 +59,12 @@ jobs:
             fi
           fi
           if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
+            if [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+              base=$(git hash-object -t tree /dev/null)
+              base=$(printf 'Publication root\n' | git -c user.name=scanner -c user.email=scanner@example.invalid commit-tree "$base")
+            else
+              base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
+            fi
           fi
           ./scripts/denylist-scan --base "$base"
       - name: Denylist self-test
