@@ -155,7 +155,8 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(on).toMatch(/^ {2}workflow_run:\n {4}workflows:\n {6}- cq-signal\n/m);
       expect(on).toMatch(/^ {4}types:\n {6}- completed$/m);
       expect(on).toMatch(/^ {2}workflow_dispatch:$/m);
-      expect(on).toContain('pull_request:\n    branches: [main]');
+      expect(on).toMatch(/^ {2}pull_request:$/m);
+      expect(on).not.toMatch(/branches:/);
       expect(on).not.toMatch(/pull_request_target|push:/);
       expect(body).toMatch(/^permissions: \{\}$/m);
       expect([...jobBlocks(body).keys()]).toEqual(['main-advisory', 'resolve', 'judge']);

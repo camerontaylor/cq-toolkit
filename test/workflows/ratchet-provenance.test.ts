@@ -146,7 +146,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(onBlock(body)).toMatch(/^ {2}workflow_run:$/m);
       expect(onBlock(body)).not.toMatch(/pull_request_target/);
       if (onBlock(body).includes('pull_request:')) {
-        expect(onBlock(body)).toContain('branches: [main]');
+        expect(onBlock(body)).not.toMatch(/branches:/);
         expect(jobBlocks(body).get('main-advisory')).toContain('permissions: {}');
         expect(jobBlocks(body).get('resolve')).toContain("github.event_name != 'pull_request'");
       }

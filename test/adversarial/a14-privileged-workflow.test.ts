@@ -612,7 +612,13 @@ describe('§7 A14 static token isolation over the toolkit’s real workflows', (
       for (const [id, job] of scan.jobs) {
         // `text` is normalised node text: comment lines (which name the
         // credentials they must not leak) are already dropped.
-        if (/\bsecrets\.[A-Za-z_]/.test(job.text)) {
+        // The direct-PR advisory job has no secrets. Trusted sibling jobs
+        // explicitly exclude that event at job level, before any mint step.
+        const condition = /^ {4}if: (.+)$/m.exec(job.text)?.[1] ?? '';
+        const excludesUntrusted =
+          !condition.includes('||') &&
+          untrusted.every((event) => condition.startsWith(`github.event_name != '${event}' && `));
+        if (/\bsecrets\.[A-Za-z_]/.test(job.text) && !excludesUntrusted) {
           carriers.push(`${path}:${id} (${untrusted.join(', ')})`);
         }
       }

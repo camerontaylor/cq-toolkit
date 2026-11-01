@@ -211,15 +211,8 @@ const failLine = (report: readonly string[]): string =>
 // ---------------------------------------------------------------------------
 
 describe('judgeAcceptance', () => {
-  test('same-account author marker requires opt-in and a current COMMENTED head review', async () => {
-    const body = `<!-- cq-agent-review: ${JSON.stringify({
-      version: 1,
-      reviewerAgentId: 'reviewer-agent',
-      authorAgentId: 'author-agent',
-      headSha: SHA_B,
-      verdict: 'PASS',
-      independent: true,
-    })} -->`;
+  test('shared-account plain exact-head PASS needs no opt-in', async () => {
+    const body = `reviewer-agent ${SHA_B} PASS`;
     const spec = prSpec({
       author: 'alice',
       reviews: [
@@ -232,7 +225,7 @@ describe('judgeAcceptance', () => {
         }),
       ],
     });
-    expect((await judge(makeForge(spec))).verdict).toBe('fail');
+    expect((await judge(makeForge(spec))).verdict).toBe('pass');
     const policy = resolveAcceptanceTrust({ [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]: 'true' }).policy;
     const forge = makeForge(spec);
     const result = await judge(forge, {}, policy);
@@ -245,12 +238,8 @@ describe('judgeAcceptance', () => {
         reviewCommitOid: SHA_B,
         submittedAt: '2026-09-24T12:00:00Z',
         attestation: {
-          version: 1,
-          reviewerAgentId: 'reviewer-agent',
-          authorAgentId: 'author-agent',
           headSha: SHA_B,
           verdict: 'PASS',
-          independent: true,
         },
       },
     });
@@ -278,7 +267,8 @@ describe('judgeAcceptance', () => {
         ],
       }),
     );
-    expect((await judge(retracted, {}, policy)).verdict).toBe('fail');
+    // A matching published comment remains evidence; the merging agent judges withdrawals.
+    expect((await judge(retracted, {}, policy)).verdict).toBe('pass');
   });
 
   test('the check name is cq/acceptance', () => {
@@ -323,12 +313,8 @@ describe('judgeAcceptance', () => {
         association: 'OWNER',
         state: 'COMMENTED',
         body: `<!-- cq-agent-review: ${JSON.stringify({
-          version: 1,
-          reviewerAgentId: 'reviewer-agent',
-          authorAgentId: 'author-agent',
           headSha: SHA_B,
           verdict: 'PASS',
-          independent: true,
         })} -->`,
       });
       const forge = makeForge(prSpec({ ...over, reviews: [marker, ...(over.reviews ?? [])] }));

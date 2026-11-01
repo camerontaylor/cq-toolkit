@@ -77,11 +77,10 @@ only when its `vars.CQ_*_APP_CLIENT_ID` repository variable is set; the
 gate's verdict selection keys on `vars.CQ_VERDICT_APP_ID`. The trust set is
 `vars.CQ_MERGE_TRUSTED_BOTS`, `vars.CQ_MERGE_ACCEPT_REVIEW_STATES`,
 `vars.CQ_MERGE_TRUSTED_ASSOCIATIONS` and the posture
-`vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default). Set
-`vars.CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true` only when the project
-uses separate author and reviewer agents under one GitHub account; it defaults
-to false and both the acceptance check and merge-time recheck require a valid
-head-bound `cq-agent-review` marker.
+`vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default). Human review comments containing the exact head SHA and `PASS` count for
+shared-account agents without an opt-in; Bot authors and `[bot]` logins are
+excluded. The legacy `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW` setting is
+retained for configuration compatibility and no longer controls matching.
 
 **Advisory posture (development).** `vars.CQ_MERGE_PROTECTED_PATHS=advisory`
 is this repository's development posture (2026-10-20; see

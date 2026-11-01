@@ -56,7 +56,6 @@ name: cq-policy
 
 on:
   pull_request:
-    branches: [main]
   workflow_run:
     workflows:
       - cq-signal
@@ -83,7 +82,7 @@ env:
 jobs:
   main-advisory:
     name: cq/policy (advisory)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -231,7 +230,7 @@ jobs:
     needs: resolve
     continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # An empty subject is resolve's "nothing to judge" (no verdict owed).
-    if: needs.resolve.outputs.subject != ''
+    if: github.event_name != 'pull_request' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The verdict signer's environment (Decision 6): its only secret is the

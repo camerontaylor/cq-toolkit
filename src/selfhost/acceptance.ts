@@ -249,7 +249,7 @@ const asReviewThread = (thread: SnapshotThread): ReviewThread => ({
 
 /** The trust set as one log-safe line. */
 const trustSummary = (policy: TrustPolicy): string =>
-  `trust: bots=${listed(policy.trustedBots)} acceptStates=${listed(policy.acceptStates)} associations=${listed(policy.trustedAssociations)} sameAccountAgentReview=${String(policy.allowSameAccountAgentReview === true)} excluded=${String(policy.excludedLogins.size)}`;
+  `trust: bots=${listed(policy.trustedBots)} acceptStates=${listed(policy.acceptStates)} associations=${listed(policy.trustedAssociations)} plainHumanHeadPass=true excluded=${String(policy.excludedLogins.size)}`;
 
 /** A failed rule: its name and the one-line reason. */
 interface RuleFailure {

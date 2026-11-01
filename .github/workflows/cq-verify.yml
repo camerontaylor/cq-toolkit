@@ -67,7 +67,6 @@ name: cq-verify
 
 on:
   pull_request:
-    branches: [main]
   workflow_run:
     workflows:
       - cq-measure
@@ -94,7 +93,7 @@ env:
 jobs:
   main-advisory:
     name: cq/ratchet (advisory)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -356,9 +355,7 @@ jobs:
     name: measurement
     needs: [resolve]
     continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
-    if: >-
-      ${{ !cancelled() && needs.resolve.result == 'success'
-      && needs.resolve.outputs.subject != '' }}
+    if: github.event_name != 'pull_request' && !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # F5: this artifact is HEAD-AUTHORED bytes — cq-measure runs head code
@@ -429,9 +426,7 @@ jobs:
     continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # A failed recompute still yields a (failing) verdict; only an
     # unresolved subject, or resolve's "nothing to judge", yields none.
-    if: >-
-      ${{ !cancelled() && needs.resolve.result == 'success'
-      && needs.resolve.outputs.subject != '' }}
+    if: github.event_name != 'pull_request' && !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The verdict signer's environment (Decision 6): its only secret is the

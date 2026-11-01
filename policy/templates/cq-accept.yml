@@ -56,7 +56,6 @@ name: cq-accept
 
 on:
   pull_request:
-    branches: [main]
   workflow_run:
     workflows:
       - cq-signal
@@ -88,7 +87,7 @@ env:
 jobs:
   main-advisory:
     name: cq/acceptance (advisory)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -268,7 +267,7 @@ jobs:
   judge:
     name: judge
     needs: resolve
-    if: needs.resolve.outputs.targets != '[]'
+    if: github.event_name != 'pull_request' && needs.resolve.outputs.targets != '[]'
     runs-on: ubuntu-latest
     # The sweep judges at most 25 PRs (its window) in one job.
     timeout-minutes: 90
