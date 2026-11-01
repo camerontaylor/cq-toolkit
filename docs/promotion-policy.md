@@ -34,3 +34,19 @@ replace the independent pre-merge review.
 
 The former branch-promotion workflows and their gate are retired. Branch and
 ruleset retirement is a coordinator settings operation, not a workflow action.
+
+Live settings after retirement: `cq-r0-history` (25287785) protects only `main`
+against deletion and non-fast-forward updates. `cq-r1-main` (25287792) requires
+a PR with merge commits, zero native approvals, no thread resolution, and
+`static` plus `denylist` from GitHub Actions (15368), without strict checks
+or an update restriction. RepositoryRole 5 and Integration 5230844 bypasses
+remain `always`. `cq-r2-merge-queue` is deleted; `merge-queue` and `cq/promoted`
+are deleted branches. `cq-c2-replay-marker` (24868640) still protects `cq/*`
+except the retired `cq/promoted` ref; `cq/review-ledger` remains. Environment
+deployment branch policies name only `main`. The saved target is
+[github-settings.json](../policy/templates/github-settings.json).
+
+The retained review-ledger rulesets (26246984 and 26246985) protect its
+immutable history and restrict writes to Integration 5230901. These existing
+protections and the live Actions allowed-events policy are also saved in the
+settings template.

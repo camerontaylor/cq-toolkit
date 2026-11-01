@@ -1,7 +1,7 @@
 # cq-toolkit doctrine — the eleven behavioral invariants
 
 Source: the toolkit plan's invariants table. Role: adoptable policy text, shipped in
-`policy/`, instantiated by any repository the same way the merge-queue templates
+`policy/`, instantiated by any repository the same way the PR templates
 are (`policy/templates/README.md`). Each invariant carries a Rule, a Why, and an
 Enforcement. This repo enforces I4, I3, both halves of I5, and the I10 lint rule today.
 

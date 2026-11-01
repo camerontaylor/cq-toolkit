@@ -566,13 +566,3 @@ describe('every trusted job runs a selfhost entry point with a classified closur
     // cannot classify.
   });
 });
-
-// W1.10 fix round (P1 composition L5, direct-diff r1 L3) — the required-
-// check list that gates D11 (`policy/protected-paths.json` `requiredChecks`)
-// and ruleset R2's required list (`policy/templates/github-settings.json`)
-// must not drift apart silently: a check removed from R2 while still listed
-// here would trip D11's "removed required check" rule at C2, and a check
-// added here with no R2 entry would never be enforced there. R2 is the C2
-// target and is a SUPERSET modulo one recorded supersession: the classic
-// `ratchet` context becomes the verdict-App `cq/ratchet` (methods note,
-// Residuals). This pins the mapping so the supersession stays documented.
