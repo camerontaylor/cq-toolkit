@@ -49,6 +49,8 @@ export interface RawCheckOutput {
    * (killed by signal, timed out, buffer overflow, spawn failure).
    */
   exitCode: number | null;
+  /** Observed child termination signal; null for ordinary exits. */
+  signal?: string | null;
 }
 
 /**
@@ -232,9 +234,9 @@ export const subprocessRunCheck: RunCheck = (cmd, options) =>
       },
       (error, stdout, stderr) => {
         const exitCode = error === null ? 0 : typeof error.code === 'number' ? error.code : null;
-        const result = { stdout, stderr, exitCode };
+        const result = { stdout, stderr, exitCode, signal: error?.signal ?? child.signalCode };
         if (error?.code === 'ABORT_ERR' && child.exitCode === null && child.signalCode === null)
-          child.once('close', () => resolve(result));
+          child.once('close', () => resolve({ ...result, signal: child.signalCode }));
         else resolve(result);
       },
     );

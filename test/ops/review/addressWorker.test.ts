@@ -395,6 +395,176 @@ fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1
       await rm(external, { recursive: true, force: true });
     }
   });
+  test('indeterminate baseline retains bounded child diagnostics', async () => {
+    const f = await fixture(
+      undefined,
+      `console.log('x'.repeat(5000)); console.error('refused selection'); process.exitCode=2;`,
+    );
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
+        exitCode: 2,
+        signal: null,
+        stdoutTail: 'x'.repeat(4095) + '\n',
+        stderrTail: 'refused selection\n',
+      });
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('indeterminate baseline with unavailable secret scan withholds output', async () => {
+    const f = await fixture(undefined, `console.log('private output'); process.exitCode=2;`, {
+      scanner: async () => {
+        throw new Error('scanner unavailable');
+      },
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
+        exitCode: 2,
+        signal: null,
+        stdoutTail: '[withheld: scanner unavailable/failed]',
+        stderrTail: '[withheld: scanner unavailable/failed]',
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([false, true])(
+    'real repository rules retain benign output and withhold secrets (%s)',
+    async (secret) => {
+      const text = secret
+        ? '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
+        : 'related test selection exceeds cap 10: 22 files';
+      const f = await fixture(
+        undefined,
+        `console.log(${JSON.stringify(text)});process.exitCode=2;`,
+        {
+          scanner: makeRepoDiffScanner(process.cwd()),
+        },
+      );
+      try {
+        await f.engine.fix(finding(), 1);
+        expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+          secret ? '[withheld: secret matched]' : text + '\n',
+        );
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('candidate check failures do not scan discarded diagnostics', async () => {
+    let scans = 0;
+    const f = await fixture(
+      undefined,
+      `if(require('node:fs').readFileSync('src/a.ts','utf8').includes('GOOD'))process.exitCode=2;`,
+      {
+        scanner: async (components) => {
+          if (components.some((c) => c.component === 'check-stdout')) scans++;
+          return components.map((c) => ({ component: c.component, hits: [] }));
+        },
+      },
+    );
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.calls()).toBeGreaterThan(0);
+      expect(scans).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('diagnostic scan observes cancellation', async () => {
+    const controller = new AbortController();
+    const f = await fixture(undefined, `process.exitCode=2;`, {
+      parentSignal: controller.signal,
+      scanner: () => {
+        controller.abort();
+        return new Promise(() => {});
+      },
+    });
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(f.engine.preconditions?.()).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([
+    { remaining: 12_000, step: 20_000, expected: 12_000 },
+    { remaining: 20_000, step: 7000, expected: 7000 },
+    { remaining: 60_000, step: 60_000, expected: 30_000 },
+  ])(
+    'diagnostic scan timeout follows budgets with a 30s ceiling (%j)',
+    async ({ remaining, step, expected }) => {
+      let timeout: number | undefined;
+      const f = await fixture(undefined, `process.exitCode=2;`, {
+        remainingWallMs: () => remaining,
+        unitWallMs: 120_000,
+        configure: (config) => {
+          config.budgets!.step!.wallMs = step;
+        },
+        scanner: async (components, options) => {
+          timeout = options?.timeoutMs;
+          return components.map((c) => ({ component: c.component, hits: [] }));
+        },
+      });
+      try {
+        await f.engine.fix(finding(), 1);
+        expect(timeout).toBe(expected);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('unresponsive diagnostic scan is bounded', async () => {
+    const f = await fixture(undefined, `process.exitCode=2;`, {
+      configure: (config) => {
+        config.budgets!.step!.wallMs = 1000;
+      },
+      scanner: () => new Promise(() => {}),
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+        '[withheld: scanner unavailable/failed]',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('indeterminate baseline retains signal after transient retry', async () => {
+    const f = await fixture(undefined, `process.kill(process.pid, 'SIGTERM');`);
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toMatchObject({
+        exitCode: null,
+        signal: 'SIGTERM',
+        stdoutTail: '',
+        stderrTail: '',
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('positive secret scan withholds indeterminate child output', async () => {
+    const f = await fixture(undefined, `console.log('sensitive output'); process.exitCode=2;`, {
+      scanner: async (components) =>
+        components.map((c) => ({
+          component: c.component,
+          hits: [{ ruleId: 'test', lines: [1] }],
+        })),
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+        '[withheld: secret matched]',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('baseline cleanup failure preserves the original typed cause', async () => {
     const f = await fixture(undefined, 'process.exitCode=1;', {
       gitHook: (args, run) =>
