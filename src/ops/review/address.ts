@@ -73,6 +73,8 @@ import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/r
 export interface ReviewAddressInput {
   repoRoot: string;
   source: string;
+  /** Prepared checkout matching PR metadata; read-only dependency source. */
+  dependencyRoot?: string;
   expectedHead?: string;
   record?: string;
   target?: string;
@@ -851,7 +853,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
               repoRoot: root,
-              dependencyRoot: input.repoRoot,
+              dependencyRoot:
+                input.dependencyRoot === undefined
+                  ? input.repoRoot
+                  : resolve(input.repoRoot, input.dependencyRoot),
+              preferDependencyRoot: input.dependencyRoot !== undefined,
               journalDir,
               policy,
               git,

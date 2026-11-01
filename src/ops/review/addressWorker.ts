@@ -109,6 +109,8 @@ export interface AddressWorkerDeps {
   repoRoot: string;
   /** Installed caller checkout; reused only when dependency metadata matches the worker tree. */
   dependencyRoot?: string;
+  /** Explicit prepared roots take priority over checkout-local dependencies. */
+  preferDependencyRoot?: boolean;
   journalDir: string;
   policy: EffectiveCqPolicy;
   attempts: AddressAttempt[];
@@ -349,7 +351,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       }
     };
     const local = await installed(root);
-    if (local) {
+    if (local && (!deps.preferDependencyRoot || resolve(deps.dependencyRoot ?? root) === root)) {
       await assertAddressDependenciesIsolated(
         local,
         [root, ...(deps.dependencyRoot ? [deps.dependencyRoot] : [])],
@@ -360,7 +362,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     if (deps.dependencyRoot === undefined || resolve(deps.dependencyRoot) === root)
       return undefined;
     const caller = await installed(deps.dependencyRoot);
-    if (!caller) return undefined;
+    if (!caller) {
+      if (deps.preferDependencyRoot)
+        throw new Error('prepared dependency root has no node_modules');
+      return undefined;
+    }
     await assertAddressDependencyMetadata(metadataRoot, deps.dependencyRoot, admit);
     await assertAddressDependenciesIsolated(caller, [root, deps.dependencyRoot], admit);
     return caller;

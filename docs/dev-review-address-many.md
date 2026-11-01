@@ -55,6 +55,19 @@ including indirect script calls. Unfamiliar settings remain compared
 conservatively. Neither plain nor bulk addressing
 automatically installs dependencies.
 
+When a PR predates a dependency change in the caller checkout, provide a
+separately prepared checkout whose metadata matches that PR. Plain
+`review.address` accepts `--dependencyRoot=/path/to/prepared-checkout`;
+bulk addressing accepts
+`'--dependencyRoots={"123":"/path/to/prepared-123","124":"/path/to/prepared-124"}'`.
+Paths resolve relative to the original `repoRoot`, before bulk isolation.
+Unmapped PRs keep the caller dependency default. The prepared root supplies
+`node_modules` and matching manifests, locks and package-manager configuration;
+all existing metadata and link-isolation checks still apply. Candidate metadata
+is copied privately, and the prepared tree is never installed into or modified.
+A mismatch remains a typed deterministic dependency prerequisite refusal. This
+option launches no installer and introduces no network or install retry path.
+
 Use `--query='is:open label:fix'` instead of `--pulls` for GitHub search discovery.
 The executor pages through the search results and checks the reported total,
 repository identities, duplicate numbers and incomplete-results flag. Truncation

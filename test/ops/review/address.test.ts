@@ -96,6 +96,28 @@ const reportOf = (
   result: Awaited<ReturnType<ReturnType<typeof makeReviewAddress>>>,
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
+test('plain caller selects the prepared dependency checkout', async () => {
+  const f = await fixture();
+  let selected: string | undefined;
+  try {
+    await makeReviewAddress({
+      ...f.deps,
+      workerFactory: (deps) => {
+        selected = deps.dependencyRoot;
+        return f.deps.workerFactory!(deps);
+      },
+    })({
+      repoRoot: f.repo.root,
+      source: 'local',
+      dependencyRoot: '/prepared/pr-7',
+      journalDir: f.input.journalDir,
+    });
+    expect(selected).toBe('/prepared/pr-7');
+  } finally {
+    await f.cleanup();
+  }
+});
+
 describe('review.address composition', () => {
   test('an engine prerequisite refusal stops the leg before paid re-review', async () => {
     const f = await fixture();

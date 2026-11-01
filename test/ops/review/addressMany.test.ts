@@ -597,3 +597,21 @@ test('aggregate reports the preserved isolation path for each leg', async () => 
       { number: 2, path: '/isolated/pr-2' },
     ]);
 });
+
+test('bulk caller forwards only the selected PR prepared dependency root', async () => {
+  const address = vi.fn(async (_input: unknown) => ({ status: 'ok' as const, value: report() }));
+  await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async () => '/isolated',
+    gh,
+    address,
+  })({ ...input, dependencyRoots: { '1': 'prepared/old-pr' } });
+  expect(address.mock.calls[0]![0]).toMatchObject({
+    repoRoot: '/isolated',
+    dependencyRoot: '/repo/prepared/old-pr',
+  });
+  expect(address.mock.calls[1]![0]).not.toHaveProperty('dependencyRoot');
+  expect(
+    ReviewAddressManyInputSchema.safeParse({ ...input, dependencyRoots: { bad: '/path' } }).success,
+  ).toBe(false);
+});

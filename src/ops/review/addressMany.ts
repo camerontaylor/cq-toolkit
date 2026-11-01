@@ -40,6 +40,8 @@ const RepositoryMetadata = z.object({ nameWithOwner: z.string() });
 export interface ReviewAddressManyInput {
   repoRoot: string;
   repo: string;
+  /** Prepared dependency checkout per PR number, relative to repoRoot or absolute. */
+  dependencyRoots?: Record<string, string>;
   pulls?: number[];
   query?: string;
   concurrency?: number;
@@ -394,6 +396,14 @@ export function makeReviewAddressMany(
               result = await address({
                 repoRoot: root,
                 source: `pr:${candidate.number}`,
+                ...(input.dependencyRoots?.[String(candidate.number)] === undefined
+                  ? {}
+                  : {
+                      dependencyRoot: resolve(
+                        input.repoRoot,
+                        input.dependencyRoots[String(candidate.number)]!,
+                      ),
+                    }),
                 expectedHead: candidate.headOid,
                 maxTokens: input.tokensPerPr,
                 ...(input.rounds === undefined ? {} : { rounds: input.rounds }),

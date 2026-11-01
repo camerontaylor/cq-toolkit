@@ -25,6 +25,17 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "maximum": 9007199254740991,
       "type": "integer"
     },
+    "dependencyRoots": {
+      "additionalProperties": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "propertyNames": {
+        "pattern": "^[1-9]\\d*$",
+        "type": "string"
+      },
+      "type": "object"
+    },
     "enrollments": {
       "items": {
         "properties": {
