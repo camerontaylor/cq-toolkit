@@ -415,8 +415,8 @@ try {
   const json = JSON.parse(readFileSync(reportPath, 'utf8'));
   report = readReport(json, repoRelative);
   // Opt-in machine evidence for configured checks; does not alter selection,
-  // locking, execution or terminal verdicts. The adapter still requires the
-  // final wrapper result (including cap/class/run validation).
+  // execution or terminal verdicts. The adapter still requires the
+  // final wrapper result (including class/run validation).
   if (process.env.CQ_TEST_NARROW_REPORT === '1')
     writeSync(1, `test:narrow report=${JSON.stringify(json)}\n`);
 } catch {

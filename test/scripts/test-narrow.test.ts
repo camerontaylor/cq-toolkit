@@ -1,5 +1,5 @@
 // Policy of the one permitted local test command (scripts/lib/test-narrow.mjs):
-// argv refusals, the run plan (fallback, class gate, file cap), the stable
+// argv refusals, the run plan (fallback and class gate), the stable
 // summary line, and the build-freshness test it relies on (ratchet-lib's
 // distIsFresh, over a copied fixture tree). Pure: no spawns, no git, no
 // vitest invocation.
@@ -46,7 +46,7 @@ const refusal = (argv: string[]) => {
 };
 
 describe('parseArgs', () => {
-  it('defaults to base mode with the full lock-wait ceiling', () => {
+  it('defaults to base mode', () => {
     expect(options([])).toEqual({
       files: [],
       base: null,

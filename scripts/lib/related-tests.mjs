@@ -1,5 +1,5 @@
 // A deliberately bounded per-fix map, not the full affected import closure.
-// Reuse the wrapper's test predicate, reviewed non-import mappings and cap.
+// Reuse the wrapper's test predicate, reviewed non-import mappings.
 import { isTest, NON_IMPORT_MAP } from './affected-tests.mjs';
 
 export function selectRelatedTests(changed, allTests) {
