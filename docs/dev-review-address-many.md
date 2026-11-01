@@ -26,8 +26,10 @@ leg with its original reason; worker/rescue retries cannot repair that
 precondition. Recognized pre-existing check findings remain baseline evidence.
 Installed dependency reuse compares lockfiles and workspace configuration
 exactly, and compares dependency-relevant package settings (including package
-manager and overrides). Script and descriptive metadata may differ; unfamiliar
-settings remain compared conservatively. Neither plain nor bulk addressing
+manager and overrides). Descriptive metadata and scripts may differ when no
+install lifecycle hooks exist. If hooks exist, the full script map is compared,
+including indirect script calls. Unfamiliar settings remain compared
+conservatively. Neither plain nor bulk addressing
 automatically installs dependencies.
 
 Use `--query='is:open label:fix'` instead of `--pulls` for GitHub search discovery.

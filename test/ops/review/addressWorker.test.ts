@@ -1006,7 +1006,7 @@ describe('review.address candidate isolation', () => {
       expect(refused.reason).toMatch(
         /execution-head evidence|missing at execution head|accompanied by edits|roles.reviewer required/,
       );
-      expect(f.calls()).toBe(1);
+      expect(f.calls()).toBe(mode === 'missing-reviewer' ? 0 : 1);
       expect(refused.commit).toBeUndefined();
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
@@ -1031,11 +1031,11 @@ describe('review.address candidate isolation', () => {
         expect(refused.reason).toMatch(
           /roles.reviewer required|check.cwd escapes|configured check was/,
         );
-        expect(f.calls()).toBe(mode === 'reviewer' ? 2 : 0);
+        expect(f.calls()).toBe(0);
         expect(refused.commit).toBeUndefined();
         expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
-        expect(f.attempts.some((a) => a.failedAttempt?.sha)).toBe(mode === 'reviewer');
+        expect(f.attempts).toEqual([]);
       } finally {
         await f.cleanup();
       }
@@ -1145,6 +1145,33 @@ console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
       await rm(external, { recursive: true, force: true });
     }
   });
+  test('baseline worktree setup failure stops the leg once before model dispatch', async () => {
+    let adds = 0;
+    const f = await fixture(undefined, '', {
+      gitHook: (args, run) => {
+        if (
+          args.includes('worktree') &&
+          args.includes('add') &&
+          args.some((a) => a.includes('baseline-'))
+        ) {
+          adds++;
+          return Promise.resolve({ code: 1, stdout: '', stderr: 'baseline setup unavailable' });
+        }
+        return run(args);
+      },
+    });
+    try {
+      for (let i = 0; i < 10; i++) {
+        const result = await f.engine.fix({ ...finding(), id: `finding-${i}` }, 1);
+        expect(result.reason).toContain('baseline setup unavailable');
+      }
+      expect(adds).toBe(1);
+      expect(f.calls()).toBe(0);
+      expect(f.engine.preconditionFailure?.()).toContain('baseline setup unavailable');
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('script and descriptive metadata differences reuse equivalent dependencies', async () => {
     const f = await fixture(undefined, '', { installedDependencies: 'matching' });
     try {
@@ -1158,6 +1185,52 @@ console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
       await f.cleanup();
     }
   });
+  test.each(['preinstall', 'install', 'postinstall', 'prepare', 'pnpm:devPreinstall'])(
+    'changed %s lifecycle refuses dependency reuse before model dispatch',
+    async (hook) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { [hook]: 'modify-installed-files' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([true, false])(
+    'install hooks compare indirectly invoked scripts (changed=%s)',
+    async (changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const manifest = {
+          scripts: { postinstall: 'pnpm run build', build: 'prepare installed files' },
+        };
+        await f.repo.write('package.json', JSON.stringify(manifest));
+        f.repo.commitAll('install lifecycle metadata');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({
+            scripts: {
+              ...manifest.scripts,
+              build: changed ? 'different installed files' : manifest.scripts.build,
+            },
+          }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        if (changed) {
+          expect(result.reason).toContain('manifests/locks differ');
+          expect(f.calls()).toBe(0);
+        } else expect(result.commit, result.reason).toBeTruthy();
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test.each([
     ['dependencies', { dep: '1' }],
     ['devDependencies', { dep: '1' }],

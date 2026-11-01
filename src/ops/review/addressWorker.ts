@@ -65,6 +65,7 @@ const DependencyManifest = z
     peerDependenciesMeta: z.record(z.string(), z.unknown()).optional(),
     pnpm: z.record(z.string(), z.unknown()).optional(),
     packageManager: z.string().optional(),
+    scripts: z.record(z.string(), z.string()).optional(),
     overrides: z.record(z.string(), z.unknown()).optional(),
     resolutions: z.record(z.string(), z.unknown()).optional(),
     workspaces: z.union([z.array(z.string()), z.record(z.string(), z.unknown())]).optional(),
@@ -86,6 +87,17 @@ const descriptiveManifestFields = new Set([
   'bugs',
   'keywords',
   'funding',
+]);
+const installLifecycleScripts = new Set([
+  'preinstall',
+  'install',
+  'postinstall',
+  'prepublish',
+  'preprepare',
+  'prepare',
+  'postprepare',
+  'dependencies',
+  'pnpm:devPreinstall',
 ]);
 export interface AddressAttempt {
   finding: string;
@@ -370,11 +382,14 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       const relevant = (text: string | null) => {
         if (path !== 'package.json' || text === null) return text;
         const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
-        // Preserve unfamiliar settings: they may affect installation. Only
-        // known descriptive/script fields are irrelevant to the dependency tree.
-        return Object.fromEntries(
+        // Preserve unfamiliar settings and lifecycle dependencies. A hook can
+        // invoke any other script, so compare the full map when one is present.
+        const fields = Object.fromEntries(
           Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
         );
+        if (Object.keys(parsed.scripts ?? {}).some((key) => installLifecycleScripts.has(key)))
+          fields.scripts = parsed.scripts;
+        return fields;
       };
       if (!isDeepStrictEqual(relevant(local), relevant(caller)))
         throw new Error(
@@ -583,6 +598,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   // model to edit the finding cannot repair them, so stop the leg before paying
   // for a semantic attempt. Candidate admission repeats the baseline on its
   // current parent so sibling commits cannot make the evidence stale.
+  const refusePrecondition = (error: unknown): never => {
+    if (error instanceof AddressRefusal) throw error;
+    preconditionFailure = `baseline precondition failed: ${error instanceof Error ? error.message : String(error)}`;
+    throw new AddressRefusal(preconditionFailure, true);
+  };
   const prepareBaseline = async (cwd: string, finding: Finding, admit: () => void) => {
     try {
       const dependencies = await dependencyDirectory(admit);
@@ -590,9 +610,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         await snapshotAddressDependencies(dependencies, resolve(cwd, 'node_modules'), admit);
       return { dependencies, checks: await runChecks(cwd, finding, false) };
     } catch (error) {
-      if (error instanceof AddressRefusal) throw error;
-      preconditionFailure = `baseline precondition failed: ${error instanceof Error ? error.message : String(error)}`;
-      throw new AddressRefusal(preconditionFailure, true);
+      return refusePrecondition(error);
     }
   };
   return {
@@ -738,6 +756,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         await safeFile(root, file);
         const classified = classifyStagePaths([file], undefined, false, false);
         if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
+        if (!policy.roles.reviewer)
+          refusePrecondition(new Error('roles.reviewer required for assigned-finding closure'));
         await withMutation(async () => {
           const baselineHead = await git(root, ['rev-parse', 'HEAD']);
           if (!verifiedHeads.has(baselineHead))
@@ -749,7 +769,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           } finally {
             await git(root, ['worktree', 'remove', '--force', candidate]);
           }
-        }, admitMutation);
+        }, admitMutation).catch(refusePrecondition);
         while (true) {
           stop();
           if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
