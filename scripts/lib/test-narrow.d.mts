@@ -21,6 +21,7 @@ export interface PlannedFile {
   project: string;
 }
 export function planRun(input: {
+  allTests?: readonly string[];
   selection: { files: readonly string[]; fallback: boolean; reason: string };
   manifest: Readonly<Record<string, string>>;
   include: readonly string[];

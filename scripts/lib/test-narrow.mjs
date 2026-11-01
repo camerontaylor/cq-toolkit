@@ -127,7 +127,14 @@ export function classOf(file, manifest) {
  * @returns {{ ok: true, run: {file: string, project: string}[] }
  *   | { ok: false, reason: string, candidates: string[] }}
  */
-export function planRun({ selection, manifest, include }) {
+export function planRun({ selection, manifest, include, allTests = [] }) {
+  if (allTests.length > 0 && allTests.every((file) => selection.files.includes(file))) {
+    return {
+      ok: false,
+      reason: 'selection covers the full test suite; name a narrower set of files',
+      candidates: [],
+    };
+  }
   if (selection.fallback) {
     return {
       ok: false,

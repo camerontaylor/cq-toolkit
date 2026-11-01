@@ -171,6 +171,26 @@ describe('planRun', () => {
     });
   });
 
+  it('refuses a complete mapped suite independently of fallback and class opt-ins', () => {
+    const files = Object.keys(manifest);
+    expect(
+      planRun({
+        selection: selection(files),
+        manifest,
+        include: ['integration', 'live'],
+        allTests: files,
+      }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('full test suite') });
+    expect(
+      planRun({
+        selection: selection(files.slice(1)),
+        manifest,
+        include: ['integration', 'live'],
+        allTests: files,
+      }).ok,
+    ).toBe(true);
+  });
+
   it('accepts more than ten named files', () => {
     const files = Array.from({ length: 12 }, (_, i) => `test/f${i}.test.ts`);
     expect(planRun({ selection: selection(files), manifest, include: [] }).ok).toBe(true);

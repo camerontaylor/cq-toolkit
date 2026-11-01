@@ -254,7 +254,7 @@ if (pythonSelection.fallback) {
   selection.reason = pythonSelection.reason;
 }
 if (relatedError !== null) selection.reason += `: ${relatedError}`;
-const plan = planRun({ selection, manifest, include: opts.include });
+const plan = planRun({ selection, manifest, include: opts.include, allTests });
 if (!plan.ok) {
   if (plan.candidates.length > 0) {
     say('selected (choose a subset and name it explicitly):');
