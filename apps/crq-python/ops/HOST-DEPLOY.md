@@ -34,12 +34,10 @@ fallback when usage is unavailable; valid vendor remaining slots govern normal
 admission. A local slot prediction never authorizes spend without rechecking
 usage. Unknown external starts and vendor admission lag retry within a minute.
 
-Deploy the signer change too: its review argv includes `--deep` and its deadline
-is 120 minutes (stall alert 150 minutes). Signer custody, its existing independent admission policy and
-its service installation remain unchanged. The signer publishes an exact
-rate-limit deadline; the runner retains the latest global deadline on harvest.
-All reviews use `--deep`, and free slots can start concurrent isolated reviews
-in promotion → prioritize → rank order. See [README](../README.md).
+All reviews use `--deep`; free slots start concurrent isolated reviews in
+operator priority → rank order. The promotion signer is retired; follow
+[signer deployment](../signer/DEPLOY.md) to stop its old daemon while preserving
+the independent root review-ledger publisher. See [README](../README.md).
 
 ## Private overlay, schema 1
 
