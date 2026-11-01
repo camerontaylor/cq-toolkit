@@ -173,14 +173,14 @@ describe('planRun', () => {
 
   it('refuses a complete mapped suite independently of fallback and class opt-ins', () => {
     const files = Object.keys(manifest);
-    expect(
-      planRun({
-        selection: selection(files),
-        manifest,
-        include: ['integration', 'live'],
-        allTests: files,
-      }),
-    ).toMatchObject({ ok: false, reason: expect.stringContaining('full test suite') });
+    const full = planRun({
+      selection: selection(files),
+      manifest,
+      include: ['integration', 'live'],
+      allTests: files,
+    });
+    expect(full.ok).toBe(false);
+    expect(full.ok ? '' : full.reason).toContain('full test suite');
     expect(
       planRun({
         selection: selection(files.slice(1)),
