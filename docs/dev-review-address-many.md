@@ -1,9 +1,11 @@
 # Bulk address executor
 
 The runtime exposes `makeReviewAddressMany` through the SDK and
-`review.addressMany` through the registry-driven CLI. SDK and CLI review
-addressing require Node 24 or newer: workspace dependency inspection uses
-[stable `fs.promises.glob` with array exclusions](https://nodejs.org/api/fs.html#fspromisesglobpattern-options).
+`review.addressMany` through the registry-driven CLI. Node 24 is the toolkit’s
+supported/tested runtime floor, matching CI. Workspace dependency inspection
+uses [`fs.promises.glob` with pattern exclusions](https://nodejs.org/api/fs.html#fspromisesglobpattern-options),
+stable since Node 22.17. On Node 21 or earlier, importing the package fails at
+link time: the root export reaches the static `glob` import.
 
 Example:
 
