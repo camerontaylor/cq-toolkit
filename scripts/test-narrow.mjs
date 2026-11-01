@@ -47,6 +47,9 @@ const toPosix = (path) => path.split(sep).join('/');
 const repoRelative = (path) => toPosix(relative(ROOT, resolve(ROOT, path)));
 const emit = (fields) => process.stdout.write(`${summaryLine(fields)}\n`);
 
+const exitAfterFlush = (code) =>
+  new Promise(() => process.stdout.write('', () => process.exit(code)));
+
 // 1. Priority ---------------------------------------------------------------
 if (getPriority() < NICE_INCREMENT) {
   if (!POSIX) {
@@ -54,27 +57,26 @@ if (getPriority() < NICE_INCREMENT) {
   } else if (process.env[REEXEC_MARK] === '1') {
     const reason = `priority ${getPriority()} after nice -n ${NICE_INCREMENT}`;
     emit({ result: 'refused', exit: 2, reason });
-    process.exit(2);
+    await exitAfterFlush(2);
   } else {
     const niced = spawn('nice', ['-n', String(NICE_INCREMENT), process.execPath, SCRIPT, ...argv], {
       stdio: 'inherit',
       env: { ...process.env, [REEXEC_MARK]: '1' },
     });
-    // A terminal signal reaches both processes (same group); the niced one
-    // relays each signal once and absorbs this immediate duplicate inside
-    // its interrupt grace window (only a repeat after the window escalates).
+    // Relay signals to the niced runner; it terminates its own child group
+    // and emits the single terminal result before this parent exits.
     for (const signal of SIGNALS) process.on(signal, () => niced.kill(signal));
-    niced.on('error', (error) => {
+    niced.on('error', async (error) => {
       emit({ result: 'error', exit: 1, reason: `cannot re-exec under nice: ${error.message}` });
-      process.exit(1);
+      await exitAfterFlush(1);
     });
-    niced.on('exit', (code, signal) => {
+    niced.on('exit', async (code, signal) => {
       // Killed by a signal, the niced process printed no summary: print one.
       if (signal !== null) {
         const reason = `niced runner killed by ${signal}`;
         emit({ result: 'interrupted', exit: signalExit(signal), reason });
       }
-      process.exit(code ?? signalExit(signal));
+      await exitAfterFlush(code ?? signalExit(signal));
     });
     // The niced process does the work; this one only relays its exit.
     await new Promise(() => {});
@@ -103,8 +105,7 @@ const signalChild = (signal) => {
   }
 };
 const sweepChild = () => signalChild('SIGKILL');
-const awaitExit = () =>
-  new Promise(() => process.stdout.write('', () => process.exit(process.exitCode)));
+const awaitExit = () => exitAfterFlush(process.exitCode ?? 1);
 const finish = async (fields) => {
   Object.assign(summary, fields);
   if (!printed) {

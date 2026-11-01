@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { needsDist } from '../scripts/lib/dist-tests.mjs';
 
-import { distPrepared, scrubbedBuildEnv } from './global-setup.js';
+import { cliFileFilters, distPrepared, scrubbedBuildEnv } from './global-setup.js';
 
 describe('scrubbedBuildEnv', () => {
   it('drops credential-bearing variables and keeps the rest', () => {
@@ -75,4 +75,21 @@ it('recognizes reviewed indirect dist consumers via relative and absolute paths'
     expect(needsDist([file], root)).toBe(true);
     expect(needsDist([join(root, file)], root)).toBe(true);
   }
+});
+
+describe('direct Vitest selection', () => {
+  it('retains positional file filters and excludes option values', () => {
+    expect(
+      cliFileFilters(['run', '--project', 'pure', '--reporter', 'json', 'test/smoke.test.ts']),
+    ).toEqual(['test/smoke.test.ts']);
+  });
+  it('uses all tests only for an unfiltered invocation', () => {
+    expect(cliFileFilters(['run', '--project', 'pure'])).toEqual([]);
+  });
+  it('retains absolute filters and normalizes Windows separators', () => {
+    expect(cliFileFilters(['run', '/repo/test/a.test.ts', 'test\\b.test.ts'])).toEqual([
+      '/repo/test/a.test.ts',
+      'test/b.test.ts',
+    ]);
+  });
 });

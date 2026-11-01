@@ -64,8 +64,9 @@ the full suite and Knip; it is **not a local verification route** — it is
 CI-only, like the suite (contract §1).
 
 Any local timing cited as evidence carries a load stamp (host uptime + load
-average at measurement time), and no protocol or record cites `--maxWorkers`
-(mechanism, and the caveat that a later slice may change it: contract §5).
+average at measurement time). Do not cite `--maxWorkers` as worker-count
+tuning or as performance evidence in protocol steps or records. The runner
+documentation describes its fixed setting (contract §5).
 
 ## Local testing
 

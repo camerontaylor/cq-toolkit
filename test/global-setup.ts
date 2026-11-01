@@ -1,4 +1,4 @@
-import type { TestProject } from 'vitest/node';
+import { parseCLI, type TestProject } from 'vitest/node';
 import { needsDist } from '../scripts/lib/dist-tests.mjs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -7,14 +7,9 @@ import { scrubbedBuildEnv } from '../scripts/lib/build-env.mjs';
 // The credential scrub is shared with the narrow runner's build.
 export { scrubbedBuildEnv };
 
-// Build-once global setup: one `pnpm run build` per Vitest invocation, before
-// collection, so no test pays a hidden build and every test sees the same dist.
-//
-// Contract with the narrow-test runner (`pnpm test:narrow`): when
-// CQ_DIST_PREPARED is exactly `1`, the caller has already made dist fresh
-// (scripts/test-narrow.mjs, under ratchet-lib's distIsFresh) and this setup returns without
-// building or checking freshness. Any other value — unset, `0`, ... — builds.
-// Keep the name and the exact-`1` semantics stable.
+// Prepare dist once before collection for the selected dist-dependent tests.
+// CQ_DIST_PREPARED exactly1 means the narrow runner already handled freshness;
+// direct Vitest runs use the CLI's positional filters for their selection.
 
 // Tests resolve the repository from their own location, so the build must
 // target that tree whatever directory Vitest was launched from.
@@ -91,14 +86,19 @@ function build(): Promise<void> {
   });
 }
 
-/**
- * Build the repository before Vitest collects any tests.
- *
- * Vitest runs global setup once per invocation, including watch mode; watch-mode
- * reruns reuse this build and do not rebuild after a source edit.
- */
+/** Parse positional filters without treating option values as test files. */
+export function cliFileFilters(args: readonly string[]): string[] {
+  return parseCLI(['vitest', ...args], { allowUnknownOptions: true }).filter.map((file) =>
+    file.replaceAll('\\', '/'),
+  );
+}
+
+/** Prepare selected dist consumers once; source-only selections skip the build. */
 export default async function globalSetup(project: TestProject): Promise<void> {
-  const specs = await project.vitest.getRelevantTestSpecifications();
+  if (distPrepared(process.env)) return;
+  const specs = await project.vitest.getRelevantTestSpecifications(
+    cliFileFilters(process.argv.slice(2)),
+  );
   if (
     !needsDist(
       specs.map((spec) => spec.moduleId),
@@ -106,7 +106,6 @@ export default async function globalSetup(project: TestProject): Promise<void> {
     )
   )
     return;
-  if (distPrepared(process.env)) return Promise.resolve();
   const shared = globalThis as typeof globalThis & { [BUILD_KEY]?: Promise<void> };
   shared[BUILD_KEY] ??= build();
   return shared[BUILD_KEY];
