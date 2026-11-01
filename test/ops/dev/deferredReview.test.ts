@@ -29,7 +29,7 @@ const reference: QueueReference & { binding: DeferredAuthorBinding } = {
     repo: 'owner/repo',
     producer: 'author',
     head: 'a'.repeat(40),
-    target: 'merge-queue',
+    target: 'main',
     targetSelector: 'promoted-main',
   },
 };
@@ -49,7 +49,7 @@ function origin(failure: VendorFailure = 'unavailable'): VendorOutageOrigin {
     cycleId: 'cycle-1',
     head: 'a'.repeat(40),
     base: deferral.base,
-    target: 'merge-queue',
+    target: 'main',
     scope: 'full',
     dirtySha256: 'clean-tree',
     failure: {
@@ -77,7 +77,7 @@ const identity = {
   repo: 'owner/repo',
   producer: 'author',
   head: 'a'.repeat(40),
-  target: 'merge-queue',
+  target: 'main',
 };
 
 function fake() {
@@ -135,7 +135,7 @@ describe('deferred vendor policy', () => {
       { ...cycle, completion: { kind: 'terminal' as const } },
       { ...cycle, head: 'd'.repeat(40) },
       { ...cycle, base: 'd'.repeat(40) },
-      { ...cycle, target: 'main' },
+      { ...cycle, target: 'release' },
       { ...cycle, scope: 'uncommitted' as const },
       { ...cycle, dirtySha256: 'changed' },
       { ...cycle, vendorFailure: origin('login-required').failure },
@@ -451,7 +451,7 @@ describe('deferred vendor policy', () => {
     for (const binding of [
       { ...next.binding, repo: 'other/repo' },
       { ...next.binding, producer: 'other' },
-      { ...next.binding, target: 'main' },
+      { ...next.binding, target: 'release' },
       { ...next.binding, targetSelector: 'merge-queue' as const },
       reference.binding,
     ]) {

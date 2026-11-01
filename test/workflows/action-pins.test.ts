@@ -38,14 +38,11 @@ const TEMPLATE_FILES = [
   'policy/templates/cq-signal.yml',
   'policy/templates/cq-policy.yml',
   'policy/templates/cq-accept.yml',
-  'policy/templates/gate.yml',
   'policy/templates/settings-drift.yml',
   'policy/templates/ratchet.yml',
   'policy/templates/ratchet-propose.yml',
   'policy/templates/ratchet-propose-measure.yml',
-  'policy/templates/init-merge-queue.yml',
   'policy/templates/live-merge.yml',
-  'policy/templates/sync-merge-queue.yml',
   'policy/templates/required-check.md',
   'policy/templates/affected-tests.md',
   'policy/templates/self-host/self-review-loop.yml',
@@ -160,25 +157,6 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
           /["']?persist-credentials["']?\s*:\s*false/,
         );
       }
-    }
-  });
-
-  it('queue-mechanics workflows keep the promote PAT (no persist-credentials key)', () => {
-    // init-merge-queue.yml pushes with the promote PAT, so the checkout keeps its
-    // persisted credential BY DEFAULT — the pin comment says why. The
-    // policy assertion is that the file does NOT DECLARE the key (which would
-    // have to be `true` to matter, and `false` would break the push); the
-    // prose comment mentioning the word is not a declaration.
-    for (const name of ['init-merge-queue.yml']) {
-      const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
-      // This pushes with the promote PAT, so the checkout keeps its
-      // persisted credential BY DEFAULT — the pin comment says why. The
-      // policy assertion is that the file does NOT DECLARE the key (which would
-      // have to be `true` to matter, and `false` would break the push); the
-      // file's prose comment mentioning the word is not a declaration.
-      expect(text, `${name}: must not declare a persist-credentials key`).not.toMatch(
-        /^\s+["']?persist-credentials["']?\s*:/m,
-      );
     }
   });
 

@@ -35,12 +35,10 @@ function groupOf(text: string): string | undefined {
   return undefined;
 }
 
-describe('merge-queue subject measurements are never superseded', () => {
-  it.each(PATHS)('%s (%s): a merge-queue push run is keyed by its SHA', (name, path) => {
+describe('PR measurements supersede older runs by event and ref', () => {
+  it.each(PATHS)('%s (%s)', (name, path) => {
     expect(groupOf(readFileSync(path, 'utf8'))).toBe(
-      `${name}-\${{ github.event_name }}-\${{ github.ref }}` +
-        "${{ github.event_name == 'push' && github.ref == 'refs/heads/merge-queue' " +
-        "&& format('-{0}', github.sha) || '' }}",
+      `${name}-\${{ github.event_name }}-\${{ github.ref }}`,
     );
   });
 });

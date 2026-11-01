@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # Decisive D11 authorization (C3 readiness T1/T2)
 
 Status: design for the held PR that makes D11 override records decisive at

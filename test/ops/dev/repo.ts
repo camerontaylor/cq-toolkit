@@ -62,7 +62,7 @@ export async function makeTestRepo(
   await write('README.md', '# fixture\n');
   commitAll('base');
   git('remote', 'add', 'origin', origin);
-  git('push', '-q', 'origin', 'HEAD:merge-queue');
+  git('push', '-q', 'origin', 'HEAD:merge-queue', 'HEAD:main');
   git('fetch', '-q', 'origin');
   git('checkout', '-q', '-b', 'feature/x');
   await write('src/a.ts', 'export const a = 1;\n');
@@ -124,7 +124,7 @@ export async function seed(
   target: TestRepo,
   extra: (state: WorkState) => DevRecord[] = () => [],
 ): Promise<WorkState> {
-  const read = await readWorkState(repoEffects(target), { target: 'merge-queue' });
+  const read = await readWorkState(repoEffects(target), { target: 'main' });
   if (!read.ok) throw new Error(read.reason);
   const { state } = read;
   const at = { base: state.base, head: state.head, dirtySha256: state.dirtySha256 };

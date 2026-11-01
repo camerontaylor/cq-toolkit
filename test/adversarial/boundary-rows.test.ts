@@ -40,9 +40,7 @@ describe('§7 worker and protected-path attacks', () => {
     // protected: promote-gate re-judges every PR it admits
     // (docs/protected-scope.md).
     expect(
-      policy.protectedPaths.some((source) =>
-        new RegExp(source).test('src/selfhost/promote-gate.ts'),
-      ),
+      policy.protectedPaths.some((source) => new RegExp(source).test('scripts/denylist-scan')),
     ).toBe(true);
     for (const path of ['policy/templates/cq-policy.yml', '.github/workflows/promote.yml']) {
       expect(isProtectedPolicyPath(path), path).toBe(true);

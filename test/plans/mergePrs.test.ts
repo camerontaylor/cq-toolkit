@@ -71,7 +71,7 @@ describe('the shipped merge-prs plan entry', () => {
     // it dispatches without a vendor name (modelSpec omitted; no conflicts
     // → the agent is never needed).
     expect(RunMergePrsInputSchema.safeParse(job?.input).success).toBe(true);
-    expect(job?.input).toEqual({ repoRoot: '.', baseBranch: 'merge-queue', prs: [] });
+    expect(job?.input).toEqual({ repoRoot: '.', baseBranch: 'main', prs: [] });
   });
 
   test('getPlan discovers the module by file through the default plans root', async () => {
@@ -93,7 +93,7 @@ describe('the merge family op registry', () => {
     const entry = await get('merge.runPrs');
     if (entry === undefined) throw new Error('no registry entry named merge.runPrs');
     expect(
-      entry.inputSchema.safeParse({ repoRoot: '.', baseBranch: 'merge-queue', prs: [] }).success,
+      entry.inputSchema.safeParse({ repoRoot: '.', baseBranch: 'main', prs: [] }).success,
     ).toBe(true);
   });
 

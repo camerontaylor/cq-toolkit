@@ -1,10 +1,10 @@
 // scripts/ratchet-propose.mjs (W1.7): the privileged proposer consumes a
 // numbers-only measurement ARTIFACT as untrusted data and targets
-// merge-queue. Spawn-driven like the other driver suites: the token gate,
+// main. Spawn-driven like the other driver suites: the token gate,
 // argument validation, and artifact refusals run against the real script
 // with a recording fake `git`/`gh` first on PATH (a refused artifact must
 // invoke neither); the happy path runs a COPY of the script in a throwaway
-// repo whose origin is a local bare repo with a merge-queue branch.
+// repo whose origin is a local bare repo with a main branch.
 // POSIX-only (shell shims, symlinks); CI is linux.
 import { spawnSync } from 'node:child_process';
 import {
@@ -187,7 +187,7 @@ describe('ratchet-propose: the measurement artifact is untrusted data', () => {
   });
 });
 
-describe('ratchet-propose: happy path against a local merge-queue origin', () => {
+describe('ratchet-propose: happy path against a local main origin', () => {
   const GIT_ENV = {
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_SYSTEM: '/dev/null',
@@ -232,7 +232,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     mkdirSync(join(repo, 'baselines'), { recursive: true });
     mkdirSync(bin);
     git(dir, ['init', '--bare', '-b', 'main', origin]);
-    git(repo, ['init', '-b', 'main']);
+    git(repo, ['init', '-b', 'trust']);
     git(repo, ['remote', 'add', 'origin', origin]);
     copyFileSync(SCRIPT, join(repo, 'scripts', 'ratchet-propose.mjs'));
     copyFileSync(
@@ -249,13 +249,13 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     )) as { markBuildComplete: () => void };
     fixtureLib.markBuildComplete();
     writeFileSync(join(repo, '.gitignore'), 'dist\n.cq/\n');
-    // main (the trust ref) carries a STRICTER baseline than merge-queue: a
-    // proposal can only happen if the comparison reads the merge-queue tip.
+    // trust carries a STRICTER baseline than main: a
+    // proposal can only happen if the comparison reads the main tip.
     writeFileSync(join(repo, COVERAGE_BASELINE), baseline(99));
     git(repo, ['add', '-A']);
-    git(repo, ['commit', '-m', 'main']);
-    git(repo, ['push', 'origin', 'main']);
-    git(repo, ['checkout', '-b', 'merge-queue']);
+    git(repo, ['commit', '-m', 'trust']);
+    git(repo, ['push', 'origin', 'trust']);
+    git(repo, ['checkout', '-b', 'main']);
     writeFileSync(join(repo, COVERAGE_BASELINE), baseline(coverageBaseline));
     writeFileSync(join(repo, 'baselines', 'ratchets.json'), '{"not":"a baseline"}\n');
     // The tip can select a Git filter through its attributes. Configure the
@@ -263,11 +263,11 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     // proposer neither checks that tree out nor filters its proposal blob.
     writeFileSync(join(repo, '.gitattributes'), 'baselines/*.json filter=evil\n');
     git(repo, ['add', '-A']);
-    git(repo, ['commit', '-m', 'merge-queue']);
-    git(repo, ['push', 'origin', 'merge-queue']);
+    git(repo, ['commit', '-m', 'main']);
+    git(repo, ['push', 'origin', 'main']);
     const mqTip = git(repo, ['rev-parse', 'HEAD']);
-    git(repo, ['checkout', 'main']);
-    git(repo, ['branch', '-D', 'merge-queue']);
+    git(repo, ['checkout', 'trust']);
+    git(repo, ['branch', '-D', 'main']);
     const filterMarker = join(dir, 'filter-ran');
     const filter = join(dir, 'filter.sh');
     writeFileSync(filter, `#!/bin/sh\nprintf 'ran\\n' >> '${filterMarker}'\ncat\n`);
@@ -321,7 +321,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
   }
 
   it(
-    'proposes against merge-queue, cut from and compared with the merge-queue tip',
+    'proposes against main, cut from and compared with the main tip',
     { timeout: 240_000 },
     async () => {
       const ctx = await setup('happy');
@@ -333,8 +333,8 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
       expect(res.stderr).not.toContain('test-token-not-real');
 
       const gh = readFileSync(ctx.ghLog, 'utf8');
-      expect(gh).toMatch(/^pr create --base merge-queue --head ratchet\/propose-/m);
-      expect(gh).toMatch(/^pr list --head \S+ --base merge-queue /m);
+      expect(gh).toMatch(/^pr create --base main --head ratchet\/propose-/m);
+      expect(gh).toMatch(/^pr list --head \S+ --base main /m);
       expect(gh).toContain(`Measured commit: \`${measuredSha}\`.`);
 
       const heads = git(ctx.origin, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
@@ -345,15 +345,15 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
         value: number;
       };
       expect(proposed.value).toBe(95);
-      // The temp worktree is gone and ROOT never left main.
+      // The temp worktree is gone and ROOT never left trust.
       expect(git(ctx.repo, ['worktree', 'list']).split('\n')).toHaveLength(1);
-      expect(git(ctx.repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main');
+      expect(git(ctx.repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('trust');
       expect(existsSync(ctx.filterMarker)).toBe(false);
     },
   );
 
   it(
-    'a reading that does not tighten the merge-queue baseline proposes nothing',
+    'a reading that does not tighten the main baseline proposes nothing',
     { timeout: 240_000 },
     async () => {
       const ctx = await setup('none');

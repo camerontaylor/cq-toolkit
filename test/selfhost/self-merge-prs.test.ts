@@ -5,7 +5,7 @@
 // — this file pins the DEPLOYMENT WIRING):
 //   1. buildRunInput, the exported pure input builder: every field comes
 //      from the frozen SelfhostDefaults or the cfg — baseBranch
-//      'merge-queue', protectedBranch 'main', wallClockMs 300000 (the #137
+//      'main', protectedBranch 'main', wallClockMs 300000 (the #137
 //      ladder arming), the served driver ModelSpec, sessionsDir under the
 //      journal root, and the injected clock — nothing invented.
 //   2. The real run: candidates come from the REAL fetchMergeCandidates over
@@ -64,7 +64,7 @@ const pullRow = (n: number, overrides?: { draft?: boolean; mergeable_state?: str
   mergeable_state: overrides?.mergeable_state ?? 'dirty',
   user: { login: `pr-author-${String(n)}` },
   head: { ref: `pr-${String(n)}`, sha: `sha-${String(n)}`, repo: { full_name: REPO_PATH } },
-  base: { ref: 'merge-queue' },
+  base: { ref: 'main' },
 });
 
 const commitPayload = (date: string) => ({ commit: { committer: { date }, author: { date } } });
@@ -116,7 +116,7 @@ const fetchGh =
         mergeable: false,
         mergeable_state: 'dirty',
         head: { ref: `pr-${String(pr)}`, sha: `sha-${String(pr)}`, repo: { full_name: REPO_PATH } },
-        base: { ref: 'merge-queue' },
+        base: { ref: 'main' },
       });
     }
     if (path === 'graphql') {
@@ -178,16 +178,16 @@ afterEach(() => {
 });
 
 describe('buildRunInput (the pure input builder)', () => {
-  test('plans direct main PRs while preserving merge-queue as the default', () => {
+  test('plans direct main PRs while preserving main as the default', () => {
     expect(buildRunInput([], { repoRoot: '/checkout', baseBranch: 'main' }, 0).baseBranch).toBe(
       'main',
     );
-    expect(buildRunInput([], { repoRoot: '/checkout' }, 0).baseBranch).toBe('merge-queue');
+    expect(buildRunInput([], { repoRoot: '/checkout' }, 0).baseBranch).toBe('main');
   });
   test('every field rides the frozen defaults or the cfg — nothing invented', () => {
     const input = buildRunInput([], { repoRoot: '/checkout', journalRoot: '/j' }, 1234);
     expect(input).toEqual({
-      baseBranch: 'merge-queue', // SelfhostDefaults.baseBranch
+      baseBranch: 'main', // SelfhostDefaults.baseBranch
       repoRoot: '/checkout',
       prs: [],
       protectedBranch: 'main', // SelfhostDefaults.protectedBranch
@@ -294,7 +294,7 @@ describe('runSelfMergePrs — real run', () => {
     expect(seen).toHaveLength(1);
     const input = seen[0];
     if (input === undefined) throw new Error('unreachable');
-    expect(input.baseBranch).toBe('merge-queue');
+    expect(input.baseBranch).toBe('main');
     expect(input.protectedBranch).toBe('main');
     expect(input.wallClockMs).toBe(SelfhostDefaults.perJobWallClockMs);
     expect(input.modelSpec).toEqual(SelfhostDefaults.driver);

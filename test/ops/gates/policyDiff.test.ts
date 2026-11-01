@@ -2306,9 +2306,8 @@ describe("the toolkit's own policy list", () => {
     const producers: Record<string, string> = {
       static: 'ci.yml',
       denylist: 'denylist.yml',
-      ratchet: 'ratchet.yml',
     };
-    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'ratchet', 'static']);
+    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'static']);
     for (const check of list.requiredChecks) {
       const file = producers[check];
       expect(file, `${check}: has a retained producer`).toBeDefined();
@@ -2359,10 +2358,6 @@ describe("the toolkit's own policy list", () => {
       'ci.yml': ['static', 'crq-python', 'from-source'],
       'denylist.yml': ['denylist'],
     });
-    // The gate verifies exactly the files gate.yml passes it; a key outside them refuses every promotion.
-    const gate = readFileSync(join(REPO_ROOT, '.github/workflows/gate.yml'), 'utf8');
-    const verified = /--verifiedWorkflows=([\w.,-]+)/.exec(gate)?.[1]?.split(',') ?? [];
-    expect(verified).toEqual(expect.arrayContaining(Object.keys(list.requiredJobs ?? {})));
     for (const [file, jobs] of Object.entries(list.requiredJobs ?? {})) {
       const scan = scanWorkflow(readFileSync(join(REPO_ROOT, '.github/workflows', file), 'utf8'));
       expect(scan.ok, `${file}: scans ok`).toBe(true);

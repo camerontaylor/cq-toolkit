@@ -674,8 +674,7 @@ describe('§7 A14 static token isolation over the toolkit’s real workflows', (
     expect(exposed).toEqual([]);
     // Non-vacuous: the promotion and automation workflows really are scanned,
     // and really do carry a promotion credential.
-    expect(carriers).toContain('.github/workflows/gate.yml:decide');
-    expect(carriers).toContain('policy/templates/gate.yml:decide');
+    expect(carriers).toContain('.github/workflows/self-merge-prs.yml:self-merge-prs');
     expect(carriers.length).toBeGreaterThan(4);
   });
 });

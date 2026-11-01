@@ -736,7 +736,7 @@ describe('review.address PR phase-one orchestration', () => {
       ]);
       // The whole-branch comparison and pinned base are unchanged by the addition.
       expect(w.reviewInputs[0]?.base).toMatch(/^[a-f0-9]{40}$/);
-      expect(w.reviewInputs[0]?.target).toBe('merge-queue');
+      expect(w.reviewInputs[0]?.target).toBe('main');
       expect(w.reviewInputs[0]?.reviewers).toEqual(['agent']);
     } finally {
       await w.cleanup();

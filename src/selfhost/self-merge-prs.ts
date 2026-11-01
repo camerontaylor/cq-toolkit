@@ -536,7 +536,7 @@ export async function runSelfMergePrs(
                 nowMs: clock,
                 settleMs,
                 policy,
-                ...(cfg.baseBranch === 'main'
+                ...((cfg.baseBranch ?? SelfhostDefaults.baseBranch) === 'main'
                   ? {}
                   : { protectedBranch: SelfhostDefaults.protectedBranch }),
               },

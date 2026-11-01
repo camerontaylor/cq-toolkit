@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W1.10 methods note
 
 W1.10 implements privileged-job provenance and rulesets-as-code: plan §6 row W1.10, as

@@ -69,7 +69,7 @@ describe('collectBoundedReviewContext (real git)', () => {
     const effects = repoEffects(repo);
     const result = await collectBoundedReviewContext(
       effects,
-      repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+      repo.git('merge-base', 'origin/main', 'HEAD').trim(),
       repo.git('rev-parse', 'HEAD').trim(),
       'full',
       DEADLINE,
@@ -114,7 +114,7 @@ describe('collectBoundedReviewContext (real git)', () => {
     const effects = repoEffects(repo);
     const result = await collectBoundedReviewContext(
       effects,
-      repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+      repo.git('merge-base', 'origin/main', 'HEAD').trim(),
       repo.git('rev-parse', 'HEAD').trim(),
       'full',
       DEADLINE,
@@ -129,7 +129,7 @@ describe('collectBoundedReviewContext (real git)', () => {
     const rawIntent = repo.git(
       'log',
       '--format=%s%n%n%b',
-      repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim() + '..HEAD',
+      repo.git('merge-base', 'origin/main', 'HEAD').trim() + '..HEAD',
     );
     expect(kept).toBeGreaterThan(0);
     expect(kept + omitted).toBe(rawIntent.length);
@@ -146,7 +146,7 @@ describe('collectBoundedReviewContext (real git)', () => {
     );
     const result = await collectBoundedReviewContext(
       effects,
-      repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+      repo.git('merge-base', 'origin/main', 'HEAD').trim(),
       repo.git('rev-parse', 'HEAD').trim(),
       'full',
       DEADLINE,
@@ -165,7 +165,7 @@ describe('collectBoundedReviewContext (real git)', () => {
     );
     const result = await collectBoundedReviewContext(
       effects,
-      repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+      repo.git('merge-base', 'origin/main', 'HEAD').trim(),
       repo.git('rev-parse', 'HEAD').trim(),
       'full',
       DEADLINE,

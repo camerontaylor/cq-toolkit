@@ -168,7 +168,7 @@ interface PrFixture {
   pr: number;
   /** The commit the trusted approval is bound to (the snapshot's commit.oid). */
   approvedOid: string;
-  /** The snapshot's live baseRefName; default 'merge-queue' (what readBaseRef says). */
+  /** The snapshot's live baseRefName; default 'main' (what readBaseRef says). */
   liveBaseName?: string;
   baseName?: string;
 }
@@ -215,7 +215,7 @@ const snapshotPayload = (fixture: PrFixture) => ({
         author: { login: `pr-author-${String(fixture.pr)}`, __typename: 'User' },
         headRefOid: HEAD(fixture.pr),
         baseRefOid: BASE_SHA,
-        baseRefName: fixture.liveBaseName ?? 'merge-queue',
+        baseRefName: fixture.liveBaseName ?? 'main',
         reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
         reviews: {
           pageInfo: { hasNextPage: false },
@@ -268,7 +268,7 @@ const forgeGh = (
             sha: HEAD(fixture.pr),
             repo: { full_name: REPO_PATH },
           },
-          base: { ref: fixture.baseName ?? 'merge-queue' },
+          base: { ref: fixture.baseName ?? 'main' },
         })),
       );
     }
@@ -287,7 +287,7 @@ const forgeGh = (
         mergeable_state: 'clean',
         user: { login: `pr-author-${String(pr)}` },
         head: { ref: `pr-${String(pr)}`, sha: HEAD(pr), repo: { full_name: REPO_PATH } },
-        base: { ref: fixtures.find((fixture) => fixture.pr === pr)?.baseName ?? 'merge-queue' },
+        base: { ref: fixtures.find((fixture) => fixture.pr === pr)?.baseName ?? 'main' },
       });
     }
     if (path === 'graphql') {
@@ -311,7 +311,7 @@ const forgeGh = (
 
 /** A recording in-memory MergeEffects: every ref resolves to the PR's head; merges succeed. */
 class RecordingMergeEffects implements MergeEffects {
-  constructor(private readonly baseName = 'merge-queue') {}
+  constructor(private readonly baseName = 'main') {}
   readonly merges: Array<{ pr: number; matchHeadCommit?: string }> = [];
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
@@ -622,24 +622,6 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
       { ...cfg(tmpJournalRoot()), baseBranch: 'main' },
     );
     expect(effects.merges).toEqual([{ pr: 7, matchHeadCommit: HEAD(7) }]);
-  });
-
-  test('a live base of the protected branch (main) is refused: protectedBranch is wired', async () => {
-    const forge = new StateForge();
-    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
-    const effects = new RecordingMergeEffects();
-    const result = await runSelfMergePrs(
-      {
-        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7), liveBaseName: 'main' }], []),
-        mergeEffects: effects,
-        nowMs: () => T0,
-      },
-      cfg(tmpJournalRoot()),
-    );
-    if (result.dryRun === true) throw new Error('unreachable');
-    expect(effects.merges).toEqual([]);
-    const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
-    expect(row?.reason).toContain('base is the protected branch main');
   });
 
   test('state branch round-trip survives a simulated Actions-cache eviction', async () => {

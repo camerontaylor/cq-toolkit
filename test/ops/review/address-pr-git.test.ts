@@ -150,7 +150,7 @@ test.each([
       const initial = repo.commitAll('seed PR finding');
       repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head', 'HEAD:refs/heads/feature/x');
       const before = await readWorkState(makeSubprocessDevEffects(repo.root), {
-        target: 'merge-queue',
+        target: 'main',
       });
       expect(before.ok && before.state.branch).toBe('feature/x');
       const ok = (value: unknown): GhResult => ({
@@ -699,7 +699,7 @@ test.each([
         'heads/cq-review/pr-7',
       );
       const state = await readWorkState(makeSubprocessDevEffects(workerRoot), {
-        target: 'merge-queue',
+        target: 'main',
       });
       expect(state.ok && state.state.branch).toBe('cq-review/pr-7');
       // Verified fix commits advance the mutable last-admitted head only; the
@@ -766,7 +766,7 @@ test.each([
               'octo',
               'widget',
               7,
-              'merge-queue',
+              'main',
               null,
               'octo/widget',
               'feature/x',

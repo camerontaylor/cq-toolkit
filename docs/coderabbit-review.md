@@ -93,9 +93,8 @@ tracked; staging is sufficient for uncommitted work.
 
 The review must cover the coherent full intended PR diff:
 
-1. Name the task's **explicit intended PR target** — `origin/merge-queue`
-   per the documented queue flow (`policy/templates/README.md`), or
-   `origin/main` when that is the task's actual target. Check the repo's
+1. Name the task's **explicit intended PR target** — `origin/main` for this
+   repository, following [merge policy](promotion-policy.md). Check the repo's
    current PR-target convention rather than assuming; record the choice.
 2. `BASE=$(git merge-base <intended-target-ref> HEAD)` — an immutable sha.
    `--base <branch>` is a moving branch; do not use it. Do not blindly pin
@@ -152,7 +151,7 @@ review adds nothing beyond them. Use the immutable `BASE` from §3 and stage
 your own new files before these checks so they are covered. Pass the recorded
 SHA to `test:narrow` at both checkpoints; never recompute it from a moving
 target. For a direct-to-main PR, `BASE` must be the pin against `origin/main`
-from §3 rather than the runner's default `origin/merge-queue`:
+from §3 rather than the runner's default `origin/main`:
 
 ```bash
 git diff --check "$BASE" HEAD  # committed PR changes
@@ -332,7 +331,7 @@ additionally carries `policy/DOCTRINE.md` as a repo-wide guideline.
 ## 9. On the opened PR
 
 The App reviews the PR under `.coderabbit.yaml` (automatic review enabled
-for `merge-queue` and `main` targets; drafts and WIP-titled PRs excluded).
+for `main` targets; drafts and WIP-titled PRs excluded).
 To address App review comments, fetch the consolidated fix prompt. The
 following command was verified with CLI **0.7.7**. Before using it, run
 `coderabbit pullrequest --help` under the platform's 30-second timeout

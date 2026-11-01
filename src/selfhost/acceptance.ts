@@ -189,7 +189,7 @@ export interface AcceptanceInput {
   pr: number;
   /** The 40-hex head the verdict is bound to. */
   subject: string;
-  /** The PR's required base branch name (normally 'merge-queue'). */
+  /** The PR's required base branch name (normally 'main'). */
   base: string;
   /** 'open' for a PR check; 'merged' when the promotion gate re-judges an already-merged PR at its merged head. */
   state: 'open' | 'merged';
@@ -392,7 +392,7 @@ const FLAGS: readonly string[] = ['repository', 'pr', 'subject', 'base', 'state'
 /**
  * Strict `--name=value` parsing for the CLI entry: `--repository=<owner>/<name>`,
  * `--pr=<n>` and `--subject=<40-hex>` are required; `--base` defaults to
- * 'merge-queue' and `--state` (open|merged) to 'open'. THROWS on an unknown,
+ * 'main' and `--state` (open|merged) to 'open'. THROWS on an unknown,
  * repeated, value-less or malformed flag, or a positional argument. Pure.
  */
 export function parseAcceptanceArgs(argv: readonly string[]): AcceptanceArgs {
@@ -431,7 +431,7 @@ export function parseAcceptanceArgs(argv: readonly string[]): AcceptanceArgs {
   return {
     owner,
     repo,
-    input: { pr, subject: subject.toLowerCase(), base: values.get('base') ?? 'merge-queue', state },
+    input: { pr, subject: subject.toLowerCase(), base: values.get('base') ?? 'main', state },
   };
 }
 

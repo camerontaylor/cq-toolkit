@@ -15,7 +15,7 @@ export async function observeRepository(
   // would prune other PRs' anchors. A listing fault must never write.
   const pages = await ghJson<unknown>(gh, [
     'api',
-    `repos/${owner}/${repo}/pulls?state=open&base=merge-queue&per_page=100`,
+    `repos/${owner}/${repo}/pulls?state=open&base=main&per_page=100`,
     '--paginate',
     '--slurp',
   ]);

@@ -759,7 +759,7 @@ describe('review.run', () => {
     const repo = await makeTestRepo();
     try {
       await configureAgentRepo(repo);
-      repo.git('push', '-q', 'origin', 'origin/merge-queue:refs/heads/main');
+      repo.git('push', '-q', 'origin', 'origin/main:refs/heads/release');
       repo.git('fetch', '-q', 'origin');
       const base = repo.git('rev-parse', 'HEAD~1').trim();
       const effects = repoEffects(repo);
@@ -768,11 +768,11 @@ describe('review.run', () => {
         effectsFactory: () => effects,
         scannerFactory: () => async (components) =>
           components.map((component) => ({ component: component.component, hits: [] })),
-      })({ repoRoot: repo.root, target: 'main', base });
+      })({ repoRoot: repo.root, target: 'release', base });
       expect(result.status).toBe('ok');
       const ledger = effects.openLedger('feature/x').load();
       const cycle = ledger.records.find((entry) => entry.kind === 'cycle');
-      expect(cycle).toMatchObject({ target: 'main', base, reviewer: 'agent:reviewer' });
+      expect(cycle).toMatchObject({ target: 'release', base, reviewer: 'agent:reviewer' });
     } finally {
       await repo.cleanup();
     }
@@ -1213,7 +1213,7 @@ describe('review.run', () => {
           base: current.base,
           head: current.head,
           dirtySha256: current.dirtySha256,
-          target: 'merge-queue',
+          target: 'main',
           at: '2026-10-24T00:00:00.000Z',
         }),
       ]);
@@ -1268,13 +1268,13 @@ describe('review.run', () => {
         base: state.base,
         head: state.head,
         dirtySha256: state.dirtySha256,
-        target: 'merge-queue',
+        target: 'main',
         scope: 'full',
       });
       if (!latestAgent || latestAgent.kind !== 'cycle') throw new Error('missing agent cycle');
       const readiness = assembleReadiness({
         branch: state.branch,
-        target: 'merge-queue',
+        target: 'main',
         identity: {
           base: state.base,
           head: state.head,
@@ -1389,7 +1389,7 @@ describe('review.run', () => {
       const syntheticPrivateBytes = ['synthetic', 'corpus', 'marker', '7f3'].join('-');
       await repo.write('.env.config', `${syntheticPrivateBytes}\n`);
       repo.commitAll('add synthetic private fixture');
-      repo.git('push', '-q', 'origin', 'HEAD:merge-queue');
+      repo.git('push', '-q', 'origin', 'HEAD:main');
       repo.git('mv', '.env.config', 'config.txt');
       repo.commitAll('rename synthetic private fixture');
 
@@ -1435,7 +1435,7 @@ describe('review.run', () => {
       repo.commitAll('remove optional package metadata');
       await repo.write('src/public.txt', 'ordinary public fixture\n');
       repo.commitAll('add public fixture');
-      repo.git('push', '-q', 'origin', 'HEAD:merge-queue');
+      repo.git('push', '-q', 'origin', 'HEAD:main');
       repo.git('mv', 'src/public.txt', 'src/public-renamed.txt');
       repo.commitAll('rename public fixture');
 
@@ -1605,7 +1605,7 @@ it.each([false, true])(
       const reviewed = {
         base: uncommitted
           ? repo.git('rev-parse', 'HEAD').trim()
-          : repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+          : repo.git('merge-base', 'origin/main', 'HEAD').trim(),
         scope: uncommitted ? 'uncommitted' : 'full',
       };
       expect(result.value.reviewed).toEqual(reviewed);
@@ -1974,7 +1974,7 @@ it('maps blocked partial findings to the ledger cycle so a disposition closes th
 
     const readiness = assembleReadiness({
       branch: ledger.branch,
-      target: 'merge-queue',
+      target: 'main',
       identity: {
         base: cycle.base,
         head: cycle.head,
@@ -2145,7 +2145,7 @@ it.each([
           branch: 'feature/x',
           head,
           reviewed: {
-            base: repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+            base: repo.git('merge-base', 'origin/main', 'HEAD').trim(),
             scope: 'full',
           },
           sources: [{ kind: 'agent', status: 'terminal' }],
@@ -2288,7 +2288,7 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
         if (command === 'gh') return args[0] === 'api' ? 'author' : 'owner/repo';
         return undefined;
       });
-      const read = await readWorkState(effects, { target: 'merge-queue' });
+      const read = await readWorkState(effects, { target: 'main' });
       if (!read.ok) throw new Error(read.reason);
       const state = read.state;
       const status: QueueStatus = {
@@ -2342,7 +2342,7 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
             repo: 'owner/repo',
             producer: 'author',
             head: state.head,
-            target: 'merge-queue',
+            target: 'main',
             targetSelector: 'promoted-main',
           },
         },
@@ -2352,7 +2352,7 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
           cycleId: origin.cycleId,
           head: state.head,
           base: state.base,
-          target: 'merge-queue',
+          target: 'main',
           scope: 'full',
           dirtySha256: 'clean-tree',
           failure,

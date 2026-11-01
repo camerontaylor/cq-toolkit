@@ -1,3 +1,6 @@
+> Queue-promotion records below are historical evidence. Current PRs merge
+> directly to `main`; see [merge policy](docs/promotion-policy.md).
+
 # SELF-HOSTING
 
 DoD 2 evidence: this repository's own PR history showing queue promotion,

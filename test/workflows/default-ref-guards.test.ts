@@ -59,8 +59,6 @@ const DEFAULT_REF = "format('refs/heads/{0}', github.event.repository.default_br
  * dispatcher-chosen ref).
  */
 const carriers: Readonly<Record<string, readonly string[]>> = {
-  'sync-merge-queue.yml': ['push'],
-  'init-merge-queue.yml': [],
   'self-merge-prs.yml': ['schedule'],
   'live-review.yml': [],
   'live-merge.yml': [],
@@ -69,8 +67,6 @@ const carriers: Readonly<Record<string, readonly string[]>> = {
 
 /** Where each file's guarded job lives (all six are single-job workflows). */
 const jobId: Readonly<Record<string, string>> = {
-  'sync-merge-queue.yml': 'sync',
-  'init-merge-queue.yml': 'init',
   'self-merge-prs.yml': 'self-merge-prs',
   'live-review.yml': 'live-review',
   'live-merge.yml': 'live-merge',
@@ -78,8 +74,6 @@ const jobId: Readonly<Record<string, string>> = {
 };
 
 const sources: Record<string, Array<[string, string]>> = {
-  'sync-merge-queue.yml': bothCopies('sync-merge-queue.yml'),
-  'init-merge-queue.yml': bothCopies('init-merge-queue.yml'),
   'self-merge-prs.yml': bothCopies('self-host/self-merge-prs.yml', 'self-merge-prs.yml'),
   'live-merge.yml': bothCopies('live-merge.yml'),
   'live-review.yml': instanceOnly('live-review.yml'),
@@ -100,53 +94,5 @@ describe('every dispatch carrier is gated to the default ref (D-A.1)', () => {
     // The dispatch carrier itself is admitted ONLY through the ref clause:
     // a bare `workflow_dispatch ||` disjunct would re-open every ref.
     expect(guard).not.toMatch(/event_name == 'workflow_dispatch'/);
-  });
-});
-
-describe('gate.yml wake: the run id is the only payload field it consumes', () => {
-  const gate = bothCopies('gate.yml')[0]?.[1] ?? '';
-  const wake = jobBlock(gate, 'wake');
-
-  it('the wake job consumes only the numeric run id from the workflow_run payload', () => {
-    const refs = [...wake.matchAll(/github\.event\.workflow_run\.([A-Za-z_]+)/g)].map(
-      (m) => m[1] ?? '',
-    );
-    expect(refs).toEqual(['id']);
-    expect(wake).toMatch(/RUN_ID: \$\{\{ github\.event\.workflow_run\.id \}\}/);
-  });
-
-  it('the template: everything else is re-read from the API by id and refused on mismatch', () => {
-    const body = code(wake);
-    expect(body).toContain('gh api "repos/${REPO}/actions/runs/${RUN_ID}"');
-    expect(body).toMatch(/case "\$path" in/);
-    expect(body).toContain('.github/workflows/ci.yml|.github/workflows/cq-measure.yml');
-    expect(body).toMatch(/\[ "\$event" = 'push' \]/);
-    expect(body).toMatch(/\[ "\$branch" = 'merge-queue' \]/);
-    expect(body).toMatch(/\[ "\$head_repo" = "\$REPO_ID" \]/);
-  });
-
-  it('the template: wake never reads head_sha (the dispatcher-shaped field)', () => {
-    expect(code(wake)).not.toContain('head_sha');
-  });
-});
-
-describe("decide's cq-verify dispatch is cq-verify.yml on the default ref only", () => {
-  const gate = code(readFileSync(join(ROOT, '.github/workflows/gate.yml'), 'utf8'));
-  const cli = code(readFileSync(join(ROOT, 'src/selfhost/promote-gate.ts'), 'utf8'));
-
-  it('the workflow wires DEFAULT_BRANCH to the event’s default branch and passes it to the CLI', () => {
-    expect(gate).toContain('DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}');
-    expect(gate).toContain('--defaultBranch="$DEFAULT_BRANCH"');
-  });
-
-  it('every dispatches POST in the gate CLI targets cq-verify.yml', () => {
-    expect(cli).toContain("VERIFY_WORKFLOW = 'cq-verify.yml'");
-    const posts = [...cli.matchAll(/actions\/workflows\/[^`/]*\/dispatches/g)].map((m) => m[0]);
-    expect(posts.length).toBeGreaterThan(0);
-    expect(posts.every((p) => p === 'actions/workflows/${VERIFY_WORKFLOW}/dispatches')).toBe(true);
-  });
-
-  it('the dispatch ref is the configured default branch (behavioral: promote-gate.test.ts)', () => {
-    expect(cli).toContain('`ref=${cfg.defaultBranch}`');
   });
 });

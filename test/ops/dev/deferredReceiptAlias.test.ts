@@ -84,7 +84,7 @@ function completed(paths: PathRow[]): Extract<DeferredVendorDebt, { vendorComple
         repo: 'owner/repo',
         producer: 'author',
         head: 'a'.repeat(40),
-        target: 'merge-queue',
+        target: 'main',
         targetSelector: 'promoted-main',
       },
     },
@@ -102,7 +102,7 @@ function completed(paths: PathRow[]): Extract<DeferredVendorDebt, { vendorComple
       cycleId: 'cycle-1',
       head: 'a'.repeat(40),
       base: 'b'.repeat(40),
-      target: 'merge-queue',
+      target: 'main',
       scope: 'full',
       dirtySha256: 'clean-tree',
       failure: { source: 'vendor', category: 'vendor-rate-limited', codes: ['rate_limited'] },
@@ -276,7 +276,7 @@ describe('authenticated alias completion consumer', () => {
     ['producer', 'other-author'],
     ['head', 'f'.repeat(40)],
     ['target', 'other-branch'],
-    ['targetSelector', 'merge-queue'],
+    ['targetSelector', 'main'],
     ['kind', 'merged-current'],
   ])('changed proof reference %s cannot settle', async (field, value) => {
     const f = await delivery();
@@ -311,7 +311,7 @@ describe('authenticated alias completion consumer', () => {
     ['repo', 'other/repo'],
     ['pr', 99],
     ['mergeSha', 'f'.repeat(40)],
-    ['targetSelector', 'merge-queue'],
+    ['targetSelector', 'main'],
   ])('proof source %s cannot differ from the immutable receipt', async (field, value) => {
     const f = await delivery();
     // Keep status/source internally correlated: the immutable document still disagrees.

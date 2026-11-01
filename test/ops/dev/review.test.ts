@@ -302,7 +302,7 @@ describe('dev.review cycle', () => {
         scanSecrets: scanner,
         run: runAgentReviewer,
       });
-      const state = await readWorkState(effects, { target: 'merge-queue' });
+      const state = await readWorkState(effects, { target: 'main' });
       expect(state.ok).toBe(true);
       if (!state.ok) return;
       const { base, head, dirtySha256 } = state.state;
@@ -322,7 +322,7 @@ describe('dev.review cycle', () => {
         kind: 'cycle',
         reviewer: 'agent:reviewer',
         scope: 'full',
-        target: 'merge-queue',
+        target: 'main',
         base,
         head,
         dirtySha256,
@@ -673,7 +673,7 @@ describe('dev.review cycle', () => {
         expect(input.intent).toContain('CONTEXT_COMMITTED_INTENT');
         expect(input.intent).toContain('[truncated:');
         expect(input.fileList).toContain('src/committed.ts');
-        expect(input.base).toBe(repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim());
+        expect(input.base).toBe(repo.git('merge-base', 'origin/main', 'HEAD').trim());
       } else {
         expect(input.intent).toBe('');
         expect(input.fileList).not.toContain('src/committed.ts');
@@ -916,12 +916,12 @@ describe('dev.review cycle', () => {
     const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
-    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const base = repo.git('rev-parse', 'origin/main').trim();
     const head = repo.git('rev-parse', 'HEAD').trim();
     expect(result.value).toMatchObject({
       reviewer: 'coderabbit',
       scope: 'full',
-      target: 'merge-queue',
+      target: 'main',
       base,
       head,
       dirtySha256: 'clean-tree',
@@ -964,7 +964,7 @@ describe('dev.review cycle', () => {
   });
 
   test('a legacy-named file without configured corpus remains in the scanner input', async () => {
-    repo.git('reset', '-q', '--hard', 'origin/merge-queue');
+    repo.git('reset', '-q', '--hard', 'origin/main');
     await repo.write('policy/denylist/patterns.yml', 'LEGACY_SECRET_PROBE\n');
     repo.commitAll('legacy-named secret');
     const scanner = capturingScanner();

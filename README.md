@@ -1,4 +1,4 @@
-@camerontaylor/cq-toolkit is a portable code-quality toolkit: a TypeScript SDK of atomic code-quality operations, a deterministic plan runner that composes those operations into reproducible execution plans, and adoptable merge-queue and doctrine policy templates that other repositories can take in whole or in part. It is greenfield and self-hosting — the toolkit's own quality gates run on the toolkit itself — and it is a work in progress. See the [documentation index](docs/README.md) for the canonical reading set.
+@camerontaylor/cq-toolkit is a portable code-quality toolkit: a TypeScript SDK of atomic code-quality operations, a deterministic plan runner that composes those operations into reproducible execution plans, and adoptable PR and doctrine policy templates that other repositories can take in whole or in part. It is greenfield and self-hosting — the toolkit's own quality gates run on the toolkit itself — and it is a work in progress. See the [documentation index](docs/README.md) for the canonical reading set.
 
 The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). Review protocol (one CodeRabbit CLI cycle before every PR, then one independent head-bound review): see [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `pnpm run gen:op-docs`).
 
@@ -218,7 +218,7 @@ Enforcement. In brief:
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human/budget-exhausted                                                                                               |
 | I2  | No-privileged-reviewer acceptance: a non-author review of the exact head, plus a ≥10-minute settle or a postdating all-clear; unresolved threads are reported (not blocking) and truncated data fails closed |
-| I3  | Merge commits only; `merge-queue`→`main` promotion is a pure fast-forward behind merge-base guards — never squash, rewrite, or force-push                                                                    |
+| I3  | Merge commits directly to `main` on exact-head CI and independent review — never squash, rewrite, or force-push                                                                                              |
 | I4  | Required checks never filter triggers; the only sanctioned skip is a job-level `if:`                                                                                                                         |
 | I5  | Baselines only tighten; a missing metrics summary is non-passing evidence, never a pass                                                                                                                      |
 | I6  | Every per-file/per-job worker is a fresh isolated invocation; context never leaks                                                                                                                            |
@@ -230,12 +230,11 @@ Enforcement. In brief:
 
 ## Adopting the policy
 
-The merge-queue and doctrine templates under [`policy/templates/`](policy/templates/)
-are parameterized and adoptable by any repository: bootstrap the `merge-queue`
-branch, gate promotion to `main`, keep the branches level, and ratchet
-typecheck/coverage baselines. The adoption guide — placeholder tokens,
-instantiation steps, and the three places a new required check must be
-registered — is [policy/README.md](policy/README.md).
+The PR and doctrine templates under [`policy/templates/`](policy/templates/)
+are adoptable by other repositories. Target `main`, require `static` and
+`denylist`, obtain an independent review comment, and merge with a merge commit.
+CRQ reviews after merge. See [merge policy](docs/promotion-policy.md) and the
+[adoption guide](policy/README.md).
 
 ## Self-hosting
 

@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W1.9 methods note
 
 W1.9 implements D11, the protected-path approval policy (ADR-0004 D-G, as reconciled at G1,

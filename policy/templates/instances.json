@@ -32,19 +32,6 @@
       "tokens": {}
     },
     {
-      "workflow": "gate.yml",
-      "template": "gate.yml",
-      "tokens": {
-        "GATE_WORKFLOWS": "ci.yml,denylist.yml",
-        "GATE_TIMEOUT_MIN": "20"
-      }
-    },
-    {
-      "workflow": "init-merge-queue.yml",
-      "template": "init-merge-queue.yml",
-      "tokens": {}
-    },
-    {
       "workflow": "live-merge.yml",
       "template": "live-merge.yml",
       "tokens": {
@@ -82,11 +69,6 @@
     {
       "workflow": "settings-drift.yml",
       "template": "settings-drift.yml",
-      "tokens": {}
-    },
-    {
-      "workflow": "sync-merge-queue.yml",
-      "template": "sync-merge-queue.yml",
       "tokens": {}
     },
     {

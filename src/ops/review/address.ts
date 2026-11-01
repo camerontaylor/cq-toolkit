@@ -1001,7 +1001,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
               )({
                 repoRoot: root,
-                target: input.target ?? 'merge-queue',
+                target: input.target ?? 'main',
                 base: reviewedBase,
                 record,
                 onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
@@ -1079,7 +1079,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const admitCleanRecord = async (root: string, record: FindingsRecord) => {
             const effects = makeSubprocessDevEffects(root);
             const read = await readWorkState(effects, {
-              target: input.target ?? 'merge-queue',
+              target: input.target ?? 'main',
               ...(reviewedBase ? { base: reviewedBase } : {}),
             });
             if (!read.ok) throw new Error(read.reason);
@@ -1111,7 +1111,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               // admitted cycle's base field. The pin (like an explicit base)
               // is schema-validated hex from this engine's own capture.
               const read = await readWorkState(effects, {
-                target: input.target ?? 'merge-queue',
+                target: input.target ?? 'main',
                 ...(input.base
                   ? { base: input.base }
                   : reviewedBasePinned
@@ -1130,7 +1130,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   cycleId: `address-${randomUUID()}`,
                   reviewer: 'review.address:import',
                   scope: 'full',
-                  target: input.target ?? 'merge-queue',
+                  target: input.target ?? 'main',
                   base: state.base,
                   head: state.head,
                   dirtySha256: state.dirtySha256,
@@ -1480,7 +1480,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   owner.toLowerCase(),
                   repo.toLowerCase(),
                   pr,
-                  input.target ?? 'merge-queue',
+                  input.target ?? 'main',
                   input.base ?? null,
                   prMetadata.headRepo!.toLowerCase(),
                   meta.headRefName,
@@ -1502,7 +1502,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           }
           if (input.source === 'local') {
             const read = await readWorkState(makeSubprocessDevEffects(root), {
-              target: input.target ?? 'merge-queue',
+              target: input.target ?? 'main',
               ...(input.base ? { base: input.base } : {}),
             });
             if (!read.ok) return await finish('needs-human', read.reason);
@@ -1519,7 +1519,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             // own base through.
             reviewedBasePinned = async () => {
               if (pinnedBase === undefined) {
-                const target = input.target ?? 'merge-queue';
+                const target = input.target ?? 'main';
                 const result = await git([
                   '-C',
                   workerRoot,
@@ -1851,7 +1851,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               ]);
               const agent = await review({
                 repoRoot: root,
-                target: input.target ?? 'merge-queue',
+                target: input.target ?? 'main',
                 ...(input.base
                   ? { base: input.base }
                   : reviewedBasePinned
@@ -1961,7 +1961,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const priorFindings = priorRoundFindings(previous);
             const refreshed = await review({
               repoRoot: root,
-              target: input.target ?? 'merge-queue',
+              target: input.target ?? 'main',
               ...(reviewedBase ? { base: reviewedBase } : {}),
               maxTokens: Math.max(1, remainingTokens()),
               wallMs: Math.max(1, remainingWallMs()),

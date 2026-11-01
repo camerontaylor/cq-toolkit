@@ -11,7 +11,7 @@
 //      5 min/job, review-debt #137), and the SERVED model id
 //      (ai-sdk/glm-5.3-flash — the conductor decision; anything else trips
 //      the served-model-mismatch guard), plus the branch conventions
-//      (merge-queue queue branch; main protected).
+//      (main queue branch; main protected).
 //   3. The PEAK-AWARE switch (owner directive 2026-10-12): the frozen
 //      SelfhostPeak window (06:00–10:00 UTC Mon–Fri) + peak driver, the
 //      pure isSelfhostPeak/resolveSelfhostDriver clock decision at every
@@ -65,7 +65,7 @@ describe('SelfhostDefaults', () => {
     // out of shipped config).
     expect(SelfhostDefaults.driver).toEqual({ provider: 'zai', model: 'glm-5.3-flash' });
     // The repo's own merge conventions.
-    expect(SelfhostDefaults.baseBranch).toBe('merge-queue');
+    expect(SelfhostDefaults.baseBranch).toBe('main');
     expect(SelfhostDefaults.protectedBranch).toBe('main');
   });
 });

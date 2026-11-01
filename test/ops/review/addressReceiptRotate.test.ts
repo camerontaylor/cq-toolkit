@@ -39,18 +39,7 @@ afterEach(async () => {
 });
 
 const namespace = createHash('sha256')
-  .update(
-    JSON.stringify([
-      'octo',
-      'widget',
-      7,
-      'merge-queue',
-      null,
-      'octo/widget',
-      'feature/x',
-      'author',
-    ]),
-  )
+  .update(JSON.stringify(['octo', 'widget', 7, 'main', null, 'octo/widget', 'feature/x', 'author']))
   .digest('hex');
 
 test('an engine-verified fresh checkout rotates the stale receipt', async () => {

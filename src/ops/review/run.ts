@@ -171,7 +171,7 @@ export function makeReviewRun(
     const deadline = startFixerDeadline(parent, Math.max(0, wallMs - (Date.now() - started)));
     const remainingWallMs = () => wallMs - (Date.now() - started);
     try {
-      const target = input.target ?? 'merge-queue';
+      const target = input.target ?? 'main';
       const read = await readWorkState(effects, {
         target,
         ...(input.base ? { base: input.base } : {}),
