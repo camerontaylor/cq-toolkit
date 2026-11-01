@@ -254,6 +254,7 @@ describe('runAgentReviewer v3 session engine', () => {
     });
     const result = await runAgentReviewer(fake.drivers, reviewerInput());
     expect(result.status).toBe('needs-human');
+    expect(result).toMatchObject({ report: { budgetExhausted: true } });
     if (result.status !== 'needs-human' || result.report === undefined) return;
     expect(result.reason).toContain('agent review budget exhausted');
     expect(result.report.findings).toEqual([]);
@@ -465,6 +466,7 @@ describe('runAgentReviewer v3 session engine', () => {
     });
     const result = await runAgentReviewer(fake.drivers, reviewerInput({ wallMs: 20 }));
     expect(result.status).toBe('needs-human');
+    expect(result).toMatchObject({ report: { budgetExhausted: true } });
     expect(receivedSignal?.aborted).toBe(true);
     expect(result).toMatchObject({
       report: { coverage: { pieces: [{ state: 'planned' }], sessions: [{ status: 'aborted' }] } },
@@ -488,7 +490,11 @@ describe('runAgentReviewer v3 session engine', () => {
       { op: 'review.run', jobKey: 'review-cancel', attempt: 1 },
     );
     expect(outcome.outcome).toBe('completed');
-    if (outcome.outcome === 'completed') expect(outcome.value.status).toBe('needs-human');
+    if (outcome.outcome === 'completed') {
+      expect(outcome.value.status).toBe('needs-human');
+      expect(outcome.value).toMatchObject({ report: { cancelled: true } });
+      expect(outcome.value).not.toMatchObject({ report: { budgetExhausted: true } });
+    }
     expect(receivedSignal?.aborted).toBe(true);
   });
 });

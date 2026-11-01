@@ -867,6 +867,7 @@ describe('review.run', () => {
           components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
       expect(result.status).toBe('needs-human');
+      expect(result).toMatchObject({ report: { blockedBudget: true } });
       if (result.status === 'needs-human')
         expect(result.reason).toContain('not every configured reviewer');
       const ledger = effects.openLedger('feature/x').load();
@@ -1339,6 +1340,8 @@ it.each(['deadline', 'parent'] as const)(
         },
       })({ repoRoot: repo.root, wallMs: 1000, reviewers: ['coderabbit', 'agent'] });
       expect(result.status).toBe('needs-human');
+      if (mode === 'deadline') expect(result).toMatchObject({ report: { blockedBudget: true } });
+      else expect(result).not.toMatchObject({ report: { blockedBudget: true } });
       expect(drivers.resolve).not.toHaveBeenCalled();
       expect(persisted).toMatchObject({
         findings: [expect.objectContaining({ text: 'partial finding', status: 'open' })],
@@ -1854,6 +1857,80 @@ it('forwards cq.json failure logging and sums driver failures into the review lo
     );
     expect(effects.logs[0]).toContain('tool failures: 3');
   } finally {
+    await repo.cleanup();
+  }
+});
+
+it.each(['auth', 'mixed', 'coverage', 'drift', 'scan', 'thrown'] as const)(
+  '#532: coincident deadline never attributes %s failure to the budget',
+  async (mode) => {
+    const repo = await makeTestRepo();
+    const originalNow = Date.now;
+    let clock = originalNow();
+    try {
+      await configureAgentRepo(repo);
+      Date.now = () => clock;
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () =>
+          repoEffects(repo, (command) => {
+            if (command !== 'coderabbit') return undefined;
+            if (mode === 'auth') clock += 1001;
+            return {
+              exitCode: 1,
+              stdout: 'Review failed: auth_required',
+              stderr: '',
+              timedOut: false,
+            };
+          }),
+        scannerFactory: () => async (components) => {
+          if (mode === 'scan') {
+            clock += 1001;
+            throw new Error('scan refused');
+          }
+          return components.map((component) => ({ component: component.component, hits: [] }));
+        },
+        runAgentReviewer: async () => {
+          clock += 1001;
+          if (mode === 'thrown') throw new Error('unexpected reviewer fault');
+          if (mode === 'drift') repo.git('commit', '--allow-empty', '-m', 'drift');
+          return mode === 'coverage'
+            ? { status: 'needs-human', reason: 'coverage incomplete' }
+            : { status: 'budget-exhausted' };
+        },
+      })({
+        repoRoot: repo.root,
+        wallMs: 1000,
+        reviewers: mode === 'auth' || mode === 'mixed' ? ['coderabbit', 'agent'] : ['agent'],
+      }).catch((error: unknown) => ({ status: 'needs-human', reason: String(error) }));
+      expect(result.status).toBe('needs-human');
+      expect(result).not.toMatchObject({ report: { blockedBudget: true } });
+    } finally {
+      Date.now = originalNow;
+      await repo.cleanup();
+    }
+  },
+);
+
+it('#532: an agent wall stop is attributed through the real review engine', async () => {
+  const repo = await makeTestRepo();
+  const originalNow = Date.now;
+  let clock = originalNow();
+  try {
+    await configureAgentRepo(repo);
+    Date.now = () => clock;
+    const result = await makeReviewRun({
+      drivers: scriptedDrivers(() => {
+        clock += 10001;
+      }),
+      effectsFactory: () => repoEffects(repo),
+      scannerFactory: () => async (components) =>
+        components.map((component) => ({ component: component.component, hits: [] })),
+    })({ repoRoot: repo.root, wallMs: 10000 });
+    expect(result.status).toBe('needs-human');
+    expect(result).toMatchObject({ report: { blockedBudget: true } });
+  } finally {
+    Date.now = originalNow;
     await repo.cleanup();
   }
 });
