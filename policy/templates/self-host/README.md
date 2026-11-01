@@ -81,7 +81,7 @@ reviewer-agent: 0123456789abcdef0123456789abcdef01234567 PASS
 Bot authors (Bot type or `[bot]` login suffix) do not count. No HTML marker or
 opt-in is required. `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW` is retained for
 configuration compatibility but no longer controls this match. The merging
-agent judges independence and the verdict; automation only matches the text.
+agent checks reviewer independence and reads the verdict; automation only matches text.
 
 ## Required credentials
 
