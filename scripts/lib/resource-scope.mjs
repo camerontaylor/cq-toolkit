@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 
 export function checkHeadroom() {
@@ -29,15 +29,27 @@ const scopeArgs = [
   'OOMScoreAdjust=500',
 ];
 
-// Probe the same properties before starting real work: unavailable user buses
-// and unsupported properties fall back without executing a job twice.
+// Probe before executing real work so a failed test/build is never retried.
+// Scopes on older systemd versions reject OOMScoreAdjust; retain the cgroup
+// limits and set our own OOM score, inherited by every child, separately.
 export async function enterResourceScope(script, args) {
   checkHeadroom();
   process.env.NODE_OPTIONS = '--max-old-space-size=2048';
+  if (process.platform === 'linux') writeFileSync('/proc/self/oom_score_adj', '500');
   if (process.env.CQ_RESOURCE_SCOPED === '1') return;
-  const probe = spawnSync('systemd-run', [...scopeArgs, 'true'], { stdio: 'ignore' });
-  if (probe.error || probe.status !== 0) return;
-  const child = spawn('systemd-run', [...scopeArgs, process.execPath, script, ...args], {
+  let selectedArgs = scopeArgs;
+  const probe = spawnSync('systemd-run', [...selectedArgs, 'true'], { stdio: 'ignore' });
+  if (probe.error?.code === 'ENOENT') return;
+  if (probe.error || probe.status !== 0) {
+    selectedArgs = scopeArgs.slice(0, -2);
+    const retry = spawnSync('systemd-run', [...selectedArgs, 'true'], { stdio: 'ignore' });
+    if (retry.error || retry.status !== 0) {
+      throw new Error(
+        'systemd-run is installed but cannot apply the memory scope; move to another host',
+      );
+    }
+  }
+  const child = spawn('systemd-run', [...selectedArgs, process.execPath, script, ...args], {
     stdio: 'inherit',
     env: { ...process.env, CQ_RESOURCE_SCOPED: '1' },
   });

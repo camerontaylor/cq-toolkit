@@ -88,7 +88,10 @@ The runner re-execs under `nice -n 5`. Before work it reads Linux
 memory users. Move to another host; there is no lock or waiting loop.
 When systemd user scopes support the requested properties, tests and builds
 run with MemoryMax=3G, MemorySwapMax=0, CPUWeight=50 and OOMScoreAdjust=500.
-Otherwise they run directly. Node uses a 2048 MB heap and Vitest at most two
+If the scope rejects OOMScoreAdjust, they retry with the memory and CPU
+limits and set their own Linux OOM score to 500 (children inherit it). Only
+a missing systemd-run permits a direct run; an installed but unusable scope
+fails immediately. Node uses a 2048 MB heap and Vitest at most two
 workers. Cancellation kills the runner's own child process group.
 Only selected tests referencing `dist/` require a fresh build; other tests
 skip dist preparation. Builds run only when dist is stale.
@@ -109,7 +112,7 @@ This drill is classified `integration`; suites classified `live` require
    prompts, policy and workflow templates, generated docs, scripts. The
    reviewed map is `NON_IMPORT_MAP` in `scripts/lib/affected-tests.mjs`.
 4. **Escalate anything you cannot classify.** `test:narrow` refuses (exit 2)
-   when a changed file has no mapping, a source file was deleted, the
+   when a changed file has no mapping, a source file was deleted, or the
    import-graph query failed. That
    refusal is the escalation trigger: name the files you can justify
    explicitly, or escalate shared interfaces, dependency/tooling and
