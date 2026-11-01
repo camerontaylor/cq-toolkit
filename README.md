@@ -19,7 +19,11 @@ Once `0.2.0` is published, the install is the usual one:
 npm install @camerontaylor/cq-toolkit
 ```
 
-The package is ESM-only (`"type": "module"`); the CI matrix runs Node 24.
+The package is ESM-only (`"type": "module"`). Node 24 is the supported/tested
+runtime floor, matching the CI matrix. Workspace inspection uses
+`fs.promises.glob` with pattern exclusions, stable since Node 22.17.
+On Node 21 or earlier, importing the package fails at link time because the
+root export reaches the static `glob` import.
 
 ## SDK first
 

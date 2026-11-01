@@ -1,7 +1,13 @@
 # Bulk address executor
 
 The runtime exposes `makeReviewAddressMany` through the SDK and
-`review.addressMany` through the registry-driven CLI:
+`review.addressMany` through the registry-driven CLI. Node 24 is the toolkit’s
+supported/tested runtime floor, matching CI. Workspace dependency inspection
+uses [`fs.promises.glob` with pattern exclusions](https://nodejs.org/api/fs.html#fspromisesglobpattern-options),
+stable since Node 22.17. On Node 21 or earlier, importing the package fails at
+link time: the root export reaches the static `glob` import.
+
+Example:
 
 ```sh
 cq review.addressMany --repoRoot=. --repo=owner/repo --owner=owner \
@@ -30,8 +36,14 @@ stage and cause, including a separate cleanup error when present.
 Successful leg-wide baselines are reused while the parent head is unchanged.
 Finding-scoped checks run only for fixed candidates, so a mapping refusal does
 not block recording a verified rejection. Deterministic leg-wide preflight
-failures still stop before asking a model for any disposition. Recognized
+failures stop with zero semantic attempts. A finding-scoped baseline refusal
+occurs after the model returns `fixed`, so it costs one semantic attempt for that
+finding and starts no worker retry or rescue. Recognized
 pre-existing check findings remain baseline evidence.
+For non-fixed dispositions, the candidate has no prepared `node_modules`.
+The rejection reviewer must verify source evidence in that checkout;
+commands requiring installed dependencies are unavailable. This avoids dependency
+preparation or a finding-scoped mapping refusal blocking a source-only rejection.
 Installed dependency reuse compares lockfiles and workspace configuration
 exactly, and compares dependency-relevant package settings (including package
 manager and overrides), package-manager rc files and declared workspace-member
