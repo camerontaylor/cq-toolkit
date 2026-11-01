@@ -1,0 +1,1527 @@
+#!/usr/bin/env node
+// denylist-scan — the cq-toolkit publish gate for must-never-publish content.
+//
+// Reads policy/denylist/patterns.yml (the single source of truth for denylist
+// classes), converts it into a gitleaks TOML config in a temp directory
+// outside the repo (so the generated regexes themselves are never scanned),
+// and runs gitleaks over the repo working tree.
+//
+// `probe_path` (optional rule key) places a path-scoped rule's probe at a
+// matching relative path (path rules cannot fire on a flat root probe).
+//
+// DENYLIST_SCAN_NO_DIST_ALLOWLIST=1 (the pack audit's opt-in) omits the
+// dist/ entry from the tree allowlist at config build: in the repo tree
+// dist/ is build output, but the pack audit points this scanner at an
+// UNPACKED TARBALL whose dist/ IS the payload to gitleaks-scan.
+//
+// Modes:
+//   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
+//   scripts/denylist-scan --self-test  four legs + two pure-text config
+//                                      checks, three gitleaks runs; the
+//                                      pure-text legs — (4) and the two
+//                                      config checks — run FIRST so their
+//                                      verdicts never depend on gitleaks:
+//                                      (1) dirty fixture — every rule class
+//                                      must fire on ITS OWN sample probe
+//                                      (per-rule probe files, one scan,
+//                                      custom-only config: no defaults, no
+//                                      allowlists);
+//                                      (2) clean probes — zero findings under
+//                                      all rules at once;
+//                                      (3) tree-config — the REAL scan config
+//                                      (default-rule overlay + allowlists)
+//                                      against a fixture tree holding one
+//                                      probe per rule at non-allowlisted
+//                                      paths, the clean probes, and a
+//                                      byte-copy of patterns.yml at its
+//                                      canonical relative path: every rule
+//                                      must still fire on its own probe (the
+//                                      default-rule overlay must fire on its
+//                                      own probe), and the clean probes and
+//                                      the copy must produce ZERO findings;
+//                                      (4) workflow-I4 — every workflow
+//                                      named in REQUIRED_WORKFLOW_CHECKS
+//                                      (the repo's required checks, each
+//                                      entry pairing a workflow FILE with
+//                                      the CHECK NAME of its producing
+//                                      job — several per file allowed,
+//                                      which a two-pair fixture proves;
+//                                      denylist.yml included) must
+//                                      exist, declare a job with exactly
+//                                      its paired check name at the first
+//                                      indent level under `jobs:`; a
+//                                      job-level name: override that
+//                                      differs from the paired check name
+//                                      fails required entries; and
+//                                      its top-level `on:` block must
+//                                      carry BOTH push and pull_request
+//                                      as TOP-LEVEL entries with NO
+//                                      filter keys (paths, paths-ignore,
+//                                      branches, branches-ignore, tags,
+//                                      tags-ignore — quoted or unquoted)
+//                                      inside that block; every OTHER
+//                                      workflow (*.yml and *.yaml) gets
+//                                      a sanity check only: a parseable
+//                                      `on:` block in ANY valid shape —
+//                                      block/flow/scalar/filtered/null
+//                                      (queue mechanics legitimately
+//                                      filter triggers; a null/empty or
+//                                      scalar `on:` hard-fails ONLY the
+//                                      required entries, via the
+//                                      both-triggers check). Quoted
+//                                      `"on":` keys and whitespace inside
+//                                      flow lists are parsed.
+//                                      plus two more PURE-TEXT checks (no
+//                                      gitleaks): the pack audit's
+//                                      DENYLIST_SCAN_NO_DIST_ALLOWLIST=1
+//                                      opt-in must omit EXACTLY the dist/
+//                                      entry from the tree config's path
+//                                      allowlist (in the unpacked tarball
+//                                      dist/ is the payload, not build
+//                                      output); and parser-guards —
+//                                      probe_path values outside
+//                                      repo-relative plain '/'-separated
+//                                      segments are rejected at parse time
+//                                      (the fs layer canonicalizes trailing
+//                                      dots/spaces and win32-absolute forms,
+//                                      so probe placement cannot be steered
+//                                      outside the fixture dir on either
+//                                      platform), and the I4 trigger matcher
+//                                      counts PAIRED quoted mapping keys
+//                                      ("push": — YAML-1.1-safe) while
+//                                      unpaired quote spellings stay absent
+//                                      (a presence check must not count
+//                                      unknown-event spellings).
+//                                      Exit 0 only if all legs pass.
+//
+// Zero npm dependencies: node:fs, node:path, node:child_process, node:os.
+// The gitleaks binary comes from $GITLEAKS_BIN if set, else from PATH; the
+// 8.x major version is required and checked in the scan/self-test branches
+// only (this scanner targets the legacy 8.x `detect` surface). Repo root is
+// resolved from this script's location: the script lives at
+// <root>/scripts/denylist-scan, so "../.." relative to the script file (or
+// ".." relative to its directory) is the repo root.
+
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+
+const REPO_ROOT = path.resolve(__filename, '..', '..');
+const PATTERNS_PATH = path.join(REPO_ROOT, 'policy', 'denylist', 'patterns.yml');
+// The patterns.yml path is derived once (#12-ish invariant): the fixture join,
+// the leak filter, and its allowlist regex all come from PATTERNS_REL.
+const PATTERNS_REL = path.relative(REPO_ROOT, PATTERNS_PATH);
+const PATTERNS_ALLOW_RE = '(^|/)' + PATTERNS_REL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
+const WORKFLOWS_DIR = path.join(REPO_ROOT, '.github', 'workflows');
+
+const TOP_KEYS = ['rules', 'clean_probes'];
+const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'];
+const RULE_KEYS = [...REQUIRED_RULE_KEYS, 'path', 'probe_path'];
+// Real invariant vs .gitignore: every .gitignore entry EXCEPT `*.env*`
+// (.env-shaped files are deliberately scanned as key material), plus `.git/`
+// and patterns.yml itself (it contains the sample strings by design: it is
+// the corpus, not a violation). A maintainer "fixing" the mismatch by
+// mirroring `*.env*` here would blind class:key-material-env with no
+// self-test failure. Entries are `(^|/)`-style because gitleaks matches them
+// against full paths.
+//
+// The dist/ entry is build output in the REPO tree — but the PACK audit
+// (.github/workflows/pack-audit.yml) copies this scanner into the UNPACKED
+// TARBALL and runs it from there, where dist/ IS the payload to scan. That
+// audit's scan step sets DENYLIST_SCAN_NO_DIST_ALLOWLIST=1, which omits the
+// dist/ entry at config build (NO_DIST_ALLOWLIST below). Any other value —
+// unset included — keeps the entry: the default fails safe toward the
+// repo-tree allowlist.
+const NO_DIST_ALLOWLIST = process.env.DENYLIST_SCAN_NO_DIST_ALLOWLIST === '1';
+
+function treeAllowlistPaths(noDist) {
+  return [
+    '(^|/)\\.git/',
+    '(^|/)node_modules/',
+    ...(noDist ? [] : ['(^|/)dist/']),
+    '(^|/)\\.gjc/',
+    '(^|/)\\.DS_Store$',
+  ];
+}
+// I4 binds to required checks; these pairs are the repo's required-check
+// LINKAGE — each entry names the workflow FILE that produces a required
+// check and the CHECK NAME that branch protection, the gate's wait list,
+// and the check-run API all key on. That name is the producing job's id
+// (GitHub reports a job's check run under the job id), so the workflow-I4
+// leg asserts the file declares a job with exactly that id at the first
+// indent level under `jobs:` — without the pairing, a job rename leaves
+// every I4 leg green while PRs hang unmergeable and the gate times out
+// waiting for a check name nothing produces. Extend when a new required
+// check lands: a file may carry several pairs (one per required job), a
+// check name only one. A job-level `name:` override that differs from the
+// paired check name fails the leg too (the check run is reported under the
+// name). Each listed file must exist (a missing one fails the leg by name,
+// keeping denylist.yml's presence required) and its `on:` is unfiltered.
+// Queue-mechanics workflows (init/gate/sync: dispatch-only,
+// merge-queue-only, main-only triggers) are deliberately NOT listed — they
+// filter by design and get the sanity check instead. An empty or malformed
+// list fails the leg closed: I4 must never become vacuous.
+const REQUIRED_WORKFLOW_CHECKS = [
+  { workflow: 'denylist.yml', check: 'denylist' },
+  { workflow: 'ci.yml', check: 'static' },
+  // H4 (PR-105 round-2): the ratchet is a required check — the I4 leg now
+  // polices ratchet.yml the same way (both triggers top-level, zero filter
+  // keys, a job named exactly 'ratchet'). (The retired merge-queue-gate.yml
+  // template's wait list once covered it before promoting; retired at C2.)
+  { workflow: 'ratchet.yml', check: 'ratchet' },
+];
+// Trigger-filter keys banned by invariant I4 inside a REQUIRED workflow's
+// `on:` block. Matched MID-LINE (word-bounded) on comment-stripped lines of
+// that block only, with an optional quote on either side of the key, so
+// flow-style `on:` maps and quoted keys (`"paths-ignore":`) cannot hide a
+// filter.
+const I4_BANNED_KEY = /["']?\b(paths|paths-ignore|branches|branches-ignore|tags|tags-ignore)\b["']?\s*:/;
+
+// Known, expected failure (bad patterns.yml, bad environment): printed as a
+// one-line diagnostic without a stack trace.
+class ConfigError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
+
+// Known gitleaks invocation failure (bad binary, unreadable version): also a
+// one-line diagnostic.
+class GitleaksError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'GitleaksError';
+  }
+}
+
+// Thrown when the gitleaks binary is missing; the top-level catch turns this
+// into exit 127 after unwinding (temp dirs are removed by finally blocks).
+class GitleaksMissingError extends Error {
+  constructor(bin) {
+    super(`gitleaks executable not found (${bin})`);
+    this.name = 'GitleaksMissingError';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hand-written parser for the constrained patterns.yml format.
+// Fail closed: unexpected keys, duplicate sections or keys, malformed
+// nesting, missing required keys, EMPTY scalars (quoted or not, optional keys
+// included), or zero rules all throw. A guard that cannot fail is a no-op, so
+// this parser is deliberately strict about the shape it accepts.
+// ---------------------------------------------------------------------------
+
+function parseScalar(raw, where) {
+  const s = raw.trim();
+  if (s === '' || s === "''") throw new ConfigError(`${where}: empty value`);
+  if (s.startsWith('"')) throw new ConfigError(`${where}: double-quoted values are not part of the constrained format`);
+  if (s.startsWith("'")) {
+    const SINGLE_QUOTED = /^'(?:[^']|'')*'$/;
+    if (!SINGLE_QUOTED.test(s)) {
+      throw new ConfigError(`${where}: unterminated single-quoted value`);
+    }
+    return s.slice(1, -1).replace(/''/g, "'");
+  }
+  if (/:\s|\s#/.test(s)) throw new ConfigError(`${where}: plain value contains reserved characters`);
+  return s;
+}
+
+function splitKeyValue(s, where) {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*):(?:[ \t]+(.*))?$/.exec(s);
+  if (!m) throw new ConfigError(`${where}: expected "key: value"`);
+  return { key: m[1], value: parseScalar(m[2] || '', where) };
+}
+
+// `probe_path` feeds the self-test probe placement as a path.join() segment
+// (probeFileFor/writeProbes): a value that is ABSOLUTE on either platform
+// REPLACES the fixture root outright (win32-absolute per path.win32 —
+// leading '/', drive prefix, or UNC — so a scanner run on a Windows host
+// cannot be steered outside the fixture either), and a `..` spelling walks
+// out of it. The segment check is done on Win32-CANONICALIZED names: fs
+// calls strip trailing dots/spaces per component (CreateFileW semantics),
+// so `.. ` and `. .` are `..` where it matters even though the string
+// comparison would miss them — segments must be plain names. Backslashes
+// are rejected outright (not normalized): gitleaks reports posix-separated
+// paths, so a `'\'-separated probe_path would parse but never match a
+// finding — accepted-but-unmatchable is a misleading leg failure.
+// Probe paths are repo-relative by discipline (both repos' patterns.yml
+// use only in-repo paths).
+// Windows device names: reserved with any extension and in any case
+// (NUL, NUL.txt, and nul all address the device), so the probe-path check
+// compares the extension-stripped uppercased stem against this set.
+const WINDOWS_DEVICE_NAMES = new Set([
+  'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$',
+  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+]);
+
+function assertRelativeProbePath(value, where) {
+  if (path.win32.isAbsolute(value)) {
+    throw new ConfigError(`${where}: probe_path must be repo-relative, got absolute "${value}"`);
+  }
+  if (value.includes('\\')) {
+    throw new ConfigError(`${where}: probe_path must be '/'-separated, got "${value}"`);
+  }
+  // Windows-plain-name rejection (review-debt cq-toolkit#187, routed from
+  // fixtures#15): probe placement must succeed on a Windows host too, where
+  // a segment carrying a reserved character (<>:"|?*), a C0-control character,
+  // or a device name fails creation or addresses a device/ADS. The device
+  // check runs on the extension-stripped stem (NUL.txt is reserved like NUL)
+  // of the already-canonicalized segment, case-insensitively.
+  for (const seg of value.split('/')) {
+    if (seg === '') {
+      throw new ConfigError(`${where}: probe_path must not contain empty segments, got "${value}"`);
+    }
+    const canonical = seg.replace(/[ .]+$/, '');
+    if (canonical !== seg || canonical === '.' || canonical === '..') {
+      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (trailing dots/spaces and "."/".." spellings are rejected — the fs layer canonicalizes them)`);
+    }
+    // C0 controls only (\x00-\x1f): DEL (\x7f) and C1 (\x80-\x9f) are
+    // legal in NTFS names, so rejecting them would over-reject.
+    if (/[<>:"|?*\x00-\x1f]/.test(seg)) {
+      // JSON.stringify, not raw interpolation: the segment can carry C0
+      // bytes, which must never reach stderr/logs verbatim.
+      throw new ConfigError(`${where}: probe_path segment ${JSON.stringify(seg)} is not a plain name (Windows-reserved and C0-control characters are rejected — probe placement must succeed on Windows hosts)`);
+    }
+    // The stem strips trailing dots/spaces too: `NUL .txt` normalizes to
+    // the device once Win32 strips the space, so the bare split stem would
+    // miss it.
+    const stem = seg.split('.')[0].replace(/[ .]+$/, '').toUpperCase();
+    if (WINDOWS_DEVICE_NAMES.has(stem)) {
+      throw new ConfigError(`${where}: probe_path segment ${JSON.stringify(seg)} is not a plain name (Windows device names are rejected with any extension — probe placement must succeed on Windows hosts)`);
+    }
+  }
+}
+
+function parsePatterns(text) {
+  const rules = [];
+  const cleanProbes = [];
+  const seenSections = new Set();
+  let section = null;
+  let rule = null;
+
+  text.split(/\r?\n/).forEach((raw, idx) => {
+    const where = `patterns.yml:${idx + 1}`;
+    if (raw.includes('\t')) throw new ConfigError(`${where}: tab indentation is not part of the constrained format`);
+    const t = raw.trim();
+    if (t === '' || t.startsWith('#')) return;
+
+    // Top-level "key:" line. Matched against the RAW line so an indented
+    // lookalike falls through to the nesting checks and is rejected as
+    // malformed instead of silently reopening a section.
+    if (/^[A-Za-z_][A-Za-z0-9_]*:$/.test(raw)) {
+      const key = raw.slice(0, -1);
+      if (!TOP_KEYS.includes(key)) throw new ConfigError(`${where}: unexpected top-level key "${key}"`);
+      if (seenSections.has(key)) throw new ConfigError(`${where}: duplicate section "${key}"`);
+      seenSections.add(key);
+      section = key;
+      rule = null;
+      return;
+    }
+    if (section === null) throw new ConfigError(`${where}: content before the first section`);
+
+    // List item: exactly two spaces of indentation.
+    if (/^ {2}- /.test(raw)) {
+      const rest = raw.slice(4);
+      if (section === 'clean_probes') {
+        cleanProbes.push(parseScalar(rest, where));
+      } else {
+        const kv = splitKeyValue(rest.trim(), where);
+        if (kv.key !== 'id') throw new ConfigError(`${where}: rule item must start with "id", got "${kv.key}"`);
+        rule = { id: kv.value };
+        rules.push(rule);
+      }
+      return;
+    }
+
+    // Key inside a rule item: exactly four spaces of indentation.
+    if (/^ {4}[A-Za-z_]/.test(raw)) {
+      if (section !== 'rules' || rule === null) throw new ConfigError(`${where}: nested key outside a rule item`);
+      const kv = splitKeyValue(raw.trim(), where);
+      if (!RULE_KEYS.includes(kv.key)) throw new ConfigError(`${where}: unexpected rule key "${kv.key}"`);
+      if (Object.hasOwn(rule, kv.key)) throw new ConfigError(`${where}: duplicate rule key "${kv.key}"`);
+      if (kv.key === 'probe_path') assertRelativeProbePath(kv.value, where);
+      rule[kv.key] = kv.value;
+      return;
+    }
+
+    throw new ConfigError(`${where}: malformed line (unexpected indentation or structure)`);
+  });
+
+  if (rules.length === 0) throw new ConfigError('patterns.yml: zero rules parsed');
+  if (cleanProbes.length === 0) throw new ConfigError('patterns.yml: clean_probes missing or empty');
+  for (const r of rules) {
+    for (const k of REQUIRED_RULE_KEYS) {
+      if (typeof r[k] !== 'string' || r[k].length === 0) throw new ConfigError(`rule "${r.id}": missing required key "${k}"`);
+    }
+  }
+  if (new Set(rules.map((r) => r.id)).size !== rules.length) throw new ConfigError('patterns.yml: duplicate rule ids');
+  return { rules, cleanProbes };
+}
+
+function loadPatterns() {
+  let text;
+  try {
+    text = fs.readFileSync(PATTERNS_PATH, 'utf8');
+  } catch (e) {
+    throw new ConfigError(`cannot read ${PATTERNS_PATH}: ${e.message}`);
+  }
+  try {
+    return parsePatterns(text);
+  } catch (e) {
+    if (e instanceof ConfigError) throw e;
+    throw new ConfigError(e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TOML generation. All values are emitted as TOML basic strings via
+// JSON.stringify: JSON's escape set is a subset of TOML's basic-string
+// escapes, so arbitrary content (single quotes, backslashes, newlines)
+// round-trips safely.
+// ---------------------------------------------------------------------------
+
+function rulesToml(rules) {
+  let out = '';
+  for (const r of rules) {
+    out += '[[rules]]\n';
+    out += `id = ${JSON.stringify(r.id)}\n`;
+    out += `description = ${JSON.stringify(r.description)}\n`;
+    out += `regex = ${JSON.stringify(r.regex)}\n`;
+    if (r.path !== undefined) out += `path = ${JSON.stringify(r.path)}\n`;
+    out += 'tags = ["denylist"]\n\n';
+  }
+  return out;
+}
+
+function allowlistsToml(noDist) {
+  // Migrated form (gitleaks 8.30.1): allowlists are top-level [[allowlists]]
+  // tables. targetRules is ONLY honored on top-level entries — per-rule
+  // [[rules.allowlists]] silently ignores it — and the legacy [allowlist]
+  // table hard-errors when combined with [[allowlists]], so this emission is
+  // all-top-level. Entries without targetRules apply to every rule,
+  // including the extended defaults. Tuning recipe for ONE rule (default or
+  // custom): add another top-level [[allowlists]] entry with
+  // targetRules = ["<rule-id>"] and a paths/regexes condition; the target
+  // rule id must exist or gitleaks refuses to load the config.
+  let out = '';
+  const pathEntries = (paths) => 'paths = [\n' + paths.map((p) => '  ' + JSON.stringify(p) + ',').join('\n') + '\n]';
+  out += '[[allowlists]]\n' + pathEntries(treeAllowlistPaths(noDist)) + '\n\n';
+  out += '[[allowlists]]\n' + pathEntries([PATTERNS_ALLOW_RE]) + '\n\n';
+  return out;
+}
+
+function treeConfigToml(rules) {
+  let out = '# Generated by scripts/denylist-scan from policy/denylist/patterns.yml -- do not edit.\n\n';
+  out += allowlistsToml(NO_DIST_ALLOWLIST);
+  // Deliberate overlay: the default gitleaks ruleset stays active on top of
+  // the denylist classes (plan-sanctioned belt-and-braces). See the tuning
+  // recipe in allowlistsToml() above for how to exempt a single rule.
+  out += '[extend]\nuseDefault = true\n\n';
+  out += rulesToml(rules);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// gitleaks plumbing
+// ---------------------------------------------------------------------------
+
+function gitleaksBin() {
+  return process.env.GITLEAKS_BIN || 'gitleaks';
+}
+
+// Shared spawn + error mapping for every gitleaks invocation (#11). Extra
+// spawnOpts (cwd for the relative-source tree scan) are merged last.
+function spawnGitleaks(args, label, spawnOpts = {}) {
+  const bin = gitleaksBin();
+  const res = spawnSync(bin, args, { encoding: 'utf8', ...spawnOpts });
+  if (res.error) {
+    if (res.error.code === 'ENOENT') throw new GitleaksMissingError(bin);
+    throw new GitleaksError(`${label}: could not run gitleaks: ${res.error.message}`);
+  }
+  return res;
+}
+
+function gitleaksArgs(source, configPath, reportPath) {
+  return [
+    'detect',
+    '--source', source,
+    '--no-git',
+    '--config', configPath,
+    '--report-format', 'json',
+    '--report-path', reportPath,
+    '--redact',
+  ];
+}
+
+function runGitleaks(source, configPath, reportPath, label, spawnOpts = {}) {
+  return spawnGitleaks(gitleaksArgs(source, configPath, reportPath), label, spawnOpts);
+}
+
+// Run at the start of the scan/self-test branches: this scanner only targets
+// the 8.x `detect` surface, so a different major (different CLI or report
+// shape) must fail loudly. Version tokens are matched on stdout only and the
+// LAST match wins, so a wrapper banner printing an earlier dotted number
+// (e.g. a dated banner) cannot shadow the real version (#9).
+function checkGitleaksMajorVersion() {
+  const bin = gitleaksBin();
+  const label = `\`${bin} version\``;
+  const res = spawnGitleaks(['version'], label);
+  if (res.status !== 0) throw new GitleaksError(`${label} exited ${describeExit(res)}`);
+  const tokens = (res.stdout || '').match(/v?\d+\.\d+\.\d+/g) || [];
+  if (tokens.length === 0) {
+    throw new GitleaksError(`cannot parse gitleaks version from "${(res.stdout || '').trim()}"`);
+  }
+  const last = tokens[tokens.length - 1];
+  const major = Number(last.replace(/^v/, '').split('.')[0]);
+  if (major !== 8) {
+    throw new GitleaksError(`gitleaks major version ${major} is unsupported (8.x required); ${label} says "${(res.stdout || '').trim()}"`);
+  }
+}
+
+function describeExit(res) {
+  return res.status === null ? `signal ${res.signal}` : String(res.status);
+}
+
+function dumpStderr(res, label) {
+  if (res && res.stderr) {
+    process.stderr.write(`--- gitleaks stderr (${label}) ---\n`);
+    process.stderr.write(res.stderr);
+  }
+}
+
+function readReport(reportPath) {
+  try {
+    const raw = fs.readFileSync(reportPath, 'utf8').trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// Every mkdtemp goes through here: fixture and config files must never live
+// inside the scanned repo.
+function assertOutsideRepo(dir) {
+  const resolved = path.resolve(dir);
+  const root = path.resolve(REPO_ROOT);
+  if (resolved === root || resolved.startsWith(root + path.sep)) {
+    throw new ConfigError(`temp dir ${dir} resolves inside the repo root; scan fixtures must live outside it`);
+  }
+}
+
+function makeTempDir(prefixPath) {
+  try {
+    const dir = fs.mkdtempSync(prefixPath);
+    assertOutsideRepo(dir);
+    return dir;
+  } catch (e) {
+    if (e instanceof ConfigError) throw e;
+    throw new ConfigError(`cannot create temp dir under ${prefixPath}: ${e.message}`);
+  }
+}
+
+// Shared scan sequence for the production tree scan and every self-test leg:
+// write config, run gitleaks over `source`, parse the report. The config and
+// report live in tmpRoot BESIDE (never inside) the scanned source, so the
+// generated regex text is never scanned (#14).
+function runScan(tmpRoot, name, configToml, source, spawnOpts = {}) {
+  const configPath = path.join(tmpRoot, `${name}.toml`);
+  const reportPath = path.join(tmpRoot, `${name}.json`);
+  fs.writeFileSync(configPath, configToml);
+  const res = runGitleaks(source, configPath, reportPath, name, spawnOpts);
+  return { res, findings: readReport(reportPath) };
+}
+
+// Self-test fixture scaffold on top of runScan: fresh mkdtemp fixture dir
+// (outside the repo), populated, then scanned.
+function scanFixture(tmpRoot, name, configToml, populate) {
+  const dir = makeTempDir(path.join(tmpRoot, `${name}-`));
+  populate(dir);
+  return runScan(tmpRoot, name, configToml, dir);
+}
+
+// ---------------------------------------------------------------------------
+// Mode 1: tree scan
+// ---------------------------------------------------------------------------
+
+function treeScan() {
+  const { rules } = loadPatterns();
+  const tmp = makeTempDir(path.join(os.tmpdir(), 'denylist-tree-'));
+  try {
+    // The source is RELATIVE to the repo root (gitleaks is spawned with its
+    // cwd there): gitleaks matches a rule's `path` filter against the path
+    // as constructed from the source argument, so an absolute source would
+    // make presence rules fire on ancestor directories ABOVE the repo (a
+    // worktree living under ~/.paseo, say) — the whole tree would look
+    // dirty. Relative paths anchor path-scoped rules to the tree actually
+    // being scanned.
+    const { res, findings } = runScan(tmp, 'tree', treeConfigToml(rules), '.', { cwd: REPO_ROOT });
+    if (res.status === 0) {
+      console.log(`denylist: tree scan clean (${rules.length} rule classes active)`);
+      return 0;
+    }
+    if (res.status === 1) {
+      if (findings.length === 0) {
+        console.error('error: gitleaks exited 1 but its report contains no findings');
+        dumpStderr(res, 'tree scan');
+        return 2;
+      }
+      for (const f of findings) console.error(`denylist finding: ${f.File}:${f.StartLine} [${f.RuleID}]`);
+      console.error(`denylist: ${findings.length} finding(s); tree is dirty`);
+      return 1;
+    }
+    console.error(`error: gitleaks exited ${describeExit(res)} during tree scan`);
+    dumpStderr(res, 'tree scan');
+    return 2;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mode 2: --self-test
+// ---------------------------------------------------------------------------
+
+function slug(id) {
+  return id.replace(/[^A-Za-z0-9]+/g, '-');
+}
+
+// Probe naming: one file per rule — `<slug>.txt`, `<slug>.env` for
+// path-scoped rules (so the file NAME exercises their path filter), or the
+// rule's own `probe_path` when it carries one: a path rule whose filter
+// demands directory segments can never fire on a flat root probe, so its
+// probe is placed at that relative path instead (nested paths included).
+// Derived from the rule id or the explicit probe_path, so probes cannot
+// collide across rules.
+function probeFileFor(rule) {
+  if (rule.probe_path !== undefined) return rule.probe_path;
+  return `${slug(rule.id)}${rule.path !== undefined ? '.env' : '.txt'}`;
+}
+
+// Path-suffix match, segment-wise: the finding path ENDS WITH the probe's
+// path segments (a nested probe_path like .zcode/probe.txt matches only that
+// nesting, never an unrelated directory that merely shares the basename).
+function pathEndsWithProbe(file, probeRel) {
+  const fileSegs = String(file || '').replace(/\\/g, '/').split('/').filter((s) => s !== '');
+  const probeSegs = probeRel.split('/');
+  if (probeSegs.length > fileSegs.length) return false;
+  return probeSegs.every((seg, i) => seg === fileSegs[fileSegs.length - probeSegs.length + i]);
+}
+
+// Findings proving THIS rule fired on ITS OWN sample probe (#1).
+function findingsOnProbe(findings, rule) {
+  return findings.filter((f) => f.RuleID === rule.id && pathEndsWithProbe(f.File, probeFileFor(rule)));
+}
+
+function writeProbes(dir, rules) {
+  const seen = new Set();
+  for (const r of rules) {
+    const name = probeFileFor(r);
+    if (seen.has(name)) throw new ConfigError(`probe filename "${name}" is shared by multiple rules; rule ids must slug distinctly`);
+    seen.add(name);
+    const target = path.join(dir, name);
+    // Nested probe paths are legal (probe_path): create the dirname first.
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${r.sample}\n`);
+  }
+}
+
+// Positive control for the default-rule overlay: the tree config extends
+// gitleaks' default ruleset ([extend] useDefault = true), but every other
+// probe exercises only the custom class:* rules — a silently dead overlay
+// (a dropped or broken extend directive) would keep the self-test green
+// while default secret detection (GitHub PATs, AWS keys, ...) stopped
+// firing. The sample is assembled so no full matchable token ever appears
+// in this script's own source (the production tree scan overlays the same
+// default rules and would flag a literal here). The body is deliberately
+// high-entropy and non-sequential: gitleaks' default github-pat rule gates
+// on entropy and ignores repeating or alphabet-ordered bodies, so either
+// would keep the control dead.
+const DEFAULT_RULE_PROBE_NAME = 'default-rule-probe.txt';
+const DEFAULT_RULE_SAMPLE = `ghp_${'tB3nR9kWxQmZ2vLhG'}${'sYaP7dKxXcMvFsNwEeR'}`;
+
+// Leg 1: one dirty-fixture run with a custom-only config (no default rules,
+// no allowlists). Each rule must have a finding on ITS OWN probe file. Returns
+// the findings, or null on an infra failure (gitleaks itself failed) so the
+// caller counts ONE failed check instead of one per rule (#10).
+function selfTestDirtyFixture(tmpRoot, rules) {
+  const { res, findings } = scanFixture(tmpRoot, 'dirty', rulesToml(rules), (dir) => {
+    writeProbes(dir, rules);
+  });
+  if (res.status !== 1) {
+    console.error(`FAIL dirty fixture: expected gitleaks exit 1 (probes present), got ${describeExit(res)}`);
+    dumpStderr(res, 'dirty fixture');
+    return null;
+  }
+  return findings;
+}
+
+// Leg 2: false-positive tuning proof — all clean probes under ALL rules at
+// once (custom-only config) must produce zero findings.
+function selfTestCleanProbes(tmpRoot, rules, cleanProbes) {
+  const { res, findings } = scanFixture(tmpRoot, 'clean', rulesToml(rules), (dir) => {
+    fs.writeFileSync(path.join(dir, 'clean-probes.txt'), `${cleanProbes.join('\n')}\n`);
+  });
+  if (res.status === 0) return true;
+  for (const f of findings) console.error(`FAIL clean-probes: line ${f.StartLine} of the probe file tripped [${f.RuleID}]`);
+  if (findings.length === 0) {
+    console.error(`FAIL clean-probes: expected gitleaks exit 0, got ${describeExit(res)}`);
+    dumpStderr(res, 'clean-probes leg');
+  }
+  return false;
+}
+
+// Leg 3: exercise the REAL tree config — default-rule overlay and allowlists
+// included — against a fixture tree: one probe per rule at non-allowlisted
+// paths, the clean probes, and a byte-copy of patterns.yml at
+// policy/denylist/patterns.yml. Asserts (a) every rule still fires on ITS OWN
+// probe, (b) the clean probes produce zero findings under the real config
+// (default-rule overlay included), and (c) the copy produces ZERO findings,
+// proving its allowlist entry actually suppresses it. (d) the default-rule
+// overlay actually fires on its own probe (positive control), so a silently
+// dead [extend] useDefault cannot pass the leg.
+function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
+  const { res, findings } = scanFixture(tmpRoot, 'tree-config', treeConfigToml(rules), (dir) => {
+    writeProbes(dir, rules);
+    fs.writeFileSync(path.join(dir, 'clean-probes.txt'), `${cleanProbes.join('\n')}\n`);
+    const copyPath = path.join(dir, PATTERNS_REL);
+    fs.mkdirSync(path.dirname(copyPath), { recursive: true });
+    fs.copyFileSync(PATTERNS_PATH, copyPath);
+    fs.writeFileSync(path.join(dir, DEFAULT_RULE_PROBE_NAME), `${DEFAULT_RULE_SAMPLE}\n`);
+  });
+  if (res.status !== 1) {
+    console.error(`FAIL tree-config: expected gitleaks exit 1 (probes present), got ${describeExit(res)}`);
+    dumpStderr(res, 'tree-config leg');
+    return false;
+  }
+  for (const r of rules) {
+    if (findingsOnProbe(findings, r).length === 0) {
+      console.error(`FAIL tree-config: no finding on its own probe file (${probeFileFor(r)}) under the real tree config`);
+      return false;
+    }
+  }
+  const cleanHit = findings.find((f) => path.basename(String(f.File || '').replace(/\\/g, '/')) === 'clean-probes.txt');
+  if (cleanHit) {
+    console.error(`FAIL tree-config: clean-probes.txt tripped under the real config: line ${cleanHit.StartLine} [${cleanHit.RuleID}] (overlay or denylist rules too broad)`);
+    return false;
+  }
+  const leaked = findings.filter((f) => String(f.File || '').replace(/\\/g, '/').endsWith(PATTERNS_REL));
+  if (leaked.length > 0) {
+    for (const f of leaked) {
+      console.error(`FAIL tree-config: finding inside the copied patterns.yml (allowlist not suppressing): ${f.File}:${f.StartLine} [${f.RuleID}]`);
+    }
+    return false;
+  }
+  const defaultHit = findings.find(
+    (f) => path.basename(String(f.File || '').replace(/\\/g, '/')) === DEFAULT_RULE_PROBE_NAME &&
+      !rules.some((r) => r.id === f.RuleID),
+  );
+  if (defaultHit === undefined) {
+    console.error(`FAIL tree-config: no DEFAULT-rule finding on ${DEFAULT_RULE_PROBE_NAME} — the [extend] useDefault overlay is not firing (default secret detection would be dead while every class rule still passes)`);
+    return false;
+  }
+  return true;
+}
+
+// Pure-text check (no gitleaks) for the pack audit's opt-in: the no-dist
+// tree config must differ from the default by EXACTLY the dist/ allowlist
+// entry — the audit's unpacked tarball has dist/ as its payload, and a fat
+// or missing finger here would under-scan or over-allow more than dist/.
+function selfTestNoDistAllowlist() {
+  const withDist = treeAllowlistPaths(false);
+  const withoutDist = treeAllowlistPaths(true);
+  const missing = withDist.filter((p) => !withoutDist.includes(p));
+  const extra = withoutDist.filter((p) => !withDist.includes(p));
+  if (missing.length !== 1 || missing[0] !== '(^|/)dist/' || extra.length !== 0) {
+    console.error(`FAIL no-dist-allowlist: the no-dist variant must omit exactly (^|/)dist/ (missing: ${JSON.stringify(missing)}, extra: ${JSON.stringify(extra)})`);
+    return false;
+  }
+  const distTomlEntry = '  "(^|/)dist/",';
+  if (!allowlistsToml(false).includes(distTomlEntry) || allowlistsToml(true).includes(distTomlEntry)) {
+    console.error('FAIL no-dist-allowlist: the dist/ entry did not move as expected through the generated tree config');
+    return false;
+  }
+  return true;
+}
+
+// Leg 4: mechanically enforce invariant I4 by parsing the CI workflows as
+// TEXT. I4 binds to REQUIRED checks: a required check must report status on
+// EVERY pull request, so its workflow must never filter its triggers — no
+// paths, no paths-ignore, no branch or tag filters of any kind; a job-level
+// `if:` is the only sanctioned skip mechanism. Every file named in
+// REQUIRED_WORKFLOW_CHECKS must exist, declare a job with exactly each of
+// its paired check names at the first indent level under `jobs:`, and its
+// top-level `on:` block must
+// carry BOTH a `push` and a `pull_request` trigger — each as a TOP-LEVEL
+// entry of the `on:` value, so a name merely nested inside another
+// trigger's payload (an input named `push`, say) never satisfies presence —
+// and NO filter keys (checked inside the `on:` block only, mid-line,
+// word-bounded, quoted or unquoted). Every OTHER *.yml or *.yaml file under
+// .github/workflows/ (GitHub executes both) gets a sanity check only: a
+// parseable `on:` block in any valid shape — flow, block, filtered, scalar,
+// or null — because queue mechanics (the gate filters to merge-queue, the
+// sync to main, the init is dispatch-only) legitimately filter their
+// triggers; a null/empty or scalar `on:` hard-fails ONLY required entries,
+// through the both-triggers check. Quoted `"on":` keys (the YAML-1.1-safe
+// spelling) and whitespace inside flow lists are parsed. Comment-only lines
+// are dropped and inline comments (an unquoted `#` preceded by whitespace,
+// to end of line) are stripped quote-aware BEFORE any check (#3).
+function stripInlineComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+// Net flow-collection depth of a comment-stripped line: opens ([ {) minus
+// closes (] }) counted outside quotes. Used to find the end of a multi-line
+// flow-style `on:` value — e.g. a flow map whose closing brace sits on a
+// column-0-anchored line is a continuation of the value, not a new key.
+function flowDepth(line) {
+  let quote = null;
+  let depth = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+    }
+  }
+  return depth;
+}
+
+// The `on:` key line at column 0, quoted-key forms included (`"on":` is
+// the YAML-1.1-safe spelling, since YAML 1.1 parsers read a bare `on` as a
+// boolean), with any value shape: none (null), a flow collection (`[`/`{`),
+// or a plain scalar (e.g. `on: workflow_dispatch`).
+const ON_KEY_LINE = /^["']?on["']?:/;
+const ON_VALUE_PREFIX = /^["']?on["']?:\s*/;
+
+// Extract the top-level `on:` block as comment-stripped lines (the `on:` key
+// line included), or null when the file has no column-0 `on:` key. Handles
+// block style (`on:` plus its indented lines), flow-list style (`on: [push,
+// pull_request]`), flow-map style (`on: {push: null}`), and the scalar form
+// (`on: workflow_dispatch`) — including MULTI-LINE flow values, consumed
+// until their brackets close (the closer may sit at column 0). The block
+// ends at the first column-0 line with content that is not a continuation
+// of the `on:` value; blank and comment-only lines never terminate it.
+function extractOnBlock(text) {
+  const stripped = text.split(/\r?\n/).map(stripInlineComment);
+  const start = stripped.findIndex((l) => ON_KEY_LINE.test(l));
+  if (start === -1) return null;
+  const block = [stripped[start]];
+  let depth = flowDepth(stripped[start].replace(ON_VALUE_PREFIX, ''));
+  let i = start + 1;
+  if (depth > 0) {
+    while (i < stripped.length && depth > 0) {
+      block.push(stripped[i]);
+      depth += flowDepth(stripped[i]);
+      i++;
+    }
+    return block;
+  }
+  while (i < stripped.length) {
+    const line = stripped[i];
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+    if (!line.startsWith(' ')) break; // column-0 content: end of the block
+    block.push(line);
+    i++;
+  }
+  return block;
+}
+
+// Split a COMPLETE flow collection (the joined `on:` value, outer brackets
+// included) into its top-level items at depth-0 commas, quote-aware.
+// `{push: null, pull_request: {branches: [main]}}` -> ["push: null",
+// "pull_request: {branches: [main]}"]; `[ push, pull_request ]` ->
+// ["push", "pull_request"].
+function splitFlowTopLevel(flowText) {
+  let t = flowText.trim();
+  if ((t.startsWith('[') && t.endsWith(']')) || (t.startsWith('{') && t.endsWith('}'))) {
+    t = t.slice(1, -1);
+  }
+  const items = [];
+  let item = '';
+  let depth = 0;
+  let quote = null;
+  for (const ch of t) {
+    if (quote) {
+      item += ch;
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      item += ch;
+    } else if (ch === '[' || ch === '{') {
+      depth++;
+      item += ch;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+      item += ch;
+    } else if (ch === ',' && depth === 0) {
+      items.push(item);
+      item = '';
+    } else {
+      item += ch;
+    }
+  }
+  if (item.trim() !== '') items.push(item);
+  return items.map((s) => s.trim());
+}
+
+// The event-name candidate of one `on:` entry: the mapping key when the
+// entry is "name: <value>" (the value may be a nested flow collection), the
+// bare name otherwise (block item `- name`, scalar `name`, flow item
+// `name`). Null when the entry is not a plain name (a nested collection or
+// a multi-word scalar). Quoted spellings are accepted when properly PAIRED
+// — `"push":` / `'pull_request':` are the YAML-1.1-safe spellings of
+// boolean-key lookalikes, so a required workflow spelled with quoted
+// triggers still passes the I4 both-triggers check — while UNPAIRED quotes
+// (`push':`, `"push:":`) stay null: GitHub reads those as unknown event
+// names, and a trigger-PRESENCE check must not count them (over-acceptance
+// here is fail-OPEN, not fail-closed — the I4 gate would pass a workflow
+// whose real trigger is silently absent).
+function entryName(entry) {
+  const t = entry.trim().replace(/^-\s+/, '');
+  // Mapping-key side first: a PAIRED same-quote key before the colon.
+  const paired = /^(["'])([A-Za-z_][A-Za-z0-9_-]*)\1\s*:/.exec(t);
+  if (paired) return paired[2];
+  const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:/.exec(t);
+  const name = kv ? kv[1] : t;
+  const quoted = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?$/.exec(name);
+  return quoted ? quoted[1] : null;
+}
+
+// A trigger is present iff a TOP-LEVEL entry of the `on:` value is exactly
+// that event name: an inline flow item or key (`on: [ push, pull_request ]`
+// — whitespace around delimiters included — or `on: {push: null, ...}`),
+// an inline scalar (`on: workflow_dispatch` — one trigger), or a
+// block-style child at the first indentation level under `on:`
+// (`push:` / `- push`). Nested names — e.g. an input named `push` under
+// `workflow_dispatch:` — never satisfy trigger presence.
+function onBlockHasTrigger(block, trigger) {
+  const inline = block[0].replace(ON_VALUE_PREFIX, '').trim();
+  if (inline !== '') {
+    if (inline.startsWith('[') || inline.startsWith('{')) {
+      const flow = block.join(' ').replace(ON_VALUE_PREFIX, '').trim();
+      return splitFlowTopLevel(flow).some((item) => entryName(item) === trigger);
+    }
+    return entryName(inline) === trigger;
+  }
+  let base = null;
+  for (let i = 1; i < block.length; i++) {
+    const line = block[i];
+    if (line.trim() === '') continue;
+    const ind = line.match(/^ */)[0].length;
+    if (base === null) base = ind;
+    if (ind !== base) continue; // deeper lines are nested entries, not triggers
+    if (entryName(line) === trigger) return true;
+  }
+  return false;
+}
+
+// The `jobs:` key line at column 0 (workflows are block-style YAML; a
+// flow-style `jobs: {a: {...}}` mapping has never appeared here and is not
+// parsed — the same constrained-text stance as the `on:` parser above).
+const JOBS_KEY_LINE = /^jobs:/;
+
+// Does the workflow text declare a job with EXACTLY this id at the first
+// indent level under the column-0 `jobs:` key? Parsed as comment-stripped
+// text: the block starts at the `jobs:` key line and ends at the next
+// column-0 content line; the base indent is the first indented line's, and
+// a job id is a base-indent line whose key spelling (before the colon) is
+// exactly the wanted name (quote-aware: `'static':` matches `static`).
+// Deeper lines are job bodies, not job ids. Returns null when the job id is
+// absent; otherwise an object { nameOverride } where nameOverride is the
+// job-level `name:` value (one leading+trailing ' or " pair stripped) or
+// null when the job declares none — a job-level `name:` renames the emitted
+// check run (GitHub reports it under the name, not the id), which is why
+// the override is surfaced. The override scan walks the job's body lines
+// (indent > base, blanks skipped) until the body ends, matching at the job
+// body's first indent level only — nested mappings (environment.name,
+// with.name) are not overrides. The FIRST body line at that indent whose
+// trimmed form matches the QUOTE-AWARE /^["']?name["']?\s*:\s*(.+?)\s*$/ wins
+// (`'name': Static` is YAML-valid), and step entries (`- name: ...`) never
+// match because the trimmed line starts with `-`. A FLOW-style or ALIASED
+// job value — a same-line `{...}` mapping, a next-line `{...}` mapping, or
+// a `*alias`; an `&anchor`-prefixed value is unwrapped before
+// classification, so an anchored flow mapping is still refused — is not
+// parsed by this text leg: it surfaces as { flowDecl: true }, which the
+// caller turns into a loud failure rather than a silent pass.
+function workflowDeclaresJob(text, jobName) {
+  const stripped = text.split(/\r?\n/).map(stripInlineComment);
+  const start = stripped.findIndex((l) => JOBS_KEY_LINE.test(l));
+  if (start === -1) return null;
+  let base = null;
+  for (let i = start + 1; i < stripped.length; i++) {
+    const line = stripped[i];
+    if (line.trim() === '') continue;
+    if (!line.startsWith(' ')) break; // column-0 content: end of jobs:
+    const ind = line.match(/^ */)[0].length;
+    if (base === null) base = ind;
+    if (ind !== base) continue; // deeper: job body, not a job id
+    const kv = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?:/.exec(line.trim());
+    if (kv && kv[1] === jobName) {
+      // A flow-style, aliased, or anchored job value (`static: {name: ...}`,
+      // `static: *renamed`, or `static: &job {name: ...}`) is not parseable
+      // by this text leg — surface it so the caller fails the entry loudly.
+      // The &anchor token is stripped before classification.
+      const postColon = line.trim().slice(kv[0].length).trimStart();
+      const val = postColon.replace(/^&\S+\s*/, '');
+      if (val.startsWith('{') || val.startsWith('*')) {
+        return { flowDecl: true };
+      }
+      let bodyBase = null; // the job body's key indent (first non-blank body line)
+      for (let j = i + 1; j < stripped.length; j++) {
+        const body = stripped[j];
+        if (body.trim() === '') continue;
+        const bodyInd = body.match(/^ */)[0].length;
+        if (bodyInd <= base) break; // end of this job's body
+        // A next-line flow mapping or an alias as the job's value is not
+        // parseable by this text leg — surface it (loud failure upstream).
+        // The &anchor token is stripped before classification (an anchored
+        // flow mapping is still refused).
+        const t = body.trimStart().replace(/^&\S+\s*/, '');
+        if (bodyBase === null && t.startsWith('{')) return { flowDecl: true };
+        if (bodyBase === null && t.startsWith('*')) return { flowDecl: true };
+        if (bodyBase === null) bodyBase = bodyInd;
+        if (bodyInd !== bodyBase) continue; // nested mapping (or malformed shallower line) — not a job-level key
+        const name = /^["']?name["']?\s*:\s*(.+?)\s*$/.exec(body.trim());
+        if (name) {
+          let value = name[1];
+          if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
+            value = value.slice(1, -1);
+          }
+          return { nameOverride: value };
+        }
+      }
+      return { nameOverride: null };
+    }
+  }
+  return null;
+}
+
+// Per-workflow checks over the extracted, comment-stripped `on:` block;
+// reports a FAIL line naming the file and the reason (through `fail`,
+// console.error by default) and returns false on any violation. REQUIRED
+// files (found by pairing the file name against `pairs`, default
+// REQUIRED_WORKFLOW_CHECKS — a file may carry several pairs): the trigger
+// checks run ONCE per file and stop at the first violation — no filter keys
+// anywhere in the block (checked first, mid-line, so a filtered flow map is
+// named for the filter, not just missing triggers), both triggers present
+// as top-level entries, which also means a null/empty or scalar `on:`
+// hard-fails required entries — and then EVERY pair for the file is checked
+// on its own: the file must declare a job with exactly that paired check
+// name at the first indent level under `jobs:`, with no differing `name:`
+// override, so a job rename can never silently orphan the branch-protection
+// context it feeds. Each failing pair is reported by name, so a second pair
+// can never hide behind a first. Other files: the block merely has to parse
+// (any trigger shape — filtered, scalar, or null); the strict obligation
+// belongs to required checks only, because queue mechanics legitimately
+// filter their triggers.
+function workflowI4Checks(rel, name, text, pairs = REQUIRED_WORKFLOW_CHECKS, fail = (msg) => console.error(msg)) {
+  const block = extractOnBlock(text);
+  if (block === null) {
+    fail(`FAIL workflow-I4: no top-level \`on:\` block in ${rel}`);
+    return false;
+  }
+  const required = pairs.filter((p) => p.workflow === name);
+  if (required.length === 0) {
+    return true;
+  }
+  for (const l of block) {
+    if (I4_BANNED_KEY.test(l)) {
+      fail(`FAIL workflow-I4: trigger filter key violates invariant I4 in the \`on:\` block of ${rel}: "${l.trim()}"`);
+      return false;
+    }
+  }
+  if (!onBlockHasTrigger(block, 'push')) {
+    fail(`FAIL workflow-I4: no \`push\` trigger in the \`on:\` block of ${rel}`);
+    return false;
+  }
+  if (!onBlockHasTrigger(block, 'pull_request')) {
+    fail(`FAIL workflow-I4: no \`pull_request\` trigger in the \`on:\` block of ${rel}`);
+    return false;
+  }
+  let ok = true;
+  for (const pair of required) {
+    if (!requiredJobI4Checks(rel, text, pair.check, fail)) ok = false;
+  }
+  return ok;
+}
+
+// The per-pair half of workflowI4Checks: the required workflow `rel`
+// declares a block-style job with exactly the id `check` and no `name:`
+// override that differs from it. Reports through `fail`; returns false on
+// a violation.
+function requiredJobI4Checks(rel, text, check, fail) {
+  const declared = workflowDeclaresJob(text, check);
+  if (declared !== null && declared.flowDecl) {
+    fail(`FAIL workflow-I4: required workflow ${rel} declares job "${check}" with a FLOW-style or ALIASED value — not parseable by this text leg; use block style so the emitted check name stays verifiable`);
+    return false;
+  }
+  if (declared === null) {
+    fail(`FAIL workflow-I4: required workflow ${rel} does not declare a job "${check}" at the first indent level under \`jobs:\` — the "${check}" required check name would dangle (restore the job id, or rename the check everywhere at once: the pairing, branch protection, and the gate's wait list)`);
+    return false;
+  }
+  if (declared.nameOverride !== null && declared.nameOverride !== check) {
+    fail(`FAIL workflow-I4: required workflow ${rel} job "${check}" overrides \`name:\` with "${declared.nameOverride}" — the check run is reported under the NAME, so the "${check}" required check would never report and the gate would wait forever (drop the override, or make it identical to the job id)`);
+    return false;
+  }
+  return true;
+}
+
+// Fail-closed gate on the pairing data itself (`pairs`, default
+// REQUIRED_WORKFLOW_CHECKS): every entry must be an object carrying
+// non-empty string `workflow` and `check` values, and no check name may
+// appear twice — a check name is a single GitHub context, so two producers
+// for it (or the same pair listed twice) is ambiguous. A workflow file MAY
+// carry several pairs (one per required job). Returns FAIL diagnostics (an
+// empty array means the data is sound).
+function requiredWorkflowChecksProblems(pairs = REQUIRED_WORKFLOW_CHECKS) {
+  const problems = [];
+  if (pairs.length === 0) {
+    problems.push('REQUIRED_WORKFLOW_CHECKS is empty — I4 would police nothing (fail-closed)');
+  }
+  const checks = new Map(); // check name -> the workflow file that first paired it
+  for (const pair of pairs) {
+    const wellFormed =
+      pair !== null &&
+      typeof pair === 'object' &&
+      !Array.isArray(pair) &&
+      typeof pair.workflow === 'string' &&
+      pair.workflow.length > 0 &&
+      typeof pair.check === 'string' &&
+      pair.check.length > 0;
+    if (!wellFormed) {
+      problems.push(`malformed required-check pair ${JSON.stringify(pair) ?? String(pair)} — expected { workflow: <file>, check: <job id> } with non-empty strings`);
+      continue;
+    }
+    const prior = checks.get(pair.check);
+    if (prior === pair.workflow) {
+      problems.push(`duplicate pair { workflow: "${pair.workflow}", check: "${pair.check}" } in REQUIRED_WORKFLOW_CHECKS`);
+    } else if (prior !== undefined) {
+      problems.push(`duplicate check name "${pair.check}" in REQUIRED_WORKFLOW_CHECKS (paired with both "${prior}" and "${pair.workflow}")`);
+    } else {
+      checks.set(pair.check, pair.workflow);
+    }
+  }
+  return problems;
+}
+
+// Pure-text fixtures for the pairing model (no live tree): the live
+// REQUIRED_WORKFLOW_CHECKS carries one pair per file today, so without
+// these nothing would exercise a multi-pair workflow. One fixture
+// file carries two required pairs: both jobs present passes; either job
+// renamed away fails naming THAT job (and only it); a `name:` override on
+// the second job fails naming it. The pairing-data gate accepts two pairs
+// for one file and still rejects a repeated check name and an exact
+// repeated pair. Expected diagnostics are captured, not printed; each case
+// asserts the verdict AND the job its diagnostic names (non-vacuity: a
+// check that fails for the wrong job does not count).
+function selfTestMultiPairFixtures() {
+  let ok = true;
+  const rel = path.join('.github', 'workflows', 'pair-fixture.yml');
+  const pairs = [
+    { workflow: 'pair-fixture.yml', check: 'first-job' },
+    { workflow: 'pair-fixture.yml', check: 'second-job' },
+  ];
+  const job = (id, extra = []) => [`  ${id}:`, ...extra, '    runs-on: ubuntu-latest', '    steps:', `      - run: echo ${id}`];
+  const fixture = (jobs) => ['name: pair-fixture', 'on:', '  push:', '  pull_request:', 'jobs:', ...jobs].join('\n');
+  const run = (text) => {
+    const messages = [];
+    const verdict = workflowI4Checks(rel, 'pair-fixture.yml', text, pairs, (msg) => messages.push(msg));
+    return { verdict, messages };
+  };
+  const names = (messages, check) => messages.some((m) => m.includes(`"${check}"`));
+  const sound = requiredWorkflowChecksProblems(pairs);
+  if (sound.length !== 0) {
+    console.error(`FAIL workflow-I4: two pairs for one workflow file were rejected as pairing data: ${sound.join('; ')}`);
+    ok = false;
+  }
+  const both = run(fixture([...job('first-job'), ...job('second-job')]));
+  if (!both.verdict || both.messages.length !== 0) {
+    console.error(`FAIL workflow-I4: a workflow declaring both of its paired jobs did not pass: ${both.messages.join('; ')}`);
+    ok = false;
+  }
+  for (const [missing, kept] of [
+    ['first-job', 'second-job'],
+    ['second-job', 'first-job'],
+  ]) {
+    const ids = pairs.map(({ check }) => (check === missing ? 'renamed-job' : check));
+    const renamed = run(fixture(ids.flatMap((id) => job(id))));
+    if (renamed.verdict || !names(renamed.messages, missing) || names(renamed.messages, kept)) {
+      console.error(`FAIL workflow-I4: a two-pair workflow with job "${missing}" renamed away did not fail naming exactly that job: ${renamed.messages.join('; ') || '(no diagnostic)'}`);
+      ok = false;
+    }
+  }
+  const override = run(fixture([...job('first-job'), ...job('second-job', ['    name: Second Job'])]));
+  if (override.verdict || !override.messages.some((m) => m.includes('job "second-job" overrides `name:`')) || names(override.messages, 'first-job')) {
+    console.error(`FAIL workflow-I4: a \`name:\` override on the second paired job did not fail naming it: ${override.messages.join('; ') || '(no diagnostic)'}`);
+    ok = false;
+  }
+  const dupCheck = requiredWorkflowChecksProblems([
+    { workflow: 'one.yml', check: 'shared' },
+    { workflow: 'two.yml', check: 'shared' },
+  ]);
+  if (!dupCheck.some((p) => p.startsWith('duplicate check name "shared"'))) {
+    console.error(`FAIL workflow-I4: a check name paired with two workflow files was not rejected: ${dupCheck.join('; ') || '(no problem reported)'}`);
+    ok = false;
+  }
+  const dupPair = requiredWorkflowChecksProblems([pairs[0], { ...pairs[0] }]);
+  if (!dupPair.some((p) => p.startsWith('duplicate pair'))) {
+    console.error(`FAIL workflow-I4: an exact repeated { workflow, check } pair was not rejected: ${dupPair.join('; ') || '(no problem reported)'}`);
+    ok = false;
+  }
+  return ok;
+}
+
+function selfTestWorkflowI4() {
+  // Fail closed on the pairing data FIRST: empty or malformed entries mean
+  // I4 would police nothing or police it against garbage, so the leg never
+  // gets to trust the data.
+  let ok = true;
+  const problems = requiredWorkflowChecksProblems();
+  for (const problem of problems) {
+    console.error(`FAIL workflow-I4: ${problem}`);
+    ok = false;
+  }
+  if (!ok) return false;
+  // The pairing model itself, on fixtures, before the live tree.
+  if (!selfTestMultiPairFixtures()) ok = false;
+  let entries;
+  try {
+    entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
+  } catch (e) {
+    console.error(`FAIL workflow-I4: cannot read ${WORKFLOWS_DIR}: ${e.message}`);
+    return false;
+  }
+  const workflows = entries
+    .filter((e) => e.isFile() && /\.ya?ml$/.test(e.name))
+    .map((e) => e.name)
+    .sort();
+  if (workflows.length === 0) {
+    console.error(`FAIL workflow-I4: no *.yml or *.yaml workflows found in ${WORKFLOWS_DIR}`);
+    return false;
+  }
+  // Fail closed on the policy data itself: a listed required workflow that
+  // has gone missing (rename or delete during a refactor) fails the leg by
+  // name — this is what keeps the denylist.yml-presence requirement alive:
+  // denylist.yml is the required file the list carries.
+  // merge-queue-gate.yml deliberately is NOT in the list (queue mechanics
+  // filter their triggers by design and get the sanity check only) — and since
+  // the C2 retirement it has no rendered workflow at all (adopter-only template).
+  // Once per file: a file carrying several pairs is reported missing once.
+  for (const workflow of new Set(REQUIRED_WORKFLOW_CHECKS.map((p) => p.workflow))) {
+    if (!workflows.includes(workflow)) {
+      console.error(`FAIL workflow-I4: required workflow "${workflow}" is missing from ${WORKFLOWS_DIR}`);
+      ok = false;
+    }
+  }
+  for (const name of workflows) {
+    const workflowPath = path.join(WORKFLOWS_DIR, name);
+    const rel = path.join('.github', 'workflows', name);
+    let text;
+    try {
+      text = fs.readFileSync(workflowPath, 'utf8');
+    } catch (e) {
+      console.error(`FAIL workflow-I4: cannot read ${workflowPath}: ${e.message}`);
+      ok = false;
+      continue;
+    }
+    if (!workflowI4Checks(rel, name, text)) ok = false;
+  }
+  return ok;
+}
+
+// Pure-text parser guards (no gitleaks): (a) probe_path must stay
+// repo-relative — absolute, backslash-separated, non-plain-segment (`..`,
+// trailing dots/spaces, empty), Windows-reserved and C0-control characters,
+// and device names (any extension, any case) are rejected at
+// parse time, so the self-test probe placement (writeProbes' path.join)
+// can never be steered outside its fixture directory on either platform,
+// while legal relative paths still parse (accept-cases below and the
+// shipped patterns.yml itself); (b) PAIRED quoted mapping keys in an `on:`
+// block ("push": / 'pull_request': — the YAML-1.1-safe spellings) satisfy
+// the I4 both-triggers check, while UNPAIRED quote spellings (`push':`,
+// `"push:":`) and a nested input named `push` never count as a trigger.
+function selfTestParserGuards(rules) {
+  let ok = true;
+  const rejectCases = [
+    '/abs/probe.txt',
+    'C:\\abs\\probe.txt',
+    '\\\\srv\\share\\probe.txt',
+    '\\root-relative.txt',
+    '../up/probe.txt',
+    'a/../b/probe.txt',
+    'a\\..\\b.txt',
+    'a\\b.txt',
+    '. .',
+    '. ..',
+    'probe..',
+    'a//b.txt',
+  ];
+  // Windows-plain-name rejection (review-debt #187): reserved characters,
+  // C0 controls, and device names (any extension, any case). These shapes
+  // must fail in the Windows guard SPECIFICALLY — the loop asserts the
+  // Windows-guard message, so a parseScalar/empty/canonical rejection cannot
+  // silently satisfy a Windows case (self-test non-vacuity).
+  const windowsRejectCases = [
+    'COM1.txt',
+    'nul',
+    'con',
+    'PRN.txt',
+    'aux',
+    'CONOUT$',
+    'conout$.log',
+    'dir/LPT9.log',
+    'a<b.txt',
+    'a|b.txt',
+    'que?.txt',
+    'a:b.txt',
+    'star*.txt',
+    'a>b.txt',
+    'quo"te.txt',
+    'NUL .txt',
+    'conin$.txt',
+    'a\x01b.txt',
+    'a\x00b.txt',
+    'a\x1f.txt',
+  ];
+  for (const probe of rejectCases) {
+    const text = [
+      'rules:',
+      '  - id: guard-probe',
+      "    description: 'parser guard fixture rule'",
+      "    regex: '(?i)guard[_-]secret'",
+      "    sample: 'guard_secret=not-a-real-value'",
+      // Quoted like the accept-cases below: an unquoted shape containing
+      // ": " or " #" would trip parseScalar's reserved-characters guard
+      // instead of the Windows guard under test.
+      `    probe_path: '${probe}'`,
+      'clean_probes:',
+      "  - 'clean/probes/none.txt'",
+    ].join('\n');
+    try {
+      parsePatterns(text);
+      console.error(`FAIL parser-guards: probe_path '${probe}' was accepted (must be rejected)`);
+      ok = false;
+    } catch (e) {
+      if (!(e instanceof ConfigError)) {
+        console.error(`FAIL parser-guards: probe_path '${probe}' threw ${e && e.constructor ? e.constructor.name : typeof e} instead of ConfigError`);
+        ok = false;
+      }
+    }
+  }
+  for (const probe of windowsRejectCases) {
+    const text = [
+      'rules:',
+      '  - id: guard-probe',
+      "    description: 'parser guard fixture rule'",
+      "    regex: '(?i)guard[_-]secret'",
+      "    sample: 'guard_secret=not-a-real-value'",
+      `    probe_path: '${probe}'`,
+      'clean_probes:',
+      "  - 'clean/probes/none.txt'",
+    ].join('\n');
+    try {
+      parsePatterns(text);
+      console.error(`FAIL parser-guards: probe_path ${JSON.stringify(probe)} was accepted (must be rejected)`);
+      ok = false;
+    } catch (e) {
+      // Non-vacuity: a Windows shape rejected by any OTHER guard
+      // (parseScalar, empty, canonical — whose message also says
+      // "plain name") fails here; only the Windows-guard messages prove
+      // the Windows guard fired. Non-ConfigError throws cannot match, so
+      // they fail the same way.
+      if (!(e instanceof ConfigError) || !/Windows-reserved|Windows device names/.test(e.message)) {
+        console.error(`FAIL parser-guards: probe_path ${JSON.stringify(probe)} did not reach the Windows guard: ${e instanceof Error ? e.message : e}`);
+        ok = false;
+      }
+    }
+  }
+  // Accept-cases: legal relative paths must still parse — a flat name and a
+  // nested directory path (the shapes patterns.yml actually uses).
+  // DEL (\x7f) and C1 (e.g. U+0085) are legal NTFS name characters:
+  // accepted here to pin the \x00-\x1f boundary of the control rejection.
+  // Near-miss device/reserved pins: future over-broadening of the device
+  // set or reserved class (COM10, CONIN without $, LPT0, #[]) must fail here.
+  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt', 'ok\x7f.txt', 'ok\x85.txt', 'COM10.txt', 'conin.txt', 'LPT0.log', 'ok#bracket[t].txt']) {
+    const text = [
+      'rules:',
+      '  - id: guard-probe',
+      "    description: 'parser guard fixture rule'",
+      "    regex: '(?i)guard[_-]secret'",
+      "    sample: 'guard_secret=not-a-real-value'",
+      `    probe_path: '${probe}'`,
+      'clean_probes:',
+      "  - 'clean/probes/none.txt'",
+    ].join('\n');
+    try {
+      parsePatterns(text);
+    } catch (e) {
+      console.error(`FAIL parser-guards: legal probe_path ${JSON.stringify(probe)} was rejected: ${e.message}`);
+      ok = false;
+    }
+  }
+  for (const r of rules) {
+    if (r.probe_path === undefined) continue;
+    // The shipped value already passed assertRelativeProbePath at load, but
+    // re-check explicitly so the leg names the offending shipped value (and
+    // the current full class list) instead of relying on the load crash.
+    try {
+      assertRelativeProbePath(r.probe_path, 'shipped patterns.yml');
+    } catch (e) {
+      console.error(`FAIL parser-guards: shipped patterns.yml probe_path '${r.probe_path}' rejected: ${e.message}`);
+      ok = false;
+    }
+  }
+  const quotedBlock = [
+    'name: quoted-triggers',
+    '"on":',
+    '  "push":',
+    "  'pull_request':",
+    'jobs:',
+    '  j:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: echo hi',
+  ].join('\n');
+  const block = extractOnBlock(quotedBlock);
+  if (block === null || !onBlockHasTrigger(block, 'push') || !onBlockHasTrigger(block, 'pull_request')) {
+    console.error('FAIL parser-guards: quoted mapping-key triggers ("push": / \'pull_request\':) do not satisfy the both-triggers check');
+    ok = false;
+  }
+  const quotedFlow = ['name: quoted-flow', 'on: ["push", "pull_request"]', 'jobs: {}'].join('\n');
+  const flow = extractOnBlock(quotedFlow);
+  if (flow === null || !onBlockHasTrigger(flow, 'push') || !onBlockHasTrigger(flow, 'pull_request')) {
+    console.error('FAIL parser-guards: quoted flow-style triggers do not satisfy the both-triggers check');
+    ok = false;
+  }
+  const nestedInput = ['name: nested-input', '"on":', '  workflow_dispatch:', '    inputs:', '      push:', 'jobs: {}'].join('\n');
+  const nested = extractOnBlock(nestedInput);
+  if (nested !== null && onBlockHasTrigger(nested, 'push')) {
+    console.error('FAIL parser-guards: a nested input named push wrongly satisfies trigger presence');
+    ok = false;
+  }
+  // UNPAIRED quote spellings stay null: GitHub reads them as unknown event
+  // names, and a trigger-presence check must not count them (fail-open).
+  // (`push:":`-shaped strings are NOT tested here: the zero-space colon is
+  // the flow-map key form `{push: null}` relies on — same tolerance class.)
+  for (const [spell, trigger] of [["push':", 'push'], ['"push:":', 'push']]) {
+    if (entryName(spell) === trigger) {
+      console.error(`FAIL parser-guards: unpaired-quote key ${spell} wrongly satisfies the trigger check`);
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+function selfTest() {
+  const { rules, cleanProbes } = loadPatterns();
+  const tmp = makeTempDir(path.join(os.tmpdir(), 'denylist-selftest-'));
+  let failed = 0;
+  let checks = 0;
+  try {
+    // Leg 4 FIRST: it is pure text (no gitleaks), so a machine without an
+    // 8.x gitleaks still gets the I4 leg verdict before the version gate
+    // below can throw.
+    checks++;
+    if (selfTestWorkflowI4()) console.log('PASS workflow-I4');
+    else failed++;
+
+    // The other pure-text checks: the pack audit's no-dist opt-in omits
+    // exactly the dist/ entry (no gitleaks needed either), and the parser
+    // guards (probe_path traversal rejection + quoted mapping-key
+    // triggers) hold.
+    checks++;
+    if (selfTestNoDistAllowlist()) console.log('PASS no-dist-allowlist');
+    else failed++;
+
+    checks++;
+    if (selfTestParserGuards(rules)) console.log('PASS parser-guards');
+    else failed++;
+
+    // Every remaining leg runs gitleaks, so the 8.x major gate belongs here
+    // — after the pure-text leg, before the first gitleaks invocation.
+    checkGitleaksMajorVersion();
+
+    // Leg 1 — one dirty-fixture run; each rule class must fire on ITS OWN
+    // sample probe. An infra failure counts as ONE failed check (#10).
+    const dirty = selfTestDirtyFixture(tmp, rules);
+    if (dirty === null) {
+      checks++;
+      failed++;
+    } else {
+      for (const r of rules) {
+        checks++;
+        if (findingsOnProbe(dirty, r).length > 0) {
+          console.log(`PASS ${r.id}`);
+        } else {
+          console.error(`FAIL ${r.id}: no finding on its own probe file (${probeFileFor(r)}) in the dirty fixture`);
+          failed++;
+        }
+      }
+    }
+
+    // Leg 2 — clean probes under all rules at once: zero findings.
+    checks++;
+    if (selfTestCleanProbes(tmp, rules, cleanProbes)) console.log('PASS clean-probes');
+    else failed++;
+
+    // Leg 3 — the real tree config fires every class on its own probe,
+    // keeps the clean probes clean, and suppresses the patterns.yml copy.
+    checks++;
+    if (selfTestTreeConfig(tmp, rules, cleanProbes)) console.log('PASS tree-config');
+    else failed++;
+
+    console.log(`total: ${checks - failed}/${checks} checks passed`);
+    return failed === 0 ? 0 : 1;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+function main(argv) {
+  // argv validation FIRST (#7): usage errors must not depend on gitleaks
+  // being installed, and the pure-text I4 leg must not be gated on it.
+  if (argv.length === 0) {
+    checkGitleaksMajorVersion();
+    return treeScan();
+  }
+  if (argv.length === 1 && argv[0] === '--self-test') {
+    // No version gate here: selfTest() runs the pure-text I4 leg first and
+    // gates the gitleaks-major check itself, after that leg.
+    return selfTest();
+  }
+  console.error('usage: scripts/denylist-scan [--self-test]');
+  console.error('  (no flags)   scan the repo tree with the denylist rules');
+  console.error('  --self-test  dirty fixture, clean probes, tree config, workflow I4, no-dist-allowlist, and parser-guards legs');
+  return 2;
+}
+
+const { rules } = loadPatterns();
+process.stdout.write(treeConfigToml(rules));

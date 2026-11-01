@@ -1,0 +1,6 @@
+head=5ef68b2429037e679fca6dbe3561f88f8ccb9a6f
+base=1eea0b5b323de8b23a9388a72da4e97f8e631450
+target=94ddc97a65261dd64403fbbf7471dfde771dec59
+worktree=clean
+active_coderabbit=none
+lock=/tmp/cq-coderabbit-cli.lock
