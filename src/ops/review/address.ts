@@ -536,7 +536,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           budgetSpent = true;
           return 'token or wall budget exhausted';
         }
-        return undefined;
+        return worker?.preconditionFailure?.();
       };
       cleanStop = stop;
       const account = (result: WorkerResult, governed = true) => {

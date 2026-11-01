@@ -20,6 +20,16 @@ only the small link/metadata directory. Installs containing real package files
 copy those files for each candidate; copy admission is cancellable but has no
 byte budget.
 
+Before a paid repair attempt, a clean-parent preflight checks dependency
+availability and configured baseline checks. An unavailable baseline stops the
+leg with its original reason; worker/rescue retries cannot repair that
+precondition. Recognized pre-existing check findings remain baseline evidence.
+Installed dependency reuse compares lockfiles and workspace configuration
+exactly, and compares dependency-relevant package settings (including package
+manager and overrides). Script and descriptive metadata may differ; unfamiliar
+settings remain compared conservatively. Neither plain nor bulk addressing
+automatically installs dependencies.
+
 Use `--query='is:open label:fix'` instead of `--pulls` for GitHub search discovery.
 The executor pages through the search results and checks the reported total,
 repository identities, duplicate numbers and incomplete-results flag. Truncation

@@ -74,7 +74,7 @@ async function fixture(
       join(dependencyRoot, 'package.json'),
       options.installedDependencies === 'matching'
         ? '{"name":"fixture"}\n'
-        : '{"name":"different"}\n',
+        : '{"name":"fixture","dependencies":{"different":"1.0.0"}}\n',
     );
     await writeFile(join(dependencyRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
     await writeFile(join(dependencyRoot, 'node_modules/check.cjs'), 'process.exitCode = 0;\n');
@@ -206,6 +206,7 @@ async function fixture(
     calls: () => calls,
     identityRequests: () => identityRequests,
     dependencyCheckMarker,
+    dependencyRoot,
     cleanup: async () => {
       await repo.cleanup();
       await rm(journal, { recursive: true, force: true });
@@ -214,6 +215,24 @@ async function fixture(
 }
 
 describe('review.address verified admission fence', () => {
+  test('preflight refuses an unverified parent before checks or model dispatch', async () => {
+    let reads = 0;
+    const f = await fixture(undefined, '', {
+      gitHook: (args, run) => {
+        if (args.at(-2) === 'rev-parse' && args.at(-1) === 'HEAD' && ++reads === 2)
+          return Promise.resolve({ code: 0, stdout: 'f'.repeat(40), stderr: '' });
+        return run(args);
+      },
+    });
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.reason).toBe('unexpected baseline head outside engine');
+      expect(f.calls()).toBe(0);
+      expect(f.attempts).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('cancellation while preparing historical bookkeeping prevents admission after await', async () => {
     const parent = new AbortController();
     let enter!: () => void;
@@ -1012,11 +1031,11 @@ describe('review.address candidate isolation', () => {
         expect(refused.reason).toMatch(
           /roles.reviewer required|check.cwd escapes|configured check was/,
         );
-        expect(f.calls()).toBe(mode === 'reviewer' ? 2 : 1);
+        expect(f.calls()).toBe(mode === 'reviewer' ? 2 : 0);
         expect(refused.commit).toBeUndefined();
         expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
-        expect(f.attempts.some((a) => a.failedAttempt?.sha)).toBe(true);
+        expect(f.attempts.some((a) => a.failedAttempt?.sha)).toBe(mode === 'reviewer');
       } finally {
         await f.cleanup();
       }
@@ -1100,6 +1119,78 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test('ten identical baseline failures run the check once without semantic attempts', async () => {
+    const external = await mkdtemp(join(tmpdir(), 'cq-baseline-refusal-'));
+    const count = join(external, 'count');
+    const f = await fixture(
+      undefined,
+      `const fs = require('node:fs'); const p = ${JSON.stringify(count)};
+fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : 0) + 1));
+console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
+      { workerAttempts: 10, rescueBase: 10 },
+    );
+    try {
+      for (let i = 0; i < 10; i++) {
+        const result = await f.engine.fix({ ...finding(), id: `finding-${i}` }, 1);
+        expect(result.reason).toMatch(/baseline precondition failed: configured check was/);
+        expect(result.finding.status).toBe('deferred');
+        expect(result.commit).toBeUndefined();
+      }
+      expect(await readFile(count, 'utf8')).toBe('1');
+      expect(f.calls()).toBe(0);
+      expect(f.attempts).toEqual([]);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+    } finally {
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+  test('script and descriptive metadata differences reuse equivalent dependencies', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ name: 'caller', version: '2.0.0', scripts: { build: 'another build' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([
+    ['dependencies', { dep: '1' }],
+    ['devDependencies', { dep: '1' }],
+    ['optionalDependencies', { dep: '1' }],
+    ['peerDependencies', { dep: '1' }],
+    ['pnpm', { overrides: { dep: '1' } }],
+    ['packageManager', 'pnpm@10.0.0'],
+    ['installConfig', { hoistingLimits: 'workspaces' }],
+    ['dependencies', null],
+    ['pnpm', []],
+  ])(
+    'changed or ambiguous dependency metadata refuses before dispatch: %s=%j',
+    async (key, value) => {
+      const f = await fixture(undefined, '', {
+        installedDependencies: 'matching',
+        workerAttempts: 10,
+        rescueBase: 10,
+      });
+      try {
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ [key as string]: value }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('baseline precondition failed');
+        expect(result.commit).toBeUndefined();
+        expect(f.calls()).toBe(0);
+        expect(f.attempts).toEqual([]);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test.each([false, true])(
     'canonical and aliased roots preserve task identity (alias=%s)',
     async (aliasRoot) => {
@@ -1134,6 +1225,20 @@ describe('review.address candidate isolation', () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+  test.each(['pnpm-lock.yaml', 'pnpm-workspace.yaml'])(
+    'changed %s refuses dependency reuse',
+    async (path) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        await writeFile(join(f.dependencyRoot, path), 'changed: true\n');
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('commits only a staged candidate that passed mandatory feedback, broader and closure gates', async () => {
     const f = await fixture();
     try {

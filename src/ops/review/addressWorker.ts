@@ -6,6 +6,7 @@ import {
 } from './internal/addressDependencies.js';
 import { readFile, writeFile, lstat, realpath } from 'node:fs/promises';
 import { relative, resolve, isAbsolute } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
@@ -55,6 +56,37 @@ const OutcomeSchema = z
   })
   .strict();
 const ClosureSchema = z.object({ closed: z.boolean(), reason: z.string().min(1) }).strict();
+const DependencyManifest = z
+  .object({
+    dependencies: z.record(z.string(), z.string()).optional(),
+    devDependencies: z.record(z.string(), z.string()).optional(),
+    optionalDependencies: z.record(z.string(), z.string()).optional(),
+    peerDependencies: z.record(z.string(), z.string()).optional(),
+    peerDependenciesMeta: z.record(z.string(), z.unknown()).optional(),
+    pnpm: z.record(z.string(), z.unknown()).optional(),
+    packageManager: z.string().optional(),
+    overrides: z.record(z.string(), z.unknown()).optional(),
+    resolutions: z.record(z.string(), z.unknown()).optional(),
+    workspaces: z.union([z.array(z.string()), z.record(z.string(), z.unknown())]).optional(),
+    bundledDependencies: z.union([z.boolean(), z.array(z.string())]).optional(),
+    bundleDependencies: z.union([z.boolean(), z.array(z.string())]).optional(),
+  })
+  .passthrough();
+const descriptiveManifestFields = new Set([
+  'name',
+  'version',
+  'private',
+  'description',
+  'scripts',
+  'license',
+  'author',
+  'contributors',
+  'repository',
+  'homepage',
+  'bugs',
+  'keywords',
+  'funding',
+]);
 export interface AddressAttempt {
   finding: string;
   tier: 'worker' | 'rescue' | 'reviewer';
@@ -83,6 +115,8 @@ export interface AddressFix {
 export interface AddressWorker {
   fix(finding: Finding, round: number): Promise<AddressFix>;
   escalation(): EscalationState;
+  /** Engine-observed prerequisite failure; the enclosing leg must stop paid work. */
+  preconditionFailure?(): string | undefined;
   /** Capture and admit against a verified head without crossing an engine commit. */
   withVerifiedHead?<T>(action: (head: string) => Promise<T>): Promise<T>;
 }
@@ -90,7 +124,7 @@ export interface AddressWorkerDeps {
   git: GhFn;
   drivers: DriverFactory;
   repoRoot: string;
-  /** Installed caller checkout; reused only when package manifests/locks match the worker tree. */
+  /** Installed caller checkout; reused only when dependency metadata matches the worker tree. */
   dependencyRoot?: string;
   journalDir: string;
   policy: EffectiveCqPolicy;
@@ -184,6 +218,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const verifiedHeads = new Set<string>();
   let initialization: Promise<void> | undefined;
   let fatal: string | undefined;
+  let preconditionFailure: string | undefined;
   const unitDeadlines = new Map<string, number>();
   const remainingUnit = (finding: Finding) =>
     (unitDeadlines.get(finding.id) ?? Infinity) - Date.now();
@@ -330,7 +365,18 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       'bun.lock',
       'bun.lockb',
     ]) {
-      if ((await manifest(root, path)) !== (await manifest(deps.dependencyRoot, path)))
+      const local = await manifest(root, path);
+      const caller = await manifest(deps.dependencyRoot, path);
+      const relevant = (text: string | null) => {
+        if (path !== 'package.json' || text === null) return text;
+        const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
+        // Preserve unfamiliar settings: they may affect installation. Only
+        // known descriptive/script fields are irrelevant to the dependency tree.
+        return Object.fromEntries(
+          Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
+        );
+      };
+      if (!isDeepStrictEqual(relevant(local), relevant(caller)))
         throw new Error(
           'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
         );
@@ -533,8 +579,25 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       if (callerUnknown.length) throw new Error('review.address requires no unknown worker files');
       verifiedHeads.add(await git(root, ['rev-parse', 'HEAD']));
     }, admit));
+  // These failures belong to the unchanged parent/environment. Asking another
+  // model to edit the finding cannot repair them, so stop the leg before paying
+  // for a semantic attempt. Candidate admission repeats the baseline on its
+  // current parent so sibling commits cannot make the evidence stale.
+  const prepareBaseline = async (cwd: string, finding: Finding, admit: () => void) => {
+    try {
+      const dependencies = await dependencyDirectory(admit);
+      if (dependencies)
+        await snapshotAddressDependencies(dependencies, resolve(cwd, 'node_modules'), admit);
+      return { dependencies, checks: await runChecks(cwd, finding, false) };
+    } catch (error) {
+      if (error instanceof AddressRefusal) throw error;
+      preconditionFailure = `baseline precondition failed: ${error instanceof Error ? error.message : String(error)}`;
+      throw new AddressRefusal(preconditionFailure, true);
+    }
+  };
   return {
     escalation: () => state,
+    preconditionFailure: () => preconditionFailure,
     async withVerifiedHead(action) {
       await initialize();
       return withMutation(async () => {
@@ -675,6 +738,18 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         await safeFile(root, file);
         const classified = classifyStagePaths([file], undefined, false, false);
         if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
+        await withMutation(async () => {
+          const baselineHead = await git(root, ['rev-parse', 'HEAD']);
+          if (!verifiedHeads.has(baselineHead))
+            throw new AddressRefusal('unexpected baseline head outside engine', true);
+          const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
+          await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
+          try {
+            await prepareBaseline(candidate, finding, admitMutation);
+          } finally {
+            await git(root, ['worktree', 'remove', '--force', candidate]);
+          }
+        }, admitMutation);
         while (true) {
           stop();
           if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
@@ -784,15 +859,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               // Candidate checks may invoke a package manager. Keep their
               // node_modules metadata private so relinking cannot corrupt the
               // caller's dependencies. Package links retain absolute targets.
-              const dependencies = await dependencyDirectory(admitMutation);
-              if (dependencies)
-                await snapshotAddressDependencies(
-                  dependencies,
-                  resolve(candidate, 'node_modules'),
-                  admitMutation,
-                );
-              const baseline =
-                output.disposition === 'fixed' ? await runChecks(candidate, finding, false) : [];
+              const { dependencies, checks } = await prepareBaseline(
+                candidate,
+                finding,
+                admitMutation,
+              );
+              const baseline = output.disposition === 'fixed' ? checks : [];
 
               const content = await readFile(await safeFile(root, file));
               await writeFile(await safeFile(candidate, file), content);
