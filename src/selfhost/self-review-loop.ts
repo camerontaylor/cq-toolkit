@@ -730,6 +730,35 @@ export async function runSelfReviewLoop(
 }
 
 /**
+ * Best-effort diagnostic write to stderr (the Q34 transport policy). A
+ * broken stderr transport fails two ways: `write` can throw synchronously,
+ * or it can emit an *asynchronous* 'error' event (EPIPE) on the stream
+ * after this turn. A bare try/catch only catches the former; an unhandled
+ * 'error' event terminates the process despite finished work. This
+ * installs a swallowing listener around the write and keeps it through
+ * that event turn, then removes it so failures on a live stderr still
+ * surface. Every post-sweep diagnostic write must go through this — not
+ * every caller can rely on the stdout-failure path having installed the
+ * listener first.
+ */
+const writeStderrDiagnostic = (line: string): void => {
+  const stderr = process.stderr;
+  const onStderrError = (): void => {
+    // Best-effort: a stderr transport failure is ignored, not fatal.
+  };
+  stderr.on('error', onStderrError);
+  try {
+    stderr.write(line);
+  } catch {
+    // A synchronous throw is equally non-fatal here.
+  }
+  // The stream can only emit the failed write's error event after this
+  // synchronous call returns; keep the listener through that event turn,
+  // then remove it so later stderr failures still surface.
+  setImmediate(() => stderr.removeListener('error', onStderrError));
+};
+
+/**
  * Append the usage markdown table to the GitHub step summary. Best-effort
  * by contract: the run's real effects (replies, pushes, journal) are
  * already committed when this runs, so a summary write failure degrades to
@@ -741,7 +770,7 @@ const appendStepSummaryTable = (stepSummary: string | undefined, usage: SweepTok
   try {
     appendFileSync(stepSummary, sweepUsageMarkdown(usage));
   } catch (error) {
-    process.stderr.write(
+    writeStderrDiagnostic(
       `sweep-usage: could not append the step-summary table: ${
         error instanceof Error ? error.message : String(error)
       }\n`,
@@ -767,15 +796,14 @@ const writeSweepUsageFile = (
       `${JSON.stringify({ sweepUsage: usage, ...(error !== undefined ? { error } : {}) })}\n`,
     );
   } catch (error) {
-    try {
-      process.stderr.write(
-        `sweep-usage: could not write ${outPath}: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    } catch {
-      // Best-effort diagnostics must not mask the original whole-run error.
-    }
+    // Best-effort diagnostics must not mask the original whole-run error;
+    // writeStderrDiagnostic also swallows the asynchronous stderr 'error'
+    // event a bare try/catch cannot catch.
+    writeStderrDiagnostic(
+      `sweep-usage: could not write ${outPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
+    );
   }
 };
 
@@ -953,45 +981,26 @@ export async function main(
     } catch (error) {
       // Q34 newly classifies only this post-sweep transport failure as
       // best-effort; oneLine bounds the warning detail to 500 characters.
-      // The fallback write itself can fail on the same closed pipes: not
-      // only by throwing synchronously, but by emitting an *asynchronous*
-      // 'error' event (EPIPE) on stderr after this turn — unhandled, that
-      // event terminates the process despite the completed sweep. Swallow
-      // both like the surrounding best-effort policy requires.
-      const stderr = process.stderr;
-      const onStderrError = (): void => {
-        // Best-effort: a stderr transport failure is ignored, not fatal.
-      };
-      stderr.on('error', onStderrError);
-      try {
-        stderr.write(
-          `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
-        );
-      } catch {
-        // Continue the remaining reports even when stderr is unavailable too.
-      }
-      // The stream can only emit the failed write's error event after this
-      // synchronous call returns; keep the listener through that event turn,
-      // then remove it so later stderr failures still surface.
-      setImmediate(() => stderr.removeListener('error', onStderrError));
+      // The fallback write itself can fail on the same closed pipes — both
+      // synchronously and via the asynchronous stderr 'error' event — and
+      // writeStderrDiagnostic swallows both.
+      writeStderrDiagnostic(
+        `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
+      );
     }
-    // Best-effort tail after a completed sweep: stderr may be the same
-    // broken transport that took out stdout, so every remaining diagnostic
-    // write is guarded — a failed diagnostic (step summary, per-PR failure
-    // echo) must not record a whole-run error against finished work.
-    try {
-      appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
-    } catch {
-      // Continue the remaining reports even when stderr is unavailable too.
-    }
+    // Best-effort tail after a completed sweep: even when the payload
+    // write's callback succeeded, stderr can be a broken transport of its
+    // own (separate pipes whose reader already exited), so every remaining
+    // diagnostic write routes through writeStderrDiagnostic — a bare
+    // try/catch would only guard the synchronous throw, leaving the
+    // asynchronous 'error' event to kill the process after finished work.
+    // A failed diagnostic (step summary, per-PR failure echo) must not
+    // record a whole-run error against that finished work.
+    appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
-      try {
-        process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
-      } catch {
-        // Continue the remaining reports even when stderr is unavailable too.
-      }
+      writeStderrDiagnostic(`pr ${String(failure.pr)}: ${failure.error}\n`);
     }
   } catch (error) {
     runError = oneLine(error instanceof Error ? error.message : String(error));
