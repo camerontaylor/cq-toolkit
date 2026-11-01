@@ -40,6 +40,8 @@ const RepositoryMetadata = z.object({ nameWithOwner: z.string() });
 export interface ReviewAddressManyInput {
   repoRoot: string;
   repo: string;
+  /** Prepared dependency checkout per PR number, relative to repoRoot or absolute. */
+  dependencyRoots?: Record<string, string>;
   pulls?: number[];
   query?: string;
   concurrency?: number;
@@ -248,6 +250,10 @@ export function makeReviewAddressMany(
       }
       if (input.enrollments?.some((row) => !numbers.includes(row.number)))
         return { status: 'needs-human', reason: 'Enrollment outside selection' };
+      if (
+        Object.keys(input.dependencyRoots ?? {}).some((number) => !numbers.includes(Number(number)))
+      )
+        return { status: 'needs-human', reason: 'Prepared dependency root outside PR selection' };
       const listed: AddressManyPrFacts[] = [];
       let cursor = 0;
       const reads = await Promise.allSettled(
@@ -394,6 +400,14 @@ export function makeReviewAddressMany(
               result = await address({
                 repoRoot: root,
                 source: `pr:${candidate.number}`,
+                ...(input.dependencyRoots?.[String(candidate.number)] === undefined
+                  ? {}
+                  : {
+                      dependencyRoot: resolve(
+                        input.repoRoot,
+                        input.dependencyRoots[String(candidate.number)]!,
+                      ),
+                    }),
                 expectedHead: candidate.headOid,
                 maxTokens: input.tokensPerPr,
                 ...(input.rounds === undefined ? {} : { rounds: input.rounds }),

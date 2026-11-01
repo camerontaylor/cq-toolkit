@@ -96,6 +96,38 @@ const reportOf = (
   result: Awaited<ReturnType<ReturnType<typeof makeReviewAddress>>>,
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
+test.each([undefined, '/prepared/pr-7', 'prepared/pr-7'])(
+  'plain caller records dependency selection: %s',
+  async (dependencyRoot) => {
+    const f = await fixture();
+    let selected: string | undefined;
+    try {
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: (deps) => {
+          selected = deps.dependencyRoot;
+          return f.deps.workerFactory!(deps);
+        },
+      })({
+        repoRoot: f.repo.root,
+        source: 'local',
+        ...(dependencyRoot === undefined ? {} : { dependencyRoot }),
+        journalDir: f.input.journalDir,
+      });
+      const expected = dependencyRoot?.startsWith('/')
+        ? dependencyRoot
+        : join(f.repo.root, dependencyRoot ?? '.');
+      expect(selected).toBe(expected);
+      expect(reportOf(result).dependencySource).toEqual({
+        kind: dependencyRoot === undefined ? 'caller' : 'prepared',
+        root: expected,
+      });
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
 describe('review.address composition', () => {
   test('an engine prerequisite refusal stops the leg before paid re-review', async () => {
     const f = await fixture();

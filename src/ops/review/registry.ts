@@ -535,6 +535,7 @@ export const FixReviewItemInputSchema: z.ZodType<ReviewFixInput> = z
 export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
   .object({
     repoRoot: z.string().min(1),
+    dependencyRoot: z.string().min(1).exactOptional(),
     source: z.string().regex(/^(local|pr:[1-9]\d*)$/),
     expectedHead: z
       .string()
@@ -556,6 +557,7 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
 export const ReviewAddressManyInputSchema = z
   .object({
     repoRoot: z.string().min(1),
+    dependencyRoots: z.record(z.string().regex(/^[1-9]\d*$/), z.string().min(1)).exactOptional(),
     repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
     pulls: z.array(z.number().int().positive()).min(1).exactOptional(),
     query: z.string().min(1).exactOptional(),

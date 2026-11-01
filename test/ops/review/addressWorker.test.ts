@@ -37,6 +37,7 @@ async function fixture(
     rescueBase?: number;
     aliasRoot?: boolean;
     installedDependencies?: 'matching' | 'mismatched';
+    preferDependencyRoot?: boolean;
     workspaceDependency?: 'caller' | 'worker';
     firstStopReason?: 'budget' | 'aborted' | 'error';
     costUSD?: number;
@@ -181,6 +182,7 @@ async function fixture(
     drivers,
     repoRoot: options.aliasRoot ? alias : repo.root,
     ...(options.installedDependencies ? { dependencyRoot } : {}),
+    ...(options.preferDependencyRoot ? { preferDependencyRoot: true } : {}),
     journalDir: journal,
     policy: resolveCqConfigDefaults(config, { packageName: 'fixture' }),
     attempts,
@@ -1354,6 +1356,60 @@ describe('review.address candidate isolation', () => {
     } finally {
       release();
       await sibling;
+      await f.cleanup();
+    }
+  });
+  test.each(['mismatched', 'missing'] as const)(
+    'explicit prepared root refusal: %s',
+    async (mode) => {
+      const f = await fixture(undefined, '', {
+        installedDependencies: mode === 'mismatched' ? 'mismatched' : 'matching',
+        preferDependencyRoot: true,
+      });
+      try {
+        if (mode === 'missing')
+          await rm(join(f.dependencyRoot, 'node_modules'), { recursive: true });
+        const result = await f.engine.fix(finding(), 1);
+        const reason =
+          mode === 'missing'
+            ? 'prepared dependency root has no node_modules'
+            : 'prepared dependency root manifests/locks differ';
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain(reason);
+        expect(result.reason).not.toContain('install dependencies in the PR worktree');
+        expect(f.engine.preconditions?.()[0]).toMatchObject({
+          kind: 'deterministic',
+          scope: 'leg',
+          stage: 'dependencies',
+        });
+        expect(f.engine.preconditions?.()[0]?.reason).toContain(reason);
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('prepared dependencies retain dev yaml for a PR predating its runtime move', async () => {
+    const f = await fixture(undefined, '', {
+      installedDependencies: 'matching',
+      preferDependencyRoot: true,
+    });
+    try {
+      await f.repo.write('.gitignore', 'node_modules/\n');
+      // An inherited clone-local tree must not shadow the explicit prepared root.
+      await mkdir(join(f.repo.root, 'node_modules'), { recursive: true });
+      await writeFile(join(f.repo.root, 'node_modules/check.cjs'), 'process.exitCode = 1;\n');
+      const old = JSON.stringify({ devDependencies: { yaml: '2.9.1' } });
+      await f.repo.write('package.json', old);
+      f.repo.commitAll('older PR metadata');
+      await writeFile(join(f.dependencyRoot, 'package.json'), old);
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+      expect(await readFile(join(f.dependencyRoot, 'package.json'), 'utf8')).toBe(old);
+      expect(await readFile(join(f.dependencyRoot, 'node_modules/check.cjs'), 'utf8')).toBe(
+        'process.exitCode = 0;\n',
+      );
+    } finally {
       await f.cleanup();
     }
   });

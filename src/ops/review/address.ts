@@ -73,6 +73,8 @@ import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/r
 export interface ReviewAddressInput {
   repoRoot: string;
   source: string;
+  /** Prepared checkout matching PR metadata; read-only dependency source. */
+  dependencyRoot?: string;
   expectedHead?: string;
   record?: string;
   target?: string;
@@ -88,6 +90,8 @@ export interface ReviewAddressInput {
 }
 export interface ReviewAddressReport {
   source: string;
+  /** Selected dependency source; prerequisite checks may still refuse it. */
+  dependencySource?: { kind: 'caller' | 'prepared'; root: string };
   reportPath: string;
   /** One entry per round; the latest reviewed record and all settled batch runs. */
   rounds: Array<{ round: number; record: FindingsRecord; runs: RunReport[] }>;
@@ -232,6 +236,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     );
     const report: ReviewAddressReport = {
       source: input.source,
+      dependencySource: {
+        kind: input.dependencyRoot === undefined ? 'caller' : 'prepared',
+        root: resolve(input.repoRoot, input.dependencyRoot ?? '.'),
+      },
       reportPath: resolve(journalDir, 'review-address-report.json'),
       rounds: [],
       findings: [],
@@ -851,7 +859,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
               repoRoot: root,
-              dependencyRoot: input.repoRoot,
+              dependencyRoot:
+                input.dependencyRoot === undefined
+                  ? input.repoRoot
+                  : resolve(input.repoRoot, input.dependencyRoot),
+              preferDependencyRoot: input.dependencyRoot !== undefined,
               journalDir,
               policy,
               git,
