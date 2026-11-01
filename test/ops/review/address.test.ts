@@ -107,6 +107,8 @@ describe('review.address composition', () => {
         workerFactory: () => ({
           escalation: createEscalationState,
           preconditionFailure: () => (refused ? reason : undefined),
+          preconditions: () =>
+            refused ? [{ kind: 'deterministic', scope: 'leg', stage: 'dependencies', reason }] : [],
           fix: async (item) => {
             refused = true;
             return {
@@ -122,6 +124,9 @@ describe('review.address composition', () => {
       expect(result.status === 'needs-human' && result.reason).toContain(reason);
       expect(f.calls).not.toContain('review');
       expect(reportOf(result).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(reportOf(result).preconditions).toEqual([
+        { kind: 'deterministic', scope: 'leg', stage: 'dependencies', reason },
+      ]);
     } finally {
       await f.cleanup();
     }

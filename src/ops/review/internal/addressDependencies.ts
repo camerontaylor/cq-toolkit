@@ -1,4 +1,7 @@
-import { cp, lstat, readdir, realpath, writeFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
+import { parse as parseYaml } from 'yaml';
+import { cp, glob, lstat, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 const within = (root: string, path: string) => {
@@ -94,4 +97,145 @@ export async function snapshotAddressDependencies(
     },
   });
   admit();
+}
+
+const DependencyManifest = z
+  .object({
+    dependencies: z.record(z.string(), z.string()).optional(),
+    devDependencies: z.record(z.string(), z.string()).optional(),
+    optionalDependencies: z.record(z.string(), z.string()).optional(),
+    peerDependencies: z.record(z.string(), z.string()).optional(),
+    peerDependenciesMeta: z.record(z.string(), z.unknown()).optional(),
+    pnpm: z.record(z.string(), z.unknown()).optional(),
+    packageManager: z.string().optional(),
+    scripts: z.record(z.string(), z.string()).optional(),
+    overrides: z.record(z.string(), z.unknown()).optional(),
+    resolutions: z.record(z.string(), z.unknown()).optional(),
+    workspaces: z.union([z.array(z.string()), z.record(z.string(), z.unknown())]).optional(),
+    bundledDependencies: z.union([z.boolean(), z.array(z.string())]).optional(),
+    bundleDependencies: z.union([z.boolean(), z.array(z.string())]).optional(),
+  })
+  .passthrough();
+const descriptiveManifestFields = new Set([
+  'name',
+  'version',
+  'private',
+  'description',
+  'scripts',
+  'license',
+  'author',
+  'contributors',
+  'repository',
+  'homepage',
+  'bugs',
+  'keywords',
+  'funding',
+]);
+const installLifecycleScripts = new Set([
+  'preinstall',
+  'install',
+  'postinstall',
+  'prepublish',
+  'preprepare',
+  'prepare',
+  'postprepare',
+  'dependencies',
+  'pnpm:devPreinstall',
+]);
+
+/** Compare installed-tree inputs without exposing package-manager credential bytes. */
+export async function assertAddressDependencyMetadata(
+  root: string,
+  caller: string,
+  admit: () => void,
+): Promise<void> {
+  const read = async (cwd: string, path: string) => {
+    admit();
+    try {
+      const full = await realpath(resolve(cwd, path));
+      if (!within(await realpath(cwd), full))
+        throw new Error('dependency metadata escapes checkout');
+      return await readFile(full, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  };
+  const relevant = (text: string | null) => {
+    if (text === null) return text;
+    const parsed = DependencyManifest.parse(JSON.parse(text) as unknown);
+    const fields = Object.fromEntries(
+      Object.entries(parsed).filter(([key]) => !descriptiveManifestFields.has(key)),
+    );
+    if (Object.keys(parsed.scripts ?? {}).some((key) => installLifecycleScripts.has(key)))
+      fields.scripts = parsed.scripts;
+    return fields;
+  };
+  const compare = async (path: string, manifest = false) => {
+    const a = await read(root, path);
+    const b = await read(caller, path);
+    if (!isDeepStrictEqual(manifest ? relevant(a) : a, manifest ? relevant(b) : b))
+      throw new Error(
+        'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
+      );
+  };
+  await compare('package.json', true);
+  for (const path of [
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+    'yarn.lock',
+    'bun.lock',
+    'bun.lockb',
+    '.npmrc',
+    '.yarnrc',
+    '.yarnrc.yml',
+    'bunfig.toml',
+  ])
+    await compare(path);
+
+  const patterns: string[] = [];
+  const pkg = DependencyManifest.parse(
+    JSON.parse((await read(root, 'package.json')) ?? '{}') as unknown,
+  );
+  if (pkg.workspaces)
+    patterns.push(
+      ...z
+        .array(z.string())
+        .parse(Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces.packages),
+    );
+  const workspace = await read(root, 'pnpm-workspace.yaml');
+  if (workspace !== null) {
+    const parsed = z
+      .object({ packages: z.array(z.string()).optional() })
+      .parse(parseYaml(workspace) as unknown);
+    patterns.push(...(parsed.packages ?? []));
+  }
+  for (const entry of patterns) {
+    const pattern = entry.startsWith('!') ? entry.slice(1) : entry;
+    if (!pattern || isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..'))
+      throw new Error('workspace pattern escapes checkout or is ambiguous');
+  }
+  const include = patterns.filter((p) => !p.startsWith('!')).map((p) => `${p}/package.json`);
+  const exclude = [
+    '**/node_modules/**',
+    '**/.git/**',
+    ...patterns.filter((p) => p.startsWith('!')).map((p) => `${p.slice(1)}/package.json`),
+  ];
+  const members = new Set<string>();
+  if (include.length)
+    for (const cwd of [root, caller]) {
+      let count = 0;
+      for await (const path of glob(include, { cwd, exclude })) {
+        admit();
+        if (++count > 1000) throw new Error('workspace metadata enumeration cap exceeded');
+        members.add(path);
+      }
+    }
+  for (const path of [...members].sort()) {
+    await compare(path, true);
+    for (const config of ['.npmrc', '.yarnrc.yml', 'bunfig.toml'])
+      await compare(`${dirname(path)}/${config}`);
+  }
 }
