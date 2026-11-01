@@ -1,5 +1,5 @@
 {
-  "_doc": "D13 settings-as-code: the TARGET state of the repository's GitHub settings (ADR-0004 D-I, RS-11 branch matrix; W1.10 methods note). Rulesets R0/R1/R2 replace classic branch protection; environments pin deployment policy, admin bypass, reviewers, prevent_self_review, wait_timer (any other protection rule type, e.g. a custom deployment protection rule, is drift) and a secret-name allowlist (interimSecrets are the interim PAT names, reported as notices until ADR-0004 D-H.3 C3); reviewers \"any\" means not compared. scripts/github-settings-drift.mjs renders the quoted VERDICT_APP_ID and PROMOTER_APP_ID placeholders to numbers and reports drift against the live settings; applying this file is the W7.3a wizard's job. This _doc field is ignored by the comparator. MINIMAL MERGE-TIME SET (owner, 2026-10-16; narrowed 2026-10-20 for the advisory development posture; docs/protected-scope.md): R2 requires only what the promotion gate cannot enforce later — cq/acceptance (I2 admission) — plus denylist (merge-queue history is append-only under R0, so a leak cannot be un-merged); static, crq-python, from-source and cq/ratchet are enforced on the queue tip by gate.yml (verified ci.yml/denylist.yml runs with the policy list's requiredJobs, and the cq/ratchet verdict), and pack-audit at publication (the release checklist). cq/policy still posts but is not required at merge, and review-thread resolution is not required (required_review_thread_resolution false): unresolved threads are reported by cq/acceptance, never a refusal. INTERIM NOTICE (do not apply R2 before the verdict App exists): R2 pins cq/acceptance to the verdict App's numeric id, but until the App is registered and minting tokens (SELF-HOSTING step 1, C2's precondition) the interim cq-accept posts cq/acceptance with the runner's GITHUB_TOKEN (the GitHub Actions app, integration_id 15368). Applying R2 in that state requires check runs the queue cannot produce, so every merge-queue PR becomes unsatisfiable. Apply R2 only at C2, together with the App. R2's pull_request rule states require_extra_approval_for_unattributed_changes: true explicitly: GitHub sets it by default on new rulesets and the comparator ignores an absent key only when its live value is false, 0, empty or null, so leaving it out reads as drift against the live R2. It is recorded for parity, not enforcement: with required_approving_review_count 0 GitHub applies no extra approval, and I2 admission stays with cq/acceptance. SCRATCH IDENTITY (ADR-0004 note N19, owner decision 2026-10-11): the adversarial-scratch environment's end-state credential is the dedicated cq-adversarial-scratch App's private key in CQ_ADVERSARIAL_APP_KEY — the App is installed on the scratch repository only, never this one, with Variables read/write and Environments read (the environments-list read needs only repository read access; nothing else), and adversarial-suite.yml mints its scratch-repo installation token per run from CQ_ADVERSARIAL_APP_KEY plus the CQ_ADVERSARIAL_APP_CLIENT_ID variable. CQ_ADVERSARIAL_TOKEN, CQ_ADVERSARIAL_SECOND_TOKEN and CQ_ADVERSARIAL_PROFILE_TOKEN are interim PATs, gone at C3; until the App is registered the mint step is skipped and the interim CQ_ADVERSARIAL_PROFILE_TOKEN drives the same step — once the client id is set a failed mint yields an empty token and the runner records per-row BLOCKED evidence (exit 3), never the interim PAT. SELF-REVIEW IDENTITY (per-run mint, PR #307 pattern; supersedes PR #303's deferral): the `automation` environment's review-loop job mints a cq-automation App installation token per run from CQ_AUTOMATION_APP_KEY plus the CQ_AUTOMATION_APP_CLIENT_ID Actions variable, scoped to this repository only, fail-closed (no PAT fallback). Each environment's `variables` array names the Actions variables its workflows read (names only); the drift comparator does not yet model variables, so they are recorded target state for the W7.3a wizard.",
+  "_doc": "Settings-as-code for direct-main PRs (live rulesets verified 2026-11-02). cq-r0-history protects only main against deletion and non-fast-forward updates. cq-r1-main requires a PR, merge commits, zero native approvals, no thread resolution, and static plus denylist from GitHub Actions (integration 15368), without strict status checks or an update rule. Its RepositoryRole 5 and Integration 5230844 bypass actors both use always. Independent exact-head review is procedural; CRQ reviews after merge. cq-r2-merge-queue is retired. The merge-queue and cq/promoted branches are deleted. cq-c2-replay-marker still protects cq/* except the retired cq/promoted ref; cq/review-ledger remains. Environments admit only main by custom branch policies; retained promote environment credentials are legacy configuration, not a promotion workflow. Environment secrets and variables list names only; reviewers any means not compared. scripts/github-settings-drift.mjs reports drift without writing settings. Environment variable names are checked against the recorded allowlist. See docs/promotion-policy.md. Historical cutover records and attestations do not describe current live settings.",
   "schemaVersion": 1,
   "rulesets": [
     {
@@ -8,12 +8,25 @@
       "enforcement": "active",
       "conditions": {
         "ref_name": {
-          "include": ["refs/heads/main", "refs/heads/merge-queue"],
-          "exclude": []
+          "exclude": [],
+          "include": ["refs/heads/main"]
         }
       },
-      "rules": [{ "type": "non_fast_forward" }, { "type": "deletion" }],
-      "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+      "rules": [
+        {
+          "type": "non_fast_forward"
+        },
+        {
+          "type": "deletion"
+        }
+      ],
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        }
+      ]
     },
     {
       "name": "cq-r1-main",
@@ -21,36 +34,8 @@
       "enforcement": "active",
       "conditions": {
         "ref_name": {
-          "include": ["refs/heads/main"],
-          "exclude": []
-        }
-      },
-      "rules": [{ "type": "update" }],
-      "bypass_actors": [
-        {
-          "actor_id": "{{PROMOTER_APP_ID}}",
-          "actor_type": "Integration",
-          "bypass_mode": "always"
-        },
-        { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
-      ]
-    },
-    {
-      "name": "cq-c2-replay-marker",
-      "target": "branch",
-      "enforcement": "active",
-      "conditions": { "ref_name": { "include": ["refs/heads/cq/*"], "exclude": [] } },
-      "rules": [{ "type": "deletion" }, { "type": "non_fast_forward" }],
-      "bypass_actors": []
-    },
-    {
-      "name": "cq-r2-merge-queue",
-      "target": "branch",
-      "enforcement": "active",
-      "conditions": {
-        "ref_name": {
-          "include": ["refs/heads/merge-queue"],
-          "exclude": []
+          "exclude": [],
+          "include": ["refs/heads/main"]
         }
       },
       "rules": [
@@ -59,6 +44,7 @@
           "parameters": {
             "required_approving_review_count": 0,
             "dismiss_stale_reviews_on_push": false,
+            "required_reviewers": [],
             "require_code_owner_review": false,
             "require_last_push_approval": false,
             "required_review_thread_resolution": false,
@@ -72,23 +58,67 @@
             "strict_required_status_checks_policy": false,
             "do_not_enforce_on_create": false,
             "required_status_checks": [
-              { "context": "cq/acceptance", "integration_id": "{{VERDICT_APP_ID}}" },
-              { "context": "denylist", "integration_id": 15368 }
+              {
+                "context": "static",
+                "integration_id": 15368
+              },
+              {
+                "context": "denylist",
+                "integration_id": 15368
+              }
             ]
           }
         }
       ],
-      "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        },
+        {
+          "actor_id": 5230844,
+          "actor_type": "Integration",
+          "bypass_mode": "always"
+        }
+      ]
+    },
+    {
+      "name": "cq-c2-replay-marker",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": ["refs/heads/cq/promoted"],
+          "include": ["refs/heads/cq/*"]
+        }
+      },
+      "rules": [
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "non_fast_forward"
+        }
+      ],
+      "bypass_actors": []
     }
   ],
   "classicBranchProtection": {
-    "main": null,
-    "merge-queue": null
+    "main": null
   },
   "environments": {
     "cq-verdict": {
-      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
-      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "branch_policies": [
+        {
+          "name": "main",
+          "type": "branch"
+        }
+      ],
       "can_admins_bypass": false,
       "reviewers": [],
       "prevent_self_review": false,
@@ -97,8 +127,16 @@
       "interimSecrets": ["CQ_SETTINGS_TOKEN"]
     },
     "promote": {
-      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
-      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "branch_policies": [
+        {
+          "name": "main",
+          "type": "branch"
+        }
+      ],
       "can_admins_bypass": false,
       "reviewers": [],
       "prevent_self_review": false,
@@ -107,8 +145,16 @@
       "interimSecrets": ["PROMOTE_TOKEN"]
     },
     "automation": {
-      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
-      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "branch_policies": [
+        {
+          "name": "main",
+          "type": "branch"
+        }
+      ],
       "can_admins_bypass": false,
       "reviewers": [],
       "prevent_self_review": false,
@@ -118,8 +164,16 @@
       "variables": ["CQ_AUTOMATION_APP_CLIENT_ID"]
     },
     "adversarial-scratch": {
-      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
-      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "branch_policies": [
+        {
+          "name": "main",
+          "type": "branch"
+        }
+      ],
       "can_admins_bypass": false,
       "reviewers": [],
       "prevent_self_review": false,
@@ -133,8 +187,16 @@
       "variables": ["CQ_ADVERSARIAL_APP_CLIENT_ID"]
     },
     "drill": {
-      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
-      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      },
+      "branch_policies": [
+        {
+          "name": "main",
+          "type": "branch"
+        }
+      ],
       "can_admins_bypass": true,
       "reviewers": "any",
       "prevent_self_review": false,

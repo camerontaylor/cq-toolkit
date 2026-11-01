@@ -158,7 +158,10 @@ resolution.
 Empty for T4.1 itself: it is leader-authored and merged through the normal
 protocol (two CodeRabbit cycles plus the gates), not by the automation.
 
-## W1.10 cutover (C1 → owner setup → C2 → C3)
+## Historical W1.10 cutover (C1 → owner setup → C2 → C3)
+
+> Retired procedure: do not apply these queue-era settings or create its branches.
+> Current rulesets and merge instructions are in [merge policy](docs/promotion-policy.md).
 
 W1.10 lands cutover step **C1** (ADR-0004 D-H.3.1; `docs/methods-w1-10.md`).
 Every App path is built but switches on only when its repository variable

@@ -39,7 +39,7 @@ const TEMPLATE_PATH = join(ROOT, 'policy', 'templates', 'github-settings.json');
 const TEMPLATE = readFileSync(TEMPLATE_PATH, 'utf8');
 const SCRIPT = join(ROOT, 'scripts', 'github-settings-drift.mjs');
 const VERDICT = 1001;
-const PROMOTER = 2002;
+const PROMOTER = 5230844;
 
 function target(): GithubSettings {
   return renderSettings(TEMPLATE, { verdictAppId: VERDICT, promoterAppId: PROMOTER });
@@ -76,7 +76,7 @@ function liveFrom(settings: GithubSettings): LiveSettings {
   }
   return {
     rulesets: settings.rulesets.map((r, i) => withServerFields(r, 100 + i)),
-    classicBranchProtection: { main: null, 'merge-queue': null },
+    classicBranchProtection: { main: null },
     environments,
     repositorySecrets: [],
     actions: clone(settings.actions),
@@ -101,28 +101,25 @@ function driftOf(live: LiveSettings): string[] {
 }
 
 describe('github-settings.json: the committed D13 target', () => {
-  it('parses as JSON with quoted placeholders and schemaVersion 1', () => {
+  it('parses the concrete live settings with schemaVersion 1', () => {
     const raw = JSON.parse(TEMPLATE) as Record<string, unknown>;
     expect(raw['schemaVersion']).toBe(1);
-    expect(TEMPLATE).toContain('"{{VERDICT_APP_ID}}"');
-    expect(TEMPLATE).toContain('"{{PROMOTER_APP_ID}}"');
+    expect(TEMPLATE).not.toContain('{{');
   });
 
-  it('names exactly the four rulesets and five environments', () => {
+  it('names exactly the three rulesets and five environments', () => {
     const settings = target();
     expect(settings.rulesets.map((r) => r.name)).toEqual([
       'cq-r0-history',
       'cq-r1-main',
       'cq-c2-replay-marker',
-      'cq-r2-merge-queue',
     ]);
-    // C2 step 1: the replay-marker ruleset ships in settings-as-code only — the
-    // owner applies it from their terminal at step 5. Pin the exact payload.
+    // Pin the retained replay-marker payload, including its retired-ref exclusion.
     const marker = settings.rulesets.find((r) => r.name === 'cq-c2-replay-marker') as RuleObject;
     expect(marker.target).toBe('branch');
     expect(marker.enforcement).toBe('active');
     expect(marker.conditions).toEqual({
-      ref_name: { include: ['refs/heads/cq/*'], exclude: [] },
+      ref_name: { include: ['refs/heads/cq/*'], exclude: ['refs/heads/cq/promoted'] },
     });
     expect(marker.rules.map((r) => r.type)).toEqual(['deletion', 'non_fast_forward']);
     expect(marker.bypass_actors).toEqual([]);
@@ -137,33 +134,37 @@ describe('github-settings.json: the committed D13 target', () => {
     expect(settings.environments.automation?.secrets).not.toContain('DEEPSEEK_API_KEY');
     expect(settings.environments.drill?.secrets).toContain('OPENCODE_GO_API_KEY');
     expect(settings.environments.drill?.secrets).toContain('DEEPSEEK_API_KEY');
-    expect(settings.classicBranchProtection).toEqual({ main: null, 'merge-queue': null });
+    expect(settings.classicBranchProtection).toEqual({ main: null });
     expect(settings.repositorySecrets).toEqual([]);
   });
 
-  it('renders the App ids as numbers where the placeholders were', () => {
+  it('pins the direct-main merge bar and existing bypass actors', () => {
     const settings = target();
-    expect(settings.rulesets[1]?.bypass_actors).toEqual([
-      { actor_id: PROMOTER, actor_type: 'Integration', bypass_mode: 'always' },
+    const main = settings.rulesets.find((r) => r.name === 'cq-r1-main') as RuleObject;
+    expect(main.rules.map((r) => r.type)).toEqual(['pull_request', 'required_status_checks']);
+    expect(main.bypass_actors).toEqual([
       { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+      { actor_id: PROMOTER, actor_type: 'Integration', bypass_mode: 'always' },
     ]);
-    // By name, not index: the C2 marker ruleset sits at index 2 between the two
-    // legacy rulesets (the queue ruleset carries the required checks).
-    const r2 = settings.rulesets.find((r) => r.name === 'cq-r2-merge-queue') as RuleObject;
-    const checks = params(r2, 'required_status_checks')['required_status_checks'] as {
-      context: string;
-      integration_id: number;
-    }[];
-    // The minimal merge-time set: the I2 verdict plus denylist; the
-    // promotion gate enforces the rest on the queue tip. cq/policy still
-    // posts but is not required (advisory development posture, 2026-10-20).
-    expect(checks).toEqual([
-      { context: 'cq/acceptance', integration_id: VERDICT },
-      { context: 'denylist', integration_id: 15368 },
-    ]);
-    expect(renderSettings(TEMPLATE, { verdictAppId: '7', promoterAppId: '8' }).schemaVersion).toBe(
-      1,
-    );
+    expect(params(main, 'required_status_checks')).toEqual({
+      strict_required_status_checks_policy: false,
+      do_not_enforce_on_create: false,
+      required_status_checks: [
+        { context: 'static', integration_id: 15368 },
+        { context: 'denylist', integration_id: 15368 },
+      ],
+    });
+    expect(params(main, 'pull_request')).toMatchObject({
+      required_approving_review_count: 0,
+      required_review_thread_resolution: false,
+      allowed_merge_methods: ['merge'],
+    });
+    expect(settings.rulesets[0]?.conditions).toEqual({
+      ref_name: { include: ['refs/heads/main'], exclude: [] },
+    });
+    for (const env of Object.values(settings.environments)) {
+      expect(env.branch_policies).toEqual([{ name: 'main', type: 'branch' }]);
+    }
   });
 
   it('refuses a non-integer or missing App id', () => {
@@ -235,12 +236,11 @@ describe('compareSettings', () => {
   it('ignores a default-valued live rule parameter the file does not name, not an enabled one', () => {
     const live = liveFrom(target());
     const r1 = ruleset(live, 'cq-r1-main');
-    r1.rules = [{ type: 'update', parameters: { update_allows_fetch_and_merge: false } }];
-    params(ruleset(live, 'cq-r2-merge-queue'), 'pull_request')['required_reviewers'] = [];
+    params(r1, 'pull_request')['optional_default'] = false;
     expect(driftOf(live)).toEqual([]);
-    r1.rules = [{ type: 'update', parameters: { update_allows_fetch_and_merge: true } }];
+    params(r1, 'pull_request')['optional_default'] = true;
     expect(driftOf(live)).toEqual([
-      'ruleset cq-r1-main: rule update: parameter update_allows_fetch_and_merge differs: expected absent actual true',
+      'ruleset cq-r1-main: rule pull_request: parameter optional_default differs: expected absent actual true',
     ]);
   });
 
@@ -265,12 +265,14 @@ describe('compareSettings', () => {
     const live = liveFrom(target());
     const r0 = ruleset(live, 'cq-r0-history');
     r0.enforcement = 'evaluate';
-    r0.conditions = { ref_name: { include: ['refs/heads/main'], exclude: [] } };
+    r0.conditions = {
+      ref_name: { include: ['refs/heads/main', 'refs/heads/obsolete'], exclude: [] },
+    };
     r0.rules = r0.rules.filter((r) => r.type !== 'deletion');
     r0.rules.push({ type: 'creation' });
     expect(driftOf(live)).toEqual([
       'ruleset cq-r0-history: enforcement differs: expected "active" actual "evaluate"',
-      'ruleset cq-r0-history: conditions differ: expected {"ref_name":{"exclude":[],"include":["refs/heads/main","refs/heads/merge-queue"]}} actual {"ref_name":{"exclude":[],"include":["refs/heads/main"]}}',
+      'ruleset cq-r0-history: conditions differ: expected {"ref_name":{"exclude":[],"include":["refs/heads/main"]}} actual {"ref_name":{"exclude":[],"include":["refs/heads/main","refs/heads/obsolete"]}}',
       'ruleset cq-r0-history: rule deletion missing',
       'ruleset cq-r0-history: rule creation present live but not in the settings file',
     ]);
@@ -289,10 +291,10 @@ describe('compareSettings', () => {
     ]);
   });
 
-  it('reports an App bypass added to R2 and an unreadable bypass list', () => {
+  it('reports an unexpected App bypass added to main and an unreadable bypass list', () => {
     const live = liveFrom(target());
-    ruleset(live, 'cq-r2-merge-queue').bypass_actors?.push({
-      actor_id: PROMOTER,
+    ruleset(live, 'cq-r1-main').bypass_actors?.push({
+      actor_id: VERDICT,
       actor_type: 'Integration',
       bypass_mode: 'always',
     });
@@ -300,44 +302,39 @@ describe('compareSettings', () => {
     const drift = driftOf(live);
     expect(drift).toHaveLength(2);
     expect(drift[0]).toMatch(/^ruleset cq-r0-history: bypass_actors unreadable/);
-    expect(drift[1]).toMatch(/^ruleset cq-r2-merge-queue: bypass_actors differ: /);
+    expect(drift[1]).toMatch(/^ruleset cq-r1-main: bypass_actors differ: /);
   });
 
   it('reports a missing, re-pinned or extra required check', () => {
     const live = liveFrom(target());
-    const p = params(ruleset(live, 'cq-r2-merge-queue'), 'required_status_checks');
-    // The minimal merge-time set (docs/protected-scope.md): a re-pinned
-    // cq/acceptance, a missing denylist, a dropped CI check still live, and
-    // a re-required cq/policy (not required since 2026-10-20).
+    const p = params(ruleset(live, 'cq-r1-main'), 'required_status_checks');
     p['required_status_checks'] = [
-      { context: 'cq/acceptance', integration_id: 15368 },
-      { context: 'static', integration_id: 15368 },
+      { context: 'static', integration_id: VERDICT },
       { context: 'cq/policy', integration_id: VERDICT },
     ];
     expect(driftOf(live)).toEqual([
-      `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/acceptance: integration_id differs: expected ${VERDICT} actual 15368`,
-      'ruleset cq-r2-merge-queue: rule required_status_checks: required check denylist (integration_id 15368) missing',
-      'ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/policy present live but not in the settings file',
-      'ruleset cq-r2-merge-queue: rule required_status_checks: required check static present live but not in the settings file',
+      'ruleset cq-r1-main: rule required_status_checks: required check denylist (integration_id 15368) missing',
+      `ruleset cq-r1-main: rule required_status_checks: required check static: integration_id differs: expected 15368 actual ${VERDICT}`,
+      'ruleset cq-r1-main: rule required_status_checks: required check cq/policy present live but not in the settings file',
     ]);
   });
 
   it('reports a pull_request parameter difference as missing/extra members', () => {
     const live = liveFrom(target());
-    const p = params(ruleset(live, 'cq-r2-merge-queue'), 'pull_request');
+    const p = params(ruleset(live, 'cq-r1-main'), 'pull_request');
     p['allowed_merge_methods'] = ['squash', 'merge'];
     p['required_review_thread_resolution'] = true;
     expect(driftOf(live)).toEqual([
-      'ruleset cq-r2-merge-queue: rule pull_request: parameter allowed_merge_methods differs: missing [] extra ["squash"]',
-      'ruleset cq-r2-merge-queue: rule pull_request: parameter required_review_thread_resolution differs: expected false actual true',
+      'ruleset cq-r1-main: rule pull_request: parameter allowed_merge_methods differs: missing [] extra ["squash"]',
+      'ruleset cq-r1-main: rule pull_request: parameter required_review_thread_resolution differs: expected false actual true',
     ]);
   });
 
   it('reports classic branch protection that is present', () => {
     const live = liveFrom(target());
-    live.classicBranchProtection['merge-queue'] = { enforce_admins: { enabled: true } };
+    live.classicBranchProtection['main'] = { enforce_admins: { enabled: true } };
     expect(driftOf(live)).toEqual([
-      'classic branch protection on merge-queue: present (target: absent; rulesets replace classic protection)',
+      'classic branch protection on main: present (target: absent; rulesets replace classic protection)',
     ]);
   });
 
@@ -368,7 +365,7 @@ describe('compareSettings', () => {
     env.deployment_branch_policy = { protected_branches: true, custom_branch_policies: false };
     env.branch_policies = [];
     expect(driftOf(live)).toEqual([
-      'environment cq-verdict: deployment_branch_policy differs: expected {"custom_branch_policies":true,"protected_branches":false} actual {"custom_branch_policies":false,"protected_branches":true} (protected_branches admits any protected branch, e.g. merge-queue: ADR-0004 D-D.1)',
+      'environment cq-verdict: deployment_branch_policy differs: expected {"custom_branch_policies":true,"protected_branches":false} actual {"custom_branch_policies":false,"protected_branches":true} (protected_branches admits every protected branch, not just the named deployment branch)',
       'environment cq-verdict: deployment branch policy {"name":"main","type":"branch"} missing',
     ]);
   });
@@ -377,14 +374,14 @@ describe('compareSettings', () => {
     const live = liveFrom(target());
     const env = live.environments['promote'];
     if (env === undefined) throw new Error('no env');
-    env.branch_policies.push({ name: 'merge-queue', type: 'branch' });
+    env.branch_policies.push({ name: 'obsolete', type: 'branch' });
     env.can_admins_bypass = true;
     env.reviewers = [{ type: 'User', login: 'owner' }];
     const drill = live.environments['drill'];
     if (drill === undefined) throw new Error('no env');
     drill.reviewers = [{ type: 'User', login: 'owner' }];
     expect(driftOf(live)).toEqual([
-      'environment promote: deployment branch policy {"name":"merge-queue","type":"branch"} present live but not in the settings file',
+      'environment promote: deployment branch policy {"name":"obsolete","type":"branch"} present live but not in the settings file',
       'environment promote: can_admins_bypass differs: expected false actual true',
       'environment promote: required reviewers differ: expected [] actual [{"login":"owner","type":"User"}]',
     ]);
