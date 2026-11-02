@@ -1,18 +1,5 @@
-# Portable-suite probe — the macOS gate venue, NON-REQUIRED. Repo-owned (no
-# template; see policy/templates/required-check.md "The macOS venue is a
-# separate workflow"). It lives OUTSIDE ci.yml on purpose: the promotion
-# gate reads ci.yml by path and requires every job in the run to be green
-# (gate.yml --verifiedWorkflows), so a macOS job inside ci.yml would be a
-# required wait. This file is deliberately NOT in that list, nor in
-# REQUIRED_WORKFLOW_CHECKS, protected-paths.json, or github-settings.json.
-#
-# PROMOTION is a governed, outward-facing change made in ONE edit across
-# every declaration of the required set (protected-paths.json,
-# denylist-scan REQUIRED_WORKFLOW_CHECKS, github-settings.json, the gate's
-# verified-workflow list and check list, and the live rulesets), gated on a
-# 10-candidate pilot measured from the merge of the suite's
-# spawn-reduction work: p90 <= 15 min, max < 20 min, zero infra-only
-# failures. Runs before that merge are BASELINE data, not pilot candidates.
+# Portable-suite probe: optional macOS venue, separate from required static.
+# Repo-owned; see policy/templates/required-check.md.
 #
 # Trigger note (development posture, 2026-10-20): path-filtered. Being
 # non-required, the venue is outside invariant I4, so it runs on a pull

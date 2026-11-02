@@ -4,11 +4,10 @@
 // It replaces `trust/dist/cli.js gates.policyDiff` in cq-policy's `judge`
 // job. The CLI shell loads every op registry (src/cli/**, src/kernel/**,
 // src/registry/** and their static imports, none of it protected), so it
-// could forge the `cq/policy` verdict that merge-time D11 rests on. Only
+// could forge the advisory `cq/policy` verdict. Only
 // this module's import closure runs now, and
 // test/ops/gates/protectedPaths.test.ts holds all of it to
-// policy/protected-paths.json. The gate's own recompute (promote-gate.ts)
-// was already in-process.
+// policy/protected-paths.json.
 //
 // POSTURE: resolved from the project env exactly as the `gates.policyDiff`
 // registry importer does (src/ops/gates/registry.ts): no per-call opt-in,
@@ -16,8 +15,7 @@
 // value is a failed result, never a fallback.
 //
 // INPUT: the op's own schema (../ops/gates/policyDiffInput.ts, which the
-// registry shares), so it carries no `authorization`: the gate binds one
-// in-process, and a PR-level check never carries one. It deliberately does
+// registry shares), so it carries no promotion `authorization`. It deliberately does
 // not import the gates registry, whose lazy importers reach ops no trusted
 // job runs.
 // OUTPUT: the same OpResult the CLI printed, as one JSON line, so the judge

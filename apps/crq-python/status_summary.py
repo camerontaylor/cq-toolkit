@@ -107,12 +107,12 @@ def merged_current(queue, receipt_root=None):
 
 
 def summarize(status, queue, heartbeat, config, events, now):
-    items = queue["items"]
+    items = [i for i in queue["items"] if i.get("kind") != "promotion"]
     backlog = {kind: sum(i["kind"] == kind and i["state"] == "pending"
                          and not (kind == "open" and
                                   len(i.get("cycles", [])) >= 1)
                          for i in items)
-               for kind in ("open", "delta", "merged", "promotion", "coverage")}
+               for kind in ("open", "delta", "merged", "coverage")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0
     for event in events:
@@ -123,40 +123,21 @@ def summarize(status, queue, heartbeat, config, events, now):
                 outcomes[outcome] += 1
             else:
                 other += 1
-    promotions = [i for i in items if i["kind"] == "promotion" and i["state"] not in ("done", "skipped")]
-    blockers = []
-    for item in promotions:
-        counts = {}
-        for finding in item.get("blocking", []):
-            if not finding.get("resolution"):
-                severity = finding.get("severity", "unknown")
-                counts[severity] = counts.get(severity, 0) + 1
-        if counts:
-            blockers.append({"item": item["id"], "counts": counts})
-    promotion = queue.get("promotion") or {}
-    enabled = bool(config.get("promotion", {}).get("enabled"))
     last_tick = heartbeat.get("last_tick") or queue.get("last_tick")
     # Freshness must follow completed ticks, never status-file writes or probes.
     timestamp(last_tick)
+    # The configured cap is a conservative scheduler fallback, not an account quota.
+    usage = queue.get("usage") or {}
+    limit = usage.get("limit") if isinstance(usage, dict) else None
+    starts_cap = limit if type(limit) is int and limit > 0 else config["max_starts_per_hour"]
     return {
         "merged_current": merged_current(queue),
         "last_tick": last_tick, "status_as_of": status["generated_at"],
         "paused": bool(queue.get("paused")), "cooldown_until": queue.get("cooldown_until"),
         "starts_60m": sum(now - 3600 <= timestamp(s) <= now for s in queue.get("starts", [])),
-        "starts_cap": config["max_starts_per_hour"],
-        "in_flight": sum(i["state"] == "reviewing" or
-                         (i["kind"] == "promotion" and i["state"] in
-                          ("requested", "signer_running")) for i in items),
+        "starts_cap": starts_cap,
+        "in_flight": sum(i["state"] == "reviewing" for i in items),
         "outcomes_24h": outcomes, "other_outcomes_24h": other, "backlog": backlog,
-        "promotion": {
-            "state": "disabled" if not enabled else
-                     "needs-human" if any(i.get("gate_stalled_at") for i in promotions) else "blocked" if blockers else
-                     ", ".join(sorted({i["state"] for i in promotions})) or "idle",
-            "last_promoted_sha": promotion.get("last_promoted_sha"),
-            "last_promoted_at": promotion.get("last_promoted_at"), "blockers": blockers,
-            "gate_alerts": [{key: alert.get(key) for key in ("at", "item", "sha", "base")}
-                            for alert in promotion.get("gate_alerts", []) if not alert.get("acked")],
-        },
     }
 
 
@@ -237,7 +218,7 @@ def systemd_activity():
     return {unit: activity[unit] for unit in timers}, {unit: activity[unit] for unit in services}
 
 
-def publish(root, queue, config, schedule, home=None, now=None, *, promotion_mode=None):
+def publish(root, queue, config, schedule, home=None, now=None):
     """Write the shared XDG state summary atomically.
 
     Call after persisting a completed tick. Administrative summary refreshes
@@ -251,22 +232,14 @@ def publish(root, queue, config, schedule, home=None, now=None, *, promotion_mod
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
     data.update(schema_version=2, generated_at=generated)
-    data["promotion"]["mode"] = promotion_mode
     data["systemd_timers"], data["systemd_services"] = systemd_activity()
     data["merged_current"] = merged_current(queue, root / "state/receipts")
     data["repair"] = repair_tick.digest(root, queue)
     data["utilization"] = coverage.utilization_digest(queue, queue.get("coverage") or coverage.new_ledger(),
-        now=now, max_starts_per_hour=config["max_starts_per_hour"])
+        now=now, max_starts_per_hour=data["starts_cap"])
     data["schedule"] = {"id": config.get("schedule_id", "crq-tick.timer"), "state": schedule.get("status") or "systemd"}
     if data["schedule"]["state"] == "unknown":
         data["schedule"]["error"] = "schedule probe unavailable"
-    data["promotion"]["merges_waiting"] = None
-    try:
-        count = command(["/usr/bin/git", "-C", str(config["clone"]), "rev-list", "--count", "--merges",
-                         "--first-parent", "origin/main..origin/merge-queue"], 5)
-        data["promotion"]["merges_waiting"] = int(count.strip())
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired):
-        data["promotion"]["merges_error"] = "cached merge refs unavailable"
     target = Path(os.environ.get("XDG_STATE_HOME", str(home / ".local/state"))) / "crq/summary.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".summary-", dir=target.parent)

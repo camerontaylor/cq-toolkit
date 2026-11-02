@@ -46,6 +46,7 @@ interface LooseResult {
 
 /** The review producer plus six loop entries, in registry order. */
 const ENTRY_NAMES = [
+  'review.addressMany',
   'review.enqueue',
   'review.queueStatus',
   'review.report',
@@ -104,6 +105,14 @@ const snapshot = (): Record<string, unknown> => ({
 
 /** One minimal valid input per entry (kept loose — mutation tests widen it). */
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
+  'review.addressMany': () => ({
+    repoRoot: '/repo',
+    repo: 'owner/repo',
+    pulls: [1],
+    owner: 'owner',
+    maxTokens: 2,
+    tokensPerPr: 1,
+  }),
   'review.enqueue': () => ({
     requestId: 'request-1',
     binding: {

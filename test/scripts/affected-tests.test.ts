@@ -79,10 +79,6 @@ describe('selectAffected', () => {
     ];
     const pick = (changed: string) =>
       selectAffected({ changed: [changed], allTests: suites, related: [] }).files;
-    expect(pick('src/selfhost/promote-gate.ts')).toEqual([
-      'test/ops/gates/protectedPaths.test.ts',
-      'test/workflows/default-ref-guards.test.ts',
-    ]);
     // The protected closure crosses directories: any source may join it.
     expect(pick('src/shared/independent-review.ts')).toEqual([
       'test/ops/gates/protectedPaths.test.ts',
@@ -327,13 +323,9 @@ describe('bounded per-fix related mapping', () => {
       advisory: 'no related tests mapped',
     });
   });
-  it('refuses beyond the wrapper cap instead of silently dropping files', () => {
-    expect(() =>
-      selectRelatedTests(
-        ['src/a.ts'],
-        Array.from({ length: 11 }, (_, i) => `test/a${i}.test.ts`),
-      ),
-    ).toThrow(/cap.*10/);
+  it('keeps all mapped files without a file-count cap', () => {
+    const files = Array.from({ length: 12 }, (_, i) => `test/a${i}.test.ts`);
+    expect(selectRelatedTests(['src/a.ts'], files).files).toHaveLength(12);
   });
   it('reuses non-import mappings', () => {
     expect(selectRelatedTests(['knip.json'], ['test/scripts/knip.test.ts']).files).toEqual([

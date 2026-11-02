@@ -146,6 +146,25 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
     expect(withFoo).toBe(withBar);
   });
 
+  test.each(['𐐀', '𝟘'])('astral word character %s blocks a quoted-span opener', (prefix) => {
+    // Letters and numbers have the same boundary contract outside the BMP.
+    // The internal delimiter must stay literal; only the later span varies.
+    for (const delimiter of ["'", '"', '`']) {
+      const message = `${prefix}${delimiter}s setting rejects ${delimiter}foo${delimiter}`;
+      expect(messageTemplate(message)).toBe(`${prefix}${delimiter}s setting rejects <str>`);
+      expect(clusterSignature(failureOf({ message }), 'eslint')).toBe(
+        clusterSignature(failureOf({ message: message.replace('foo', 'bar') }), 'eslint'),
+      );
+    }
+  });
+
+  test.each(['😀', '\ud800', '\udc00'])(
+    'non-word character %s still permits a quoted-span opener',
+    (prefix) => {
+      expect(messageTemplate(`${prefix}'foo'`)).toBe(`${prefix}<str>`);
+    },
+  );
+
   test('escaped delimiters cannot close a span ("a\\"b" is ONE span)', () => {
     // The body consumes backslash pairs, so the escaped quote does not end
     // the span — changing the volatile tail must not change the signature.

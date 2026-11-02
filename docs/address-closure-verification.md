@@ -1,10 +1,26 @@
-# R4C closure evidence verification (standalone helper)
+# R4C closure evidence verification
 
-Status: implemented as a standalone pure helper awaiting single-writer
-integration. Card R4C of the 2026-10-27 reviewer plan; the blind-rejection
-increment (R4B) will stack on the invocation/evidence seam this helper
-defines. This document scopes what shipped and the contract the later writer
-must honor; it records no runtime behavior change.
+Status: the pure verifier is wired into `review.address` behind the optional
+`--verifyClosure` boolean flag (SDK input `verifyClosure: true`). The default
+retains existing behavior. With the flag, each worker's fixed result is checked
+before a fixed disposition or PR-thread resolution. Only `resolved` may close;
+`unresolved` and `uncertain` keep the finding open and return `needs-human`.
+
+The operation assembles the finding text, exact single-file patch and full
+before/after snapshots using the worker-validated parent and fix commit, never live
+working-tree content. Concurrent siblings may advance HEAD after the initial
+worker observation; the packet uses `validatedParent`, not that earlier
+observation. Custom legacy workers without it fall back to `observedHead` and
+refuse if the actual commit parent differs. It records packets and verdicts in the report's
+`closureVerifications` array. Missing objects, unsupported patches, cancellation
+and budget refusal cannot close a finding. Dependency completeness is currently
+**unattested**: the assembler supplies no dependencies and sets
+`relevantDependenciesComplete: false`. Thus this opt-in path conservatively
+cannot return `resolved` (`uncertain` or concrete `unresolved` instead); it does not offer a flag to invent
+completeness. A future dependency-evidence producer is needed for resolved
+runtime verdicts.
+
+Example: `cq review.address --source=local --repoRoot=. --verifyClosure --json`.
 
 ## Problem
 
@@ -17,18 +33,6 @@ engine therefore closes on evidence that is necessary but not sufficient.
 Review-audit fixes show the failure mode: the fixer's own argument is
 persuasive, the checks are green, and the original complaint is still true of
 the tree.
-
-## Scope split
-
-- **Shipped here:** the pure verification half: a typed packet shape, a
-  deterministic check sequence, the three-verdict vocabulary and the
-  conservative uncertainty rules. No provider call, no git access, no report
-  mutation, no registry entry, no CLI surface.
-- **Not shipped here:** packet assembly from a real run (the writer's job),
-  finding-status mapping, `addressWorker.ts`/`invoke` integration, report and
-  attempt-type changes, and the blind-rejection protocol. The helper exposes
-  exactly the types and one function a later single writer needs; see
-  `src/ops/review/internal/addressVerification.ts`.
 
 ## Packet
 
@@ -138,7 +142,7 @@ stable `verification gate refused` reason in that case; evidence failures
 retain `unavailable-evidence`. Ordinary Error messages and non-Error string
 details are preserved. Diagnostic failure cannot establish closure.
 
-## Integration contract (for the later single writer)
+## Integration contract
 
 - Assemble the packet from the pinned execution revision: `before`/`after`
   from the tree at `metadata.revision.head` and `.parent`, patch from the
@@ -166,5 +170,16 @@ non-Error gate refusal, a check-side storage failure and the cross-scenario
 verdict invariants (resolved has five passes; uncertain never carries a
 fail; check names are always a canonical prefix).
 
-Evidence boundary: no test invokes a provider, spawns a process or touches
-the network; the suite is pure computation on literals.
+The helper tests are pure computation on literals. The op-path tests in
+`address.test.ts` and `address-pr.test.ts` exercise opt-in uncertainty,
+unchanged default behavior, pinned snapshots despite live-file drift,
+report persistence and PR-thread resolution refusal. They script model
+responses; the local composition test uses real git.
+
+The CLI fixture in `test/fixtures/review-closure-cli/entry.mjs` uses production
+CLI dispatch and the production operation with a scripted fixer. It demonstrates
+the closure gate, not real model quality. Commits that pass existing worker
+checks remain eligible for publication even when deterministic closure is
+uncertain; `verifiedHead` denotes worker validation, not a resolved finding.
+The packet patch covers the finding file only, consistent with the verifier's
+single-file contract; it is not a claim of complete multi-file evidence.

@@ -36,7 +36,7 @@ function reuseRecord(overrides: Partial<DevReuseRecord> = {}): DevReuseRecord {
     reuseId: 'r001-aaaaaaaa',
     cycleId: 'c001-aaaaaaaa',
     basis: 'exact-terminal',
-    target: 'merge-queue',
+    target: 'main',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',
@@ -401,7 +401,7 @@ function assemble(
 ) {
   return assembleReadiness({
     branch: BRANCH,
-    target: 'merge-queue',
+    target: 'main',
     identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
     ledger: { version: DEV_LEDGER_VERSION, branch: BRANCH, records: ledgerRecords },
     untracked,
@@ -648,7 +648,7 @@ describe('assembleReadiness', () => {
     const currentReviewer = cycleRecord({ findings: [] });
     const result = assembleReadiness({
       branch: BRANCH,
-      target: 'merge-queue',
+      target: 'main',
       identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
       ledger: {
         version: DEV_LEDGER_VERSION,
@@ -701,7 +701,7 @@ test('a blocked attempt keeps its major findings open after a later terminal cyc
 // ---------------------------------------------------------------------------
 
 const REQUEST = {
-  target: 'merge-queue',
+  target: 'main',
   base: BASE,
   head: HEAD,
   dirtySha256: 'dirty',
@@ -736,7 +736,7 @@ describe('findReusableCycle', () => {
   });
 
   test('changed target at the same merge-base never reuses', () => {
-    expect(findReusableCycle([cycleRecord()], { ...REQUEST, target: 'main' })).toBeNull();
+    expect(findReusableCycle([cycleRecord()], { ...REQUEST, target: 'release' })).toBeNull();
   });
 
   test('changed head or base never reuses', () => {
@@ -1314,7 +1314,7 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
     // no reuse resolution attributed to the unrelated unconfigured tail.
     const result = assembleReadiness({
       branch: BRANCH,
-      target: 'merge-queue',
+      target: 'main',
       identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
       ledger: {
         version: DEV_LEDGER_VERSION,
@@ -1342,24 +1342,31 @@ describe('assembleReadiness reuse resolution (no-fresh tail)', () => {
   });
 
   test('blocking findings on the tail still block readiness through the resolution', () => {
-    const result = assemble([
+    const findingId = 'c002-aaaaaaaa#f1';
+    const records = [
       cycleRecord(),
-      blockedTail(),
+      { ...blockedTail(), findings: [{ id: findingId, severity: 'critical' }] },
       reuseRecord({ basis: 'no-fresh-tail', resolvesCycleId: 'c002-aaaaaaaa' }),
       checkRecord(),
-      cycleRecord({
-        cycleId: 'c000-aaaaaaaa',
-        findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'critical' }],
-      }),
-    ]);
+    ];
+    const result = assemble(records);
     expect(result.ready).toBe(false);
-    if (!result.ready)
-      expect(
-        result.gaps.some(
-          (gap) =>
-            gap.field === 'open-blocking-findings' && gap.detail.includes('c000-aaaaaaaa#f1'),
-        ),
-      ).toBe(true);
+    if (!result.ready) {
+      expect(result.gaps.map((gap) => gap.field)).toEqual(['open-blocking-findings']);
+      expect(result.gaps[0]?.detail).toContain(findingId);
+    }
+    const deferred = assemble([...records, dispositionRecord({ findingId, action: 'deferred' })]);
+    expect(deferred.ready).toBe(false);
+    if (!deferred.ready)
+      expect(deferred.gaps.map((gap) => gap.field)).toEqual(['open-blocking-findings']);
+    for (const action of ['fixed', 'rejected'] as const) {
+      const adjudicated = assemble([...records, dispositionRecord({ findingId, action })]);
+      expect(adjudicated.ready).toBe(true);
+      if (adjudicated.ready) {
+        expect(adjudicated.record.cycleId).toBe('c001-aaaaaaaa');
+        expect(adjudicated.record.reuse).toBe('r001-aaaaaaaa');
+      }
+    }
   });
 
   test('reuse evidence rides the ready record verbatim: the caveat stays authoritative', () => {

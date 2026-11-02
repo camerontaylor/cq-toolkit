@@ -9,8 +9,8 @@
 
 The Team plan supplies 10 included review starts in a rolling 60-minute window.
 CRQ reads repository-scoped `coderabbit usage --agent`, fills available slots
-concurrently (default inflight and per-tick ceiling 10), and keeps promotion →
-prioritize → rank ordering. Unavailable/invalid usage falls back to the existing
+concurrently (default inflight and per-tick ceiling 10), reviewing merged PRs
+as visible post-merge debt. Unavailable/invalid usage falls back to the existing
 local starts/hour cap. Every runner and signer review passes `--deep` with a
 120-minute deadline. Rate-limit cooldown uses exact waitTime without padding.
 The next local slot expiry is cross-checked against vendor usage. A minute timer
@@ -44,13 +44,13 @@ residual ownership rules: [CRQ contract](../apps/crq-python/README.md#runtime-ow
 14. **Author evidence is a claim; verification uses only facts an owner credential cannot write** (2026-10-16).
 15. **The PR is not development state; every checkable rule is a command** (2026-10-16).
 16. **Gates are advisory; only the privileged list needs a human** (2026-10-20). `cq/policy` is not required; the `cq-override` label is parked.
-17. **Must stay blocking:** fail-closed denylist before upload; core CI at the exact SHA; independent head-bound PASS with no P0/P1; FF-only promotion with no force-push of `main`/`cq/promoted`/replay markers; owner sign-off on credentials, signer custody and deploy trust. Unchanged.
-18. **Merge commits only in the engine; promotion is FF-only.** Practice: `automerge.sh` merges; promotion needs break-glass FF until #376.
+17. **Must stay blocking:** fail-closed denylist before upload; core CI at the exact SHA; independent head-bound PASS with no P0/P1; no force-push or shared-history rewrite; owner sign-off on credentials, custody and deploy trust. PRs target `main` with required `static` and `denylist` checks.
+18. **Merge commits directly to main.** Merge on `static` + `denylist` + one independent exact-head review comment; CRQ reviews after merge. The promotion gate, signer status and settle-ledger promotion path are retired. See [merge policy](promotion-policy.md).
 19. **Self-hosting proves the toolkit** (spec DoD 2). _Scaled back_ 2026-10-20: review loop off, self-merge off, re-enable only with a fixes-per-run metric.
 20. **Freeze new self-host machinery until S1–S6 ship** (2026-10-20). S1–S6 shipped 2026-10-20; whether the freeze lifted is a GAP.
 21. **Local tests are narrow, on triton, one run at a time; CI is the full-suite authority** (owner, 2026-10-11/10-14). Per-package suites come after the ops cut.
 22. **Protect the deployed system, not in-development code** (2026-10-18).
-23. **Greenfield, low vigilance: the chancellor merges, acks and FFs; the owner is asked only about credentials, settings and direction** (2026-10-19/20).
+23. **Greenfield, low vigilance: the merging agent merges reviewed PRs to main; the owner is asked only about credentials, settings and direction** (2026-10-19/20).
 24. **"No staging, one coherent v1"** — dropped in practice by the 0.2 decision and incremental slices; not formally struck.
 25. **Fixtures/eval must produce scored per-role comparisons** — deferred; owner-blocked on keys and spend.
 

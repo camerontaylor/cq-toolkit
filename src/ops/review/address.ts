@@ -39,7 +39,13 @@ import {
   type AddressAttempt,
   type AddressFix,
   type AddressWorker,
+  type AddressPrecondition,
 } from './addressWorker.js';
+import {
+  verifyClosureEvidence,
+  type ClosurePacket,
+  type ClosureVerification,
+} from './internal/addressVerification.js';
 import { makeAddressBookkeepingReceipt } from './internal/addressBookkeeping.js';
 import { parseQueueReceipt } from './internal/queueEvidence.js';
 import type { DeferredQueueClient } from './internal/queueProtocol.js';
@@ -67,6 +73,9 @@ import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/r
 export interface ReviewAddressInput {
   repoRoot: string;
   source: string;
+  /** Prepared checkout matching PR metadata; read-only dependency source. */
+  dependencyRoot?: string;
+  expectedHead?: string;
   record?: string;
   target?: string;
   base?: string;
@@ -76,9 +85,13 @@ export interface ReviewAddressInput {
   concurrency?: number;
   journalDir?: string;
   push?: boolean;
+  /** Require deterministic closure evidence before persisting a fixed disposition. */
+  verifyClosure?: boolean;
 }
 export interface ReviewAddressReport {
   source: string;
+  /** Selected dependency source; prerequisite checks may still refuse it. */
+  dependencySource?: { kind: 'caller' | 'prepared'; root: string };
   reportPath: string;
   /** One entry per round; the latest reviewed record and all settled batch runs. */
   rounds: Array<{ round: number; record: FindingsRecord; runs: RunReport[] }>;
@@ -87,6 +100,11 @@ export interface ReviewAddressReport {
   advisories?: string[];
   openBlocking: Finding[];
   fixes: AddressFix[];
+  closureVerifications?: Array<{
+    finding: string;
+    packet: ClosurePacket;
+    verification: ClosureVerification;
+  }>;
   attempts: AddressAttempt[];
   failed: AddressFailedAttempt[];
   fixesPerRun: number;
@@ -94,6 +112,7 @@ export interface ReviewAddressReport {
   costUSD?: number;
   wallMs: number;
   reasons: string[];
+  preconditions?: AddressPrecondition[];
   escalation?: ReturnType<AddressWorker['escalation']>;
   /**
    * The leg's structured terminal outcome: round cap, run budget, or a
@@ -127,6 +146,8 @@ export type ReviewAddressResult = OpResult<ReviewAddressReport> & {
   report?: ReviewAddressReport;
 };
 export interface ReviewAddressDeps {
+  /** Durable receipts and per-PR exclusion domain for isolated bulk checkouts. */
+  coordinationRoot?: string;
   drivers?: DriverFactory;
   git?: GhFn;
   gh?: GhFn;
@@ -215,6 +236,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     );
     const report: ReviewAddressReport = {
       source: input.source,
+      dependencySource: {
+        kind: input.dependencyRoot === undefined ? 'caller' : 'prepared',
+        root: resolve(input.repoRoot, input.dependencyRoot ?? '.'),
+      },
       reportPath: resolve(journalDir, 'review-address-report.json'),
       rounds: [],
       findings: [],
@@ -464,6 +489,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
       ).size;
       if (worker) report.escalation = worker.escalation();
+      const preconditions = worker?.preconditions?.();
+      if (preconditions?.length) report.preconditions = [...preconditions];
       try {
         await mkdir(journalDir, { recursive: true });
         await writeFile(report.reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
@@ -521,7 +548,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           budgetSpent = true;
           return 'token or wall budget exhausted';
         }
-        return undefined;
+        return worker?.preconditionFailure?.();
       };
       cleanStop = stop;
       const account = (result: WorkerResult, governed = true) => {
@@ -613,7 +640,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         lockPath: resolve(await realpath(commonPath), 'cq-review-address-ownership'),
         failFast: true,
       });
-      return await ownership.withLock(async () => {
+      const runOwned = async () => {
         try {
           await mkdir(journalDir, { recursive: true });
           const bookkeepingKey = async (root: string, path: string) =>
@@ -692,7 +719,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 if (!(await untrackedAllowed(root, path))) throw new Error('bookkeeping mismatch');
             } catch (error) {
               bookkeepingTampered = true;
-              throw new Error('engine bookkeeping changed; worker tree is dirty', { cause: error });
+              throw new Error('engine bookkeeping changed; worker tree is dirty', {
+                cause: error,
+              });
             }
           };
           // Parallel PR workers share the ledger. Keep the fingerprint check,
@@ -830,7 +859,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const bindWorker = (root: string) =>
             (worker ??= (deps.workerFactory ?? makeAddressWorker)({
               repoRoot: root,
-              dependencyRoot: input.repoRoot,
+              dependencyRoot:
+                input.dependencyRoot === undefined
+                  ? input.repoRoot
+                  : resolve(input.repoRoot, input.dependencyRoot),
+              preferDependencyRoot: input.dependencyRoot !== undefined,
               journalDir,
               policy,
               git,
@@ -989,7 +1022,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 deps.resolveDeferredVendorContext ?? resolveDeferredVendorContext
               )({
                 repoRoot: root,
-                target: input.target ?? 'merge-queue',
+                target: input.target ?? 'main',
                 base: reviewedBase,
                 record,
                 onEvidenceImported: (evidence) => noteQueueEvidence(root, evidence),
@@ -1067,7 +1100,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           const admitCleanRecord = async (root: string, record: FindingsRecord) => {
             const effects = makeSubprocessDevEffects(root);
             const read = await readWorkState(effects, {
-              target: input.target ?? 'merge-queue',
+              target: input.target ?? 'main',
               ...(reviewedBase ? { base: reviewedBase } : {}),
             });
             if (!read.ok) throw new Error(read.reason);
@@ -1099,7 +1132,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               // admitted cycle's base field. The pin (like an explicit base)
               // is schema-validated hex from this engine's own capture.
               const read = await readWorkState(effects, {
-                target: input.target ?? 'merge-queue',
+                target: input.target ?? 'main',
                 ...(input.base
                   ? { base: input.base }
                   : reviewedBasePinned
@@ -1118,7 +1151,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   cycleId: `address-${randomUUID()}`,
                   reviewer: 'review.address:import',
                   scope: 'full',
-                  target: input.target ?? 'merge-queue',
+                  target: input.target ?? 'main',
                   base: state.base,
                   head: state.head,
                   dirtySha256: state.dirtySha256,
@@ -1197,6 +1230,70 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             if (run) entry.runs.push(run);
             return entry;
           };
+          let closureRefused: string | undefined;
+          const verifyFix = async (root: string, fix: AddressFix) => {
+            if (!input.verifyClosure || fix.finding.status !== 'fixed') return;
+            const validatedParent = fix.validatedParent ?? fix.observedHead;
+            const packet: ClosurePacket = {
+              finding: { ...fix.finding },
+              task: fix.finding.text,
+              patch: '',
+              before: '',
+              after: '',
+              dependencies: [],
+              // Neither a fixer claim nor a file list proves dependency completeness.
+              relevantDependenciesComplete: false,
+              metadata: { revision: { head: fix.commit ?? '', parent: validatedParent } },
+            };
+            let unavailable: string | undefined;
+            const read = async (args: string[]) => {
+              const result = await git(['-C', root, ...args]);
+              if (result.code !== 0) throw new Error('pinned closure evidence unavailable');
+              return result.stdout;
+            };
+            try {
+              if (
+                !fix.commit ||
+                !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(fix.commit) ||
+                !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(validatedParent) ||
+                !fix.finding.file
+              )
+                throw new Error('pinned closure identity or file unavailable');
+              if ((await read(['rev-parse', `${fix.commit}^`])).trim() !== validatedParent)
+                throw new Error('closure parent differs from validated parent');
+              packet.before = await read(['show', `${validatedParent}:${fix.finding.file}`]);
+              packet.after = await read(['show', `${fix.commit}:${fix.finding.file}`]);
+              packet.patch = await read([
+                'diff',
+                '--no-ext-diff',
+                '--no-textconv',
+                '--no-color',
+                validatedParent,
+                fix.commit,
+                '--',
+                `:(literal)${fix.finding.file}`,
+              ]);
+            } catch (error) {
+              unavailable = error instanceof Error ? error.message : 'closure evidence unavailable';
+            }
+            const verification = verifyClosureEvidence(packet, {
+              admit: () => {
+                const reason = stop() ?? unavailable;
+                if (reason) throw new Error(reason);
+              },
+            });
+            (report.closureVerifications ??= []).push({
+              finding: fix.finding.id,
+              packet,
+              verification,
+            });
+            if (verification.verdict !== 'resolved') {
+              closureRefused = `closure ${fix.finding.id}: ${verification.verdict}: ${verification.reason}`;
+              fix.finding.status = 'open';
+              fix.finding.reason = closureRefused;
+              fix.reason = closureRefused;
+            }
+          };
           const dispatchFindings = async (root: string, record: FindingsRecord, round: number) => {
             rowsDispatchedAt.set(record.findings, {
               fixes: report.fixes.length,
@@ -1236,6 +1333,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 importer: async () => async (raw: unknown) => {
                   const request = raw as FindingReviewItemInput;
                   const fix = await bindWorker(root).fix(request.item.finding, round);
+                  await verifyFix(root, fix);
                   remember(fix);
                   return { status: 'ok', value: fix };
                 },
@@ -1274,11 +1372,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   continue;
                 }
                 const fix = row.result.value as AddressFix;
+                if (fix.finding.status === 'open') continue;
                 if (!(await recordDisposition(root, fix.finding))) fix.finding.status = 'open';
               }
               noteRound(round, record, run);
             }
-            return pathless.length > 0 ? unresolvedReason : undefined;
+            return closureRefused ?? (pathless.length > 0 ? unresolvedReason : undefined);
           };
           const retainDeferred = (record: FindingsRecord): FindingsRecord => {
             const findings = record.findings.map((finding) => {
@@ -1402,7 +1501,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   owner.toLowerCase(),
                   repo.toLowerCase(),
                   pr,
-                  input.target ?? 'merge-queue',
+                  input.target ?? 'main',
                   input.base ?? null,
                   prMetadata.headRepo!.toLowerCase(),
                   meta.headRefName,
@@ -1410,10 +1509,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 ]),
               )
               .digest('hex');
-            const receiptDir = resolve(root, commonDir, 'cq-review-address', namespace);
+            const receiptDir = resolve(
+              deps.coordinationRoot ?? resolve(root, commonDir),
+              'cq-review-address',
+              namespace,
+            );
             await mkdir(receiptDir, { recursive: true });
             dispatchLogPath = resolve(receiptDir, 'dispatch.jsonl');
-            bookkeepingReceiptPath = resolve(await realpath(receiptDir), 'bookkeeping.json');
+            const checkoutReceipts = resolve(root, commonDir, 'cq-review-address', namespace);
+            await mkdir(checkoutReceipts, { recursive: true });
+            bookkeepingReceiptPath = resolve(await realpath(checkoutReceipts), 'bookkeeping.json');
             pendingRerequestPath = resolve(await realpath(receiptDir), 'pending-rerequests.json');
             persistedBookkeeping = makeAddressBookkeepingReceipt({
               path: bookkeepingReceiptPath,
@@ -1424,7 +1529,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           }
           if (input.source === 'local') {
             const read = await readWorkState(makeSubprocessDevEffects(root), {
-              target: input.target ?? 'merge-queue',
+              target: input.target ?? 'main',
               ...(input.base ? { base: input.base } : {}),
             });
             if (!read.ok) return await finish('needs-human', read.reason);
@@ -1441,7 +1546,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             // own base through.
             reviewedBasePinned = async () => {
               if (pinnedBase === undefined) {
-                const target = input.target ?? 'merge-queue';
+                const target = input.target ?? 'main';
                 const result = await git([
                   '-C',
                   workerRoot,
@@ -1518,6 +1623,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   }
                   dispatchedFindings.push(finding);
                   const fix = await bound.fix(finding, round);
+                  await verifyFix(root, fix);
+                  if (fix.finding.status === 'open') {
+                    fixesById.set(finding.id, fix);
+                    remember(fix);
+                    return { status: 'needs-human', reason: fix.reason };
+                  }
                   const dispositionRecorded = await recordDisposition(root, fix.finding);
                   if (!dispositionRecorded) fix.finding.status = 'open';
                   remember(fix);
@@ -1541,7 +1652,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       } satisfies FixReviewItemResult,
                     };
                   if (!fix.commit)
-                    return { status: 'needs-human', reason: `${NO_OUTCOME_REASON}: ${fix.reason}` };
+                    return {
+                      status: 'needs-human',
+                      reason: `${NO_OUTCOME_REASON}: ${fix.reason}`,
+                    };
                   const value: FixReviewItemResult = {
                     observedHead: fix.observedHead,
                     disposition: 'fixed',
@@ -1561,6 +1675,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 headRefName: meta.headRefName,
                 ...(meta.headRepo ? { headRepo: meta.headRepo } : {}),
                 repoRoot: input.repoRoot,
+                ...(round === 1 && input.expectedHead ? { expectedHead: input.expectedHead } : {}),
                 gh,
                 git,
                 registry:
@@ -1634,11 +1749,27 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 publishedBase = await gitText(root, ['rev-parse', 'HEAD']);
               }
               if (loop.status !== 'ok') report.reasons.push(...loop.reasons);
+              if (loop.headRefused)
+                return await finish('needs-human', 'PR head changed before dispatch');
               if (admissionRefused)
                 return await finish(
                   'needs-human',
-                  'PR worker admission refused; persisted/caller bytes retained',
+                  worker?.preconditionFailure?.() ??
+                    'PR worker admission refused; persisted/caller bytes retained',
                 );
+              if (closureRefused) {
+                if (dispatchedRecord) {
+                  const record = {
+                    ...dispatchedRecord,
+                    findings: dispatchedFindings.map(
+                      (finding) => fixesById.get(finding.id)?.finding ?? finding,
+                    ),
+                  };
+                  report.findings = record.findings;
+                  report.openBlocking = openBlocking(record, policy.review.blockingSeverities);
+                }
+                return await finish('needs-human', closureRefused);
+              }
               const fetched = await fetchReviewState(
                 { owner: meta.owner, repo: meta.repo, pr: meta.pr },
                 undefined,
@@ -1754,7 +1885,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               ]);
               const agent = await review({
                 repoRoot: root,
-                target: input.target ?? 'merge-queue',
+                target: input.target ?? 'main',
                 ...(input.base
                   ? { base: input.base }
                   : reviewedBasePinned
@@ -1864,7 +1995,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const priorFindings = priorRoundFindings(previous);
             const refreshed = await review({
               repoRoot: root,
-              target: input.target ?? 'merge-queue',
+              target: input.target ?? 'main',
               ...(reviewedBase ? { base: reviewedBase } : {}),
               maxTokens: Math.max(1, remainingTokens()),
               wallMs: Math.max(1, remainingWallMs()),
@@ -1912,7 +2043,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             error instanceof Error ? error.message : String(error),
           );
         }
-      }, parent);
+      };
+      if (input.source !== 'local') {
+        const domain = deps.coordinationRoot ?? (await realpath(commonPath));
+        await mkdir(domain, { recursive: true });
+        return await makeGitMutex({
+          lockPath: resolve(domain, `cq-review-address-pr-${input.source.slice(3)}`),
+          failFast: true,
+        }).withLock(() => ownership.withLock(runOwned, parent), parent);
+      }
+      return await ownership.withLock(runOwned, parent);
     } catch (error) {
       return await finish('needs-human', error instanceof Error ? error.message : String(error));
     }

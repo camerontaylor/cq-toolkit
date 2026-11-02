@@ -28,7 +28,7 @@ test.each(['valid', 'bound-head', 'base', 'changed-bytes'] as const)(
   async (mode) => {
     const f = await fixture();
     try {
-      const base = f.repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim();
+      const base = f.repo.git('merge-base', 'origin/main', 'HEAD').trim();
       const ledger = parseDevLedger(f.ledgerText);
       ledger.records.push({
         kind: 'vendor-debt',
@@ -41,7 +41,7 @@ test.each(['valid', 'bound-head', 'base', 'changed-bytes'] as const)(
               repo: 'owner/repo',
               producer: 'author',
               head: mode === 'bound-head' ? 'f'.repeat(40) : f.head,
-              target: 'merge-queue',
+              target: 'main',
               targetSelector: 'promoted-main',
             },
           },
@@ -54,7 +54,7 @@ test.each(['valid', 'bound-head', 'base', 'changed-bytes'] as const)(
             cycleId: 'c001-outage',
             head: f.head,
             base,
-            target: 'merge-queue',
+            target: 'main',
             scope: 'full',
             dirtySha256: 'clean-tree',
             failure: { source: 'vendor', category: 'vendor-unavailable', codes: ['con_err'] },

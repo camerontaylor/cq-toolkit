@@ -302,7 +302,7 @@ describe('dev.review cycle', () => {
         scanSecrets: scanner,
         run: runAgentReviewer,
       });
-      const state = await readWorkState(effects, { target: 'merge-queue' });
+      const state = await readWorkState(effects, { target: 'main' });
       expect(state.ok).toBe(true);
       if (!state.ok) return;
       const { base, head, dirtySha256 } = state.state;
@@ -322,7 +322,7 @@ describe('dev.review cycle', () => {
         kind: 'cycle',
         reviewer: 'agent:reviewer',
         scope: 'full',
-        target: 'merge-queue',
+        target: 'main',
         base,
         head,
         dirtySha256,
@@ -673,7 +673,7 @@ describe('dev.review cycle', () => {
         expect(input.intent).toContain('CONTEXT_COMMITTED_INTENT');
         expect(input.intent).toContain('[truncated:');
         expect(input.fileList).toContain('src/committed.ts');
-        expect(input.base).toBe(repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim());
+        expect(input.base).toBe(repo.git('merge-base', 'origin/main', 'HEAD').trim());
       } else {
         expect(input.intent).toBe('');
         expect(input.fileList).not.toContain('src/committed.ts');
@@ -916,12 +916,12 @@ describe('dev.review cycle', () => {
     const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
-    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const base = repo.git('rev-parse', 'origin/main').trim();
     const head = repo.git('rev-parse', 'HEAD').trim();
     expect(result.value).toMatchObject({
       reviewer: 'coderabbit',
       scope: 'full',
-      target: 'merge-queue',
+      target: 'main',
       base,
       head,
       dirtySha256: 'clean-tree',
@@ -964,7 +964,7 @@ describe('dev.review cycle', () => {
   });
 
   test('a legacy-named file without configured corpus remains in the scanner input', async () => {
-    repo.git('reset', '-q', '--hard', 'origin/merge-queue');
+    repo.git('reset', '-q', '--hard', 'origin/main');
     await repo.write('policy/denylist/patterns.yml', 'LEGACY_SECRET_PROBE\n');
     repo.commitAll('legacy-named secret');
     const scanner = capturingScanner();
@@ -1767,6 +1767,59 @@ test.each([
       .records.filter((entry) => entry.kind === 'cycle');
     expect(cycles).toHaveLength(1);
     expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+  },
+);
+
+test.each([
+  ['wall deadline abort', 0, true, false, true],
+  ['parent abort before deadline', 1000, true, false, false],
+  ['null exit without interruption', 0, false, false, false],
+  ['explicit refusal before wall deadline abort', 0, true, true, false],
+] as const)(
+  '#534: %s attributes budget stops only to an interrupted reviewer without a refusal',
+  async (_mode, wall, interrupted, refused, marked) => {
+    const controller = new AbortController();
+    let remaining = 1000;
+    const effects = repoEffects(
+      repo,
+      reviewer(() => {
+        remaining = wall;
+        if (interrupted) controller.abort(new Error('review interrupted'));
+        return ran(
+          null,
+          JSON.stringify(
+            refused
+              ? { type: 'error', message: 'auth_required' }
+              : { type: 'heartbeat', status: 'reviewing' },
+          ),
+          {
+            timedOut: false,
+            ...(interrupted
+              ? { interruption: { kind: 'abort' as const, reason: controller.signal.reason } }
+              : {}),
+          },
+        );
+      }),
+    );
+    const result = await makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      signal: controller.signal,
+      remainingWallMs: () => remaining,
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (marked) expect(result).toMatchObject({ report: { budgetStopped: true } });
+    else expect(result).not.toMatchObject({ report: { budgetStopped: true } });
+    const cycles = effects
+      .openLedger('feature/x')
+      .load()
+      .records.filter((entry) => entry.kind === 'cycle');
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.completion).toMatchObject({ kind: 'blocked' });
+    if (refused)
+      expect(cycles[0]?.completion).toMatchObject({
+        reason: expect.stringContaining('error event') as unknown,
+      });
   },
 );
 

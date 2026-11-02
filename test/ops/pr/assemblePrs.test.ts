@@ -513,6 +513,30 @@ describe('per-package rows isolate their outcomes', () => {
 // ---------------------------------------------------------------------------
 
 describe('boundary validation refuses bad inputs before any gh call', () => {
+  test.each(['cq/09-16a/core.', 'cq/09-16a/core./fix'])(
+    'refuses trailing-dot branch components: %s',
+    async (branch) => {
+      const fake = fakeGh();
+      expect(
+        await failedAt(
+          makeAssemblePrs(fake.gh),
+          inputOf({
+            packages: [{ name: 'core', branch, title: 'fix' }],
+          }),
+        ),
+      ).toContain('packages[0].branch');
+      expect(fake.calls).toEqual([]);
+    },
+  );
+
+  test('refuses a trailing-dot run prefix before any gh call', async () => {
+    const fake = fakeGh();
+    expect(await failedAt(makeAssemblePrs(fake.gh), inputOf({ runPrefix: 'cq/run.' }))).toContain(
+      'runPrefix',
+    );
+    expect(fake.calls).toEqual([]);
+  });
+
   test('a package branch outside the run prefix is refused naming the entry', async () => {
     const fake = fakeGh();
     const error = await failedAt(

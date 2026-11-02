@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from runtime_target import DEFAULT_REF, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
 import status_summary
 import repair_tick
 import coverage
@@ -32,6 +33,8 @@ import review_receipt
 import deferred_refresh
 import merged_reconcile
 import usage_slots
+import backfill_runtime
+import backfill_jobs
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -159,11 +162,69 @@ def event(kind: str, **data: Any) -> None:
         f.write(json.dumps({"at": iso(), "event": kind, **data}) + "\n")
 
 
+class SpoolUnreachable(Exception):
+    """The dedicated ledger publication transport is unavailable."""
+
+
+class Spool:
+    """Dedicated SSH transport for review-ledger publication only."""
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self.key = cfg.get("ssh_key") or cfg.get("key")  # the signer runbook calls it `.key`
+        self.host = cfg.get("ssh_alias") or cfg.get("host")
+        self.dir = cfg.get("dir") or "/var/lib/crq-spool"
+        # removed (owner D4: no fallback): refuse the spool rather than ignore the key
+        self.refused = ("publisher_spool.legacy_shell is not supported: the dedicated forced-command "
+                        "key is the only transport (owner decision D4) — remove it") if "legacy_shell" in cfg else None
+        if self.host and not self.refused and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*",
+                                                               self.host):
+            self.refused = (f"publisher_spool.ssh_alias must be a literal user@host (ssh runs with -F none), "
+                            f"got {self.host!r}")
+
+    def _ssh(self, remote: str, data: Optional[bytes] = None, *, timeout: int = 45) -> str:
+        if self.refused:
+            raise SpoolUnreachable(self.refused)
+        if self.key:
+            # -F none: no ssh_config identities, Match/ProxyCommand or ControlMaster. A shared master
+            # opened with a general key would silently ignore -i and bypass the forced command.
+            auth = ["-F", "none", "-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes",
+                    "-o", "IdentityAgent=none", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
+        else:
+            raise SpoolUnreachable("no dedicated spool key configured (publisher_spool.ssh_key) — refusing "
+                                   "to use a general-purpose ssh identity")
+        cmd = ["/usr/bin/ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
+               "-o", "ServerAliveCountMax=2", self.host, remote]
+        try:
+            p = subprocess.run(cmd, input=data if data is not None else b"", capture_output=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise SpoolUnreachable(f"ssh {self.host}: {exc}"[:200])
+        if p.returncode != 0:
+            raise SpoolUnreachable(f"ssh {self.host} exit {p.returncode}: {p.stderr.decode(errors='replace').strip()[:200]}")
+        return p.stdout.decode(errors="replace")
+
+    def publish_ledger(self, base: str, head: str, bundle: bytes) -> None:
+        if not self.host or not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
+            raise OSError("ledger publication requires the dedicated signer transport")
+        if not bundle or len(bundle) > 64 * 1024 * 1024:
+            raise OSError("invalid ledger bundle size")
+        try:
+            reply = self._ssh("ledger-publish " + base + " " + head, bundle, timeout=330)
+        except SpoolUnreachable as exc:
+            raise OSError("ledger signer transport unavailable; retain publication outbox") from exc
+        if json.loads(reply) != {"published": head}:
+            raise OSError("signer did not acknowledge the exact ledger commit")
+
+
+def live_items(q):
+    """Retain historical promotion records on disk, outside the active queue."""
+    return [item for item in q["items"] if item.get("kind") != "promotion"]
+
+
 def load_queue() -> Dict[str, Any]:
     q = json.loads(QUEUE.read_text())
     # Idempotently retire the superseded second-cycle debt. Explicit optional
     # requeues survive reload; running reviews still have to be harvested.
-    for item in q["items"]:
+    for item in live_items(q):
         item.pop("boost", None)
         if (item.get("kind") == "open" and completed_open_cycles(item) >= 1
                 and item.get("state") in ("pending", "blocked") and not item.get("optional_cycle")):
@@ -233,8 +294,8 @@ def _unquote(v: str) -> str:
 
 
 def denylist_rules() -> List[Dict[str, str]]:
-    """Parse policy/denylist/patterns.yml (constrained format) from origin/merge-queue."""
-    text = git("show", "origin/merge-queue:policy/denylist/patterns.yml")
+    """Parse policy/denylist/patterns.yml (constrained format) from the default branch."""
+    text = git("show", f"{DEFAULT_REF}:policy/denylist/patterns.yml")
     rules: List[Dict[str, str]] = []
     cur: Optional[Dict[str, str]] = None
     in_rules = False
@@ -640,11 +701,12 @@ def is_doc(path: str) -> bool:
     return path.endswith((".md", ".mdx", ".txt")) or path.startswith("docs/")
 
 
-def measure_merged(item: Dict[str, Any]) -> Dict[str, Any]:
+def measure_merged(item: Dict[str, Any], target: Optional[str] = None) -> Dict[str, Any]:
     """Blame-based survival: of the lines the PR added, how many are still
-    attributed (git blame -w -M) to the PR's own commits in origin/merge-queue."""
+    attributed (git blame -w -M) to the PR's own commits at the selected target.
+    Without an explicit target, use the shared default branch."""
     merge = item["merge_commit"]
-    mq = git("rev-parse", "origin/merge-queue")
+    mq = target if target is not None else git("rev-parse", DEFAULT_REF)
     commits = pr_commit_set(merge)
     renames = rename_map(merge, mq)
     files = []
@@ -670,7 +732,7 @@ def measure_merged(item: Dict[str, Any]) -> Dict[str, Any]:
         if not is_doc(path):
             nondoc_surv += surv
         files.append({"path": path, "now": cur, "added": added, "surviving": surv})
-    # Per-file synthetic delta (pre-merge → merge-queue). A path joins the
+    # Per-file synthetic delta (pre-merge → default branch). A path joins the
     # synthetic review only when the PR's surviving lines are a meaningful
     # share of that path's later churn; otherwise the review would mostly
     # re-review other PRs' work on a hot file.
@@ -713,35 +775,20 @@ def synth_paths(merge: str, mq: str) -> List[str]:
     return sorted(names)
 
 
-def build_synthetic(item: Dict[str, Any]) -> Tuple[str, str, int]:
-    """Synthetic pair, both descending from current merge-queue:
-         MQ → B' (PR-touched paths reset to pre-merge content) → H (tree == MQ)
-       Reviewing H against B' shows exactly what the PR introduced to those
-       paths plus every later change to them, with today's tree as context."""
+def build_synthetic(item: Dict[str, Any], target: str) -> Tuple[str, str, int]:
+    """Explicit immutable T; generation pins replace mutable per-PR refs."""
+    repo = backfill_runtime.accounting.Repository(CLONE)
+    repo.resolve(target)
     merge = item["merge_commit"]
-    mq = git("rev-parse", "origin/merge-queue")
-    pre = git("rev-parse", f"{merge}^1")
-    paths = (item.get("measure") or {}).get("synthetic_paths") or synth_paths(merge, mq)
-    with tempfile.TemporaryDirectory() as td:
-        env = dict(os.environ, GIT_INDEX_FILE=str(Path(td) / "index"))
-        git("read-tree", mq, env=env)
-        for p in paths:
-            ls = git("ls-tree", pre, "--", p)
-            if ls:
-                mode, _typ, rest = ls.split(" ", 2)
-                sha = rest.split("\t", 1)[0]
-                git("update-index", "--add", "--cacheinfo", f"{mode},{sha},{p}", env=env)
-            else:
-                git("update-index", "--force-remove", "--", p, env=env)
-        tree = git("write-tree", env=env)
-    ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
-                 GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
-    base = run(["git", "commit-tree", tree, "-p", mq, "-m",
-                f"crq synthetic base: PR #{item['pr']} paths at pre-merge {pre[:10]}"], cwd=CLONE, env=ident).stdout.strip()
-    head = run(["git", "commit-tree", f"{mq}^{{tree}}", "-p", base, "-m",
-                f"crq synthetic head: PR #{item['pr']} paths at merge-queue {mq[:10]}"], cwd=CLONE, env=ident).stdout.strip()
-    git("update-ref", f"refs/crq/synth/pr{item['pr']}-base", base)
-    git("update-ref", f"refs/crq/synth/pr{item['pr']}-head", head)
+    paths = (item.get("measure") or {}).get("synthetic_paths") or synth_paths(merge, target)
+    live = repo.entries(target)
+    paths = sorted(p for p in paths if p in live)
+    # Legacy subjects use the same safe full-file projection when provenance
+    # cannot establish complete residual scope. New A unions use the bounded
+    # synthetic/residual constructor in backfill_subjects directly.
+    base, head = backfill_runtime.subjects.projection(repo, target, paths)
+    identity = backfill_runtime.ledger.digest({"item": item["id"], "target": target, "paths": paths})
+    backfill_runtime.subjects.pin(repo, identity, item.get("generation", 0), 0, base, head, target)
     return base, head, len(paths)
 
 
@@ -875,7 +922,7 @@ def prepare_current(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optio
         return {"base": "(dispatch-pin)", "head": "(dispatch-pin)", "target": item["subject"]["target_selector"],
                 "cycle": None, "branch": None, "label": "affected current files (not captured)", "notes": []}
     if any(i.get("kind") == "merged" and i.get("pr") == item["pr"] and i.get("state") == "reviewing"
-           for i in q["items"]):
+           for i in live_items(q)):
         raise NotReady("legacy source review still owns a live/ambiguous run; no new dispatch")
     if not item.get("capture"):
         selector = item["subject"]["target_selector"]
@@ -932,8 +979,8 @@ def enqueue_merged(pr: int, merge_sha: str, request_id: str, target_selector: st
     # Verify before touching the queue. PR number alone is never scope authority.
     info = pr_info(pr)
     if (info.get("number") != pr or info.get("state") != "MERGED" or
-            (info.get("mergeCommit") or {}).get("oid") != merge_sha or info.get("baseRefName") != "merge-queue"):
-        raise ValueError("source must be a verified merged PR into merge-queue with matching merge SHA")
+            (info.get("mergeCommit") or {}).get("oid") != merge_sha or info.get("baseRefName") not in DISCOVERY_BRANCHES):
+        raise ValueError("source must be a verified merged PR into an accepted target branch with matching merge SHA")
     q = load_queue()
     result = review_receipt.enroll(q, repo=REPO, pr=pr, merge_sha=merge_sha, request_id=request_id,
                                    at=iso(), target_selector=target_selector)
@@ -966,7 +1013,7 @@ def _save_discovery_queue(q, stage):
                                      "; tick aborted; persisted progress must be revalidated") from None
 
 
-def _read_reconcile_wrapper(path, interval, page_budget):
+def _read_reconcile_wrapper(path, interval, page_budget, recent=False):
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -985,8 +1032,8 @@ def _read_reconcile_wrapper(path, interval, page_budget):
     source = wrapper["source"]
     if (set(source) != {"version", "method", "repo", "base", "repository_id", "ceiling", "window"} or
             type(source.get("version")) is not int or source["version"] != 1 or
-            source.get("method") != "all-number-slots-v1" or source.get("repo") != REPO or
-            source.get("base") != "merge-queue" or source.get("window") != merged_reconcile.NUMBER_WINDOW or
+            source.get("method") != ("closed-updated-v1" if recent else "all-number-slots-v1") or source.get("repo") != REPO or
+            source.get("base") != DISCOVERY_SELECTOR or source.get("window") != merged_reconcile.NUMBER_WINDOW or
             not isinstance(source.get("repository_id"), str) or not source["repository_id"] or
             type(source.get("ceiling")) is not int or
             not 0 <= source["ceiling"] <= merged_reconcile.MAX_REPOSITORY_NUMBER):
@@ -995,19 +1042,20 @@ def _read_reconcile_wrapper(path, interval, page_budget):
         raise merged_reconcile.ReconcileRefused("source/checkpoint wrapper digest mismatch")
     if wrapper["checkpoint"] is not None:
         wrapper["checkpoint"] = merged_reconcile.load_checkpoint(wrapper["checkpoint"], interval, page_budget,
-            repo=REPO, base="merge-queue", allow_complete=True)
+            repo=REPO, base=DISCOVERY_SELECTOR, allow_complete=True)
     return wrapper
 
 
-def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
+def reconcile_merged(q, *, after, before, page_budget, dry_run=False, recent=False):
     """Caller owns tick.lock; persist source/page before reads and Q1 before watermark."""
     interval = merged_reconcile.normalize_interval(after, before)
     if before >= iso():
         raise merged_reconcile.ReconcileRefused("upper bound must precede scan startup")
     merged_reconcile.normalize_page_budget(page_budget)
-    key = review_receipt.digest({"repo": REPO, "base": "merge-queue", **interval})
+    key = review_receipt.digest({"repo": REPO, "base": DISCOVERY_SELECTOR, **interval,
+                                **({"method": "closed-updated-v1"} if recent else {})})
     path = STATE / "reconcile" / (key + ".json")
-    wrapper = _read_reconcile_wrapper(path, interval, page_budget)
+    wrapper = _read_reconcile_wrapper(path, interval, page_budget, recent=recent)
 
     def save_wrapper():
         wrapper["digest"] = review_receipt.digest({k: v for k, v in wrapper.items() if k != "digest"})
@@ -1023,7 +1071,10 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
             raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
 
     if wrapper is None:
-        source = merged_reconcile.freeze_source(forge, repo=REPO, base="merge-queue")
+        source = ({"version": 1, "method": "closed-updated-v1", "repo": REPO,
+                   "base": DISCOVERY_SELECTOR, "repository_id": REPO, "ceiling": 0,
+                   "window": merged_reconcile.NUMBER_WINDOW} if recent else
+                  merged_reconcile.freeze_source(forge, repo=REPO, base=DISCOVERY_SELECTOR))
         wrapper = {"source": source, "checkpoint": None}
         if not dry_run:
             save_wrapper()
@@ -1036,11 +1087,12 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     raw = wrapper["checkpoint"]
     if raw and raw.get("complete"):
         result = merged_reconcile.load_checkpoint(raw, interval, page_budget, repo=REPO,
-                                                   base="merge-queue", allow_complete=True)
+                                                   base=DISCOVERY_SELECTOR, allow_complete=True)
     else:
         result = merged_reconcile.reconcile(None,
-            lambda cursor: merged_reconcile.number_page(forge, source, cursor, repo=REPO, base="merge-queue"),
-            repo=REPO, **interval, page_budget=page_budget, checkpoint_raw=raw,
+            lambda cursor: (recent_merged_page(cursor, after) if recent else
+                merged_reconcile.number_page(forge, source, cursor, repo=REPO, base=DISCOVERY_SELECTOR)),
+            repo=REPO, base=DISCOVERY_SELECTOR, **interval, page_budget=page_budget, checkpoint_raw=raw,
             checkpoint_save=persist, dry_run=dry_run)
     summary = {**result["summary"], "inventory_digest": result["digest"],
                "source": source, "checkpoint_key": key}
@@ -1070,12 +1122,57 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False):
     return summary
 
 
-def discover_merged(q, budget):
-    """Natural nonselective tick, same bounded inventory and overlap replay."""
+def rolling_discovery_interval(q, config):
+    """Keep the configured history floor; freeze only each in-progress scan."""
+    before = iso(now() - dt.timedelta(seconds=1))
+    floor = merged_reconcile.normalize_interval(config.get("after"), before)["after"]
+    active = q.get("merged_discovery") or {}
+    if (not active.get("complete") and active.get("after", "") >= floor
+            and active.get("before", "") < before and active.get("after", "") < active.get("before", "")):
+        return merged_reconcile.normalize_interval(active["after"], active["before"])
+    watermark = q.get("merged_watermark")
+    after = max(floor, iso(parse_iso(watermark) - dt.timedelta(minutes=5))) if watermark else floor
+    return merged_reconcile.normalize_interval(after, before)
+
+
+def recent_merged_page(cursor, after):
+    """Newest closed PRs first; stop at the history floor, with resumable pages."""
+    page = 1 if cursor is None else int(cursor)
+    if page < 1 or (cursor is not None and str(page) != cursor):
+        raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
+    try:
+        rows = gh_json(["api", f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}"])
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, deferred_refresh.RefreshExhausted):
+        raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise merged_reconcile.ReconcileRefused("invalid closed-PR page")
+    records = []
+    older = False
+    for row in rows:
+        if not isinstance(row, dict):
+            raise merged_reconcile.ReconcileRefused("invalid closed-PR record")
+        updated = row.get("updated_at")
+        merged_reconcile.normalize_interval("1970-01-01T00:00:00Z", updated)
+        if updated <= after:
+            older = True
+        if "merged_at" not in row:
+            raise merged_reconcile.ReconcileRefused("missing merge metadata")
+        if row["merged_at"] and (row.get("base") or {}).get("ref") in DISCOVERY_BRANCHES:
+            records.append({"number": row.get("number"), "mergedAt": row["merged_at"],
+                "mergeCommit": {"oid": row.get("merge_commit_sha")},
+                "headRefOid": (row.get("head") or {}).get("sha")})
+    more = len(rows) == 100 and not older
+    return {"records": records, "has_next_page": more, "next_cursor": str(page + 1) if more else None}
+
+
+def discover_merged(q, budget, *, interval=None, recent=False):
+    """Persist a bounded discovery scan; resume it before rolling the next upper."""
     caller = q
     q = json.loads(json.dumps(q))
     active = q.get("merged_discovery") or {}
-    if active and not active.get("complete"):
+    if interval is not None:
+        after, before = interval["after"], interval["before"]
+    elif active and not active.get("complete"):
         after, before = active["after"], active["before"]
     else:
         watermark = q.get("merged_watermark") or q["created_at"]
@@ -1085,12 +1182,12 @@ def discover_merged(q, budget):
         return []
     # Record the frozen bounds in queue too: a crash after source pinning but
     # before page one must not cause the next tick to choose a different upper.
-    if not active or active.get("complete"):
+    if interval is not None or not active or active.get("complete"):
         q["merged_discovery"] = {"after": after, "before": before, "complete": False}
         _save_discovery_queue(q, "bounds-save")
     try:
         with forge_window(budget):
-            result = reconcile_merged(q, after=after, before=before, page_budget=4)
+            result = reconcile_merged(q, after=after, before=before, page_budget=4, recent=recent)
         q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
         _save_discovery_queue(q, "discovery-summary-save")
         if result["complete"]:
@@ -1173,11 +1270,14 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
     if dry:
-        return {"base": "(synthetic)", "head": "(synthetic)", "target": "origin/merge-queue",
+        return {"base": "(synthetic)", "head": "(synthetic)", "target": DEFAULT_REF,
                 "label": "post-merge synthetic review", "cycle": None, "notes": [], "branch": None}
-    base, head, n = build_synthetic(item)
-    return {"base": base, "head": head, "target": "origin/merge-queue", "cycle": None, "branch": None,
-            "label": f"post-merge synthetic review ({n} PR-touched paths, pre-merge → merge-queue)", "notes": []}
+    target = git("rev-parse", DEFAULT_REF + "^{commit}")
+    if not is_ancestor(item["merge_commit"], target):
+        raise NotReady("not-yet-promoted: merge commit is not an ancestor of origin/main")
+    base, head, n = build_synthetic(item, target)
+    return {"base": base, "head": head, "target": target, "cycle": None, "branch": None,
+            "label": f"post-merge current projection ({n} PR-touched paths at promoted main)", "notes": []}
 
 
 def object_present(sha: str) -> bool:
@@ -1210,9 +1310,25 @@ def starts_last_hour(q: Dict[str, Any]) -> int:
     return sum(1 for s in q.get("starts", []) if parse_iso(s) > cutoff)
 
 
+def notify_owner(text: str) -> Dict[str, Any]:
+    """Paseo message to the chancellor (the owner's desk). promotion.alert_agent_host
+    names its daemon when it is not the local one (queue-host runner → worker-host). Never
+    raises: an unreachable daemon must not stall the tick that is reporting."""
+    res: Dict[str, Any] = {}
+    aid = CONFIG.get("promotion", {}).get("alert_agent_id")
+    if aid:
+        host = CONFIG.get("promotion", {}).get("alert_agent_host")
+        try:
+            p = run(["paseo", "send", "--no-wait", *(["--host", host] if host else []), aid, text], check=False,
+                    timeout=30 if host else 90)
+            res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            res["paseo_send"] = f"error: {exc}"[:150]
+    return res
+
+
 def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [i for i in q["items"] if i["state"] == "reviewing" or (i["kind"] == "promotion" and (
-        i["state"] in SIGNER_STATES or (i.get("request") or {}).get("reconciliation_required")))]
+    return [i for i in live_items(q) if (i["state"] == "reviewing" or (i.get("kind") in backfill_jobs.RANK4 and backfill_jobs.is_execution_owner(i)))]
 
 
 def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str:
@@ -1227,6 +1343,10 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         ok, scan = secret_scan_diff(patch, rdir / "secret-scan.json", base=plan["base"], head=plan["head"])
     else:
         ok, scan = secret_scan(plan["base"], plan["head"], rdir / "secret-scan.json")
+    if ok and item["kind"] == backfill_jobs.KIND:
+        context = backfill_runtime.ledger.canonical(item.get("context", {})).decode()
+        patch = "diff --git a/.crq-review-context.json b/.crq-review-context.json\n--- /dev/null\n+++ b/.crq-review-context.json\n@@ -0,0 +1 @@\n+" + context + "\n"
+        ok, scan = secret_scan_diff(patch, rdir / "context-secret-scan.json", base=plan["base"], head=plan["head"])
     if not ok:
         item["state"] = "blocked"
         item["last_error"] = (f"secret scan failed before upload: {len(scan['denylist_hits'])} denylist + "
@@ -1262,6 +1382,8 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "range_policy": plan.get("range_policy"), "started_at": iso(),
             "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
+    if item["kind"] == backfill_jobs.KIND:
+        meta["backfill"] = {k: item[k] for k in ("subject_id", "job_id", "attempt_id", "target", "scope_digest")}
     if item["kind"] == review_receipt.KIND:
         meta["capture"] = item["capture"]
         meta["source"] = item["subject"]
@@ -1367,12 +1489,31 @@ def cmd_review_child(run_id: str) -> int:
     rdir = RUNS / run_id
     meta = json.loads((rdir / "meta.json").read_text())
     cmd = review_wrapper_argv(meta["cmd"], CONFIG["review_timeout_min"])
+    reviewer_env = dict(os.environ, CODERABBIT_CLI_DISABLE_AUTO_UPDATE="true",
+                        CODERABBIT_CLI_UPDATE_MANAGED="true")
     pidfile = rdir / "review.pid"
     identity = {"run_id": run_id, "pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(),
                 "sid": os.getsid(0), "group_owner": author_quota.GROUP_OWNER_MARKER}
     repair_tick.atomic(pidfile, identity)
+    try:
+        if meta.get("kind") == backfill_jobs.KIND:
+            version = subprocess.run([meta["cmd"][0], "--version"], capture_output=True, text=True, check=True, timeout=30, env=reviewer_env).stdout.strip()
+            if version not in backfill_runtime.history.REVIEWER_FORMATS:
+                raise RuntimeError("backfill scope adapter refuses unknown CodeRabbit version")
+            repository = backfill_runtime.accounting.Repository(meta["worktree"])
+            if repository.git("rev-parse", "HEAD^{commit}").decode().strip() != meta["head"] or repository.git("status", "--porcelain").strip():
+                raise RuntimeError("backfill submission must match clean pinned head")
+            proof = {"cli_version": version, "format": backfill_runtime.history.REVIEWER_FORMATS[version], "run_id": run_id,
+                     "head": meta["head"], "base": meta["base"], "attempt_id": meta["backfill"]["attempt_id"],
+                     "submitted_scope": backfill_runtime.history.submitted_scope(repository, meta["base"], meta["head"])}
+            repair_tick.atomic(rdir / "submission.json", proof)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        (rdir / "review.ndjson").write_text(json.dumps({"type": "error", "message": str(exc)}) + "\n")
+        repair_tick.atomic(rdir / "exit.json", {"exit": 3, "ended_at": iso(), "timed_out": False,
+                                               "pre_vendor_refusal": True})
+        return 3
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
-        proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL, env=reviewer_env)
         repair_tick.atomic(pidfile, {**identity, "cli_pid": proc.pid})
         rc = proc.wait()
     # GNU timeout exits 124 when it sends TERM at the deadline; a `--kill-after`
@@ -1489,12 +1630,12 @@ def set_rate_cooldown(q, cls, rdir):
 
 def has_collectable_runs(q):
     """Match the minute harvester's reviewing/run eligibility without probing owners."""
-    return any(i["state"] == "reviewing" and i.get("run") for i in q["items"])
+    return any(i["state"] == "reviewing" and i.get("run") for i in live_items(q))
 
 
 def refresh_slot_deadline(q, usage, remaining, gate, at=None):
     at = now() if at is None else at
-    if q.get("paused") or gate == "inflight" or not any(i["state"] == "pending" for i in q["items"]):
+    if q.get("paused") or gate == "inflight" or not any(i["state"] == "pending" for i in live_items(q)):
         deadline = at + dt.timedelta(minutes=12)
     elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > at:
         deadline = parse_iso(q["cooldown_until"])
@@ -1563,6 +1704,27 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         save_queue(q)
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
         return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (no repair)"
+    if item["kind"] == backfill_jobs.KIND:
+        return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
+                                        terminal_verified=(state == "harvest"))
+    if item["kind"] == "coverage":
+        try:
+            coverage._legacy_origins(q, item)
+        except ValueError as exc:
+            item.update(state="blocked", vendor_state="terminal", run=None,
+                        last_error="legacy coverage lineage unresolved: " + str(exc))
+            if item.get("attempt_id"):
+                q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
+            if cls["outcome"] in ("auth", "action_required"):
+                q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
+            if cls["outcome"] == "rate_limited":
+                set_rate_cooldown(q, cls, rdir)
+            save_queue(q)
+            remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
+            return item["last_error"]
+    if item["kind"] == "coverage" and item.get("attempt_id"):
+        item["vendor_state"] = "terminal"
+        q.get("backfill_reservations", {}).get(item["attempt_id"], {})["terminal_at"] = iso()
     remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
     attempt = {"run_id": r["run_id"], "outcome": cls["outcome"], "counted": cls["counted"], "at": iso(),
                "head": meta["head"], "base": meta["base"], "message": cls.get("message")}
@@ -1603,15 +1765,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             run_id=meta["run_id"], completed_at=record["completed_at"], reviewed_paths=terminal_paths,
             review_sha=meta.get("coverage_sha") or meta.get("reviewed_tip") or meta["head"],
             counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
-        if item["kind"] == "promotion":
-            promotion_result = harvest_promotion(item, meta, cls, rdir)
-            repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
-            return f"{item['id']}: completed ({cls['findings']} findings) {promotion_result}"
+        if item["kind"] == "coverage" and item.get("coverage_source"):
+            coverage.record_legacy_success(q, item, terminal_paths)
         repair_pending = repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
         item["state"] = "repairing" if repair_pending else "done"
         return f"{item['id']}: completed ({cls['findings']} findings)"
     if o == "rate_limited":
         set_rate_cooldown(q, cls, rdir)
+        attempt["deadline"] = q["cooldown_until"]
         q["rl_backoff_min"] = min(240, (q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]) * 2)
         item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
         if item["kind"] == author_quota.AUTHOR_KIND:
@@ -1633,19 +1794,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # error / interrupted / skipped / too_large: item-level backoff, never counted
     item["failures"] = item.get("failures", 0) + 1
     item["last_error"] = f"{o}: {cls.get('message')}"
+    if item["kind"] == "coverage":
+        coverage.record_legacy_failure(q, item, iso(), o, r["run_id"])
     if item["kind"] == author_quota.AUTHOR_KIND:
         # An attempted author dispatch is always a consumed terminal: the generic
         # pending/backoff retry path below must never apply to it.
         author_dispatch_failed(item, r, o, cls)
         return f"{item['id']}: {o} (not counted) → {item['state']} (author, no retry)"
-    if item["kind"] == "promotion" and o in ("skipped", "too_large"):
-        item["state"] = "split_needed"  # promotion_tick re-cuts a smaller prefix (never reported as success)
-    elif item["kind"] == "promotion" and o == "error" and item["failures"] >= CONFIG["max_item_failures"]:
-        item.update(state="blocked", not_before=None)
-    elif item["kind"] == "promotion":  # other failures retain the existing promotion retry policy
-        item["state"] = "pending"
-        item["not_before"] = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
-    elif o in ("skipped", "too_large") or item["failures"] >= CONFIG["max_item_failures"]:
+    if o in ("skipped", "too_large") or item["failures"] >= CONFIG["max_item_failures"]:
         item["state"] = "blocked"
     else:
         item["state"] = "pending"
@@ -1672,13 +1828,13 @@ def parked_merged_linked_receipt(q: Dict[str, Any], item: Dict[str, Any]) -> boo
     """A merged row parked because a linked current-code receipt owns recovery
     never starts on its own, so it demands no additional-cycle wait."""
     return item["kind"] == "merged" and any(
-        i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"] for i in q["items"])
+        i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"] for i in live_items(q))
 
 
 def optional_wait(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     return additional_cycle(item) and any(
         i["state"] == "pending" and rank(i) <= 3 and not parked_merged_linked_receipt(q, i)
-        for i in q["items"] if i is not item)
+        for i in live_items(q) if i is not item)
 
 
 def advance_open(item: Dict[str, Any]) -> None:
@@ -1698,1155 +1854,6 @@ def ledger_append(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any
                   f"- disposition: detached repair inbox; see status digest\n")
 
 
-# ----------------------------------------------------------- promotion to main
-#
-# cq-toolkit docs/promotion-policy.md (PR #269): main is promoted in batches,
-# and only to a merge-queue sha carrying an owner-posted `crq/promotion-review`
-# status whose description binds `main=<base>`. crq cuts the batch, reviews
-# base..batch (or reviewed..batch for a delta) and posts the status.
-
-PROMO = CONFIG.get("promotion", {})
-OPEN_PROMO_STATES = ("pending", "reviewing", "findings", "promoting", "split_needed", "chain_next", "blocked",
-                     "requested", "signer_running")
-MAIN_TOKEN = re.compile(r"(^|\s)main=[0-9a-f]{40}(\s|$)")
-# A refused gate is not a retryable review failure. Bound silent ownership of
-# the promotion slot even when no usable gate result is available.
-PROMOTION_GATE_STALL_MIN = 60
-
-
-def policy_at(rev: str) -> bool:
-    return run(["git", "cat-file", "-e", f"{rev}:docs/promotion-policy.md"], cwd=CLONE, check=False).returncode == 0
-
-
-def workflow_at(rev: str, name: str) -> bool:
-    """True when the promotion gate workflow `name` exists on fetched `rev`."""
-    return run(["git", "cat-file", "-e", f"{rev}:.github/workflows/{name}"], cwd=CLONE,
-               check=False).returncode == 0
-
-
-def promotion_gate_live() -> bool:
-    """The gate only exists once #269's policy is on main; before that a
-    promotion review would spend quota on nothing."""
-    return policy_at("origin/main")
-
-
-def main_sha() -> str:
-    return run(["gh", "api", f"repos/{REPO}/git/ref/heads/main", "--jq", ".object.sha"], timeout=60).stdout.strip()
-
-
-def checks_verdict(sha: str) -> str:
-    """Mirror merge-queue-gate's I4 fold over check-runs?filter=latest: per
-    required name, pass only when EVERY row is completed+success."""
-    rows = run(["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs?filter=latest", "--paginate", "--jq",
-                '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'], timeout=120).stdout.splitlines()
-    for name in PROMO.get("checks", ["static", "denylist", "ratchet"]):
-        mine = [r.split("\t") for r in rows if r.split("\t")[0] == name]
-        if not mine:
-            return f"{name} missing"
-        bad = [f"{s}/{c}" for _n, s, c in mine if s != "completed" or c != "success"]
-        if bad:
-            return f"{name} {bad[0]}"
-    return "pass"
-
-
-PROMOTION_TIP_CHECKS_PER_TICK = 5
-
-
-def newest_green_tip(base: str, log: List[str], state: Dict[str, Any]) -> Optional[str]:
-    """Scan newest-first in bounded pages; persist progress, never truncate the range.
-
-    A sweep finishes its pinned snapshot even if new commits arrive, so a busy
-    queue cannot starve an older green tip. The next sweep starts at the new tip.
-    """
-    cursor = state.get("tip_scan")
-    cursor = cursor if isinstance(cursor, dict) else {}
-    resume = cursor.get("next")
-    if (cursor.get("schema_version") != 1 or cursor.get("base") != base
-            or not isinstance(resume, str) or not re.fullmatch(r"[0-9a-f]{40}", resume)
-            or not is_ancestor(resume, "origin/merge-queue")):
-        resume = "origin/merge-queue"
-    # One lookahead SHA makes the next page inclusive, without repeating a check.
-    tips = git("rev-list", "--first-parent", "--max-count",
-               str(PROMOTION_TIP_CHECKS_PER_TICK + 1), f"{base}..{resume}").split()
-    for sha in tips[:PROMOTION_TIP_CHECKS_PER_TICK]:
-        # Save before the remote read; an exception retries only this candidate.
-        state["tip_scan"] = {"schema_version": 1, "base": base, "next": sha}
-        v = checks_verdict(sha)
-        if v == "pass":
-            state.pop("tip_scan", None)
-            return sha
-        log.append(f"promotion: skip tip {sha[:10]} ({v})")
-    if len(tips) > PROMOTION_TIP_CHECKS_PER_TICK:
-        state["tip_scan"] = {"schema_version": 1, "base": base, "next": tips[-1]}
-        log.append("promotion: green-tip scan continues next tick")
-    else:
-        state.pop("tip_scan", None)  # completed sweep; recheck pending tips next tick
-    return None
-
-
-def promotion_record(item: Dict[str, Any]) -> Optional[str]:
-    """Persist the owner-visible record without a GitHub comment or review."""
-    iid = item["id"]
-    from record_ids import record_id, legacy_record_id
-    try:
-        alias = record_id(iid)
-    except ValueError:
-        alias = legacy_record_id(iid)  # no canonical normalization of old state
-    if not re.fullmatch(r"[A-Za-z0-9_+.-]+", iid):
-        raise ValueError("invalid promotion record id")
-    directory = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "crq/records"
-    record = {"item": iid, "state": item["state"], "base": item.get("base_sha"),
-              "batch": item.get("batch_sha"), "blocking": item.get("blocking", []), "as_of": iso()}
-    for name in {iid, alias}:
-        target = directory / (name + '.json')
-        if target.exists() and json.loads(target.read_text()).get('item') != iid:
-            raise ValueError('ambiguous promotion record binding')
-        repair_tick.atomic(target, record)
-    template = PROMO.get("record_url_template")
-    from urllib.parse import quote
-    return template.format(item=quote(alias, safe="-_")) if template else None
-
-
-def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str, log: List[str]) -> None:
-    if not MAIN_TOKEN.search(desc) or len(desc) > 140:
-        raise RuntimeError(f"bad promotion status description: {desc!r}")
-    if not PROMO.get("post_status", False):
-        log.append(f"promotion: status NOT posted (post_status off): {state} {sha[:10]} {desc}")
-        return
-    if promotion_mode() != "user":  # the gate trusts only the signer's bot now; a User status would go red
-        log.append(f"promotion: status NOT posted ({promotion_mode()} mode): {state} {sha[:10]}")
-        return
-    # A status from a non-allowed creator turns the gate RED; never post as anyone but the owner's User.
-    who = run(["gh", "api", "user", "--jq", '.login + " " + .type'], timeout=60).stdout.strip()
-    if who != f"{PROMO['poster']} User":
-        raise RuntimeError(f"refusing to post {PROMO['status_context']}: gh auth is {who!r}, not {PROMO['poster']} (User)")
-    target = promotion_record(item)
-    argv = ["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{sha}", "-f", f"context={PROMO['status_context']}",
-            "-f", f"state={state}", "-f", f"description={desc}"]
-    if target:
-        argv.extend(["-f", "target_url=" + target])
-    out = run(argv, timeout=60).stdout
-    # the GitHub status id is what the promotion audit matches against
-    item.setdefault("statuses", []).append({"at": iso(), "sha": sha, "state": state, "description": desc,
-                                            "id": json.loads(out).get("id"), "target_url": target})
-    event("promotion_status", item=item["id"], sha=sha, state=state, description=desc)
-    log.append(f"promotion: posted {state} on {sha[:10]}: {desc}")
-
-
-def first_parents(start: str, end: str) -> List[str]:
-    """merge-queue first-parent commits in start..end, oldest first (one per merge)."""
-    return git("rev-list", "--first-parent", "--reverse", f"{start}..{end}").split()
-
-
-def green_within(fps: List[str], log: List[str]) -> Optional[str]:
-    """Newest commit of a contiguous oldest-first prefix whose gate checks are all green."""
-    for sha in reversed(fps):
-        v = checks_verdict(sha)
-        if v == "pass":
-            return sha
-        log.append(f"promotion: skip tip {sha[:10]} ({v})")
-    return None
-
-
-def split_promotion(q: Dict[str, Any], item: Dict[str, Any], log: List[str], dry: bool) -> None:
-    """CodeRabbit skipped/refused the batch: re-cut the oldest contiguous half of
-    its merges; escalate to the owner only when a single-merge batch is refused."""
-    st = q.setdefault("promotion", {})
-    start = item.get("reviewed_sha") or item["base_sha"]
-    fps = first_parents(start, item["batch_sha"])
-    outcome = (item.get("attempts") or [{}])[-1].get("outcome", "skipped")
-    if len(fps) <= 1:
-        if dry:
-            log.append(f"promotion: would escalate {item['id']} (single-merge batch {outcome})")
-            return
-        item.update(state="blocked", last_error=f"single-merge batch {outcome} by CodeRabbit — owner override needed")
-        post_promotion_status(item, item["batch_sha"], "error",  # no-op in signer mode (the signer posted error)
-                              f"review {outcome} on 1-merge batch main={item['base_sha']} crq#{item['id']}"[:140], log)
-        st.setdefault("escalations", []).append({"at": iso(), "item": item["id"], "sha": item["batch_sha"],
-                                                 "base": item["base_sha"], "outcome": outcome, "acked": None})
-        st["attempts"] = st.get("attempts", []) + [{"at": iso(), "item": item["id"], "merges": 1, "why": f"{outcome} → ESCALATED"}]
-        event("promotion_escalated", item=item["id"], sha=item["batch_sha"], outcome=outcome)
-        notify_owner(f"crq PROMOTION NEEDS OWNER OVERRIDE: CodeRabbit {outcome} the single-merge batch "
-                     f"{item['batch_sha'][:10]} (main={item['base_sha'][:10]}). Override per docs/promotion-policy.md, "
-                     f"then `crq.py promotion-ack {item['batch_sha'][:10]} \"<reason>\"`.")
-        log.append(f"promotion: {item['id']} single-merge batch {outcome} → escalated to owner")
-        return
-    n = len(fps) // 2
-    tip = green_within(fps[:n], log)
-    if not tip:
-        log.append(f"promotion: {item['id']} {outcome}; no green tip in the oldest {n} merges yet — waiting")
-        return
-    if not dry:
-        item.update(state="split", last_error=f"{outcome} at {len(fps)} merges → re-cut to {n}")
-        st["continue_to"] = st.get("continue_to") or item["batch_sha"]
-        st["batch_cap"] = n
-    if promotion_mode() == "signer":  # full prefix review from main under a fresh id
-        cut_promotion(q, log, dry, item["base_sha"], tip, f"{outcome} at {len(fps)} merges → oldest {n}")
-        return
-    cut_promotion(q, log, dry, item["base_sha"], tip, f"{outcome} at {len(fps)} merges → oldest {n}",
-                  reviewed=item.get("reviewed_sha"), carried=item.get("blocking"),
-                  must_reach=(item.get("must_reach") or item["batch_sha"]) if item.get("blocking") else None)
-
-
-def open_promotion(q: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return next((i for i in q["items"] if i["kind"] == "promotion" and i["state"] in OPEN_PROMO_STATES), None)
-
-
-def cut_promotion(q: Dict[str, Any], log: List[str], dry: bool, base: str, batch: str, why: str,
-                  reviewed: Optional[str] = None, carried: Optional[List[Dict[str, Any]]] = None,
-                  must_reach: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    if promotion_mode() == "signer":
-        try:
-            iid = fresh_signer_id(q, batch)
-        except SpoolUnreachable as exc:
-            spool_unreachable(q, exc, log)
-            q.setdefault("promotion", {})["requested"] = True  # re-cut once the spool is back
-            return None
-        spool_ok(q)
-        if iid is None:
-            signer_alert(q, None, f"no fresh signer id left for batch {batch[:10]} (10 attempts used)", log)
-            return None
-    else:
-        iid = f"promo-{batch[:10]}{'-delta' if reviewed else ''}"
-        while any(i["id"] == iid for i in q["items"]):
-            iid += "+"
-    merges = len(first_parents(reviewed or base, batch))
-    item = new_item(q, log, dry, id=iid, pr=0, kind="promotion", base_sha=base, batch_sha=batch,
-                    reviewed_sha=reviewed, blocking=carried or [], merges=merges, why=why)
-    if promotion_mode() == "signer":
-        item["signer"] = True  # cut under the signer gate (user-era items get re-requested once)
-    if must_reach and must_reach != batch:
-        item["must_reach"] = must_reach  # carries resolved findings: success only once the fix tip is reviewed
-    if not dry:
-        st = q.setdefault("promotion", {})
-        st["requested"] = False
-        st["attempts"] = (st.get("attempts", []) + [{"at": iso(), "item": iid, "merges": merges, "why": why}])[-30:]
-    log.append(f"promotion: {'would cut' if dry else 'cut'} {item['id']} {(reviewed or base)[:10]}..{batch[:10]} "
-               f"main={base[:10]} ({why})")
-    return item
-
-
-def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
-    """Advance the (single) open promotion, or cut a new one when a trigger fired."""
-    log: List[str] = []
-    if not PROMO.get("enabled"):
-        return log
-    if not promotion_gate_live():
-        return ["promotion: dormant (origin/main has no docs/promotion-policy.md yet)"]
-    st = q.setdefault("promotion", {})
-    mode = promotion_mode()
-    if mode == "signer_unconfigured":
-        if not st.get("unconfigured_alerted") and not dry:
-            st["unconfigured_alerted"] = iso()
-            signer_alert(q, None, f"reviewer identity not pinned: {_MODE_WHY.get('origin/main', '?')} — promotion "
-                                  f"halted (no User statuses: they would go red). Fill promotion.signer from the "
-                                  f"owner's registration record only.", log)
-        return log + [f"promotion: HALTED — reviewer identity not pinned ({_MODE_WHY.get('origin/main', '?')})"]
-    main = main_sha()
-    if not st.get("last_promoted_at"):
-        # epoch, not %cI: %cI carries the committer's UTC offset, and truncating it to "...Z" skewed this by hours
-        st["last_promoted_at"] = iso(dt.datetime.fromtimestamp(int(git("log", "-1", "--format=%ct", "origin/main")), dt.timezone.utc))
-    item = open_promotion(q)
-    if mode == "signer" and item and not item.get("signer") and item["state"] != "reviewing":
-        # cut under the User-status gate: its statuses no longer count — re-request a full signer review
-        recut_promotion(q, item, log, dry, "superseded", "gate switched to the promotion reviewer signer")
-        return log
-    if item and item["state"] in ("pending", "findings", "split_needed", "chain_next", "blocked") \
-            and is_ancestor(item["batch_sha"], main):
-        if not dry:  # e.g. the owner overrode an escalated batch: the slot must not stay held
-            item.update(state="done", last_error=f"batch already in main {main[:10]} (promoted outside crq)")
-            event("promoted_outside_crq", item=item["id"], sha=item["batch_sha"])
-        log.append(f"promotion: {item['id']} batch already in main → closed")
-        item = None
-    if item and item["state"] == "promoting":
-        if is_ancestor(item["batch_sha"], main):
-            if not dry:
-                item["state"] = "done"
-                st.update(last_promoted_sha=item["batch_sha"], last_promoted_at=iso())
-                event("promoted", item=item["id"], sha=item["batch_sha"])
-            log.append(f"promotion: main reached {item['batch_sha'][:10]} → {item['id']} done")
-            item = None
-        elif not is_ancestor(item["base_sha"], main):
-            if not dry:
-                item.update(state="skipped", last_error=f"main moved to {main[:10]}, which lacks the review base")
-            log.append(f"promotion: {item['id']} superseded (main {main[:10]} lacks base) → re-cut")
-            item = None
-        elif item.get("gate_stalled_at") and main != item["base_sha"] and is_ancestor(main, item["batch_sha"]):
-            # Main advanced inside the stalled range: the old exact-base review
-            # cannot authorize the remainder. Re-cut for a fresh full review.
-            why = f"main advanced within stalled range to {main[:10]} → re-cut remaining range"
-            if dry:
-                log.append(f"promotion: {item['id']} would re-cut remaining range from {main[:10]}")
-            else:
-                recut_promotion(q, item, log, dry, "skipped", why)
-            return log
-        else:
-            since = (now() - parse_iso(item["success_at"])).total_seconds() / 60
-            if item.get("gate_stalled_at") or since >= PROMOTION_GATE_STALL_MIN:
-                text = (f"{item['id']}: main has not reached batch {item['batch_sha'][:10]} "
-                        f"(base {item['base_sha'][:10]}) within {PROMOTION_GATE_STALL_MIN}m of review success; "
-                        "inspect cq-gate for refused/needs-human verdicts. Owner intervention required; "
-                        "no further gate dispatch or automatic retry.")
-                if not dry and not item.get("gate_stalled_at"):
-                    item.update(gate_stalled_at=iso(), last_error=text)
-                    st.setdefault("gate_alerts", []).append({"at": iso(), "item": item["id"],
-                        "sha": item["batch_sha"], "base": item["base_sha"], "text": text, "acked": None})
-                    event("promotion_gate_stalled", item=item["id"], sha=item["batch_sha"],
-                          base=item["base_sha"])
-                if not dry:
-                    alert = next((a for a in st.get("gate_alerts", [])
-                                  if a["item"] == item["id"] and a["sha"] == item["batch_sha"]), None)
-                    if alert and not alert.get("acked") and not alert.get("notified_at") and \
-                            (not alert.get("notify_after") or now() >= parse_iso(alert["notify_after"])):
-                        alert["notification"] = notify_owner(
-                            f"crq PROMOTION GATE NEEDS HUMAN: {text} — see {STATE / 'status.md'}; "
-                            f"ack with `crq.py promotion-ack {item['batch_sha'][:10]} \"<reason>\"`.")
-                        if alert["notification"].get("paseo_send") == 0:
-                            alert["notified_at"] = iso()
-                        else:
-                            alert["notify_after"] = iso(now() + dt.timedelta(minutes=15))
-                return log + [f"promotion: {'would escalate' if dry else 'GATE NEEDS HUMAN'} — {text}"]
-            if since >= PROMO.get("dispatch_after_min", 20) and not item.get("dispatched"):
-                # C2 cutover: the old gate is dispatched while it still exists on
-                # fetched main; once deleted, gate.yml (no sha input) takes over.
-                if workflow_at("origin/main", "merge-queue-gate.yml"):
-                    wf = "merge-queue-gate.yml"
-                elif workflow_at("origin/main", "gate.yml"):
-                    wf = "gate.yml"
-                else:
-                    wf = None
-                if wf is not None:
-                    if not dry:
-                        st.pop("gate_absent_alerted", None)
-                else:
-                    if not dry and not st.get("gate_absent_alerted"):
-                        st["gate_absent_alerted"] = iso()
-                        signer_alert(q, item, f"no promotion gate workflow on origin/main "
-                                              f"(merge-queue-gate.yml and gate.yml both absent) — refusing "
-                                              f"to dispatch for batch {item['batch_sha'][:10]}", log)
-                    log.append(f"promotion: no gate workflow on origin/main → refusing dispatch "
-                               f"for {item['batch_sha'][:10]}")
-                    return log
-                if wf == "merge-queue-gate.yml":
-                    cmd = ["gh", "workflow", "run", "merge-queue-gate.yml", "--repo", REPO, "--ref",
-                           "main", "-f", f"sha={item['batch_sha']}"]
-                else:
-                    cmd = ["gh", "workflow", "run", "gate.yml", "--repo", REPO, "--ref", "main"]
-                if not PROMO.get("post_status"):
-                    log.append(f"promotion: post_status off → no gate nudge "
-                               f"(would dispatch {wf} for {item['batch_sha'][:10]})")
-                    return log
-                if dry:
-                    log.append(f"promotion: would dispatch {wf} for {item['batch_sha'][:10]} "
-                               f"({since:.0f}m after success)")
-                    return log
-                r = run(cmd, check=False, timeout=60)
-                if r.returncode == 0:
-                    item["dispatched"] = iso()
-                    event("promotion_dispatch", item=item["id"], sha=item["batch_sha"], workflow=wf)
-                    log.append(f"promotion: main not at {item['batch_sha'][:10]} {since:.0f}m after success "
-                               f"→ {wf} dispatched")
-                else:
-                    event("promotion_dispatch_failed", item=item["id"], sha=item["batch_sha"],
-                          workflow=wf, exit=r.returncode, stderr=(r.stderr or "")[:300])
-                    log.append(f"promotion: {wf} dispatch failed (exit {r.returncode}): "
-                               f"{(r.stderr or '').strip()[:200]} — will retry")
-                    if not item.get("dispatch_alerted"):
-                        item["dispatch_alerted"] = iso()
-                        signer_alert(q, item, f"gate dispatch failed ({wf} exit {r.returncode}) for batch "
-                                              f"{item['batch_sha'][:10]} — will retry", log)
-            return log
-    if item and item["state"] == "findings":
-        if not is_ancestor(item["base_sha"], main):
-            if not dry:
-                item.update(state="skipped", last_error=f"main moved to {main[:10]}, which lacks the review base")
-            item = None
-        elif all(b.get("resolution") for b in item["blocking"]) and mode == "signer":
-            # signer-owned coverage: no agent-judged success, no delta — a FULL re-review of main..tip
-            tip = newest_green_tip(main, log, dict(st) if dry else st)
-            if not tip or tip == item["batch_sha"]:
-                return log + [f"promotion: {item['id']} resolved but no newer green tip yet — waiting for the fix to "
-                              f"merge (false positives need an owner override)"]
-            if not dry:
-                item.update(state="done", last_error="superseded by a full re-review after promotion-resolve")
-            cut_promotion(q, log, dry, main, tip, f"full re-review after {item['id']} findings resolved")
-            return log
-        elif all(b.get("resolution") for b in item["blocking"]):
-            tip = newest_green_tip(main, log, dict(st) if dry else st)
-            if tip == item["batch_sha"]:
-                n = len(item["blocking"])
-                if not dry:
-                    post_promotion_status(item, tip, "success",
-                                          f"reviewed; {n} blocking dispositioned main={item['base_sha']} crq#{item['id']}"[:140], log)
-                    item.update(state="promoting", success_at=iso())
-                return log
-            if tip and is_ancestor(item["batch_sha"], tip):
-                if not dry:
-                    item["state"] = "done"
-                cut_promotion(q, log, dry, item["base_sha"], tip, f"blocking findings of {item['id']} addressed",
-                              reviewed=item["batch_sha"], carried=item["blocking"])
-                return log
-            if tip:
-                if not dry:
-                    item.update(state="skipped", last_error=f"new green tip {tip[:10]} does not descend from the batch")
-                item = None
-            else:
-                return log + ["promotion: findings resolved; waiting for a green merge-queue tip"]
-        else:
-            open_n = sum(1 for b in item["blocking"] if not b.get("resolution"))
-            return log + [f"promotion: {item['id']} waiting on {open_n} unresolved blocking finding(s)"]
-    if item and item["state"] == "chain_next":
-        st_cap = st.get("batch_cap")
-        rest = first_parents(item["batch_sha"], item["must_reach"])
-        tip = green_within(rest[:st_cap or len(rest)], log)
-        if tip:
-            if not dry:
-                item["state"] = "done"
-            cut_promotion(q, log, dry, item["base_sha"], tip, f"chained delta toward fix tip {item['must_reach'][:10]}",
-                          reviewed=item["batch_sha"], carried=item["blocking"], must_reach=item["must_reach"])
-        return log
-    if item and item["state"] == "split_needed":
-        split_promotion(q, item, log, dry)
-        return log
-    if item:
-        return log  # pending / reviewing / blocked: the start loop and harvest own it
-    target = st.get("continue_to")
-    if target and is_ancestor(target, main):
-        if not dry:
-            st.pop("continue_to", None)
-            st.pop("batch_cap", None)
-        log.append(f"promotion: split batch {target[:10]} fully promoted")
-    elif target:  # promote a split batch prefix by prefix, at the size CodeRabbit accepted
-        rest = first_parents(main, target)
-        tip = green_within(rest[:st.get("batch_cap") or len(rest)], log)
-        if tip:
-            cut_promotion(q, log, dry, main, tip, f"continuing split batch toward {target[:10]} "
-                          f"(≤{st.get('batch_cap')} of {len(rest)} remaining merges)")
-        else:
-            log.append(f"promotion: continuing split batch toward {target[:10]}; no green tip in the next prefix yet")
-        return log
-    merges = int(git("rev-list", "--count", "--merges", "--first-parent", f"{main}..origin/merge-queue"))
-    age_h = (now() - parse_iso(st["last_promoted_at"])).total_seconds() / 3600
-    why = ("on demand" if st.get("requested") else
-           f"{merges} merges since last promotion" if merges >= PROMO.get("merges_trigger", 5) else
-           f"{age_h:.1f}h since last promotion" if merges and age_h >= PROMO.get("hours_trigger", 8) else None)
-    if not why:
-        return log
-    tip = newest_green_tip(main, log, dict(st) if dry else st)
-    if not tip or is_ancestor(tip, main):
-        return log + [f"promotion: trigger fired ({why}) but no merge-queue tip beyond main has all gate checks green"]
-    cut_promotion(q, log, dry, main, tip, why)
-    return log
-
-
-# ----------------------------------------------------------- signer mode (promotion reviewer bot, contract v1)
-#
-# Once main's merge-queue-gate.yml pins the promotion reviewer bot (cq-toolkit PR-B),
-# the gate trusts only that bot's statuses. The signer (the dedicated `crq`
-# macOS user) then reviews AND posts. crq only spools requests and reads
-# results: it never judges success and never posts a status. Until the pin is
-# on main, everything above runs unchanged ("user" mode).
-
-SIGNER = PROMO.get("signer", {})
-
-
-class SpoolUnreachable(Exception):
-    """The spool could not be read or written (ssh down, dir missing): state UNKNOWN."""
-
-
-class Spool:
-    """Request/result spool of contract v1. The signer runs on queue-host, so the spool
-    lives there (/var/lib/crq-spool) and crq pushes/reads over ssh (queue-host stays
-    outbound-only). The ssh key is DEDICATED (owner decision D4): on queue-host it
-    is pinned in authorized_keys to the forced command /opt/cq-reviewer/spool-shell,
-    which allows only the verbs below (put / snapshot / withdraw / read / exist).
-    This is the ONLY supported transport: no plain-shell fallback exists, and
-    without the dedicated key crq refuses to talk to the spool (fail closed).
-    `host: null` means a local directory (simulations only). Every id passes
-    SIGNER_ID before any command is built."""
-
-    def __init__(self, cfg: Dict[str, Any]):
-        self.key = cfg.get("ssh_key") or cfg.get("key")  # the signer runbook calls it `.key`
-        self.host = cfg.get("ssh_alias") or cfg.get("host")
-        self.dir = cfg.get("dir") or "/var/lib/crq-spool"
-        # removed (owner D4: no fallback): refuse the spool rather than ignore the key
-        self.refused = ("config promotion.signer.spool.legacy_shell is not supported: the dedicated forced-command "
-                        "key is the only transport (owner decision D4) — remove it") if "legacy_shell" in cfg else None
-        if self.host and not self.refused and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*",
-                                                               self.host):
-            self.refused = (f"promotion.signer.spool.ssh_alias must be a literal user@host (ssh runs with -F none), "
-                            f"got {self.host!r}")
-
-    @staticmethod
-    def _id(iid: str) -> str:
-        if not SIGNER_ID.match(iid):
-            raise ValueError(f"refusing spool access for id {iid!r}")
-        return iid
-
-    def _path(self, rel: str) -> Path:
-        return Path(self.dir) / rel
-
-    def _ssh(self, remote: str, data: Optional[bytes] = None) -> str:
-        if self.refused:
-            raise SpoolUnreachable(self.refused)
-        if self.key:
-            # -F none: no ssh_config identities, Match/ProxyCommand or ControlMaster. A shared master
-            # opened with a general key would silently ignore -i and bypass the forced command.
-            auth = ["-F", "none", "-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes",
-                    "-o", "IdentityAgent=none", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
-        else:
-            raise SpoolUnreachable("no dedicated spool key configured (promotion.signer.spool.ssh_key) — refusing "
-                                   "to use a general-purpose ssh identity")
-        cmd = ["/usr/bin/ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
-               "-o", "ServerAliveCountMax=2", self.host, remote]
-        try:
-            p = subprocess.run(cmd, input=data if data is not None else b"", capture_output=True, timeout=45)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            raise SpoolUnreachable(f"ssh {self.host}: {exc}"[:200])
-        if p.returncode != 0:
-            raise SpoolUnreachable(f"ssh {self.host} exit {p.returncode}: {p.stderr.decode(errors='replace').strip()[:200]}")
-        return p.stdout.decode(errors="replace")
-
-    def _remote(self, verb: str, *args: str, data: Optional[bytes] = None) -> str:
-        """`<verb> <args>` becomes SSH_ORIGINAL_COMMAND for spool-shell (word-split
-        there with globbing off, never eval)."""
-        return self._ssh(" ".join([verb, *args]), data)
-
-    def snapshot(self, iid: str) -> Dict[str, Any]:
-        """One round trip: {claimed, request, result: text|None} for one id."""
-        iid = self._id(iid)
-        if not self.host:
-            r = self._path(f"results/{iid}.json")
-            return {"claimed": self._path(f"results/{iid}.claimed").exists(),
-                    "request": self._path(f"requests/{iid}.json").exists(), "result": r.read_text() if r.exists() else None}
-        out = self._remote("snapshot", iid)
-        lines = out.split("\n", 2)
-        if len(lines) < 3 or lines[0] not in ("claimed 0", "claimed 1") or lines[1] not in ("request 0", "request 1"):
-            raise SpoolUnreachable(f"unexpected snapshot reply from {self.host}: {out[:80]!r}")
-        rest, result = lines[2], None
-        if rest.startswith("result begin\n") and rest.endswith("result end\n"):
-            result = rest[len("result begin\n"):-len("result end\n")]  # file may lack a final newline: "}result end"
-        elif rest != "result -\n":
-            raise SpoolUnreachable(f"unexpected snapshot result framing from {self.host}: {rest[:80]!r}")
-        return {"claimed": lines[0] == "claimed 1", "request": lines[1] == "request 1", "result": result}
-
-    def read(self, rel: str) -> Optional[str]:
-        """Only ledger/backoff.json or results/<valid id>.json. Empty = absent."""
-        if rel == "ledger/backoff.json":
-            target = ("backoff", "-")
-        elif rel.startswith("results/") and rel.endswith(".json"):
-            target = ("result", self._id(rel[8:-5]))
-        else:
-            raise ValueError(f"refusing spool read {rel!r}")
-        if not self.host:
-            f = self._path(rel)
-            return f.read_text() if f.exists() else None
-        out = self._remote("read", *target)
-        return out or None
-
-    def results_exist(self, ids: List[str]) -> set:
-        ids = [self._id(i) for i in ids]
-        if not self.host:
-            return {i for i in ids if self._path(f"results/{i}.json").exists()}
-        rows = dict(line.rsplit(" ", 1) for line in self._remote("exist", *ids).splitlines() if " " in line)
-        if set(rows) != set(ids) or not set(rows.values()) <= {"0", "1"}:
-            raise SpoolUnreachable(f"unexpected exist reply from {self.host}")
-        return {i for i in ids if rows[i] == "1"}
-
-    def write_request(self, iid: str, body: bytes) -> None:
-        """tmp + rename inside requests/ (atomic on the spool's filesystem)."""
-        iid = self._id(iid)
-        if not self.host:
-            d = self._path("requests")
-            (d / f".{iid}.json.tmp").write_bytes(body)
-            (d / f".{iid}.json.tmp").replace(d / f"{iid}.json")
-            return
-        out = self._remote("put", iid, data=body).strip()
-        if out != f"PUT {iid}":
-            raise SpoolUnreachable(f"unexpected put reply from {self.host}: {out[:80]!r}")
-
-    def withdraw(self, iid: str) -> bool:
-        """Unlink crq's own unclaimed request: True = removed, False = ENOENT (the
-        signer renamed it before claiming: it is the signer's now)."""
-        iid = self._id(iid)
-        if not self.host:
-            try:
-                self._path(f"requests/{iid}.json").unlink()
-                return True
-            except FileNotFoundError:
-                return False
-        out = self._remote("withdraw", iid).strip()
-        if out in ("RM", "ENOENT"):
-            return out == "RM"
-        raise SpoolUnreachable(f"unexpected withdraw reply from {self.host}: {out[:80]!r}")
-
-
-SPOOL = Spool(SIGNER.get("spool") or {"host": None, "dir": SIGNER.get("spool_dir")})
-
-
-def spool_ok(q: Dict[str, Any]) -> None:
-    st = q.setdefault("promotion", {})
-    if st.get("spool_fail_since"):
-        st["spool_recovered_at"] = iso()
-        event("spool_recovered", since=st["spool_fail_since"])
-    st.pop("spool_fail_since", None)
-    st.pop("spool_fail_alerted", None)
-
-
-def spool_unreachable(q: Dict[str, Any], exc: Exception, log: List[str]) -> str:
-    """ssh/spool failure = UNKNOWN: no new request, no withdrawal, never counted as
-    signer-down; after 30 min a distinct '<host> unreachable' alert (once)."""
-    st = q.setdefault("promotion", {})
-    st.setdefault("spool_fail_since", iso())
-    mins = (now() - parse_iso(st["spool_fail_since"])).total_seconds() / 60
-    if mins > PROMO.get("signer_down_min", 30) and not st.get("spool_fail_alerted"):
-        st["spool_fail_alerted"] = iso()
-        signer_alert(q, None, f"{SPOOL.host or 'spool'} unreachable for {mins:.0f}m (signer state unknown; no requests "
-                              f"or withdrawals meanwhile): {exc}", log)
-    msg = f"promotion: spool unreachable ({mins:.0f}m): {exc}"[:240]
-    log.append(msg)
-    return msg
-SIGNER_ID = re.compile(r"^promo-[0-9a-f]{10}\+{0,9}$")
-SIGNER_DONE_CODES = {"success_present", "already_in_main"}
-SIGNER_RECUT_CODES = {"base_not_main", "main_not_ancestor", "checks_not_green", "subject_moved"}
-SIGNER_STATES = ("requested", "signer_running")
-_MODE: Dict[str, str] = {}
-_MODE_WHY: Dict[str, str] = {}
-# A THIRD PARTY's public App (owner cqrect, App 1175046), wrongly pinned on
-# 2026-10-04 from a public-API lookup by a guessed name. Never trusted, never
-# used, even if it reappears in config. The reviewer identity comes ONLY from the
-# owner's registration record (toolkit-research/plans/app-registration-session-20261004.md).
-BANNED_BOT_IDS = {202921479}
-BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
-REVIEWER_POLICY_PATH = "policy/promotion-reviewer.json"
-
-def reviewer_identity() -> Optional[Tuple[str, int]]:
-    """(bot login, numeric bot user id) from config, or None (unpinned → fail closed).
-    No defaults anywhere: an unset, malformed or banned identity is never trusted."""
-    login, bot_id = SIGNER.get("app_login"), SIGNER.get("reviewer_bot_id")
-    if not isinstance(login, str) or not login.endswith("[bot]") or isinstance(bot_id, bool) or not isinstance(bot_id, int):
-        return None
-    if bot_id <= 0 or bot_id in BANNED_BOT_IDS or login in BANNED_BOT_LOGINS:
-        return None
-    return login, bot_id
-
-
-def promotion_mode_at(rev: str) -> str:
-    """Validate the structured trust source; never infer pins from workflow text.
-
-    PR-B's protected required-static lockstep check guarantees that each gate
-    step consumes this source. Missing or invalid policy never permits User
-    status fallback. Extra JSON fields are allowed.
-    """
-    if rev not in _MODE:
-        source = run(['git', 'show', f'{rev}:{REVIEWER_POLICY_PATH}'], cwd=CLONE, check=False)
-        try:
-            identity = json.loads(source.stdout) if source.returncode == 0 else None
-        except (ValueError, UnicodeDecodeError):
-            identity = None
-        configured = reviewer_identity()
-        valid = (
-            configured is not None
-            and isinstance(identity, dict)
-            and not isinstance(identity.get('schemaVersion'), bool)
-            and identity.get('schemaVersion') == 1
-            and identity.get('type') == 'Bot'
-            and isinstance(identity.get('login'), str)
-            and identity.get('login') == configured[0]
-            and type(identity.get('id')) in (int, float)
-            and identity.get('id') == configured[1]
-            and isinstance(identity.get('record'), str)
-            and bool(identity.get('record', '').strip())
-        )
-        _MODE[rev] = 'signer' if valid else 'signer_unconfigured'
-        if not valid:
-            _MODE_WHY[rev] = 'promotion reviewer policy absent, invalid, unconfigured or mismatched'
-    return _MODE[rev]
-
-
-def promotion_mode() -> str:
-    return promotion_mode_at("origin/main")
-
-
-def signer_alert(q: Dict[str, Any], item: Optional[Dict[str, Any]], text: str, log: List[str]) -> None:
-    st = q.setdefault("promotion", {})
-    sha = (item or {}).get("batch_sha") or "signer"
-    st.setdefault("signer_alerts", []).append({"at": iso(), "item": (item or {}).get("id"), "sha": sha,
-                                               "text": text[:300], "acked": None})
-    event("promotion_signer_alert", item=(item or {}).get("id"), text=text[:300])
-    notify_owner(f"crq PROMOTION SIGNER: {text[:500]} — see {STATE / 'status.md'}; ack with "
-                 f"`crq.py promotion-ack {sha[:10]} \"<reason>\"`.")
-    log.append(f"promotion: SIGNER ALERT {text[:200]}")
-
-
-def apply_signer_backoff(q: Dict[str, Any], log: List[str]) -> None:
-    """The signer publishes deferrals in ledger/backoff.json ({"v":1,"item",
-    "wait_minutes","until","at","reason":"budget"|"rate_limit"}). A rate limit is
-    the shared CodeRabbit quota, so it extends crq's global cooldown. A budget
-    deferral is only the signer's own 2/h cap: it must not stall crq's PR
-    reviews, it only explains an unclaimed request (see harvest_signer). (If
-    ledger/ is unwritable, rate_limited results still reach crq via harvest.)"""
-    try:
-        raw = SPOOL.read("ledger/backoff.json")
-    except SpoolUnreachable as exc:
-        spool_unreachable(q, exc, log)
-        return
-    try:
-        b = json.loads(raw or "")
-        until = parse_iso(b["until"]) if b.get("v") == 1 and b.get("until") else None
-    except (OSError, ValueError, KeyError, TypeError):
-        return
-    if until:
-        q.setdefault("promotion", {})["signer_deferral"] = {"item": b.get("item"), "until": iso(until),
-                                                           "reason": b.get("reason")}
-    cur = parse_iso(q.get("cooldown_until"))
-    if b.get("reason", "rate_limit") != "rate_limit":
-        return
-    if until and until > now() and (cur is None or until > cur):
-        q["cooldown_until"] = iso(until)
-        log.append(f"signer backoff ({b.get('item')}, {b.get('wait_minutes')}m) → cooldown until {q['cooldown_until']}")
-
-
-def fresh_signer_id(q: Dict[str, Any], batch: str) -> Optional[str]:
-    """promo-<sha10> plus up to nine '+', unused in the queue AND in results/
-    (the signer treats an existing results/<id>.json as already done)."""
-    cands = [f"promo-{batch[:10]}{'+' * k}" for k in range(10)]
-    taken = SPOOL.results_exist(cands)  # may raise SpoolUnreachable (cut_promotion handles it)
-    return next((i for i in cands if i not in taken and not any(x["id"] == i for x in q["items"])), None)
-
-
-def request_promotion_review(q: Dict[str, Any], item: Dict[str, Any], log: List[str]) -> None:
-    """Spool requests/<id>.json atomically (tmp + rename, never rewritten)."""
-    if not SIGNER_ID.match(item["id"]):
-        raise NotReady(f"item id {item['id']} does not fit the signer id pattern")
-    body = json.dumps({"v": 1, "kind": "promotion", "item": item["id"], "base_sha": item["base_sha"],
-                       "batch_sha": item["batch_sha"], "requested_at": iso()}, sort_keys=True).encode()
-    item["state"] = "requested"
-    item["request"] = {"sha256": hashlib.sha256(body).hexdigest(), "requested_at": json.loads(body)["requested_at"],
-                       "dispatch_pending": True, "payload": body.decode()}
-    q.setdefault("starts", []).append(item["request"]["requested_at"])
-    save_queue(q)  # identity and quota survive unknown spool mutation outcomes
-    try:
-        SPOOL.write_request(item["id"], body)
-    except SpoolUnreachable as exc:
-        item["last_error"] = "signer request delivery unknown; reconcile exact request id before retry"
-        save_queue(q)
-        raise NotReady(spool_unreachable(q, exc, log))
-    spool_ok(q)
-    item["request"]["dispatch_pending"] = False
-    save_queue(q)
-    event("promotion_requested", item=item["id"], base=item["base_sha"], batch=item["batch_sha"])
-    log.append(f"promotion: requested signer review {item['id']} main={item['base_sha'][:10]}..{item['batch_sha'][:10]}")
-
-
-def recut_promotion(q: Dict[str, Any], item: Dict[str, Any], log: List[str], dry: bool, state: str, why: str,
-                    batch: Optional[str] = None, not_before: Optional[str] = None) -> None:
-    """Close `item` and request a fresh full review (fresh id) from the current main."""
-    batch = batch or item["batch_sha"]
-    main = main_sha()
-    if not dry:
-        item.update(state=state, last_error=why)
-    if is_ancestor(batch, main):
-        log.append(f"promotion: {item['id']} {why}; batch already in main")
-        return
-    new = cut_promotion(q, log, dry, main, batch, why)
-    if new is not None and not_before and not dry:
-        new["not_before"] = not_before
-
-
-def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
-    log: List[str] = []
-    iid = item["id"]
-    try:
-        snap = SPOOL.snapshot(iid)
-    except SpoolUnreachable as exc:
-        return spool_unreachable(q, exc, log)  # unknown: no state change, no withdrawal, not signer-down
-    spool_ok(q)
-    age = (now() - parse_iso(item["request"]["requested_at"])).total_seconds() / 60
-    if snap["result"] is None:
-        if snap.get("request") or snap["claimed"]:
-            item["request"]["dispatch_pending"] = False
-        elif item["request"].get("dispatch_pending") and age > 1:
-            # v1 snapshot does not establish absence of a dot-renamed request
-            # during claiming. Never redispatch an unknown paid request or use
-            # withdrawal ENOENT as a false proof. Retain exact identity/payload
-            # and quota reservation for explicit custody-side reconciliation.
-            item["state"] = "blocked"
-            item["last_error"] = "journaled signer delivery absent or indeterminate; exact request reconciliation required"
-            item["request"]["reconciliation_required"] = True
-            save_queue(q)
-            return f"{iid}: signer delivery needs human; exact request identity retained"
-        if snap["claimed"]:
-            if not dry:
-                item["state"] = "signer_running"
-            if age > PROMO.get("signer_stall_min", 150) and not item.get("stall_alerted") and not dry:
-                item["stall_alerted"] = iso()
-                signer_alert(q, item, f"{iid} claimed but no result after {age:.0f}m (signer CLI timeout 120m)", log)
-            return "; ".join(log) or None
-        if item["base_sha"] != main_sha() and not dry:  # stale before the signer claimed it: withdraw (contract B)
-            try:  # the signer renames a request to a dot-name before claiming: we win, or ENOENT
-                if not SPOOL.withdraw(iid):
-                    return f"{iid}: main moved, but the signer already took the request — awaiting its result"
-            except SpoolUnreachable as exc:
-                return spool_unreachable(q, exc, log)
-            recut_promotion(q, item, log, dry, "withdrawn", "main moved before the signer claimed the request")
-            return "; ".join(log)
-        # a healthy signer defers unclaimed (budget / rate limit): count from the end of its published deferral
-        d = (q.get("promotion") or {}).get("signer_deferral") or {}
-        ref = parse_iso(item["request"]["requested_at"])
-        back = parse_iso((q.get("promotion") or {}).get("spool_recovered_at"))
-        if back and back > ref:  # time the spool was unreachable is not the signer's
-            ref = back
-        if d.get("item") in (iid, None) and d.get("until") and parse_iso(d["until"]) > ref:
-            ref = parse_iso(d["until"])
-        idle = (now() - ref).total_seconds() / 60
-        if idle > PROMO.get("signer_down_min", 30) and not item.get("down_alerted") and not dry:
-            item["down_alerted"] = iso()
-            signer_alert(q, item, f"{iid} unclaimed for {age:.0f}m ({idle:.0f}m past any published deferral) — "
-                                  f"signer down?", log)
-        return "; ".join(log) or None
-    if dry:
-        return f"would harvest signer result {iid}"
-    try:
-        r = json.loads(snap["result"])
-    except ValueError as exc:
-        signer_alert(q, item, f"{iid}: unparseable signer result ({exc})", log)
-        item["state"] = "blocked"
-        return "; ".join(log)
-    if (r.get("request_sha256") != item["request"]["sha256"] or r.get("item") != iid
-            or r.get("base_sha") != item["base_sha"] or r.get("batch_sha") != item["batch_sha"]):
-        if not item.get("mismatch_alerted"):
-            item["mismatch_alerted"] = iso()
-            signer_alert(q, item, f"{iid}: signer result does not match crq's request (sha256/item/base/batch) — ignored", log)
-        return "; ".join(log)
-    usage_slots.write_next(STATE / "next-review-at", now())
-    o, posted = r.get("outcome"), r.get("posted") or {}
-    item["signer_result"] = {k: r.get(k) for k in ("outcome", "posted_state", "posted", "blocking", "started_at",
-                                                   "ended_at", "wait_minutes", "reason")}
-    item.setdefault("attempts", []).append({"run_id": f"signer:{iid}", "outcome": o, "at": iso(), "head": item["batch_sha"],
-                                            "base": item["base_sha"], "message": r.get("reason")})
-    if posted.get("status_id"):
-        item.setdefault("statuses", []).append({"at": posted.get("at"), "sha": item["batch_sha"], "id": posted["status_id"],
-                                                "state": posted.get("state"), "description": posted.get("description"),
-                                                "by": "signer"})
-    event("promotion_signer_result", item=iid, outcome=o, posted_state=r.get("posted_state"), blocking=r.get("blocking"))
-    LEDGER.mkdir(parents=True, exist_ok=True)
-    with (LEDGER / "promotion-findings.md").open("a") as f:
-        f.write(f"\n## promotion {iid} — signer {o}/{r.get('posted_state')} — {iso()}\n\n- main `{item['base_sha'][:12]}`"
-                f" → batch `{item['batch_sha'][:12]}`; blocking {json.dumps(r.get('blocking'))}; severity "
-                f"{json.dumps(r.get('severity_counts'))}\n"
-                + "".join(f"- F{x.get('n')} [{x.get('severity')}] {x.get('file')}:{x.get('line')} — {str(x.get('title'))[:160]}\n"
-                          for x in r.get("findings") or []))
-    if o == "completed" and r.get("posted_state") == "success":
-        item.update(state="promoting", success_at=posted.get("at") or iso(), cycles=[{"run_id": f"signer:{iid}"}])
-        return f"{iid}: signer success → promoting"
-    if o == "completed" and r.get("posted_state") not in ("success", "failure"):
-        # reviewed, but the signer's final post failed: re-request; its coverage ledger usually posts without a new CLI run
-        item["failures"] = item.get("failures", 0) + 1
-        nb = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
-        recut_promotion(q, item, log, dry, "retried", f"signer completed without a final status ({r.get('posted_state')})",
-                        not_before=nb)
-        return "; ".join(log)
-    if o == "completed" and r.get("posted_state") == "failure":
-        item.update(state="findings", cycles=[{"run_id": f"signer:{iid}"}],
-                    blocking=[{"n": x.get("n"), "severity": x.get("severity"), "file": x.get("file"), "line": x.get("line"),
-                               "title": str(x.get("title"))[:160], "resolution": None} for x in r.get("findings") or []])
-        # Persist the authenticated spool finding summaries as review evidence.
-        # The forced-command transport and signer request identity remain unchanged.
-        run_id = "signer-" + iid
-        rdir = RUNS / run_id
-        rdir.mkdir(parents=True, exist_ok=True)
-        raw = r.get("findings") or []
-        actionable = [x for x in raw if x.get("severity") in ("critical", "major")]
-        events = [{"type": "finding", "severity": x["severity"], "fileName": x.get("file"),
-                   "codegenInstructions": x.get("codegenInstructions") or x.get("body") or
-                       (str(x.get("title") or "") + " at line " + str(x.get("line") or 1))}
-                  for x in actionable]
-        (rdir / "review.ndjson").write_text("".join(json.dumps(e) + "\n" for e in events))
-        meta = {"run_id": run_id, "base": item["base_sha"], "head": item["batch_sha"],
-                "review_pin": item["base_sha"], "cycle": None, "pr_branch": None}
-        (rdir / "meta.json").write_text(json.dumps(meta) + "\n")
-        item["cycles"] = [{"run_id": run_id, "findings": len(events)}]
-        for n, x in enumerate(actionable, 1):
-            blocker = next((b for b in item["blocking"] if b["n"] == x.get("n")), None)
-            if blocker is not None:
-                blocker.update(run=run_id, run_finding=n)
-        repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
-        return f"{iid}: signer failure ({r.get('blocking')}) → findings / detached repair"
-    if o in ("skipped", "too_large"):
-        item["state"] = "split_needed"  # signer already posted error; promotion_tick halves
-        return f"{iid}: signer {o} → split"
-    if o == "rate_limited":
-        mins = r.get("wait_minutes")
-        if mins is None:
-            mins = CONFIG["rate_limit_default_backoff_min"]
-        until = (parse_iso(r.get("ended_at")) or now()) + dt.timedelta(minutes=mins)
-        current = parse_iso(q.get("cooldown_until"))
-        q["cooldown_until"] = iso(max(current, until) if current else until)
-        recut_promotion(q, item, log, dry, "retried", f"signer rate limited ({mins}m)", not_before=q["cooldown_until"])
-        return "; ".join(log)
-    if o == "auth":
-        q["paused"] = True
-        q["pause_reason"] = f"signer auth failure on {iid} — owner action needed (never --use-credits)"
-        item["state"] = "blocked"
-        signer_alert(q, item, q["pause_reason"], log)
-        return "; ".join(log)
-    code = r.get("reason_code")
-    if o in ("rejected", "error") and code:  # machine reason codes; never regex the reason text
-        why = f"{code}: {str(r.get('reason') or '')[:150]}"
-        if code in SIGNER_DONE_CODES:
-            item.update(state="done", last_error=f"signer {o} {why} (treated as done)")
-            return f"{iid}: signer {o} {code} → done"
-        if code in SIGNER_RECUT_CODES:
-            item.update(state="rejected", last_error=f"signer {o} {why}")
-            q.setdefault("promotion", {})["requested"] = True  # re-cut from the current main / newest green tip
-            return f"{iid}: signer {o} {code} → re-cut"
-        item.update(state="blocked", last_error=f"signer {o} {why}")
-        signer_alert(q, item, f"{iid}: signer {o} {why}", log)
-        return "; ".join(log)
-    if o in ("error", "interrupted"):
-        item["failures"] = item.get("failures", 0) + 1
-        nb = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
-        recut_promotion(q, item, log, dry, "retried", f"signer {o}: {r.get('reason') or ''}"[:200], not_before=nb)
-        return "; ".join(log)
-    if o == "secret_scan_blocked":
-        item["state"] = "blocked"
-        signer_alert(q, item, f"{iid}: signer secret scan blocked main={item['base_sha'][:10]}..{item['batch_sha'][:10]} "
-                              f"— owner must inspect (nothing uploaded)", log)
-        return "; ".join(log)
-    if o == "rejected":  # without a reason_code: contract violation
-        item.update(state="blocked", last_error=f"signer rejected without reason_code: {str(r.get('reason'))[:150]}")
-        signer_alert(q, item, f"{iid}: signer rejected without a reason_code ({str(r.get('reason'))[:150]})", log)
-        return "; ".join(log)
-    item["state"] = "blocked"
-    signer_alert(q, item, f"{iid}: unknown signer outcome {o!r}", log)
-    return "; ".join(log)
-
-
-# ----------------------------------------------------------- promotion audit (read-only toward GitHub)
-#
-# Compensating control (owner ruling, #269 P1): any fleet agent with the
-# owner's gh auth can post crq/promotion-review. So on every tick, when main
-# has advanced, find the status that authorized the new main sha and require
-# that crq itself posted it, for a promotion item with a completed review.
-
-
-def promotion_statuses(sha: str) -> List[Dict[str, Any]]:
-    rows = run(["gh", "api", f"repos/{REPO}/commits/{sha}/statuses?per_page=100", "--paginate", "--jq",
-                f'.[] | select(.context == "{PROMO.get("status_context", "crq/promotion-review")}") | '
-                '{id, state, description, created_at, login: .creator.login, type: .creator.type, creator_id: .creator.id}'],
-               timeout=120).stdout.splitlines()
-    return [json.loads(r) for r in rows if r.strip()]
-
-
-def notify_owner(text: str) -> Dict[str, Any]:
-    """Paseo message to the chancellor (the owner's desk). promotion.alert_agent_host
-    names its daemon when it is not the local one (queue-host runner → worker-host). Never
-    raises: an unreachable daemon must not stall the tick that is reporting."""
-    res: Dict[str, Any] = {}
-    aid = PROMO.get("alert_agent_id")
-    if aid:
-        host = PROMO.get("alert_agent_host")
-        try:
-            p = run(["paseo", "send", "--no-wait", *(["--host", host] if host else []), aid, text], check=False,
-                    timeout=30 if host else 90)
-            res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            res["paseo_send"] = f"error: {exc}"[:150]
-    return res
-
-
-def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """PRIMARY (P1 / admin-bypass detector): main advanced only with a trusted bot
-    success (login, Bot, numeric id) whose main=<base> is contained in the
-    previous main. Corroboration against crq's own requests is informational."""
-    reasons: List[str] = []
-    notes: List[str] = []
-    if not is_ancestor(last, main):
-        reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
-    sts = promotion_statuses(main)
-    ident = reviewer_identity()  # None → nothing is trusted (fail closed)
-    bot = [x for x in sts if ident and x["type"] == "Bot" and x["login"] == ident[0] and x.get("creator_id") == ident[1]]
-    others = [f"{x['login']}({x['type']},{x.get('creator_id')}) {x['state']}" for x in sts if x not in bot]
-    if others:
-        rec["other_creators"] = others
-    auth = max(bot, key=lambda x: (x["created_at"], x["id"])) if bot else None
-    if auth:
-        rec["status"] = auth
-    if not auth or auth["state"] != "success":
-        reasons.append("no trusted reviewer-bot success on the new main sha" + (f" (newest is {auth['state']})" if auth else "")
-                       + ("" if ident else " — reviewer identity not pinned in crq"))
-        return reasons, notes
-    desc = auth.get("description") or ""
-    m = re.search(r"(?:^|\s)main=([0-9a-f]{40})(?:\s|$)", desc)
-    if not m:
-        reasons.append("trusted success binds no main=<base>")
-    elif not is_ancestor(m.group(1), last):
-        reasons.append(f"trusted success binds main={m.group(1)[:10]}, which the previous main {last[:10]} does not contain")
-    if desc.startswith("override"):
-        rec["override"] = desc[:140]  # owner override via crq-override: logged, not alerted
-        return reasons, notes
-    cm = re.search(r"crq#(\S+)", desc)
-    item = next((i for i in q["items"] if i["kind"] == "promotion" and cm and i["id"] == cm.group(1)), None)
-    if not item or item.get("batch_sha") != main:
-        notes.append(f"crq#{cm.group(1) if cm else '?'} is not a crq promotion item cut for {main[:10]}")
-    else:
-        rec["item"] = item["id"]
-        try:
-            r = json.loads(SPOOL.read(f"results/{item['id']}.json") or "{}")
-        except SpoolUnreachable as exc:
-            r = {}
-            notes.append(f"results/{item['id']}.json unavailable ({exc})")
-        except ValueError:
-            r = {}
-        posted = r.get("posted") or {}
-        if r.get("outcome") != "completed" or posted.get("state") != "success" or posted.get("status_id") != auth["id"]:
-            notes.append(f"signer results/{item['id']}.json does not corroborate status {auth['id']} "
-                         f"(outcome={r.get('outcome')}, posted={posted.get('state')}/{posted.get('status_id')})")
-        if (item.get("request") or {}).get("sha256") != r.get("request_sha256"):
-            notes.append(f"results/{item['id']}.json request_sha256 does not match crq's request")
-    return reasons, notes
-
-
-def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
-    a = q.setdefault("promotion_audit", {"records": [], "alerts": []})
-    main = main_sha()
-    last = a.get("last_main")
-    if not last:
-        if not dry:
-            a["last_main"] = main
-        return [f"promotion audit: baseline main={main[:10]}"]
-    if main == last:
-        return []
-    if run(["git", "cat-file", "-e", f"{main}^{{commit}}"], cwd=CLONE, check=False).returncode != 0:
-        git("fetch", "--quiet", "origin", "main", check=False)
-    rec: Dict[str, Any] = {"at": iso(), "from": last, "to": main}
-    reasons: List[str] = []
-    if not policy_at(last):
-        rec["verdict"] = "pre-policy"  # advanced under the old gate (policy not yet on main)
-    elif promotion_mode_at(last) != "user":
-        rec["mode"] = "signer"
-        reasons, notes = audit_signer_advance(q, last, main, rec)
-        rec["verdict"] = ("override" if rec.get("override") and not reasons else "UNVERIFIED" if reasons else
-                          "verified" if not notes else "verified-uncorroborated")
-        rec["reasons"], rec["notes"] = reasons, notes
-    else:
-        if not is_ancestor(last, main):
-            reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
-        sts = promotion_statuses(main)
-        allowed = {PROMO.get("poster", "camerontaylor")} | set(PROMO.get("allowed_reviewers", []))
-        ok_creator = [x for x in sts if x["type"] == "User" and x["login"] in allowed]
-        others = [f"{x['login']}({x['type']}) {x['state']}" for x in sts if x not in ok_creator]
-        if others:
-            rec["other_creators"] = others
-        auth = max(ok_creator, key=lambda x: (x["created_at"], x["id"])) if ok_creator else None
-        if auth:
-            rec["status"] = auth
-        if not auth or auth["state"] != "success":
-            reasons.append("no qualifying crq/promotion-review success on the new main sha"
-                           + (f" (newest allowed is {auth['state']})" if auth else ""))
-        else:
-            if (auth.get("description") or "").startswith("override"):
-                reasons.append(f"owner-style override status by {auth['login']}: {auth['description'][:100]}")
-            item = next((i for i in q["items"] if i["kind"] == "promotion" and i.get("batch_sha") == main), None)
-            if not item:
-                reasons.append("crq has no promotion item for this batch sha")
-            else:
-                rec["item"] = item["id"]
-                if not item.get("cycles"):
-                    reasons.append(f"{item['id']} has no completed review")
-                if not any(x.get("id") == auth["id"] and x["state"] == "success" for x in item.get("statuses", [])):
-                    reasons.append(f"authorizing status {auth['id']} by {auth['login']} was not posted by crq "
-                                   f"(crq posted ids {[x.get('id') for x in item.get('statuses', [])]})")
-        rec["verdict"] = "UNVERIFIED" if reasons else "verified"
-        rec["reasons"] = reasons
-    line = f"promotion audit: main {last[:10]} → {main[:10]}: {rec['verdict']}" + (f" — {'; '.join(reasons)}" if reasons else "")
-    if dry:
-        return [line]
-    a["last_main"] = main
-    # Retain positions needed by any alert, including acknowledged receipt retries.
-    # Do not deduplicate: duplicate exact identities must remain ambiguous.
-    def identity(x):
-        key = tuple(x.get(k) for k in ("from", "to", "at"))
-        if (not all(isinstance(v, str) and v for v in key)
-                or not all(re.fullmatch(r"[0-9a-f]{40}", v) for v in key[:2])):
-            return None
-        try:
-            observed = parse_iso(key[2])
-            return key if observed is not None and iso(observed) == key[2] else None
-        except ValueError:
-            return None
-
-    referenced = {identity(x) for x in a["alerts"]} - {None}
-    records = a["records"] + [rec]
-    a["records"] = [x for x in records[:-300] if identity(x) in referenced] + records[-300:]
-    LEDGER.mkdir(parents=True, exist_ok=True)
-    with (LEDGER / "promotion-audit.md").open("a") as f:
-        f.write(f"- {rec['at']} main {last[:12]} → {main[:12]}: **{rec['verdict']}**"
-                f"{' (' + rec['item'] + ', status ' + str(rec['status']['id']) + ')' if rec.get('item') else ''}"
-                f"{' — ' + '; '.join(reasons) if reasons else ''}"
-                f"{' — notes: ' + '; '.join(rec['notes']) if rec.get('notes') else ''}\n")
-    if rec["verdict"] == "UNVERIFIED":
-        rec["notified"] = notify_owner(f"crq PROMOTION UNVERIFIED: main advanced {last[:10]} → {main[:10]} without a "
-                                       f"crq-verified promotion review. {'; '.join(reasons)[:600]} — see "
-                                       f"{STATE / 'status.md'}; procedural ack with `crq.py promotion-ack {main} "
-                                       f"\"<reason>\" --audit-from {last} --audit-at {rec['at']}`.")
-        a["alerts"].append({"from": last, "to": main, "at": rec["at"], "reasons": reasons, "acked": None})
-        event("promotion_unverified", **{k: v for k, v in rec.items() if k != "at"})
-    else:
-        if rec.get("notes"):
-            event("promotion_uncorroborated", to=main, notes=rec["notes"])
-        event("promotion_verified" if rec["verdict"].startswith("verified") else "promotion_audit",
-              **{k: v for k, v in rec.items() if k != "at"})
-    return [line]
-
-
-def blocking_findings(ndjson: Path) -> List[Dict[str, Any]]:
-    out = []
-    for line in ndjson.read_text(errors="replace").splitlines() if ndjson.exists() else []:
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        if e.get("type") == "finding" and e.get("severity") in BLOCKING_SEVERITIES:
-            m = re.search(r" at line (\d+)", e.get("codegenInstructions") or e.get("comment") or "")
-            out.append({"n": len(out) + 1, "severity": e["severity"], "file": e.get("fileName"),
-                        "line": int(m.group(1)) if m else None, "resolution": None})
-    return out
-
-
-def harvest_promotion(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any], rdir: Path) -> str:
-    log: List[str] = []
-    new = blocking_findings(rdir / "review.ndjson")
-    base = item["base_sha"]
-    if new:
-        item["blocking"] = item.get("blocking", []) + [dict(b, n=len(item.get("blocking", [])) + k + 1, run=meta["run_id"], run_finding=k + 1)
-                                                       for k, b in enumerate(new)]
-        sev = ", ".join(f"{sum(1 for b in new if b['severity'] == s)} {s}" for s in ("critical", "major")
-                        if any(b["severity"] == s for b in new))
-        post_promotion_status(item, item["batch_sha"], "failure", f"blocked: {sev} main={base}", log)
-        item["state"] = "findings"
-    elif item.get("must_reach") and item["must_reach"] != item["batch_sha"]:
-        item["state"] = "chain_next"  # clean, but the fix is beyond this prefix: never promote without it
-        log.append(f"prefix clean; continuing toward fix tip {item['must_reach'][:10]} before any success")
-    else:
-        desc = (f"delta {item['reviewed_sha'][:12]}.. main={base} crq#{item['id']}" if item.get("reviewed_sha")
-                else f"reviewed main={base} crq#{item['id']}")
-        post_promotion_status(item, item["batch_sha"], "success", desc[:140], log)
-        item.update(state="promoting", success_at=iso())
-    return "; ".join(log)
-
-
-def plan_promotion(item: Dict[str, Any]) -> Dict[str, Any]:
-    base = item.get("reviewed_sha") or item["base_sha"]
-    if not is_ancestor(base, item["batch_sha"]):
-        raise NotReady(f"{base[:10]} is not an ancestor of batch {item['batch_sha'][:10]}")
-    scope = f"delta {base[:10]}..{item['batch_sha'][:10]}" if item.get("reviewed_sha") else \
-        f"main {base[:10]}..{item['batch_sha'][:10]}"
-    return {"base": base, "head": item["batch_sha"], "target": "origin/main", "cycle": None, "branch": None,
-            "label": f"promotion review — {scope}", "notes": []}
-
-
 # ----------------------------------------------------------- tick
 
 
@@ -2857,11 +1864,11 @@ def rank(item: Dict[str, Any]) -> int:
         return 5
     if item["kind"] == review_receipt.KIND:
         return 2
-    if item["kind"] == "coverage":
+    if item["kind"] in ("coverage", backfill_jobs.KIND):
         return coverage.COVERAGE_RANK
     if item["kind"] == author_quota.AUTHOR_KIND:
         return author_quota.AUTHOR_RANK
-    if item["kind"] in ("open", "promotion"):
+    if item["kind"] in ("open",):
         return 0
     if item["kind"] == "delta":
         return 2 if item.get("followup") == "merged" else 1
@@ -2869,8 +1876,8 @@ def rank(item: Dict[str, Any]) -> int:
 
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
-    # promotion (and its delta) takes the next start slot ahead of everything (docs/promotion-policy.md)
-    return (0 if item["kind"] == "promotion" else 1, 0 if item.get("operator_priority") else 1, rank(item), item.get("order", 999))
+    # Explicit operator priority precedes ordinary rank and insertion order.
+    return (0 if item.get("operator_priority") else 1, rank(item), item.get("order", 999))
 
 
 # ----------------------------------------------------------- enrollment
@@ -2878,7 +1885,7 @@ def sort_key(item: Dict[str, Any]) -> Tuple:
 
 def last_reviewed(q: Dict[str, Any], pr: int) -> Optional[Dict[str, Any]]:
     """Newest completed CLI review of the PR's own head (open cycles and deltas)."""
-    recs = [c for i in q["items"] if i["pr"] == pr and i["kind"] in ("open", "delta") for c in i.get("cycles", [])]
+    recs = [c for i in live_items(q) if i["pr"] == pr and i["kind"] in ("open", "delta") for c in i.get("cycles", [])]
     return max(recs, key=lambda c: c["completed_at"]) if recs else None
 
 
@@ -2886,9 +1893,9 @@ def reviewed_head(rec: Dict[str, Any]) -> str:
     return rec.get("pr_head") or rec["head"]
 
 
-def chains_to_merge_queue(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]]) -> bool:
+def chains_to_target(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]]) -> bool:
     for _ in range(8):
-        if p["baseRefName"] == "merge-queue":
+        if p["baseRefName"] in DISCOVERY_BRANCHES:
             return True
         p = by_head.get(p["baseRefName"])
         if p is None:
@@ -2897,11 +1904,11 @@ def chains_to_merge_queue(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]])
 
 
 def next_order(q: Dict[str, Any]) -> int:
-    return max((i.get("order", 0) for i in q["items"]), default=0) + 1
+    return max((i.get("order", 0) for i in live_items(q)), default=0) + 1
 
 
 def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dict[str, Any]:
-    dup = next((i for i in q["items"] if i["id"] == fields.get("id")), None)
+    dup = next((i for i in live_items(q) if i["id"] == fields.get("id")), None)
     if dup is not None:  # ids are unique: an existing item (even skipped) is sticky
         return dup
     if fields.get("kind") == "open":
@@ -2927,11 +1934,11 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
     by_head = {p["headRefName"]: p for p in opened}
     for p in sorted(opened, key=lambda x: x["number"]):
         n, head = p["number"], p["headRefOid"]
-        if p["isDraft"] or not chains_to_merge_queue(p, by_head):
+        if p["isDraft"] or not chains_to_target(p, by_head):
             continue
-        mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
+        mine = [i for i in live_items(q) if i["pr"] == n and i["kind"] in ("open", "delta")]
         if not mine:
-            stacked = "" if p["baseRefName"] == "merge-queue" else f", stacked on {p['baseRefName']}"
+            stacked = "" if p["baseRefName"] in DISCOVERY_BRANCHES else f", stacked on {p['baseRefName']}"
             new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
                      why=f"open PR not yet enrolled{stacked}")
             continue
@@ -2966,27 +1973,40 @@ def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     dep = item.get("depends_on")
     if not dep:
         return True
-    d = next((i for i in q["items"] if i["id"] == dep), None)
+    d = next((i for i in live_items(q) if i["id"] == dep), None)
     return d is None or d["state"] in ("done", "skipped") or additional_cycle(d)
 
 
+def ordinary_review_eligible(q):
+    if q.get("backfill_ordinary_exhausted"):
+        return False
+    return any(i.get("state") == "pending" and rank(i) <= 3
+               and not parked_merged_linked_receipt(q, i) and deps_met(q, i)
+               and (not i.get("not_before") or parse_iso(i["not_before"]) <= now())
+               for i in live_items(q))
+
+
 def coverage_fallback(q, log, dry, only):
+    started, available = backfill_runtime.select(sys.modules[__name__], q, log, dry, only)
+    if started or available:
+        return started, available
+    if backfill_runtime.settings(STATE, dispatch=True):
+        return None, False
     if only:
         return None, False
-    mq = git("rev-parse", "origin/merge-queue")
-    candidates = [i for i in q["items"] if i["kind"] == "coverage" and i["state"] == "pending"]
+    mq = git("rev-parse", DEFAULT_REF + "^{commit}")
+    candidates = [i for i in live_items(q) if i["kind"] == "coverage" and i["state"] == "pending"]
     for i in candidates:
-        if i.get("coverage_sha") != mq:
-            i["state"] = "skipped"
-            i["last_error"] = "coverage tip moved; re-cut"
+        # A captured coverage target is immutable across tip moves.
+        i.setdefault("coverage_sha", mq)
     candidates = [i for i in candidates if i["state"] == "pending"]
     if not candidates:
-        if any(i["kind"] == "coverage" and i["state"] == "reviewing" for i in q["items"]):
+        if any(i["kind"] == "coverage" and i["state"] == "reviewing" for i in live_items(q)):
             return None, False
-        for i in q["items"]:
+        for i in live_items(q):
             if i["kind"] == "merged" and i.get("merge_commit"):
                 try:
-                    i["measure"] = measure_merged(i)
+                    i["measure"] = measure_merged(i, mq)
                 except Exception as exc:
                     log.append("coverage measurement failed: " + str(exc)[:150])
         candidate = coverage.coverage_candidate(q, q.get("coverage") or coverage.new_ledger(),
@@ -2999,18 +2019,33 @@ def coverage_fallback(q, log, dry, only):
     for item in sorted(candidates, key=sort_key):
         if item.get("not_before") and parse_iso(item["not_before"]) > now() or not deps_met(q, item):
             continue
+        try:
+            source, origins = coverage._legacy_origins(q, item)
+            if not origins or any(not coverage._legacy_retry_allowed(q, source["pr"], origin, now())
+                                  for origin in origins):
+                item["wait_reason"] = "legacy coverage retry history or cooldown unresolved"
+                continue
+        except (ValueError, KeyError, TypeError):
+            item["wait_reason"] = "legacy coverage retry identity unresolved"
+            continue
         available = True
         if dry:
             log.append("DRY-RUN would cut coverage " + item["id"])
             return None, True
         try:
-            base, head, paths = build_synthetic(item)
+            base, head, paths = build_synthetic(item, item["coverage_sha"])
             if not git("diff", "--name-only", base, head):
                 item.update(state="skipped", last_error="empty coverage range")
                 continue
-            plan = dict(base=base, head=head, target="origin/merge-queue", cycle=None,
+            plan = dict(base=base, head=head, target=item["coverage_sha"], cycle=None,
                         branch=None, notes=[], label="lowest-priority coverage review")
+            if not backfill_runtime.rank4_gate(sys.modules[__name__], q, item, dry):
+                continue
             run_id = launch(q, item, plan)
+            if item["state"] == "reviewing":
+                backfill_jobs.bind_run(q, item, run_id)
+            elif not item.get("run"):
+                backfill_jobs.cancel_before_vendor(q, item)
             log.append("coverage " + item["id"] + ": " + item["state"])
             return run_id if item["state"] == "reviewing" else None, True
         except Exception as exc:
@@ -3023,7 +2058,8 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
     started = None
     has_coverage = False
     reservations_before = len(q.get("starts", []))
-    for item in sorted(q["items"], key=sort_key):
+    q["backfill_ordinary_exhausted"] = False
+    for item in sorted(live_items(q), key=sort_key):
         if only and item["id"] != only:
             continue
         if item["state"] != "pending":
@@ -3031,7 +2067,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
         if item["kind"] == review_receipt.KIND and not capture_current and not item.get("capture"):
             item["wait_reason"] = "first current capture waits for fetching maintenance tick"
             continue
-        if item["kind"] == "coverage":
+        if item["kind"] in ("coverage", backfill_jobs.KIND):
             if item.get("operator_priority"):
                 started, has_coverage = coverage_fallback(q, log, dry, only)
                 if started or (dry and has_coverage):
@@ -3040,7 +2076,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
         if only and item["kind"] in (author_quota.AUTHOR_KIND, review_receipt.KIND) and not dry:
             # Author enrollment is PENDING NATURAL-ONLY by design. A selective
             # `crq start <author-id>` would dispatch the author item while a
-            # pending promotion/ordinary item is skipped by the `only` filter,
+            # pending ordinary item is skipped by the `only` filter,
             # bypassing the priority order, so it is refused. The natural tick
             # (no `only`) is unaffected. An explicit --dry-run may still show
             # the plan; it never launches.
@@ -3056,7 +2092,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
             if started or (dry and has_coverage):
                 break
         if item["kind"] == "merged" and any(i.get("kind") == review_receipt.KIND and i.get("pr") == item["pr"]
-                                              for i in q["items"]):
+                                              for i in live_items(q)):
             item["wait_reason"] = "linked merged-current intent owns current-scope recovery; legacy evidence retained"
             continue
         if item.get("not_before") and parse_iso(item["not_before"]) > now():
@@ -3066,20 +2102,7 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
             item["wait_reason"] = f"waiting for {item['depends_on']}"
             continue
         try:
-            if item["kind"] == "promotion" and promotion_mode() != "user":
-                if promotion_mode() != "signer":
-                    raise NotReady("reviewer identity not pinned (signer_unconfigured)")
-                if item["base_sha"] != main_sha():
-                    raise NotReady("main moved since the cut; re-cut pending")
-                if dry:
-                    log.append(f"DRY-RUN would request signer review {item['id']} "
-                               f"main={item['base_sha'][:10]}..{item['batch_sha'][:10]}")
-                else:
-                    request_promotion_review(q, item, log)
-                break
-            if item["kind"] == "promotion":
-                plan = plan_promotion(item)
-            elif item["kind"] == author_quota.AUTHOR_KIND:
+            if item["kind"] == author_quota.AUTHOR_KIND:
                 # Author items bind their own base/head/target: no PR, no
                 # active-agent quiet gate. Global pause/cooldown/hourly/
                 # inflight gates and the pre-upload secret scan still apply.
@@ -3142,16 +2165,14 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
                 log.append(f"{item['id']}: blocked before vendor start")
                 continue
             log.append(f"started {item['id']} [{plan['label']}] run {started}")
-            if item["kind"] == "promotion" and item["state"] == "reviewing":
-                post_promotion_status(item, item["batch_sha"], "pending",
-                                      f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
         break
     else:
+        q["backfill_ordinary_exhausted"] = not bool(only)
         started, has_coverage = coverage_fallback(q, log, dry, only)
         if not started:
             log.append("no eligible item this tick")
     if dry:
-        log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(q["items"], key=sort_key)
+        log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(live_items(q), key=sort_key)
                 if i["state"] == "pending" and i.get("wait_reason")]
     return started, has_coverage
 
@@ -3159,20 +2180,15 @@ def start_one(q, log, dry, only, ignore_quiet, capture_current=True):
 def read_slot_usage(q):
     """Subtract reservations lacking vendor evidence BEFORE the usage snapshot.
 
-    Aggregate usage cannot identify an unclaimed signer or a detached child
-    still preparing its CLI session. Never reallocate those promised slots.
-    Signer claims/start journals are pre-admission too: retain their hold until
-    the result is harvested. Local progress may be cached only after a valid
+    Aggregate usage cannot identify a detached child still preparing its CLI
+    session. Never reallocate those promised slots. Local progress may be
+    cached only after a valid
     subsequent usage observation, never from a pid or review_context alone.
     """
     held = []
     observed = []
-    for item in q["items"]:
-        request = item.get("request") or {}
-        if item.get("kind") == "promotion" and (
-                item["state"] in SIGNER_STATES or request.get("reconciliation_required")):
-            held.append(request.get("requested_at"))
-        elif item["state"] == "reviewing":
+    for item in live_items(q):
+        if item["state"] == "reviewing":
             run = item.get("run") or {}
             if run.get("vendor_observed"):
                 continue
@@ -3192,7 +2208,7 @@ def read_slot_usage(q):
 
 def collect_finished(q, log):
     """Terminal detached reviews only; no enrollment, repairs or promotion audits."""
-    for item in list(q["items"]):
+    for item in list(live_items(q)):
         if item["state"] != "reviewing" or not item.get("run"):
             continue
         run = item["run"]
@@ -3211,6 +2227,8 @@ def admit_available(q, usage, log, dry=False, only=None, ignore_quiet=False, res
     has_coverage = False
     global_gate = None
     q["usage"] = usage
+    backfill_runtime.usage_context(sys.modules[__name__], q, usage, reserved)
+    q["backfill_starts_at_observation"] = len(q.get("starts", []))
     if usage is not None:
         slots = max(0, usage["remaining"] - len(reserved))
     else:
@@ -3262,8 +2280,6 @@ def slot():
     # than trusting fullCapacityInMs as the first available slot.
     for attempt in range(2):
         collect_finished(q, log)
-        if PROMO.get("enabled") and promotion_mode() == "signer":
-            apply_signer_backoff(q, log)
         usage, reserved = read_slot_usage(q)
         _, gate, remaining = admit_available(q, usage, log, reserved=reserved, capture_current=False)
         save_queue(q)
@@ -3283,9 +2299,30 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
+    if not dry:
+        operation = "publication-request"
+        try:
+            backfill_runtime.publish(sys.modules[__name__], q)
+            operation = "inventory"
+            rollout = backfill_runtime.settings(STATE)
+            if rollout and rollout.get("inventory_mode") == "integrated" and not only:
+                backfill_runtime.run_inventory(sys.modules[__name__], q)
+        except Exception as exc:
+            # Fail closed for rank4 while retaining ordinary scheduler progress.
+            if not q.get("backfill_halted") or q.get("backfill_halt_operation") == operation:
+                q["backfill_halted"] = str(exc)[:300]
+                q["backfill_halt_operation"] = operation
+            log.append("backfill halted: " + str(exc)[:300])
     if not dry and only is None:
         budget = ForgeBudget()
-        log += discover_merged(q, budget)
+        discovery = CONFIG.get("merged_discovery")
+        if isinstance(discovery, dict) and discovery.get("enabled") is True:
+            try:
+                interval = rolling_discovery_interval(q, discovery)
+            except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
+                log.append("merged discovery disabled: invalid configured interval")
+            else:
+                log += discover_merged(q, budget, interval=interval, recent=True)
         with forge_window(budget):
             refreshed = deferred_refresh.refresh_deferred(q,
                 verify_source=verify_deferred_source, find_source=find_deferred_source,
@@ -3295,12 +2332,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             save_queue(q)
             log.append(f"refreshed {len(refreshed)} deferred author intent(s)")
     starts_before = len(q.get("starts", []))
-    for item in list(q["items"]):
-        if item["kind"] == "promotion" and item["state"] in SIGNER_STATES:
-            msg = harvest_signer(q, item, dry)
-            if msg:
-                log.append(msg)
-        elif item["state"] == "reviewing":
+    for item in list(live_items(q)):
+        if item["state"] == "reviewing":
             msg = harvest_review(q, item, dry)
             if msg:
                 log.append(msg)
@@ -3326,20 +2359,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         notify_owner(f"crq RECOVERED after an outage: the previous completed tick was {q['last_tick']} ({gap:.0f}m ago, "
                      f"> {stale_min}m). Schedule runs may have reported 'succeeded' meanwhile. See {STATE / 'status.md'}.")
     q["last_tick"] = iso()
-    if PROMO.get("enabled") and promotion_mode() == "signer":
-        apply_signer_backoff(q, log)
     log += enroll(q, dry)
-    try:
-        log += promotion_audit(q, dry)
-    except Exception as exc:  # retried next tick: last_main only advances after a completed audit
-        log.append(f"promotion audit: error {exc}"[:300])
-        if not dry:
-            event("promotion_audit_error", error=str(exc)[:300])
-    try:
-        log += promotion_tick(q, dry)
-    except Exception as exc:  # never let promotion bookkeeping stop the queue
-        log.append(f"promotion: error {exc}"[:300])
-    pending_at_selection = any(i["state"] == "pending" for i in q["items"])
+    pending_at_selection = any(i["state"] == "pending" for i in live_items(q))
     usage, reserved = read_slot_usage(q)
     has_coverage, global_gate, remaining = admit_available(q, usage, log, dry, only, ignore_quiet, reserved=reserved)
     if not dry:
@@ -3359,19 +2380,13 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
 
 
 def write_status(q: Dict[str, Any]) -> None:
-    items = sorted(q["items"], key=sort_key)
+    items = sorted(live_items(q), key=sort_key)
     owed_open = sum(max(0, 1 - completed_open_cycles(i)) for i in items
                     if i["kind"] == "open" and i["state"] not in ("skipped",))
     rows = []
     for i in items:
         if i["kind"] == "open":
             cyc = f"{completed_open_cycles(i)}/1"
-        elif i["kind"] == "promotion":
-            cyc = f"{len(i.get('cycles', []))}/1"
-            unresolved = sum(1 for b in i.get("blocking", []) if not b.get("resolution"))
-            i_extra = (f"{(i.get('reviewed_sha') or i['base_sha'])[:10]}..{i['batch_sha'][:10]} ({i.get('merges', '?')} merges) "
-                       f"main={i['base_sha'][:10]}"
-                       f"{f'; {unresolved} blocking unresolved' if unresolved else ''}")
         elif i["kind"] == author_quota.AUTHOR_KIND:
             a = i.get("author") or {}
             cyc = f"{len(i.get('author_cycles', []))}/1"
@@ -3379,7 +2394,7 @@ def write_status(q: Dict[str, Any]) -> None:
                        f"{(a.get('head') or '')[:10]} → {a.get('target')}")
         else:
             cyc = f"{len(i.get('cycles', []))}/1"
-        extra = i_extra if i["kind"] in ("promotion", author_quota.AUTHOR_KIND) else ""
+        extra = i_extra if i["kind"] == author_quota.AUTHOR_KIND else ""
         if i["kind"] == "merged" and i.get("measure"):
             m = i["measure"]
             extra = f"survival {m['survival']} ({m['surviving']}/{m['added']}), focus {m['focus']}"
@@ -3402,49 +2417,7 @@ def write_status(q: Dict[str, Any]) -> None:
         except Exception as exc:
             next_run = f"(schedule inspect failed: {exc})"[:200]
     recent = EVENTS.read_text().splitlines()[-15:] if EVENTS.exists() else []
-    alerts = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) if not x.get("acked")]
     banner = []
-    for x in alerts:
-        if (re.fullmatch(r"[0-9a-f]{40}", x.get("from", ""))
-                and re.fullmatch(r"[0-9a-f]{40}", x["to"])):
-            ack = (f"Procedural ack: `crq.py promotion-ack {x['to']} \"<reason>\" "
-                   f"--audit-from {x['from']} --audit-at {x['at']}`")
-        else:
-            ack = f"Legacy ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`"
-        banner.append(f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: "
-                      f"{'; '.join(x['reasons'])[:300]}. {ack}")
-    st_p = q.get("promotion") or {}
-    for x in st_p.get("escalations", []):
-        if not x.get("acked"):
-            banner.append(f"> **ALERT — PROMOTION NEEDS OWNER OVERRIDE:** CodeRabbit {x['outcome']} the single-merge batch "
-                          f"`{x['sha'][:12]}` (main=`{x['base'][:12]}`, {x['item']}). Owner: override per "
-                          f"docs/promotion-policy.md, then `crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
-    for x in st_p.get("signer_alerts", []):
-        if not x.get("acked"):
-            banner.append(f"> **ALERT — PROMOTION SIGNER** ({x['at']}): {x['text']}. Ack: "
-                          f"`crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
-    for x in st_p.get("gate_alerts", []):
-        if not x.get("acked"):
-            banner.append(f"> **ALERT — PROMOTION GATE NEEDS HUMAN** ({x['at']}): {x['text']}. Ack: "
-                          f"`crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
-    for i in items:
-        if i["kind"] == "promotion":
-            url = promotion_record(i)
-            for blocker in i.get("blocking", []):
-                advice = blocker.get("repair_advice")
-                if advice:
-                    banner.append(f"> Repair advice {i['id']} F{blocker['n']}: " +
-                                  str(advice).replace("\n", " ")[:1000] +
-                                  (f" — [promotion record]({url})" if url else ""))
-        if i["kind"] == "promotion" and i["state"] == "findings":
-            open_b = [b for b in i.get("blocking", []) if not b.get("resolution")]
-            if open_b:
-                banner.append(f"> **PROMOTION BLOCKED ({i['id']}, batch `{i['batch_sha'][:12]}`):** {len(open_b)} unresolved "
-                              + ", ".join(f"#{b['n']} {b['severity']} {b['file']}:{b.get('line')}" for b in open_b)[:300]
-                              + f". {PROMO.get('resolver', 'conductor')}: fix in merge-queue, then "
-                              f"`crq.py promotion-resolve <n|all> \"fixed in PR #N\"`")
-    attempts = [f"{a['item']} ({a['merges']} merges: {a['why']})" for a in st_p.get("attempts", [])[-6:]]
-    mode = promotion_mode()
     md = [f"# CodeRabbit review queue — status ({iso()})", "", *banner, *([""] if banner else []),
           f"- queue: {'**PAUSED** — ' + str(q.get('pause_reason')) if q.get('paused') else 'active'}",
           f"- schedule: `{sched}` {next_run}",
@@ -3455,11 +2428,6 @@ def write_status(q: Dict[str, Any]) -> None:
           f"- open-PR CLI reviews still owed: {owed_open}",
           "- merged-current discovery/receipt proof (retained capture T): " +
           json.dumps(status_summary.merged_current(q, STATE / "receipts"), sort_keys=True),
-          f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'} · mode {mode}"
-          f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
-          f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}"
-          f"{'; splitting toward ' + st_p['continue_to'][:10] + ' at ≤' + str(st_p.get('batch_cap')) + ' merges' if st_p.get('continue_to') else ''}",
-          f"- promotion attempts (newest last): {' → '.join(attempts) or '—'}",
           f"- last tick: {q.get('last_tick')}", "",
           "| item | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
           "|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
@@ -3470,13 +2438,11 @@ def write_status(q: Dict[str, Any]) -> None:
     (STATE / "status.md").write_text("\n".join(md))
     (STATE / "status.json").write_text(json.dumps({"generated_at": iso(), "paused": q.get("paused"),
                                                    "cooldown_until": q.get("cooldown_until"),
-                                                   "promotion_gate_alerts": [x for x in st_p.get("gate_alerts", [])
-                                                                             if not x.get("acked")],
                                                    "items": [{k: i.get(k) for k in ("id", "kind", "state",
                                                               "prior_cycles", "cycles", "operator_priority", "optional_cycle", "pinned_base", "last_error",
                                                               "wait_reason", "gate_stalled_at")} for i in items]}, indent=2) + "\n")
     try:
-        status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=mode)
+        status_summary.publish(ROOT, q, CONFIG, schedule)
     except Exception as exc:
         # Preserve the last complete summary; failed publishing must not stop
         # reviews or manufacture fresh zero counters.
@@ -3535,7 +2501,9 @@ def cmd_measure() -> None:
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
-    merged = [i for i in q["items"] if i["kind"] == "merged"]
+    # Repair-only backfill items share the merged kind but have no PR merge.
+    merged = [i for i in live_items(q) if i["kind"] == "merged"
+              and not (i.get("pr") == 0 and i.get("repair_runs") and not i.get("merge_commit"))]
     for i in merged:
         if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
             continue  # merged head already reviewed; not a supersession decision
@@ -3566,31 +2534,15 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         tmp = WATCHDOG_HOME / ".heartbeat.json.tmp"
         tmp.write_text(json.dumps({"last_tick": q["last_tick"], "stale_alarm_min": CONFIG.get("stale_alarm_min", 36),
                                    "schedule_id": CONFIG.get("schedule_id"), "root": str(ROOT),
-                                   "alert_agent_id": PROMO.get("alert_agent_id"),
-                                   "alert_agent_host": PROMO.get("alert_agent_host")}) + "\n")
+                                   "alert_agent_id": CONFIG.get("promotion", {}).get("alert_agent_id"),
+                                   "alert_agent_host": CONFIG.get("promotion", {}).get("alert_agent_host")}) + "\n")
         tmp.replace(WATCHDOG_HOME / "heartbeat.json")
     except OSError as exc:
         event("heartbeat_failed", error=str(exc)[:200])
 
 
 def cmd_selfcheck() -> int:
-    """Negative check: the third-party App identity wrongly pinned on 2026-10-04 must
-    never reappear in config, and an unset identity must keep signer mode off."""
-    raw = (ROOT / "config.json").read_text()
-    bad = [str(x) for x in BANNED_BOT_IDS if str(x) in raw] + [x for x in BANNED_BOT_LOGINS if x in raw]
-    ident, mode = reviewer_identity(), promotion_mode()
-    print(f"reviewer identity: {ident or 'UNPINNED (fail closed)'}; main gate mode: {mode}"
-          f"{' (' + _MODE_WHY.get('origin/main', '') + ')' if mode == 'signer_unconfigured' else ''}")
-    if bad:
-        print(f"FAIL: config.json contains banned third-party identity {bad}")
-        return 1
-    if SPOOL.refused:
-        print(f"FAIL: {SPOOL.refused}")
-        return 1
-    if ident is None and mode == "signer":
-        print("FAIL: signer mode with an unpinned identity")
-        return 1
-    print("ok")
+    print("ok: post-merge review queue")
     return 0
 
 
@@ -3619,80 +2571,11 @@ def with_lock(fn, *a, lock_wait=0, **kw):
 def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
           audit_from: Optional[str] = None, audit_at: Optional[str] = None) -> None:
     q = load_queue()
-    if action == "promotion-ack" and (audit_from is not None or audit_at is not None):
-        # Procedural disposition only: never changes the audit verdict or promotion authority.
-        sha, _, why = (reason or "").partition(" ")
-        if (not audit_from or not audit_at or not why.strip()
-                or not re.fullmatch(r"[0-9a-f]{40}", audit_from)
-                or not re.fullmatch(r"[0-9a-f]{40}", sha)):
-            sys.exit("exact audit acknowledgement requires full from/to SHAs, --audit-at and a reason")
-        try:
-            observed = parse_iso(audit_at)
-            valid_at = iso(observed) == audit_at and observed <= now()
-        except ValueError:
-            valid_at = False
-        if not valid_at:
-            sys.exit("audit acknowledgement requires a recorded UTC observation timestamp")
-        audit = q.get("promotion_audit") or {}
-        matches = lambda x: x.get("from") == audit_from and x.get("to") == sha and x.get("at") == audit_at
-        records = [x for x in audit.get("records", []) if matches(x)]
-        alerts = [x for x in audit.get("alerts", []) if matches(x)]
-        if len(records) != 1 or len(alerts) != 1 or records[0].get("verdict") != "UNVERIFIED":
-            sys.exit("audit acknowledgement requires one matching UNVERIFIED record and alert")
-        record, alert = records[0], alerts[0]
-        identity = {"from": audit_from, "to": sha, "audit_at": audit_at, "reason": why.strip()}
-        previous = alert.get("acknowledgement")
-        if alert.get("acked") or previous or record.get("acknowledgement"):
-            if (not isinstance(previous, dict) or set(previous) != set(identity) | {"acknowledged_at"}
-                    or any(previous.get(k) != v for k, v in identity.items())
-                    or not previous.get("acknowledged_at") or record.get("acknowledgement") != previous
-                    or alert.get("acked") != f"{previous['acknowledged_at']} {why.strip()}"):
-                sys.exit("audit acknowledgement already has a different or incomplete disposition")
-            write_status(q)  # A prior status/event failure cannot undo the durable disposition.
-            print("promotion-ack already recorded (procedural only)")
-            return
-        acknowledgement = {**identity, "acknowledged_at": iso()}
-        record["acknowledgement"] = alert["acknowledgement"] = acknowledgement
-        alert["acked"] = f"{acknowledgement['acknowledged_at']} {why.strip()}"
-        save_queue(q)  # Commit before any event, status rendering, or success output.
-        event("admin_promotion_audit_ack", **acknowledgement)
-        write_status(q)
-        print("promotion-ack ok (procedural only)")
-        return
     if action in ("pause", "resume"):
         q["paused"] = action == "pause"
         q["pause_reason"] = reason if action == "pause" else None
-    elif action == "promotion-ack":
-        sha, _, why = (reason or "").partition(" ")
-        legacy_audit = [x for x in (q.get("promotion_audit") or {}).get("alerts", [])
-                        if not (isinstance(x.get("from"), str) and isinstance(x.get("to"), str)
-                                and re.fullmatch(r"[0-9a-f]{40}", x["from"])
-                                and re.fullmatch(r"[0-9a-f]{40}", x["to"]))]
-        hit = [x for x in legacy_audit + (q.get("promotion") or {}).get("escalations", [])
-               + (q.get("promotion") or {}).get("signer_alerts", [])
-               + (q.get("promotion") or {}).get("gate_alerts", [])
-               if not x.get("acked") and (sha == "all" or x.get("to", x.get("sha", "")).startswith(sha))]
-        if not hit or not why.strip():
-            sys.exit('usage: crq.py promotion-ack <main-sha-prefix|all> "<reason>" (no matching open alert?)')
-        for x in hit:
-            x["acked"] = f"{iso()} {why.strip()}"
-    elif action == "promote":
-        q.setdefault("promotion", {})["requested"] = True  # cut on the next tick (on demand)
-    elif action == "promotion-resolve":
-        item = open_promotion(q)
-        if not item or item["state"] != "findings":
-            sys.exit("no promotion is waiting on findings")
-        which, _, how = (reason or "").partition(" ")
-        if not how.strip():
-            sys.exit('usage: crq.py promotion-resolve <finding-n|all> "<disposition: fixed in PR #N / rebuttal>"')
-        hit = [b for b in item["blocking"] if which == "all" or str(b["n"]) == which]
-        if not hit:
-            sys.exit(f"no blocking finding {which}")
-        for b in hit:
-            b["resolution"] = f"{iso()} {how.strip()}"
-        item_id = item["id"]
     else:
-        item = next((i for i in q["items"] if i["id"] == item_id), None)
+        item = next((i for i in live_items(q) if i["id"] == item_id), None)
         if not item:
             sys.exit(f"no item {item_id}")
         if action == "requeue" and item["kind"] == review_receipt.KIND:
@@ -3816,7 +2699,7 @@ def main() -> int:
     p.add_argument("--request-id", required=True)
     p.add_argument("--base", required=True, help="immutable base commit sha")
     p.add_argument("--head", required=True, help="immutable reviewed head commit sha")
-    p.add_argument("--target", required=True, help="target ref, e.g. origin/merge-queue")
+    p.add_argument("--target", required=True, help=f"target ref, e.g. {DEFAULT_REF}")
     p.add_argument("--cycle", type=int, required=True, help="author cycle number (1 or 2)")
     p.add_argument("--review-policy", help="opt into leases using review.reviewerTimeoutMin from this JSON file")
     p.add_argument("--fallback-reviewer", help="configured agent reviewer identity; requires --review-policy")
@@ -3844,17 +2727,9 @@ def main() -> int:
     sub.add_parser("summary", help="refresh only the home-resident fleet summary; no ticks or reviews")
     p = sub.add_parser("synth")
     p.add_argument("pr", type=int)
-    for a in ("pause", "resume", "promote"):
+    for a in ("pause", "resume"):
         p = sub.add_parser(a)
         p.add_argument("reason", nargs="?")
-    p = sub.add_parser("promotion-ack", help="acknowledge an unverified-promotion alert")
-    p.add_argument("sha")
-    p.add_argument("reason")
-    p.add_argument("--audit-from", help="exact previous main SHA; requires --audit-at and full target SHA")
-    p.add_argument("--audit-at", help="exact recorded audit observation UTC timestamp; requires --audit-from")
-    p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
-    p.add_argument("finding", help="finding number, or all")
-    p.add_argument("disposition")
     for a in ("requeue", "skip", "block", "prioritize", "deprioritize"):
         p = sub.add_parser(a)
         p.add_argument("item")
@@ -3918,20 +2793,15 @@ def main() -> int:
                 schedule = paseo_json(["schedule", "inspect", CONFIG["schedule_id"]])
             except Exception:
                 pass
-        status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=promotion_mode())
+        status_summary.publish(ROOT, q, CONFIG, schedule)
         print(WATCHDOG_HOME / "summary.json")
     elif args.cmd == "synth":
         q = load_queue()
         fetch()
-        item = next(i for i in q["items"] if i["kind"] == "merged" and i["pr"] == args.pr)
-        base, head, n = build_synthetic(item)
+        item = next(i for i in live_items(q) if i["kind"] == "merged" and i["pr"] == args.pr)
+        base, head, n = build_synthetic(item, git("rev-parse", DEFAULT_REF + "^{commit}"))
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
-    elif args.cmd == "promotion-ack":
-        with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}",
-                  audit_from=args.audit_from, audit_at=args.audit_at)
-    elif args.cmd == "promotion-resolve":
-        with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
     elif args.cmd == "author-enroll":
         with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
                   args.review_policy, args.fallback_reviewer)

@@ -16,6 +16,14 @@ const marker = (over: Record<string, unknown> = {}): string =>
   })} -->`;
 
 describe('parseIndependentReview', () => {
+  test('matches the current head even when a comment mentions another full SHA first', () => {
+    expect(
+      parseIndependentReview(`${'b'.repeat(40)} base; ${'a'.repeat(40)} PASS`, 'a'.repeat(40)),
+    ).toMatchObject({ kind: 'valid' });
+    expect(parseIndependentReview(`${'b'.repeat(40)} PASS`, 'a'.repeat(40))).toEqual({
+      kind: 'absent',
+    });
+  });
   test('accepts one strict, independent, head-bound PASS marker', () => {
     expect(parseIndependentReview(marker())).toMatchObject({
       kind: 'valid',
@@ -30,16 +38,23 @@ describe('parseIndependentReview', () => {
   });
 
   test.each([
-    marker({ authorAgentId: 'reviewer-agent' }),
-    marker({ independent: false }),
-    marker({ verdict: 'APPROVED' }),
-    marker({ headSha: 'bad' }),
+    `Reviewer opus: ${'a'.repeat(40)} PASS`,
+    marker({ authorAgentId: 'reviewer-agent', independent: false }),
     `${marker()} ${marker()}`,
-    `${marker()} <!-- cq-agent-review: broken`,
-    '<!-- cq-agent-review: {not-json} -->',
-  ])('rejects malformed or duplicate marker %s', (body) => {
-    expect(parseIndependentReview(body)).toEqual({ kind: 'invalid' });
+    `<!-- cq-agent-review-v2: ${'a'.repeat(40)} PASS -->`,
+  ])('accepts head-bound PASS without syntax requirements: %s', (body) => {
+    expect(parseIndependentReview(body)).toMatchObject({
+      kind: 'valid',
+      attestation: { headSha: 'a'.repeat(40), verdict: 'PASS' },
+    });
   });
+
+  test.each(['PASS', `${'a'.repeat(40)} HOLD`, 'bad PASS'])(
+    'ignores incomplete evidence: %s',
+    (body) => {
+      expect(parseIndependentReview(body)).toEqual({ kind: 'absent' });
+    },
+  );
 });
 
 describe('parseSameAccountReviewFlag', () => {

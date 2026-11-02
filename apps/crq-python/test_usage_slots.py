@@ -13,7 +13,6 @@ import test_author_quota as fixtures
 
 crq = fixtures.crq
 REFRESH = crq.refresh_slot_deadline
-BACKOFF = crq.apply_signer_backoff
 AT = dt.datetime(2026, 10, 28, 1, 1, tzinfo=dt.timezone.utc)
 
 
@@ -75,11 +74,10 @@ class ConcurrencyTest(unittest.TestCase):
             item['state'] = 'reviewing'
             q['starts'].append(crq.iso())
             return item['id']
-        for name, value in [('launch', launch), ('plan_promotion', lambda item: self.plan),
+        for name, value in [('launch', launch),
                             ('plan_open', lambda *args: self.plan),
                             ('pr_info', lambda pr: {'state': 'OPEN'}),
-                            ('quiet_reason', lambda *args, **kwargs: None),
-                            ('post_promotion_status', lambda *args: None)]:
+                            ('quiet_reason', lambda *args, **kwargs: None)]:
             patch = mock.patch.object(crq, name, value)
             patch.start()
             self.addCleanup(patch.stop)
@@ -88,7 +86,7 @@ class ConcurrencyTest(unittest.TestCase):
         self.addCleanup(self.usage.stop)
 
     def items(self):
-        self.q['items'] = [dict(id=i, kind='promotion' if i == 'promotion' else 'open',
+        self.q['items'] = [dict(id=i, kind='open',
                                 state='pending', pr=n, order=n, operator_priority=i == 'prioritized',
                                 base_sha=fixtures.BASE, batch_sha=fixtures.HEAD)
                            for n, i in enumerate(['normal', 'prioritized', 'promotion', 'later'])]
@@ -97,7 +95,7 @@ class ConcurrencyTest(unittest.TestCase):
         self.items()
         self.q['starts'] = [crq.iso()] * 5
         crq.tick()
-        self.assertEqual(self.started, ['promotion', 'prioritized', 'normal'])
+        self.assertEqual(self.started, ['prioritized', 'normal', 'promotion'])
         self.assertEqual(len(crq.inflight(self.q)), 3)
 
     def test_ceiling_inflight_and_zero_vendor_slots(self):
@@ -111,27 +109,6 @@ class ConcurrencyTest(unittest.TestCase):
                 crq.tick()
                 self.assertEqual(len(self.started), expected)
 
-    def test_unknown_signer_delivery_consumes_one_admission(self):
-        for remaining, limit, expected_launches in [(1, 10, 0), (10, 1, 0), (2, 2, 1)]:
-            with self.subTest(remaining=remaining, max_inflight=limit):
-                self.items()
-                self.started.clear()
-                self.q['starts'] = []
-                promotion = next(i for i in self.q['items'] if i['kind'] == 'promotion')
-                promotion['id'] = 'promo-' + fixtures.HEAD[:10]
-                crq.CONFIG['max_inflight'] = limit
-                with mock.patch.object(crq, 'promotion_mode', return_value='signer'), \
-                     mock.patch.object(crq, 'main_sha', return_value=fixtures.BASE), \
-                     mock.patch.object(crq.SPOOL, 'write_request', side_effect=crq.SpoolUnreachable('unknown')) as write, \
-                     mock.patch.object(crq, 'spool_unreachable', return_value='unknown delivery'):
-                    _, _, remaining_after = crq.admit_available(self.q, {'remaining': remaining}, [])
-                write.assert_called_once()
-                self.assertEqual(promotion['state'], 'requested')
-                self.assertTrue(promotion['request']['dispatch_pending'])
-                self.assertEqual(len(self.started), expected_launches)
-                self.assertEqual(len(self.q['starts']), 1 + expected_launches)
-                self.assertLessEqual(len(crq.inflight(self.q)), limit)
-                self.assertEqual(remaining_after, remaining - 1 - expected_launches)
 
     def test_minute_leaves_first_current_capture_to_fetching_tick(self):
         for minute, captured, expected in [(True, False, 0), (True, True, 1), (False, False, 1)]:
@@ -171,7 +148,7 @@ class ConcurrencyTest(unittest.TestCase):
              mock.patch.object(crq, 'now', return_value=AT), \
              mock.patch.object(crq, 'fetch') as fetch:
             crq.slot()
-            self.assertEqual(self.started, ['promotion', 'prioritized', 'normal'])
+            self.assertEqual(self.started, ['prioritized', 'normal', 'promotion'])
             fetch.assert_not_called()
             self.q['items'] = []
             crq.slot()
@@ -191,7 +168,7 @@ class ConcurrencyTest(unittest.TestCase):
             crq.slot()
         wait.assert_called_once_with(17)
         self.assertEqual(self.probe.call_count, 2)
-        self.assertEqual(self.started, ['promotion', 'prioritized'])
+        self.assertEqual(self.started, ['prioritized', 'normal'])
 
     def test_repeated_usage_does_not_spend_outstanding_reservations(self):
         self.items()
@@ -201,34 +178,6 @@ class ConcurrencyTest(unittest.TestCase):
             crq.slot()  # unchanged usage still includes the detached reservations
         self.assertEqual(len(self.started), 3)
 
-    def test_signer_reservations_survive_claims_and_the_local_hour(self):
-        for state in ('requested', 'signer_running', 'blocked'):
-            with self.subTest(state=state):
-                signer = dict(id='signer', kind='promotion', state=state,
-                              request={'requested_at': crq.iso(AT - dt.timedelta(hours=2)),
-                                       'reconciliation_required': state == 'blocked'})
-                self.q['items'] = [signer, dict(id='next', kind='open', state='pending', pr=1)]
-                self.probe.return_value = {'remaining': 1}
-                with mock.patch.object(crq, 'now', return_value=AT):
-                    usage, held = crq.read_slot_usage(self.q)
-                    crq.admit_available(self.q, usage, [], reserved=held)
-                self.assertEqual(self.started, [])
-                self.assertEqual(len(held), 1)
-
-    def test_blocked_signer_reservation_occupies_inflight_capacity(self):
-        signer = dict(id='signer', kind='promotion', state='blocked',
-                      request={'requested_at': crq.iso(AT), 'reconciliation_required': True})
-        self.q['items'] = [signer, dict(id='next', kind='open', state='pending', pr=1)]
-        crq.CONFIG['max_inflight'] = 1
-        self.probe.return_value = {'remaining': 2}
-        usage, held = crq.read_slot_usage(self.q)
-        _, gate, remaining = crq.admit_available(self.q, usage, [], reserved=held)
-        self.assertEqual(held, [signer['request']['requested_at']])
-        self.assertEqual(crq.inflight(self.q), [signer])
-        self.assertEqual(gate, 'inflight')
-        self.assertEqual(remaining, 1)
-        self.assertEqual(self.started, [])
-        self.assertEqual(self.q['starts'], [])
 
     def test_vendor_progress_precedes_usage_and_requires_a_valid_probe(self):
         run = dict(run_id='delayed', started_at=crq.iso(AT))
@@ -285,24 +234,6 @@ class ConcurrencyTest(unittest.TestCase):
             crq.admit_available(self.q, None, [], reserved=[crq.iso(AT - dt.timedelta(hours=2))])
         self.assertEqual(self.started, [])
 
-    def test_minute_admission_applies_actual_signer_backoff(self):
-        until = AT + dt.timedelta(minutes=5)
-        for reason, expected in [('rate_limit', 0), ('budget', 3)]:
-            with self.subTest(reason=reason):
-                self.items()
-                self.q['cooldown_until'] = None
-                self.started.clear()
-                with mock.patch.object(crq, 'PROMO', {'enabled': True}), \
-                     mock.patch.object(crq, 'promotion_mode', return_value='signer'), \
-                     mock.patch.object(crq, 'apply_signer_backoff', BACKOFF), \
-                     mock.patch.object(crq.SPOOL, 'read', return_value=json.dumps(
-                         dict(v=1, until=crq.iso(until), reason=reason))), \
-                     mock.patch.object(crq, 'now', return_value=AT), \
-                     mock.patch.object(crq, 'refresh_slot_deadline', REFRESH):
-                    crq.slot()
-                self.assertEqual(len(self.started), expected)
-                if reason == 'rate_limit':
-                    self.assertEqual(self.q['cooldown_until'], crq.iso(until))
 
     def test_undated_retry_does_not_sleep_under_lock(self):
         self.items()
@@ -351,16 +282,14 @@ class ConcurrencyTest(unittest.TestCase):
                      mock.patch.object(crq, 'findings_md', return_value=''), \
                      mock.patch.object(crq, 'refresh_slot_deadline', REFRESH), \
                      mock.patch.object(crq, 'fetch') as fetch, \
-                     mock.patch.object(crq, 'enroll') as enroll, \
-                     mock.patch.object(crq, 'promotion_audit') as audit:
+                     mock.patch.object(crq, 'enroll') as enroll:
                     crq.slot()
                 fetch.assert_not_called()
                 enroll.assert_not_called()
-                audit.assert_not_called()
                 if outcome == 'completed':
                     self.assertEqual(item['state'], 'done')
                     self.assertEqual(len(item['author_cycles']), 1)
-                    self.assertEqual(self.started, ['promotion'])
+                    self.assertEqual(self.started, ['prioritized'])
                 else:
                     self.assertTrue(self.q['paused'])
                     self.assertEqual(item['state'], crq.author_quota.AUTHOR_FAILED)
@@ -377,23 +306,6 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual((self.root / 'next-review-at').read_text().strip(),
                          crq.iso(AT + dt.timedelta(minutes=1)))
 
-    def test_signer_only_inflight_preserves_ceiling_without_minute_hint(self):
-        for state in ('requested', 'signer_running', 'blocked'):
-            with self.subTest(state=state):
-                signer = dict(id='signer', kind='promotion', state=state,
-                              request={'requested_at': crq.iso(AT), 'reconciliation_required': state == 'blocked'})
-                self.q['items'] = [signer, dict(id='next', kind='open', state='pending', pr=1)]
-                crq.CONFIG['max_inflight'] = 1
-                self.probe.return_value = {'remaining': 2}
-                usage, held = crq.read_slot_usage(self.q)
-                _, gate, remaining = crq.admit_available(self.q, usage, [], reserved=held)
-                deadline = REFRESH(self.q, usage, remaining, gate, at=AT)
-                self.assertEqual(crq.inflight(self.q), [signer])
-                self.assertFalse(crq.has_collectable_runs(self.q))
-                self.assertEqual(gate, 'inflight')
-                self.assertEqual(self.started, [])
-                self.assertEqual(deadline, AT + dt.timedelta(minutes=12))
-                self.assertEqual((self.root / 'next-review-at').read_text().strip(), crq.iso(deadline))
 
     def test_collection_eligibility_matches_reviewing_run_guard(self):
         for state, run, expected in [('reviewing', None, False), ('reviewing', {}, False),

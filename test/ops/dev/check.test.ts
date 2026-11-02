@@ -254,11 +254,11 @@ describe('dev.check', () => {
       'ok',
     );
     if (result.status !== 'ok') return;
-    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const base = repo.git('rev-parse', 'origin/main').trim();
     const head = repo.git('rev-parse', 'HEAD').trim();
     expect(result.value).toMatchObject({
       checkId: `k001-${head.slice(0, 8)}`,
-      target: 'merge-queue',
+      target: 'main',
       base,
       head,
       dirtySha256: 'clean-tree',
@@ -281,7 +281,7 @@ describe('dev.check', () => {
     const effects = effectsFor();
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });
     expect(result.status, JSON.stringify(result)).toBe('ok');
-    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const base = repo.git('rev-parse', 'origin/main').trim();
     expect(pnpmArgs(effects)).toContainEqual(['test:narrow', '--base', base]);
     // No gated run happened, so no gate row or record field may claim one.
     const [record] = effects.openLedger('feature/x').load().records;
@@ -417,7 +417,7 @@ describe('dev.check', () => {
     const effects = effectsFor();
     const result = await makeDevCheck(effects)({ repoRoot: repo.root, includeIntegration: true });
     expect(result.status, JSON.stringify(result)).toBe('ok');
-    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const base = repo.git('rev-parse', 'origin/main').trim();
     expect(pnpmArgs(effects)).toContainEqual([
       'test:narrow',
       '--include-integration',
@@ -509,7 +509,7 @@ describe('dev.check', () => {
 
     const behind = await makeDevCheck(effectsFor())({
       repoRoot: repo.root,
-      range: 'HEAD~1..origin/merge-queue',
+      range: 'HEAD~1..origin/main',
     });
     expect(behind.status).toBe('needs-human');
     const missing = await makeDevCheck(effectsFor())({ repoRoot: repo.root, range: 'nope..HEAD' });
@@ -531,7 +531,7 @@ describe('dev.check', () => {
   });
 
   test('knip is skipped (and recorded) for a docs-only diff, and runs for a code change', async () => {
-    repo.git('reset', '-q', '--hard', 'origin/merge-queue');
+    repo.git('reset', '-q', '--hard', 'origin/main');
     await repo.write('README.md', '# docs only\n');
     repo.commitAll('docs');
     const docs = effectsFor();
@@ -555,6 +555,7 @@ describe('dev.check', () => {
     const seen: string[] = [];
     const effects = effectsFor(async (command, args) => {
       if (command !== 'node') return undefined;
+      expect(args[1]).toBe('--tree');
       const tree = (args[0] ?? '').replace(/\/scripts\/denylist-scan$/, '');
       seen.push(await readFile(`${tree}/src/staged.ts`, 'utf8'));
       seen.push(await readFile(`${tree}/README.md`, 'utf8'));

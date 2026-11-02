@@ -6,7 +6,7 @@ selection, shared-allocation admission and per-PR aggregation — and nothing
 else. It performs no I/O, has no runtime imports, reads no configuration and
 dispatches no driver, forge, queue, provider or provider CLI. The source
 baseline is `0a45e5c2951206b317858f07d349aed9732c7198`, targeting
-`merge-queue`.
+`main`.
 
 The module is `src/ops/review/internal/addressManyPlan.ts`, imported only by
 `test/ops/review/addressManyPlan.test.ts`. It is not an op: it is absent from

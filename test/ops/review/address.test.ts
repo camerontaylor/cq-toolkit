@@ -1,3 +1,6 @@
+import { makeGitMutex } from '../../../src/shared/gitMutex.js';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -47,7 +50,7 @@ async function fixture(findings: Finding[] = [finding('a')]) {
   const record = (): FindingsRecord => ({
     schemaVersion: 1,
     branch: 'feature/x',
-    reviewed: { base: repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(), scope: 'full' },
+    reviewed: { base: repo.git('merge-base', 'origin/main', 'HEAD').trim(), scope: 'full' },
     head: repo.git('rev-parse', 'HEAD').trim(),
     sources: [{ kind: 'agent', status: 'terminal' }],
     findings,
@@ -93,7 +96,168 @@ const reportOf = (
   result: Awaited<ReturnType<ReturnType<typeof makeReviewAddress>>>,
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
+test.each([undefined, '/prepared/pr-7', 'prepared/pr-7'])(
+  'plain caller records dependency selection: %s',
+  async (dependencyRoot) => {
+    const f = await fixture();
+    let selected: string | undefined;
+    try {
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: (deps) => {
+          selected = deps.dependencyRoot;
+          return f.deps.workerFactory!(deps);
+        },
+      })({
+        repoRoot: f.repo.root,
+        source: 'local',
+        ...(dependencyRoot === undefined ? {} : { dependencyRoot }),
+        journalDir: f.input.journalDir,
+      });
+      const expected = dependencyRoot?.startsWith('/')
+        ? dependencyRoot
+        : join(f.repo.root, dependencyRoot ?? '.');
+      expect(selected).toBe(expected);
+      expect(reportOf(result).dependencySource).toEqual({
+        kind: dependencyRoot === undefined ? 'caller' : 'prepared',
+        root: expected,
+      });
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
 describe('review.address composition', () => {
+  test('an engine prerequisite refusal stops the leg before paid re-review', async () => {
+    const f = await fixture();
+    const reason = 'baseline precondition failed: dependency metadata differs';
+    let refused = false;
+    try {
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: () => ({
+          escalation: createEscalationState,
+          preconditionFailure: () => (refused ? reason : undefined),
+          preconditions: () =>
+            refused ? [{ kind: 'deterministic', scope: 'leg', stage: 'dependencies', reason }] : [],
+          fix: async (item) => {
+            refused = true;
+            return {
+              finding: { ...item, status: 'deferred', reason },
+              observedHead: f.record().head,
+              reason,
+              validation: [],
+            };
+          },
+        }),
+      })({ ...f.input, rounds: 10 });
+      expect(result.status).toBe('needs-human');
+      expect(result.status === 'needs-human' && result.reason).toContain(reason);
+      expect(f.calls).not.toContain('review');
+      expect(reportOf(result).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(reportOf(result).preconditions).toEqual([
+        { kind: 'deterministic', scope: 'leg', stage: 'dependencies', reason },
+      ]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('CLI closure fixture preserves an uncertain finding as open with exit 3', async () => {
+    const f = await fixture();
+    try {
+      await f.repo.write('a.ts', 'throw new Error("BAD");\n');
+      f.repo.commitAll('closure CLI trigger');
+      const child = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../../fixtures/review-closure-cli/entry.mjs', import.meta.url)),
+          'review.address',
+          '--source=local',
+          `--repoRoot=${f.repo.root}`,
+          '--verifyClosure',
+          '--rounds=1',
+          `--journalDir=${f.input.journalDir}`,
+          '--json',
+        ],
+        { encoding: 'utf8', timeout: 30_000 },
+      );
+      expect(child.status, child.stderr).toBe(3);
+      expect(JSON.parse(child.stdout)).toMatchObject({
+        status: 'needs-human',
+        report: {
+          findings: [{ id: 'demo', status: 'open' }],
+          closureVerifications: [
+            {
+              verification: { verdict: 'uncertain', reason: 'omitted-consumer-or-dependency' },
+            },
+          ],
+        },
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test.each([true, false])(
+    'closure verification opt-in=%s uses pinned evidence',
+    async (verifyClosure) => {
+      const f = await fixture([{ ...finding('a'), text: 'Replace `a = 1`' }]);
+      try {
+        let committed = '';
+        const before = f.repo.git('show', 'HEAD:src/a.ts');
+        const result = await makeReviewAddress({
+          ...f.deps,
+          workerFactory: () => ({
+            escalation: createEscalationState,
+            fix: async (item) => {
+              const observedHead = f.record().head;
+              await f.repo.write('sibling.txt', 'concurrent sibling\n');
+              const validatedParent = f.repo.commitAll('sibling fix');
+              await f.repo.write('src/a.ts', 'export const fixedA = 2;\n');
+              committed = f.repo.commitAll('fix a');
+              // The packet must read the committed snapshot, never this live file.
+              await f.repo.write('src/a.ts', 'uncommitted drift\n');
+              return {
+                finding: { ...item, status: 'fixed' },
+                observedHead,
+                commit: committed,
+                validatedParent,
+                reason: 'fixed',
+                validation: [],
+              };
+            },
+          }),
+        })({ ...f.input, verifyClosure, rounds: 1 });
+        const report = reportOf(result);
+        if (verifyClosure) {
+          expect(result.status).toBe('needs-human');
+          expect(f.calls).not.toContain('disposition:fixed');
+          expect(f.calls).not.toContain('review');
+          expect(report.findings[0]?.status).toBe('open');
+          const evidence = report.closureVerifications?.[0];
+          expect(evidence?.packet.before).toBe(before);
+          expect(evidence?.packet.after).toBe('export const fixedA = 2;\n');
+          expect(evidence?.packet.metadata.revision.head).toBe(committed);
+          expect(evidence?.packet.metadata.revision.parent).toBe(
+            f.repo.git('rev-parse', `${committed}^`).trim(),
+          );
+          expect(evidence?.packet.patch).toContain('+export const fixedA = 2;');
+          expect(evidence?.packet.relevantDependenciesComplete).toBe(false);
+          expect(evidence?.verification.verdict).toBe('uncertain');
+          expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toMatchObject({
+            closureVerifications: report.closureVerifications,
+          });
+        } else {
+          expect(report.closureVerifications).toBeUndefined();
+          expect(f.calls).toContain('disposition:fixed');
+        }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+
   test.each([true, false])(
     'portable cq.json parsing gates clean record acceptance: valid=%s',
     async (valid) => {
@@ -610,7 +774,7 @@ test.each([
               head:
                 mode === 'latest-unknown-head'
                   ? 'a'.repeat(40)
-                  : f.repo.git('rev-parse', 'origin/merge-queue').trim(),
+                  : f.repo.git('rev-parse', 'origin/main').trim(),
               ...(mode === 'latest-other-branch' ? { branch: 'other' } : {}),
             }),
       );
@@ -696,7 +860,7 @@ test('re-review keeps the original full comparison when a mutable target ref mov
           const observedHead = f.record().head;
           await f.repo.write('src/a.ts', 'verified fixture fix\n');
           const commit = f.repo.commitAll('scripted verified fix');
-          f.repo.git('update-ref', 'refs/remotes/origin/merge-queue', commit);
+          f.repo.git('update-ref', 'refs/remotes/origin/main', commit);
           return {
             finding: { ...item, status: 'fixed' },
             commit,
@@ -716,7 +880,7 @@ test('re-review keeps the original full comparison when a mutable target ref mov
     })(f.input);
     expect(result.status).toBe('ok');
     expect(reviewedBase).toBe(originalBase);
-    expect(f.repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim()).not.toBe(originalBase);
+    expect(f.repo.git('merge-base', 'origin/main', 'HEAD').trim()).not.toBe(originalBase);
   } finally {
     await f.cleanup();
   }
@@ -929,7 +1093,7 @@ async function vendorAddressFixture() {
   repo.commitAll('configure both reviewers');
   const branch = 'feature/x';
   const head = repo.git('rev-parse', 'HEAD').trim();
-  const base = repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim();
+  const base = repo.git('merge-base', 'origin/main', 'HEAD').trim();
   makeSubprocessDevEffects(repo.root)
     .openLedger(branch)
     .save({
@@ -1119,7 +1283,7 @@ describe('review.address vendor preparation boundary', () => {
         kind: 'deferred-author',
         repo: 'owner/repo',
         producer: 'author',
-        target: 'merge-queue',
+        target: 'main',
         head: f.head,
       });
       expect(debt.deferral).toMatchObject({
@@ -1131,7 +1295,7 @@ describe('review.address vendor preparation boundary', () => {
         cycleId: 'c001-origin',
         head: f.head,
         base: f.base,
-        target: 'merge-queue',
+        target: 'main',
       });
       // The real durable enrollment is the engine's own request on disk.
       const onDisk = JSON.parse(
@@ -1150,4 +1314,25 @@ describe('review.address vendor preparation boundary', () => {
       await f.cleanup();
     }
   });
+});
+
+test('plain and isolated address calls share the caller per-PR lock', async () => {
+  const f = await fixture();
+  try {
+    const domain = f.repo.git('rev-parse', '--path-format=absolute', '--git-common-dir').trim();
+    const result = await makeGitMutex({
+      lockPath: join(domain, 'cq-review-address-pr-7'),
+      failFast: true,
+    }).withLock(async () => {
+      return makeReviewAddress({ ...f.deps, coordinationRoot: domain })({
+        ...f.input,
+        source: 'pr:7',
+      });
+    });
+    expect(result.status).toBe('needs-human');
+    expect(f.calls).toEqual([]);
+    expect(result.status === 'needs-human' && result.reason).toMatch(/lock|locked/i);
+  } finally {
+    await f.cleanup();
+  }
 });

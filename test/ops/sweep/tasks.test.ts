@@ -54,6 +54,34 @@ test('fallback argv reaches Vitest positional filters, including flag-shaped fil
   expect(parsed.filter).toEqual(['chosen.test.ts', './-flag.test.ts']);
 });
 
+test('template argv reaches Vitest positional filters, including flag-shaped filenames', () => {
+  const check = { command: 'vitest', args: ['ignored'], cwd: '/repo' };
+  const files = ['chosen.test.ts', '-flag.test.ts', '--help', 'a space.test.ts', '$(literal).ts'];
+  const relatedArgs = ['related', '{files}', '--reporter=json'];
+  const related = relatedCheckCommand(check, files, relatedArgs);
+  const expectedFiles = [
+    'chosen.test.ts',
+    './-flag.test.ts',
+    './--help',
+    'a space.test.ts',
+    '$(literal).ts',
+  ];
+  expect(related).toEqual({
+    ...check,
+    args: ['related', ...expectedFiles, '--reporter=json'],
+  });
+  const parsed = parseCLI(['vitest', ...related.args]);
+  expect(parsed.options.related).toEqual(expectedFiles);
+  expect(files).toEqual([
+    'chosen.test.ts',
+    '-flag.test.ts',
+    '--help',
+    'a space.test.ts',
+    '$(literal).ts',
+  ]);
+  expect(relatedArgs).toEqual(['related', '{files}', '--reporter=json']);
+});
+
 test('failure containment resolves workspace aliases and refuses real or symlink escapes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cq-task-paths-'));
   try {

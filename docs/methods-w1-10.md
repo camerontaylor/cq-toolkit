@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W1.10 methods note
 
 W1.10 implements privileged-job provenance and rulesets-as-code: plan §6 row W1.10, as
@@ -116,7 +118,6 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - the head moved;
     - the snapshot is truncated;
     - the REST lag cross-check fails (I11);
-    - there are unresolved external review threads;
     - a trusted objection is outstanding;
     - there is no trusted acceptance bound to the head.
 
@@ -165,7 +166,7 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     First-parent merge commits must be clean: their tree equals
     `git merge-tree --write-tree <p1> <p2>` (git ≥ 2.38, ort). I2's evidence rows are
     recomputed per PR at that PR's merged head: a head-bound trusted acceptance, no outstanding
-    trusted objection, no unresolved external threads, and the lag cross-check. I2's settle
+    trusted objection, and the lag cross-check. Open threads are advisory. I2's settle
     half (≥10 minutes since the head, or an all-clear that postdates it) is not recomputed. Only
     the merger's recheck (`self-merge-prs`, `merge-recheck.ts`) enforces it, so a PR merged
     into `merge-queue` by hand skips settle (see Residuals). `gates.policyDiff` is recomputed

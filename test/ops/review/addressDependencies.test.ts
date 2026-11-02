@@ -1,8 +1,22 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  symlink,
+  writeFile,
+  readFile,
+  readlink,
+  unlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
-import { assertAddressDependenciesIsolated } from '../../../src/ops/review/internal/addressDependencies.js';
+import {
+  assertAddressDependenciesIsolated,
+  snapshotAddressDependencies,
+} from '../../../src/ops/review/internal/addressDependencies.js';
 
 test.each([
   'store',
@@ -67,6 +81,58 @@ test.each([1, 3])(
         }),
       ).rejects.toThrow('budget or cancellation');
       expect(calls).toBe(at);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test('candidate relinking and metadata writes leave caller dependencies intact', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-dependency-snapshot-'));
+  try {
+    const installed = join(root, 'caller', 'node_modules');
+    const candidate = join(root, 'deep', 'candidate', 'node_modules');
+    const store = join(root, 'store');
+    await mkdir(installed, { recursive: true });
+    await mkdir(store);
+    await writeFile(join(store, 'index.js'), 'installed bytes');
+    await symlink('../../store', join(installed, 'package'), 'dir');
+    await writeFile(join(installed, '.modules.yaml'), 'caller metadata');
+    await snapshotAddressDependencies(installed, candidate, () => {});
+    expect(await readlink(join(candidate, 'package'))).toBe(store);
+    expect(await readFile(join(candidate, 'package', 'index.js'), 'utf8')).toBe('installed bytes');
+    await unlink(join(candidate, 'package'));
+    await symlink('/missing/relinked-package', join(candidate, 'package'));
+    await writeFile(join(candidate, '.modules.yaml'), 'candidate metadata');
+    expect(await readlink(join(installed, 'package'))).toBe('../../store');
+    expect(await readFile(join(installed, '.modules.yaml'), 'utf8')).toBe('caller metadata');
+    expect(await readFile(join(installed, 'package', 'index.js'), 'utf8')).toBe('installed bytes');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === 'win32')(
+  'relocated candidate keeps executable shims private',
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-dependency-shim-'));
+    try {
+      const installed = join(root, "caller'quoted", 'node_modules');
+      const candidate = join(root, 'deeper', 'candidate', 'node_modules');
+      const store = join(root, 'store');
+      await mkdir(join(installed, '.bin'), { recursive: true });
+      await mkdir(store);
+      await writeFile(join(store, 'data.cjs'), "module.exports = 'installed tool';");
+      const source = join(installed, '.bin', 'check.cjs');
+      const content =
+        "#!/usr/bin/env node\nconsole.log(require('../../../store/data.cjs'), process.argv[2]);";
+      await writeFile(source, content, { mode: 0o755 });
+      await snapshotAddressDependencies(installed, candidate, () => {});
+      const shim = join(candidate, '.bin', 'check.cjs');
+      const result = await promisify(execFile)(shim, ['argument with spaces']);
+      expect(result.stdout.trim()).toBe('installed tool argument with spaces');
+      await writeFile(shim, 'candidate replacement');
+      expect(await readFile(source, 'utf8')).toBe(content);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

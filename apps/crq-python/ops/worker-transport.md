@@ -26,7 +26,7 @@ Configure the worker's `CQ_AUTHOR_SSH_ALIAS` for this separate identity. The CLI
 uses the normal dotted-command flag grammar:
 
 ```sh
-cq dev.review --action=enroll --requestId=branch-cycle-1 --base=<40hex> --head=<40hex> --target=origin/merge-queue --cycle=1 --json
+cq dev.review --action=enroll --requestId=branch-cycle-1 --base=<40hex> --head=<40hex> --target=origin/main --cycle=1 --json
 ```
 
 Use `--action=status` with the same complete binding to observe the lease, and

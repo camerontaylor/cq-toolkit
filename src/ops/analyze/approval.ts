@@ -764,7 +764,7 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
       } catch (err) {
         return {
           granted: false,
-          reason: `approval refused: the approval ledger could not be read or appended — ${messageOf(err)}; the ledger is fail-closed, so nothing was written. The token is UNSPENT when the fault struck before the record was appended (an unreadable or torn ledger, a short write) and INDETERMINATE when it struck after (a sync or close fault, after which a later consume may read it as spent) — re-approve rather than retry`,
+          reason: `approval refused: the approval ledger could not be read or appended — ${messageOf(err)}; the ledger is fail-closed, so nothing was written. The token is UNSPENT only when the fault struck before any append bytes could reach disk and INDETERMINATE whenever an append may have changed the ledger (including a short write, sync or close fault) — inspect the ledger and re-approve rather than retry`,
         };
       }
       if (outcome === 'spent') {

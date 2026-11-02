@@ -1,0 +1,253 @@
+# R4C CLI closure demonstration
+
+Observed on triton, 2026-10-31. This is **production CLI dispatch and op execution
+with a scripted fixer**, not a real model invocation. Git objects and packet
+assembly are real. No network/provider calls were made.
+
+Both invocations used:
+
+```sh
+node --experimental-transform-types --import /tmp/r4c-loader.mjs \
+  test/fixtures/review-closure-cli/entry.mjs review.address \
+  --source=local --repoRoot=<temporary-fixture> --verifyClosure \
+  --rounds=1 --journalDir=<external-journal> --json
+```
+
+The temporary loader maps this checkout’s dist `.js` imports to source `.ts`
+imports, excluding node_modules; no build ran. With built dist, omit the two
+experimental/import options. Each temporary repository has branch feature/demo,
+a committed a.ts, and origin/merge-queue pinned to the starting commit.
+
+The scripted fixer replaces a.ts with `export const value = "GOOD";` and
+commits it. The fixture refuses any attempt to persist a fixed disposition.
+CLI exit code was **3** for each invocation. Selected fields from actual JSON:
+
+## Surviving declaration
+
+```json
+{
+  "status": "needs-human",
+  "findingStatus": "open",
+  "packet": {
+    "finding": {
+      "id": "demo",
+      "source": "agent",
+      "file": "a.ts",
+      "severity": "major",
+      "text": "Replace `BAD` in a.ts",
+      "status": "fixed"
+    },
+    "task": "Replace `BAD` in a.ts",
+    "patch": "diff --git a/a.ts b/a.ts\nindex d4a253e..56b558a 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const value = \"BAD\";\n+export const value = \"GOOD\";\n",
+    "before": "export const value = \"BAD\";\n",
+    "after": "export const value = \"GOOD\";\n",
+    "dependencies": [],
+    "relevantDependenciesComplete": false,
+    "metadata": {
+      "revision": {
+        "head": "ee43eeb56a2f4df03cdf2c3478e14be695b8492e",
+        "parent": "8236493dac60f09979b1cae78cc41dec35fc9e13"
+      }
+    }
+  },
+  "verification": {
+    "verdict": "unresolved",
+    "reason": "deleted-trigger-survives",
+    "checks": [
+      {
+        "check": "packet-complete",
+        "outcome": "pass",
+        "detail": "packet fields present; 0 dependencies captured"
+      },
+      {
+        "check": "revision-pinned",
+        "outcome": "pass",
+        "detail": "revision pinned at ee43eeb56a2f4df03cdf2c3478e14be695b8492e"
+      },
+      {
+        "check": "patch-coherent",
+        "outcome": "pass",
+        "detail": "patch coherent: +1/-1 on a.ts"
+      },
+      {
+        "check": "trigger-removed",
+        "outcome": "fail",
+        "detail": "removed declaration re-declared in after content: value",
+        "reason": "deleted-trigger-survives"
+      }
+    ],
+    "revision": {
+      "head": "ee43eeb56a2f4df03cdf2c3478e14be695b8492e",
+      "parent": "8236493dac60f09979b1cae78cc41dec35fc9e13"
+    }
+  }
+}
+```
+
+## Unattested dependencies
+
+```json
+{
+  "status": "needs-human",
+  "findingStatus": "open",
+  "packet": {
+    "finding": {
+      "id": "demo",
+      "source": "agent",
+      "file": "a.ts",
+      "severity": "major",
+      "text": "Replace `BAD` in a.ts",
+      "status": "fixed"
+    },
+    "task": "Replace `BAD` in a.ts",
+    "patch": "diff --git a/a.ts b/a.ts\nindex 9b00c6c..56b558a 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-throw new Error(\"BAD\");\n+export const value = \"GOOD\";\n",
+    "before": "throw new Error(\"BAD\");\n",
+    "after": "export const value = \"GOOD\";\n",
+    "dependencies": [],
+    "relevantDependenciesComplete": false,
+    "metadata": {
+      "revision": {
+        "head": "f5e5f494aa6511f0f26e622f376498f098afbaab",
+        "parent": "914ee4e71a01429a6aa25a7a14b70ad87905a5f8"
+      }
+    }
+  },
+  "verification": {
+    "verdict": "uncertain",
+    "reason": "omitted-consumer-or-dependency",
+    "checks": [
+      {
+        "check": "packet-complete",
+        "outcome": "pass",
+        "detail": "packet fields present; 0 dependencies captured"
+      },
+      {
+        "check": "revision-pinned",
+        "outcome": "pass",
+        "detail": "revision pinned at f5e5f494aa6511f0f26e622f376498f098afbaab"
+      },
+      {
+        "check": "patch-coherent",
+        "outcome": "pass",
+        "detail": "patch coherent: +1/-1 on a.ts"
+      },
+      {
+        "check": "trigger-removed",
+        "outcome": "pass",
+        "detail": "no survival of 1 quoted spans, 0 removed declarations"
+      },
+      {
+        "check": "dependencies-covered",
+        "outcome": "unavailable",
+        "detail": "relevant consumer/dependency completeness is not attested for the changed surface",
+        "reason": "omitted-consumer-or-dependency"
+      }
+    ],
+    "revision": {
+      "head": "f5e5f494aa6511f0f26e622f376498f098afbaab",
+      "parent": "914ee4e71a01429a6aa25a7a14b70ad87905a5f8"
+    }
+  }
+}
+```
+
+The first invocation reached trigger removal and found declaration `value`
+re-declared in the after snapshot. The second removed `throw new Error("BAD");`
+and reached dependency coverage. Neither finding closed. The second packet
+explicitly records an empty dependency list and false completeness attestation.
+
+## Real model invocation
+
+A separate isolated repository ran the actual production CLI and worker using
+`opencode-go/deepseek-v4.1-flash` for worker and reviewer. Credentials were
+loaded from the owner’s configured environment without printing them. This
+invocation did not use the scripted-fixer registry. The input was a committed
+`export function add(a, b) { return a - b; }` and a findings record asking for
+addition while preserving the exported API. The configured check was
+`node --check add.js`; it establishes syntax only, not arithmetic correctness.
+
+```sh
+node --experimental-transform-types --import /tmp/r4c-loader.mjs src/cli.ts \
+  review.address --source=local --repoRoot=<isolated-real-fixture> \
+  --record=<external-findings.json> --verifyClosure --rounds=1 \
+  --maxTokens=30000 --wallMs=180000 --journalDir=<external-journal> --json
+```
+
+Observed CLI exit: **3**. Selected actual result fields:
+
+```json
+{
+  "status": "needs-human",
+  "findingStatus": "open",
+  "usage": {
+    "input": 3966,
+    "output": 730,
+    "cacheRead": 6528,
+    "cacheWrite": 0
+  },
+  "wallMs": 41539,
+  "packet": {
+    "finding": {
+      "id": "arithmetic",
+      "source": "agent",
+      "file": "add.js",
+      "line": 1,
+      "severity": "major",
+      "text": "add(2, 3) must return 5 but `a - b` returns -1. Replace subtraction with addition while retaining the exported API.",
+      "status": "fixed",
+      "reason": "add.js line 1 now reads `export function add(a, b) { return a + b; }`, so add(2, 3) returns 5 instead of -1; the exported `add(a, b)` API is unchanged and the only other files (cq.json, package.json) are unaffected.",
+      "evidence": "7fdee81efb3ebd78361002b9d6928d2ec1c9f918"
+    },
+    "task": "add(2, 3) must return 5 but `a - b` returns -1. Replace subtraction with addition while retaining the exported API.",
+    "patch": "diff --git a/add.js b/add.js\nindex 89b41c0..f643dbe 100644\n--- a/add.js\n+++ b/add.js\n@@ -1 +1 @@\n-export function add(a, b) { return a - b; }\n+export function add(a, b) { return a + b; }\n",
+    "before": "export function add(a, b) { return a - b; }\n",
+    "after": "export function add(a, b) { return a + b; }\n",
+    "dependencies": [],
+    "relevantDependenciesComplete": false,
+    "metadata": {
+      "revision": {
+        "head": "7fdee81efb3ebd78361002b9d6928d2ec1c9f918",
+        "parent": "9307f7b8be9c06a2b44eace93a726cf1085ec429"
+      }
+    }
+  },
+  "verification": {
+    "verdict": "unresolved",
+    "reason": "deleted-trigger-survives",
+    "checks": [
+      {
+        "check": "packet-complete",
+        "outcome": "pass",
+        "detail": "packet fields present; 0 dependencies captured"
+      },
+      {
+        "check": "revision-pinned",
+        "outcome": "pass",
+        "detail": "revision pinned at 7fdee81efb3ebd78361002b9d6928d2ec1c9f918"
+      },
+      {
+        "check": "patch-coherent",
+        "outcome": "pass",
+        "detail": "patch coherent: +1/-1 on add.js"
+      },
+      {
+        "check": "trigger-removed",
+        "outcome": "fail",
+        "detail": "removed declaration re-declared in after content: add",
+        "reason": "deleted-trigger-survives"
+      }
+    ],
+    "revision": {
+      "head": "7fdee81efb3ebd78361002b9d6928d2ec1c9f918",
+      "parent": "9307f7b8be9c06a2b44eace93a726cf1085ec429"
+    }
+  }
+}
+```
+
+The real worker committed addition and passed the configured syntax check.
+The deterministic helper conservatively regarded the surviving `add` declaration
+as counter-evidence, so the finding remained open. This demonstrates actual
+model editing and closure gating, not semantic proof that the fix is wrong.
+The current assembler still cannot produce resolved closure without attested
+dependency completeness.

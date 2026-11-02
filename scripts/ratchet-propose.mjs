@@ -31,11 +31,10 @@
 // reading is a too-tight proposal — a visible PR judged by the same checks
 // as any other.
 //
-// TARGET merge-queue: the proposal PR is opened against `merge-queue`, cut
-// from the merge-queue tip and judged against THAT tip's committed
+// TARGET main: the proposal PR is opened against `main`, cut
+// from the main tip and judged against THAT tip's committed
 // baselines — not the checkout's (the checkout is main, the trust ref for
-// the code that runs here). Proposals previously targeted main and so
-// bypassed the merge-queue checks (ADR-0004 D-B). The tip is fetched, pinned
+// the code that runs here). The comparison tip is fetched and pinned
 // to a SHA. A temporary worktree is created with --no-checkout: read-tree
 // loads its index, while only canonical baseline blobs are materialized as
 // data for the op. Proposal bytes enter the index through hash-object
@@ -100,7 +99,7 @@ import {
 } from './ratchet-lib.mjs';
 
 /** The proposal target branch (the op validates it as a git ref). */
-const BASE = 'merge-queue';
+const BASE = 'main';
 const MAX_BUFFER = 64 * 1024 * 1024;
 /**
  * Hardened git prefix for EVERY git call. The subject cannot reinterpret
@@ -336,7 +335,7 @@ function runGh(args) {
 // the only credential source (withGitAskpass: token in the child ENV only).
 const CRED = ['-c', 'credential.helper='];
 
-// ---- pin the merge-queue tip: the proposal's base AND its comparison point ----
+// ---- pin the main tip: the proposal's base AND its comparison point ----
 let baseSha;
 try {
   baseSha = await withGitAskpass(token, async (gitEnv) => {
@@ -470,7 +469,7 @@ function listOpenProposalPrs(head, base) {
   });
 }
 
-// ---- index-only merge-queue workspace: no head checkout or filters ----
+// ---- index-only main workspace: no head checkout or filters ----
 const wsParent = mkdtempSync(join(tmpdir(), 'ratchet-propose-mq-'));
 const ws = join(wsParent, 'ws');
 
@@ -500,7 +499,7 @@ const effects = {
         // Reuse the local proposal branch without checking out its tree.
         runGit(['read-tree', localHead], { cwd: ws });
       } else {
-        // Cut from the PINNED merge-queue tip, changing only a ref.
+        // Cut from the PINNED main tip, changing only a ref.
         runGit(['branch', head, baseSha], { cwd: ws });
       }
       const parent = localHead === '' ? baseSha : localHead;

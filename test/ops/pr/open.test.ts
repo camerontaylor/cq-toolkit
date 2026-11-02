@@ -146,7 +146,7 @@ describe('pr.open', () => {
         number: 42,
         url: 'https://example.invalid/pull/42',
         created: true,
-        base: 'merge-queue',
+        base: 'main',
         head: state.head,
         branch: 'feature/x',
         evidenceClass: 'author',
@@ -160,7 +160,7 @@ describe('pr.open', () => {
       draft: boolean;
     };
     expect(create.title).toBe('feature');
-    expect(create.base).toBe('merge-queue');
+    expect(create.base).toBe('main');
     expect(create.draft).toBe(false);
     expect(create.body.startsWith(DEV_READINESS_SECTION_MARKER)).toBe(true);
     expect(create.body).toContain('| check:static | pass |');
@@ -448,7 +448,7 @@ describe('the readiness renderers', () => {
     evidenceClass: 'author' as const,
     caveat: 'the caveat',
     branch: BRANCH,
-    target: 'merge-queue',
+    target: 'main',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',
@@ -561,7 +561,7 @@ describe('the NOT-READY gaps section renderer', () => {
   ];
 
   test('the section renders start and end markers and every gap verbatim', () => {
-    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'merge-queue', gaps);
+    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'main', gaps);
     expect(section.startsWith(DEV_READINESS_GAPS_SECTION_MARKER)).toBe(true);
     expect(section).toContain('<!-- /cq:dev-readiness-gaps -->');
     expect(section).toContain(
@@ -588,7 +588,7 @@ describe('the NOT-READY gaps section renderer', () => {
         ],
         BRANCH,
       ),
-      'merge-queue',
+      'main',
       gaps,
     );
     expect(section).toContain('finding dispositions: 2');
@@ -601,7 +601,7 @@ describe('the NOT-READY gaps section renderer', () => {
   });
 
   test('an empty disposition list renders the explicit none-note', () => {
-    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'merge-queue', gaps);
+    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'main', gaps);
     expect(section).toContain('finding dispositions: 0');
     expect(section).toContain('(none recorded)');
   });
@@ -610,7 +610,7 @@ describe('the NOT-READY gaps section renderer', () => {
     const section = renderReadinessGapsSection(
       state,
       ledgerWith([dispositionRecord({ why: 'a|b <script>x</script>' })], BRANCH),
-      'merge-queue',
+      'main',
       [{ field: 'a|b', detail: '<script>y</script>' }],
     );
     expect(section).toContain('**a\\|b**:');

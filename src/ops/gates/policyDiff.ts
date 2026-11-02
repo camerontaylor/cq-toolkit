@@ -323,6 +323,10 @@ function isUnder(path: string, target: string): boolean {
 /** Longest chain of nested local actions followed before failing closed. */
 const LOCAL_ACTION_MAX_DEPTH = 8;
 
+/** Bound blob reads and queued edges, including repeated references. */
+const LOCAL_ACTION_MAX_TARGETS = 128;
+const LOCAL_ACTION_MAX_REFERENCES = 1024;
+
 /** The metadata files a local action may carry; both are read when both exist. */
 const ACTION_METADATA = ['action.yml', 'action.yaml'] as const;
 
@@ -332,7 +336,8 @@ const ACTION_METADATA = ['action.yml', 'action.yaml'] as const;
  * or space in it, then an optional comment (whitespace before `#`, as YAML
  * requires).
  */
-const STRICT_USES = /^\s*(?:-\s+)?uses\s*:\s*(['"]?)([\w.][^\s'"#\\]*)\1(?:\s+#.*)?\s*$/;
+const STRICT_USES =
+  /^\s*(?:-\s+)?uses\s*:\s*(['"]?)((?:[\w.]|\$(?=\/))[^\s'"#\\]*)\1(?:\s+#.*)?\s*$/;
 
 /** YAML line breaks: CRLF, a lone CR or LF, NEL, LS and PS. */
 const YAML_LINE_BREAK = /\r\n?|[\n\u0085\u2028\u2029]/;
@@ -346,7 +351,7 @@ const YAML_LINE_BREAK = /\r\n?|[\n\u0085\u2028\u2029]/;
 const SUSPECT_USES = /\buses\b|\\[xu]|(?:^|[\s{[,])(?:\?(?:\s|$)|\*[^\s,[\]{}]+\s*:)/i;
 
 /**
- * The `uses: ./` targets in one local action's metadata at `rev` (normalised
+ * The `uses: ./` or `uses: $/` targets in one local action's metadata at `rev` (normalised
  * as `WorkflowJob.localUses`), or why they cannot be known. Never throws: a
  * target that is not a canonical repo-relative path (a `..` escape, a `.` or
  * empty segment), metadata absent or not a regular file, or a line that may
@@ -358,6 +363,7 @@ async function nestedLocalUses(
   repo: string,
   rev: string,
   target: string,
+  budget: { references: number },
 ): Promise<string[] | string> {
   if (target !== '.') {
     try {
@@ -391,11 +397,24 @@ async function nestedLocalUses(
       }
       // A plain value continuing onto a deeper line is a different value to GitHub.
       const column = /^\s*(?:-\s+)?/.exec(line)![0].length;
-      const next = rows.slice(i + 1).find((r) => r.trim() !== '' && !/^\s*#/.test(r));
+      let next: string | undefined;
+      for (let j = i + 1; j < rows.length; j += 1) {
+        const row = rows[j]!;
+        if (row.trim() !== '' && !/^\s*#/.test(row)) {
+          next = row;
+          break;
+        }
+      }
       if (next !== undefined && /^\s*/.exec(next)![0].length > column) {
         return `${path}: uses value continues onto the next line ${JSON.stringify(next.trim())}`;
       }
-      if (value.startsWith('./')) out.push(value.slice(2).replace(/\/+$/, '') || '.');
+      if (value.startsWith('./') || value.startsWith('$/')) {
+        budget.references += 1;
+        if (budget.references > LOCAL_ACTION_MAX_REFERENCES) {
+          return `local action graph exceeds ${LOCAL_ACTION_MAX_REFERENCES} references`;
+        }
+        out.push(value.slice(2).replace(/\/+$/, '') || '.');
+      }
     }
   }
   return found ? out : `no ${ACTION_METADATA.join(' or ')}`;
@@ -403,7 +422,7 @@ async function nestedLocalUses(
 
 /**
  * Every local action `roots` (target → the producer job using it) reach at
- * `rev`, following nested `uses: ./` transitively: a visited set stops
+ * `rev`, following nested `uses: ./` and `uses: $/` transitively: a visited set stops
  * cycles, and a chain longer than {@link LOCAL_ACTION_MAX_DEPTH} is
  * undecidable. Never throws; each target {@link nestedLocalUses} cannot
  * resolve is an `undecidable` entry, so the caller fails closed.
@@ -415,6 +434,18 @@ async function localActionsAt(
 ): Promise<{ targets: Map<string, string>; undecidable: { target: string; why: string }[] }> {
   const targets = new Map<string, string>();
   const undecidable: { target: string; why: string }[] = [];
+  const budget = { references: roots.size };
+  const discovered = new Set(roots.keys());
+  const exceeded = (): void => {
+    undecidable.push({
+      target: '.',
+      why: `local action graph exceeds ${LOCAL_ACTION_MAX_TARGETS} targets`,
+    });
+  };
+  if (roots.size > LOCAL_ACTION_MAX_TARGETS) {
+    exceeded();
+    return { targets, undecidable };
+  }
   let frontier = [...roots];
   for (let depth = 0; frontier.length > 0; depth += 1) {
     if (depth > LOCAL_ACTION_MAX_DEPTH) {
@@ -432,13 +463,20 @@ async function localActionsAt(
     for (const [target, user] of frontier) {
       if (targets.has(target)) continue;
       targets.set(target, user);
-      const nested = await nestedLocalUses(repo, rev, target);
+      const nested = await nestedLocalUses(repo, rev, target, budget);
       if (typeof nested === 'string') {
         undecidable.push({ target, why: `${user}: ${nested}` });
         continue;
       }
       for (const inner of nested) {
-        if (!targets.has(inner) && !next.has(inner)) next.set(inner, user);
+        if (!targets.has(inner) && !next.has(inner)) {
+          if (!discovered.has(inner) && discovered.size >= LOCAL_ACTION_MAX_TARGETS) {
+            exceeded();
+            return { targets, undecidable };
+          }
+          discovered.add(inner);
+          next.set(inner, user);
+        }
       }
     }
     frontier = [...next];
@@ -843,6 +881,19 @@ export function createPolicyDiff(
       }
     }
     for (const check of policy.requiredChecks) {
+      // An unscannable base workflow may hide any producer and any local
+      // action root. Action code may live anywhere outside the workflow dir.
+      const unreadable = [...baseFlows].filter(([, { scan }]) => !scan.ok).map(([path]) => path);
+      if (unreadable.length > 0) {
+        for (const path of safe) {
+          if (isWorkflowPath(path)) continue;
+          add(
+            'required-check',
+            path,
+            `local action of required check ${check} unresolvable at the range base (${unreadable.join(', ')} unparseable); ${path} changed`,
+          );
+        }
+      }
       const before = producers(baseFlows, check);
       const after = producers(subjectFlows, check);
       // Phantom producers: a job the range base lacks that produces the

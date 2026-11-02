@@ -22,7 +22,9 @@ async function world(
   human = false,
   options: {
     runBudget?: number;
+    verifyClosure?: boolean;
     refuseAdmissionAt?: number;
+    admissionPrecondition?: string;
     postFixSnapshotFailure?: boolean;
     sameFile?: boolean;
     fileless?: 'first' | 'last';
@@ -480,6 +482,10 @@ async function world(
       });
       return {
         ...worker,
+        preconditionFailure: () =>
+          (admissionCalls >= (options.refuseAdmissionAt ?? Infinity)
+            ? options.admissionPrecondition
+            : undefined) ?? worker.preconditionFailure?.(),
         async withVerifiedHead<T>(action: (head: string) => Promise<T>) {
           if (++admissionCalls === options.refuseAdmissionAt)
             throw new Error('scripted admission ownership changed');
@@ -525,6 +531,7 @@ async function world(
       const result = await op({
         repoRoot: root,
         source: 'pr:7',
+        ...(options.verifyClosure ? { verifyClosure: true } : {}),
         push,
         ...(target ? { target } : {}),
         ...(options.recoverResolution ? {} : { journalDir: join(root, 'journal') }),
@@ -540,6 +547,36 @@ async function world(
   };
 }
 describe('review.address PR phase-one orchestration', () => {
+  test('PR admission refusal retains an existing prerequisite cause', async () => {
+    const reason = 'baseline precondition failed: dependency metadata differs';
+    const w = await world(false, { refuseAdmissionAt: 1, admissionPrecondition: reason });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      expect(result.status === 'needs-human' && result.reason).toContain(reason);
+      expect(w.reviewerCalls()).toBe(0);
+    } finally {
+      await w.cleanup();
+    }
+  });
+  test('opt-in closure uncertainty refuses PR-thread resolution', async () => {
+    const w = await world(false, { verifyClosure: true });
+    try {
+      const result = await w.run();
+      expect(result.status).toBe('needs-human');
+      const report = result.status === 'ok' ? result.value : result.report!;
+      expect(report.closureVerifications?.[0]?.verification.verdict).toBe('uncertain');
+      expect(report.findings).toMatchObject([{ id: 'T1', status: 'open' }]);
+      expect(report.openBlocking).toMatchObject([{ id: 'T1', status: 'open' }]);
+      expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+      expect(w.resolved.has('T1')).toBe(false);
+      expect(w.actions).not.toContain('resolve:T1');
+      expect(w.reviewerCalls()).toBe(0);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
   test.each(['initial-refusal', 'sibling-refusal', 'snapshot-failure'] as const)(
     'settled PR run retention survives %s',
     async (mode) => {
@@ -716,7 +753,7 @@ describe('review.address PR phase-one orchestration', () => {
       ]);
       // The whole-branch comparison and pinned base are unchanged by the addition.
       expect(w.reviewInputs[0]?.base).toMatch(/^[a-f0-9]{40}$/);
-      expect(w.reviewInputs[0]?.target).toBe('merge-queue');
+      expect(w.reviewInputs[0]?.target).toBe('main');
       expect(w.reviewInputs[0]?.reviewers).toEqual(['agent']);
     } finally {
       await w.cleanup();

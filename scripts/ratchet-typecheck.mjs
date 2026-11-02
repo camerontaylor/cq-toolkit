@@ -81,6 +81,7 @@ const lint = spawnSync(
     'test',
     'lint',
     'scripts',
+    'experimental',
     'vitest.config.ts',
   ],
   { cwd: ROOT, encoding: 'utf8' },

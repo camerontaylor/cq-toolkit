@@ -30,8 +30,8 @@ function parseArgs(args) {
   return options;
 }
 
-// A `types` sibling (string or condition map) supplies the declaration for every runtime
-// branch of the same conditional object, so those branches need no colocated `.d.ts`.
+// A reachable `types` sibling supplies the declaration for runtime branches of the
+// same conditional object. Earlier matching conditions take precedence.
 // `null` targets are Node's explicit "blocked" marker and contribute no targets.
 
 function collectTargets(value, conditions = [], targets = [], typesContext = undefined) {
@@ -48,7 +48,7 @@ function collectTargets(value, conditions = [], targets = [], typesContext = und
   if (value && typeof value === 'object') {
     const own =
       typeof value.types === 'string' || (value.types && typeof value.types === 'object')
-        ? { map: value.types, depth: conditions.length }
+        ? { map: value, depth: conditions.length }
         : typesContext;
     for (const [condition, child] of Object.entries(value)) {
       collectTargets(
@@ -68,7 +68,12 @@ function collectTargets(value, conditions = [], targets = [], typesContext = und
 function resolveTypesTarget(context, conditions) {
   if (!context) return undefined;
   const remaining = new Set(conditions.slice(context.depth));
-  let node = context.map;
+  remaining.add('types');
+  const first = Object.keys(context.map).find(
+    (candidate) => remaining.has(candidate) || candidate === 'default',
+  );
+  if (first !== 'types') return undefined;
+  let node = context.map.types;
   while (node && typeof node === 'object' && !Array.isArray(node)) {
     const key = Object.keys(node).find(
       (candidate) => remaining.has(candidate) || candidate === 'default',
@@ -162,7 +167,7 @@ function maskSource(source) {
     } else if (ch === '/' && next === '/') {
       const end = source.indexOf('\n', i);
       const stop = end === -1 ? source.length : end;
-      if (/^\/\/\/\s*<reference\s+path\s*=/.test(source.slice(i, stop))) {
+      if (/^\/\/\/\s*<reference\s+(?:path|types)\s*=/.test(source.slice(i, stop))) {
         out += source.slice(i, stop);
       }
       i = stop;
@@ -196,8 +201,16 @@ function declarationReferences(rawSource) {
   const sideEffectImportPattern = new RegExp(String.raw`\bimport\s*${literal}`, 'g');
   const importTypePattern = new RegExp(String.raw`\bimport\s*\(\s*${literal}\s*(?:,[^)]*)?\)`, 'g');
   const requirePattern = new RegExp(String.raw`\brequire\s*\(\s*${literal}\s*\)`, 'g');
+  const augmentationPattern = new RegExp(String.raw`\bdeclare\s+module\s*${literal}`, 'g');
   const referencePathPattern = /\/\/\/\s*<reference\s+path\s*=\s*(['"])([^'"]+)\1/g;
-  for (const pattern of [fromPattern, sideEffectImportPattern, importTypePattern, requirePattern]) {
+  const referenceTypesPattern = /\/\/\/\s*<reference\s+types\s*=\s*(['"])([^'"]+)\1/g;
+  for (const pattern of [
+    fromPattern,
+    sideEffectImportPattern,
+    importTypePattern,
+    requirePattern,
+    augmentationPattern,
+  ]) {
     for (const match of masked.matchAll(pattern))
       references.add(decodeStringLiteral(strings[Number(match[2])]));
   }
@@ -206,6 +219,9 @@ function declarationReferences(rawSource) {
   for (const match of masked.matchAll(referencePathPattern)) {
     const target = match[2];
     references.add(target.startsWith('.') || path.isAbsolute(target) ? target : `./${target}`);
+  }
+  for (const match of masked.matchAll(referenceTypesPattern)) {
+    if (match[2].startsWith('.')) references.add(match[2]);
   }
   return [...references].sort(compareStrings);
 }
@@ -297,9 +313,35 @@ function resolveImportAlias(imports, specifier, conditions) {
   return mapped.startsWith('./') ? mapped : undefined;
 }
 
-async function resolveDeclaration(root, containingFile, specifier, pkg) {
+async function readPackage(root, directory) {
+  try {
+    const file = await resolveInside(
+      root,
+      path.join(directory, 'package.json'),
+      'package metadata',
+    );
+    return JSON.parse(await readFile(file, 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return undefined;
+    throw error;
+  }
+}
+
+async function packageScope(root, containingFile) {
+  let directory = path.dirname(containingFile);
+  while (isInside(root, directory)) {
+    const pkg = await readPackage(root, directory);
+    if (pkg) return { directory, pkg };
+    if (directory === root) break;
+    directory = path.dirname(directory);
+  }
+  throw new Error('cannot find declaration package scope');
+}
+
+async function resolveDeclaration(root, containingFile, specifier) {
   let unresolved;
   if (specifier.startsWith('#')) {
+    const { directory, pkg } = await packageScope(root, containingFile);
     const mapped = resolveImportAlias(
       pkg.imports,
       specifier,
@@ -308,21 +350,40 @@ async function resolveDeclaration(root, containingFile, specifier, pkg) {
     if (mapped === undefined) return undefined;
     if (hasParentSegment(mapped))
       throw new Error(`package import escapes package root: ${specifier}`);
-    unresolved = path.resolve(root, mapped);
+    unresolved = path.resolve(directory, mapped);
   } else unresolved = path.resolve(path.dirname(containingFile), specifier);
   if (!isInside(root, unresolved))
     throw new Error(`declaration import escapes package root: ${specifier}`);
-  for (const candidate of declarationCandidates(unresolved)) {
+  const candidates = declarationCandidates(unresolved);
+  for (const [index, candidate] of candidates.entries()) {
+    // TypeScript tries file declarations before a directory's types/typings,
+    // then falls back to conventional index declarations.
+    if (index === 3) {
+      const nested = await readPackage(root, unresolved);
+      const types = nested?.types ?? nested?.typings;
+      if (typeof types === 'string' && types.length > 0) {
+        const target = path.resolve(unresolved, types);
+        if (!isInside(root, target))
+          throw new Error(`declaration import escapes package root: ${specifier}`);
+        for (const typedCandidate of declarationCandidates(target).slice(0, 3)) {
+          try {
+            return await resolveInside(root, typedCandidate, `declaration import ${specifier}`);
+          } catch (error) {
+            if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
+          }
+        }
+      }
+    }
     try {
       return await resolveInside(root, candidate, `declaration import ${specifier}`);
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
     }
   }
   throw new Error(`cannot resolve package declaration import ${specifier}`);
 }
 
-async function declarationGraph(root, entry, pkg) {
+async function declarationGraph(root, entry) {
   const pending = [entry];
   const seen = new Set();
   const graph = [];
@@ -340,7 +401,7 @@ async function declarationGraph(root, entry, pkg) {
     const source = bytes.toString('utf8');
     for (const reference of declarationReferences(source)) {
       if (!reference.startsWith('.') && !reference.startsWith('#')) continue;
-      const resolved = await resolveDeclaration(root, actual, reference, pkg);
+      const resolved = await resolveDeclaration(root, actual, reference);
       if (resolved) pending.push(resolved);
     }
   }
@@ -408,7 +469,7 @@ async function makeReport(root = ROOT) {
         conditions,
         target,
         declaration,
-        declarationGraph: await declarationGraph(root, declarationFile, pkg),
+        declarationGraph: await declarationGraph(root, declarationFile),
       });
     }
     if (targets.length === 0 && !isBlockedExport(exportValue))
@@ -421,7 +482,7 @@ async function makeReport(root = ROOT) {
   }
 
   entries.sort((a, b) => compareStrings(a.specifier, b.specifier));
-  return { schemaVersion: 1, package: pkg.name, entries };
+  return { schemaVersion: 1, package: pkg.name, packageType: pkg.type ?? 'commonjs', entries };
 }
 
 function stableJson(value) {

@@ -14,7 +14,7 @@ python3 apps/crq-python/crq.py enqueue-merged --pr=42 --merge-sha=<full-source-m
 python3 apps/crq-python/crq.py report --request-id=outage-pr42
 ```
 
-Enrollment verifies the forge PR is merged into `merge-queue` with exactly that
+Enrollment verifies the forge PR is merged into `main` with exactly that
 merge SHA, binds the stable request ID in the existing queue under `tick.lock`,
 and starts nothing. Repeating the same binding, including through another request
 ID, returns the same intent. Reusing an ID with a different binding refuses.
@@ -25,9 +25,9 @@ work requires an explicit ownership/lineage decision through the coordinator.
 
 The default selector is `promoted-main`: the tick fetches, then captures full
 `origin/main` commit `T` and tree under its dispatch lock. It waits with
-`not-yet-promoted` until the source merge is an ancestor of that target. An explicit
-`--target-selector=merge-queue` chooses the different, potentially unpromoted
-queue target. The captured target never follows later ref movement, including
+`not-yet-promoted` until the source merge is an ancestor of that target.
+The historical `--target-selector=merge-queue` alias now selects the same
+main target without reading the retired branch. The captured target never follows later ref movement, including
 across restart, failed attempts or receipt reads. Request replay cannot repin a
 finished intent; a future fresh-target lineage needs its own explicit contract.
 
@@ -133,8 +133,20 @@ python3 apps/crq-python/crq.py reconcile-merged --after=2026-10-01T00:00:00Z --b
 ```
 
 Remove `--dry-run` to persist and enroll; repeat the same flags to resume.
-Bounds mean `(after, before]`; `before` must precede scan startup. Natural
-discovery freezes its upper bound one second behind the tick clock. The command prints one JSON discovery summary,
+Manual bounds mean `(after, before]`; `before` must precede scan startup.
+Automatic discovery is enabled with committed `merged_discovery` settings:
+`{"enabled": true, "after": "2026-11-01T00:00:00Z"}`. Set `enabled` to false
+to pause. The lower bound prevents historical re-flooding. Each completed scan
+advances the watermark; the next scan overlaps it by five minutes, bounded by
+the floor, and rolls the upper bound to one second before startup. A legacy
+configured `before` no longer freezes automatic discovery. Partial scans retain
+their frozen bounds and cursor until complete. Automatic scans list closed PRs
+sorted by most recently updated, 100 per page, stopping once updates are older
+than the scan's lower bound. Both main and merge-queue merged PRs are eligible.
+Recent merges normally fit in one or two requests; an incomplete scan resumes
+next tick. Historical backfill remains the backfill controller's responsibility.
+
+The command prints one JSON discovery summary,
 holds the existing tick lock, and never dispatches a provider or repair. An
 incomplete result retains its cursor and enrolls nothing. A completed inventory
 enrolls supported sources through the Q1 API, deduplicating exact source bindings
@@ -142,7 +154,7 @@ even when legacy records were skipped, synthetic or done. Unsupported identities
 remain represented with reasons in the checkpoint inventory. Discovery is not
 review credit. A completed manual interval never advances the natural watermark.
 
-The adapter first freezes an all-state repository number ceiling and repository
+The manual adapter first freezes an all-state repository number ceiling and repository
 node identity, checking that issue plus PR counts agree with the ceiling. It then
 queries every numeric slot in windows of 50 using `issueOrPullRequest(number)`.
 Changing merge order cannot shift those numeric windows. New higher-numbered PRs
@@ -158,9 +170,7 @@ Source identity, frozen bounds, page cursor and inventory are atomically persist
 under `state/reconcile/<interval-digest>.json` before the next read. The wrapper
 binds source and checkpoint with a corruption-detection digest; this is trusted
 local state, not an authorization signature. On complete discovery, enrollment
-is atomically saved before advancing the natural watermark. The natural
-non-dry, nonselective tick uses the same adapter and replays five minutes before
-its last independently complete watermark. A crash after page completion or
+is atomically saved before advancing the natural watermark. A crash after page completion or
 enrollment replays idempotently. Source-head loss stays explicit unsupported debt.
 
 Discovery and deferred refresh share at most 24 requests / 30 seconds under the

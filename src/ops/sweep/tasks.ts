@@ -101,12 +101,13 @@ export function relatedCheckCommand(
   if (relatedArgs !== undefined && !relatedArgs.includes('{files}')) {
     throw new Error('relatedArgs must include a standalone {files} token');
   }
+  const fileArgs = files.map((file) => (file.startsWith('-') ? './' + file : file));
   return {
     ...check,
     args:
       relatedArgs === undefined
-        ? [...check.args, ...files.map((file) => (file.startsWith('-') ? './' + file : file))]
-        : relatedArgs.flatMap((arg) => (arg === '{files}' ? [...files] : [arg])),
+        ? [...check.args, ...fileArgs]
+        : relatedArgs.flatMap((arg) => (arg === '{files}' ? fileArgs : [arg])),
   };
 }
 

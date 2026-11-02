@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { needsDist } from '../scripts/lib/dist-tests.mjs';
 
-import { distPrepared, scrubbedBuildEnv } from './global-setup.js';
+import { cliFileFilters, distPrepared, scrubbedBuildEnv } from './global-setup.js';
 
 describe('scrubbedBuildEnv', () => {
   it('drops credential-bearing variables and keeps the rest', () => {
@@ -40,5 +44,52 @@ describe('distPrepared', () => {
     for (const value of ['0', '', 'true', ' 1', '1 ', 'yes']) {
       expect(distPrepared({ CQ_DIST_PREPARED: value })).toBe(false);
     }
+  });
+});
+
+describe('selected dist dependencies', () => {
+  it('requires dist only when a selected test references it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dist-tests-'));
+    try {
+      writeFileSync(join(root, 'source.test.ts'), "import '../src/index.js';");
+      writeFileSync(join(root, 'built.test.ts'), "import '../dist/index.js';");
+      expect(needsDist(['source.test.ts'], root)).toBe(false);
+      expect(needsDist(['source.test.ts', 'built.test.ts'], root)).toBe(true);
+      expect(needsDist([], root)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+it('recognizes reviewed indirect dist consumers via relative and absolute paths', () => {
+  const root = new URL('..', import.meta.url).pathname;
+  for (const file of [
+    'test/e2e/review/review-address.e2e.test.ts',
+    'test/e2e/fix/fix-run.e2e.test.ts',
+    'test/scripts/static-conformance.test.ts',
+    'test/scripts/tooling-commands.test.ts',
+    'test/scripts/ratchet-propose.test.ts',
+    'test/ops/review/address.test.ts',
+  ]) {
+    expect(needsDist([file], root)).toBe(true);
+    expect(needsDist([join(root, file)], root)).toBe(true);
+  }
+});
+
+describe('direct Vitest selection', () => {
+  it('retains positional file filters and excludes option values', () => {
+    expect(
+      cliFileFilters(['run', '--project', 'pure', '--reporter', 'json', 'test/smoke.test.ts']),
+    ).toEqual(['test/smoke.test.ts']);
+  });
+  it('uses all tests only for an unfiltered invocation', () => {
+    expect(cliFileFilters(['run', '--project', 'pure'])).toEqual([]);
+  });
+  it('retains absolute filters and normalizes Windows separators', () => {
+    expect(cliFileFilters(['run', '/repo/test/a.test.ts', 'test\\b.test.ts'])).toEqual([
+      '/repo/test/a.test.ts',
+      'test/b.test.ts',
+    ]);
   });
 });

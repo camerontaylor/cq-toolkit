@@ -314,7 +314,7 @@ function compareRequiredChecks(prefix, expected, actual, drift) {
 }
 
 /**
- * @param {string} prefix  e.g. `ruleset cq-r2-merge-queue: rule pull_request`
+ * @param {string} prefix  e.g. `ruleset cq-r1-main: rule pull_request`
  * @param {Record<string, any> | undefined} expected
  * @param {Record<string, any> | undefined} actual
  * @param {string[]} drift
@@ -476,7 +476,7 @@ function compareEnvironment(name, expected, actual, drift, notices, c3Attested) 
   if (canon(expDbp) !== canon(actDbp)) {
     const t19 =
       actDbp?.protected_branches === true
-        ? ' (protected_branches admits any protected branch, e.g. merge-queue: ADR-0004 D-D.1)'
+        ? ' (protected_branches admits every protected branch, not just the named deployment branch)'
         : '';
     drift.push(
       `${prefix}: deployment_branch_policy differs: expected ${canon(expDbp)} actual ${canon(actDbp)}${t19}`,

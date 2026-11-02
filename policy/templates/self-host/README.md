@@ -70,21 +70,18 @@ and the same JSON written to `$SWEEP_USAGE_OUT` for the workflow's artifact
 upload. The workflow uses the visible `${{ runner.temp }}/sweep-usage.json`
 path so the upload action does not exclude it as hidden; missing files warn.
 
-I2 acceptance normally requires a non-author review. When author and reviewer
-agents must share one GitHub account, set repository variable
-`CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true` in the adopting repo; blank or
-false keeps author reviews ineligible. The independent reviewer must submit a
-`COMMENTED` review containing exactly one marker in this form, with distinct
-agent IDs and the exact reviewed head SHA:
+I2 independence is procedural: a fresh reviewer agent reviews the final head.
+The reviewer may share the author's GitHub account. Automation accepts a human
+PR comment or review containing the exact head SHA and `PASS`, for example:
 
-```html
-<!-- cq-agent-review: {"version":1,"reviewerAgentId":"reviewer-agent","authorAgentId":"author-agent","headSha":"0123456789abcdef0123456789abcdef01234567","verdict":"PASS","independent":true} -->
+```text
+reviewer-agent: 0123456789abcdef0123456789abcdef01234567 PASS
 ```
 
-`HOLD`, `RETRACT`, malformed markers, stale heads, and later marked reviews
-supersede earlier author-agent passes. An ordinary author comment does not
-count. The marker records the independent review procedure; it does not
-cryptographically authenticate the agent IDs.
+Bot authors (Bot type or `[bot]` login suffix) do not count. No HTML marker or
+opt-in is required. `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW` is retained for
+configuration compatibility but no longer controls this match. The merging
+agent checks reviewer independence and reads the verdict; automation only matches text.
 
 ## Required credentials
 
@@ -127,10 +124,16 @@ pushes) and Issues write (top-level PR comments). This is the per-run-mint
 pattern shipped for the adversarial drills in PR #307
 (`policy/templates/adversarial-suite.yml`); it supersedes the PR #303 identity
 note, which deferred per-run minting as a separately scoped behavior change.
-An App identity keeps the loop's replies, fixes and pushes attributable and
-review-independent (doctrine I2), revokes independently of every human
-credential, and avoids a long-lived repo-scope secret — and minting per run
-removes the static-token refresh problem (#303) outright.
+An App identity keeps the loop's replies, fixes and pushes attributable,
+revokes independently of every human credential, and avoids a long-lived
+repo-scope secret — and minting per run removes the static-token refresh
+problem (#303) outright. App identity alone is not independent review: I2
+still requires the separate exact-head review and marker described above.
+
+The automation App has no `workflows` permission. GitHub refuses an App-token
+ref update that introduces changes under `.github/workflows/**`; those changes
+require an owner handoff and owner merge as described in
+[ADR-0004](../../../docs/adr/0004-policy-check-trust-boundaries.md).
 
 There is no PAT fallback: the schedule has no second identity. With an empty
 `CQ_AUTOMATION_APP_CLIENT_ID` variable the mint step is skipped and the loop

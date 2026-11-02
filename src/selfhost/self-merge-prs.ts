@@ -36,7 +36,7 @@
 // re-fetched IMMEDIATELY before every merge call: gateMergeEffects wraps the
 // executor's mergePr, so there is no classify→merge window. Acceptance comes
 // only from a trusted actor's CURRENT review whose commit.oid equals the
-// live headRefOid; unresolved external threads refuse; the base branch name
+// live headRefOid; open threads are advisory; the base branch name
 // the executor's readBaseRef saw right before the call must still be the
 // live base, and a live base of SelfhostDefaults.protectedBranch refuses.
 // Settle comes from >= 2 durable observations of the identical (head, base,
@@ -139,6 +139,7 @@ export interface SelfMergePrsDeps {
 
 /** The run's coordinates and overrides. Plain data. */
 export interface SelfMergePrsCfg {
+  baseBranch?: string;
   /** Repository owner (org or user login). */
   owner: string;
   /** Repository name. */
@@ -284,6 +285,7 @@ export function buildRunInput(
   candidates: MergePrsCandidate[],
   cfg: {
     repoRoot: string;
+    baseBranch?: string;
     journalRoot?: string;
     disableConflictResolution?: boolean;
     classifyConfig?: ClassifyPrConfig;
@@ -295,7 +297,7 @@ export function buildRunInput(
   const allowSameAccountAgentReview =
     cfg.allowSameAccountAgentReview ?? classifyConfig?.allowSameAccountAgentReview;
   return {
-    baseBranch: SelfhostDefaults.baseBranch,
+    baseBranch: cfg.baseBranch ?? SelfhostDefaults.baseBranch,
     repoRoot: cfg.repoRoot,
     prs: candidates,
     protectedBranch: SelfhostDefaults.protectedBranch,
@@ -534,7 +536,9 @@ export async function runSelfMergePrs(
                 nowMs: clock,
                 settleMs,
                 policy,
-                protectedBranch: SelfhostDefaults.protectedBranch,
+                ...((cfg.baseBranch ?? SelfhostDefaults.baseBranch) === 'main'
+                  ? {}
+                  : { protectedBranch: SelfhostDefaults.protectedBranch }),
               },
               pr,
               head,
@@ -595,6 +599,7 @@ async function main(): Promise<void> {
       owner,
       repo,
       repoRoot,
+      baseBranch: process.env['CQ_MERGE_BASE_BRANCH'] || SelfhostDefaults.baseBranch,
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),

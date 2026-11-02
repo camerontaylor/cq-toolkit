@@ -108,3 +108,6 @@ export type {
   ReviewAddressResult,
   ReviewAddressDeps,
 } from './address.js';
+
+export { makeReviewAddressMany } from './addressMany.js';
+export type { ReviewAddressManyInput, ReviewAddressManyResult } from './addressMany.js';

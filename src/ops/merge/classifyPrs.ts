@@ -16,7 +16,7 @@
 //      only CLEAN, BEHIND, and HAS_HOOKS reach the evidence rows
 //   3. truncated review data                  → `awaiting`    (review_data_truncated)
 //   4. last-commit-time unknown               → `awaiting`    (last_commit_unknown)
-//   5. unresolved external threads > 0        → `has-issues`  (unresolved_external_threads)
+//   5. unresolved external threads              → advisory count only
 //   6. outstanding post-commit objection
 //      (a non-author CHANGES_REQUESTED)       → `awaiting`    (merge_objection_outstanding)
 //   7. no acceptable review OF THE LAST
@@ -81,7 +81,7 @@ import { parseIndependentReview } from '../../shared/independent-review.js';
  * `conflicting`: the branch cannot merge as it stands (dirty merge state);
  * `awaiting`: the PR is fine but not ready — the table is waiting on data,
  * a first look, or quiet time; `has-issues`: a human owes the PR work
- * (unresolved external review threads); `eligible`: the I2 acceptance
+ * (review objections); `eligible`: the I2 acceptance
  * condition holds — dispatch may offer the merge. Changing the vocabulary
  * is a recorded deviation.
  */
@@ -89,7 +89,7 @@ export type PrMergeVerdict = 'never' | 'conflicting' | 'awaiting' | 'has-issues'
 
 /** The decision table's output: the verdict, WHY (stable snake_case, one
  * value per table row — safe to log, group, and assert on), and the
- * unresolved-external-thread count the row-5 decision was made from
+ * advisory unresolved-external-thread count
  * (surfaced on EVERY verdict, whatever row fired, so callers never
  * recount). */
 export interface PrClassification {
@@ -296,71 +296,16 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
-const STRUCTURAL_EXCLUDED = new Set([
-  'github-actions[bot]',
-  'cq-automation[bot]',
-  'cq-verdict[bot]',
-  'cq-promoter[bot]',
-  'cq-promotion-reviewer[bot]',
-]);
-const attestationLogin = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
-
-/** Latest marked PR-author review supersedes earlier markers before validation. */
-const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
-  if (ctx.config.allowSameAccountAgentReview !== true) return false;
-  const author = candidate.authorLogin?.toLowerCase();
-  const head = candidate.headRefOid?.toLowerCase();
-  if (author === undefined || author === '' || head === undefined || !/^[0-9a-f]{40}$/.test(head))
-    return false;
-  const marked = candidate.reviews.filter((review) => {
-    if (review.authorLogin?.toLowerCase() !== author) return false;
-    if (review.state === null && review.submittedAt === null) return false;
-    return parseIndependentReview(review.body).kind !== 'absent';
-  });
-  if (marked.length === 0) return false;
-  let latest: ReviewSummary | undefined;
-  let latestMs = -Infinity;
-  for (const review of marked) {
-    const submittedMs = parseMs(review.submittedAt);
-    if (submittedMs === null) return false;
-    if (latest === undefined || submittedMs >= latestMs) {
-      latest = review;
-      latestMs = submittedMs;
-    }
-  }
-  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
-    return false;
-  const parsed = parseIndependentReview(latest.body);
-  const attestation = parsed.kind === 'valid' ? parsed.attestation : null;
-  if (
-    attestation === null ||
-    attestation.verdict !== 'PASS' ||
-    attestation.headSha.toLowerCase() !== head ||
-    latest.commitOid?.toLowerCase() !== head ||
-    latestMs <= (ctx.lastCommitMs ?? Infinity)
-  )
-    return false;
-  const associations = ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR'];
-  if (
-    latest.authorAssociation === null ||
-    latest.authorAssociation === undefined ||
-    !associations.some(
-      (association) => association.toUpperCase() === latest.authorAssociation?.toUpperCase(),
-    )
-  )
-    return false;
-  if (latest.authorLogin == null) return false;
-  const login = latest.authorLogin.toLowerCase();
-  const normalizedLogin = attestationLogin(login);
-  if ([...STRUCTURAL_EXCLUDED].some((excluded) => attestationLogin(excluded) === normalizedLogin))
-    return false;
-  if (
-    ctx.config.excludedLogins?.some(
-      (excluded) => attestationLogin(excluded) === normalizedLogin,
-    ) === true
-  )
-    return false;
-  return true;
+/** Review independence is judged by the merging agent, including shared accounts. */
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, _ctx: ReviewContext): boolean => {
+  const head = candidate.headRefOid;
+  if (head == null || !/^[0-9a-f]{40}$/i.test(head)) return false;
+  return [...candidate.reviews, ...candidate.issueComments].some(
+    (comment) =>
+      comment.authorType !== 'Bot' &&
+      !comment.authorLogin?.toLowerCase().endsWith('[bot]') &&
+      parseIndependentReview(comment.body, head).kind === 'valid',
+  );
 };
 
 /**
@@ -461,15 +406,7 @@ export function classifyPr(
   if (lastCommitMs === null) {
     return { verdict: 'awaiting', reason: 'last_commit_unknown', unresolvedExternalThreads };
   }
-  // Row 5 — a human owes the PR work: unresolved threads from reviewers
-  // other than the author (the author's own threads do not block).
-  if (unresolvedExternalThreads > 0) {
-    return {
-      verdict: 'has-issues',
-      reason: 'unresolved_external_threads',
-      unresolvedExternalThreads,
-    };
-  }
+  // Thread counts are advisory; review verdicts decide acceptance.
   // Rows 6–9 read review evidence; they share one screening context.
   const ctx: ReviewContext = {
     authorLogin: candidate.authorLogin,

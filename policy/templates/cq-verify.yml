@@ -1,70 +1,8 @@
-# cq-verify — the DEFAULT-BRANCH ratchet verifier (ADR-0004 D-B, D-C; W1.7).
-#
-# Carrier: `workflow_run` on `cq-measure` (plus `workflow_dispatch`, honoured
-# only on the default ref — ADR-0004 D-A.1). GitHub runs the DEFAULT BRANCH's
-# copy of this file for both, so a pull request cannot edit what judges it
-# (RS-4 T-2/T-8). Everything that decides comes from the trust ref
-# (`github.sha` here, the default-branch tip):
-#   - the verifier code: the toolkit built from the trust checkout with
-#     `pnpm install --frozen-lockfile --ignore-scripts` (never the head's
-#     dist/ or node_modules);
-#   - the ratchet definitions and definition set: `baselines/ratchets.json`
-#     read with `git cat-file` AT THE TRUST REF;
-#   - the baselines: read at the trust ref the same way.
-# The head is DATA: its git objects are fetched and read attribute-free
-# (`ls-tree` + `cat-file`, never `git archive` or a checkout), and its
-# measurement artifact is size-capped and schema-validated, never executed.
-#
-# Jobs (ADR-0004 D-B compute/sign split — no credential-bearing job runs head
-# content):
-#   - `resolve` verifies the triggering run (workflow path, event, repository
-#     id — fork runs are refused) and resolves the subject from `head_sha`,
-#     never `head_branch`; a PR subject's base comes from the commit→PR API.
-#     No open same-repo PR into merge-queue/main with that head
-#     (superseded, closed, merged or another base) is NOTHING TO JUDGE: a
-#     notice, no verdict, every later job skipped, a green run.
-#   - `fetch` has read-only repository access (a step-scoped credential,
-#     never persisted into .git/config) and transfers the trust and
-#     subject git objects — and the base ref, so the merge-base that starts
-#     the judged range travels with them — as a bundle, without executing
-#     head code. This keeps private repositories usable without a token in
-#     `compute`, `measurement` or `judge`.
-#   - `compute` recomputes typecheck-count with the TRUST-REF toolchain over
-#     the extracted head tree. It runs `tsc` over head content, so it holds
-#     NOTHING: `permissions: {}`, no secrets, no environment. Its only output
-#     is a number. It runs `trust/dist/selfhost/recompute-typecheck.js`, not
-#     the CLI, so only protected code produces that number (residual R1,
-#     docs/protected-scope.md).
-#   - `measurement` downloads the HEAD-AUTHORED measurement artifact and
-#     re-validates it in a job that holds no write scope and no secrets;
-#     only a numbers-only JSON crosses to `judge`, which therefore never
-#     unpacks a single byte the head authored (F5).
-#   - `judge` is the SIGNING job: it runs the trusted verifier over git
-#     objects + those numbers and posts the `cq/ratchet` check run (a fail
-#     or needs-human verdict is a RED CHECK RUN, not a red job: the job
-#     fails only when trusted code crashed or the post failed). It runs
-#     no head code, holds `checks: write` plus read-only API scopes for the
-#     D11 evidence, runs in environment `cq-verdict`, and checks the trust
-#     ref out of the bundle with no persisted credential. The verifier runs
-#     IN-PROCESS (`dist/selfhost/verify-ratchet.js`, readiness T2): for a
-#     queue-tip subject it binds the promotion gate's own D11 authorization
-#     over `main..subject` (closure, label records, settle epoch, the C3
-#     attestation at the trust ref), so an owner-authorized definition change
-#     is judged on its evidence instead of needs-human. Records stay dormant
-#     until C3, and every unreadable input binds nothing (fail closed). `compute` stays credential-free: the signing
-#     environment never reaches a job that runs `tsc` over head content.
-#
-# IDENTITY (EXPAND, ADR-0004 D-H.2; W1.10 Decision 6): `judge` posts with a
-# verdict-App token when `vars.CQ_VERDICT_APP_CLIENT_ID` is set, and with its
-# GITHUB_TOKEN (`checks: write`) otherwise. ADR-0004 D-F: a GITHUB_TOKEN check
-# run is not a trust anchor — any workflow can forge one. C2 requires the App
-# and makes `cq/ratchet` required with expected source = that App; until
-# then the legacy `ratchet` check (ratchet.yml) stays the required one. All
-# verdict posters (cq-policy, cq-verify, cq-accept) switch together.
-# `external_id` binds `<trust-sha>:<subject-sha>`.
+# Advisory PR diagnostics for direct main development. No queue promotion carrier.
 name: cq-verify
 
 on:
+  pull_request:
   workflow_run:
     workflows:
       - cq-measure
@@ -89,14 +27,23 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  main-advisory:
+    name: cq/ratchet (advisory)
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Report advisory policy
+        run: echo 'Direct main PRs use CI and denylist; this verdict is advisory.'
   resolve:
     name: resolve
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
     # dispatch on any other ref would run that ref's copy of this file.
     if: >-
+      github.event_name != 'pull_request' && (
       github.event_name == 'workflow_run' ||
       github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
+      format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -156,9 +103,8 @@ jobs:
                   '[.[] | select(.state == "open"
                      and .head.sha == $sha
                      and .head.repo.id == $repo) | .base.ref]
-                   | map(select(. == "merge-queue" or . == "main"))
-                   | if index("merge-queue") then "merge-queue"
-                     elif index("main") then "main"
+                   | map(select(. == "main"))
+                   | if index("main") then "main"
                      else empty end' <<<"$pulls"
               }
               pulls="$(list_pulls)"
@@ -184,19 +130,13 @@ jobs:
                 if [ "$same_repo" = 0 ]; then
                   msg="nothing to judge: commit→PR association unconfirmed: no same-repo PR lists ${subject} (looked twice)"
                 else
-                  msg="nothing to judge: no open same-repo PR into merge-queue/main has head ${subject} (superseded, closed or merged, or another base)"
+                  msg="nothing to judge: no open same-repo PR into main has head ${subject} (superseded, closed or merged, or another base)"
                 fi
                 echo "::notice title=cq-verify::${msg}"
                 echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
                 exit 0
               fi
               kind='pr'
-              ;;
-            push)
-              [ "$branch" = "merge-queue" ] || {
-                echo "refusing: push run on '$branch'"; exit 1; }
-              kind='push'
-              base='main'
               ;;
             *) echo "refusing: event '$event'"; exit 1;;
           esac
@@ -211,6 +151,7 @@ jobs:
   fetch:
     name: fetch trust and subject objects
     needs: resolve
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # An empty subject is resolve's "nothing to judge" (no verdict owed);
     # `compute` needs this job, so it skips with it.
     if: needs.resolve.outputs.subject != ''
@@ -270,6 +211,7 @@ jobs:
   compute:
     name: compute
     needs: [resolve, fetch]
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Runs the trust-ref tsc over HEAD CONTENT (a head tsconfig can point tsc
@@ -341,9 +283,8 @@ jobs:
   measurement:
     name: measurement
     needs: [resolve]
-    if: >-
-      ${{ !cancelled() && needs.resolve.result == 'success'
-      && needs.resolve.outputs.subject != '' }}
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
+    if: github.event_name != 'pull_request' && !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # F5: this artifact is HEAD-AUTHORED bytes — cq-measure runs head code
@@ -411,11 +352,10 @@ jobs:
   judge:
     name: judge
     needs: [resolve, compute, measurement]
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # A failed recompute still yields a (failing) verdict; only an
     # unresolved subject, or resolve's "nothing to judge", yields none.
-    if: >-
-      ${{ !cancelled() && needs.resolve.result == 'success'
-      && needs.resolve.outputs.subject != '' }}
+    if: github.event_name != 'pull_request' && !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The verdict signer's environment (Decision 6): its only secret is the
@@ -559,13 +499,14 @@ jobs:
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
+          ADVISORY: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
           TYPECHECK_COUNT: ${{ needs.compute.outputs.typecheck_count }}
         run: |
           set -euo pipefail
           # Anything but an ok op result with verdict "pass" is a failure;
           # needs-human is a failure whose summary names D11.
           jq -n --slurpfile v "${RUNNER_TEMP}/verdict.json" \
-            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" '
+            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" --arg advisory "$ADVISORY" '
             ($v[0] // {}) as $r
             | ($r.value.verdict // "fail") as $verdict
             | {
@@ -573,7 +514,7 @@ jobs:
                 head_sha: $sha,
                 external_id: $ext,
                 status: "completed",
-                conclusion: (if $r.status == "ok" and $verdict == "pass"
+                conclusion: (if $advisory == "true" then "neutral" elif $r.status == "ok" and $verdict == "pass"
                   then "success" else "failure" end),
                 output: {
                   title: ("ratchet: " + (if $r.status == "ok"

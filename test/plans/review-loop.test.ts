@@ -638,6 +638,7 @@ const runLoop = async (
     gitLog?: string[][];
     invocations?: OpInvocation[];
     headRepo?: string;
+    expectedHead?: string;
     dispatchLogPath?: string;
     promptOverride?: string;
     /** Governor LIMITS half riding the loop opts (the review-path #137 arming). */
@@ -722,6 +723,7 @@ const runLoop = async (
     headRefName: HEAD_REF,
     ...(o.headRepo !== undefined ? { headRepo: o.headRepo } : {}),
     repoRoot: '/fake/repo',
+    ...(o.expectedHead ? { expectedHead: o.expectedHead } : {}),
     gh: o.ghHook ? (args) => o.ghHook!(args, ghRunner) : ghRunner,
     git: o.gitHook ? (args) => o.gitHook!(args, gitRunner) : gitRunner,
     ...(o.signal ? { signal: o.signal } : {}),
@@ -3472,4 +3474,14 @@ describe('parent cancellation during publication and replies', () => {
       );
     },
   );
+});
+
+test('an expected-head mismatch refuses before forge reads, actions or worker dispatch', async () => {
+  const world = defaultWorld();
+  const invocations: OpInvocation[] = [];
+  const result = await runLoop(world, { expectedHead: 'f'.repeat(40), invocations });
+  expect(result.outcome.status).toBe('needs-human');
+  expect(result.outcome.reasons).toContain('PR head changed before dispatch');
+  expect(result.ghLog).toEqual([]);
+  expect(invocations).toEqual([]);
 });

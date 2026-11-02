@@ -1,4 +1,5 @@
 """Tick-owned inbox, result harvesting and publication. No model dispatch."""
+from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
 import copy
 import json
 from pathlib import Path
@@ -24,7 +25,8 @@ def prepare_current_job(c, q, old_job_id, source_sha, evidence):
     existing = item.get('repair_runs', {}).get(run)
     if existing:
         return job_id
-    history = [r for i in q['items'] if i.get('pr') == item.get('pr')
+    history = [r for i in q['items'] if (i.get('id') == item.get('id') if old.get('canonical_finding_id')
+                                        else i.get('pr') == item.get('pr'))
                for r in i.get('repair_runs', {}).values()]
     count = sum(r.get('pin') == source_sha for r in history)
     if count >= c.CONFIG['repair'].get('max_rounds_per_pin', 2):
@@ -79,7 +81,7 @@ def enqueue(c, q, item, meta, rdir):
         item['last_error'] = 'repair round ceiling reached; needs human'
         return False
     open_pr = item['kind'] in ('open', 'delta') and bool(meta.get('pr_branch'))
-    base = meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', 'origin/merge-queue')
+    base = meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', DEFAULT_REF)
     record = {'jobs': [], 'pin': pin, 'base': base, 'branch': meta.get('pr_branch'),
               'open_pr': open_pr, 'round': count + 1, 'state': 'queued'}
     reviewed_diff = c.git('diff', meta['base'], meta['head'])
@@ -193,7 +195,7 @@ def publish(c, q, item, run, record, fixed):
     if info and info['state'] != 'OPEN':
         record.update(state='stale', error='PR closed or merged before repair publication')
         return
-    target = info['headRefOid'] if info else c.git('rev-parse', 'origin/merge-queue')
+    target = info['headRefOid'] if info else c.git('rev-parse', DEFAULT_REF)
     if info and not c.is_ancestor(record['base'], target):
         record.update(state='stale', error='head moved non-fast-forward; await new pin review')
         return
@@ -293,7 +295,7 @@ def finalize_publication(c, q, item, run, record, publication):
             publication['pr_create_pending'] = True
             atomic(c.STATE / 'repair' / record['jobs'][0] / 'publication.json', publication)
             c.save_queue(q)
-            c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', 'merge-queue', '--head', branch,
+            c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', DEFAULT_BRANCH, '--head', branch,
                    '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
             prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
         if len(prs) != 1:
@@ -361,7 +363,7 @@ def reconcile_fix_prs(c, q):
             pr['state'] = info['state']
             if info['state'] == 'MERGED':
                 merge = (info.get('mergeCommit') or {}).get('oid')
-                if not merge or not c.is_ancestor(merge, c.git('rev-parse', 'origin/merge-queue')):
+                if not merge or not c.is_ancestor(merge, c.git('rev-parse', DEFAULT_REF)):
                     continue
                 fixed = {v['job'] for v in record.get('verdicts', []) if v['verdict'] == 'FIXED'}
                 for index, job in enumerate(record['jobs'], 1):

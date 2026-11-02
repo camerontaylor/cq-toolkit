@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import * as gitMutex from '../../../src/shared/gitMutex.js';
+import * as checkRunner from '../../../src/ops/gates/checkRunner.js';
 import { makeAddressWorker, type AddressAttempt } from '../../../src/ops/review/addressWorker.js';
 import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaults.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
@@ -36,6 +37,7 @@ async function fixture(
     rescueBase?: number;
     aliasRoot?: boolean;
     installedDependencies?: 'matching' | 'mismatched';
+    preferDependencyRoot?: boolean;
     workspaceDependency?: 'caller' | 'worker';
     firstStopReason?: 'budget' | 'aborted' | 'error';
     costUSD?: number;
@@ -74,7 +76,7 @@ async function fixture(
       join(dependencyRoot, 'package.json'),
       options.installedDependencies === 'matching'
         ? '{"name":"fixture"}\n'
-        : '{"name":"different"}\n',
+        : '{"name":"fixture","dependencies":{"different":"1.0.0"}}\n',
     );
     await writeFile(join(dependencyRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
     await writeFile(join(dependencyRoot, 'node_modules/check.cjs'), 'process.exitCode = 0;\n');
@@ -180,6 +182,7 @@ async function fixture(
     drivers,
     repoRoot: options.aliasRoot ? alias : repo.root,
     ...(options.installedDependencies ? { dependencyRoot } : {}),
+    ...(options.preferDependencyRoot ? { preferDependencyRoot: true } : {}),
     journalDir: journal,
     policy: resolveCqConfigDefaults(config, { packageName: 'fixture' }),
     attempts,
@@ -206,6 +209,7 @@ async function fixture(
     calls: () => calls,
     identityRequests: () => identityRequests,
     dependencyCheckMarker,
+    dependencyRoot,
     cleanup: async () => {
       await repo.cleanup();
       await rm(journal, { recursive: true, force: true });
@@ -213,7 +217,451 @@ async function fixture(
   };
 }
 
+describe('baseline failure scope and reuse', () => {
+  test.each([75, null])(
+    'transient baseline exit %s retries checks once, leaves siblings usable',
+    async (exit) => {
+      const external = await mkdtemp(join(tmpdir(), 'cq-transient-baseline-'));
+      const count = join(external, 'count');
+      const recovered = join(external, 'recovered');
+      const timeoutCapture =
+        exit === null
+          ? vi
+              .spyOn(checkRunner, 'subprocessRunCheck')
+              .mockResolvedValueOnce({ stdout: '', stderr: 'timeout', exitCode: null })
+              .mockResolvedValueOnce({ stdout: '', stderr: 'timeout', exitCode: null })
+          : undefined;
+      const f = await fixture(
+        undefined,
+        `
+const fs = require('node:fs'); const p = ${JSON.stringify(count)};
+fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : 0) + 1));
+if (!fs.existsSync(${JSON.stringify(recovered)})) {
+  ${exit === null ? 'setInterval(() => {}, 1000);' : 'console.log(\'test:narrow result="refused" exit=75 reason="low memory"\'); process.exitCode = 75;'}
+}
+`,
+        {
+          workerAttempts: 10,
+          rescueBase: 10,
+        },
+      );
+      try {
+        const a = await f.engine.fix(finding(), 1);
+        expect(a.reason).toContain('transient baseline failed');
+        if (timeoutCapture) {
+          expect(timeoutCapture).toHaveBeenCalledTimes(2);
+          timeoutCapture.mockRestore();
+        } else expect(await readFile(count, 'utf8')).toBe('2');
+        expect(f.calls()).toBe(0);
+        expect(f.engine.preconditionFailure?.()).toBeUndefined();
+        expect(f.engine.preconditions?.()).toMatchObject([{ kind: 'transient', scope: 'leg' }]);
+        await writeFile(recovered, 'yes');
+        const b = await f.engine.fix(finding('src/b.ts'), 1);
+        expect(b.commit, b.reason).toBeTruthy();
+        expect(f.attempts.filter((a) => a.invocation === 'edit')).toHaveLength(1);
+      } finally {
+        timeoutCapture?.mockRestore();
+        await f.cleanup();
+        await rm(external, { recursive: true, force: true });
+      }
+    },
+  );
+  test('a transient baseline can recover on its single check retry before model dispatch', async () => {
+    const external = await mkdtemp(join(tmpdir(), 'cq-recover-baseline-'));
+    const count = join(external, 'count');
+    const f = await fixture(
+      undefined,
+      `const fs = require('node:fs'); const p = ${JSON.stringify(count)};
+const n = Number(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : 0) + 1; fs.writeFileSync(p, String(n));
+if(n === 1) process.exitCode=75;`,
+    );
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+      expect(await readFile(count, 'utf8')).toBe('4');
+      expect(f.attempts.filter((a) => a.invocation === 'edit')).toHaveLength(1);
+      expect(f.engine.preconditions?.()).toEqual([]);
+    } finally {
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+  const narrowPass = `console.log('test:narrow report='+JSON.stringify({success:true,numTotalTests:1,numPassedTests:1,numFailedTests:0,testResults:[{name:'test/a.test.ts',status:'passed',assertionResults:[{status:'passed'}]}]}));
+console.log('test:narrow result="pass" exit=0 files=1 tests="1/1" failed=0');`;
+  test.each([2, 75])(
+    'finding-scoped narrow refusal exit %s does not stop a healthy sibling',
+    async (exit) => {
+      const f = await fixture(
+        undefined,
+        `if(process.argv.at(-1)==='src/a.ts') {
+console.log('test:narrow result="refused" exit=${exit} reason="${exit === 75 ? 'low memory' : 'unmapped module'}"'); process.exitCode=${exit};
+} else { ${narrowPass} }`,
+        {
+          workerAttempts: 10,
+          rescueBase: 10,
+          configure: (c) => {
+            c.checks[0]!.adapter = 'test-narrow';
+            c.checks[0]!.kind = 'tests';
+            c.checks[0]!.relatedArgs = ['scripts/check.cjs', '{files}'];
+          },
+        },
+      );
+      try {
+        const a = await f.engine.fix(finding(), 1);
+        expect(a.commit).toBeUndefined();
+        expect(f.engine.preconditionFailure?.()).toBeUndefined();
+        expect(f.engine.preconditions?.()).toMatchObject([
+          {
+            kind: exit === 75 ? 'transient' : 'deterministic',
+            scope: 'finding',
+            stage: 'check',
+            finding: 'src/a.ts',
+          },
+        ]);
+        const b = await f.engine.fix(finding('src/b.ts'), 1);
+        expect(b.commit, b.reason).toBeTruthy();
+        expect(f.attempts.filter((a) => a.finding === 'src/a.ts')).toHaveLength(1);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('a rejected finding needs no finding-scoped baseline or mapping', async () => {
+    const f = await fixture(
+      async (input) =>
+        input.outputSchema?.name === 'review.address.closure/v1'
+          ? { closed: true, reason: 'false positive confirmed' }
+          : {
+              disposition: 'rejected',
+              reason: 'false positive',
+              evidence: [{ path: 'src/a.ts', line: 1 }],
+            },
+      'throw new Error("scoped checks must not execute for rejection");',
+      {
+        configure: (c) => {
+          c.checks[0]!.addressOnly = true;
+        },
+      },
+    );
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.finding.status, result.reason).toBe('rejected');
+      expect(f.calls()).toBe(2);
+      expect(f.engine.preconditions?.()).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('baseline results are reused across retries at the same parent', async () => {
+    const external = await mkdtemp(join(tmpdir(), 'cq-cache-baseline-'));
+    const count = join(external, 'count');
+    let closures = 0;
+    const f = await fixture(
+      async (input) => {
+        if (input.outputSchema?.name === 'review.address.closure/v1')
+          return { closed: ++closures > 1, reason: 'closure check' };
+        if (input.prompt.includes('initial task') || input.prompt.includes('worker retry'))
+          await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+        return { disposition: 'fixed', reason: 'fixed', evidence: [] };
+      },
+      `const fs = require('node:fs'); const p=${JSON.stringify(count)};
+fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : 0)+1));`,
+      { workerAttempts: 2 },
+    );
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+      expect(await readFile(count, 'utf8')).toBe('5');
+      expect(f.attempts.filter((a) => a.invocation === 'edit')).toHaveLength(2);
+    } finally {
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+  test('baseline cache is invalidated by an engine sibling commit', async () => {
+    const external = await mkdtemp(join(tmpdir(), 'cq-parent-baseline-'));
+    const count = join(external, 'count');
+    const f = await fixture(
+      undefined,
+      `const fs=require('node:fs');const p=${JSON.stringify(count)};
+fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1));`,
+    );
+    try {
+      expect((await f.engine.fix(finding(), 1)).commit).toBeTruthy();
+      expect((await f.engine.fix(finding('src/b.ts'), 1)).commit).toBeTruthy();
+      expect(await readFile(count, 'utf8')).toBe('6');
+    } finally {
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+  test('indeterminate baseline retains bounded child diagnostics', async () => {
+    const f = await fixture(
+      undefined,
+      `console.log('x'.repeat(5000)); console.error('refused selection'); process.exitCode=2;`,
+    );
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
+        exitCode: 2,
+        signal: null,
+        stdoutTail: 'x'.repeat(4095) + '\n',
+        stderrTail: 'refused selection\n',
+      });
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('indeterminate baseline with unavailable secret scan withholds output', async () => {
+    const f = await fixture(undefined, `console.log('private output'); process.exitCode=2;`, {
+      scanner: async () => {
+        throw new Error('scanner unavailable');
+      },
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toEqual({
+        exitCode: 2,
+        signal: null,
+        stdoutTail: '[withheld: scanner unavailable/failed]',
+        stderrTail: '[withheld: scanner unavailable/failed]',
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([false, true])(
+    'real repository rules retain benign output and withhold secrets (%s)',
+    async (secret) => {
+      const text = secret
+        ? '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'
+        : 'related test selection exceeds cap 10: 22 files';
+      const f = await fixture(
+        undefined,
+        `console.log(${JSON.stringify(text)});process.exitCode=2;`,
+        {
+          scanner: makeRepoDiffScanner(process.cwd()),
+        },
+      );
+      try {
+        await f.engine.fix(finding(), 1);
+        expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+          secret ? '[withheld: secret matched]' : text + '\n',
+        );
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('candidate check failures do not scan discarded diagnostics', async () => {
+    let scans = 0;
+    const f = await fixture(
+      undefined,
+      `if(require('node:fs').readFileSync('src/a.ts','utf8').includes('GOOD'))process.exitCode=2;`,
+      {
+        scanner: async (components) => {
+          if (components.some((c) => c.component === 'check-stdout')) scans++;
+          return components.map((c) => ({ component: c.component, hits: [] }));
+        },
+      },
+    );
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.calls()).toBeGreaterThan(0);
+      expect(scans).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('diagnostic scan observes cancellation', async () => {
+    const controller = new AbortController();
+    const f = await fixture(undefined, `process.exitCode=2;`, {
+      parentSignal: controller.signal,
+      scanner: () => {
+        controller.abort();
+        return new Promise(() => {});
+      },
+    });
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit).toBeUndefined();
+      expect(f.engine.preconditions?.()).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each([
+    { remaining: 12_000, step: 20_000, expected: 12_000 },
+    { remaining: 20_000, step: 7000, expected: 7000 },
+    { remaining: 60_000, step: 60_000, expected: 30_000 },
+  ])(
+    'diagnostic scan timeout follows budgets with a 30s ceiling (%j)',
+    async ({ remaining, step, expected }) => {
+      let timeout: number | undefined;
+      const f = await fixture(undefined, `process.exitCode=2;`, {
+        remainingWallMs: () => remaining,
+        unitWallMs: 120_000,
+        configure: (config) => {
+          config.budgets!.step!.wallMs = step;
+        },
+        scanner: async (components, options) => {
+          timeout = options?.timeoutMs;
+          return components.map((c) => ({ component: c.component, hits: [] }));
+        },
+      });
+      try {
+        await f.engine.fix(finding(), 1);
+        expect(timeout).toBe(expected);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('unresponsive diagnostic scan is bounded', async () => {
+    const f = await fixture(undefined, `process.exitCode=2;`, {
+      configure: (config) => {
+        config.budgets!.step!.wallMs = 1000;
+      },
+      scanner: () => new Promise(() => {}),
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+        '[withheld: scanner unavailable/failed]',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('indeterminate baseline retains signal after transient retry', async () => {
+    const f = await fixture(undefined, `process.kill(process.pid, 'SIGTERM');`);
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics).toMatchObject({
+        exitCode: null,
+        signal: 'SIGTERM',
+        stdoutTail: '',
+        stderrTail: '',
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('positive secret scan withholds indeterminate child output', async () => {
+    const f = await fixture(undefined, `console.log('sensitive output'); process.exitCode=2;`, {
+      scanner: async (components) =>
+        components.map((c) => ({
+          component: c.component,
+          hits: [{ ruleId: 'test', lines: [1] }],
+        })),
+    });
+    try {
+      await f.engine.fix(finding(), 1);
+      expect(f.engine.preconditions?.()[0]?.checkDiagnostics?.stdoutTail).toBe(
+        '[withheld: secret matched]',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('baseline cleanup failure preserves the original typed cause', async () => {
+    const f = await fixture(undefined, 'process.exitCode=1;', {
+      gitHook: (args, run) =>
+        args.includes('worktree') &&
+        args.includes('remove') &&
+        args.some((a) => a.includes('baseline-'))
+          ? Promise.resolve({ code: 1, stdout: '', stderr: 'cleanup unavailable' })
+          : run(args),
+    });
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.reason).toContain('configured check was indeterminate');
+      expect(result.reason).toContain('cleanup unavailable');
+      const cause = f.engine.preconditions?.()[0];
+      expect(cause?.stage).toBe('check');
+      expect(cause?.reason).toContain('configured check was indeterminate');
+      expect(cause?.cleanupError).toContain('cleanup unavailable');
+      expect(f.calls()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each(['.npmrc', '.yarnrc.yml', 'bunfig.toml'])(
+    'dependency reuse compares %s without exposing its contents',
+    async (path) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        await writeFile(
+          join(f.dependencyRoot, path),
+          'registry=https://different.example.invalid/',
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(result.reason).not.toContain('different.example.invalid');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each(['pnpm', 'npm'])(
+    'dependency reuse checks %s workspace member lifecycle scripts',
+    async (manager) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        if (manager === 'pnpm') {
+          await f.repo.write('pnpm-workspace.yaml', 'packages:\n  - "packages/*"\n');
+          await writeFile(
+            join(f.dependencyRoot, 'pnpm-workspace.yaml'),
+            'packages:\n  - "packages/*"\n',
+          );
+        } else {
+          await f.repo.write('package.json', JSON.stringify({ workspaces: ['packages/*'] }));
+          await writeFile(
+            join(f.dependencyRoot, 'package.json'),
+            JSON.stringify({ workspaces: ['packages/*'] }),
+          );
+        }
+        await f.repo.write(
+          'packages/lib/package.json',
+          JSON.stringify({ name: 'lib', scripts: { postinstall: 'original install' } }),
+        );
+        f.repo.commitAll('workspace metadata');
+        await mkdir(join(f.dependencyRoot, 'packages/lib'), { recursive: true });
+        await writeFile(
+          join(f.dependencyRoot, 'packages/lib/package.json'),
+          JSON.stringify({ name: 'lib', scripts: { postinstall: 'different install' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+});
+
 describe('review.address verified admission fence', () => {
+  test('preflight refuses an unverified parent before checks or model dispatch', async () => {
+    let reads = 0;
+    const f = await fixture(undefined, '', {
+      gitHook: (args, run) => {
+        if (args.at(-2) === 'rev-parse' && args.at(-1) === 'HEAD' && ++reads === 2)
+          return Promise.resolve({ code: 0, stdout: 'f'.repeat(40), stderr: '' });
+        return run(args);
+      },
+    });
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.reason).toBe('unexpected baseline head outside engine');
+      expect(f.calls()).toBe(0);
+      expect(f.attempts).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('cancellation while preparing historical bookkeeping prevents admission after await', async () => {
     const parent = new AbortController();
     let enter!: () => void;
@@ -987,7 +1435,7 @@ describe('review.address candidate isolation', () => {
       expect(refused.reason).toMatch(
         /execution-head evidence|missing at execution head|accompanied by edits|roles.reviewer required/,
       );
-      expect(f.calls()).toBe(1);
+      expect(f.calls()).toBe(mode === 'missing-reviewer' ? 0 : 1);
       expect(refused.commit).toBeUndefined();
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
@@ -1012,11 +1460,11 @@ describe('review.address candidate isolation', () => {
         expect(refused.reason).toMatch(
           /roles.reviewer required|check.cwd escapes|configured check was/,
         );
-        expect(f.calls()).toBe(mode === 'reviewer' ? 2 : 1);
+        expect(f.calls()).toBe(0);
         expect(refused.commit).toBeUndefined();
         expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
-        expect(f.attempts.some((a) => a.failedAttempt?.sha)).toBe(true);
+        expect(f.attempts).toEqual([]);
       } finally {
         await f.cleanup();
       }
@@ -1081,6 +1529,60 @@ describe('review.address candidate isolation', () => {
       await f.cleanup();
     }
   });
+  test.each(['mismatched', 'missing'] as const)(
+    'explicit prepared root refusal: %s',
+    async (mode) => {
+      const f = await fixture(undefined, '', {
+        installedDependencies: mode === 'mismatched' ? 'mismatched' : 'matching',
+        preferDependencyRoot: true,
+      });
+      try {
+        if (mode === 'missing')
+          await rm(join(f.dependencyRoot, 'node_modules'), { recursive: true });
+        const result = await f.engine.fix(finding(), 1);
+        const reason =
+          mode === 'missing'
+            ? 'prepared dependency root has no node_modules'
+            : 'prepared dependency root manifests/locks differ';
+        expect(result.commit).toBeUndefined();
+        expect(result.reason).toContain(reason);
+        expect(result.reason).not.toContain('install dependencies in the PR worktree');
+        expect(f.engine.preconditions?.()[0]).toMatchObject({
+          kind: 'deterministic',
+          scope: 'leg',
+          stage: 'dependencies',
+        });
+        expect(f.engine.preconditions?.()[0]?.reason).toContain(reason);
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('prepared dependencies retain dev yaml for a PR predating its runtime move', async () => {
+    const f = await fixture(undefined, '', {
+      installedDependencies: 'matching',
+      preferDependencyRoot: true,
+    });
+    try {
+      await f.repo.write('.gitignore', 'node_modules/\n');
+      // An inherited clone-local tree must not shadow the explicit prepared root.
+      await mkdir(join(f.repo.root, 'node_modules'), { recursive: true });
+      await writeFile(join(f.repo.root, 'node_modules/check.cjs'), 'process.exitCode = 1;\n');
+      const old = JSON.stringify({ devDependencies: { yaml: '2.9.1' } });
+      await f.repo.write('package.json', old);
+      f.repo.commitAll('older PR metadata');
+      await writeFile(join(f.dependencyRoot, 'package.json'), old);
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+      expect(await readFile(join(f.dependencyRoot, 'package.json'), 'utf8')).toBe(old);
+      expect(await readFile(join(f.dependencyRoot, 'node_modules/check.cjs'), 'utf8')).toBe(
+        'process.exitCode = 0;\n',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
   test.each(['matching', 'mismatched'] as const)(
     'fresh worker tree reuses installed caller dependencies only with matching metadata: %s',
     async (installedDependencies) => {
@@ -1095,6 +1597,151 @@ describe('review.address candidate isolation', () => {
           expect(result.reason).toContain('manifests/locks differ');
           expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
         }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('ten identical baseline failures run the check once without semantic attempts', async () => {
+    const external = await mkdtemp(join(tmpdir(), 'cq-baseline-refusal-'));
+    const count = join(external, 'count');
+    const f = await fixture(
+      undefined,
+      `const fs = require('node:fs'); const p = ${JSON.stringify(count)};
+fs.writeFileSync(p, String(Number(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : 0) + 1));
+console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
+      { workerAttempts: 10, rescueBase: 10 },
+    );
+    try {
+      for (let i = 0; i < 10; i++) {
+        const result = await f.engine.fix({ ...finding(), id: `finding-${i}` }, 1);
+        expect(result.reason).toMatch(/baseline precondition failed: configured check was/);
+        expect(result.finding.status).toBe('deferred');
+        expect(result.commit).toBeUndefined();
+      }
+      expect(await readFile(count, 'utf8')).toBe('1');
+      expect(f.calls()).toBe(0);
+      expect(f.attempts).toEqual([]);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+    } finally {
+      await f.cleanup();
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+  test('baseline worktree setup failure stops the leg once before model dispatch', async () => {
+    let adds = 0;
+    const f = await fixture(undefined, '', {
+      gitHook: (args, run) => {
+        if (
+          args.includes('worktree') &&
+          args.includes('add') &&
+          args.some((a) => a.includes('baseline-'))
+        ) {
+          adds++;
+          return Promise.resolve({ code: 1, stdout: '', stderr: 'baseline setup unavailable' });
+        }
+        return run(args);
+      },
+    });
+    try {
+      for (let i = 0; i < 10; i++) {
+        const result = await f.engine.fix({ ...finding(), id: `finding-${i}` }, 1);
+        expect(result.reason).toContain('baseline setup unavailable');
+      }
+      expect(adds).toBe(1);
+      expect(f.calls()).toBe(0);
+      expect(f.engine.preconditionFailure?.()).toContain('baseline setup unavailable');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('script and descriptive metadata differences reuse equivalent dependencies', async () => {
+    const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+    try {
+      await writeFile(
+        join(f.dependencyRoot, 'package.json'),
+        JSON.stringify({ name: 'caller', version: '2.0.0', scripts: { build: 'another build' } }),
+      );
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.commit, result.reason).toBeTruthy();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each(['preinstall', 'install', 'postinstall', 'prepare', 'pnpm:devPreinstall'])(
+    'changed %s lifecycle refuses dependency reuse before model dispatch',
+    async (hook) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ scripts: { [hook]: 'modify-installed-files' } }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([true, false])(
+    'install hooks compare indirectly invoked scripts (changed=%s)',
+    async (changed) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        const manifest = {
+          scripts: { postinstall: 'pnpm run build', build: 'prepare installed files' },
+        };
+        await f.repo.write('package.json', JSON.stringify(manifest));
+        f.repo.commitAll('install lifecycle metadata');
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({
+            scripts: {
+              ...manifest.scripts,
+              build: changed ? 'different installed files' : manifest.scripts.build,
+            },
+          }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        if (changed) {
+          expect(result.reason).toContain('manifests/locks differ');
+          expect(f.calls()).toBe(0);
+        } else expect(result.commit, result.reason).toBeTruthy();
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    ['dependencies', { dep: '1' }],
+    ['devDependencies', { dep: '1' }],
+    ['optionalDependencies', { dep: '1' }],
+    ['peerDependencies', { dep: '1' }],
+    ['pnpm', { overrides: { dep: '1' } }],
+    ['packageManager', 'pnpm@10.0.0'],
+    ['installConfig', { hoistingLimits: 'workspaces' }],
+    ['dependencies', null],
+    ['pnpm', []],
+  ])(
+    'changed or ambiguous dependency metadata refuses before dispatch: %s=%j',
+    async (key, value) => {
+      const f = await fixture(undefined, '', {
+        installedDependencies: 'matching',
+        workerAttempts: 10,
+        rescueBase: 10,
+      });
+      try {
+        await writeFile(
+          join(f.dependencyRoot, 'package.json'),
+          JSON.stringify({ [key as string]: value }),
+        );
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('baseline precondition failed');
+        expect(result.commit).toBeUndefined();
+        expect(f.calls()).toBe(0);
+        expect(f.attempts).toEqual([]);
       } finally {
         await f.cleanup();
       }
@@ -1134,6 +1781,20 @@ describe('review.address candidate isolation', () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+  test.each(['pnpm-lock.yaml', 'pnpm-workspace.yaml'])(
+    'changed %s refuses dependency reuse',
+    async (path) => {
+      const f = await fixture(undefined, '', { installedDependencies: 'matching' });
+      try {
+        await writeFile(join(f.dependencyRoot, path), 'changed: true\n');
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.reason).toContain('manifests/locks differ');
+        expect(f.calls()).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('commits only a staged candidate that passed mandatory feedback, broader and closure gates', async () => {
     const f = await fixture();
     try {
@@ -1818,11 +2479,11 @@ test.each(['baseline', 'related', 'broader'] as const)(
     const parent = new AbortController();
     const external = await mkdtemp(join(tmpdir(), 'cq-running-check-'));
     const marker = join(external, 'ready');
-    // Counts are candidate-owned, not shared worker edits: baseline then related then broader.
+    // Count across the cached clean-parent preflight and the candidate checks.
     const wanted = { baseline: 1, related: 2, broader: 3 }[phase];
     const check = `
 const fs = require('node:fs');
-const countFile = '.cq-check-count';
+const countFile = ${JSON.stringify(join(external, 'check-count'))};
 const n = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, 'utf8')) + 1 : 1;
 fs.writeFileSync(countFile, String(n));
 if (n === ${wanted}) {

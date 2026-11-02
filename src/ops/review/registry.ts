@@ -405,6 +405,7 @@ export const VerifyReviewOutcomeOpInputSchema = z
 
 export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
   .object({
+    areas: z.boolean().exactOptional(),
     repoRoot: z.string().min(1),
     maxTokens: z.number().int().positive().exactOptional(),
     wallMs: z.number().int().positive().exactOptional(),
@@ -413,6 +414,7 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
       .min(1)
       .exactOptional(),
     uncommitted: z.boolean().exactOptional(),
+    prepareEvidence: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: z
       .string()
@@ -533,7 +535,12 @@ export const FixReviewItemInputSchema: z.ZodType<ReviewFixInput> = z
 export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
   .object({
     repoRoot: z.string().min(1),
+    dependencyRoot: z.string().min(1).exactOptional(),
     source: z.string().regex(/^(local|pr:[1-9]\d*)$/),
+    expectedHead: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .exactOptional(),
     record: z.string().min(1).exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: z.string().min(1).exactOptional(),
@@ -543,10 +550,50 @@ export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
     concurrency: z.number().int().positive().exactOptional(),
     journalDir: z.string().min(1).exactOptional(),
     push: z.boolean().exactOptional(),
+    verifyClosure: z.boolean().exactOptional(),
   })
   .strict();
 
+export const ReviewAddressManyInputSchema = z
+  .object({
+    repoRoot: z.string().min(1),
+    dependencyRoots: z.record(z.string().regex(/^[1-9]\d*$/), z.string().min(1)).exactOptional(),
+    repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
+    pulls: z.array(z.number().int().positive()).min(1).exactOptional(),
+    query: z.string().min(1).exactOptional(),
+    concurrency: z.number().int().positive().exactOptional(),
+    cloneRoot: z.string().min(1).exactOptional(),
+    enrollments: z
+      .array(z.object({ number: z.number().int().positive(), request: QueueEnqueueInputSchema }))
+      .exactOptional(),
+    owner: z.string().min(1),
+    maxTokens: z.number().int().positive(),
+    tokensPerPr: z.number().int().positive(),
+    rounds: z.number().int().positive().exactOptional(),
+    wallMs: z.number().int().positive().exactOptional(),
+    push: z.boolean().exactOptional(),
+  })
+  .strict()
+  .refine(
+    (i) => (i.pulls !== undefined) !== (i.query !== undefined),
+    'Provide pulls or query exclusively',
+  )
+  .refine(
+    (i) => new Set(i.enrollments?.map((r) => r.number)).size === (i.enrollments?.length ?? 0),
+    'Duplicate enrollment rows',
+  )
+  .refine(
+    (i) => !i.pulls || !i.enrollments?.some((r) => !i.pulls!.includes(r.number)),
+    'Enrollment outside selection',
+  );
+
 export const registry: OpRegistryEntry[] = [
+  {
+    name: 'review.addressMany',
+    inputSchema: ReviewAddressManyInputSchema,
+    importer: async () =>
+      (await import('./addressMany.js')).makeReviewAddressMany() as Op<unknown, unknown>,
+  },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
   {
     name: 'review.enqueue',

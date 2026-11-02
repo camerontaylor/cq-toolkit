@@ -705,12 +705,11 @@ class CurrentTest(unittest.TestCase):
                 return SimpleNamespace(pid=919191)
             return real_popen(argv, **kw)
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(crq, "promotion_mode", return_value="user"))
             if not discovery:
                 stack.enter_context(mock.patch.object(crq, "discover_merged", return_value=[]))
             for name in ("fetch", "write_status", "write_heartbeat", "notify_owner"):
                 stack.enter_context(mock.patch.object(crq, name))
-            for name in ("enroll", "promotion_audit", "promotion_tick"):
+            for name in ("enroll",):
                 stack.enter_context(mock.patch.object(crq, name, return_value=[]))
             stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs"))
             stack.enter_context(mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")))
@@ -980,9 +979,6 @@ class CurrentTest(unittest.TestCase):
         with mock.patch.object(crq, "fetch"), mock.patch.object(crq, "enroll", return_value=[]), \
              mock.patch.object(crq, "discover_merged", return_value=[]), \
              mock.patch.object(crq, "write_status"), mock.patch.object(crq, "write_heartbeat"), \
-             mock.patch.object(crq, "promotion_mode", return_value="user"), \
-             mock.patch.object(crq, "promotion_tick", return_value=[]), \
-             mock.patch.object(crq, "promotion_audit", return_value=[]), \
              mock.patch.object(crq.repair_tick, "reconcile_fix_prs"), \
              mock.patch.object(crq, "prepare_current") as planner:
             log = crq.with_lock(crq.tick, False, item["id"])
@@ -1204,56 +1200,6 @@ class CurrentTest(unittest.TestCase):
         self.assertIsNone(crq._FORGE_BUDGET)
 
 
-    def test_auth_classification_pauses_current_ordinary_and_promotion_harvest(self):
-        initial = copy.deepcopy(self.q)
-        auth = {"type": "error", "errorType": "auth", "recoverable": True}
-        vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
-        mixed = [{"type": "error", "errorType": code}
-                 for code in ("unknown", "scan", "budget", "cancel")] + [vendor]
-        streams = [[auth]] + [events for other in mixed
-                              for events in ([auth, other], [other, auth])]
-        n = 0
-        for kind in (review_receipt.KIND, "pr", "promotion"):
-            for events in streams:
-                with self.subTest(kind=kind, events=events), \
-                     mock.patch.object(crq, "RUNS", self.state / f"auth-runs-{n}"):
-                    n += 1
-                    self.q = copy.deepcopy(initial)
-                    crq.save_queue(self.q)
-                    item = self.enroll(f"auth-{n}")
-                    rdir = self.launch_item(item)
-                    self.terminal_artifacts(item, events)
-                    (rdir / "exit.json").write_text(json.dumps({"exit": 1}))
-                    # A real detached run, stream and classifier feed each harvest route.
-                    item["kind"] = kind
-                    result = self.harvest(item)
-                    cls = json.loads((rdir / "classification.json").read_text())
-                    self.assertEqual(cls["outcome"], "auth")
-                    self.assertFalse(cls["counted"])
-                    self.assertEqual(cls["failure_provenance"]["causes"][:len(events)], [
-                        {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
-                        if e["errorType"] == "rate_limit" else
-                        {"source": "queue", "category": "unknown", "code": e["errorType"]}
-                        for e in events])
-                    self.assertTrue(self.q["paused"])
-                    self.assertIn("auth", self.q["pause_reason"])
-                    self.assertIsNone(item["run"])
-                    self.assertNotIn("not_before", item)
-                    self.assertEqual(item.get("cycles", []), [])
-                    self.assertNotIn("coverage", self.q)
-                    if kind == review_receipt.KIND:
-                        document = self.document(item)
-                        self.assertEqual(document["outcome"], "auth")
-                        self.assertFalse(document["counted"])
-                        self.assertEqual(document["classification"], cls)
-                        self.assertFalse(queue_transport._vendor_rate_limit(document))
-                    else:
-                        self.assertIn("PAUSED", result)
-                        self.assertEqual(item["state"], "pending")
-                    crq.save_queue(self.q)
-                    self.assertEqual(self.tick(), 0)
-                    self.assertTrue(crq.load_queue()["paused"])
-
     def test_prose_auth_and_unknown_mixed_causes_do_not_pause_or_gain_vendor_authority(self):
         initial = copy.deepcopy(self.q)
         vendor = {"type": "error", "errorType": "rate_limit", "recoverable": True}
@@ -1335,8 +1281,80 @@ class CurrentTest(unittest.TestCase):
                     if n == 0 else {"source": "queue", "category": "unknown", "code": "unclassified"})
 
 
+    def test_discovery_enrolls_direct_main_and_queue_merges_with_legacy_records(self):
+        legacy = {"id": "promo-old", "kind": "promotion", "state": "reviewing"}
+        self.q["items"].append(legacy)
+        crq.save_queue(self.q)
+        forge = self.forge_inventory(count=2)
+        def both_branches(args):
+            response = forge(args)
+            node = response["data"]["repository"].get("n1")
+            if node:
+                node["baseRefName"] = "main"
+            return response
+        interval = {"after": "2026-10-01T00:00:00Z", "before": "2026-10-03T00:00:00Z"}
+        with mock.patch.object(crq, "gh_json", side_effect=both_branches):
+            crq.discover_merged(self.q, crq.ForgeBudget(), interval=interval)
+        saved = crq.load_queue()
+        self.assertEqual(saved["items"][0], legacy)
+        self.assertEqual({i["pr"] for i in crq.live_items(saved)}, {1, 2})
+        self.assertTrue(all(i["state"] == "pending" for i in crq.live_items(saved)))
+        self.assertEqual(crq.inflight(saved), [])
+        self.assertFalse(crq.has_collectable_runs(saved))
+        self.assertEqual(saved["merged_watermark"], interval["before"])
+
+    def test_next_tick_discovers_main_merge_after_old_upper_bound(self):
+        floor = "2026-10-01T00:00:00Z"
+        old_upper = "2026-10-27T00:00:00Z"
+        self.q.update(created_at=floor, merged_watermark=old_upper,
+                      merged_discovery={"after": floor, "before": old_upper, "complete": True})
+        crq.save_queue(self.q)
+        rows = [{"number": 750, "base": {"ref": "main"},
+                 "updated_at": "2026-10-29T00:00:00Z", "merged_at": "2026-10-29T00:00:00Z",
+                 "merge_commit_sha": self.merge, "head": {"sha": self.merge}}]
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {
+                "enabled": True, "after": floor, "before": old_upper}}), \
+             mock.patch.object(crq, "gh_json", return_value=rows) as forge, \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("fixture")), \
+             mock.patch.object(crq, "now", return_value=crq.parse_iso("2026-10-30T00:00:00Z")):
+            self.tick(discovery=True)
+        saved = crq.load_queue()
+        self.assertEqual([i["pr"] for i in saved["items"]], [750])
+        self.assertEqual(saved["items"][0]["state"], "pending")
+        self.assertGreater(saved["merged_watermark"], old_upper)
+        self.assertGreaterEqual(saved["merged_discovery"]["after"], floor)
+        self.assertEqual(forge.call_count, 1)
+        self.assertIn("sort=updated&direction=desc", forge.call_args.args[0][1])
+
+    def test_open_main_and_stacked_main_prs_enroll(self):
+        opened = [{"number": n, "isDraft": False, "baseRefName": base,
+                   "headRefName": head, "headRefOid": self.merge}
+                  for n, base, head in [(750, "main", "feature"),
+                      (751, "feature", "stacked"), (752, "merge-queue", "legacy")]]
+        with mock.patch.object(crq, "gh_json", return_value=opened):
+            crq.enroll(self.q, False)
+        self.assertEqual({i["pr"] for i in self.q["items"]}, {750, 751, 752})
+
+    def test_recent_pages_stop_at_floor_and_resume(self):
+        row = {"number": 750, "base": {"ref": "main"},
+               "updated_at": "2026-10-29T00:00:00Z", "merged_at": "2026-10-29T00:00:00Z",
+               "merge_commit_sha": self.merge, "head": {"sha": self.merge}}
+        with mock.patch.object(crq, "gh_json", return_value=[row] * 100):
+            page = crq.recent_merged_page(None, "2026-10-27T00:00:00Z")
+        self.assertEqual(page["next_cursor"], "2")
+        with mock.patch.object(crq, "gh_json", return_value=[row] * 100) as forge:
+            page = crq.recent_merged_page("2", "2026-10-30T00:00:00Z")
+        self.assertIsNone(page["next_cursor"])
+        self.assertTrue(forge.call_args.args[0][1].endswith("page=2"))
+
     def forge_inventory(self, count=125):
         def forge(args):
+            if len(args) == 2 and "/pulls?" in args[1]:
+                page = int(args[1].rsplit("page=", 1)[1])
+                return [{"number": n, "base": {"ref": "merge-queue"},
+                         "updated_at": "2026-10-02T00:00:00Z", "merged_at": "2026-10-02T00:00:00Z",
+                         "merge_commit_sha": self.merge, "head": {"sha": self.merge}}
+                        for n in range((page - 1) * 100 + 1, min(page * 100, count) + 1)]
             query = args[-1]
             repository = {"id": "repo-id", "nameWithOwner": crq.REPO}
             if "issues(last:" in query:
@@ -1430,25 +1448,36 @@ class CurrentTest(unittest.TestCase):
         self.assertTrue(result["complete"])
 
 
-    def test_natural_discovery_overlap_watermark_and_dry_selective_gating(self):
+    def test_natural_discovery_requires_explicit_frozen_interval(self):
         actual = self.forge_inventory()
         self.q["created_at"] = "2026-10-01T00:00:00Z"
         crq.save_queue(self.q)
-        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": False}}), \
+             mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+            self.tick(discovery=True)
+            forge.assert_not_called()
+        for config in ({}, {"enabled": "true"}, {"enabled": True},
+                       {"enabled": True, "after": "2099-01-01T00:00:00Z", "before": "2099-01-02T00:00:00Z"},
+                       {"enabled": True, "after": "bad", "before": "bad"}):
+            with mock.patch.dict(crq.CONFIG, {"merged_discovery": config}), \
+                 mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
+                self.tick(discovery=True)
+                forge.assert_not_called()
+        interval = {"after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}
+        self.q["merged_discovery"] = {"after": "2020-01-01T00:00:00Z",
+                                      "before": "2026-10-29T00:00:00Z", "complete": False}
+        crq.save_queue(self.q)
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True, **interval}}), \
+             mock.patch.object(crq, "gh_json", side_effect=actual), \
+             mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(dry=True, discovery=True)
             self.tick(only="selection", discovery=True)
             self.assertNotIn("merged_watermark", crq.load_queue())
             self.tick(discovery=True)
         q = crq.load_queue()
-        watermark = q["merged_watermark"]
         self.assertEqual(q["merged_reconcile"]["represented"], 125)
-        self.assertEqual(q["merged_discovery"]["before"], watermark)
-        # Advancing an interval replays 5 minutes; request bindings dedupe.
-        with mock.patch.object(crq, "gh_json", side_effect=actual),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
-            self.tick(discovery=True)
-        q = crq.load_queue()
-        self.assertEqual(q["merged_reconcile"]["after"],
-                         crq.iso(crq.parse_iso(watermark) - crq.dt.timedelta(minutes=5)))
+        self.assertEqual(q["merged_reconcile"]["after"], interval["after"])
+        self.assertGreater(q["merged_reconcile"]["before"], interval["before"])
         self.assertEqual(len(q["items"]), 125)
 
 
@@ -1503,7 +1532,7 @@ class CurrentTest(unittest.TestCase):
     def test_real_tick_recovery_budget_shared_and_exhausted_debt_untouched(self):
         self.q["created_at"] = "2026-10-01T00:00:00Z"
         entry = self.deferred_entry()
-        self.q["queue_client_requests"] = {f"request-{n:02}": copy.deepcopy(entry) for n in range(3)}
+        self.q["queue_client_requests"] = {f"request-{n:02}": copy.deepcopy(entry) for n in range(5)}
         crq.save_queue(self.q)
         original_run = crq.run
         actual_forge = self.forge_inventory()
@@ -1514,16 +1543,18 @@ class CurrentTest(unittest.TestCase):
                 return original_run(argv, **kwargs)
             calls.append(argv)
             self.assertLessEqual(kwargs["timeout"], 10)
-            value = actual_forge(argv[1:]) if argv[2] == "graphql" else self.forge_data()
+            value = actual_forge(argv[1:]) if argv[2] == "graphql" or "/pulls?" in argv[2] else self.forge_data()
             return SimpleNamespace(stdout=json.dumps(value), returncode=0)
-        with mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
+        with mock.patch.dict(crq.CONFIG, {"merged_discovery": {"enabled": True,
+                "after": "2026-10-01T00:00:00Z", "before": "2026-10-27T00:00:00Z"}}), \
+             mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
-        self.assertEqual(len(calls), 5)  # ceiling + 3 numeric pages + 1 deferred read
+        self.assertEqual(len(calls), 5)  # 2 recent-PR pages + 3 deferred reads
         self.assertEqual(q["merged_reconcile"]["represented"], 125)
-        self.assertEqual(q["deferred_refresh_cursor"], "request-00")
-        self.assertEqual(q["queue_client_requests"]["request-01"], entry)
-        self.assertEqual(q["queue_client_requests"]["request-02"], entry)
+        self.assertEqual(q["deferred_refresh_cursor"], "request-02")
+        self.assertEqual(q["queue_client_requests"]["request-03"], entry)
+        self.assertEqual(q["queue_client_requests"]["request-04"], entry)
 
 
     def test_future_bound_refuses_before_forge_and_full_range_dispatch_is_committed(self):
@@ -1583,7 +1614,6 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual(sum(item["kind"] == "delta" and item["pr"] == 43 for item in self.q["items"]), 1)
 
 
-
 class DiscoveryFailureBoundaryTest(unittest.TestCase):
     """Real discovery/persistence; temporary files and counter-only tick effects."""
 
@@ -1603,6 +1633,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.patch(crq, "STATE", new=self.root)
         self.patch(crq, "QUEUE", new=self.root / "queue.json")
         self.patch(crq, "now", return_value=crq.parse_iso("2026-10-03T00:00:01Z"))
+        self.patch(crq, "CONFIG", new={**crq.CONFIG, "merged_discovery": {
+            "enabled": True, "after": self.AFTER, "before": self.BEFORE}})
         self.forge = self.patch(crq, "gh_json", side_effect=self.forge_response)
         self.reset_case()
 
@@ -1611,7 +1643,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.q = {"created_at": self.AFTER, "items": [], "starts": [],
                   "merged_watermark": self.AFTER,
                   "merged_discovery": {"after": self.AFTER, "before": self.BEFORE, "complete": False}}
-        key = review_receipt.digest({"repo": crq.REPO, "base": "merge-queue",
+        key = review_receipt.digest({"repo": crq.REPO, "base": "main-or-merge-queue",
                                      "after": self.AFTER, "before": self.BEFORE})
         self.path = self.root / "reconcile" / (key + ".json")
         self.path.parent.mkdir(exist_ok=True)
@@ -1638,7 +1670,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
 
     def wrapper(self, checkpoint=None):
         value = {"source": {"version": 1, "method": "all-number-slots-v1", "repo": crq.REPO,
-            "base": "merge-queue", "repository_id": "fixture-repository", "ceiling": self.count,
+            "base": "main-or-merge-queue", "repository_id": "fixture-repository", "ceiling": self.count,
             "window": crq.merged_reconcile.NUMBER_WINDOW}, "checkpoint": checkpoint}
         value["digest"] = review_receipt.digest(value)
         return value
@@ -1779,9 +1811,9 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                         effects["refresh_deferred"].side_effect = (
                                             lambda *a, **k: order.append("refresh") or [])
                                         crq.tick()
-                                        self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
-                                        for name in ("harvest_review", "harvest", "enroll", "promotion_audit",
-                                                     "promotion_tick", "read_slot_usage", "admit_available",
+                                        self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
+                                        for name in ("harvest_review", "harvest", "enroll",
+                                                      "read_slot_usage", "admit_available",
                                                      "write_status", "write_heartbeat"):
                                             effects[name].assert_called_once()
                                 else:
@@ -1792,7 +1824,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                             crq.tick()
                                         for effect in effects.values():
                                             effect.assert_not_called()
-                                        self.assertEqual(len(events), 1)
+                                        self.assertEqual([event[1] for event in events],
+                                                         ["bounds-save", "refusal-debt-save"])
                             # Shared parser restored before persisted reloads or digest checks.
                             self.assertIs(json.loads, original_loads)
                             self.assertEqual(len(encounters), attempt + 1)
@@ -1911,16 +1944,19 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
     def tick_effects(self):
         """Every external continuation seam is counter-only; discovery stays real."""
         with contextlib.ExitStack() as stack:
+            discover = crq.discover_merged
+            stack.enter_context(mock.patch.object(crq, "discover_merged", side_effect=
+                lambda q, budget, *, interval, recent: discover(q, budget,
+                    interval={"after": self.AFTER, "before": self.BEFORE})))
             effects = {}
             def counter(obj, name, result=None):
                 effects[name] = stack.enter_context(mock.patch.object(obj, name, return_value=result))
             counter(crq, "load_queue", self.q)
             counter(crq, "fetch")
-            counter(crq, "promotion_mode", "user")
-            for name in ("harvest_signer", "harvest_review", "apply_signer_backoff", "refresh_slot_deadline",
+            for name in ("harvest_review", "refresh_slot_deadline",
                          "write_status", "write_heartbeat", "event", "notify_owner"):
                 counter(crq, name)
-            for name in ("enroll", "promotion_audit", "promotion_tick"):
+            for name in ("enroll",):
                 counter(crq, name, [])
             for name in ("harvest", "backfill", "archive_legacy", "reconcile_fix_prs"):
                 counter(crq.repair_tick, name, [])
@@ -1959,8 +1995,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                 mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
             effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
             crq.tick()
-            self.assertEqual(order[:2], ["refusal-debt-save", "refresh"])
-            for name in ("harvest_review", "harvest", "enroll", "promotion_audit", "promotion_tick",
+            self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
+            for name in ("harvest_review", "harvest", "enroll",
                          "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
                 effects[name].assert_called_once()
         self.assertEqual(crq.load_queue()["merged_watermark"], self.AFTER)
@@ -2169,13 +2205,13 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
                 ("load_queue", lambda: self.q), ("fetch", mock.Mock()),
                 ("gh_json", mock.Mock(side_effect=AssertionError("unmocked forge in admission fixture"))),
                 ("enroll", lambda q, dry: []), ("discover_merged", lambda q, budget: []),
-                ("promotion_audit", lambda q, dry: []),
-                ("promotion_tick", lambda q, dry: []), ("save_queue", mock.Mock()),
+
+                 ("save_queue", mock.Mock()),
                 ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
                 ("notify_owner", mock.Mock()), ("event", mock.Mock()),
                 ("coverage_fallback", lambda *a: (None, False)),
-                ("promotion_mode", lambda: "user"), ("apply_signer_backoff", mock.Mock()),
-                ("STATE", self.root), ("PROMO", {"enabled": False}),
+
+                ("STATE", self.root),
                 ("CONFIG", {"max_starts_per_hour": 5, "max_inflight": 2,
                             "stale_alarm_min": 36, "repair": {}})):
             patch = mock.patch.object(crq, name, value)
@@ -2216,6 +2252,307 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
         self.q["items"] = [open_row, merged, receipt, optional]
         launch = self.start()
         self.assertEqual(launch.call_args.args[1]["id"], "pr9")
+
+
+class CoverageFallbackTargetTest(unittest.TestCase):
+    def test_success_after_released_legacy_failure_preserves_counter_audit(self):
+        import datetime as dt
+        import backfill
+        at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
+        source = {"id": "source", "pr": 42, "kind": "merged",
+                  "measure": {"files": [{"path": "old.py", "now": "new.py"}]}}
+        item = {"id": "legacy", "kind": "coverage", "state": "blocked", "pr": 42,
+                "coverage_source": "source", "coverage_paths": ["new.py"], "failures": 6, "attempts": [], "cycles": []}
+        q = {"items": [source, item]}
+        for n in range(6):
+            stamp = f"2026-10-{20+n:02d}T00:00:00Z"; run = f"old-{n}"
+            item["attempts"].append({"run_id": run, "outcome": "error", "counted": False,
+                                     "at": stamp, "head": "a" * 40, "base": "b" * 40})
+            crq.coverage.record_legacy_failure(q, item, stamp, "error", run)
+        release_at = "2026-10-28T00:00:00Z"
+        family = crq.coverage._legacy_family(42, "old.py")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            evidence = {"family": family, "checked_at": release_at, "exact_no_live_run": True,
+                        "checked_runs": [f"old-{n}" for n in range(6)], "queue_digest": backfill.queue_digest_v1(q)}
+            evidence_file = root / "release.json"; evidence_file.write_bytes(backfill.ledger.canonical(evidence))
+            operator = SimpleNamespace(STATE=root, load_queue=lambda: q, iso=lambda: release_at, save_queue=lambda q: None)
+            args = SimpleNamespace(command="quarantine-release", family=family, evidence=str(evidence_file),
+                                   operator="operator", reason="investigated")
+            with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
+                 mock.patch.object(backfill.runtime, "services", return_value=(None, None, None, None)):
+                self.assertTrue(backfill.execute(operator, args)["released"])
+        stamp = "2026-10-30T10:00:00Z"
+        item["attempts"].append({"run_id": "new-failure", "outcome": "error", "counted": False,
+                                 "at": stamp, "head": "a" * 40, "base": "b" * 40})
+        item.update(failures=7, state="reviewing", run={"run_id": "success"})
+        crq.coverage.record_legacy_failure(q, item, stamp, "error", "new-failure")
+        counter = copy.deepcopy(q["backfill_families"][family])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rdir = root / "runs" / "success"; rdir.mkdir(parents=True)
+            (rdir / "exit.json").write_text(json.dumps({"exit": 0}))
+            (rdir / "meta.json").write_text(json.dumps({"run_id": "success", "head": "c" * 40,
+                "base": "d" * 40, "cycle": 1, "worktree": str(root / "wt"), "wt_branch": "fixture",
+                "coverage_paths": ["new.py"]}))
+            (rdir / "review.ndjson").write_text(json.dumps({"type": "complete", "reviewedFiles": ["new.py"]}) + "\n")
+            cls = {"outcome": "completed", "counted": True, "findings": 0, "severity_counts": {}}
+            with mock.patch.object(crq, "RUNS", root / "runs"), mock.patch.object(crq, "STATE", root), \
+                 mock.patch.object(crq, "run_liveness", return_value="harvest"), mock.patch.object(crq, "now", return_value=at), \
+                 mock.patch.object(crq, "classify", return_value=cls), mock.patch.object(crq, "findings_md", return_value=""), \
+                 mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                 mock.patch.object(crq.usage_slots, "write_next"), mock.patch.object(crq.repair_tick, "enqueue", return_value=False):
+                crq.harvest_review(q, item, False)
+        view = crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(days=2))
+        self.assertTrue(view["allowed"], view)
+        self.assertEqual(view["failures"], 0)
+        self.assertEqual(q["backfill_families"][family], counter)
+        self.assertEqual(len(q["legacy_coverage_releases"]), 1)
+        self.assertEqual(len(item["attempts"]), 8)
+        for history_key in ("backfill_families", "backfill_scope_failures"):
+            for replacement in (None, 5):
+                altered = copy.deepcopy(q)
+                if replacement is None:
+                    altered[history_key].pop(family)
+                else:
+                    altered[history_key][family]["failures"] = replacement
+                before = copy.deepcopy(altered)
+                held = crq.coverage.legacy_retry_view(altered, 42, "old.py", at + dt.timedelta(days=2))
+                self.assertFalse(held["allowed"])
+                self.assertIn("released counter floor missing or reduced", held["reasons"])
+                self.assertEqual(altered, before)
+        later_at = "2026-10-30T13:00:00Z"
+        item["attempts"].append({"run_id": "after-success", "outcome": "error", "counted": False,
+                                 "at": later_at, "head": "a" * 40, "base": "b" * 40})
+        item.update(failures=1, state="blocked")
+        crq.coverage.record_legacy_failure(q, item, later_at, "error", "after-success")
+        view = crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(days=2))
+        self.assertEqual(view["failures"], 1)
+        self.assertTrue(view["allowed"], view)
+        for n in range(5):
+            stamp = f"2026-11-{n+1:02d}T00:00:00Z"; run = f"later-{n}"
+            item["attempts"].append({"run_id": run, "outcome": "error", "counted": False,
+                                     "at": stamp, "head": "a" * 40, "base": "b" * 40})
+            item["failures"] += 1
+            crq.coverage.record_legacy_failure(q, item, stamp, "error", run)
+        release_at = "2026-11-10T00:00:00Z"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            evidence = {"family": family, "checked_at": release_at, "exact_no_live_run": True,
+                        "checked_runs": ["after-success"] + [f"later-{n}" for n in range(5)],
+                        "queue_digest": backfill.queue_digest_v1(q)}
+            evidence_file = root / "release.json"; evidence_file.write_bytes(backfill.ledger.canonical(evidence))
+            operator = SimpleNamespace(STATE=root, load_queue=lambda: q, iso=lambda: release_at, save_queue=lambda q: None)
+            args = SimpleNamespace(command="quarantine-release", family=family, evidence=str(evidence_file),
+                                   operator="operator", reason="second epoch investigated")
+            with mock.patch.object(backfill.runtime, "settings", return_value={"enabled": True}), \
+                 mock.patch.object(backfill.runtime, "services", return_value=(None, None, None, None)):
+                self.assertTrue(backfill.execute(operator, args)["released"])
+        self.assertTrue(crq.coverage.legacy_retry_view(q, 42, "old.py", release_at)["allowed"])
+        altered = copy.deepcopy(q)
+        altered["backfill_families"][family]["failures"] += 1
+        held = crq.coverage.legacy_retry_view(altered, 42, "old.py", release_at)
+        self.assertFalse(held["allowed"])
+        self.assertIn("unreconciled family aggregate", held["reasons"])
+        altered = copy.deepcopy(q)
+        altered_item = next(i for i in altered["items"] if i["id"] == "legacy")
+        altered_item["attempts"].append({"run_id": "missing-from-release", "outcome": "error", "counted": False,
+                                         "at": "2026-11-06T00:00:00Z", "head": "a" * 40, "base": "b" * 40})
+        altered_item["failures"] += 1
+        held = crq.coverage.legacy_retry_view(altered, 42, "old.py", release_at)
+        self.assertFalse(held["allowed"])
+        self.assertIn("failure predates or coincides with release but lacks release proof", held["reasons"])
+
+    def test_harvested_scope_success_resets_only_matching_legacy_streak(self):
+        import datetime as dt
+        at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
+        source = {"id": "source", "pr": 42, "kind": "merged", "measure": {"files": [
+            {"path": "old.py", "now": "new.py"}, {"path": "sibling.py", "now": "sibling.py"}]}}
+        failure = {"run_id": "old-run", "outcome": "error", "counted": False,
+                   "at": (at - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"), "head": "a" * 40, "base": "b" * 40}
+        item = {"id": "legacy", "kind": "coverage", "state": "reviewing", "pr": 42,
+                "coverage_source": "source", "coverage_paths": ["new.py", "sibling.py"],
+                "run": {"run_id": "success"}, "failures": 1, "attempts": [failure], "cycles": []}
+        q = {"items": [source, item]}
+        crq.coverage.record_legacy_failure(q, item, failure["at"], "error", "old-run")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rdir = root / "runs" / "success"; rdir.mkdir(parents=True)
+            (rdir / "exit.json").write_text(json.dumps({"exit": 0}))
+            (rdir / "meta.json").write_text(json.dumps({"run_id": "success", "head": "c" * 40,
+                "base": "d" * 40, "cycle": 1, "worktree": str(root / "wt"), "wt_branch": "fixture",
+                "coverage_paths": ["new.py", "sibling.py"]}))
+            (rdir / "review.ndjson").write_text(json.dumps({"type": "complete", "reviewedFiles": ["new.py"]}) + "\n")
+            cls = {"outcome": "completed", "counted": True, "findings": 0, "severity_counts": {}}
+            with mock.patch.object(crq, "RUNS", root / "runs"), mock.patch.object(crq, "STATE", root), \
+                 mock.patch.object(crq, "run_liveness", return_value="harvest"), mock.patch.object(crq, "now", return_value=at), \
+                 mock.patch.object(crq, "classify", return_value=cls), mock.patch.object(crq, "findings_md", return_value=""), \
+                 mock.patch.object(crq, "event"), mock.patch.object(crq, "remove_worktree"), \
+                 mock.patch.object(crq.usage_slots, "write_next"), mock.patch.object(crq.repair_tick, "enqueue", return_value=False):
+                crq.harvest_review(q, item, False)
+        self.assertTrue(crq.coverage.legacy_retry_view(q, 42, "old.py", at)["allowed"])
+        self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "sibling.py", at)["allowed"])
+        self.assertEqual(len(item["attempts"]), 2)
+        self.assertIn("old-run", q["legacy_coverage_failure_runs"])
+        later_at = "2026-10-30T13:00:00Z"
+        item["attempts"].append({"run_id": "after-success", "outcome": "error", "counted": False,
+                                 "at": later_at, "head": "a" * 40, "base": "b" * 40})
+        item.update(failures=1, state="blocked")
+        crq.coverage.record_legacy_failure(q, item, later_at, "error", "after-success")
+        self.assertEqual(crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(days=2))["failures"], 1)
+        self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "sibling.py", at + dt.timedelta(days=2))["allowed"])
+
+    def test_pending_candidate_obeys_real_historical_family_deadline(self):
+        import datetime as dt
+        at = dt.datetime(2026, 10, 30, 12, tzinfo=dt.timezone.utc)
+        source = {"id": "source", "pr": 42, "kind": "merged",
+                  "measure": {"files": [{"path": "old.py", "now": "new.py"}]}}
+        old = {"id": "old", "kind": "coverage", "state": "blocked", "pr": 42,
+               "coverage_source": "source", "coverage_paths": ["new.py"], "failures": 3,
+               "attempts": [{"run_id": f"r{i}", "outcome": "error", "counted": False,
+                             "at": (at - dt.timedelta(hours=3-i)).isoformat(),
+                             "head": "a" * 40, "base": "b" * 40} for i in range(3)]}
+        pending = {"id": "new", "kind": "coverage", "state": "pending", "pr": 42,
+                   "coverage_source": "source", "coverage_paths": ["new.py"]}
+        q = {"items": [source, old, pending]}
+        with mock.patch.object(crq.backfill_runtime, "select", return_value=(None, False)), \
+             mock.patch.object(crq.backfill_runtime, "settings", return_value=None), \
+             mock.patch.object(crq, "git", return_value="a" * 40), \
+             mock.patch.object(crq, "now", return_value=at), \
+             mock.patch.object(crq, "deps_met", return_value=True), \
+             mock.patch.object(crq, "build_synthetic") as build:
+            self.assertEqual(crq.coverage_fallback(q, [], False, None), (None, False))
+        build.assert_not_called()
+        self.assertFalse(crq.coverage.legacy_retry_view(q, 42, "old.py", at)["allowed"])
+        self.assertTrue(crq.coverage.legacy_retry_view(q, 42, "old.py", at + dt.timedelta(hours=4))["allowed"])
+
+    def test_pending_legacy_candidate_obeys_family_cooldown_before_planning(self):
+        source = {"id": "source", "pr": 42, "kind": "merged",
+                  "measure": {"files": [{"path": "old.py", "now": "new.py"}]}}
+        item = {"id": "coverage", "kind": "coverage", "state": "pending",
+                "coverage_source": "source", "coverage_paths": ["new.py"]}
+        q = {"items": [source, item]}
+        with mock.patch.object(crq.backfill_runtime, "select", return_value=(None, False)), \
+             mock.patch.object(crq.backfill_runtime, "settings", return_value=None), \
+             mock.patch.object(crq, "git", return_value="a" * 40), \
+             mock.patch.object(crq, "deps_met", return_value=True), \
+             mock.patch.object(crq.coverage, "_legacy_retry_allowed", return_value=False) as gate, \
+             mock.patch.object(crq, "build_synthetic") as build:
+            self.assertEqual(crq.coverage_fallback(q, [], False, None), (None, False))
+        gate.assert_called_once()
+        build.assert_not_called()
+        self.assertIn("cooldown unresolved", item["wait_reason"])
+
+    def test_tick_slot_templates_pin_managed_cli_updates(self):
+        root = Path(__file__).parent / "ops/systemd"
+        for name in ("crq-tick.service", "crq-slot.service"):
+            text = (root / name).read_text()
+            self.assertIn("Environment=CODERABBIT_CLI_DISABLE_AUTO_UPDATE=true", text)
+            self.assertIn("Environment=CODERABBIT_CLI_UPDATE_MANAGED=true", text)
+
+    def test_backfill_child_records_scope_and_preflight_refusal(self):
+        for version in ("0.8.2", "0.9.2", "0.9.1", "unknown"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as td:
+                root = Path(td); run_dir = root / "run"; run_dir.mkdir()
+                meta = {"cmd": ["coderabbit", "review"], "kind": "backfill", "worktree": td,
+                        "head": "a" * 40, "base": "b" * 40, "backfill": {"attempt_id": "attempt"}}
+                (run_dir / "meta.json").write_text(json.dumps(meta))
+                repository = mock.Mock()
+                repository.git.side_effect = lambda *args: ("a" * 40).encode() if args[0] == "rev-parse" else b""
+                process = mock.Mock(pid=999); process.wait.return_value = 0
+                with mock.patch.object(crq, "RUNS", root), mock.patch.object(crq.signal, "signal"), \
+                     mock.patch.object(crq.subprocess, "run", return_value=SimpleNamespace(stdout=version)) as preflight, \
+                     mock.patch.object(crq.subprocess, "Popen", return_value=process) as spawn, \
+                     mock.patch.object(crq.backfill_runtime.accounting, "Repository", return_value=repository), \
+                     mock.patch.object(crq.backfill_runtime.history, "submitted_scope", return_value=[]), \
+                     mock.patch.object(crq, "run"):
+                    result = crq.cmd_review_child("run")
+                self.assertTrue((run_dir / "review.pid").exists())
+                self.assertTrue((run_dir / "exit.json").exists())
+                self.assertEqual(preflight.call_args.kwargs["env"]["CODERABBIT_CLI_DISABLE_AUTO_UPDATE"], "true")
+                self.assertEqual(preflight.call_args.kwargs["env"]["CODERABBIT_CLI_UPDATE_MANAGED"], "true")
+                if version in ("0.8.2", "0.9.2"):
+                    self.assertEqual(result, 0); spawn.assert_called_once()
+                    proof = json.loads((run_dir / "submission.json").read_text())
+                    self.assertEqual(proof["attempt_id"], "attempt")
+                    self.assertEqual(proof["cli_version"], version)
+                    self.assertEqual(proof["format"], "coderabbit-agent-" + version)
+                    self.assertEqual(spawn.call_args.kwargs["env"], preflight.call_args.kwargs["env"])
+                else:
+                    self.assertEqual(result, 3); spawn.assert_not_called()
+                    self.assertTrue(json.loads((run_dir / "exit.json").read_text())["pre_vendor_refusal"])
+
+    def test_merged_projection_waits_for_promoted_code(self):
+        with mock.patch.object(crq, "git", return_value="a" * 40), \
+             mock.patch.object(crq, "is_ancestor", return_value=False), \
+             mock.patch.object(crq, "build_synthetic") as build:
+            with self.assertRaises(crq.NotReady):
+                crq.plan_merged({"merge_commit": "b" * 40}, False)
+        build.assert_not_called()
+
+    def test_selective_backfill_preserves_ordinary_priority(self):
+        queue = {"items": [{"id": "ordinary", "kind": "open", "state": "pending", "pr": 1}]}
+        observed = []
+        def fallback(q, log, dry, only):
+            observed.append(crq.ordinary_review_eligible(q))
+            return None, False
+        with mock.patch.object(crq, "coverage_fallback", side_effect=fallback):
+            crq.start_one(queue, [], False, "backfill-only", False)
+        self.assertEqual(observed, [True])
+
+
+    def test_ledger_spool_transport_binds_only_base_and_head(self):
+        spool = crq.Spool({"host": "operator@127.0.0.1", "key": "/fixture/key"})
+        base, head = "a" * 40, "b" * 40
+        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": head})) as ssh:
+            spool.publish_ledger(base, head, b"bundle")
+            ssh.assert_called_once_with("ledger-publish " + base + " " + head, b"bundle", timeout=330)
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, "--force", b"bundle")
+            self.assertEqual(ssh.call_count, 1)
+        with mock.patch.object(spool, "_ssh", side_effect=crq.SpoolUnreachable("connection lost")):
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, head, b"bundle")
+        with mock.patch.object(spool, "_ssh", return_value=json.dumps({"published": base})):
+            with self.assertRaises(OSError):
+                spool.publish_ledger(base, head, b"bundle")
+
+    def test_measure_skips_repair_only_merged_item(self):
+        repair = {"id": "repair-1", "kind": "merged", "pr": 0, "repair_runs": {"run": {}}, "state": "pending"}
+        queue = {"items": [repair]}
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(crq, 'STATE', Path(td)), \
+             mock.patch.object(crq, 'load_queue', return_value=queue), mock.patch.object(crq, 'fetch'), \
+             mock.patch.object(crq, 'apply_measure') as measure, mock.patch.object(crq, 'save_queue') as save, \
+             mock.patch.object(crq, 'write_status'):
+            crq.cmd_measure()
+        measure.assert_not_called()
+        save.assert_called_once_with(queue)
+        self.assertNotIn('measure', repair)
+
+    def test_measurement_uses_supplied_immutable_target(self):
+        target = 'a' * 40
+        item = {'merge_commit': 'b' * 40}
+        with mock.patch.object(crq, 'git', return_value='') as git, \
+             mock.patch.object(crq, 'pr_commit_set', return_value=set()), \
+             mock.patch.object(crq, 'rename_map', return_value={}) as renames, \
+             mock.patch.object(crq, 'synth_paths', return_value=[]) as paths:
+            result = crq.measure_merged(item, target)
+        self.assertEqual(result['merge_queue'], target)
+        renames.assert_called_once_with(item['merge_commit'], target)
+        paths.assert_called_once_with(item['merge_commit'], target)
+        self.assertNotIn(mock.call('rev-parse', 'origin/merge-queue'), git.call_args_list)
+
+    def test_measurement_and_coverage_use_same_selected_main_commit(self):
+        target = 'a' * 40
+        item = {'id': 'merged-1', 'kind': 'merged', 'state': 'done', 'merge_commit': 'b' * 40}
+        q = {'items': [item]}
+        with mock.patch.object(crq.backfill_runtime, 'select', return_value=(None, False)), \
+             mock.patch.object(crq.backfill_runtime, 'settings', return_value=None), \
+             mock.patch.object(crq, 'git', return_value=target), \
+             mock.patch.object(crq, 'measure_merged', return_value={'merge_queue': target}) as measure, \
+             mock.patch.object(crq.coverage, 'coverage_candidate', return_value=None) as candidate:
+            crq.coverage_fallback(q, [], False, None)
+        measure.assert_called_once_with(item, target)
+        self.assertEqual(candidate.call_args.kwargs['merge_queue_sha'], target)
+        self.assertEqual(item['measure']['merge_queue'], target)
 
 
 class ConfiguredBranchTargetTest(unittest.TestCase):

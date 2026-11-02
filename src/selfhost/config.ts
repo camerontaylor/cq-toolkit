@@ -85,10 +85,8 @@ export interface SelfhostDefaultsConfig {
    */
   driver: ModelSpec;
   /**
-   * The queue branch the merge-prs plan merges into for THIS repo (the
-   * documented merge-queue policy: PRs land on `merge-queue`, never
-   * directly on the trunk). The merge.runPrs op hardcodes no branch name —
-   * baseBranch is configuration, and this is its self-hosted value.
+   * The PR base for this repository. Direct PRs land on main.
+   * Generic merge operations still receive the branch as configuration.
    */
   baseBranch: string;
   /**
@@ -108,7 +106,7 @@ export const SelfhostDefaults: SelfhostDefaultsConfig = deepFreeze({
   maxTokens: 2_000_000,
   perJobWallClockMs: 300_000,
   driver: { provider: 'zai', model: 'glm-5.3-flash' },
-  baseBranch: 'merge-queue',
+  baseBranch: 'main',
   protectedBranch: 'main',
 });
 

@@ -709,14 +709,14 @@ class TickTest(unittest.TestCase):
             ("refresh_slot_deadline", mock.Mock()),
             ("load_queue", lambda: self.q), ("fetch", mock.Mock()), ("enroll", lambda q, dry: []),
             ("discover_merged", lambda q, budget: []),
-            ("promotion_audit", lambda q, dry: []), ("promotion_tick", lambda q, dry: []),
+
             ("save_queue", mock.Mock()), ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),
             ("notify_owner", mock.Mock()), ("event", mock.Mock()), ("coverage_fallback", lambda *a: (None, False)),
-            ("promotion_mode", lambda: "user"), ("apply_signer_backoff", mock.Mock()),
+
             ("plan_author", lambda item, dry: author_quota.plan(item)),
             ("pr_info", mock.Mock(side_effect=AssertionError("author items must not query a PR"))),
             ("quiet_reason", mock.Mock(side_effect=AssertionError("author items skip the PR quiet gate"))),
-            ("STATE", self.root), ("PROMO", {"enabled": False}),
+            ("STATE", self.root),
             ("CONFIG", {"max_starts_per_hour": 5, "max_inflight": 2, "stale_alarm_min": 36, "repair": {}}),
         ]
         for name, value in self.patches:
@@ -829,17 +829,6 @@ class TickTest(unittest.TestCase):
         launch.assert_not_called()
         self.assertTrue(any("in flight" in line for line in log))
 
-    def test_promotion_is_selected_before_the_author(self):
-        author_item(self.q)
-        self.q["items"].append({"id": "promo-1", "kind": "promotion", "state": "pending",
-                                "base_sha": BASE, "batch_sha": HEAD, "order": 0})
-        started = []
-        with mock.patch.object(crq, "plan_promotion",
-                               return_value={"base": BASE, "head": HEAD, "target": "origin/main",
-                                             "cycle": None, "branch": None, "notes": [], "label": "p"}), \
-             mock.patch.object(crq, "launch", side_effect=lambda q, i, p: started.append(i["id"]) or "r"):
-            crq.tick()
-        self.assertEqual(started, ["promo-1"])
 
     def test_author_starts_in_the_tick_and_coverage_fallback_is_not_reached(self):
         item = author_item(self.q)
@@ -1051,7 +1040,7 @@ class OpenCyclePolicyTest(unittest.TestCase):
 
     def test_optional_cycle_lowest_rank_and_never_a_dependency_blocker(self):
         optional = self.item(cycles=[{}], optional_cycle=True)
-        for kind in ("open", "delta", "merged", "promotion", "coverage", crq.review_receipt.KIND,
+        for kind in ("open", "delta", "merged", "coverage", crq.review_receipt.KIND,
                      author_quota.AUTHOR_KIND):
             with self.subTest(kind=kind):
                 self.assertLess(crq.rank(self.item(kind=kind)), crq.rank(optional))
@@ -1069,7 +1058,6 @@ class OpenCyclePolicyTest(unittest.TestCase):
                     crq.admin("prioritize", "pr1", "urgent")
                     self.assertTrue(item["operator_priority"])
                     self.assertLess(crq.sort_key(item), crq.sort_key(self.item(order=0)))
-                    self.assertLess(crq.sort_key(self.item(kind="promotion")), crq.sort_key(item))
                     event.assert_called_with("admin_prioritize", item="pr1", reason="urgent")
                     save.assert_called_with(q)
                     crq.admin("deprioritize", "pr1", "normal")

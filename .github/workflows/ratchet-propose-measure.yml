@@ -12,7 +12,7 @@
 # `pnpm install --frozen-lockfile` or test execution.
 #
 # Worst case for a forged reading: an inflated value proposes a baseline
-# that is TOO TIGHT — a visible, reviewed PR through merge-queue, never a
+# that is TOO TIGHT — a visible, reviewed PR through main, never a
 # loosening (the monotonic guard and the verifier judge it like any PR).
 #
 # typecheck-count is measured with the same recompute the verifier uses

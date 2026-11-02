@@ -1,7 +1,7 @@
 # cq-toolkit doctrine — the eleven behavioral invariants
 
 Source: the toolkit plan's invariants table. Role: adoptable policy text, shipped in
-`policy/`, instantiated by any repository the same way the merge-queue templates
+`policy/`, instantiated by any repository the same way the PR templates
 are (`policy/templates/README.md`). Each invariant carries a Rule, a Why, and an
 Enforcement. This repo enforces I4, I3, both halves of I5, and the I10 lint rule today.
 
@@ -31,9 +31,8 @@ thrown config errors and 127 for a missing binary — binding from phase 1.
 
 **Rule.** A change is acceptable when an independent review of the last commit's exact
 head state exists — evidence covering an earlier commit never qualifies, no matter
-how long the settle, and no matter when it was resubmitted — plus either a settle
-of ≥10 minutes since that commit or an explicit all-clear that also postdates it.
-Unresolved external threads block; truncated review data fails closed.
+when it was resubmitted.
+Unresolved bot threads are reported rather than blocking; truncated review data fails closed.
 
 **Why.** Requiring a privileged reviewer deadlocks a queue when that reviewer is
 unavailable; evidence predating the last commit accepts code nobody looked at.
@@ -42,42 +41,27 @@ Truncated pagination reads as "no blocking threads" — absence never passes.
 **Enforcement.** The decision table is built and tested in phase 3 as specified, on
 top of `src/ops/review` (phases 1–2). Independence is procedural: a fresh reviewer
 agent must review the final head separately from the author agent. The reviewer may
-share the author's GitHub account when `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true`
-is explicitly enabled. The review must be a `COMMENTED` review with exactly one
-`cq-agent-review` HTML marker carrying version 1, distinct nonempty reviewer and
-author agent IDs, the exact 40-hex head SHA, `verdict: "PASS"`, and
-`independent: true`. `HOLD`, `RETRACT`, malformed markers, and later marked reviews
-supersede earlier author-agent attestations. The setting defaults to false for
-adopters; ordinary author comments and reviews never count as acceptance.
+share the author's GitHub account. Automation matches any PR comment containing
+both the exact current head SHA and `PASS`, ignoring bot authors (Bot type or
+`[bot]` login suffix); no HTML marker syntax, separate
+GitHub identity or opt-in is required. The merging agent judges independence.
 
-## I3 — merge commits only; promotion to main is a pure fast-forward
+## I3 — merge commits directly to main
 
-**Rule.** History advances only by merge commits; `merge-queue` promotes to `main`
-as a pure ff-push behind merge-base guards. Never squash-merge, never push no-ff
-to `main`, never rewrite history, never force-push — the policy invariant, not just
-a repo setting — and `main` is advanced by the gate alone.
+**Rule.** PRs target `main` and merge with merge commits after required `static`
+and `denylist` checks pass on the exact head and an independent reviewer posts
+an exact-head PASS comment. Never squash, rewrite shared history or force-push
+`main`. CRQ reviews merged PRs after merge as visible debt.
 
-**Why.** Squashing breaks the mapping between the commits that were checked and the
-commits that land; rewrite or force-push moves `main` past commits whose check
-evidence was collected for a different history — upstream gates stop describing
-reality.
+**Why.** One integration branch removes duplicate checks and promotion waits while
+keeping CI and independent review bound to the code being merged.
 
-**Enforcement (today).** `policy/templates/gate.yml`, instantiated as
-`.github/workflows/gate.yml` (armed — `CQ_GATE_PROMOTES: 'true'`), is the only component that advances
-`main`, behind merge-base guards in order: an already-promoted sha is a
-logged no-op; divergence refuses and a human merges `main` into `merge-queue`;
-only then `<sha>:refs/heads/main`. The old `merge-queue-gate.yml` is retired at the C2 cutover
-(2026-10-11): its instance entry and rendered workflow are deleted, and (Phase 0.2) so is its template. The repo's merge settings allow merge commits
-only. Adopting repos: disable squash and rebase merges in repo settings —
-nothing in the templates configures it for you.
-
-### Entitlement facts
-
-Personal accounts get merge-queue 422 — why this queue is branch-based; the refs
-PATCH `force=false` is the server-side ff invariant for sync's merge-queue advance,
-while the gate promotes `main` by unforced git push behind a merge-queue-tip
-guard plus two merge-base guards. Dated API facts live once:
-`policy/templates/README.md`.
+**Enforcement (today).** The main ruleset requires `static` and `denylist`.
+The merging agent reads the independent review and uses
+`gh pr merge --merge --match-head-commit <sha>`. There is no promotion workflow,
+signer status, replay-marker advancement or settle-ledger promotion receipt.
+See [merge policy](../docs/promotion-policy.md). Repository settings disable
+squash and rebase merges; workflow templates do not configure settings.
 
 ## I4 — required checks never filter triggers
 
@@ -93,8 +77,7 @@ only skip because it still reports a conclusion.
 
 **Enforcement (today).** The unfiltered `on: push / pull_request` triggers of
 `.github/workflows/ci.yml` (instantiated from `policy/templates/required-check.md`),
-of `.github/workflows/ratchet.yml` (a required check since H4 — review-debt #120
-updated this enumeration), and of `.github/workflows/denylist.yml`, which predates the templates and carries
+and `.github/workflows/denylist.yml`, which predates the templates and carries
 only their trigger shape (its steps are the scan itself — not regenerable from
 the template; `policy/templates/README.md`), policed by the denylist-scan
 self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_CHECKS` (each entry pairing

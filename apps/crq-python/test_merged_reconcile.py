@@ -466,7 +466,7 @@ class DurableBoundaryTests(unittest.TestCase):
                 with self.assertRaises(mr.ReconcileRefused):
                     self.run_inventory(lambda cursor: self.fail("unexpected fetch"),
                                        checkpoint_raw=bad, page_budget=1)
-        for kwargs in ({"repo": "other/repo"}, {"base": "main"}):
+        for kwargs in ({"repo": "other/repo"}, {"base": "release"}):
             arguments = dict(repo="org/repo", after=A, before=B, page_budget=1, checkpoint_raw=first)
             arguments.update(kwargs)
             with self.assertRaisesRegex(mr.ReconcileRefused, "repository/base"):

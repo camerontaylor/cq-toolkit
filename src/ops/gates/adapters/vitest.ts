@@ -18,8 +18,8 @@ import type {
 export const VITEST_SUITE_RULE_ID = 'vitest-suite';
 
 /**
- * `ruleId` marking an assertion that carried NO test name (`fullName`,
- * `ancestorTitles` and `title` all absent): its `message` is the first
+ * `ruleId` marking an assertion without a non-empty `fullName` or `title`,
+ * even if `ancestorTitles` exist: its `message` is the first
  * failure-message line, not a stable test name, so identity must stay
  * position-based.
  */
@@ -81,7 +81,7 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
       }
       failingAssertions++;
       const line = firstFailureLine(record);
-      const name = assertionMessage(record, null);
+      const name = assertionMessage(record);
       const message = name ?? line;
       if (message === null) {
         return {
@@ -181,20 +181,18 @@ function summaryContradiction(
   return null;
 }
 
-/** The test title, titles-chain style: ancestorTitles joined with the title. */
-function assertionMessage(
-  record: Record<string, unknown>,
-  fallbackLine: string | null,
-): string | null {
+/** Prefer the reporter name; otherwise encode the title chain without delimiter ambiguity. */
+function assertionMessage(record: Record<string, unknown>): string | null {
   if (typeof record.fullName === 'string' && record.fullName.trim() !== '') {
     return record.fullName;
   }
   const ancestors = Array.isArray(record.ancestorTitles)
     ? record.ancestorTitles.filter((part): part is string => typeof part === 'string')
     : [];
-  const title = typeof record.title === 'string' ? record.title : '';
-  const composed = [...ancestors, title].filter((part) => part !== '').join(' > ');
-  return composed !== '' ? composed : fallbackLine;
+  if (typeof record.title !== 'string' || record.title.trim() === '') {
+    return null;
+  }
+  return JSON.stringify([...ancestors, record.title]);
 }
 
 /** First non-empty line of the first string failureMessage, when present. */

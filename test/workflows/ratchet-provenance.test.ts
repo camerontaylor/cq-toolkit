@@ -14,7 +14,7 @@
 //      `--ignore-scripts`, restore no cache, and never run the test suite;
 //      cq-verify's compute job (tsc over head content) holds nothing, and
 //      only its signing job (judge) runs in environment `cq-verdict`.
-//   4. ratchet-propose targets merge-queue through the script, consumes the
+//   4. ratchet-propose targets main through the script, consumes the
 //      measure leg's artifact, and holds its token behind `environment:`.
 //   5. The legacy ratchet.yml's target/metric pairs are exactly the trust
 //      manifest's (baselines/ratchets.json), and its guard runs in ref mode.
@@ -124,7 +124,7 @@ describe('head code runs only in credential-free measurement jobs (ADR-0004 D-D.
   );
 
   it.each(bothCopies('cq-measure.yml'))(
-    '%s measures the PR head SHA (the verdict subject), on PRs and merge-queue pushes',
+    '%s measures the PR head SHA (the verdict subject), on PRs and main pushes',
     (_label, text) => {
       const body = code(text);
       expect(body).toMatch(
@@ -132,7 +132,7 @@ describe('head code runs only in credential-free measurement jobs (ADR-0004 D-D.
       );
       const on = onBlock(body);
       expect(on).toMatch(/^ {2}pull_request:\s*$/m);
-      expect(on).toMatch(/^ {2}push:\n {4}branches:\n {6}- merge-queue$/m);
+      expect(on).not.toMatch(/^ {2}push:/m);
       expect(on).not.toMatch(/pull_request_target|workflow_run/);
     },
   );
@@ -144,7 +144,12 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
     (_label, text) => {
       const body = code(text);
       expect(onBlock(body)).toMatch(/^ {2}workflow_run:$/m);
-      expect(onBlock(body)).not.toMatch(/pull_request/);
+      expect(onBlock(body)).not.toMatch(/pull_request_target/);
+      if (onBlock(body).includes('pull_request:')) {
+        expect(onBlock(body)).not.toMatch(/branches:/);
+        expect(jobBlocks(body).get('main-advisory')).toContain('permissions: {}');
+        expect(jobBlocks(body).get('resolve')).toContain("github.event_name != 'pull_request'");
+      }
       expect(body).toMatch(/^permissions: \{\}$/m);
       // Every checkout is the trust ref; the head is never checked out.
       const refs = [...body.matchAll(/^\s+ref: (.*)$/gm)].map((m) => m[1]);
@@ -180,11 +185,8 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(resolveJob).toMatch(
         /github\.ref ==\s*format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/,
       );
-      // A head with open PRs into both branches must be judged against the
-      // merge-queue target, regardless of API array order.
-      expect(resolveJob).toMatch(
-        /if index\("merge-queue"\) then "merge-queue"\s*elif index\("main"\) then "main"\s*else empty end/,
-      );
+      // Resolve only the main target, regardless of API array order.
+      expect(resolveJob).toMatch(/if index\("main"\) then "main"\s*else empty end/);
       const fetch = jobs.get('fetch') ?? '';
       expect(fetch).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
       expect(fetch).toContain('git fetch --no-tags origin "$SUBJECT"');
@@ -257,7 +259,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
   );
 
   it.each(bothCopies('cq-verify.yml'))(
-    '%s: actual jq resolver prefers merge-queue for dual-target PRs in either API order',
+    '%s: actual jq resolver prefers main for dual-target PRs in either API order',
     { timeout: 30_000 },
     (_label, text) => {
       const resolveJob = jobBlocks(code(text)).get('resolve') ?? '';
@@ -278,8 +280,8 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
         base: { ref: base },
       });
       for (const pulls of [
-        [pull('main'), pull('merge-queue')],
-        [pull('merge-queue'), pull('main')],
+        [pull('main'), pull('main')],
+        [pull('main'), pull('main')],
       ]) {
         const result = spawnSync(
           'jq',
@@ -299,7 +301,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
           },
         );
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout.trim()).toBe('merge-queue');
+        expect(result.stdout.trim()).toBe('main');
       }
     },
   );

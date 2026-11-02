@@ -1,7 +1,6 @@
 // A deliberately bounded per-fix map, not the full affected import closure.
-// Reuse the wrapper's test predicate, reviewed non-import mappings and cap.
+// Reuse the wrapper's test predicate, reviewed non-import mappings.
 import { isTest, NON_IMPORT_MAP } from './affected-tests.mjs';
-import { MAX_FILES } from './test-narrow.mjs';
 
 export function selectRelatedTests(changed, allTests) {
   const selected = new Set();
@@ -20,7 +19,5 @@ export function selectRelatedTests(changed, allTests) {
     }
   }
   const files = [...selected].sort();
-  if (files.length > MAX_FILES)
-    throw new Error(`related test selection exceeds cap ${MAX_FILES}: ${files.length} files`);
   return { files, advisory: files.length === 0 ? 'no related tests mapped' : undefined };
 }

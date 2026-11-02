@@ -37,6 +37,8 @@ import {
 import { SETTLE_STATE_PATH } from '../../src/selfhost/config.js';
 import {
   STATE_BRANCH,
+  SETTLE_HISTORY_MAX_PAGES,
+  readSettleHistory,
   readSettleState,
   writeSettleState,
 } from '../../src/selfhost/state-branch.js';
@@ -460,5 +462,89 @@ describe('durability', () => {
     });
     // The store never touched the filesystem: the evicted dir stays absent.
     expect(existsSync(journalRoot)).toBe(false);
+  });
+});
+
+describe('settle history pagination', () => {
+  const commitAt = (n: number) => (n + 1).toString(16).padStart(40, '0');
+  const containsPr = (versions: readonly { prs: Record<string, unknown> }[]) =>
+    versions.some((v) => Object.hasOwn(v.prs, '7'));
+
+  function historyForge(count: number, target = -1, fault = -1) {
+    const calls: string[] = [];
+    const gh: GhFn = async (args) => {
+      const path = args[1] ?? '';
+      calls.push(path);
+      const url = new URL(`https://example.test/${path}`);
+      if (url.pathname.endsWith('/commits')) {
+        const page = Number(url.searchParams.get('page'));
+        const size = Number(url.searchParams.get('per_page'));
+        const start = (page - 1) * size;
+        return ok(
+          Array.from({ length: Math.max(0, Math.min(size, count - start)) }, (_, n) => ({
+            sha: commitAt(start + n),
+          })),
+        );
+      }
+      const index = Number.parseInt(url.searchParams.get('ref') ?? '0', 16) - 1;
+      if (index === fault)
+        return ok({ encoding: 'base64', content: Buffer.from('invalid').toString('base64') });
+      const state =
+        index === target
+          ? observe(emptySettleState(FULL), 7, TUPLE, T0, 'self-merge-prs:observe')
+          : emptySettleState(FULL);
+      return ok({
+        encoding: 'base64',
+        content: Buffer.from(JSON.stringify(state)).toString('base64'),
+      });
+    };
+    return { gh, calls };
+  }
+
+  test('finds an epoch beyond 50 commits and pins later pages to the first commit', async () => {
+    const forge = historyForge(120, 50);
+    const read = await readSettleHistory({ ...forge, owner: OWNER, repo: REPO }, 50, containsPr);
+    expect(read.versions).toHaveLength(51);
+    expect(read).toMatchObject({ exhausted: false, barrier: false, limited: false });
+    const lists = forge.calls.filter((p) => p.includes('/commits?'));
+    expect(lists).toHaveLength(2);
+    expect(lists[0]).toContain('sha=cq-state');
+    expect(lists[1]).toContain(`sha=${commitAt(0)}`);
+    expect(lists[1]).toContain('page=2');
+    expect(read.versions[50]?.prs['7']?.tuple.head).toBe(TUPLE.head);
+  });
+
+  test('stops at a malformed later-page barrier before stale evidence', async () => {
+    const forge = historyForge(60, 52, 50);
+    const read = await readSettleHistory({ ...forge, owner: OWNER, repo: REPO }, 50, containsPr);
+    expect(read).toMatchObject({ barrier: true, limited: false, exhausted: false });
+    expect(containsPr(read.versions)).toBe(false);
+    expect(read.versions).toHaveLength(51);
+  });
+
+  test('distinguishes genuine exhaustion from the bounded page budget', async () => {
+    const short = historyForge(51);
+    const exhausted = await readSettleHistory(
+      { ...short, owner: OWNER, repo: REPO },
+      50,
+      containsPr,
+    );
+    expect(exhausted).toMatchObject({ exhausted: true, limited: false });
+    const long = historyForge(100);
+    const limited = await readSettleHistory({ ...long, owner: OWNER, repo: REPO }, 1, containsPr);
+    expect(limited).toMatchObject({ exhausted: false, limited: true });
+    expect(limited.versions).toHaveLength(SETTLE_HISTORY_MAX_PAGES);
+    expect(long.calls.filter((p) => p.includes('/commits?'))).toHaveLength(
+      SETTLE_HISTORY_MAX_PAGES,
+    );
+  });
+
+  test('a missing pinned page throws instead of pretending history ended', async () => {
+    const forge = historyForge(60);
+    const gh: GhFn = (args) =>
+      args[1]?.includes('page=2') ? Promise.resolve(notFound()) : forge.gh(args);
+    await expect(
+      readSettleHistory({ gh, owner: OWNER, repo: REPO }, 50, containsPr),
+    ).rejects.toThrow();
   });
 });

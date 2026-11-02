@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W1.2 methods note (run=v11, tier O)
 
 SHA-bound acceptance at merge time and durable settle state, per the RS-3
@@ -22,7 +24,6 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
     head, base oid or base name that changed between pages;
   - the settle ledger cannot be read;
   - the REST cross-check finds review data lag, or cannot run (below);
-  - an unresolved external review thread remains (below);
   - a trusted reviewer's latest opinionated review is CHANGES_REQUESTED;
   - no trusted actor's current opinion accepts the live head;
   - the tuple has not settled;
@@ -56,11 +57,9 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   "base unverified" with no pin, "base changed" when the live
   `baseRefName` differs from it, and refuses outright when the live base
   is `SelfhostDefaults.protectedBranch` (`main`).
-- **Unresolved threads (I2).** Unresolved review threads whose root author
-  is external to the PR author are counted with `countUnresolvedThreads`,
-  the same rule as classify row 5. A null root author counts as external,
-  and a non-boolean `isResolved` counts as unresolved. Any such thread
-  refuses "unresolved external threads: <n>" before reviews are judged.
+- **Threads.** Open external threads are reported as advisory counts by candidate
+  classification. They do not refuse a merge. The merging agent fixes cheap accepted
+  findings and groups deferred work into one follow-up issue per PR.
 - **Fold.** The latest opinionated review per actor is folded over all
   reviews. Acceptance comes from each trusted actor's current opinion:
   its latest review whose state is an accept state, CHANGES_REQUESTED, or

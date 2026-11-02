@@ -1,61 +1,9 @@
 # instantiated from policy/templates/cq-accept.yml — edit the template, not this file
-# cq-accept — the DEFAULT-BRANCH I2 acceptance verifier (W1.10 Decision 10;
-# ADR-0004 D-B, D-F). Posts `cq/acceptance` on merge-queue PR heads.
-#
-# Carrier (P1): `workflow_run` on `cq-signal` (PR head, review and
-# merge-queue push events; debounced 2026-10-20), a `schedule` sweep (every
-# 15 minutes: a review dismissal, a comment, an edit or a settle change can
-# arrive without an event this workflow sees — the sweep is the reconciler) and `workflow_dispatch` with a PR number
-# (honoured only on the default ref — ADR-0004 D-A.1). GitHub runs the
-# DEFAULT BRANCH's copy of this file for all three, so a pull request cannot
-# edit what judges it (RS-4 T-2/T-8).
-#
-# What is judged (Decision 10, the RS-3 rules in merge-recheck.ts composed
-# read-only by src/selfhost/acceptance.ts): the PR is open, not a draft and
-# into merge-queue; its head is the subject; the snapshot is complete and
-# passes the I11 REST lag cross-check; no outstanding trusted objection; a
-# trusted acceptance is bound to the head. Unresolved external review
-# threads are reported, never a refusal (advisory development posture,
-# 2026-10-20). Settle and mergeability are not judged here.
-#
-# DATA-ONLY: the verifier reads PR, review and thread API data with this
-# job's GITHUB_TOKEN. Nothing is checked out but the trust ref, and no head
-# byte is fetched at all. The trust set comes from `vars.*` (P7 keys,
-# Decision 11); blank means the conservative default.
-#
-# Jobs:
-#   - `resolve` verifies the triggering run (workflow path, repository id —
-#     fork runs are refused) and resolves the targets: `{pr, subject}` pairs.
-#     A PR event judges the one open same-repo PR into merge-queue whose head
-#     is the run's `head_sha`; a merge-queue push has nothing to judge; the
-#     sweep lists every open same-repo non-draft PR into merge-queue and
-#     judges a rotating window of 25 of them (sorted by number, advancing
-#     one window per 15-minute slot of the clock, wrapping), so its API cost
-#     is fixed and every eligible PR is reached within ceil(count / 25)
-#     consecutive slots (plus any skipped schedule firings).
-#     It also emits judge's lock: `pr-<n>` for a single-PR event or a
-#     dispatch, `sweep` for the schedule.
-#   - `judge` builds the trusted toolkit, runs the acceptance CLI per target
-#     and posts one `cq/acceptance` check run per target. A `fail` verdict is
-#     a RED CHECK RUN, not a red job: the job fails only when the verifier
-#     crashed or a post failed. Every row carries its snapshot time as both
-#     `started_at` and `completed_at`, so posted order is snapshot order for
-#     every consumer; the reference row is the same-app `cq/acceptance` run
-#     on that head with the latest snapshot. Every run skips a post when the
-#     reference row's snapshot is later than its own (a best-effort
-#     stale-verdict guard: the next event or sweep heals a miss), and the
-#     sweep skips one only when the reference row already carries the same
-#     conclusion and trust binding AND is also the latest-completed row (the
-#     one GitHub shows as latest).
-#
-# Identity (Decision 6): the check run is posted with a verdict-App token in
-# environment `cq-verdict` when `vars.CQ_VERDICT_APP_CLIENT_ID` is set, and
-# with this job's GITHUB_TOKEN otherwise. EXPAND (ADR-0004 D-H.2):
-# `cq/acceptance` becomes required (pinned to the verdict App) at C2.
-# `external_id` binds `<trust-sha>:<subject-sha>`.
+# Advisory PR diagnostics for direct main development. No queue promotion carrier.
 name: cq-accept
 
 on:
+  pull_request:
   workflow_run:
     workflows:
       - cq-signal
@@ -66,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: 'merge-queue PR number to judge (its current head is the subject)'
+        description: 'main PR number to judge (its current head is the subject)'
         required: true
 
 permissions: {}
@@ -85,15 +33,24 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  main-advisory:
+    name: cq/acceptance (advisory)
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Report advisory policy
+        run: echo 'Direct main PRs use CI and denylist; this verdict is advisory.'
   resolve:
     name: resolve
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
     # dispatch on any other ref would run that ref's copy of this file.
     if: >-
+      github.event_name != 'pull_request' && (
       github.event_name == 'workflow_run' ||
       github.event_name == 'schedule' ||
       github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
+      format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -154,26 +111,20 @@ jobs:
                   targets="$(jq "[.[] | select(.state == \"open\"
                        and .head.sha == \"${subject}\"
                        and .head.repo.id == ${REPO_ID}
-                       and .base.ref == \"merge-queue\")
+                       and .base.ref == \"main\")
                        | {pr: .number, subject: .head.sha}]" <<<"$pulls")"
                   count="$(jq 'length' <<<"$targets")"
                   case "$count" in
                     0)
                       # A PR into another base: acceptance is not judged.
-                      echo "no open same-repo PR into merge-queue has head ${subject}"
+                      echo "no open same-repo PR into main has head ${subject}"
                       targets='[]';;
                     1) ;;
                     *)
                       echo "refusing: ${count} open same-repo PRs"
-                      echo "into merge-queue have head ${subject}"
+                      echo "into main have head ${subject}"
                       exit 1;;
                   esac
-                  ;;
-                push)
-                  [ "$branch" = "merge-queue" ] || {
-                    echo "refusing: push run on '$branch'"; exit 1; }
-                  echo 'merge-queue push: nothing to judge'
-                  targets='[]'
                   ;;
                 *) echo "refusing: event '$event'"; exit 1;;
               esac
@@ -187,9 +138,9 @@ jobs:
               # ~400 requests/hour, whatever the queue's size.
               window=25
               targets="$(gh api --paginate \
-                "repos/${REPO}/pulls?state=open&base=merge-queue&per_page=100" \
+                "repos/${REPO}/pulls?state=open&base=main&per_page=100" \
                 --jq ".[] | select(.head.repo.id == ${REPO_ID}
-                   and .draft == false and .base.ref == \"merge-queue\")
+                   and .draft == false and .base.ref == \"main\")
                    | {pr: .number, subject: .head.sha}" |
                 jq -s 'sort_by(.pr)')"
               count="$(jq 'length' <<<"$targets")"
@@ -224,8 +175,8 @@ jobs:
                 echo "refusing: PR #${PR_INPUT} is not open"; exit 1; }
               [ "$(jq -r '.head.repo.id' <<<"$pull")" = "$REPO_ID" ] || {
                 echo "refusing: PR #${PR_INPUT} is from a fork"; exit 1; }
-              [ "$(jq -r '.base.ref' <<<"$pull")" = merge-queue ] || {
-                echo "refusing: PR #${PR_INPUT} is not into merge-queue"
+              [ "$(jq -r '.base.ref' <<<"$pull")" = main ] || {
+                echo "refusing: PR #${PR_INPUT} is not into main"
                 exit 1; }
               targets="$(jq -c '[{pr: .number, subject: .head.sha}]' \
                 <<<"$pull")"
@@ -257,8 +208,9 @@ jobs:
 
   judge:
     name: judge
+    continue-on-error: true
     needs: resolve
-    if: needs.resolve.outputs.targets != '[]'
+    if: github.event_name != 'pull_request' && needs.resolve.outputs.targets != '[]'
     runs-on: ubuntu-latest
     # The sweep judges at most 25 PRs (its window) in one job.
     timeout-minutes: 90
@@ -353,7 +305,7 @@ jobs:
             date -u +%Y-%m-%dT%H:%M:%SZ > "${dir}/${pr}.judged-at"
             node trust/dist/selfhost/acceptance.js \
               --repository="$REPO" --pr="$pr" --subject="$subject" \
-              --base=merge-queue --state=open > "$verdict" || true
+              --base=main --state=open > "$verdict" || true
             if ! jq -e -s \
               'length == 1 and (.[0] | type) == "object"
                and (.[0].status | type) == "string"
@@ -396,8 +348,7 @@ jobs:
                   started_at: $judged,
                   completed_at: $judged,
                   status: "completed",
-                  conclusion: (if $r.status == "ok" and $verdict == "pass"
-                    then "success" else "failure" end),
+                  conclusion: "neutral",
                   output: {
                     title: (if $r.status != "ok"
                       then "acceptance: check " + ($r.status // "crashed")

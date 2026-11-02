@@ -1,0 +1,24 @@
+{
+  "research_head": "08aadb32ab3a5074072f7e790bcddd4da239144c",
+  "implementation_base": "5dd1b34a357f2ce687fed264eeeb9564241ed34e",
+  "intended_pr_target": "origin/merge-queue",
+  "inputs": [
+    {
+      "source": "specs/coderabbit-backfill-protocol-spec.md",
+      "sha256": "f29176df404e6de3026f21df8efdfc8b5d0c441ec89faf12e2d8326526532bfb",
+      "custody": "private-inputs:coderabbit-backfill-protocol-spec.md.snapshot"
+    },
+    {
+      "source": "specs/coderabbit-backfill-protocol-trace.md",
+      "sha256": "d7fa59205f6b55c074a54d874df8ecb7775888daee7ef9e61a4b8f1c53cf73e7",
+      "custody": "private-inputs:coderabbit-backfill-protocol-trace.md.snapshot"
+    },
+    {
+      "source": "plans/review-debt-20261030/cr-backfill-order.md",
+      "sha256": "d8ecbf7d914491884ebbe4a8820ca1fc0c4426c02091b198955f8f1d8099c374",
+      "custody": "private-inputs:cr-backfill-order.md.snapshot"
+    }
+  ],
+  "input_custody": "cq-backfill-protocol-20261030-private-inputs",
+  "publication_boundary": "Original bytes retained privately; hashes and source-relative provenance only are publishable."
+}

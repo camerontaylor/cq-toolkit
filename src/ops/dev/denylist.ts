@@ -335,7 +335,10 @@ export function scanComponents(
 
 /** A reusable scanner over the component set (the injected seam). */
 export interface DiffSecretScanner {
-  (components: readonly ScanComponentInput[]): ComponentScan[] | Promise<ComponentScan[]>;
+  (
+    components: readonly ScanComponentInput[],
+    options?: { timeoutMs?: number },
+  ): ComponentScan[] | Promise<ComponentScan[]>;
 }
 
 /**
@@ -344,10 +347,10 @@ export interface DiffSecretScanner {
  * independent nets, and the gate clears only when both do.
  */
 export function composeScanners(...scanners: DiffSecretScanner[]): DiffSecretScanner {
-  return async (components): Promise<ComponentScan[]> => {
+  return async (components, options): Promise<ComponentScan[]> => {
     const merged = new Map<string, ComponentScan>();
     for (const scanner of scanners) {
-      for (const scan of await scanner(components)) {
+      for (const scan of await scanner(components, options)) {
         const existing = merged.get(scan.component);
         merged.set(scan.component, {
           component: scan.component,
@@ -384,7 +387,7 @@ export const GITLEAKS_TIMEOUT_MS = 10 * 60 * 1000;
  * also a fault: a claimed finding without readable evidence cannot gate.
  */
 export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecretScanner {
-  return async (components): Promise<ComponentScan[]> => {
+  return async (components, options): Promise<ComponentScan[]> => {
     if (components.length === 0) return [];
     const scratch = await effects.makeScratchDir('secret-scan');
     try {
@@ -409,7 +412,7 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
           reportPath,
           '--redact',
         ],
-        { timeoutMs: GITLEAKS_TIMEOUT_MS },
+        { timeoutMs: Math.max(1, Math.min(GITLEAKS_TIMEOUT_MS, options?.timeoutMs ?? Infinity)) },
       );
       if (result.exitCode !== 0 && result.exitCode !== 1) {
         throw new Error(

@@ -535,3 +535,198 @@ test('accepts a directly exported JSON file as its own declaration-graph leaf', 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('uses the nearest package scope for aliases and declaration module mode', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        type: 'module',
+        exports: { '.': './dist/index.js' },
+        imports: { '#dep': './dist/wrong.js' },
+      }),
+    );
+    await mkdir(path.join(root, 'dist/nested/deeper'), { recursive: true });
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};');
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export * from "./nested/deeper/api.js";');
+    await writeFile(
+      path.join(root, 'dist/nested/package.json'),
+      JSON.stringify({
+        type: 'commonjs',
+        imports: { '#dep': { import: './wrong.js', require: './dep.js' } },
+      }),
+    );
+    await writeFile(path.join(root, 'dist/nested/deeper/api.d.ts'), 'export * from "#dep";');
+    await writeFile(path.join(root, 'dist/nested/dep.d.ts'), 'export type D = number;');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path }) => path),
+      ['./dist/index.d.ts', './dist/nested/deeper/api.d.ts', './dist/nested/dep.d.ts'],
+    );
+    await writeFile(
+      path.join(root, 'dist/nested/package.json'),
+      '{"imports":{"#other":"external-package"}}',
+    );
+    await assert.rejects(makeReport(root), /cannot resolve package import #dep/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an earlier matching export condition wins over a later types sibling', async () => {
+  for (const earlier of ['default', 'import']) {
+    const root = await fixture({
+      '.': { [earlier]: './dist/index.js', types: './dist/later.d.ts' },
+    });
+    try {
+      await writeFile(path.join(root, 'dist/index.js'), 'export {};');
+      await writeFile(path.join(root, 'dist/index.d.ts'), 'export * from "./leaf.js";');
+      await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export type Visible = string;');
+      await writeFile(path.join(root, 'dist/later.d.ts'), 'export {};');
+      const report = await makeReport(root);
+      assert.equal(report.entries[0].targets[0].declaration, './dist/index.d.ts');
+      assert.deepEqual(
+        report.entries[0].targets[0].declarationGraph.map(({ path }) => path),
+        ['./dist/index.d.ts', './dist/leaf.d.ts'],
+      );
+      await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export type Visible = number;');
+      assert.notDeepEqual(await makeReport(root), report);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('follows relative and package-local module augmentations but ignores quoted examples', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        exports: { '.': './dist/index.js' },
+        imports: { '#local': './dist/local.js' },
+      }),
+    );
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      [
+        'declare module "./leaf.js" { interface Added { enabled: true } }',
+        'declare module "#local" { interface Added { local: true } }',
+        'declare module "external-package" { interface Added {} }',
+        '// declare module "./missing.js" {}',
+        'export type Example = \'declare module "./also-missing.js" {}\';',
+      ].join('\n'),
+    );
+    await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export interface Added {}');
+    await writeFile(path.join(root, 'dist/local.d.ts'), 'export interface Added {}');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path }) => path),
+      ['./dist/index.d.ts', './dist/leaf.d.ts', './dist/local.d.ts'],
+    );
+    await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export interface Added { value: number }');
+    assert.notDeepEqual(await makeReport(root), report);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('follows relative triple-slash type references to files and directory type entries', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await mkdir(path.join(root, 'dist/types'), { recursive: true });
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      [
+        '/// <reference types="./extra.d.ts" />',
+        '/// <reference types="./types" />',
+        '/// <reference types="external-package" />',
+        '/* /// <reference types="./missing.d.ts" /> */',
+        'export {};',
+      ].join('\n'),
+    );
+    await writeFile(path.join(root, 'dist/extra.d.ts'), 'declare const extra: number;');
+    await writeFile(path.join(root, 'dist/types/package.json'), '{"types":"custom.d.ts"}');
+    await writeFile(path.join(root, 'dist/types/custom.d.ts'), 'declare const custom: number;');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path }) => path),
+      ['./dist/extra.d.ts', './dist/index.d.ts', './dist/types/custom.d.ts'],
+    );
+    await writeFile(path.join(root, 'dist/extra.d.ts'), 'declare const extra: string;');
+    assert.notDeepEqual(await makeReport(root), report);
+    await rm(path.join(root, 'dist/extra.d.ts'));
+    await assert.rejects(makeReport(root), /cannot resolve package declaration import/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('records effective package type even when declaration bytes do not change', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};');
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export {};');
+    const implicit = await makeReport(root);
+    assert.equal(implicit.packageType, 'commonjs');
+    for (const type of ['commonjs', 'module']) {
+      await writeFile(
+        path.join(root, 'package.json'),
+        JSON.stringify({
+          name: 'fixture',
+          type,
+          exports: { '.': './dist/index.js' },
+        }),
+      );
+      const report = await makeReport(root);
+      assert.equal(report.packageType, type);
+      assert.deepEqual(report.entries, implicit.entries);
+      if (type === 'commonjs') assert.deepEqual(report, implicit);
+      else assert.notDeepEqual(report, implicit);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('resolves directory types and typings before index declarations, after file declarations', async () => {
+  for (const field of ['types', 'typings']) {
+    const root = await fixture({ '.': './dist/index.js' });
+    try {
+      await mkdir(path.join(root, 'dist/nested'), { recursive: true });
+      await writeFile(path.join(root, 'dist/index.js'), 'export {};');
+      await writeFile(path.join(root, 'dist/index.d.ts'), 'export * from "./nested";');
+      await writeFile(
+        path.join(root, 'dist/nested/package.json'),
+        JSON.stringify({ [field]: './custom.d.ts' }),
+      );
+      await writeFile(path.join(root, 'dist/nested/custom.d.ts'), 'export type D = number;');
+      await writeFile(path.join(root, 'dist/nested/index.d.ts'), 'export type Wrong = string;');
+      const report = await makeReport(root);
+      assert.deepEqual(
+        report.entries[0].targets[0].declarationGraph.map(({ path }) => path),
+        ['./dist/index.d.ts', './dist/nested/custom.d.ts'],
+      );
+      await writeFile(path.join(root, 'dist/nested/custom.d.ts'), 'export type D = string;');
+      assert.notDeepEqual(await makeReport(root), report);
+      await writeFile(path.join(root, 'dist/nested.d.ts'), 'export type FileWins = true;');
+      assert.deepEqual(
+        (await makeReport(root)).entries[0].targets[0].declarationGraph.map(({ path }) => path),
+        ['./dist/index.d.ts', './dist/nested.d.ts'],
+      );
+      await rm(path.join(root, 'dist/nested.d.ts'));
+      await writeFile(
+        path.join(root, 'dist/nested/package.json'),
+        JSON.stringify({ [field]: '../../../outside.d.ts' }),
+      );
+      await assert.rejects(makeReport(root), /escapes package root/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});

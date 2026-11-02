@@ -219,7 +219,7 @@ interface GraphqlPayload {
 interface RawRestComment {
   id: number;
   node_id?: string | null;
-  user?: { login?: string } | null;
+  user?: { login?: string; type?: string | null } | null;
   body: string;
   created_at?: string | null;
   in_reply_to_id?: number | null;
@@ -307,6 +307,7 @@ const toRestComment = (raw: RawRestComment): RestComment => ({
   id: raw.id,
   nodeId: raw.node_id ?? null,
   authorLogin: raw.user?.login ?? null,
+  authorType: raw.user?.type ?? null,
   body: raw.body,
   createdAt: raw.created_at ?? null,
   inReplyToId: raw.in_reply_to_id ?? null,
