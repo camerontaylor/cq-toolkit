@@ -191,6 +191,16 @@ class QueueTransportTests(unittest.TestCase):
             self.assertEqual(dispatcher.main(), 2)
             self.assertEqual(stderr.getvalue(), "queue capability refused; no permission\n")
 
+    def test_checkpoint_replacement_during_projection_returns_busy(self):
+        path = self.inventory_fixture()
+        original = receipts.status
+        def replace(q, rid):
+            result = original(q, rid)
+            path.write_text("{}")
+            return result
+        with mock.patch.object(receipts, "status", side_effect=replace):
+            self.assertEqual(self.inventory_call()["error"], {"code": "busy", "retryable": True})
+
     def test_inventory_missing_pagination_digest_and_read_only(self):
         self.inventory_fixture()
         before = copy.deepcopy(self.q)

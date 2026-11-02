@@ -280,6 +280,8 @@ def _inventory(req, runner, q, principal, receipt_root, snapshot_id):
             return {"error": {"code": "stale-cursor", "retryable": False, "restart": True}}
         start = int(match[1])
     end = min(start + req["limit"], len(selected))
+    if json.loads(path.read_text()) != raw:
+        return {"error": {"code": "busy", "retryable": True}}
     return {"entries": selected[start:end], "terminal": end == len(selected),
             "nextCursor": None if end == len(selected) else digest + ":" + str(end),
             "snapshot": receipts.digest({"queue": snapshot_id, "checkpoint": cp["digest"]}),
