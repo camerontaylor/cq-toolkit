@@ -53,6 +53,14 @@ import type {
   WitnessesRecord,
   AttemptFinishedJournalEvent,
   AttemptFinishedPayload,
+  ApprovalJournalEvent,
+  ApprovalPayload,
+  GateVerdictJournalEvent,
+  GateVerdictPayload,
+  TaskFinishedJournalEvent,
+  TaskFinishedPayload,
+  WriteObservationJournalEvent,
+  WriteObservationPayload,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -665,7 +673,7 @@ export const RunStartedV3JournalEventSchema: z.ZodType<RunStartedV3JournalEvent>
   .object({
     type: z.literal('run-started'),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     planId: z.string(),
     journalVersion: z.literal(3),
     seq: z.number().int().positive(),
@@ -778,12 +786,105 @@ export const AttemptFinishedJournalEventSchema: z.ZodType<AttemptFinishedJournal
   .object({
     type: z.literal('attempt-finished'),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     unitId: z.string().min(1),
     jobId: z.string().min(1).nullable(),
     taskId: z.string().min(1),
     attempt: z.number().int().min(1),
     payload: AttemptFinishedPayloadSchema,
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Kernel: journal v3 gate/task/approval/write schemas (ADR-0008, T26 —
+// schema only; reserved members parse without producers, no writer enabled)
+// ---------------------------------------------------------------------------
+
+export const GateVerdictPayloadSchema: z.ZodType<GateVerdictPayload> = z
+  .object({
+    gate: z.string().min(1),
+    verdict: z.enum(['pass', 'fail', 'indeterminate', 'needs-human']),
+    bail: z.string().min(1).exactOptional(),
+    fingerprintVersion: z.number().int().nonnegative().nullable(),
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const GateVerdictJournalEventSchema: z.ZodType<GateVerdictJournalEvent> = z
+  .object({
+    type: z.literal('gate-verdict'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1),
+    attempt: z.number().int().min(1),
+    payload: GateVerdictPayloadSchema,
+  })
+  .strict();
+
+export const TaskFinishedPayloadSchema: z.ZodType<TaskFinishedPayload> = z
+  .object({
+    taskId: z.string().min(1),
+    changed: z.boolean(),
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const TaskFinishedJournalEventSchema: z.ZodType<TaskFinishedJournalEvent> = z
+  .object({
+    type: z.literal('task-finished'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1),
+    attempt: z.number().int().min(1),
+    payload: TaskFinishedPayloadSchema,
+  })
+  .strict();
+
+export const ApprovalPayloadSchema: z.ZodType<ApprovalPayload> = z
+  .object({
+    approvalId: HashSchema,
+    reason: z.string(),
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const ApprovalJournalEventSchema: z.ZodType<ApprovalJournalEvent> = z
+  .object({
+    type: z.enum(['approval-granted', 'approval-expired']),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: ApprovalPayloadSchema,
+  })
+  .strict();
+
+export const WriteObservationPayloadSchema: z.ZodType<WriteObservationPayload> = z
+  .object({
+    path: z.string(),
+    reason: z.string(),
+    cap: NonnegativeSafeCountSchema.nullable(),
+    observed: NonnegativeSafeCountSchema.nullable(),
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const WriteObservationJournalEventSchema: z.ZodType<WriteObservationJournalEvent> = z
+  .object({
+    type: z.enum(['write-path-denied', 'write-path-cap-tripped']),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: WriteObservationPayloadSchema,
   })
   .strict();
 

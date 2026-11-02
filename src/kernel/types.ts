@@ -637,6 +637,117 @@ export interface AttemptFinishedJournalEvent {
   payload: AttemptFinishedPayload;
 }
 
+/** The `gate-verdict` payload (ADR-0008 gate row), all fields exact. */
+export interface GateVerdictPayload {
+  /** Configured check name. */
+  gate: string;
+  verdict: 'pass' | 'fail' | 'indeterminate' | 'needs-human';
+  /** Why validation did not run; omitted when absent. */
+  bail?: string;
+  /** Fingerprint identity version used, or null when no fingerprint was used. */
+  fingerprintVersion: number | null;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one gate evaluation (ADR-0008). `taskId` is required non-null and
+ * `attempt` a positive integer on gate events; `unitId` is the composition
+ * unit. `bail` is omitted if absent; a spawn/DNS/provider failure yields an
+ * indeterminate gate with `bail` explaining why validation did not run.
+ * Writer disabled until T16.
+ */
+export interface GateVerdictJournalEvent {
+  type: 'gate-verdict';
+  runId: string;
+  at: string;
+  unitId: string;
+  jobId: string | null;
+  taskId: string;
+  attempt: number;
+  payload: GateVerdictPayload;
+}
+
+/** The `task-finished` payload (ADR-0008 task row). */
+export interface TaskFinishedPayload {
+  taskId: string;
+  /** Candidate tree changed before vs after the task, independent of outcome. */
+  changed: boolean;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one composition task finished (ADR-0008). `changed` compares trees
+ * before and after the task, independent of outcome; legacy unknown uses
+ * availability. Writer disabled until T15.
+ */
+export interface TaskFinishedJournalEvent {
+  type: 'task-finished';
+  runId: string;
+  at: string;
+  unitId: string;
+  jobId: string | null;
+  taskId: string;
+  attempt: number;
+  payload: TaskFinishedPayload;
+}
+
+/** The approval event payload (ADR-0008 approval row). */
+export interface ApprovalPayload {
+  /** SHA-256 (hash spelling) of the opaque approval identifier, never the raw capability. */
+  approvalId: string;
+  reason: string;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: approval observation (ADR-0008). `approval-granted` is emitted by
+ * the existing approval authority on granted:true (T17); `approval-expired`
+ * is a RESERVED schema member with NO producer at the pin (no kernel approval
+ * verifier exists; tracked in #789). Scope fields are nullable: approvals are
+ * not inherently unit-scoped. No new authority is added by this schema.
+ */
+export interface ApprovalJournalEvent {
+  type: 'approval-granted' | 'approval-expired';
+  runId: string;
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: ApprovalPayload;
+}
+
+/** The write-observation payload (ADR-0008 write-decision row). */
+export interface WriteObservationPayload {
+  /** Redacted repo-relative path. */
+  path: string;
+  reason: string;
+  /** Configured count cap, or null for non-count denials. */
+  cap: number | null;
+  /** Observed count at the refusal, or null for non-count denials. */
+  observed: number | null;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: write-path observation (ADR-0008). `write-path-denied` observes
+ * existing path-policy refusals from taskLoop/addressWorker (T18);
+ * `write-path-cap-tripped` is a RESERVED schema member with NO producer at
+ * the pin (no count cap exists). This observes existing decisions and adds
+ * no enforcement. Scope fields nullable: addressWorker refusals may lack a
+ * task scope.
+ */
+export interface WriteObservationJournalEvent {
+  type: 'write-path-denied' | 'write-path-cap-tripped';
+  runId: string;
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: WriteObservationPayload;
+}
+
 /** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
 export type JournalEvent =
   | RunStartedJournalEvent
