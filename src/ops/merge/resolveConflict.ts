@@ -113,6 +113,7 @@ import { boundedErrorText } from '../../driver/error-text.js';
 import type { ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import { ModelSpecSchema } from '../../kernel/schema.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import type { GhResult } from '../../adapters/forge-github/gh.js';
@@ -602,6 +603,13 @@ export function makeResolveConflictOp(
                 workspace: { path: worktree },
                 outputSchema: RESOLVE_DECISION_OUTPUT_SCHEMA,
                 budget: { wallClockMs },
+                // Session-log correlation (items 1.3–1.5): forward the
+                // runner's minted work identity onto the invocation so the
+                // lane stamps the child's CQ_* env. Absent outside a
+                // governed dispatch — the un-governed op behaves exactly
+                // as before. The shared driver helper stays pure over the
+                // correlation value (ADR-0002 one-directional rule).
+                ...correlationInvocation(currentJobContext()?.info?.correlation),
               },
               { signal: currentJobContext()?.signal },
             );
