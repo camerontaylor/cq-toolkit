@@ -360,16 +360,38 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
     // P1-2: each null without its availability pointer fails — numerator,
     // denominator, baselineFailures[i].count — and an unknown baseline count
     // with a known denominator fails.
-    const nullCases: MetricRecord[] = [
-      { ...metric(), fixesPerRun: { numerator: null, denominator: 3 } },
-      { ...metric(), fixesPerRun: { numerator: 1, denominator: null } },
-      { ...metric(), baselineFailures: [baseline({ count: null })] },
-    ];
-    for (const m of nullCases) {
+    const nullCases: { metric: MetricRecord; availability: Record<string, AvailabilityRecord> }[] =
+      [
+        {
+          metric: { ...metric(), fixesPerRun: { numerator: null, denominator: 3 } },
+          availability: {},
+        },
+        {
+          metric: { ...metric(), fixesPerRun: { numerator: 1, denominator: null } },
+          availability: {},
+        },
+        {
+          // count:null with denominator:null: only the missing baseline count
+          // pointer fails (the denominator pointer is present).
+          metric: {
+            ...metric(),
+            fixesPerRun: { numerator: 1, denominator: null },
+            baselineFailures: [baseline({ count: null })],
+          },
+          availability: {
+            '/metric/fixesPerRun/denominator': {
+              state: 'not-collected',
+              reason: 'probe bailed',
+              source: null,
+            },
+          },
+        },
+      ];
+    for (const c of nullCases) {
       expect(
         MeasurementSummaryJournalEventSchema.safeParse({
           ...measurement(),
-          payload: { metric: m, availability: {} },
+          payload: { metric: c.metric, availability: c.availability },
         }).success,
       ).toBe(false);
     }
@@ -386,11 +408,11 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
     expect(
       MeasurementSummaryJournalEventSchema.safeParse(unknownCountKnownDenominator).success,
     ).toBe(false);
-    // Same three null cases on the report root (empty availability map so
-    // only the refinement is exercised).
-    for (const m of nullCases) {
-      const r = report(m);
-      (r as unknown as Record<string, unknown>).availability = {};
+    // Same three null cases on the report root (same per-case availability
+    // maps, so only the missing pointer fails each case).
+    for (const c of nullCases) {
+      const r = report(c.metric);
+      (r as unknown as Record<string, unknown>).availability = c.availability;
       expect(ReportV2Schema.safeParse(r).success).toBe(false);
     }
 
@@ -402,6 +424,35 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
       ReportV2Schema.safeParse(
         report({ verifiedCommits: [HEAD], closures: [closure({ todo: true })] }),
       ).success,
+    ).toBe(false);
+
+    // P3-3: a null value cannot carry availability state 'known' or
+    // 'known-zero' (contradiction — a known zero is not null).
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: { ...metric(), fixesPerRun: { numerator: 1, denominator: null } },
+          availability: {
+            '/metric/fixesPerRun/denominator': {
+              state: 'known-zero',
+              reason: 'no units',
+              source: null,
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: { ...metric(), fixesPerRun: { numerator: null, denominator: 3 } },
+          availability: {
+            '/metric/fixesPerRun/numerator': { state: 'known', reason: 'counted', source: null },
+          },
+        },
+      }).success,
     ).toBe(false);
 
     // Legacy scalar fixesPerRun shape rejected (unknown evidence).

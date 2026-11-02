@@ -1065,10 +1065,19 @@ function checkMetric(
   },
 ): void {
   const pointer = (p: string): void => {
-    if (availability[p] === undefined) {
+    const record = availability[p];
+    if (record === undefined) {
       ctx.addIssue({
         code: 'custom',
         message: `a null metric value requires an availability entry at ${p}`,
+        path: ['metric'],
+      });
+      // P3-3 coordinator ruling: a null value is not a known zero — a 'known'
+      // or 'known-zero' state on a null contradicts the record.
+    } else if (record.state === 'known' || record.state === 'known-zero') {
+      ctx.addIssue({
+        code: 'custom',
+        message: `a null metric value cannot carry availability state '${record.state}' at ${p}`,
         path: ['metric'],
       });
     }

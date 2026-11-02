@@ -925,7 +925,7 @@ export interface ReportV2 {
   provenance: ProvenanceRecord;
   correlation: CorrelationRecord;
   tasks: TaskFinishedPayload[];
-  /** Envelope + payload rows per ADR-0008 registry rows 199/202/203/204 (mirrors the journal carriers). */
+  /** Envelope + payload rows mirroring the journal carriers (ADR-0008 registry rows: Attempt, Gate, Approval, Write observation). */
   attempts: AttemptFinishedJournalEvent[];
   gates: GateVerdictJournalEvent[];
   dispositions: DispositionPayload[];
