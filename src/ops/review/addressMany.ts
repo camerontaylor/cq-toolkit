@@ -10,6 +10,7 @@ import { ReviewAddressManyInputSchema } from './registry.js';
 import type { OpResult } from '../../kernel/types.js';
 import {
   createKnownUsageLedger,
+  normalizeUsageObservation,
   type KnownUsageSummary,
   type UsageObservation,
 } from '../../shared/knownUsage.js';
@@ -63,11 +64,11 @@ export type ReviewAddressManyResult = OpResult<
   AddressManyAggregate & { usageSummary: KnownUsageSummary }
 > & {
   report?: AddressManyAggregate & { usageSummary: KnownUsageSummary };
+  /** Top-level envelope for report-less exits, per the I1 usage-summary carrier. */
+  usageSummary?: KnownUsageSummary;
 };
 
 class IsolationRefusal extends Error {}
-
-const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
 /** Independent object store and common directory; caller receipts remain durable. */
 export async function isolateAddressMany(
@@ -188,9 +189,9 @@ export function makeReviewAddressMany(
     const usageSummary = ledger.snapshot();
     if (result.status === 'ok')
       return { status: 'ok' as const, value: { ...result.value, usageSummary } };
-    // A schema refusal exits before any dispatch: no spend exists to retain,
-    // so there is no report to extend.
-    if (result.report === undefined) return result as ReviewAddressManyResult;
+    // A report-less exit (schema refusal, pre-dispatch refusal, or the op-level
+    // catch) still carries its spend on the I1 top-level usageSummary envelope.
+    if (result.report === undefined) return { ...result, usageSummary } as ReviewAddressManyResult;
     return {
       status: result.status,
       ...('error' in result ? { error: result.error } : {}),
@@ -202,9 +203,8 @@ export function makeReviewAddressMany(
 }
 
 /** The aggregate the core returns; the wrapper stamps the retained usage summary. */
-type AddressManyAggregateCore = Omit<AddressManyAggregate, never>;
-type ReviewAddressManyCoreResult = OpResult<AddressManyAggregateCore> & {
-  report?: AddressManyAggregateCore;
+type ReviewAddressManyCoreResult = OpResult<AddressManyAggregate> & {
+  report?: AddressManyAggregate;
 };
 
 function makeReviewAddressManyCore(
@@ -389,7 +389,6 @@ function makeReviewAddressManyCore(
             continue;
           }
           budget = admission.state;
-          let admitted = true;
           let result: ReviewAddressResult | undefined;
           let dispatched = false;
           let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
@@ -499,20 +498,30 @@ function makeReviewAddressManyCore(
           const report = result?.status === 'ok' ? result.value : result?.report;
           const usage = report?.usage;
           // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
-          // settlement point: measured usage when the settled report carried a
-          // measurement, an explicit unknown observation when the leg was
-          // dispatched without one, and a measured zero for a settled leg that
-          // never dispatched (a missed admission spends nothing). Not-admitted
-          // legs are never recorded, so a refusal cannot invent spend.
-          if (admitted)
+          // settlement point: measured usage (and derived cost, when priced)
+          // when the settled report carried a measurement, an explicit unknown
+          // observation otherwise. A leg that settled without dispatching is
+          // also unknown: it is not an invocation, so counting it as measured
+          // zero would inflate knownCount. Not-admitted legs are never
+          // recorded, so a refusal cannot invent spend. A telemetry failure
+          // degrades to unknown and never replaces the leg's settlement.
+          try {
             record(
               identity.id,
               usage
-                ? { usage, ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }) }
-                : dispatched
-                  ? {}
-                  : { usage: zeroUsage() },
+                ? normalizeUsageObservation({
+                    usage,
+                    ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
+                  })
+                : {},
             );
+          } catch {
+            try {
+              record(identity.id, {});
+            } catch {
+              // The dispatch was already recorded; retain the first observation.
+            }
+          }
           const settled = usage
             ? settleAddressMany(budget, {
                 ...identity,

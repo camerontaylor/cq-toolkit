@@ -625,10 +625,10 @@ test('refuses prepared roots outside the PR selection before dispatch', async ()
     gh,
     address,
   })({ ...input, dependencyRoots: { '123': '/prepared' } });
-  expect(result).toEqual({
-    status: 'needs-human',
-    reason: 'Prepared dependency root outside PR selection',
-  });
+  expect(result.status).toBe('needs-human');
+  if (result.status !== 'needs-human') throw new Error('expected needs-human');
+  expect(result.reason).toBe('Prepared dependency root outside PR selection');
+  expect(result.usageSummary).toEqual({ knownCount: 0, unknownCount: 0, unpricedCount: 0 });
   expect(address).not.toHaveBeenCalled();
   expect(isolate).not.toHaveBeenCalled();
 });
@@ -680,9 +680,10 @@ test('M7-many missing evidence', async () => {
 });
 
 test('M7-many failure evidence', async () => {
-  // The first leg settles with measured usage, the second throws: failure and
+  // The first leg settles with measured usage, the second THROWS: failure and
   // thrown exits retain the first leg's usage exactly once, and parent totals
-  // do not double count it.
+  // do not double count it. The later failed-result case retains a failed
+  // leg's OWN usage; this one covers the thrown path.
   let calls = 0;
   const address = vi.fn(async () => {
     if (++calls === 1) return { status: 'ok' as const, value: report() };
@@ -702,4 +703,132 @@ test('M7-many failure evidence', async () => {
     unpricedCount: 2,
   });
   expect(result.report?.accounting.observedTokens).toBe(10);
+});
+
+test('M7-many exhaustion evidence', async () => {
+  // Two measured legs exhaust the allocation: the budget-exhausted exit
+  // retains both legs' settled usage exactly once, and the third candidate is
+  // a not-admitted refusal that invents no spend.
+  const address = vi.fn(async ({ source }: { source: string }) => {
+    const n = Number(source.split(':')[1]);
+    return {
+      status: 'ok' as const,
+      value: { ...report(), usage: { input: 40, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      source: `pr:${n}`,
+    };
+  });
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })({ ...input, pulls: [1, 2, 3], maxTokens: 100, tokensPerPr: 50 });
+  expect(result.status).toBe('budget-exhausted');
+  expect(result.report?.usageSummary).toEqual({
+    usage: { input: 80, output: 0, cacheRead: 0, cacheWrite: 0 },
+    knownCount: 2,
+    unknownCount: 0,
+    unpricedCount: 2,
+  });
+  expect(result.report?.accounting.observedTokens).toBe(80);
+});
+
+test('M7-many failure evidence', async () => {
+  // The first leg settles with a definitive NON-THROWN failure and its OWN
+  // measured usage; the second succeeds: the failed leg's spend is retained
+  // exactly once beside the successful sibling's, and parent totals do not
+  // double count either. The earlier thrown-sibling case retains usage across
+  // an exception; this one across a failed result.
+  let calls = 0;
+  const address = vi.fn(async () =>
+    ++calls === 1
+      ? {
+          status: 'failed' as const,
+          error: 'verification failed',
+          report: { ...report(), usage: { input: 30, output: 0, cacheRead: 0, cacheWrite: 0 } },
+        }
+      : { status: 'ok' as const, value: report() },
+  );
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.status).toBe('failed');
+  expect(result.report?.usageSummary).toEqual({
+    usage: { input: 40, output: 0, cacheRead: 0, cacheWrite: 0 },
+    knownCount: 2,
+    unknownCount: 0,
+    unpricedCount: 2,
+  });
+  expect(result.report?.accounting.observedTokens).toBe(40);
+});
+
+test('M7-many cancellation evidence', async () => {
+  // A non-dispatched admitted leg (changed head before dispatch) settles with
+  // an EXPLICIT UNKNOWN observation, never a measured zero: it is not an
+  // invocation, so knownCount must not inflate.
+  let calls = 0;
+  const changingGh = async (args: string[]) => ({
+    code: 0,
+    stderr: '',
+    stdout:
+      args[0] === 'repo'
+        ? JSON.stringify({ nameWithOwner: 'owner/repo' })
+        : JSON.stringify({
+            ...metadata(1),
+            head: { ...metadata(1).head, sha: ++calls === 1 ? head : 'b'.repeat(40) },
+          }),
+  });
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh: changingGh,
+    address,
+  })({ ...input, pulls: [1] });
+  expect(result.status).toBe('needs-human');
+  expect(result.report?.usageSummary).toEqual({
+    knownCount: 0,
+    unknownCount: 1,
+    unpricedCount: 1,
+  });
+});
+
+test('M7-many malformed evidence degrades to unknown without losing settlement', async () => {
+  // A malformed usage measurement never throws out of the leg: settlement
+  // still lands (held reservation released) and the observation degrades to
+  // explicit unknown instead of losing the dispatch.
+  const badUsage = report();
+  (badUsage.usage as unknown as { input: number }).input = -5;
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: badUsage }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.report?.usageSummary).toEqual({
+    knownCount: 0,
+    unknownCount: 2,
+    unpricedCount: 2,
+  });
+});
+
+test('M7-many report-less refusal carries a top-level usage summary', async () => {
+  // A report-less exit (here: remote mismatch before dispatch) still carries
+  // its I1 top-level usageSummary envelope, never silently dropping spend.
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh: async () => ({ code: 1, stderr: 'nope', stdout: '' }),
+    address: vi.fn(),
+  })(input);
+  expect(result.status).toBe('needs-human');
+  expect(result.usageSummary).toEqual({
+    knownCount: 0,
+    unknownCount: 0,
+    unpricedCount: 0,
+  });
 });
