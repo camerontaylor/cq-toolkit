@@ -12,6 +12,7 @@ import {
 } from 'node:fs/promises';
 import { resolve, join, posix, relative } from 'node:path';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { Usage, WorkerResult } from '../../driver/types.js';
 import { createGovernor, currentJobContext } from '../../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../../kernel/runner.js';
@@ -631,10 +632,21 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             ...resolved,
             driver: {
               ...resolved.driver,
-              run: async (...args) => {
+              run: async (invocation, options) => {
                 const stopped = stop();
                 if (stopped) throw new Error(stopped);
-                const result = await resolved.driver.run(...args);
+                // Session-log correlation (M5b3): forward the governed job's
+                // minted work identity onto the review-leg invocation. The
+                // KERNEL reads the job context; the shared driver helper
+                // stays pure over the correlation value (ADR-0002
+                // one-directional rule). Absent outside a governed dispatch.
+                const result = await resolved.driver.run(
+                  {
+                    ...invocation,
+                    ...correlationInvocation(currentJobContext()?.info?.correlation),
+                  },
+                  options,
+                );
                 account(result, false);
                 return result;
               },

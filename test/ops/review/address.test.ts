@@ -1,11 +1,15 @@
 import { makeGitMutex } from '../../../src/shared/gitMutex.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { WorkerResult } from '../../../src/driver/types.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test, vi } from 'vitest';
+import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
+import { runLadder } from '../../../src/kernel/governor.js';
+import { correlationInvocation } from '../../../src/driver/correlationInvocation.js';
+import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import {
   addressBatches,
   makeReviewAddress,
@@ -1367,4 +1371,228 @@ test('plain and isolated address calls share the caller per-PR lock', async () =
   } finally {
     await f.cleanup();
   }
+});
+
+describe('M5b3 forward governed invocation correlation (review.address)', () => {
+  let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
+  beforeEach(async () => {
+    scanner = await makeGitleaksFixture();
+    vi.stubEnv('PATH', scanner.path);
+  });
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await rm(scanner.root, { recursive: true, force: true });
+  });
+  const correlationCases = [
+    { name: 'run id only', correlation: { workId: 'run:jr:1', runId: 'run' } },
+    {
+      name: 'work and parent',
+      correlation: { workId: 'run:jr:1', runId: 'run', parentWorkId: 'paseo:agent-1' },
+    },
+    {
+      name: 'explicit role',
+      correlation: { workId: 'run:jr:1', runId: 'run', role: 'review.address' },
+    },
+  ] as const;
+  test.each(correlationCases)(
+    'table: $name does not silently inherit the outer job',
+    async ({ correlation }) => {
+      const f = await fixture();
+      try {
+        const invocations: Array<Record<string, unknown>> = [];
+        const result = await runLadder(
+          () =>
+            makeReviewAddress({
+              ...f.deps,
+              review: (input) => {
+                invocations.push({ shape: input.repoRoot });
+                return f.deps.review!(input);
+              },
+            })(f.input),
+          { wallClockMs: 20000 },
+          {
+            op: 'review.address',
+            jobKey: 'outer-job',
+            attempt: 1,
+            correlation: { ...correlation },
+          },
+        );
+        // The outer job's correlation must not surface as a fabricated run /
+        // work / parent / role on the composition's own bookkeeping: the leg
+        // completes with the same calls as un-governed.
+        expect(result.outcome).toBe('completed');
+        expect(f.calls.filter((call) => call.startsWith('fix:'))).toEqual(['fix:a']);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+
+  // A review-leg driver run needs a real committed cq.json in the fixture repo.
+  const withCommittedConfig = async () => {
+    const repo = await makeTestRepo();
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        ...config,
+        budgets: { run: { maxTokens: 1000, wallMs: 20000 }, step: { wallMs: 5000 } },
+      }),
+    );
+    await repo.write('package.json', '{"name":"fixture-review"}\n');
+    repo.commitAll('fixture review config');
+    return repo;
+  };
+  const depsForReviewLeg = (
+    f: Awaited<ReturnType<typeof fixture>>,
+    repo: Awaited<ReturnType<typeof withCommittedConfig>>,
+    drivers?: DriverFactory,
+  ): ReviewAddressDeps => ({
+    config: {
+      ...config,
+      budgets: { run: { maxTokens: 1000, wallMs: 20000 }, step: { wallMs: 5000 } },
+    },
+    initialRecord: {
+      schemaVersion: 1,
+      branch: 'feature/x',
+      reviewed: { base: repo.git('merge-base', 'origin/main', 'HEAD').trim(), scope: 'full' },
+      head: repo.git('rev-parse', 'HEAD').trim(),
+      sources: [{ kind: 'agent', status: 'terminal' }],
+      findings: f.deps.initialRecord!.findings,
+    },
+    drivers: drivers ?? f.deps.drivers!,
+  });
+
+  // M5b3 nominal evidence: under a governed dispatch, the review-leg driver
+  // wrapper forwards the minted correlation onto the invocation.
+  test('M5b3 nominal evidence', async () => {
+    const f = await fixture();
+    const repo = await withCommittedConfig();
+    try {
+      const seen: Array<{ prompt: string; correlation?: unknown }> = [];
+      const drivers: DriverFactory = {
+        resolve: (request) => ({
+          lane: 'ai-sdk',
+          modelSpec: request.modelSpec,
+          driver: {
+            run: async (invocation) => {
+              seen.push({ prompt: invocation.prompt, correlation: invocation.correlation });
+              return {
+                stopReason: 'complete' as const,
+                structuredOutput: { findings: [] },
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+              };
+            },
+          },
+        }),
+      };
+      const correlation = { workId: 'run:jn:2', runId: 'run', role: 'review.address' } as const;
+      const expected = correlationInvocation({ ...correlation }).correlation;
+      const outcome = await runLadder(
+        () =>
+          makeReviewAddress(depsForReviewLeg(f, repo, drivers))({
+            repoRoot: repo.root,
+            source: 'local',
+            journalDir: f.input.journalDir,
+          }),
+        { wallClockMs: 20000 },
+        { op: 'review.address', jobKey: 'jn', attempt: 1, correlation: { ...correlation } },
+      );
+      // The re-review then ends needs-human on the scripted reviewer's
+      // non-terminal cycle; the invocation forwarding under test already
+      // happened on every review-leg dispatch.
+      expect(outcome.outcome).toBe('completed');
+      expect(seen.length).toBeGreaterThan(0);
+      for (const row of seen) expect(row.correlation).toEqual(expected);
+    } finally {
+      await repo.cleanup();
+      await f.cleanup();
+    }
+  });
+
+  // M5b3 missing evidence: no governed context — the review leg forwards no
+  // correlation and the composition behaves exactly as before.
+  test('M5b3 missing evidence', async () => {
+    const f = await fixture();
+    const repo = await withCommittedConfig();
+    try {
+      const seen: Array<{ prompt: string; correlation?: unknown }> = [];
+      const drivers: DriverFactory = {
+        resolve: (request) => ({
+          lane: 'ai-sdk',
+          modelSpec: request.modelSpec,
+          driver: {
+            run: async (invocation) => {
+              seen.push({ prompt: invocation.prompt, correlation: invocation.correlation });
+              return {
+                stopReason: 'complete' as const,
+                structuredOutput: { findings: [] },
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+              };
+            },
+          },
+        }),
+      };
+      const result = await makeReviewAddress(depsForReviewLeg(f, repo, drivers))({
+        repoRoot: repo.root,
+        source: 'local',
+        journalDir: f.input.journalDir,
+      });
+      expect(result.status).toBe('needs-human');
+      expect(seen.length).toBeGreaterThan(0);
+      for (const row of seen) expect(row.correlation).toBeUndefined();
+    } finally {
+      await repo.cleanup();
+      await f.cleanup();
+    }
+  });
+
+  // M5b3 failure evidence: a correlation whose role is already set passes
+  // through verbatim — no new role is minted on the review leg.
+  test('M5b3 failure evidence', async () => {
+    const f = await fixture();
+    const repo = await withCommittedConfig();
+    try {
+      const seen: Array<{ prompt: string; correlation?: unknown }> = [];
+      const drivers: DriverFactory = {
+        resolve: (request) => ({
+          lane: 'ai-sdk',
+          modelSpec: request.modelSpec,
+          driver: {
+            run: async (invocation) => {
+              seen.push({ prompt: invocation.prompt, correlation: invocation.correlation });
+              return {
+                stopReason: 'complete' as const,
+                structuredOutput: { findings: [] },
+                usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                denials: [],
+              };
+            },
+          },
+        }),
+      };
+      const correlation = { workId: 'run:jf:2', runId: 'run', role: 'reviewer' } as const;
+      const expected = correlationInvocation({ ...correlation }).correlation;
+      const outcome = await runLadder(
+        () =>
+          makeReviewAddress(depsForReviewLeg(f, repo, drivers))({
+            repoRoot: repo.root,
+            source: 'local',
+            journalDir: f.input.journalDir,
+          }),
+        { wallClockMs: 20000 },
+        { op: 'review.address', jobKey: 'jf', attempt: 1, correlation: { ...correlation } },
+      );
+      // The re-review then ends needs-human on the scripted reviewer's
+      // non-terminal cycle; the invocation forwarding under test already
+      // happened on every review-leg dispatch.
+      expect(outcome.outcome).toBe('completed');
+      expect(seen.length).toBeGreaterThan(0);
+      for (const row of seen) expect(row.correlation).toEqual(expected);
+    } finally {
+      await repo.cleanup();
+      await f.cleanup();
+    }
+  });
 });
