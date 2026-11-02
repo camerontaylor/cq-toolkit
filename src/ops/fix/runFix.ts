@@ -79,8 +79,6 @@ export interface FixRunReport {
   /** Explicit denominators over `planned` (see {@link FixRunCounters}). */
   counters: FixRunCounters;
   fixesPerRun: number;
-  /** Distinct verified commit SHAs landed by this run (M1 evidence count). */
-  verifiedCommits: number;
   usage: Usage;
   wallMs: number;
   run?: RunReport;
@@ -148,10 +146,12 @@ export function githubCompareBaseUrl(remote: string, revision: string): string |
 }
 
 /**
- * Distinct verified commit SHAs across fixed tasks: a commit landing in two
- * sibling rows counts once (M1 measurement slice, see README:97).
+ * The run's fixes-per-run metric: the count of distinct verified commit SHAs
+ * across fixed tasks (see src/ops/review/README.md:97). One commit that
+ * resolves two sibling rows counts once; non-fixed rows never contribute,
+ * even when attempt evidence carries SHAs.
  */
-export function verifiedCommitCount(tasks: readonly FixTaskReport[]): number {
+export function fixesPerRunOf(tasks: readonly FixTaskReport[]): number {
   return new Set(tasks.filter((task) => task.outcome === 'fixed').flatMap((task) => task.commits))
     .size;
 }
@@ -185,7 +185,6 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         rescueFixes: 0,
       },
       fixesPerRun: 0,
-      verifiedCommits: 0,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       wallMs: 0,
     };
@@ -274,8 +273,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             ];
       });
       accountPlanned();
-      report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
-      report.verifiedCommits = verifiedCommitCount(report.tasks);
+      report.fixesPerRun = fixesPerRunOf(report.tasks);
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       for (const task of report.tasks)
@@ -608,8 +606,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           });
         }
       }
-      report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
-      report.verifiedCommits = verifiedCommitCount(report.tasks);
+      report.fixesPerRun = fixesPerRunOf(report.tasks);
       report.usage = report.run.usage ?? report.usage;
       const human =
         parentSignal?.aborted ||
