@@ -23,7 +23,29 @@ export function applyCorrelationEnv(
   env: Record<string, string>,
   correlation: WorkCorrelation | undefined,
 ): Record<string, string> {
-  if (correlation === undefined) return env;
+  if (correlation === undefined) {
+    // Direct op invocation (measurement M5b1): no runner minted a
+    // correlation, so derive the Paseo parent HERE at the shared driver
+    // boundary — every transport composes its child env through this one
+    // function, and the CLI surface needs no second precedence
+    // implementation. The derivation reads ONLY the passed env (never
+    // process.env), so an explicit inherited CQ_* identity is respected and
+    // a Paseo agent id is translated to the `paseo:` parent-work shape the
+    // governed path already uses. `PASEO_AGENT_ID` itself is never
+    // forwarded (not on the child allowlist). The Paseo id is the LAST
+    // precedence tier: an inherited CQ_WORK_ID or CQ_PARENT_WORK_ID is kept
+    // as-is (blank counts as absent); with neither, the derived parent is
+    // stamped and an env with no identity at all is left exactly as before.
+    const pick = (name: string): string | undefined => {
+      const value = env[name]?.trim();
+      return value === undefined || value === '' ? undefined : value;
+    };
+    if (pick('CQ_WORK_ID') === undefined && pick('CQ_PARENT_WORK_ID') === undefined) {
+      const paseoParent = paseoParentWorkId(env);
+      if (paseoParent !== undefined) env['CQ_PARENT_WORK_ID'] = paseoParent;
+    }
+    return env;
+  }
   for (const [field, name] of FIELDS) {
     const value = correlation[field];
     if (value !== undefined && value !== '') env[name] = value;
@@ -46,6 +68,20 @@ export function correlationEnvRemovals(correlation: WorkCorrelation | undefined)
 }
 
 /**
+ * The PASEO fallback tier of `inboundParentWorkId` alone: the enclosing
+ * Paseo agent as `paseo:<PASEO_AGENT_ID>`, or undefined with no agent id
+ * (blank counts as absent). The direct-op path stamps THIS, and only this,
+ * into the child env — an explicit inherited CQ_* identity is already on
+ * the env and must not be second-guessed at the boundary.
+ */
+export function paseoParentWorkId(
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const paseoAgentId = env['PASEO_AGENT_ID']?.trim();
+  return paseoAgentId === undefined || paseoAgentId === '' ? undefined : `paseo:${paseoAgentId}`;
+}
+
+/**
  * The parent work id a governed run's jobs inherit from the env cq was
  * launched in (minted into every job's correlation by the runner). An
  * explicit CQ_* identity always wins: the launcher's own `CQ_WORK_ID` (the
@@ -64,6 +100,5 @@ export function inboundParentWorkId(
   };
   const explicit = pick('CQ_WORK_ID') ?? pick('CQ_PARENT_WORK_ID');
   if (explicit !== undefined) return explicit;
-  const paseoAgentId = pick('PASEO_AGENT_ID');
-  return paseoAgentId === undefined ? undefined : `paseo:${paseoAgentId}`;
+  return paseoParentWorkId(env);
 }
