@@ -1,5 +1,6 @@
 import {
   recordAddressTerminalAttempt,
+  releaseAddressTerminalAttempt,
   checkpointAddressTerminalWorker,
   addressTerminalCandidate,
   deferAddressTerminalAttempt,
@@ -907,6 +908,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
               : git(root, ['worktree', 'remove', '--force', candidate]));
           }
+          if (deps.terminalBinding && terminalAttempt) {
+            releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+            terminalAttempt = undefined;
+          }
           touched = false;
         }).catch((error: unknown) => {
           restoreRefused = true;
@@ -1131,6 +1136,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                     throw new Error('rejection not supported at worker execution head');
                 }
                 touched = false;
+                if (deps.terminalBinding && terminalAttempt) {
+                  releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+                  terminalAttempt = undefined;
+                }
                 return {
                   finding: {
                     ...finding,
@@ -1262,6 +1271,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 throw new AddressRefusal('commit does not match gated parent/tree', true);
               verifiedHeads.add(commit);
               touched = false;
+              if (deps.terminalBinding && terminalAttempt) {
+                releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+                terminalAttempt = undefined;
+              }
               for (let i = 0; i < baseline.length; i++)
                 state = recordFixedFailures(state, baseline[i]!, broader[i]!);
               return {

@@ -9,6 +9,7 @@ import { makeGitMutex } from '../../../shared/gitMutex.js';
 import type { ReviewAddressInput, ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
   recordAddressTerminalEvidence,
+  releaseAddressTerminalEvidence,
   checkpointAddressTerminalEvidence,
   noteAddressTerminalBookkeeping,
   noteAddressOrdinaryReport,
@@ -88,6 +89,7 @@ interface TerminalInternals {
   track(promise: Promise<void>): void;
   record(participant: Participant, input: AddressTerminalAttemptInput): Promise<object>;
   defer(participant: Participant, attempt: object): boolean;
+  release(participant: Participant, attempt: object): void;
   checkpoint(
     root: string,
     head?: string,
@@ -358,6 +360,15 @@ export class AddressOwnership {
       track: (promise) => this.registerTerminalProcess(promise),
       record: (participant, input) => this.recordAttempt(participant, input),
       defer: (participant, attempt) => this.deferAttempt(participant, attempt),
+      release: (participant, attempt) => {
+        if (!this.active || participant.closed || !this.participants.has(participant))
+          throw new Error('address terminal: release after close');
+        const index = participant.attempts.indexOf(attempt as AddressTerminalAttempt);
+        if (index < 0 || participant.attempts[index]!.cancelled)
+          throw new Error('address terminal: forged/stale or cancelled release');
+        participant.attempts.splice(index, 1);
+        releaseAddressTerminalEvidence(attempt);
+      },
     });
   }
 
@@ -858,13 +869,18 @@ export class AddressOwnership {
       throw new Error('address terminal: attempt after close');
     await this.assertOwned();
     const attempt = await recordAddressTerminalEvidence(this.terminalToken, input);
-    await this.assertOwned();
-    if (participant.closed) {
-      this.terminalFailure = new Error('address terminal: late attempt on closed participant');
-      throw this.terminalFailure;
+    try {
+      await this.assertOwned();
+      if (participant.closed) {
+        this.terminalFailure = new Error('address terminal: late attempt on closed participant');
+        throw this.terminalFailure;
+      }
+      participant.attempts.push(attempt);
+      return attempt;
+    } catch (error) {
+      releaseAddressTerminalEvidence(attempt);
+      throw error;
     }
-    participant.attempts.push(attempt);
-    return attempt;
   }
 
   private deferAttempt(participant: Participant, value: object): boolean {
@@ -1343,6 +1359,11 @@ export function recordAddressTerminalAttempt(
   const association = terminalWorkers.get(binding);
   if (!association) throw new Error('address terminal: forged worker association');
   return terminalInternals.get(association.owner)!.record(association.participant, input);
+}
+export function releaseAddressTerminalAttempt(binding: object, attempt: object): void {
+  const association = terminalWorkers.get(binding);
+  if (!association) throw new Error('address terminal: forged worker association');
+  terminalInternals.get(association.owner)!.release(association.participant, attempt);
 }
 export function deferAddressTerminalAttempt(binding: object, attempt: object): boolean {
   const association = terminalWorkers.get(binding);
