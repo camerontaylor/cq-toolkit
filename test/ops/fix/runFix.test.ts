@@ -415,4 +415,121 @@ process.exitCode = failed ? 1 : 0;
       await rm(f.root, { recursive: true, force: true });
     }
   });
+
+  // ---- M7-fix: retain fix exit spend -------------------------------------
+  // finish() folds landed attempt evidence once; on exits where NO attempt
+  // evidence survived (killed or replaced units whose dispatches were still
+  // governed-metered) the report adopts the engine's settled ledger exactly
+  // once. The carriers are disjoint, so settled usage never double counts,
+  // and absence stays explicit (no ledger and no attempt usage: zeros, never
+  // a fabricated measurement). Every named case runs through makeFixRun.
+
+  /**
+   * A driver whose dispatches meter real governed usage but never leave
+   * surviving attempt evidence: it throws a fault after settlement, so the
+   * unit folds to a rejected result with no FixTaskReport attempts. The
+   * engine's ledger is the only carrier that observed the spend.
+   */
+  const meterThenFaultDriver = (): DriverFactory => ({
+    resolve: ({ modelSpec }) => ({
+      modelSpec,
+      lane: 'ai-sdk',
+      driver: {
+        run: async () => {
+          const usage = { input: 7, output: 3, cacheRead: 2, cacheWrite: 1 };
+          currentJobContext()?.reportResult({ usage });
+          const error = new Error('fixture: dispatch fault after settlement') as Error & {
+            usage?: typeof usage;
+          };
+          error.usage = usage;
+          throw error;
+        },
+      },
+    }),
+  });
+
+  /** A driver whose dispatches are never metered at all. */
+  const silentFaultDriver = (): DriverFactory => ({
+    resolve: ({ modelSpec }) => ({
+      modelSpec,
+      lane: 'ai-sdk',
+      driver: {
+        run: async () => {
+          throw new Error('fixture: unmetered fault');
+        },
+      },
+    }),
+  });
+
+  test('M7-fix nominal evidence', async () => {
+    const f = await fixture();
+    try {
+      // A fault thrown AFTER settlement: governed metering still observed
+      // the dispatch spend, so the failed report retains it via the engine
+      // ledger instead of the zeroed attempt fold.
+      const result = await makeFixRun({ drivers: meterThenFaultDriver() })(input(f));
+      // A thrown dispatch folds to needs-human (a misconfiguration-class
+      // ending), which still flows through finish(). The fixture repo has
+      // four tasks, so the fault metered four governed dispatches: the
+      // ledger retains exactly that spend once.
+      expect(result.status).toBe('needs-human');
+      expect(result.report?.usage).toEqual({
+        input: 28,
+        output: 12,
+        cacheRead: 8,
+        cacheWrite: 4,
+      });
+      // Settled exactly once: the surviving attempt rows carry NO usage
+      // (the driver threw before returning a measurement), so the report's
+      // spend comes solely from the ledger, never double folded.
+      expect(
+        result.report?.tasks.flatMap((task) =>
+          (task.attempts ?? []).filter((attempt) => attempt.usage !== undefined),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('M7-fix missing evidence', async () => {
+    const f = await fixture();
+    try {
+      // A fault that never metered anything: the ledger is absent and the
+      // attempt fold is empty, so the report keeps explicit zeros rather
+      // than inventing a measurement.
+      const result = await makeFixRun({ drivers: silentFaultDriver() })(input(f));
+      expect(result.status).toBe('needs-human');
+      expect(result.report?.usage).toEqual({
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      expect(result.report?.run?.usage).toBeUndefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('M7-fix failure evidence', async () => {
+    const f = await fixture();
+    try {
+      // Landed attempt evidence (the shared-SHA unit's open row carries one
+      // usage-bearing attempt {1,1,0,0}) keeps folding through the task
+      // attempts: the ledger must NOT be adopted alongside it (the carriers
+      // are disjoint, so no double counting), and the sums preserve the
+      // attempt evidence once.
+      const result = await makeFixRun({
+        drivers: fixingDrivers(false),
+        registry: { get: stubSweepRegistries(sharedUnitReport()) },
+      })(input(f));
+      expect(result.status).toBe('needs-human');
+      const report = reportOf(result);
+      expect(report.usage).toEqual({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0 });
+      expect(report.fixesPerRun).toBe(2);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 });

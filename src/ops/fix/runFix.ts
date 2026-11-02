@@ -279,9 +279,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       report.fixesPerRun = fixesPerRunOf(report.tasks);
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      let attemptUsageObserved = false;
       for (const task of report.tasks)
         for (const attempt of task.attempts) {
           if (!attempt.usage) continue;
+          attemptUsageObserved = true;
           report.usage.input += attempt.usage.input;
           report.usage.output += attempt.usage.output;
           report.usage.cacheRead += attempt.usage.cacheRead;
@@ -289,6 +291,14 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           if (attempt.usage.reasoning !== undefined)
             report.usage.reasoning = (report.usage.reasoning ?? 0) + attempt.usage.reasoning;
         }
+      // Retain the engine's settled ledger on exits where NO attempt evidence
+      // survived (a killed or replaced unit whose dispatches were still
+      // metered by the governed runner). The two carriers are disjoint by
+      // construction, so adopting the ledger only in the empty fold keeps
+      // settled usage on the report exactly once — never double counted and
+      // never invented when neither carrier observed spend.
+      if (!attemptUsageObserved && report.run?.usage !== undefined)
+        report.usage = { ...report.run.usage };
       if (escalationPolicy)
         report.escalation = {
           ...escalation,
