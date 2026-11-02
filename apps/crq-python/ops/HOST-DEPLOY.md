@@ -222,7 +222,9 @@ Ordering and guarantees:
    an explicit `"unmarked"` or unknown string is an explicit marker), no
    `author_*` state keys, and a readable queue — the one shape the recorded
    prior target is known to read. A present marker of any value, `author_*`
-   keys, an unreadable queue, a missing/unchecked record, or a malformed
+   keys, an unreadable queue (missing `queue.json`, invalid JSON, a non-object
+   root such as `null`/`[...]`/a string, or a non-array `items` — the same
+   evidence the drain refuses), a missing/unchecked record, or a malformed
    presence field (only literal boolean `false` proves absence) disables
    automatic rollback — fail stopped with an explicit operator recovery
    action, never an old-snapshot restore or an incompatible binary start.

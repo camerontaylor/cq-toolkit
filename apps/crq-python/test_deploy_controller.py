@@ -291,6 +291,19 @@ class DrainTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
             dc.drain_check(self.effects, lambda *a: "harvest")
 
+    def test_non_object_queue_root_refuses_never_crashes(self):
+        for root in (None, [1], "str", 7, {"items": {"pr1": {}}}):
+            with self.subTest(root=root):
+                self.write_state("queue.json", root)
+                with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+                    dc.drain_check(self.effects, lambda *a: "harvest")
+
+    def test_non_object_queue_item_blocks_as_ambiguous(self):
+        self.write_state("queue.json", {"items": ["pr1"]})
+        result = dc.drain_check(self.effects, lambda *a: "harvest")
+        self.assertFalse(result["drained"])
+        self.assertEqual(result["blocked"][0]["state"], "ambiguous")
+
 
 class RunnerProbeTests(ControllerFixture):
     def write_probe(self, source):
@@ -588,6 +601,25 @@ class CompatibilityRecordTests(ControllerFixture):
                 self.assertIs(record["schema_marker_present"], True)
                 self.assertEqual(record["queue_schema"], marker)
                 # ANY explicit marker value disables rollback, even "unmarked".
+                self.assertFalse(dc.rollback_compatible(record))
+
+    def test_missing_queue_is_unreadable_never_empty_and_fails_closed(self):
+        (self.runner / "state").mkdir(exist_ok=True)
+        record = dc.compatibility_record(self.effects, self.target)
+        self.assertIn("unreadable", record["queue_schema"])
+        self.assertIs(record["schema_marker_present"], True)
+        self.assertFalse(dc.rollback_compatible(record))
+        # Same evidence, same verdict: the drain refuses it too.
+        with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+            dc.drain_check(self.effects, lambda *a: "harvest")
+
+    def test_non_object_queue_root_is_recorded_unreadable_not_raised(self):
+        for root in (None, [1], "str", 7):
+            with self.subTest(root=root):
+                self.write_state("queue.json", root)
+                record = dc.compatibility_record(self.effects, self.target)
+                self.assertIn("not a JSON object", record["queue_schema"])
+                self.assertIs(record["schema_marker_present"], True)
                 self.assertFalse(dc.rollback_compatible(record))
 
     def test_unreadable_queue_is_recorded_not_crashed_and_fails_closed(self):

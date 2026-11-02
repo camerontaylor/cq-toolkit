@@ -232,6 +232,22 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def read_queue(effects: Effects) -> dict:
+    """The queue ledger's JSON-object root, or ValueError/OSError.
+
+    The single read both drain and rollback compatibility reason from: a
+    missing file (FileNotFoundError), invalid JSON or a non-object root
+    (``null``, a list, a bare string) is unreadable for both, never empty.
+    """
+    queue = effects.read_json("queue.json")
+    if not isinstance(queue, dict):
+        raise ValueError("queue.json root is " + type(queue).__name__
+                         + ", not a JSON object")
+    if not isinstance(queue.get("items", []), list):
+        raise ValueError("queue.json items is not a JSON array")
+    return queue
+
+
 def compatibility_record(effects: Effects, target_sha: str) -> dict:
     """Read-only rollback-compatibility evidence for the CURRENT->TARGET move.
 
@@ -246,22 +262,24 @@ def compatibility_record(effects: Effects, target_sha: str) -> dict:
     """
     record = {"checked": True, "schema_observations": [],
               "schema_marker_present": False, "queue_schema": None}
-    if effects.exists("queue.json"):
-        try:
-            queue = effects.read_json("queue.json")
-            if "schema_version" in queue:
-                # Presence is recorded separately from the value: ANY explicit
-                # marker (including the literal string "unmarked" or another
-                # unknown value) disables automatic rollback, because the
-                # prior target's reader was never proven against it.
-                record["schema_marker_present"] = True
-                record["queue_schema"] = queue["schema_version"]
-            for key in sorted(queue):
-                if key.startswith("author_"):
-                    record["schema_observations"].append(key)
-        except (ValueError, OSError) as exc:
-            record["queue_schema"] = "unreadable: " + str(exc)[:120]
-            record["schema_marker_present"] = True  # unprovable: fail closed
+    try:
+        # A missing queue or a non-object root is evidence never read: it is
+        # unreadable here exactly as drain_check refuses it (#548).
+        queue = read_queue(effects)
+    except (ValueError, OSError) as exc:
+        record["queue_schema"] = "unreadable: " + str(exc)[:120]
+        record["schema_marker_present"] = True  # unprovable: fail closed
+    else:
+        if "schema_version" in queue:
+            # Presence is recorded separately from the value: ANY explicit
+            # marker (including the literal string "unmarked" or another
+            # unknown value) disables automatic rollback, because the
+            # prior target's reader was never proven against it.
+            record["schema_marker_present"] = True
+            record["queue_schema"] = queue["schema_version"]
+        for key in sorted(queue):
+            if key.startswith("author_"):
+                record["schema_observations"].append(key)
     record["target_sha"] = target_sha
     return record
 
@@ -301,13 +319,17 @@ def drain_check(effects: Effects, liveness) -> dict:
     semantics identical to the runner's.
     """
     try:
-        queue = effects.read_json("queue.json")
+        queue = read_queue(effects)
     except (ValueError, OSError) as exc:
         raise Refused("queue unreadable, refusing to reason about drain: "
                       + str(exc)[:160]) from None
     runs = effects.state_dir() / "runs"
     blocked = []
     for item in queue.get("items", []):
+        if not isinstance(item, dict):
+            blocked.append({"item": None, "state": "ambiguous",
+                            "reason": "malformed queue item"})
+            continue
         if item.get("run") is None and "run" not in item:
             continue  # genuinely unstarted: no recorded run to probe
         r = item.get("run")
