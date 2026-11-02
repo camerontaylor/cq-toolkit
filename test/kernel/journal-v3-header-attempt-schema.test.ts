@@ -209,9 +209,9 @@ describe('journal v3 header/attempt schemas (T25)', () => {
     expect(RunStartedV3JournalEventSchema.safeParse(upperSha).success).toBe(false);
     // Seconds-only `at` fails on both v3 envelopes: UTC ISO-8601 WITH
     // milliseconds is the envelope rule (ADR-0008).
-    expect(
-      RunStartedV3JournalEventSchema.safeParse(header({ at: AT_NO_MILLIS })).success,
-    ).toBe(false);
+    expect(RunStartedV3JournalEventSchema.safeParse(header({ at: AT_NO_MILLIS })).success).toBe(
+      false,
+    );
     expect(
       AttemptFinishedJournalEventSchema.safeParse(attemptFinished({ at: AT_NO_MILLIS })).success,
     ).toBe(false);
