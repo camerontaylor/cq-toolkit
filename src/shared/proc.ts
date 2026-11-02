@@ -197,6 +197,18 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
   'PROCESSOR_ARCHITECTURE',
 ]);
 
+/**
+ * The ONE place the `paseo:<id>` parent-work link is spelled (M5b1 P3):
+ * both the composition-time stamp in buildChildEnv above and the
+ * driver-boundary derivation (correlation-env.paseoParentWorkId, which
+ * imports this) go through it, so the id shape cannot drift between the two
+ * layers. Blank/undefined counts as absent.
+ */
+export function paseoParentLinkFromAgentId(agentId: string | undefined): string | undefined {
+  const id = agentId?.trim();
+  return id === undefined || id === '' ? undefined : `paseo:${id}`;
+}
+
 /** The POSIX/Windows-standard environment variable NAME shape (r2). */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ENV_PASSTHROUGH = 'CQ_RUN_ENV_PASSTHROUGH';
@@ -254,10 +266,8 @@ export function buildChildEnv(
   // the composition is best-effort: no agent id in the parent env means
   // no link, exactly as before.
   if (child['CQ_PARENT_WORK_ID'] === undefined || child['CQ_PARENT_WORK_ID'].trim() === '') {
-    const paseoAgentId = parentEnv['PASEO_AGENT_ID']?.trim();
-    if (paseoAgentId !== undefined && paseoAgentId !== '') {
-      child['CQ_PARENT_WORK_ID'] = `paseo:${paseoAgentId}`;
-    }
+    const paseoParent = paseoParentLinkFromAgentId(parentEnv['PASEO_AGENT_ID']);
+    if (paseoParent !== undefined) child['CQ_PARENT_WORK_ID'] = paseoParent;
   }
   return child;
 }

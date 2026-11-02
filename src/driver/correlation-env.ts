@@ -6,9 +6,18 @@
 // authoritative: a field it lacks REMOVES any inherited value of that name
 // (the names are allowlisted, so an outer run's CQ_ROLE/CQ_TASK would
 // otherwise sit next to this job's CQ_WORK_ID). Absent correlation leaves
-// the env untouched (un-governed callers behave exactly as before).
+// the inherited identity alone EXCEPT for the M5b1 direct-op derivation: a
+// direct op invocation (no runner minted a correlation) with no inherited
+// CQ_* identity gets the enclosing Paseo agent derived as CQ_PARENT_WORK_ID
+// (see the undefined-correlation branch below).
+//
+// STAMP SCOPE (deliberate, one line): applyCorrelationEnv is called ONLY at
+// the three transports' child-env composition sites (claude-code CLI, SDK,
+// ACP) — each stamps the env of the child it is about to spawn, nothing
+// wider.
 
 import type { WorkCorrelation } from './types.js';
+import { paseoParentLinkFromAgentId } from '../shared/proc.js';
 
 const FIELDS: ReadonlyArray<readonly [keyof WorkCorrelation, string]> = [
   ['workId', 'CQ_WORK_ID'],
@@ -78,7 +87,7 @@ export function paseoParentWorkId(
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
   const paseoAgentId = env['PASEO_AGENT_ID']?.trim();
-  return paseoAgentId === undefined || paseoAgentId === '' ? undefined : `paseo:${paseoAgentId}`;
+  return paseoParentLinkFromAgentId(paseoAgentId);
 }
 
 /**
