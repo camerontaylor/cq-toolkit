@@ -1077,7 +1077,8 @@ class QueueTransportTests(unittest.TestCase):
         before = copy.deepcopy(self.q)
         for principal, expected in (("developer", {"retry": 1}), ("stranger", {"denied": "no-permission"})):
             output = io.BytesIO()
-            with mock.patch.dict(os.environ, {"CRQ_QUEUE_POLICY": str(policy_path), "CRQ_QUEUE_PRINCIPAL": principal}), \
+            with mock.patch.dict(sys.modules, {"crq": SimpleNamespace(REPO="owner/repo", enqueue_merged=lambda: None)}), \
+                    mock.patch.dict(os.environ, {"CRQ_QUEUE_POLICY": str(policy_path), "CRQ_QUEUE_PRINCIPAL": principal}), \
                     mock.patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request))), \
                     mock.patch.object(sys, "stdout", SimpleNamespace(buffer=output)), \
                     mock.patch("signal.signal"), mock.patch("signal.alarm"), \
@@ -1086,6 +1087,28 @@ class QueueTransportTests(unittest.TestCase):
                 self.assertEqual(json.loads(output.getvalue())["result"], expected)
                 supervised.assert_not_called()
             self.assertEqual(self.q, before)
+
+    def test_retry_probe_and_write_agree_on_runner_repository_gate(self):
+        self.retry_fixture()
+        policy_path = Path(self.tmp.name) / "policy.json"
+        policy_path.write_text(json.dumps(self.policy))
+        for fake in (SimpleNamespace(REPO="other/repo", enqueue_merged=lambda: None),
+                     SimpleNamespace(REPO="owner/repo")):
+            for op in ("retry-capability", "retry"):
+                request = {"v": 1, "op": op, "requestId": "request-1", "binding": self.b}
+                if op == "retry":
+                    request["expectedReceiptId"] = "a" * 64
+                output = io.BytesIO()
+                with self.subTest(op=op, runner=fake), \
+                        mock.patch.dict(sys.modules, {"crq": fake}), \
+                        mock.patch.dict(os.environ, {"CRQ_QUEUE_POLICY": str(policy_path), "CRQ_QUEUE_PRINCIPAL": "developer"}), \
+                        mock.patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(receipts.canonical(request)))), \
+                        mock.patch.object(sys, "stdout", SimpleNamespace(buffer=output)), \
+                        mock.patch("signal.signal"), mock.patch("signal.alarm"), \
+                        mock.patch("author_transport.supervised", side_effect=AssertionError("must not lock")) as supervised:
+                    self.assertEqual(dispatcher.queue_main(), 0)
+                    self.assertIn("unsupported", json.loads(output.getvalue())["result"])
+                    supervised.assert_not_called()
 
     def test_unknown_exits_and_unlisted_causes_never_authorize_retry(self):
         for exit_code in (2, 3, 255):

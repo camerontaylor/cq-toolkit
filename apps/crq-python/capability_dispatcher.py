@@ -34,8 +34,12 @@ def queue_main():
         policy = queue_transport.validate_policy(
             json.loads(Path(os.environ["CRQ_QUEUE_POLICY"]).read_text()))
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
-        # No-op probe: validate authorization without importing the runner or taking tick.lock.
+        # No-op probe: apply the same runner compatibility gate without taking tick.lock.
         if queue_transport.decode(raw)["op"] == "retry-capability":
+            if policy.get("enabled") is True:
+                import crq
+                if not hasattr(crq, "enqueue_merged") or crq.REPO != policy.get("repo"):
+                    policy = {**policy, "enabled": False}
             sys.stdout.buffer.write(queue_transport.handle(raw, None, principal=principal,
                 policy=policy, verify_source=None, receipt_root=None))
             return 0
