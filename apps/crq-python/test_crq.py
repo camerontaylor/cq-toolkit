@@ -2783,6 +2783,24 @@ class OversizedIntervalPartitionTest(unittest.TestCase):
         md = crq.load_queue()["merged_discovery"]
         self.assertEqual((md["before"], md["reason"]), (self.BEFORE, "reconcile-refused"))
 
+    def test_dense_overlap_marker_outlives_the_rolling_upper_bound(self):
+        # A part completes at the rolling upper bound while its reduced
+        # overlap is under five minutes old: drop the width, keep the marker.
+        self.outage([])
+        mark = "2026-10-02T23:58:00Z"
+        self.q.update(merged_watermark=mark, merged_discovery={
+            "after": mark, "before": self.BEFORE, "complete": False, "span": 4, "overlap_from": mark})
+        crq.save_queue(self.q)
+        with mock.patch.object(crq, "gh_json", side_effect=self.forge):
+            log = crq.discover_merged(self.q, crq.ForgeBudget(),
+                                      interval={"after": mark, "before": self.BEFORE}, recent=True)
+        self.assertIn("complete=True", log[0])
+        md = crq.load_queue()["merged_discovery"]
+        self.assertEqual(md.get("overlap_from"), mark)
+        self.assertNotIn("span", md)
+        self.assertGreaterEqual(
+            crq.rolling_discovery_interval(self.q, {"enabled": True, "after": self.AFTER})["after"], mark)
+
     def test_partition_bounds(self):
         t = "2026-10-01T00:{:02d}:{:02d}Z".format
         # Halves above the watermark, keeping the overlap below it.

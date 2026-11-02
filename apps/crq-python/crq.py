@@ -1535,8 +1535,10 @@ def _span(record):
     to try next, and the watermark below which the overlap was too dense."""
     record = record or {}
     span, start = record.get("span"), record.get("overlap_from")
-    hints = {"span": span} if type(span) is int and 0 < span <= MAX_SPAN else {}
-    if hints and isinstance(start, str) and merged_reconcile.TS_RE.fullmatch(start):
+    hints = {}
+    if type(span) is int and 0 < span <= MAX_SPAN:
+        hints["span"] = span
+    if isinstance(start, str) and merged_reconcile.TS_RE.fullmatch(start):
         hints["overlap_from"] = start
     return hints
 
@@ -1566,14 +1568,15 @@ def discover_merged(q, budget, *, interval, recent=False):
         with forge_window(budget):
             result = reconcile_merged(q, after=after, before=before, page_budget=4, recent=recent)
         hints = _span(active)
-        if hints and result["complete"]:
+        if result["complete"]:
             # A partition completed: try twice its width next, until the
             # interval reaches the rolling upper bound again. A reduced
-            # overlap lapses once the normal five minutes have passed it.
-            hints["span"] = min(hints["span"] * 2, MAX_SPAN)
+            # overlap lapses only once the normal five minutes have passed it.
+            if hints.get("span"):
+                hints["span"] = min(hints["span"] * 2, MAX_SPAN)
             if before >= iso(now() - dt.timedelta(seconds=1)):
-                hints = {}
-            elif hints.get("overlap_from", "") <= iso(parse_iso(before) - dt.timedelta(minutes=5)):
+                hints.pop("span", None)
+            if hints.get("overlap_from", "") <= iso(parse_iso(before) - dt.timedelta(minutes=5)):
                 hints.pop("overlap_from", None)
         q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"], **hints}
         _save_discovery_queue(q, "discovery-summary-save")
