@@ -49,6 +49,7 @@ const ENTRY_NAMES = [
   'review.addressMany',
   'review.enqueue',
   'review.queueStatus',
+  'review.queueHealth',
   'review.report',
   'review.address',
   'review.run',
@@ -124,6 +125,7 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     },
   }),
   'review.queueStatus': () => minimalInputs['review.enqueue']!(),
+  'review.queueHealth': () => minimalInputs['review.enqueue']!(),
   'review.report': () => ({
     ...minimalInputs['review.enqueue']!(),
     evidenceDir: '/tmp/queue-evidence',
