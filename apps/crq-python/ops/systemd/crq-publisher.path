@@ -1,0 +1,9 @@
+[Unit]
+Description=Publish CRQ ledger records as soon as they are spooled
+[Path]
+# Harvest, admission and inventory spool records here; publish them at once
+# instead of waiting for the one-minute fallback timer.
+PathChanged=@CRQ_ROOT@/state/backfill/publication/pending
+Unit=crq-publisher.service
+[Install]
+WantedBy=default.target

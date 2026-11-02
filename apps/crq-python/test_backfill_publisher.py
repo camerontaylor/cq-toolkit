@@ -191,6 +191,9 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("@CRQ_ROOT@/backfill_publisher.py", service)
         self.assertIn("KillMode=control-group", service)
         self.assertIn("OnUnitInactiveSec=1min", (root / "crq-publisher.timer").read_text())
+        path = (root / "crq-publisher.path").read_text()
+        self.assertIn("PathChanged=@CRQ_ROOT@/state/backfill/publication/pending", path)
+        self.assertIn("Unit=crq-publisher.service", path)
 
     def test_live_owner_is_never_completed_by_reconciliation(self):
         self.prepare()
