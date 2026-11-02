@@ -2639,3 +2639,73 @@ test.each(['commit', 'restore'] as const)(
     }
   },
 );
+
+test.each(['rejected', 'deferred'] as const)(
+  'terminal captures recycle across 65 sequential %s outcomes',
+  async (disposition) => {
+    const f = await fixture(
+      async (input) =>
+        input.outputSchema?.name === 'review.address.closure/v1'
+          ? { closed: true, reason: 'false positive confirmed' }
+          : { disposition, reason: 'no edit needed', evidence: [{ path: 'src/a.ts', line: 1 }] },
+      '',
+      {
+        configure: (config) => {
+          config.budgets = { ...config.budgets, run: { wallMs: 600_000, maxTokens: 100_000 } };
+          config.checks[0]!.addressOnly = true;
+        },
+      },
+    );
+    try {
+      await addressOwnership.withAddressOwnership(
+        { repoRoot: f.repo.root, git: f.engineDeps.git, source: 'local', production: false },
+        async (lease) => {
+          const binding = addressOwnership.addressTerminalWorkerBinding(lease);
+          await addressOwnership.checkpointAddressTerminalWorker(binding, f.repo.root, f.initial);
+          const engine = makeAddressWorker({ ...f.engineDeps, terminalBinding: binding });
+          for (let index = 0; index < 65; index++) {
+            const result = await engine.fix(finding(), 1);
+            expect(result.finding.status, result.reason).toBe(disposition);
+            expect(result.reason).toBe('no edit needed');
+          }
+          expect(f.calls()).toBe(disposition === 'rejected' ? 130 : 65);
+          expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+        },
+      );
+    } finally {
+      await f.cleanup();
+    }
+  },
+  180_000,
+);
+
+test('a capture release failure after commit does not restore or retain a failed commit', async () => {
+  const f = await fixture();
+  const release = vi
+    .spyOn(addressOwnership, 'releaseAddressTerminalAttempt')
+    .mockImplementation(() => {
+      throw new Error('synthetic release failure');
+    });
+  try {
+    await addressOwnership.withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.engineDeps.git, source: 'local', production: false },
+      async (lease) => {
+        const binding = addressOwnership.addressTerminalWorkerBinding(lease);
+        await addressOwnership.checkpointAddressTerminalWorker(binding, f.repo.root, f.initial);
+        const engine = makeAddressWorker({ ...f.engineDeps, terminalBinding: binding });
+        const result = await engine.fix(finding(), 1);
+        expect(result.reason).toContain('synthetic release failure');
+        expect(result.failedAttempts).toEqual([]);
+        expect(f.repo.git('rev-parse', 'HEAD').trim()).not.toBe(f.initial);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('GOOD\n');
+        expect(
+          f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/failed/'),
+        ).toBe('');
+        expect(release).toHaveBeenCalledTimes(1);
+      },
+    );
+  } finally {
+    release.mockRestore();
+    await f.cleanup();
+  }
+});
