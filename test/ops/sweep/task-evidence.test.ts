@@ -493,11 +493,49 @@ test('M6a nominal evidence', async () => {
 });
 
 test('M6a missing evidence', async () => {
+  // Missing unit-segment evidence: with no resolved segments binding the
+  // verified commit still emits the full shared key set through the real
+  // commit-message path, falling back to the raw unit fixer/package for
+  // Cq-Unit, and no governed correlation is forwarded.
   const invocations: OpInvocation[] = [];
-  const outcome = await runLoop(invocations);
-  expect(['ok', 'failed']).toContain(outcome.status);
+  const messages: string[] = [];
+  const bindings: Record<string, unknown> = { ...loopBindings(invocations) };
+  delete bindings.segments;
+  const outcome = await runLadder(
+    () =>
+      runTaskLoop(
+        bindings as unknown as Parameters<typeof runTaskLoop>[0],
+        UNIT,
+        { path: '/tmp/unused', branch: 'run/x' } as never,
+        PROBE,
+        'run/x',
+        {
+          ...EFFECTS,
+          commit: async (message: string) => {
+            messages.push(message);
+            return 'c'.repeat(40);
+          },
+        },
+      ),
+    { wallClockMs: 5000 },
+    { op: 'sweep.unit', jobKey: 'j-2', attempt: 1 },
+  );
+  expect(outcome.outcome).toBe('completed');
+  expect(invocations.length).toBeGreaterThan(0);
   for (const invocation of invocations) {
     expect(invocation.correlation).toBeUndefined();
+  }
+  expect(messages.length).toBeGreaterThan(0);
+  for (const message of messages) {
+    expect(message).toContain('Cq-Run: run/x');
+    expect(message).toContain('Cq-Unit: fix/alpha');
+    expect(message).toContain('Cq-Task: src/a.ts');
+    expect(message).toContain('Cq-Attempt: 1');
+    expect(message).toContain('Cq-Tier: worker');
+    expect(message).toContain('Cq-Model: fixture/scripted');
+    for (const key of ['Cq-Run:', 'Cq-Unit:', 'Cq-Task:', 'Cq-Attempt:', 'Cq-Tier:', 'Cq-Model:']) {
+      expect(message.split('\n').filter((line) => line.startsWith(key))).toHaveLength(1);
+    }
   }
 });
 
