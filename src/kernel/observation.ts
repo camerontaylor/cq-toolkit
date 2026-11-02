@@ -164,6 +164,17 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
             `compositionRunId '${compositionRunId}'`,
         );
       }
+      // The stream file lives under its workId: a header claiming another
+      // workId would misattribute the whole stream at the join.
+      if (
+        parsed.type === 'composition-started' &&
+        parsed.payload.correlation.workId !== workId
+      ) {
+        throw new Error(
+          `observation: header correlation.workId '${parsed.payload.correlation.workId}' ` +
+            `does not match this stream's workId '${workId}'`,
+        );
+      }
       const line = `${JSON.stringify(parsed)}\n`;
       const next = tail.then(
         () => write(line),

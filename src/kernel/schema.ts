@@ -1244,7 +1244,21 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
     events: z.array(ObservationEventSchema),
     complete: z.boolean(),
   })
-  .strict();
+  .strict()
+  // Stream coupling (ADR-0008): a COMPLETE stream carries exactly one
+  // composition-started header, first. An INCOMPLETE stream is exempt — a
+  // crash during the header write can leave a torn, headerless prefix.
+  .superRefine((stream, ctx) => {
+    if (!stream.complete) return;
+    const headers = stream.events.filter((e) => e.type === 'composition-started');
+    if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a complete stream must open with exactly one composition-started header',
+        path: ['events'],
+      });
+    }
+  });
 
 /**
  * The v1/v2 kernel event union exactly as it stood before the v3 dual reader

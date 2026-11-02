@@ -26,9 +26,11 @@ import {
   readObservations,
 } from '../../src/kernel/observation.js';
 import { JournalEventV1V2Schema, ObservationEventSchema } from '../../src/kernel/schema.js';
+import { openRunLog } from '../../src/kernel/journal.js';
 import type {
   ApprovalJournalEvent,
   CompositionStartedJournalEvent,
+  JournalEvent,
   KernelRunLinkedJournalEvent,
   ObservationEvent,
   ObservationStream,
@@ -199,23 +201,34 @@ describe('T29 round-trip', () => {
       // File order preserved within each stream; two kernel runs linked for
       // the same work stay in their own streams (never merged by timestamp).
       expect(linkedKernelRuns(byWork[0] as ObservationStream)).toEqual([KERNEL_RUN]);
-      // The kernel RunLog's append still validates v1/v2 shapes ONLY: a
-      // composition carrier is not a kernel journal event.
+      // The kernel RunLog stays untouched by observation writes: its append
+      // still validates v1/v2 shapes ONLY (a composition carrier never
+      // parses), and the kernel stream's BYTES are unchanged after the
+      // observation writer ran in the same journal directory.
       expect(() => JournalEventV1V2Schema.parse(header())).toThrow();
-      // Kernel events (like run-started) are never observation events: the
-      // observation union has no kernel-run member.
-      expect(
-        streams.every((s) =>
-          s.events.every(
-            (e) =>
-              !(
-                'journalVersion' in e &&
-                'planId' in e &&
-                !('payload' in e && 'kernelRunId' in (e.payload as object))
-              ),
-          ),
-        ),
-      ).toBe(true);
+      const runLog = openRunLog(dir);
+      const kernelEvent: JournalEvent = {
+        type: 'job-started',
+        runId: KERNEL_RUN,
+        at: AT,
+        jobId: 'job-1',
+        op: 'sweep.unit',
+        attempt: 1,
+      };
+      await runLog.append(KERNEL_RUN, kernelEvent);
+      const before = await readFile(join(dir, `${KERNEL_RUN}.ndjson`), 'utf8');
+      await writeStream(
+        dir,
+        [
+          header({ runId: 'cr-after-kernel' }),
+          linked(KERNEL_RUN, 1, { runId: 'cr-after-kernel' }),
+        ],
+        'cr-after-kernel',
+      );
+      const after = await readFile(join(dir, `${KERNEL_RUN}.ndjson`), 'utf8');
+      expect(after).toBe(before);
+      expect(after).toContain('"type":"job-started"');
+      expect(after).not.toContain('composition-started');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
