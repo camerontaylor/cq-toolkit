@@ -207,6 +207,21 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(len(list(Path(self.tmp.name, "deliveries").glob("*.lock"))), 1)
         self.assertEqual(self.q.get("queue_client_requests", {}), {})
 
+    def test_forge_cache_releases_lock_during_fetch_and_preserves_other_insert(self):
+        self.reconciled_fixture()
+        def fetch(repo, pr):
+            with Path(self.tmp.name, "read-forge-cache.lock").open("a") as lock:
+                transport.fcntl.flock(lock, transport.fcntl.LOCK_EX | transport.fcntl.LOCK_NB)
+            transport._cached_forge(self.tmp.name, "developer", "other-request", self.b,
+                                    lambda repo, pr: self.forge, self.policy)
+            return self.forge
+        transport._cached_forge(self.tmp.name, "developer", self.request_id, self.b, fetch, self.policy)
+        cache = json.loads(Path(self.tmp.name, "read-forge-cache.json").read_text())
+        self.assertEqual(len(cache), 2)
+        with mock.patch.object(transport, "_forge", side_effect=AssertionError("cached")):
+            for rid in (self.request_id, "other-request"):
+                transport._cached_forge(self.tmp.name, "developer", rid, self.b, fetch, self.policy)
+
     def test_forge_cache_capacity_is_bounded(self):
         self.reconciled_fixture()
         with mock.patch.object(transport, "FORGE_CACHE_LIMIT", 2):

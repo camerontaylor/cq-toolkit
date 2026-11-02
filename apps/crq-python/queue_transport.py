@@ -385,14 +385,25 @@ def _cached_forge(root, principal, rid, b, verify_source, policy):
     path = root / "read-forge-cache.json"
     key = receipts.digest({"principal": principal, "requestId": rid, "binding": b,
                            "branches": policy.get("branches", [])})
-    with (root / "read-forge-cache.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    def current():
         now = time.time()
         cache = json.loads(path.read_text()) if path.exists() else {}
-        cache = {k: stamp for k, stamp in cache.items() if 0 <= now - stamp < FORGE_CACHE_TTL}
+        return now, {k: stamp for k, stamp in cache.items() if 0 <= now - stamp < FORGE_CACHE_TTL}
+
+    lock_path = root / "read-forge-cache.lock"
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _, cache = current()
         if key in cache:
             return
-        _forge(verify_source, b, b["pr"], b["mergeSha"], policy)
+    # Network latency must not hold up unrelated reconciled reads. Concurrent
+    # misses may fetch the same binding; only successful checks are inserted.
+    _forge(verify_source, b, b["pr"], b["mergeSha"], policy)
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        now, cache = current()
+        if key in cache:
+            return
         if len(cache) >= FORGE_CACHE_LIMIT:
             del cache[min(cache, key=cache.get)]
         cache[key] = now
