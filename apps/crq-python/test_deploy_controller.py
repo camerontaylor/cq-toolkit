@@ -533,6 +533,100 @@ class HealthTests(ControllerFixture):
                          sorted([bad, broken, terminal]))
         self.assertNotIn(good, [i["receipt"] for i in validation["invalid"]])
 
+    def age(self, path, seconds_ago):
+        stamp = 1_800_000_000 - seconds_ago
+        os.utime(path, (stamp, stamp))
+
+    def test_receipt_sample_is_the_newest_by_mtime_not_lowest_hash(self):
+        root = self.runner / "state/receipts"
+        for index in range(dc.RECEIPT_SAMPLE + 2):
+            name = self.write_receipt(self.receipt_document(item_id="current-%d" % index))
+            self.age(root / (name + ".json"), 1000 + index)
+        bad = self.write_raw_receipt(b"{broken")
+        # Newest: written after the switch, so it must be sampled whatever its name.
+        self.age(root / (bad + ".json"), 0)
+        validation = dc.receipt_validation(self.effects)
+        self.assertEqual(validation["sampled"], dc.RECEIPT_SAMPLE)
+        self.assertEqual([i["receipt"] for i in validation["invalid"]], [bad])
+        # The same bad receipt, oldest of all, falls outside the bounded sample.
+        self.age(root / (bad + ".json"), 10**6)
+        validation = dc.receipt_validation(self.effects)
+        self.assertEqual(validation["sampled"], dc.RECEIPT_SAMPLE)
+        self.assertIs(validation["valid"], True)
+
+    def test_run_readability_sample_is_the_newest_by_mtime(self):
+        runs = self.runner / "state/runs"
+        for index in range(dc.RECEIPT_SAMPLE + 2):
+            run = runs / ("aaaa%04d-20261028T000000Z" % index)
+            run.mkdir(parents=True)
+            (run / "meta.json").write_text("{}\n")
+            self.age(run, 1000 + index)
+        broken = runs / "zzzz-20261028T000500Z"  # sorts last by name
+        broken.mkdir()
+        (broken / "meta.json").write_bytes(b"{broken")
+        self.age(broken, 0)
+        self.complete_tick("2026-10-28T00:05:00Z")
+        observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        self.assertEqual(observation["receipts"],
+                         {"sampled": dc.RECEIPT_SAMPLE, "readable": dc.RECEIPT_SAMPLE - 1})
+        self.assertIs(observation["receipts_readable"], False)
+        self.age(broken, 10**6)
+        observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        self.assertIs(observation["receipts_readable"], True)
+
+    def install_receipt_sources(self, selectors=None):
+        shutil.copy(ROOT / "runtime_target.py", self.runner / "runtime_target.py")
+        source = (ROOT / "review_receipt.py").read_text()
+        if selectors is not None:
+            old = 'SELECTORS = {"promoted-main": DEFAULT_REF, LEGACY_BRANCH: DEFAULT_REF}'
+            self.assertIn(old, source)
+            source = source.replace(old, selectors)
+        (self.runner / "review_receipt.py").write_text(source)
+
+    def test_schema_constants_come_from_the_deployment_tree_read_only(self):
+        self.install_receipt_sources(
+            'SELECTORS = {"promoted-main": DEFAULT_REF, LEGACY_BRANCH: DEFAULT_REF,'
+            ' "release-train": DEFAULT_REF}')
+        sentinel = self.base / "executed"
+        with (self.runner / "review_receipt.py").open("a") as out:
+            out.write("\nopen(%r, 'w').write('ran')\n" % str(sentinel))
+        schema = dc.receipt_schema(self.effects)
+        self.assertEqual(schema["schema_source"],
+                         "deployment:apps/crq-python/review_receipt.py")
+        self.assertEqual(schema["targets"], ("promoted-main", "merge-queue", "release-train"))
+        self.assertEqual((schema["policy"], schema["version"]),
+                         (review_receipt.POLICY, review_receipt.VERSION))
+        self.assertFalse(sentinel.exists())  # parsed, never executed
+        document = self.receipt_document(
+            source={**self.receipt_document()["source"], "target_selector": "release-train"})
+        self.write_receipt(document)
+        validation = dc.receipt_validation(self.effects)
+        self.assertIs(validation["valid"], True, validation["invalid"])
+        self.assertEqual(validation["schema_source"], schema["schema_source"])
+        # The builtin copy would have reported the new selector as invalid.
+        data = review_receipt.canonical(document)
+        self.assertIn("target", dc.receipt_problem(
+            hashlib.sha256(data).hexdigest() + ".json", data))
+
+    def test_unusable_deployment_sources_fall_back_to_recorded_builtin(self):
+        # Fixture checkouts carry no review_receipt.py: missing source.
+        schema = dc.receipt_schema(self.effects)
+        self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+        self.assertIn("FileNotFoundError", schema["schema_source"])
+        self.assertEqual(schema["targets"], dc.RECEIPT_TARGETS)
+        for broken in ("def (:\n", 'POLICY = 7\nVERSION = 1\nSELECTORS = {"a": 1}\n',
+                       "VERSION = 1\nSELECTORS = {UNKNOWN: 1}\n"):
+            with self.subTest(broken=broken):
+                self.install_receipt_sources()
+                (self.runner / "review_receipt.py").write_text(broken)
+                schema = dc.receipt_schema(self.effects)
+                self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+                self.assertEqual(schema["policy"], dc.RECEIPT_POLICY)
+        self.write_receipt(self.receipt_document())
+        validation = dc.receipt_validation(self.effects)
+        self.assertIs(validation["valid"], True)
+        self.assertTrue(validation["schema_source"].startswith("builtin"))
+
     def test_valid_bounded_receipt_sample_and_stalled_tick_stay_independent(self):
         for index in range(dc.RECEIPT_SAMPLE + 2):
             self.write_receipt(self.receipt_document(item_id="current-%d" % index))

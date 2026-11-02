@@ -40,6 +40,7 @@ no deployment, no signer or credential operations.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import datetime as dt
 import hashlib
@@ -458,8 +459,12 @@ def _tick_value(effects: Effects) -> str:
 
 RECEIPT_SAMPLE = 10
 RECEIPT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json")
+# Builtin fallback only: the deployment's own review_receipt.py constants are
+# preferred (receipt_schema); this copy is used, and recorded as such, when
+# they cannot be read statically.
 RECEIPT_POLICY = "affected-current-additions-v1"
 RECEIPT_TARGETS = ("promoted-main", "merge-queue")
+RECEIPT_VERSION = 1
 RECEIPT_COUNTED_OUTCOMES = ("terminal-clean", "terminal-with-findings", "partial-scope")
 RECEIPT_RESOLUTIONS = ("same-path-current", "git-rename-M50")
 RECEIPT_DISPOSITIONS = ("included", "renamed", "deleted", "unsupported",
@@ -476,15 +481,82 @@ def _text(value) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-def receipt_problem(name: str, data: bytes) -> str | None:
+def _newest(entries, limit: int) -> list:
+    """The ``limit`` most recently modified entries (ties by name), so a
+    sample taken after a switch covers what the new runner wrote."""
+    def key(entry):
+        try:
+            mtime = entry.stat().st_mtime_ns
+        except OSError:
+            mtime = -1  # unstattable: still sampleable, never preferred
+        return (-mtime, entry.name)
+    return sorted(entries, key=key)[:limit]
+
+
+def _module_constants(path: Path, imported: dict | None = None) -> dict:
+    """Module-level literal assignments, read statically: never executed.
+
+    Names imported ``from runtime_target`` resolve through ``imported``.
+    Raises OSError/SyntaxError/ValueError when the source is unusable.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    values = dict(imported or {})
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        value = node.value
+        if isinstance(value, ast.Constant):
+            values[node.targets[0].id] = value.value
+        elif isinstance(value, ast.Dict):
+            keys = []
+            for key in value.keys:
+                if isinstance(key, ast.Constant):
+                    keys.append(key.value)
+                elif isinstance(key, ast.Name) and key.id in values:
+                    keys.append(values[key.id])
+                else:
+                    raise ValueError("unresolvable key in " + node.targets[0].id)
+            values[node.targets[0].id] = {"keys": keys}
+    return values
+
+
+def receipt_schema(effects: Effects) -> dict:
+    """Receipt policy/version/target selectors from THIS deployment's
+    review_receipt.py (and runtime_target.py), parsed read-only with ast so
+    nothing from the checkout executes outside the controller lock. Falls
+    back to the builtin copy with the reason recorded in ``schema_source``.
+    """
+    runner = effects.root / "apps/crq-python"
+    try:
+        target = _module_constants(runner / "runtime_target.py")
+        constants = _module_constants(runner / "review_receipt.py", target)
+        policy, version = constants["POLICY"], constants["VERSION"]
+        targets = tuple(constants["SELECTORS"]["keys"])
+        if (not isinstance(policy, str) or type(version) is not int or not targets
+                or not all(isinstance(t, str) for t in targets)):
+            raise ValueError("unexpected constant types")
+        return {"schema_source": "deployment:apps/crq-python/review_receipt.py",
+                "policy": policy, "version": version, "targets": targets}
+    except (OSError, SyntaxError, ValueError, KeyError, TypeError) as exc:
+        return {"schema_source": "builtin (deployment constants unavailable: "
+                                 + type(exc).__name__ + ": " + str(exc)[:80] + ")",
+                "policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
+                "targets": RECEIPT_TARGETS}
+
+
+def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str | None:
     """Why a retained receipt is not a valid v1 review receipt, or None.
 
     Mirrors the stable receipt contract read-only and offline: the immutable
     content identity (review_receipt.read_receipt), the TS QueueReceiptSchema
     (src/ops/review/internal/queueEvidence.ts) and its scope-digest check.
     Groups: run identity, captured target, terminal outcome. Never imports
-    runner code and never grants review credit.
+    runner code and never grants review credit. ``schema`` is
+    ``receipt_schema()`` output; the builtin copy when omitted.
     """
+    schema = schema or {"policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
+                        "targets": RECEIPT_TARGETS}
     if hashlib.sha256(data).hexdigest() + ".json" != name:
         return "content identity: sha256 does not match the receipt name"
     try:
@@ -493,7 +565,7 @@ def receipt_problem(name: str, data: bytes) -> str | None:
         return "malformed: not valid JSON"
     if not isinstance(doc, dict):
         return "malformed: not a JSON object"
-    if doc.get("version") != 1:
+    if doc.get("version") != schema["version"]:
         return "unsupported receipt version"
     # Run identity: the queue item, and the run when one was launched.
     run_id = doc.get("run_id")
@@ -513,8 +585,8 @@ def receipt_problem(name: str, data: bytes) -> str | None:
             and re.fullmatch(r"[\w.-]+/[\w.-]+", source["repo"])
             and type(source.get("pr")) is int and source["pr"] > 0
             and _hex(_HEX40, source.get("merge_sha"))
-            and source.get("target_selector") in RECEIPT_TARGETS
-            and source.get("policy") == RECEIPT_POLICY):
+            and source.get("target_selector") in schema["targets"]
+            and source.get("policy") == schema["policy"]):
         return "target: source binding is not a v1 merged-current subject"
     if not (isinstance(capture, dict)
             and _hex(_HEX40, capture.get("target"))
@@ -532,7 +604,7 @@ def receipt_problem(name: str, data: bytes) -> str | None:
     if capture.get("scope_digest") != hashlib.sha256(canonical).hexdigest():
         return "target: scope digest does not match the path manifest"
     if not (_hex(_HEX64, capture.get("equivalence"))
-            and capture.get("policy") == RECEIPT_POLICY
+            and capture.get("policy") == schema["policy"]
             and capture.get("projection")
             == "current-affected-files/full-file-addition-projection"
             and capture.get("reviewer") == "coderabbit-review-agent-committed-v1"
@@ -572,18 +644,20 @@ def receipt_validation(effects: Effects) -> dict | None:
     root = effects.state_dir() / "receipts"
     if not root.is_dir():
         return None
-    names = sorted(entry.name for entry in root.iterdir()
-                   if RECEIPT_NAME_RE.fullmatch(entry.name))[:RECEIPT_SAMPLE]
+    names = [entry.name for entry in _newest(
+        [e for e in root.iterdir() if RECEIPT_NAME_RE.fullmatch(e.name)], RECEIPT_SAMPLE)]
+    schema = receipt_schema(effects)
     invalid = []
     for name in names:
         try:
-            problem = receipt_problem(name, (root / name).read_bytes())
+            problem = receipt_problem(name, (root / name).read_bytes(), schema)
         except OSError as exc:
             problem = "unreadable: " + str(exc)[:80]
         if problem:
             invalid.append({"receipt": name[:-5], "reason": problem})
     return {"sampled": len(names), "valid_count": len(names) - len(invalid),
-            "invalid": invalid, "valid": (not invalid) if names else None}
+            "invalid": invalid, "valid": (not invalid) if names else None,
+            "schema_source": schema["schema_source"]}
 
 
 def health_observation(effects: Effects, prior_tick: str) -> dict:
@@ -602,9 +676,9 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
     receipts = effects.state_dir() / "runs"
     receipt_sample = None
     if receipts.is_dir():
-        entries = sorted(receipts.iterdir())
+        entries = _newest(list(receipts.iterdir()), RECEIPT_SAMPLE)
         readable = 0
-        for entry in entries[:10]:
+        for entry in entries:
             meta = entry / "meta.json"
             if meta.is_file():
                 try:
@@ -612,7 +686,7 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
                     readable += 1
                 except (ValueError, OSError):
                     pass
-        receipt_sample = {"sampled": len(entries[:10]), "readable": readable}
+        receipt_sample = {"sampled": len(entries), "readable": readable}
     validation = receipt_validation(effects)
     return {"observed_tick": current, "advanced": advanced,
             "receipts": receipt_sample,
