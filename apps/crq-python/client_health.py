@@ -2,6 +2,7 @@
 import datetime as dt
 from pathlib import Path
 import re
+import subprocess
 
 TITLE = "crq: merged discovery incomplete"
 MARKER = "<!-- crq-discovery-health-v1 -->"
@@ -51,7 +52,7 @@ def snapshot(q):
             "deployedSha": health.get("sha")}
 
 
-def advisory(c, q, health, budget):
+def advisory(c, q, health, budget, log):
     """At most three calls, using a separate fixed budget; settled transitions are quiet."""
     threshold = c.CONFIG.get("discovery_incomplete_ticks", 3)
     if type(threshold) is not int or not 1 <= threshold <= 1000000:
@@ -62,12 +63,12 @@ def advisory(c, q, health, budget):
         return
     calls = 0
 
-    def forge(args):
+    def forge(args, *, create=False):
         nonlocal calls
         if calls >= 3 or not budget.available():
             raise RuntimeError("health advisory budget exhausted")
         calls += 1
-        return c.gh_json(args)
+        return c.gh_json(args, definite_failure=True) if create else c.gh_json(args)
 
     with c.forge_window(budget):
         number = health.get("issue_number")
@@ -76,14 +77,22 @@ def advisory(c, q, health, budget):
                           "--limit", "100", "--json", "number,title,body"])
             matches = [r for r in rows if r.get("title") == TITLE and MARKER in (r.get("body") or "")]
             number = matches[0]["number"] if matches else None
-        if number is None and health.get("opening"):
-            raise RuntimeError("opening issue not yet found; attempt skipped")
+            if health.get("opening"):
+                if number is None:
+                    log.append("health advisory: opening marker unresolved; confirming list found no issue, marker cleared")
+                health.update(opening=False, issue_number=number)
+                c.save_queue(q)
         body = MARKER + "\nDiscovery incomplete for " + str(health["incomplete_ticks"]) + " ticks. Advisory only."
         if desired:
             if number is None:
                 health["opening"] = True
                 c.save_queue(q)  # persist intent before an ambiguous create response
-                result = forge(["api", f"repos/{c.REPO}/issues", "-f", "title=" + TITLE, "-f", "body=" + body])
+                try:
+                    result = forge(["api", f"repos/{c.REPO}/issues", "-f", "title=" + TITLE, "-f", "body=" + body], create=True)
+                except subprocess.CalledProcessError:
+                    health["opening"] = False
+                    c.save_queue(q)
+                    raise
                 number = result["number"]
                 health["issue_number"] = number
                 c.save_queue(q)
@@ -112,9 +121,12 @@ def record(c, q, *, discovery_enabled):
     # Skipped discovery retains the last observation without advancing history.
     if not discovery_enabled or complete is None:
         return ["health advisory skipped: discovery not run"]
+    log = []
     try:
-        advisory(c, q, health, c.ForgeBudget(requests=3, seconds=10))
+        advisory(c, q, health, c.ForgeBudget(requests=3, seconds=10), log)
     except Exception as exc:
         # Never include forge responses or credential-bearing exception text.
-        return ["health advisory skipped or failed: " + type(exc).__name__]
-    return []
+        log.append("health advisory skipped or failed: " + type(exc).__name__)
+        if health.get("opening") and health.get("issue_number") is None:
+            log.append("health advisory: opening marker unresolved")
+    return log

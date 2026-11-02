@@ -267,10 +267,13 @@ comments/closes on recovery. The issue body refreshes only at multiples of
 `discovery_incomplete_ticks` (3, 6, 9 by default), and on open/recovery transitions.
 Each attempt uses a separate fixed ForgeBudget of three calls and ten seconds,
 so exhausted discovery cannot starve the advisory. Skipped or failed attempts
-produce a tick log line. Before create, a durable opening marker is saved; an
-ambiguous create is never repeated automatically. A bounded, non-search-index
-issue list finds the stable marker on later ticks; if it cannot find the issue,
-the attempt is logged and skipped. Operators can reconcile a persistent opening
-marker after checking GitHub; it is advisory and never blocks dispatch.
+produce a tick log line. Before create, a durable opening marker is saved; a
+definite non-zero create exit clears the marker so later ticks can retry.
+Timeouts and other ambiguous outcomes retain it and log `opening marker unresolved`.
+The next attempt makes one bounded, non-search-index confirming issue-list call:
+if it finds the marker it adopts that issue; otherwise it clears the opening
+marker and may create within the remaining budget. If discovery has recovered,
+absence clears the marker without creating an issue. Failed confirmation retains
+the marker and logs the unresolved state. This remains advisory and never blocks dispatch.
 Budget exhaustion and forge failures never fail a tick. Existing gh credentials
 are reused. The advisory does not block dispatch or alter review credit.

@@ -152,8 +152,12 @@ def forge_window(budget):
         _FORGE_BUDGET = previous
 
 
-def gh_json(args: List[str]) -> Any:
+def gh_json(args: List[str], *, definite_failure: bool = False) -> Any:
     timeout = _FORGE_BUDGET.take() if _FORGE_BUDGET is not None else 120
+    if definite_failure:
+        result = run(["gh", *args], cwd=CLONE, timeout=timeout, check=False)
+        result.check_returncode()
+        return json.loads(result.stdout)
     return json.loads(run(["gh", *args], cwd=CLONE, timeout=timeout).stdout)
 
 

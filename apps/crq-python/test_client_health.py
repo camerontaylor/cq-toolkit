@@ -1,5 +1,6 @@
 """Offline health history and advisory transition fixtures."""
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 import unittest
@@ -97,23 +98,71 @@ class HealthTests(unittest.TestCase):
         self.assertIn("skipped or failed", health.record(c, q, discovery_enabled=True)[0])
         c.gh_json.assert_not_called()
 
-    def test_ambiguous_create_is_not_repeated_after_restart(self):
+    def test_failed_create_then_healthy_ticks_then_recovery(self):
+        for failure in (subprocess.CalledProcessError(1, ["gh"]),
+                        subprocess.TimeoutExpired(["gh"], 10), RuntimeError("ambiguous response")):
+            with self.subTest(failure=type(failure).__name__):
+                c = self.runner()
+                c.gh_json.side_effect = [[], failure]
+                q = {"merged_discovery": {"complete": False}, "client_health": {"incomplete_ticks": 2}}
+                persisted = []
+                c.save_queue.side_effect = lambda q: persisted.append(json.loads(json.dumps(q)))
+                log = health.record(c, q, discovery_enabled=True)
+                self.assertIn("failed", log[0])
+                ambiguous = not isinstance(failure, subprocess.CalledProcessError)
+                self.assertEqual(q["client_health"]["opening"], ambiguous)
+                self.assertEqual(any("opening marker unresolved" in line for line in log), ambiguous)
+                q = persisted[-1]  # restart with the actual durable marker state
+                c.gh_json.side_effect = [[], {"number": 42}, {}, {}, {}]
+                log = health.record(c, q, discovery_enabled=True)
+                self.assertEqual(any("opening marker unresolved" in line for line in log), ambiguous)
+                self.assertTrue(q["client_health"]["issue_open"])
+                self.assertFalse(q["client_health"]["opening"])
+                self.assertEqual(c.gh_json.call_count, 4)  # one confirming list, then create
+                c.gh_json.assert_called_with(mock.ANY, definite_failure=True)
+                health.record(c, q, discovery_enabled=True)
+                health.record(c, q, discovery_enabled=True)
+                q["merged_discovery"]["complete"] = True
+                health.record(c, q, discovery_enabled=True)
+                health.record(c, q, discovery_enabled=True)
+                self.assertEqual(c.gh_json.call_count, 7)
+                self.assertEqual(q["client_health"]["issue_number"], 42)
+                self.assertFalse(q["client_health"]["issue_open"])
+                self.assertFalse(q["client_health"]["opening"])
+                self.assertEqual(q["client_health"]["incomplete_ticks"], 0)
+
+    def test_timeout_adopts_existing_issue_without_duplicate_create(self):
         c = self.runner()
-        c.CONFIG["discovery_incomplete_ticks"] = 1
-        c.gh_json.side_effect = [[], RuntimeError("lost create response")]
-        q = {"merged_discovery": {"complete": False}}
-        persisted = []
-        c.save_queue.side_effect = lambda q: persisted.append(json.loads(json.dumps(q)))
-        self.assertIn("failed", health.record(c, q, discovery_enabled=True)[0])
-        q = persisted[-1]
-        self.assertTrue(q["client_health"]["opening"])
+        q = {"merged_discovery": {"complete": False}, "client_health": {"incomplete_ticks": 2}}
+        c.gh_json.side_effect = [[], subprocess.TimeoutExpired(["gh"], 10)]
+        self.assertIn("opening marker unresolved", health.record(c, q, discovery_enabled=True)[1])
+        q = json.loads(json.dumps(q))
         c.gh_json.reset_mock(side_effect=True)
-        c.gh_json.side_effect = [[], [{"number": 42, "title": health.TITLE, "body": health.MARKER}], {}]
-        self.assertIn("skipped", health.record(c, q, discovery_enabled=True)[0])
+        c.gh_json.side_effect = [[{"number": 42, "title": health.TITLE, "body": health.MARKER}], {}, {}, {}]
+        self.assertEqual(health.record(c, q, discovery_enabled=True), [])
+        self.assertEqual(c.gh_json.call_count, 2)  # confirming list, update; no create
+        self.assertFalse(q["client_health"]["opening"])
+        self.assertEqual(q["client_health"]["issue_number"], 42)
+        q["merged_discovery"]["complete"] = True
         health.record(c, q, discovery_enabled=True)
-        self.assertTrue(q["client_health"]["issue_open"])
-        self.assertEqual(c.gh_json.call_count, 3)  # list, list, update; never a second create
-        self.assertNotIn("--search", c.gh_json.call_args_list[0].args[0])
+        self.assertFalse(q["client_health"]["issue_open"])
+        self.assertEqual(c.gh_json.call_count, 4)
+
+    def test_recovery_clears_unresolved_marker_after_absent_confirming_list(self):
+        c = self.runner()
+        q = {"merged_discovery": {"complete": True}, "client_health": {"opening": True}}
+        c.gh_json.side_effect = [[]]
+        self.assertIn("opening marker unresolved", health.record(c, q, discovery_enabled=True)[0])
+        self.assertFalse(q["client_health"]["opening"])
+        self.assertFalse(q["client_health"]["issue_open"])
+        self.assertIsNone(q["client_health"]["issue_number"])
+        self.assertEqual(c.gh_json.call_count, 1)
+
+    def test_create_adapter_preserves_definite_nonzero_exit(self):
+        with mock.patch.object(crq, "run", return_value=subprocess.CompletedProcess(["gh"], 1, "", "")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                crq.gh_json(["api", "repos/owner/repo/issues"], definite_failure=True)
+            self.assertFalse(run.call_args.kwargs["check"])
 
     def test_recovery_reconciles_an_ambiguous_opening(self):
         c = self.runner()
