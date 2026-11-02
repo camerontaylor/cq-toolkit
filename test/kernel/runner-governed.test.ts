@@ -1617,10 +1617,12 @@ describe('governed journal v2 + resume', () => {
         },
         availability: {},
       };
-      // Dispatch + spend evidence, so the v1-dispatch gate (runner :757) and
-      // the seedRuns v1 tag (:779) both have something to get wrong: a
-      // misfiled v1 run would refuse the resume (no v1 spend) and would not
-      // seed the ledger.
+      // Dispatch + spend evidence for the seedRuns v1 tag (runner :779): a
+      // misfiled v1 tag would silently drop this run's spend from the seed.
+      // (The v1-DISPATCH gate at :757 needs a header WITHOUT a legacyJournal
+      // reset naming the run — the self-naming reset here filters it out of
+      // unaccountedV1, so refusal (b) cannot fire. The plan-gov-v3b fixture
+      // below covers that gate.)
       const dispatched: Array<Record<string, unknown>> = [
         {
           type: 'job-started',
@@ -1746,6 +1748,85 @@ describe('governed journal v2 + resume', () => {
       // seq 4: the seed-trip run consumed seq 2 and the reset run seq 3
       // (maxPriorSeq counts the v3 header's seq 1, proving v3 seq continuity).
       expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 4 });
+
+      // The v1-DISPATCH gate (runner :757) — a plan whose governed v3 history
+      // has NO legacyJournal reset: a v1-misfiled v3 run with dispatches
+      // would hit refusal (b) ('governed resume over v1 journals'), so the
+      // clean resolve below kills that revert.
+      const v3bStarted: Extract<JournalEvent, { type: 'run-started' }> = {
+        type: 'run-started',
+        runId: 'plan-gov-v3b--k--a',
+        at: '2026-01-03T04:05:06.789Z',
+        planId: 'plan-gov-v3b',
+        journalVersion: 3,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+        provenance: {
+          cqVersion: '0.2.0',
+          producerVersion: '0.2.0',
+          repoId: null,
+          cqJsonHash: `sha256:${'b'.repeat(64)}`,
+          baseSha: 'a'.repeat(40),
+          runPrefix: 'plan-gov-v3b',
+          startedAt: '2026-01-03T04:05:06.789Z',
+          endedAt: null,
+          journalLink: 'runs/plan-gov-v3b--k--a.ndjson',
+          reportLink: 'reports/plan-gov-v3b--k--a.json',
+          witnesses: {
+            base: 'a'.repeat(40),
+            admitted: null,
+            execution: null,
+            reviewed: null,
+            accepted: null,
+          },
+        },
+        correlation: {
+          workId: '5f2b8c1e-1111-4222-8333-444455556666',
+          parentWorkId: null,
+          branch: 'feat/demo',
+          commitSha: null,
+          sessionId: null,
+          agentId: null,
+        },
+        availability: {},
+      };
+      await writeFile(
+        join(dir, 'plan-gov-v3b--k--a.ndjson'),
+        [
+          v3bStarted,
+          {
+            type: 'job-started',
+            runId: 'plan-gov-v3b--k--a',
+            at: '2026-01-03T04:05:07.000Z',
+            jobId: 'j1',
+            op: 'fake',
+            attempt: 1,
+          },
+          {
+            type: 'job-finished',
+            runId: 'plan-gov-v3b--k--a',
+            at: '2026-01-03T04:05:08.000Z',
+            jobId: 'j1',
+            opId: 'op-j1',
+            inputsHash: 'hash-j1',
+            result: { status: 'ok', value: 'j1' },
+            costUSD: 1,
+          },
+        ]
+          .map((event) => `${JSON.stringify(event)}\n`)
+          .join(''),
+        'utf8',
+      );
+      const v3bCalls: string[] = [];
+      const v3bReport = await runPlan(
+        independentPlan('plan-gov-v3b', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(v3bCalls))),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      // The gate did NOT misfile the v3 run as v1: no refusal — the op ran.
+      expect(v3bCalls).toEqual(['j1']);
+      expect(v3bReport.counts).toMatchObject({ done: 1, failed: 0, 'budget-exhausted': 0 });
     },
     journalEnclosure(3),
   );
