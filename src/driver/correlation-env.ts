@@ -8,7 +8,8 @@
 // otherwise sit next to this job's CQ_WORK_ID). Absent correlation leaves
 // the inherited identity alone EXCEPT for the M5b1 direct-op derivation: a
 // direct op invocation (no runner minted a correlation) with no inherited
-// CQ_* identity gets the enclosing Paseo agent derived as CQ_PARENT_WORK_ID
+// CQ_WORK_ID and no inherited CQ_PARENT_WORK_ID gets the enclosing Paseo
+// agent derived as CQ_PARENT_WORK_ID
 // (see the undefined-correlation branch below).
 //
 // STAMP SCOPE (deliberate, one line): applyCorrelationEnv is called ONLY at
@@ -35,10 +36,13 @@ export function applyCorrelationEnv(
   if (correlation === undefined) {
     // Direct op invocation (measurement M5b1): no runner minted a
     // correlation, so derive the Paseo parent HERE at the shared driver
-    // boundary — every transport composes its child env through this one
-    // function, and the CLI surface needs no second precedence
-    // implementation. The derivation reads ONLY the passed env (never
-    // process.env), so an explicit inherited CQ_* identity is respected and
+    // boundary — the SDK and ACP transports hand their composed child env
+    // through this one function, and the CLI surface needs no second
+    // precedence implementation (the CLI's overrides-only composition is
+    // stamped by buildChildEnv instead, so this derivation is its backstop).
+    // The derivation reads ONLY the passed env (never
+    // process.env), so an explicit inherited CQ_WORK_ID or CQ_PARENT_WORK_ID
+    // is respected and
     // a Paseo agent id is translated to the `paseo:` parent-work shape the
     // governed path already uses. `PASEO_AGENT_ID` itself is never
     // forwarded (not on the child allowlist). The Paseo id is the LAST
@@ -86,7 +90,7 @@ export function correlationEnvRemovals(correlation: WorkCorrelation | undefined)
 export function paseoParentWorkId(
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
-  const paseoAgentId = env['PASEO_AGENT_ID']?.trim();
+  const paseoAgentId = env['PASEO_AGENT_ID'];
   return paseoParentLinkFromAgentId(paseoAgentId);
 }
 
