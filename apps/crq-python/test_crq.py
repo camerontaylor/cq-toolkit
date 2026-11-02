@@ -4,6 +4,7 @@ import base64
 import contextlib
 import copy
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -1057,6 +1058,14 @@ class CurrentTest(unittest.TestCase):
             exact = crq.current_paths(self.merge, self.merge)
         self.assertEqual([r["source_path"] for r in exact], names)
         self.assertEqual([r["disposition"] for r in exact], ["unsupported"] * 3 + ["included"])
+
+    def test_git_z_has_run_timeout_and_propagates_expiry(self):
+        expired = subprocess.TimeoutExpired(["git", "diff"], 600)
+        with mock.patch.object(crq.subprocess, "run", side_effect=expired) as launch:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                crq.git_z("diff", "--name-only", "--no-renames", "-z", self.pre, self.merge)
+        self.assertEqual(launch.call_args.kwargs["timeout"], 600)
+        self.assertEqual(launch.call_args.kwargs["timeout"], inspect.signature(crq.run).parameters["timeout"].default)
 
     def test_source_at_path_count_cap_is_scanned_normally(self):
         names = self.oversized_source()

@@ -851,13 +851,14 @@ def build_synthetic(item: Dict[str, Any], target: str) -> Tuple[str, str, int]:
 CURRENT_PATH_CAP = 1000
 
 
-def git_z(*args: str) -> List[str]:
+def git_z(*args: str, timeout: int = 600) -> List[str]:
     """NUL-delimited git output read as bytes, so paths stay exact.
 
     Text mode would translate \\r and \\r\\n, collapsing distinct paths.
     surrogateescape keeps undecodable bytes distinct and round-trips them to git.
+    Same 600 s timeout as run(): subprocess.TimeoutExpired propagates.
     """
-    p = subprocess.run(["git", *args], cwd=CLONE, capture_output=True)
+    p = subprocess.run(["git", *args], cwd=CLONE, capture_output=True, timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:5])} … exit {p.returncode}: "
                            f"{p.stderr.decode('utf-8', 'replace').strip()[:400]}")
