@@ -12,12 +12,38 @@ import admission_history
 from crq_repair import atomic
 
 
+def generate_live(path):
+    """25,526 <=37 KB decisions, <=112 holds, ~9.5 MB non-history data."""
+    holds = {f"{i:064x}": {"item": f"{i:048x}", "at": "2026-11-02T00:00:00Z",
+             "quota_state": "expired" if i < 100 else "reserved",
+             "vendor_run_id": f"{i:024x}", "terminal_at": "2026-11-01T00:00:00Z"}
+             for i in range(112)}
+    row = json.dumps({"at": "2026-11-02T00:00:00Z", "item": "synthetic-job",
+                      "ordinary_eligible": False, "observation": {
+                          "successful": True, "remaining": 1, "observed_at": "2026-11-02T00:00:00Z",
+                          "reflected_reservations": []}, "reservations": holds,
+                      "effective_remaining": -11, "decision": "one-slot-reserve"})
+    item = json.dumps({"id": "ordinary", "kind": "open", "state": "done", "notes": ["x" * 5850]})
+    assert len(row) <= 37000
+    with path.open("w") as out:
+        out.write('{"items":[')
+        for i in range(1596):
+            out.write(("," if i else "") + item)
+        out.write('],"backfill_reservations":' + json.dumps(holds) + ',"backfill_admissions":[')
+        for i in range(25526):
+            out.write(("," if i else "") + row)
+        out.write("]}")
+    print(f"shape=live-shaped admissions=25526 entry_bytes={len(row)} reservations=112 items=1596")
+
+
 def main():
     directory, mode = Path(sys.argv[1]), sys.argv[2]
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "queue.json"
     started = time.monotonic()
-    if mode == "generate":
+    if mode == "generate-live":
+        generate_live(path)
+    elif mode == "generate":
         holds = {f"attempt-{i}": {"item": f"job-{i}", "at": "2026-11-02T00:00:00Z",
                  "quota_state": "released", "vendor_run_id": f"run-{i}"} for i in range(3000)}
         row = json.dumps({"at": "2026-11-02T00:00:00Z", "item": "job", "ordinary_eligible": False,

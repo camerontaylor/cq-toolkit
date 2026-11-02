@@ -226,13 +226,24 @@ def live_items(q):
     return [item for item in q["items"] if item.get("kind") != "promotion"]
 
 
+# Keep source identity outside the queue: checkpoint/transport copies serialize it.
+_pending_admission_compaction = None
+
+
+def queue_identity():
+    stat = QUEUE.stat()
+    return (QUEUE.resolve(), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
 def load_queue(*, persist_compaction=False) -> Dict[str, Any]:
-    before_bytes = QUEUE.stat().st_size
+    global _pending_admission_compaction
+    identity = queue_identity()
     q, compacted = admission_history.load(QUEUE)
+    if compacted:
+        _pending_admission_compaction = identity
     # Only lock-owning mutators may replace the snapshot; status/report stay read-only.
     if compacted and persist_compaction:
         save_queue(q)
-        print(f"admission compaction v{admission_history.VERSION}: before_bytes={before_bytes} after_bytes={QUEUE.stat().st_size}", file=sys.stderr)
     # Idempotently retire the superseded second-cycle debt. Explicit optional
     # requeues survive reload; running reviews still have to be harvested.
     for item in live_items(q):
@@ -244,7 +255,14 @@ def load_queue(*, persist_compaction=False) -> Dict[str, Any]:
 
 
 def save_queue(q: Dict[str, Any]) -> None:
+    global _pending_admission_compaction
+    pending = _pending_admission_compaction
+    log_compaction = (pending is not None and q.get(admission_history.MARKER) == admission_history.VERSION
+                      and QUEUE.exists() and queue_identity() == pending)
     repair_tick.atomic(QUEUE, q)
+    _pending_admission_compaction = None
+    if log_compaction:
+        admission_history.log_compaction(QUEUE, pending[3])
 
 
 def pid_alive(pid: Optional[int]) -> bool:

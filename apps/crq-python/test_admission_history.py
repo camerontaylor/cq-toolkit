@@ -9,6 +9,8 @@ import admission_history as history
 import backfill_jobs as jobs
 import crq
 import backfill_report
+import review_ledger as ledger
+import io
 
 
 class HistoryTests(unittest.TestCase):
@@ -64,3 +66,58 @@ class HistoryTests(unittest.TestCase):
                 with patch.object(crq, "QUEUE", path), self.assertRaises(ValueError):
                     crq.load_queue()
                 self.assertEqual(path.read_text(), raw)
+
+    def test_nested_duplicates_and_invalid_numbers_fail_before_journal_operation(self):
+        cases = ('{"items": [{"id": "one", "id": "two"}]}',
+                 '{"items": [], "backfill_admissions": [{"observation": {"remaining": 1, "remaining": 2}}]}',
+                 '{"items": [], "value": 1.5}', '{"items": [], "value": NaN}',
+                 '{"items": [], "backfill_admissions": [{"observation": {"remaining": 1.5}}]}')
+        for raw in cases:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as td:
+                journal = jobs.Journal(Path(td) / "queue.json", Path(td) / "tick.lock")
+                journal.filename.write_text(raw)
+                operation = unittest.mock.Mock()
+                with self.assertRaises(ledger.IntegrityError):
+                    journal.transact(operation)
+                operation.assert_not_called()
+                self.assertEqual(journal.filename.read_text(), raw)
+
+    def test_invalid_version_marker_has_typed_error(self):
+        for marker in (None, "1", 1.0, True, [], {}, -1, 2):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "queue.json"
+                path.write_text(json.dumps({history.MARKER: marker}))
+                with self.assertRaisesRegex(ValueError, "unsupported admission history version"):
+                    history.load(path)
+
+    def test_first_non_tick_save_logs_once_even_after_queue_copy(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "queue.json"
+            path.write_text(json.dumps({"items": [], "backfill_admissions": [{"decision": "usage-unknown"}]}))
+            before = path.stat().st_size
+            with patch.object(crq, "QUEUE", path), patch("sys.stderr", new_callable=io.StringIO) as log:
+                q = json.loads(json.dumps(crq.load_queue()))
+                self.assertEqual(log.getvalue(), "")
+                crq.save_queue(q)
+                self.assertIn(f"before_bytes={before} after_bytes={path.stat().st_size}", log.getvalue())
+                crq.save_queue(q)
+                self.assertEqual(log.getvalue().count("admission compaction v1"), 1)
+
+    def test_journal_logs_first_compaction_only_after_successful_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            journal = jobs.Journal(Path(td) / "queue.json", Path(td) / "tick.lock")
+            journal.filename.write_text('{"items": [], "backfill_admissions": []}')
+            with patch("sys.stderr", new_callable=io.StringIO) as log:
+                with patch.object(ledger, "atomic", side_effect=OSError("save failed")):
+                    with self.assertRaises(OSError):
+                        journal.transact(lambda q: None)
+                self.assertEqual(log.getvalue(), "")
+                journal.transact(lambda q: None)
+                journal.transact(lambda q: None)
+                self.assertEqual(log.getvalue().count("admission compaction v1"), 1)
+
+    def test_admission_summarized_once(self):
+        with patch.object(history, "summarize", wraps=history.summarize) as summarize:
+            decision = jobs.admission({"items": []}, {"id": "job"}, "2026-11-02T00:00:00Z", None, False)
+            summarize.assert_called_once()
+            self.assertEqual(decision["decision"], "usage-unknown")

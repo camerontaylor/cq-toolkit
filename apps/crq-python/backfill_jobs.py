@@ -127,8 +127,7 @@ def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
     decision = {"at": at, "item": item["id"], "ordinary_eligible": bool(ordinary_eligible),
                 "observation": observation, "reservations": holds,
                 "effective_remaining": effective, "decision": reason or "admit"}
-    decision = admission_history.summarize(decision)
-    admission_history.append(queue, decision)
+    decision = admission_history.append(queue, decision)
     if reason or not reserve:
         return decision
     item["attempt"] = item.get("attempt", 0) + 1
@@ -257,7 +256,11 @@ class Journal:
 
     def transact(self, operation):
         with ledger.locked(self.lock):
-            queue = admission_history.load(self.filename)[0] if self.filename.exists() else {"items": []}
+            before = self.filename.stat().st_size if self.filename.exists() else None
+            queue, compacted = (admission_history.load(self.filename, strict=True)
+                                if before is not None else ({"items": []}, False))
             result = operation(queue)
             ledger.atomic(self.filename, ledger.canonical(queue))
+            if compacted:
+                admission_history.log_compaction(self.filename, before)
             return result
