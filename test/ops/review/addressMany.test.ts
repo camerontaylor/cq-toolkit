@@ -774,7 +774,13 @@ test('M7-many failed-result evidence', async () => {
 test('M7-many cancellation evidence', async () => {
   // A non-dispatched admitted leg (changed head before dispatch) settles with
   // an EXPLICIT UNKNOWN observation, never a measured zero: it is not an
-  // invocation, so knownCount must not inflate.
+  // invocation, so knownCount must not inflate. This is the deliberate
+  // admitted-leg-as-unit model, not an inconsistency: the leg's ledger
+  // OBSERVATION records {} (usageSummary unknownCount 1) while its BUDGET
+  // settlement is a measured zero, because a budget hold and a usage
+  // observation answer different questions — the hold reserves capacity for a
+  // leg that was admitted as a unit, the observation records only real
+  // invocations.
   let calls = 0;
   const changingGh = async (args: string[]) => ({
     code: 0,
@@ -804,10 +810,12 @@ test('M7-many cancellation evidence', async () => {
 
 test('M7-many malformed evidence degrades to unknown without losing settlement', async () => {
   // A malformed usage measurement is unmeasurable telemetry: it settles
-  // through the unknown-usage path, so the held reservations actually release
-  // (marked unresolved), the sticky unknown-usage stop is set, the aggregate
-  // never spuriously reports settled-ok accounting, and the observation
-  // degrades to explicit unknown instead of throwing out of the leg.
+  // through the unknown-usage path, so the held reservations settle as
+  // unresolved and are retained in outstanding at their full allocations
+  // (never released, never refunded), the sticky unknown-usage stop is set,
+  // the aggregate never spuriously reports settled-ok accounting, and the
+  // observation degrades to explicit unknown instead of throwing out of the
+  // leg.
   const badUsage = report();
   (badUsage.usage as unknown as { input: number }).input = -5;
   const address = vi.fn(async () => ({ status: 'ok' as const, value: badUsage }));

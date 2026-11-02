@@ -504,9 +504,10 @@ function makeReviewAddressManyCore(
           // a malformed one (negative or non-integer tokens) is unmeasurable
           // telemetry, so the leg settles through the SAME unknown-usage path
           // as a dispatched leg without a measurement. The held reservation
-          // actually releases (marked unresolved), the sticky unknown-usage
-          // stop is set, and the raw value can never leak into the ledger as
-          // a token total.
+          // settles as unresolved and is retained in outstanding at its full
+          // allocation (never released, never refunded), the sticky
+          // unknown-usage stop is set, and the raw value can never leak into
+          // the ledger as a token total.
           const observation = usage
             ? normalizeUsageObservation({
                 usage,
@@ -533,9 +534,17 @@ function makeReviewAddressManyCore(
           }
           // A thrown settlement (ledger arithmetic leaving the safe range) is
           // folded into the same unknown-usage settlement path: the held
-          // reservation releases as unresolved, the sticky stop is set, and
+          // reservation settles as unresolved and is retained in outstanding
+          // at its full allocation, the sticky stop is set, and
           // the fault is named — the leg can never skip settlement, and the
           // aggregate can never spuriously flip on a held allocation.
+          // A thrown settlement and a refused known settlement are handled
+          // DIFFERENTLY, deliberately: a refusal (individually safe
+          // measurement whose honest total exceeds MAX_SAFE_INTEGER) leaves
+          // the reservation `reserved` with stop: null — nothing is settled,
+          // so nothing may be marked unresolved — while a thrown total
+          // becomes `unresolved` with the sticky unknown-usage stop. Do NOT
+          // fold these paths; that would change behavior outside this lane.
           let settled: ReturnType<typeof settleAddressMany>;
           try {
             settled = known
