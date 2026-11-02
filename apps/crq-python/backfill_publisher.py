@@ -93,5 +93,7 @@ def run(c):
 
 
 if __name__ == "__main__":
+    import json
     import crq
-    run(crq)
+    # Journal the outcome so recurring reconciliation-pending runs are visible.
+    print(json.dumps(run(crq), sort_keys=True))

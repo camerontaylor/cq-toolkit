@@ -99,8 +99,10 @@ class PublisherTest(unittest.TestCase):
         self.assertNotEqual(self.q.get("backfill_halt_operation"), "publication")
         self.c.with_lock = lock
         self.q["backfill_halted"] = "unrelated operator halt"
-        worker.run(self.c)
+        self.assertEqual(worker.run(self.c)["publication"], "reconciled")
         self.assertEqual(len(self.pushes), 1)
+        self.assertEqual(self.q["review_ledger_head"], self.pushes[0])
+        self.assertFalse((self.state / "backfill/publish-request.json").exists())
         self.assertFalse((self.state / "backfill/publication-failure.json").exists())
         self.assertEqual(self.q["backfill_halted"], "unrelated operator halt")
 
