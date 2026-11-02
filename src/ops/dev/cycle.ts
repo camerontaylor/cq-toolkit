@@ -1317,6 +1317,10 @@ export function makeDevCycle(deps: DevCycleDeps): Op<DevCycleCompositionInput, D
         pending.delete(id);
       },
     };
+    // The guard is the ONE boundary (guardDevOp): the core folds every fault
+    // to a typed result and never rejects, so this await either returns a
+    // typed result or the process is unwinding — settled usage always lands
+    // on the result's existing carrier below.
     const result = await makeDevCycleCore(deps, observe)(input);
     open = false;
     for (const id of pending) usageLedger.record(id, {});
