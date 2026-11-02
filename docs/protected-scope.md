@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # Protected scope: the deployed system, not the codebase
 
 Owner principle, 2026-10-16: _"It makes sense to have the deployed quality

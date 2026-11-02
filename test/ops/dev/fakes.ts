@@ -109,7 +109,7 @@ export function cycleRecord(overrides: Partial<DevCycleRecord> = {}): DevCycleRe
     cycleId: 'c001-aaaaaaaa',
     reviewer: 'coderabbit',
     scope: 'full',
-    target: 'merge-queue',
+    target: 'main',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',
@@ -126,7 +126,7 @@ export function checkRecord(overrides: Partial<DevCheckRecord> = {}): DevCheckRe
   return {
     kind: 'check',
     checkId: 'k001-aaaaaaaa',
-    target: 'merge-queue',
+    target: 'main',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',

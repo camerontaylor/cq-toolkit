@@ -28,7 +28,7 @@ describe('dev.ready', () => {
         ready: true,
         evidenceClass: 'author',
         branch: 'feature/x',
-        target: 'merge-queue',
+        target: 'main',
         head: state.head,
         cycleId: 'c001-aaaaaaaa',
         reviewer: 'coderabbit',
@@ -133,11 +133,14 @@ describe('dev.ready', () => {
 
   test('records for another target are stale for this one', async () => {
     await seed(repo);
-    repo.git('push', '-q', 'origin', 'origin/merge-queue:refs/heads/main');
+    repo.git('push', '-q', 'origin', 'origin/main:refs/heads/release');
     repo.git('fetch', '-q', 'origin');
-    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root, target: 'main' });
+    const result = await makeDevReady(repoEffects(repo))({
+      repoRoot: repo.root,
+      target: 'release',
+    });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain("not 'main'");
+    if (result.status === 'needs-human') expect(result.reason).toContain("not 'release'");
   });
 
   test('a same-identity no-fresh tail resolves to ready through its reuse record (#485)', async () => {
@@ -160,7 +163,7 @@ describe('dev.ready', () => {
         cycleId: 'c001-aaaaaaaa',
         basis: 'no-fresh-tail',
         resolvesCycleId: 'c002-bbbbbbbb',
-        target: 'merge-queue',
+        target: 'main',
         base: current.base,
         head: current.head,
         dirtySha256: current.dirtySha256,
@@ -216,7 +219,7 @@ describe('dev.ready', () => {
         cycleId: 'c001-aaaaaaaa',
         basis: 'no-fresh-tail',
         resolvesCycleId: 'c002-bbbbbbbb',
-        target: 'merge-queue',
+        target: 'main',
         base: current.base,
         head: current.head,
         dirtySha256: current.dirtySha256,
@@ -374,7 +377,7 @@ describe('dev.ready deferred lineage', () => {
           repo: 'owner/repo',
           producer: 'author',
           head: identity.head,
-          target: 'merge-queue' as const,
+          target: 'main' as const,
           targetSelector: 'promoted-main' as const,
         },
       },
@@ -382,7 +385,7 @@ describe('dev.ready deferred lineage', () => {
         cycleId: 'c001-vendor-origin',
         head: identity.head,
         base: identity.base,
-        target: 'merge-queue',
+        target: 'main',
         scope: 'full' as const,
         dirtySha256: 'clean-tree' as const,
         failure,
@@ -449,7 +452,7 @@ describe('dev.ready deferred lineage', () => {
     const result = await readReadinessWithGaps(
       effects,
       'dev.ready',
-      'merge-queue',
+      'main',
       undefined,
       queueClient,
     );
@@ -491,7 +494,7 @@ describe('dev.ready deferred lineage', () => {
     const result = await readReadinessWithGaps(
       effects,
       'dev.ready',
-      'merge-queue',
+      'main',
       undefined,
       queueClient,
     );

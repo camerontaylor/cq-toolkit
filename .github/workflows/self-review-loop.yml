@@ -1,4 +1,5 @@
 # instantiated from policy/templates/self-host/self-review-loop.yml — edit the template, not this file
+# Reviews open PRs against main; listOpenPrs is base-unfiltered.
 # Template: self-review-loop — the adoptable review-loop automation: the
 # toolkit, built from source, runs its OWN review loop (runReviewLoop over
 # the frozen SelfhostDefaults, driver peak-aware from the run's clock)

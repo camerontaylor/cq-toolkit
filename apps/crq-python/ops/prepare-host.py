@@ -93,8 +93,10 @@ def validate(overlay):
             if value is not False:
                 raise ValueError('overlay cannot enable repair')
         elif name == 'paseo_hosts':
-            if not isinstance(value, list) or len(value) < 2 or any(not isinstance(v, str) or not v for v in value):
-                raise ValueError('paseo_hosts must contain at least two nonempty endpoint strings')
+            if (not isinstance(value, list)
+                    or any(not isinstance(v, str) or not v for v in value)
+                    or len(set(value)) < 2):
+                raise ValueError('paseo_hosts must contain at least two distinct nonempty endpoint strings')
         elif name in PATH_KEYS:
             # The accepted legacy renderer records a literal ~/ key path.
             # CRQ expands it only at SSH invocation; retain those config bytes.
@@ -285,8 +287,16 @@ def validate_unit_template(name, text):
         raise ValueError('unit lacks monorepo root placeholder: ' + name)
 
 
-def render_units(root, output):
-    templates = [(source, source.read_text()) for source in unit_files(root)]
+def render_units(root, output, sha='HEAD'):
+    # Read both the inventory and exact bytes from one immutable commit, as
+    # verify_target does. Dirty/deleted/extra worktree units are not deploy inputs.
+    sha = git(root, 'rev-parse', sha + '^{commit}')
+    sources = git(root, 'ls-tree', '-r', '--name-only', sha,
+                  'apps/crq-python/ops/systemd/').splitlines()
+    templates = [(Path(source), run(['git', '-C', str(root), 'show', f'{sha}:{source}']))
+                 for source in sources if Path(source).name.startswith('crq-')]
+    if not templates:
+        raise ValueError('target lacks CRQ unit templates')
     for source, text in templates:
         validate_unit_template(source.name, text)
     output.mkdir(parents=True, exist_ok=True)
@@ -336,9 +346,10 @@ def prepare(root, overlay, raw, output):
     inactive(root)
     with tick_lock(root):
         inactive(root)
-        data = render(root, overlay)
+        sha = git(root, 'rev-parse', 'HEAD')
+        data = render(root, overlay, sha)
         with tempfile.TemporaryDirectory(prefix='crq-units-') as temporary:
-            paths = render_units(root, Path(temporary))
+            paths = render_units(root, Path(temporary), sha)
             run(['systemd-analyze', '--user', 'verify', *paths])
             record(root, overlay, raw, data, 'prepare', unit_sha256={Path(p).name: digest(Path(p).read_bytes()) for p in paths})
             output.mkdir(parents=True, exist_ok=True)

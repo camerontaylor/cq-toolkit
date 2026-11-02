@@ -34,7 +34,12 @@ async function configureAgentRepo(repo: Awaited<ReturnType<typeof makeTestRepo>>
   repo.commitAll('fixture agent review setup');
 }
 
-function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailures = 0) {
+function scriptedDrivers(
+  onRun?: (input: { prompt: string }) => void,
+  toolFailures = 0,
+  findings?: () => unknown[],
+  stopReason?: () => 'complete' | 'error',
+) {
   return {
     resolve: vi.fn(
       (request: {
@@ -57,9 +62,11 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
               { kind: 'model-request' },
             );
             return {
-              stopReason: 'complete' as const,
+              stopReason: stopReason?.() ?? ('complete' as const),
+              error: 'provider quota refused',
+              errorClass: 'quota' as const,
               structuredOutput: {
-                findings: [{ severity: 'high', text: 'seeded' }],
+                findings: findings?.() ?? [{ severity: 'high', text: 'seeded' }],
               },
               usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0 },
               // Seam v3: this scripted driver models a provider MEASUREMENT, so
@@ -76,6 +83,210 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void, toolFailur
 }
 
 describe('review.run', () => {
+  it('forwards opt-in area execution through the public op', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('a/api.ts', 'export const a = 1;');
+      await repo.write('b/client.ts', 'export const b = 2;');
+      repo.commitAll('two areas');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => (components) =>
+          components.map(({ component }) => ({ component, hits: [] })),
+      })({ repoRoot: repo.root, areas: true });
+      expect(result.status).toBe('ok');
+      expect(prompts.some((prompt) => prompt.includes('Review cross-area contracts'))).toBe(true);
+      const record = result.status === 'ok' ? result.value : result.report;
+      const coverage = record?.sources.find((source) => source.kind === 'agent')?.coverage;
+      expect(coverage && 'version' in coverage).toBe(true);
+      if (coverage && 'version' in coverage && coverage.version === 2) {
+        expect(coverage.modeReason).toContain('area review:');
+        expect(coverage.sessions.find((session) => session.id === 'cross-area')).toMatchObject({
+          id: 'cross-area',
+          status: 'complete',
+          deliveries: [],
+        });
+      }
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it.each([
+    'valid',
+    'repaired',
+    'invalid',
+    'dirty',
+    'untracked',
+    'supporting',
+    'historical-invalid',
+  ] as const)('prepares %s anchored evidence through review.run', async (mode) => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/dependency.ts', 'export const dependency = 1;\n');
+      repo.commitAll('dependency baseline');
+      const base = repo.git('rev-parse', 'HEAD').trim();
+      if (mode === 'dirty') {
+        await repo.write('src/evidence.ts', 'export const value = 0;\n');
+        repo.commitAll('old evidence value');
+      }
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      if (mode !== 'untracked' && mode !== 'dirty') repo.commitAll('evidence fixture');
+      let requests = 0;
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(
+          () => {
+            requests++;
+          },
+          0,
+          () => [
+            {
+              file: 'src/evidence.ts',
+              line: 1,
+              severity: 'high',
+              text: 'seeded',
+              evidenceV1: {
+                version: 1,
+                ...(mode === 'historical-invalid'
+                  ? { validation: { status: 'invalid', reasons: ['quote-mismatch'] } }
+                  : {}),
+                failureScenario: 'seeded scenario',
+                primary: {
+                  file: 'src/evidence.ts',
+                  side: 'head',
+                  start: 1,
+                  end: 1,
+                  quote:
+                    !['repaired', 'invalid'].includes(mode) || (mode === 'repaired' && requests > 1)
+                      ? 'export const value = 1;'
+                      : 'wrong quote',
+                },
+                supporting:
+                  mode === 'supporting'
+                    ? [
+                        {
+                          file: 'src/dependency.ts',
+                          side: 'head',
+                          start: 1,
+                          end: 1,
+                          quote: 'export const dependency = 1;',
+                          relevance: 'caller dependency',
+                        },
+                      ]
+                    : [],
+              },
+            },
+          ],
+        ),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, base, prepareEvidence: true, maxTokens: 5000 });
+      expect(requests).toBe(mode === 'invalid' ? 3 : mode === 'repaired' ? 2 : 1);
+      expect(result.status).toBe(mode === 'invalid' ? 'needs-human' : 'ok');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.evidenceV1?.primary.quote).toBe(
+        mode === 'invalid' ? 'wrong quote' : 'export const value = 1;',
+      );
+      expect(report?.findings[0]?.evidenceV1?.validation?.status).toBe(
+        mode === 'invalid' ? 'invalid' : undefined,
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('opt-in evidence preparation invokes repair on the operation path and blocks missing evidence', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => prompts.push(input.prompt)),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(3);
+      expect(prompts[0]).toContain('emit evidenceV1');
+      expect(prompts[1]).toContain('Repair only the evidence');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.text).toBe('seeded');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('retains completed findings when an evidence repair throws', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers((input) => {
+          prompts.push(input.prompt);
+          if (prompts.length === 2) throw new Error('repair transport failed');
+        }),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toContain('emit evidenceV1');
+      expect(prompts[1]).toContain('Repair only the evidence');
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings[0]?.text).toBe('seeded');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('stops all repair dispatch after a provider refusal and retains both findings', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/evidence.ts', 'export const value = 1;\n');
+      repo.commitAll('evidence fixture');
+      const prompts: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(
+          () => {
+            prompts.push('request');
+          },
+          0,
+          () => [
+            { severity: 'high', text: 'first' },
+            { severity: 'medium', text: 'second' },
+          ],
+          () => (prompts.length === 1 ? 'complete' : 'error'),
+        ),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, prepareEvidence: true, maxTokens: 5000 });
+      expect(result.status).toBe('needs-human');
+      expect(prompts).toHaveLength(2);
+      const report = result.status === 'ok' ? result.value : result.report;
+      expect(report?.findings.map((finding) => finding.text)).toEqual(['first', 'second']);
+      expect(report?.sources[0]?.reason).toContain('provider quota refused');
+      expect(report?.sources.some((source) => source.status === 'blocked')).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('requires a readable cq.json before starting a review', async () => {
     const repo = await makeTestRepo();
     try {
@@ -548,7 +759,7 @@ describe('review.run', () => {
     const repo = await makeTestRepo();
     try {
       await configureAgentRepo(repo);
-      repo.git('push', '-q', 'origin', 'origin/merge-queue:refs/heads/main');
+      repo.git('push', '-q', 'origin', 'origin/main:refs/heads/release');
       repo.git('fetch', '-q', 'origin');
       const base = repo.git('rev-parse', 'HEAD~1').trim();
       const effects = repoEffects(repo);
@@ -557,11 +768,11 @@ describe('review.run', () => {
         effectsFactory: () => effects,
         scannerFactory: () => async (components) =>
           components.map((component) => ({ component: component.component, hits: [] })),
-      })({ repoRoot: repo.root, target: 'main', base });
+      })({ repoRoot: repo.root, target: 'release', base });
       expect(result.status).toBe('ok');
       const ledger = effects.openLedger('feature/x').load();
       const cycle = ledger.records.find((entry) => entry.kind === 'cycle');
-      expect(cycle).toMatchObject({ target: 'main', base, reviewer: 'agent:reviewer' });
+      expect(cycle).toMatchObject({ target: 'release', base, reviewer: 'agent:reviewer' });
     } finally {
       await repo.cleanup();
     }
@@ -1002,7 +1213,7 @@ describe('review.run', () => {
           base: current.base,
           head: current.head,
           dirtySha256: current.dirtySha256,
-          target: 'merge-queue',
+          target: 'main',
           at: '2026-10-24T00:00:00.000Z',
         }),
       ]);
@@ -1057,13 +1268,13 @@ describe('review.run', () => {
         base: state.base,
         head: state.head,
         dirtySha256: state.dirtySha256,
-        target: 'merge-queue',
+        target: 'main',
         scope: 'full',
       });
       if (!latestAgent || latestAgent.kind !== 'cycle') throw new Error('missing agent cycle');
       const readiness = assembleReadiness({
         branch: state.branch,
-        target: 'merge-queue',
+        target: 'main',
         identity: {
           base: state.base,
           head: state.head,
@@ -1178,7 +1389,7 @@ describe('review.run', () => {
       const syntheticPrivateBytes = ['synthetic', 'corpus', 'marker', '7f3'].join('-');
       await repo.write('.env.config', `${syntheticPrivateBytes}\n`);
       repo.commitAll('add synthetic private fixture');
-      repo.git('push', '-q', 'origin', 'HEAD:merge-queue');
+      repo.git('push', '-q', 'origin', 'HEAD:main');
       repo.git('mv', '.env.config', 'config.txt');
       repo.commitAll('rename synthetic private fixture');
 
@@ -1224,7 +1435,7 @@ describe('review.run', () => {
       repo.commitAll('remove optional package metadata');
       await repo.write('src/public.txt', 'ordinary public fixture\n');
       repo.commitAll('add public fixture');
-      repo.git('push', '-q', 'origin', 'HEAD:merge-queue');
+      repo.git('push', '-q', 'origin', 'HEAD:main');
       repo.git('mv', 'src/public.txt', 'src/public-renamed.txt');
       repo.commitAll('rename public fixture');
 
@@ -1394,7 +1605,7 @@ it.each([false, true])(
       const reviewed = {
         base: uncommitted
           ? repo.git('rev-parse', 'HEAD').trim()
-          : repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+          : repo.git('merge-base', 'origin/main', 'HEAD').trim(),
         scope: uncommitted ? 'uncommitted' : 'full',
       };
       expect(result.value.reviewed).toEqual(reviewed);
@@ -1763,7 +1974,7 @@ it('maps blocked partial findings to the ledger cycle so a disposition closes th
 
     const readiness = assembleReadiness({
       branch: ledger.branch,
-      target: 'merge-queue',
+      target: 'main',
       identity: {
         base: cycle.base,
         head: cycle.head,
@@ -1934,7 +2145,7 @@ it.each([
           branch: 'feature/x',
           head,
           reviewed: {
-            base: repo.git('merge-base', 'origin/merge-queue', 'HEAD').trim(),
+            base: repo.git('merge-base', 'origin/main', 'HEAD').trim(),
             scope: 'full',
           },
           sources: [{ kind: 'agent', status: 'terminal' }],
@@ -2077,7 +2288,7 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
         if (command === 'gh') return args[0] === 'api' ? 'author' : 'owner/repo';
         return undefined;
       });
-      const read = await readWorkState(effects, { target: 'merge-queue' });
+      const read = await readWorkState(effects, { target: 'main' });
       if (!read.ok) throw new Error(read.reason);
       const state = read.state;
       const status: QueueStatus = {
@@ -2131,7 +2342,7 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
             repo: 'owner/repo',
             producer: 'author',
             head: state.head,
-            target: 'merge-queue',
+            target: 'main',
             targetSelector: 'promoted-main',
           },
         },
@@ -2141,7 +2352,7 @@ it.each(['current', 'changed', 'queue-auth', 'empty-file', 'absent-file'] as con
           cycleId: origin.cycleId,
           head: state.head,
           base: state.base,
-          target: 'merge-queue',
+          target: 'main',
           scope: 'full',
           dirtySha256: 'clean-tree',
           failure,

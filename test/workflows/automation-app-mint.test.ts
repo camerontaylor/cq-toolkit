@@ -68,22 +68,6 @@ const CONSUMERS: ReadonlyArray<{
     ],
   },
   {
-    name: 'sync-merge-queue',
-    template: 'policy/templates/sync-merge-queue.yml',
-    instance: '.github/workflows/sync-merge-queue.yml',
-    id: 'sync-app',
-    // List + open the sync PR only (reads/dispatches keep GITHUB_TOKEN).
-    permissions: ['permission-pull-requests: write'],
-  },
-  {
-    name: 'init-merge-queue',
-    template: 'policy/templates/init-merge-queue.yml',
-    instance: '.github/workflows/init-merge-queue.yml',
-    id: 'init-app',
-    // Creating the merge-queue branch is a write.
-    permissions: ['permission-contents: write'],
-  },
-  {
     name: 'ratchet-propose',
     template: 'policy/templates/ratchet-propose.yml',
     instance: '.github/workflows/ratchet-propose.yml',

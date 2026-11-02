@@ -45,7 +45,7 @@ async function fixture() {
       };
     return undefined;
   });
-  const read = await readWorkState(effects, { target: 'merge-queue' });
+  const read = await readWorkState(effects, { target: 'main' });
   if (!read.ok) throw Error(read.reason);
   const state = read.state;
   const status: QueueStatus = {
@@ -94,7 +94,7 @@ async function fixture() {
           repo: 'owner/repo',
           producer: 'author',
           head: state.head,
-          target: 'merge-queue',
+          target: 'main',
           targetSelector: 'promoted-main',
         },
       },
@@ -104,7 +104,7 @@ async function fixture() {
         cycleId: origin.cycleId,
         head: state.head,
         base: state.base,
-        target: 'merge-queue',
+        target: 'main',
         scope: 'full',
         dirtySha256: 'clean-tree',
         failure: origin.vendorFailure!,
@@ -181,10 +181,10 @@ for (const [name, patch] of staleCases)
 test('no debt: dirty current state falls back without claiming debt', async () => {
   const f = await fixture();
   await f.repo.write('src/a.ts', 'export const a = 2;\n');
-  const read = await readWorkState(f.effects, { target: 'merge-queue' });
+  const read = await readWorkState(f.effects, { target: 'main' });
   if (!read.ok) throw Error(read.reason);
   expect(
-    await prepareDeferredVendorReview(f.effects, 'merge-queue', read.state, f.client),
+    await prepareDeferredVendorReview(f.effects, 'main', read.state, f.client),
   ).toBeUndefined();
   const result = await f.run();
   expect(f.effects.calls.filter((call) => call.command === 'coderabbit')).toHaveLength(1);

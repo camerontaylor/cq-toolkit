@@ -60,7 +60,7 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
     );
     repo.commitAll('seed PR finding');
     repo.git('push', '-q', 'origin', 'HEAD:refs/pull/7/head', 'HEAD:refs/heads/feature/x');
-    const pinnedBase = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const pinnedBase = repo.git('rev-parse', 'origin/main').trim();
     const ok = (value: unknown): GhResult => ({
       code: 0,
       stdout: typeof value === 'string' ? value : JSON.stringify(value),
@@ -287,8 +287,8 @@ test('the round-2 re-review keeps the invocation-pinned comparison when the targ
           const stacked = repo
             .git('commit-tree', tree, '-p', published, '-m', 'stacked parent lands')
             .trim();
-          repo.git('push', '-q', 'origin', `${stacked}:refs/heads/merge-queue`);
-          repo.git('update-ref', 'refs/remotes/origin/merge-queue', stacked);
+          repo.git('push', '-q', 'origin', `${stacked}:refs/heads/main`);
+          repo.git('update-ref', 'refs/remotes/origin/main', stacked);
           // The loop's stage-5 publish already pushed the fix to feature/x;
           // GitHub keeps refs/pull/7/head tracking it, so round 2's
           // resolution fetch sees the published head and reuses the tree.

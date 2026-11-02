@@ -54,6 +54,13 @@ function expectEveryJobGuarded(text: string, file: string): void {
     const idLine = lines.findIndex((line, i) => i >= start && line === `  ${id}:`);
     const next = lines.findIndex((line, i) => i > idLine && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line));
     const blockLines = lines.slice(idLine, next === -1 ? lines.length : next);
+    if (id === 'propose-drop') {
+      // This reporter runs only for main PRs, never for any branch push.
+      expect(blockLines).toContain(
+        "    if: github.event_name == 'pull_request' && github.base_ref == 'main' && needs.ratchet.outputs.drop == 'true'",
+      );
+      continue;
+    }
     expect(
       blockLines,
       `${file} job ${id} carries the cq-state skip at JOB-KEY indentation`,

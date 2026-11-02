@@ -1,31 +1,5 @@
 #!/usr/bin/env node
-// test-narrow — the ONE permitted local test command (`pnpm test:narrow`).
-// The full suite is CI-only. This script IS the policy: callers do not pick
-// vitest flags, projects, priorities or concurrency; they name files (or a
-// git range) and the script decides. Usage: `pnpm test:narrow --help`.
-//
-// Order of operations:
-//   1. priority: when below `nice -n 5`, re-exec under it (children inherit);
-//      the check reads the real niceness, so no env var can skip it;
-//   2. parse argv (scripts/lib/test-narrow.mjs; refusals exit 2);
-//   3. the host-wide single-flight lock (scripts/lib/heavy-lock.mjs), bounded
-//      wait, exit 75 on timeout; held through selection, build and run;
-//   4. selection: explicit files, or the changed files of a git range, mapped
-//      to test files by scripts/lib/affected-tests.mjs (import graph ∪
-//      reviewed non-import map); fallbacks, oversize selections and
-//      integration/live suites are refused (see planRun);
-//   5. build once: dist is rebuilt only when stale (ratchet-lib's
-//      distIsFresh, #255), as a child process group recorded in the lock
-//      like vitest's (below), killed after BUILD_TIMEOUT_MS; the vitest child
-//      then gets CQ_DIST_PREPARED=1 so the root globalSetup
-//      (test/global-setup.ts, the build-once harvest) does not build again;
-//   6. ONE vitest invocation: the plan's projects, serial files, one worker,
-//      a JSON report for the counts, in its own process group (recorded in
-//      the lock with its leader's start time, so a killed runner cannot
-//      leave an orphan that runs beside the next one), killed after
-//      RUN_TIMEOUT_MS; load= and uptime= cover the combined execution interval;
-//   7. one stable summary line on stdout (`test:narrow result=… exit=…`),
-//      printed on every exit path.
+// Named tests under nice, with headroom preflight and optional resource scope.
 import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -41,13 +15,13 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isTest, selectAffected } from './lib/affected-tests.mjs';
 import { scrubbedBuildEnv } from './lib/build-env.mjs';
-import { EX_TEMPFAIL, acquireLock, canSignalGroup, describeHolder } from './lib/heavy-lock.mjs';
+import { enterResourceScope } from './lib/resource-scope.mjs';
+import { needsDist } from './lib/dist-tests.mjs';
 import {
   DEFAULT_BASE,
   NICE_INCREMENT,
   RUN_TIMEOUT_MS,
   USAGE,
-  interruptAction,
   loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
@@ -59,7 +33,6 @@ import {
   selectPython,
   runVerdict,
   signalExit,
-  spawnLocked,
   summaryLine,
 } from './lib/test-narrow.mjs';
 
@@ -72,15 +45,10 @@ const argv = process.argv.slice(2);
 const say = (line) => process.stderr.write(`test:narrow: ${line}\n`);
 const toPosix = (path) => path.split(sep).join('/');
 const repoRelative = (path) => toPosix(relative(ROOT, resolve(ROOT, path)));
-/** Synchronous: stdout to a pipe is asynchronous on macOS, and we exit next. */
-const emit = (fields) => {
-  const line = `${summaryLine(fields)}\n`;
-  try {
-    writeSync(1, line);
-  } catch {
-    process.stdout.write(line);
-  }
-};
+const emit = (fields) => process.stdout.write(`${summaryLine(fields)}\n`);
+
+const exitAfterFlush = (code) =>
+  new Promise(() => process.stdout.write('', () => process.exit(code)));
 
 // 1. Priority ---------------------------------------------------------------
 if (getPriority() < NICE_INCREMENT) {
@@ -89,27 +57,26 @@ if (getPriority() < NICE_INCREMENT) {
   } else if (process.env[REEXEC_MARK] === '1') {
     const reason = `priority ${getPriority()} after nice -n ${NICE_INCREMENT}`;
     emit({ result: 'refused', exit: 2, reason });
-    process.exit(2);
+    await exitAfterFlush(2);
   } else {
     const niced = spawn('nice', ['-n', String(NICE_INCREMENT), process.execPath, SCRIPT, ...argv], {
       stdio: 'inherit',
       env: { ...process.env, [REEXEC_MARK]: '1' },
     });
-    // A terminal signal reaches both processes (same group); the niced one
-    // relays each signal once and absorbs this immediate duplicate inside
-    // its interrupt grace window (only a repeat after the window escalates).
+    // Relay signals to the niced runner; it terminates its own child group
+    // and emits the single terminal result before this parent exits.
     for (const signal of SIGNALS) process.on(signal, () => niced.kill(signal));
-    niced.on('error', (error) => {
+    niced.on('error', async (error) => {
       emit({ result: 'error', exit: 1, reason: `cannot re-exec under nice: ${error.message}` });
-      process.exit(1);
+      await exitAfterFlush(1);
     });
-    niced.on('exit', (code, signal) => {
+    niced.on('exit', async (code, signal) => {
       // Killed by a signal, the niced process printed no summary: print one.
       if (signal !== null) {
         const reason = `niced runner killed by ${signal}`;
         emit({ result: 'interrupted', exit: signalExit(signal), reason });
       }
-      process.exit(code ?? signalExit(signal));
+      await exitAfterFlush(code ?? signalExit(signal));
     });
     // The niced process does the work; this one only relays its exit.
     await new Promise(() => {});
@@ -125,158 +92,66 @@ const stamp = () => ({ load: loadavg()[0].toFixed(1), uptimeS: uptime() });
 // Re-stamped at the start of the combined Python/build/Vitest interval.
 const summary = { result: 'error', exit: 1, nice: getPriority(), ...stamp() };
 let printed = false;
-let releaseLock = () => {};
 let child = null;
 let childDone = false;
-let childIdentity = null;
 let interruptedBy = null;
-/** Per signal: when its first copy was relayed (interruptAction's input). */
-const relayedAt = Object.create(null);
-
-/** Signal the current child's whole process group (vitest's pool workers, the build's tsc). */
 const signalChild = (signal) => {
   if (child === null || childDone || child.pid === undefined) return;
   try {
-    if (POSIX) {
-      if (!canSignalGroup(childIdentity)) {
-        say(
-          `skipping ${signal} for process group ${child.pid}: gone or leader identity unverified`,
-        );
-        return;
-      }
-      process.kill(-child.pid, signal);
-    }
-    // Windows has no process groups and child.kill() ends only the leader:
-    // end the whole tree (cmd/pnpm/tsc, vitest's workers) while it is alive.
+    if (POSIX) process.kill(-child.pid, signal);
     else spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
   } catch {
-    // the group is gone already
+    /* already exited */
   }
 };
-/** How long cleanup waits for a group to disappear before the lock is pinned. */
-const SWEEP_WAIT_MS = 10_000;
-/** Set when a child group survives cleanup: the lock is then never released. */
-let lockPinned = false;
-/**
- * True once no RUNNABLE process of the group led by `pid` remains. A zombie
- * cannot run, and from the 'exit' handler our own killed leader stays an
- * unreaped zombie (the event loop never runs again) — which kill(-pgid, 0)
- * still reports (Linux: success; macOS: EPERM). So anything but ESRCH asks
- * ps whether a non-zombie member is left.
- */
-const groupGone = (pid) => {
-  try {
-    process.kill(-pid, 0);
-  } catch (error) {
-    if (error.code === 'ESRCH') return true;
-  }
-  const res = spawnSync('ps', ['-A', '-o', 'pgid=,stat='], { encoding: 'utf8' });
-  if (res.status !== 0) return false;
-  return !res.stdout.split('\n').some((line) => {
-    const [pgid, stat] = line.trim().split(/\s+/);
-    return Number(pgid) === pid && stat !== undefined && !stat.startsWith('Z');
-  });
-};
-/**
- * SIGKILL only a group whose live leader matches its recorded start time,
- * then wait — bounded, synchronously (also from the 'exit' handler) — until
- * it is gone. An unverifiable group is never signalled. SIGKILL is asynchronous,
- * and the lock must not free while a member still runs. A group that outlives
- * the wait pins the lock: its record stays for the next waiter to judge.
- */
-const sweepChild = () => {
-  if (child === null || childDone || child.pid === undefined) return;
-  signalChild('SIGKILL');
-  if (!POSIX) return; // taskkill /T /F has already ended the tree
-  const tick = new Int32Array(new SharedArrayBuffer(4));
-  const deadline = Date.now() + SWEEP_WAIT_MS;
-  while (!groupGone(child.pid)) {
-    if (Date.now() >= deadline) {
-      say(`process group ${child.pid} still runs after cleanup; leaving the host lock held`);
-      lockPinned = true;
-      releaseLock = () => {};
-      return;
-    }
-    Atomics.wait(tick, 0, 0, 25);
-  }
-};
-const finish = (fields) => {
+const sweepChild = () => signalChild('SIGKILL');
+const awaitExit = () => exitAfterFlush(process.exitCode ?? 1);
+const finish = async (fields) => {
   Object.assign(summary, fields);
   if (!printed) {
     printed = true;
     emit(summary);
   }
-  releaseLock();
-  process.exit(summary.exit);
+  process.exitCode = summary.exit;
+  await awaitExit();
 };
-// Every exit path — including a library's process.exit and an uncaught
-// exception — stops the child's group, prints the summary and frees the
-// lock, in that order: the lock is never free while a child runs. An
-// unplanned exit is never a success, even when the event loop just drained.
-process.on('exit', (code) => {
-  sweepChild();
-  if (!printed) {
-    printed = true;
-    const exit = code || 1;
-    process.exitCode = exit;
-    emit({ ...summary, result: 'error', exit, reason: summary.reason ?? 'exited early' });
-  }
-  releaseLock();
-});
-// Terminal signals: the first copy of each is relayed to the child group
-// gracefully; the immediate duplicate (terminal broadcast + the un-niced
-// parent's relay) is absorbed; a repeat after the grace window means the
-// graceful relay went unheeded, so the group is swept NOW — SIGKILL of the
-// verified identity, bounded — instead of waiting out the run/build
-// timeout (#283). The sweep never signals an unverifiable group.
-for (const signal of SIGNALS) {
-  process.on(signal, () => {
-    const action = interruptAction({
-      childLive: child !== null && !childDone,
-      signal,
-      relayedAt,
-      now: Date.now(),
-    });
-    if (action === 'finish') {
-      finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
-    }
-    interruptedBy ??= signal;
-    if (action === 'relay') {
-      relayedAt[signal] = Date.now();
-      signalChild(signal); // the code awaiting the child finishes
-      return;
-    }
-    if (action === 'escalate') {
-      say(`repeated ${signal}: SIGKILL of process group ${child.pid}`);
-      sweepChild();
-    }
-    // 'absorb': the parent relay's duplicate of the same interrupt
-  });
-}
-
+process.on('exit', () => sweepChild());
 // 2. Arguments --------------------------------------------------------------
 const parsed = parseArgs(argv);
 if (!parsed.ok && parsed.help) {
   process.stderr.write(`${USAGE}\n`);
-  finish({ result: 'help', exit: 0 });
+  await finish({ result: 'help', exit: 0 });
 }
-if (!parsed.ok) finish({ result: 'refused', exit: 2, reason: parsed.reason });
+if (!parsed.ok) await finish({ result: 'refused', exit: 2, reason: parsed.reason });
 const opts = parsed.options;
 
-// 3. Host lock --------------------------------------------------------------
-const lock = await acquireLock({
-  maxWaitMs: opts.maxWaitS * 1000,
-  info: { cwd: ROOT, command: `test:narrow ${argv.join(' ')}`.trim() },
-});
-summary.waitMs = lock.waitedMs;
-if (!lock.acquired) {
-  finish({
-    result: 'lock-timeout',
-    exit: EX_TEMPFAIL,
-    reason: `host lock still held by ${describeHolder(lock.holder)}`,
+if (!opts.dryRun) {
+  try {
+    const scoped = await enterResourceScope(SCRIPT, argv, {
+      onSignalExit: (signal, exit) =>
+        emit({
+          ...summary,
+          result: signal === 'SIGKILL' ? 'error' : 'interrupted',
+          exit,
+          reason: `scope runner killed by ${signal}`,
+        }),
+    });
+    if (scoped) {
+      process.exitCode = scoped.exit;
+      await awaitExit();
+    }
+  } catch (error) {
+    await finish({ result: 'refused', exit: error.code === 75 ? 75 : 1, reason: error.message });
+  }
+}
+
+for (const signal of SIGNALS) {
+  process.on(signal, async () => {
+    interruptedBy = signal;
+    sweepChild();
+    await finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
   });
 }
-releaseLock = lock.release;
 
 // 4. Selection --------------------------------------------------------------
 const git = (args) => {
@@ -317,7 +192,7 @@ try {
     ];
   }
 } catch (error) {
-  finish({ result: 'refused', exit: 2, reason: error.message });
+  await finish({ result: 'refused', exit: 2, reason: error.message });
 }
 changed = [...new Set(changed)].sort();
 const missing = changed.filter((f) => !existsSync(f));
@@ -326,7 +201,7 @@ const manifest = JSON.parse(readFileSync(join(ROOT, 'test/suite-classes.json'), 
 const staleEntries = missingManifestEntries(manifest, existsSync);
 if (staleEntries.length > 0) {
   const reason = `test/suite-classes.json lists missing files: ${staleEntries.join(',')}`;
-  finish({ result: 'refused', exit: 2, reason });
+  await finish({ result: 'refused', exit: 2, reason });
 }
 // Every test file on disk, classified or not (unclassified ones run in the
 // conservative `process` project), so the class gate sees all of them.
@@ -380,63 +255,43 @@ if (pythonSelection.fallback) {
   selection.reason = pythonSelection.reason;
 }
 if (relatedError !== null) selection.reason += `: ${relatedError}`;
-const plan = planRun({ selection, manifest, include: opts.include });
+const plan = planRun({ selection, manifest, include: opts.include, allTests });
 if (!plan.ok) {
   if (plan.candidates.length > 0) {
     say('selected (choose a subset and name it explicitly):');
     for (const file of plan.candidates) say(`  ${file}`);
   }
   const files = plan.candidates.length > 0 ? plan.candidates : undefined;
-  finish({ result: 'refused', exit: 2, files, reason: plan.reason });
+  await finish({ result: 'refused', exit: 2, files, reason: plan.reason });
 }
 const projects = projectsOf(plan.run);
 const files = plan.run.map((r) => r.file);
 const pythonFiles = plan.run.filter((r) => r.project === 'python').map((r) => r.file);
 const tsFiles = files.filter((f) => !pythonFiles.includes(f));
 if (pythonFiles.length > 0 && opts.testNamePattern !== null) {
-  finish({ result: 'refused', exit: 2, reason: 'test-name filtering is unavailable for Python' });
+  await finish({
+    result: 'refused',
+    exit: 2,
+    reason: 'test-name filtering is unavailable for Python',
+  });
 }
 Object.assign(summary, { files, projects });
 say(`${changed.length} changed file(s) -> ${files.length} test file(s)`);
 for (const r of plan.run) say(`  ${r.project.padEnd(11)} ${r.file}`);
 
-if (opts.dryRun) finish({ result: 'dry-run', exit: 0 });
+if (opts.dryRun) await finish({ result: 'dry-run', exit: 0 });
 if (files.length === 0) {
   // Never start vitest with no file filter: that would be the full suite.
-  finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
+  await finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
 }
 
-/**
- * Run one child in its own process group, recorded in the lock (pgid and
- * leader start time) before anything waits on it, so a runner killed
- * mid-child leaves a group the next waiter can verify and kill, or wait
- * out. Resolves once it exits and its group is gone (sweepChild); after that
- * the pgid is never signalled again (it could be reused).
- */
+// Run each child in a group owned only by this invocation.
 const runGroup = (command, args, { label, timeoutMs, captureStderr = false, ...options }) =>
   new Promise((done) => {
     let timedOut = false;
     let stderr = '';
     childDone = false;
-    try {
-      const spawned = spawnLocked(
-        lock,
-        () => {
-          child = spawn(command, args, { cwd: ROOT, detached: POSIX, ...options });
-          // Keep local identity even if writing the lock annotation throws.
-          childIdentity = { childPgid: child.pid, childStartedAt: new Date().toISOString() };
-          return child;
-        },
-        POSIX,
-      );
-      child = spawned.child;
-      childIdentity = spawned.identity ?? childIdentity;
-    } catch (error) {
-      if (error.code === EX_TEMPFAIL) {
-        finish({ result: 'lock-lost', exit: EX_TEMPFAIL, reason: error.message });
-      }
-      throw error;
-    }
+    child = spawn(command, args, { cwd: ROOT, detached: POSIX, ...options });
     if (captureStderr)
       child.stderr.on('data', (chunk) => {
         process.stderr.write(chunk);
@@ -459,7 +314,7 @@ const runGroup = (command, args, { label, timeoutMs, captureStderr = false, ...o
     child.on('close', (code, signal) => settle({ code, signal }));
   });
 
-// Python and TypeScript children run serially under the same host lock.
+// Python and TypeScript children run serially under the same resource scope.
 Object.assign(summary, stamp());
 const started = Date.now();
 let pythonCounts = null;
@@ -475,13 +330,17 @@ if (pythonFiles.length > 0) {
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHON_COLORS: '0' },
   });
   pythonCounts = readPythonReport(run.stderr);
-  const verdict = pythonRunVerdict({ run, counts: pythonCounts, interruptedBy, lockPinned });
+  const verdict = pythonRunVerdict({ run, counts: pythonCounts, interruptedBy });
   if (verdict.result !== 'pass') {
-    finish({ ...verdict, tests: pythonCounts, ran: pythonFiles, durationMs: Date.now() - started });
+    await finish({
+      ...verdict,
+      tests: pythonCounts,
+      ran: pythonFiles,
+      durationMs: Date.now() - started,
+    });
   }
-  lock.annotate({ childPgid: null });
   if (tsFiles.length === 0)
-    finish({
+    await finish({
       result: 'pass',
       exit: 0,
       tests: pythonCounts,
@@ -492,7 +351,7 @@ if (pythonFiles.length > 0) {
 
 // 5. Build once --------------------------------------------------------------
 const { BUILD_TIMEOUT_MS, distIsFresh } = await import('./ratchet-lib.mjs');
-if (!distIsFresh()) {
+if (needsDist(tsFiles, ROOT) && !distIsFresh()) {
   say('dist is stale: pnpm run build');
   const build = await runGroup('pnpm', ['run', 'build'], {
     label: 'dist build',
@@ -501,16 +360,8 @@ if (!distIsFresh()) {
     env: scrubbedBuildEnv(process.env), // live suites' credentials stay out of the build
     shell: !POSIX, // pnpm is a .cmd shim on win32
   });
-  if (lockPinned) {
-    finish({
-      result: 'error',
-      exit: 1,
-      reason: 'the dist build left processes that survived cleanup',
-    });
-  }
-  lock.annotate({ childPgid: null });
   if (interruptedBy !== null) {
-    finish({ result: 'interrupted', exit: signalExit(interruptedBy), reason: interruptedBy });
+    await finish({ result: 'interrupted', exit: signalExit(interruptedBy), reason: interruptedBy });
   }
   if (build.error !== undefined || build.timedOut || build.code !== 0) {
     const why =
@@ -520,7 +371,11 @@ if (!distIsFresh()) {
         : build.signal
           ? `killed by ${build.signal}`
           : `exit ${build.code}`);
-    finish({ result: 'error', exit: 1, reason: `dist build failed (pnpm run build): ${why}` });
+    await finish({
+      result: 'error',
+      exit: 1,
+      reason: `dist build failed (pnpm run build): ${why}`,
+    });
   }
 }
 
@@ -532,7 +387,7 @@ const vitestArgs = [
   'run',
   ...projects.filter((p) => p !== 'python').flatMap((p) => ['--project', p]),
   '--no-file-parallelism',
-  '--maxWorkers=1',
+  '--maxWorkers=2',
   '--reporter=default',
   '--reporter=json',
   `--outputFile.json=${reportPath}`,
@@ -553,7 +408,7 @@ const run = await runGroup(process.execPath, vitestArgs, {
   label: 'run',
   timeoutMs: RUN_TIMEOUT_MS,
   stdio: 'inherit',
-  env: { ...process.env, CQ_DIST_PREPARED: '1' },
+  env: { ...process.env, CQ_DIST_PREPARED: '1', NODE_OPTIONS: process.env.NODE_OPTIONS },
 });
 const durationMs = Date.now() - started;
 let report = null;
@@ -561,23 +416,16 @@ try {
   const json = JSON.parse(readFileSync(reportPath, 'utf8'));
   report = readReport(json, repoRelative);
   // Opt-in machine evidence for configured checks; does not alter selection,
-  // locking, execution or terminal verdicts. The adapter still requires the
-  // final wrapper result (including cap/class/run validation).
+  // execution or terminal verdicts. The adapter still requires the
+  // final wrapper result (including class/run validation).
   if (process.env.CQ_TEST_NARROW_REPORT === '1')
     writeSync(1, `test:narrow report=${JSON.stringify(json)}\n`);
 } catch {
   // no report (vitest died early, or never started): counts stay '-'
 }
 rmSync(reportDir, { recursive: true, force: true });
-if (lockPinned) {
-  finish({
-    result: 'error',
-    exit: 1,
-    reason: 'the test run left processes that could not be safely swept',
-  });
-}
 if (run.error !== undefined) {
-  finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
+  await finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
 }
 const exit = run.code ?? signalExit(run.signal);
 const verdict = runVerdict({
@@ -593,4 +441,4 @@ if (report !== null && pythonCounts !== null) {
   for (const key of ['total', 'passed', 'failed', 'skipped'])
     report.tests[key] += pythonCounts[key];
 }
-finish({ durationMs, ...report, ...verdict });
+await finish({ durationMs, ...report, ...verdict });

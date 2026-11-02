@@ -1,7 +1,5 @@
 /** Type boundary for the standalone JavaScript test-narrow policy. */
-export const MAX_FILES: number;
 export const NICE_INCREMENT: number;
-export const MAX_WAIT_CEILING_S: number;
 export const RUN_TIMEOUT_MS: number;
 export const DEFAULT_BASE: string;
 export const GATED_CLASSES: readonly string[];
@@ -13,7 +11,6 @@ export interface NarrowOptions {
   dryRun: boolean;
   include: string[];
   testNamePattern: string | null;
-  maxWaitS: number;
 }
 export function parseArgs(
   argv: readonly string[],
@@ -24,6 +21,7 @@ export interface PlannedFile {
   project: string;
 }
 export function planRun(input: {
+  allTests?: readonly string[];
   selection: { files: readonly string[]; fallback: boolean; reason: string };
   manifest: Readonly<Record<string, string>>;
   include: readonly string[];
@@ -43,7 +41,6 @@ export function pythonRunVerdict(input: {
   run: { code: number | null; signal: string | null; timedOut: boolean; error?: Error };
   counts: TestCounts | null;
   interruptedBy: string | null;
-  lockPinned: boolean;
 }): { result: string; exit: number; reason?: string };
 export interface TestCounts {
   total: number;
@@ -57,7 +54,6 @@ export interface Summary {
   files?: readonly string[];
   projects?: readonly string[];
   tests?: TestCounts;
-  waitMs?: number;
   durationMs?: number;
   nice?: number;
   load?: string;
@@ -76,15 +72,6 @@ export interface RunReport {
   executed: Record<string, number>;
 }
 export function signalExit(signal: string): number;
-/** How long a repeat of a terminal signal is still the parent relay's duplicate. */
-export const INTERRUPT_GRACE_MS: number;
-export type InterruptAction = 'relay' | 'absorb' | 'escalate' | 'finish';
-export function interruptAction(input: {
-  childLive: boolean;
-  signal: string;
-  relayedAt: Readonly<Record<string, number | undefined>>;
-  now: number;
-}): InterruptAction;
 export function runVerdict(input: {
   exit: number;
   report: RunReport | null;
@@ -95,14 +82,3 @@ export function runVerdict(input: {
 }): { result: string; exit: number; reason?: string };
 
 /** Fences and records one injected heavy spawn. */
-export function spawnLocked<T extends { pid?: number }>(
-  lock: {
-    stillHeld: () => boolean;
-    annotate: (fields: {
-      childPgid?: number | null;
-      childPending?: boolean;
-    }) => { childPgid?: number; childStartedAt?: string } | void;
-  },
-  spawnChild: () => T,
-  recordGroup?: boolean,
-): { child: T; identity: { childPgid?: number; childStartedAt?: string } | void };

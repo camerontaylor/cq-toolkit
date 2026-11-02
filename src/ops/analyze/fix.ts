@@ -215,7 +215,7 @@ interface SelectedCluster {
 const SIDECAR_NAME = /^analysis-[0-9a-f]{16}\.sidecar\.json$/;
 const PROPOSAL_PREFIX = 'proposal-';
 
-/** The newest analysis sidecar in `out`, or undefined. */
+/** The newest analysis sidecar, or undefined; non-missing metadata faults throw. */
 function newestSidecar(out: string): string | undefined {
   let names: string[];
   try {
@@ -226,7 +226,16 @@ function newestSidecar(out: string): string | undefined {
   let best: { path: string; mtime: number } | undefined;
   for (const name of names.sort()) {
     const path = join(out, name);
-    const mtime = statSync(path).mtimeMs;
+    let mtime: number;
+    try {
+      mtime = statSync(path).mtimeMs;
+    } catch (err) {
+      // Only a confirmed missing entry is safe to omit from newest selection.
+      if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') {
+        continue;
+      }
+      throw err;
+    }
     if (best === undefined || mtime >= best.mtime) best = { path, mtime };
   }
   return best?.path;
@@ -244,8 +253,16 @@ function selectCluster(
   out: string,
   input: AnalyzeFixInput,
 ): { ok: true; selected: SelectedCluster } | { ok: false; error: string } {
-  const sidecarPath =
-    input.sidecarPath === undefined ? newestSidecar(out) : resolve(dir, input.sidecarPath);
+  let sidecarPath: string | undefined;
+  try {
+    sidecarPath =
+      input.sidecarPath === undefined ? newestSidecar(out) : resolve(dir, input.sidecarPath);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `analyze.fix: could not select the newest analysis sidecar in '${out}' — ${messageOf(err)}; nothing was written`,
+    };
+  }
   if (sidecarPath === undefined) {
     return {
       ok: false,
@@ -435,7 +452,10 @@ export function patchTargets(
     else if (/^(rename|copy) (from|to) /.test(line)) candidate = line.replace(/^\S+ \S+ /, '');
     else if (line.startsWith('GIT binary patch') || line.startsWith('Binary files ')) {
       return { ok: false, reason: 'binary patches are not applied' };
-    } else if (/^(new file mode|new mode|old mode|deleted file mode) 1[26]0000/.test(line)) {
+    } else if (
+      /^(new file mode|new mode|old mode|deleted file mode) 1[26]0000/.test(line) ||
+      /^index \S+\.\.\S+ 1[26]0000$/.test(line)
+    ) {
       return { ok: false, reason: 'symlink and submodule entries are not applied' };
     }
     if (candidate === undefined || candidate === null) continue;
@@ -808,6 +828,7 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
         diffs: result.value.files.map(({ file, edits, diff }) => ({ file, edits, diff })),
       };
     } else if (preview.kind === 'rule-codemod') {
+      const expectedPreviewDigest = approvalInputDigest(preview.files);
       const applyInput = {
         dir,
         rule: input.rule as string,
@@ -826,9 +847,16 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
           files: applyInput.files,
           dryRun: false,
           timeoutMs: input.timeoutMs,
+          expectedPreviewDigest,
         }),
       };
-      const result = await makeAstGrepCodemod(deps.run, () => store, authority)(applyInput);
+      const result = await makeAstGrepCodemod(
+        deps.run,
+        () => store,
+        authority,
+        undefined,
+        expectedPreviewDigest,
+      )(applyInput);
       if (result.status === 'needs-human') return refusal(result.reason);
       if (result.status !== 'ok') return relay(result, 'analyze.fix: apply');
       applied = {

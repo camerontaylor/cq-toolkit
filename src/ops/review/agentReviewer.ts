@@ -1,3 +1,4 @@
+import type { EvidencePreparationContext } from './internal/reviewEvidencePreparation.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import type { ModelSpec } from '../../driver/types.js';
 import { boundedErrorText } from '../../driver/error-text.js';
@@ -6,6 +7,7 @@ import type { OpResult } from '../../kernel/types.js';
 import type { DiffSecretScanner, ScanComponentInput } from '../dev/denylist.js';
 import type { Finding } from './findings.js';
 import { REVIEW_SESSION_DEFAULTS } from '../analyze/cqConfig.js';
+import { createAreaReviewPlan } from './internal/areaReviewPlan.js';
 import { createReviewPlan } from './internal/reviewPlan.js';
 import {
   isCoverageV2Complete,
@@ -22,6 +24,9 @@ import {
 import { usageProvenanceOf } from '../../driver/usageProvenance.js';
 
 export interface AgentReviewerInput {
+  areas?: boolean;
+  evidenceContext?: EvidencePreparationContext;
+  loadEvidencePaths?: (paths: readonly string[]) => Promise<void>;
   repoRoot: string;
   head: string;
   branch: string;
@@ -166,13 +171,21 @@ export async function runAgentReviewer(
       ).map((component) => Object.freeze({ ...component }));
       if (new Set(components.map((component) => component.component)).size !== components.length)
         throw new Error('agent review component identities must be unique');
-      const plan = createReviewPlan({
+      const plan = (input.areas ? createAreaReviewPlan : createReviewPlan)({
         head: input.head,
         base: input.base ?? input.head,
         scope: input.scope ?? 'full',
         branch: input.branch,
         components,
-        ...(input.intent === undefined ? {} : { intent: input.intent }),
+        ...(input.evidenceContext === undefined
+          ? input.intent === undefined
+            ? {}
+            : { intent: input.intent }
+          : {
+              intent:
+                'For every finding emit evidenceV1: {version:1,failureScenario:string,primary:{file,side:"base"|"head",start,end,quote},supporting:[]}. Quote exact complete source lines at original line numbers. Read source to verify anchors. Primary must overlap changed hunks; supporting may contain at most five anchors with relevance.\n' +
+                (input.intent ?? ''),
+            }),
         ...(input.fileList === undefined ? {} : { fileList: input.fileList }),
         ...(input.priorFindings === undefined ? {} : { priorFindings: input.priorFindings }),
         ...(input.session === undefined ? {} : { session: input.session }),
@@ -341,8 +354,18 @@ export async function runAgentReviewer(
             scanSecrets: input.scanSecrets,
             components,
             plan: session,
+            ...(input.evidenceContext === undefined
+              ? {}
+              : { evidenceContext: input.evidenceContext }),
+            ...(input.loadEvidencePaths === undefined
+              ? {}
+              : { loadEvidencePaths: input.loadEvidencePaths }),
             evidence,
             logToolFailures: input.logToolFailures ?? false,
+            onFindings: (findings) => {
+              outcomes[index] = findings;
+              rebuildFindings();
+            },
             onUsage: (usage) => {
               report!.usage += totalUsage(usage);
             },
@@ -444,6 +467,19 @@ export async function runAgentReviewer(
         return {
           status: 'needs-human',
           reason: incompleteReason(report.coverage),
+          report: snapshot()!,
+        };
+      if (
+        report.findings.some(
+          (finding) =>
+            input.evidenceContext !== undefined &&
+            (finding.evidenceV1 === undefined ||
+              finding.evidenceV1.validation?.status === 'invalid'),
+        )
+      )
+        return {
+          status: 'needs-human',
+          reason: 'agent evidence preparation incomplete after bounded repairs',
           report: snapshot()!,
         };
       return { status: 'ok', value: snapshot()! };

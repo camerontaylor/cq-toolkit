@@ -49,7 +49,7 @@ async function scriptedCheck(
   passed: boolean,
   checkId: string,
 ): Promise<OpResult<DevCheckReport>> {
-  const read = await readWorkState(effects, { target: 'merge-queue' });
+  const read = await readWorkState(effects, { target: 'main' });
   if (!read.ok) throw new Error(read.reason);
   const record = checkRecord({
     checkId,
@@ -176,7 +176,7 @@ async function run(scenario: Scenario) {
       return scriptedCheck(author, false, 'k002-final');
     },
     review: async () => {
-      const read = await readWorkState(author, { target: 'merge-queue' });
+      const read = await readWorkState(author, { target: 'main' });
       if (!read.ok) throw new Error(read.reason);
       return {
         status: 'ok',
@@ -309,7 +309,7 @@ async function run(scenario: Scenario) {
             if (scenario.probeThrows !== undefined) throw new Error(scenario.probeThrows);
             if (scenario.probeFault !== undefined)
               return { status: 'needs-human', reason: scenario.probeFault };
-            const read = await readWorkState(effects, { target: 'merge-queue' });
+            const read = await readWorkState(effects, { target: 'main' });
             if (!read.ok) throw new Error(read.reason);
             if (scenario.probeAdvanceMs !== undefined) {
               const now = Date.now();
@@ -328,13 +328,13 @@ async function run(scenario: Scenario) {
           openIn: (effects: DevEffects, root: string) => async (input: PrOpenInput) => {
             opens.push({ input, root });
             if (scenario.openInResult !== undefined) return scenario.openInResult();
-            const read = await readWorkState(effects, { target: 'merge-queue' });
+            const read = await readWorkState(effects, { target: 'main' });
             if (!read.ok) throw new Error(read.reason);
             const value: PrOpenReport = {
               number: 77,
               url: 'https://example.invalid/pull/77',
               created: true,
-              base: input.target ?? 'merge-queue',
+              base: input.target ?? 'main',
               head: read.state.head,
               branch: read.state.branch,
               evidenceClass: 'author',

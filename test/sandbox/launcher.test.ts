@@ -178,6 +178,41 @@ describe('the launcher env scrub reaches the actual run child', () => {
       }),
     ).toThrow(/may not expose policy env/);
   });
+
+  test.each(POLICY_NAMES.flatMap((name) => [name.toLowerCase(), name.replace('CQ_', 'cQ_')]))(
+    'rejects policy alias %s before case-insensitive parent lookup',
+    (name) => {
+      // Model Windows environment lookup on every test host.
+      const parent = new Proxy<Record<string, string | undefined>>(
+        { [name.toUpperCase()]: 'policy-value' },
+        { get: (target, key: string) => target[key.toUpperCase()] },
+      );
+      expect(parent[name]).toBe('policy-value');
+      expect(() => buildSandboxLauncherEnv(parent, { envPassthrough: [name] })).toThrow(
+        /not permitted/,
+      );
+      expect(() =>
+        buildSandboxLauncherEnv(parent, { envPassthrough: [], declaredEnvNames: [name] }),
+      ).toThrow(/not permitted/);
+      expect(() =>
+        resolveSandboxConfig({
+          env: { CQ_SANDBOX: 'off', CQ_RUN_ENV_PASSTHROUGH: name },
+          platform: 'linux',
+        }),
+      ).toThrow(/may not expose policy env/);
+    },
+  );
+
+  test('preserves case-sensitive non-policy names and values', () => {
+    const config = resolveSandboxConfig({
+      env: { CQ_SANDBOX: 'off', CQ_RUN_ENV_PASSTHROUGH: 'custom_Name' },
+      platform: 'linux',
+    });
+    expect(config.envPassthrough).toEqual(['custom_Name']);
+    expect(buildSandboxLauncherEnv({ custom_Name: 'kept', CUSTOM_NAME: 'other' }, config)).toEqual({
+      custom_Name: 'kept',
+    });
+  });
 });
 
 describe('CQ_SANDBOX_NETWORK is advisory, not an enforced boundary', () => {

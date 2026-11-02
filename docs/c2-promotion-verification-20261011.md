@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # C2 promotion verification — 2026-10-11
 
 Dated handover record for the C2 cutover, per

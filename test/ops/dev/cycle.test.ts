@@ -7,6 +7,7 @@
 // network, no credentials.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { rm } from 'node:fs/promises';
+import { relative } from 'node:path';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import {
@@ -57,8 +58,8 @@ import type { OpResult } from '../../../src/kernel/types.js';
 /** A scripted green check leg recording its calls. */
 function greenCheck(calls: string[] = []): CheckLeg {
   return async (input) => {
-    calls.push(`check:${input.target ?? 'merge-queue'}`);
-    const read = await readWorkState(effects(), { target: input.target ?? 'merge-queue' });
+    calls.push(`check:${input.target ?? 'main'}`);
+    const read = await readWorkState(effects(), { target: input.target ?? 'main' });
     if (!read.ok) throw new Error(read.reason);
     const at = {
       base: read.state.base,
@@ -69,7 +70,7 @@ function greenCheck(calls: string[] = []): CheckLeg {
       status: 'ok',
       value: {
         checkId: `k0${String(calls.length).padStart(2, '0')}-aaaaaaaa`,
-        target: input.target ?? 'merge-queue',
+        target: input.target ?? 'main',
         ...at,
         passed: true,
         testSelection:
@@ -195,7 +196,7 @@ function openFake(calls: PrOpenInput[], number = 42, ready = true): OpenLeg {
         number,
         url: `https://example.invalid/pull/${String(number)}`,
         created: true,
-        base: input.target ?? 'merge-queue',
+        base: input.target ?? 'main',
         head: 'head-from-open',
         branch: 'feature/x',
         evidenceClass: 'author',
@@ -251,6 +252,35 @@ async function seedReadyLedger(state: WorkState): Promise<void> {
 }
 
 describe('dev.cycle', () => {
+  test('a relative repoRoot publishes and verifies the reviewed head with the production Git runner', async () => {
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const opens: PrOpenInput[] = [];
+    const repoRoot = relative(process.cwd(), repo.root);
+    expect(repoRoot).not.toBe(repo.root);
+    expect(repo.git('ls-remote', 'origin', 'refs/heads/feature/x')).toBe('');
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      review: cleanReview(state),
+      address: cleanAddress(state),
+      open: openFake(opens),
+      // No git override: exercise cwd and -C together against the local origin.
+    });
+
+    const result = await op({ repoRoot });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.pushed).toBe(true);
+    expect(result.value.head).toBe(state.head);
+    expect(repo.git('ls-remote', 'origin', 'refs/heads/feature/x').trim()).toBe(
+      `${state.head}\trefs/heads/feature/x`,
+    );
+    expect(opens).toEqual([{ repoRoot: repo.root, target: 'main' }]);
+    expect(result.value.followUp).toBe(followUpCommand(42, repo.root));
+  });
+
   test('the clean loop: check → review → address → final check → push → ready PR (ok)', async () => {
     const state = await seed(repo);
     await seedReadyLedger(state);
@@ -274,9 +304,9 @@ describe('dev.cycle', () => {
     expect(result.value.pr.number).toBe(42);
     expect(result.value.pr.ready).toBe(true);
     // TWO check legs: before the review and after the address.
-    expect(checkCalls).toEqual(['check:merge-queue', 'check:merge-queue']);
+    expect(checkCalls).toEqual(['check:main', 'check:main']);
     // The PR opened ready (no draft flags), at the intended target.
-    expect(opens).toEqual([{ repoRoot: repo.root, target: 'merge-queue' }]);
+    expect(opens).toEqual([{ repoRoot: repo.root, target: 'main' }]);
   });
 
   test('includeIntegration=true reaches BOTH check legs', async () => {
@@ -438,7 +468,7 @@ describe('dev.cycle', () => {
     expect(result.reason).toContain('draft PR #43');
     // The branch was published BEFORE the draft opened (pr.open's rule).
     expect(opens).toEqual([
-      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+      { repoRoot: repo.root, target: 'main', draft: true, draftWhenNotReady: true },
     ]);
     // The findings section was composed onto the draft's REAL body after
     // creation — the three spec sections, in one body.
@@ -490,7 +520,7 @@ describe('dev.cycle', () => {
     expect(result.reason).toContain('review round cap reached with open findings');
     expect(result.reason).toContain(`follow-up: ${followUpCommand(45, repo.root)}`);
     expect(opens).toEqual([
-      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+      { repoRoot: repo.root, target: 'main', draft: true, draftWhenNotReady: true },
     ]);
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
@@ -665,7 +695,7 @@ describe('dev.cycle', () => {
       expect(checks).toHaveLength(2);
       expect(pushCalls).toBe(1);
       expect(opens).toEqual([
-        { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+        { repoRoot: repo.root, target: 'main', draft: true, draftWhenNotReady: true },
       ]);
       // The open findings ride the draft like the round cap's, and the
       // section names ITS OWN structured stop — a blocked re-review must not
@@ -1294,14 +1324,14 @@ describe('dev.cycle', () => {
   });
 
   test('P2 v9bK7: the follow-up command carries a NON-DEFAULT target, quoted; the default is omitted', () => {
-    expect(followUpCommand(7, '/repo', 'main')).toBe(
-      "cq review.address --repoRoot='/repo' --target='main' --source=pr:7",
+    expect(followUpCommand(7, '/repo', 'release')).toBe(
+      "cq review.address --repoRoot='/repo' --target='release' --source=pr:7",
     );
     expect(followUpCommand(7, '/repo', "o'brien-queue")).toBe(
       "cq review.address --repoRoot='/repo' --target='o'\\''brien-queue' --source=pr:7",
     );
     // The default target changes nothing about the comparison: omit it.
-    expect(followUpCommand(7, '/repo', 'merge-queue')).toBe(
+    expect(followUpCommand(7, '/repo', 'main')).toBe(
       "cq review.address --repoRoot='/repo' --source=pr:7",
     );
     expect(followUpCommand(7, '/repo')).toBe("cq review.address --repoRoot='/repo' --source=pr:7");
@@ -1309,18 +1339,18 @@ describe('dev.cycle', () => {
 
   test('P2 v9bK7 (e2e): a non-default --target flows into the published report and the cap reason', async () => {
     await seed(repo);
-    repo.git('push', '-q', 'origin', 'origin/merge-queue:refs/heads/main');
+    repo.git('push', '-q', 'origin', 'origin/main:refs/heads/release');
     repo.git('fetch', '-q', 'origin');
     repo.git('push', '-q', 'origin', 'feature/x');
-    // Records must be pinned to the MAIN target (readiness refuses records
+    // Records must be pinned to the RELEASE target (readiness refuses records
     // recorded for another target). The open leg captures the target it was
     // called with; the clean address leg ends ok, so the READY path runs.
     const opens: PrOpenInput[] = [];
     const state2 = await seed(repo, () => []);
     const at = { base: state2.base, head: state2.head, dirtySha256: state2.dirtySha256 };
     const records = [
-      cycleRecord({ ...at, target: 'main' }),
-      checkRecord({ ...at, target: 'main' }),
+      cycleRecord({ ...at, target: 'release' }),
+      checkRecord({ ...at, target: 'release' }),
     ];
     repoEffects(repo)
       .openLedger(state2.branch)
@@ -1333,12 +1363,12 @@ describe('dev.cycle', () => {
       open: openFake(opens, 46),
       git: async () => ({ code: 0, stdout: `${state2.head}\trefs/heads/feature/x\n`, stderr: '' }),
     });
-    const result = await op({ repoRoot: repo.root, target: 'main' });
+    const result = await op({ repoRoot: repo.root, target: 'release' });
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
-      expect(opens[0]?.target).toBe('main');
-      expect(result.value.followUp).toBe(followUpCommand(46, repo.root, 'main'));
-      expect(result.value.followUp).toContain("--target='main'");
+      expect(opens[0]?.target).toBe('release');
+      expect(result.value.followUp).toBe(followUpCommand(46, repo.root, 'release'));
+      expect(result.value.followUp).toContain("--target='release'");
     }
   });
 
@@ -1494,7 +1524,7 @@ describe('dev.cycle', () => {
     expect(checks).toHaveLength(2);
     expect(pushCalls).toBe(1);
     expect(opens).toEqual([
-      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+      { repoRoot: repo.root, target: 'main', draft: true, draftWhenNotReady: true },
     ]);
     // The findings section names the blocked re-review, never the round cap.
     expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
@@ -1602,7 +1632,7 @@ describe('dev.cycle', () => {
       expect(result.reason).toContain(followUpCommand(44, repo.root));
     }
     expect(opens).toEqual([
-      { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
+      { repoRoot: repo.root, target: 'main', draft: true, draftWhenNotReady: true },
     ]);
     // A clean address report carries NO findings section: nothing is open.
     expect(bodies).toEqual([]);

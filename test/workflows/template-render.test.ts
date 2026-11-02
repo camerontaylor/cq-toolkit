@@ -76,7 +76,7 @@ describe('template render-diff: coverage', () => {
 
   it('finds the workflows and the templates, including the self-host subdirectory', () => {
     expect(workflows).toContain('ci.yml');
-    expect(templates).toContain('gate.yml');
+    expect(templates).not.toContain('gate.yml');
     expect(templates).toContain('self-host/self-review-loop.yml');
   });
 
@@ -142,25 +142,6 @@ describe('template render-diff: coverage', () => {
 // the template while GATE_TIMEOUT_MIN is an adopter token: the wait plus
 // checkout/install/build must stay under it, so the instance keeps the wait
 // <= 25 minutes (a runner kill mid-wait fails closed but loses the report).
-describe('gate.yml: GATE_TIMEOUT_MIN stays under the decide job timeout', () => {
-  it('the template pins decide at 40 minutes and the instance waits <= 25', () => {
-    const tpl = readFileSync(join(ROOT, TEMPLATES_DIR, 'gate.yml'), 'utf8');
-    const decide = /^ {2}decide:\n((?: {4}.*\n|\n)*)/m.exec(tpl)?.[1] ?? '';
-    expect(decide).toMatch(/^ {4}timeout-minutes: 40$/m);
-    expect(tpl).toContain('--timeoutMin={{GATE_TIMEOUT_MIN}}');
-    const table = JSON.parse(readFileSync(join(ROOT, TABLE_PATH), 'utf8')) as {
-      instances: Array<{ template: string; tokens: Record<string, string> }>;
-    };
-    const gates = table.instances.filter((i) => i.template === 'gate.yml');
-    expect(gates.length).toBeGreaterThan(0);
-    for (const gate of gates) {
-      const min = gate.tokens['GATE_TIMEOUT_MIN'] ?? '';
-      expect(min).toMatch(/^[1-9][0-9]*$/);
-      expect(Number(min)).toBeLessThanOrEqual(25);
-    }
-  });
-});
-
 describe('renderTemplate', () => {
   const header = '# instantiated from policy/templates/t.yml — edit the template, not this file\n';
 

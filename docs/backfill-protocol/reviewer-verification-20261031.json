@@ -1,0 +1,27 @@
+{
+  "schema": "cq.reviewer-verification/v1",
+  "cli_version": "0.8.2",
+  "adapter": "submitted-hunks-v1",
+  "base": "5dd1b34a357f2ce687fed264eeeb9564241ed34e",
+  "head": "e3c526b2d442b5cd134cca46091ea50d7522b641",
+  "exit_code": 0,
+  "terminal_status": "review_completed",
+  "terminal_outcome": "completed",
+  "errors": [],
+  "submitted_diff_bytes": 380535,
+  "vendor_confirmed_files": 38,
+  "verified_bounds": {
+    "max_files": 8,
+    "max_diff_bytes": 262144,
+    "max_file_bytes": 200000,
+    "max_total_bytes": 500000
+  },
+  "raw_sha256": "50a7d85c77a400940eae18ff23707d8d93f719405c6e53d80e057923e7595834",
+  "submitted_diff_sha256": "757694122b06ef1f1b09dd212a3805f281a877280b8ef2a34a923ec007b2b531",
+  "method": "Observed successful larger submission; conservative dispatch bounds. Vendor-confirmed paths intersect exact submitted head-side hunks; unlisted paths remain debt. Unknown version or format and unsubmitted paths refuse credit. Historical path-only streams without bound submission evidence remain uncredited.",
+  "coverage_credit": false,
+  "observed_largest_confirmed_head_blob_bytes": 215528,
+  "observed_confirmed_head_content_bytes": 731256,
+  "retained_run": "backfill-20261031/operator-scope-verification",
+  "version_probe_sha256": "179a5390966e85c2071a87c1b31de13df67460665196f6529f8c4986842f81e5"
+}

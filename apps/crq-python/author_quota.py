@@ -96,7 +96,7 @@ def normalize_binding(*, request_id: Any, base: Any, head: Any, target: Any, cyc
     if base == head:
         raise AuthorRefused("base and head are the same commit")
     if not isinstance(target, str) or not TARGET_RE.match(target):
-        raise AuthorRefused("target must be a ref name like origin/merge-queue")
+        raise AuthorRefused("target must be a ref name like origin/main")
     if isinstance(cycle, bool) or not isinstance(cycle, int) or not (1 <= cycle <= MAX_CYCLE):
         raise AuthorRefused(f"cycle must be an integer 1..{MAX_CYCLE}")
     return {"request_id": request_id, "base": base, "head": head, "target": target, "cycle": cycle}

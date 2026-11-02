@@ -105,3 +105,82 @@ D1C must review/activate that exact capability under existing deployment trust,
 after compatible Q1 service/state and healthy dispatch. Disabled/old runners
 return unsupported or a transport refusal with a deployment prerequisite.
 Q3 source/test success alone does not establish activation or live acceptance.
+
+## Operator activation (queue-v1)
+
+Activation is an operator action under existing deployment trust. It changes no
+runner code, signer or unit. Install exactly one restricted client identity per
+calling principal:
+
+1. Generate a dedicated client key on the calling host. The private key never
+   leaves that host.
+2. On the queue host, add one `authorized_keys` line for the account that owns
+   the queue state. The line uses `restrict` and a fixed forced command, and sets
+   the server-only principal and policy inside that command:
+
+   ```text
+   restrict,command="/usr/bin/env PATH=<cli-path> CRQ_QUEUE_PRINCIPAL=<principal> CRQ_QUEUE_POLICY=<policy.json> /usr/bin/python3 <runner-root>/apps/crq-python/capability_dispatcher.py" ssh-ed25519 <public-key> <comment>
+   ```
+
+   Do not run the dispatcher with `python3 -I`: it imports its sibling transport
+   modules. Never accept these variables from the client (`PermitUserEnvironment`
+   stays off). Do not add `CRQ_AUTHOR_*` settings to this queue identity.
+   `PATH` must resolve `git` and `gh`; authenticate `gh` as the queue account.
+
+3. Create the policy file (mode 0600) disabled, owned by the queue-state account
+   that runs the dispatcher. Verify that account can read it before enabling it.
+   Turn it on only for an approved window:
+
+   ```json
+   {"enabled": false, "repo": "<owner/repo>", "read": ["<principal>"], "write": ["<principal>"], "targets": ["promoted-main"], "branches": ["<base-branch>"], "max_requests": 50}
+   ```
+
+4. On the calling host, define the alias named by `CQ_QUEUE_SSH_ALIAS`. The
+   transport passes its own non-interactive options but reads the user's SSH
+   configuration, so make sure no catch-all `Host *` block adds other identity
+   files, agent forwarding or connection sharing to the alias (for example
+   `Host * !<alias>`). Check it offline with `ssh -G <alias>`: there must be a
+   single `identityfile`, `forwardagent no` and `controlmaster false`.
+
+Rollback: `"enabled": false` is the fast off. Otherwise-valid authorized requests
+then return `unsupported` with no restart; malformed or unauthorized requests are
+still refused earlier. For full rollback, revoke server authorization first by
+commenting out the `authorized_keys` line, keep managed backups, then retire the
+client key and alias. Queue requests and receipts are never deleted; deferred
+debt stays inspectable and can be cancelled with `review.enqueue --action=cancel`.
+
+## Reading reconciled inventory
+
+An operator may authorize adoption of one existing merged-current request by adding
+an exact grant to the server policy's `reconciled_reads` array:
+
+```json
+{"principal":"developer","requestId":"reconcile-<subject-digest>","binding":{"kind":"merged-current","repo":"owner/repo","pr":506,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetSelector":"promoted-main"}}
+```
+
+Grant and use a request ID actually present in `merged_current_requests`, with its
+exact immutable source binding. Reconciliation enrolls only `intent` entries.
+For `already-enrolled` subjects, the inventory's proposed `reconcile-…` ID may have
+no stored mapping: use the existing mapped request ID for that exact subject,
+which the operator must identify from queue state. Do not grant the proposed ID
+unless it has a stored mapping. The client uses the existing SDK
+`status` / `report` methods or `review.queueStatus` / `review.report` commands.
+No enqueue alias is needed. The principal must also have ordinary read authority;
+acknowledgement still requires write authority. The first successful read validates
+forge source and allowed base branch, the exact stored mapping and unique item,
+and capacity before persisting the principal-bound client entry. Adoption neither
+enrolls debt nor starts a review. Existing client entries retain their original
+principal binding: if another client principal already holds the mapped ID,
+adoption by a new principal is refused even with an exact grant. The existing
+principal must consume it, or an authorized writer must explicitly enqueue a new
+alias using its own ID and exact source binding; this seam does not transfer
+ownership or create that alias. Each request ID may appear only once in the grant
+array. Removing the grant prevents new adoption; revoke ordinary read
+or write access to revoke an already adopted client's corresponding capability.
+
+Deployment requires this transport and compatible receipt storage on the queue
+runner, an operator-owned exact grant, and the existing activated queue-v1 boundary.
+No deployment is performed by this source change. Live D2 inventory/adoption
+acceptance must be recorded separately from quota discharge: pending inventory,
+a completed report, consumption acknowledgement and remediation remain distinct;
+adoption alone supplies no review, fixed-state or full-quota credit.

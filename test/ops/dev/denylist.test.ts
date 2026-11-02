@@ -180,6 +180,20 @@ describe('the component scan', () => {
     ).toThrow(/class:badpath.*does not compile/);
   });
 
+  test('synthetic check output path does not trigger protected-file content rules', () => {
+    expect(
+      scanComponents(
+        [
+          {
+            component: 'check',
+            path: 'check-output.txt',
+            text: 'private value',
+          },
+        ],
+        [{ id: 'env', description: 'env content', regex: '.+', path: '\\.env' }],
+      ),
+    ).toEqual([{ component: 'check', hits: [] }]);
+  });
   test('scanComponents gives one verdict per component, in order, each scoped by its own path', () => {
     const scans = scanComponents(
       [
@@ -236,6 +250,21 @@ describe('makeGitleaksDefaultsScanner', () => {
     };
   }
 
+  test('composed scanners forward the diagnostic timeout to the gitleaks child', async () => {
+    const effects = gitleaksEffects(0, []);
+    let timeout: number | undefined;
+    const scanner = composeScanners(
+      makeGitleaksDefaultsScanner({
+        ...effects,
+        runCommand: (command, args, options) => {
+          timeout = options.timeoutMs;
+          return effects.runCommand(command, args);
+        },
+      }),
+    );
+    await scanner(components, { timeoutMs: 100 });
+    expect(timeout).toBe(100);
+  });
   test('a clean run maps no hits; components keep their order', async () => {
     const effects = gitleaksEffects(0, []);
     const scan = await makeGitleaksDefaultsScanner(effects)(components);

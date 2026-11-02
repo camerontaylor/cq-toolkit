@@ -20,6 +20,7 @@ export type {
   QuarantineRecord,
 } from '../../../adapters/store/quarantine.js';
 export {
+  DispatchInFlightError,
   makePlaybookDispatchOp,
   makePlaybookQuarantineListOp,
   makePlaybookRegisterOp,

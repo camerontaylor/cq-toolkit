@@ -131,7 +131,7 @@ describe('cq-signal is a wake-up only (ADR-0004 D-B)', () => {
       // Debounced (development posture, 2026-10-20): comments, edits and
       // label events no longer wake the verifiers; cq-accept's sweep reconciles.
       expect(on).not.toMatch(/pull_request_review_comment|- edited|labeled/);
-      expect(on).toMatch(/^ {2}push:\n {4}branches:\n {6}- merge-queue$/m);
+      expect(on).not.toMatch(/^ {2}push:/m);
       expect(on).not.toMatch(/pull_request_target|workflow_run|workflow_dispatch/);
       expect(body).toMatch(/^permissions: \{\}$/m);
       const jobs = jobBlocks(body);
@@ -155,9 +155,16 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(on).toMatch(/^ {2}workflow_run:\n {4}workflows:\n {6}- cq-signal\n/m);
       expect(on).toMatch(/^ {4}types:\n {6}- completed$/m);
       expect(on).toMatch(/^ {2}workflow_dispatch:$/m);
-      expect(on).not.toMatch(/pull_request|push:/);
+      expect(on).toMatch(/^ {2}pull_request:$/m);
+      expect(on).not.toMatch(/branches:/);
+      expect(on).not.toMatch(/pull_request_target|push:/);
       expect(body).toMatch(/^permissions: \{\}$/m);
-      expect([...jobBlocks(body).keys()]).toEqual(['resolve', 'judge']);
+      expect([...jobBlocks(body).keys()]).toEqual(['main-advisory', 'resolve', 'judge']);
+      const advisory = jobBlocks(body).get('main-advisory') ?? '';
+      expect(advisory).toContain("if: github.event_name == 'pull_request'");
+      expect(advisory).toContain('permissions: {}');
+      expect(advisory).not.toMatch(/uses:|secrets\./);
+      expect(jobBlocks(body).get('resolve')).toContain("github.event_name != 'pull_request'");
       // Only the signing job has an environment (Decision 6).
       expect([...body.matchAll(/^\s*environment: (.*)$/gm)].map((m) => m[1])).toEqual([
         'cq-verdict',
@@ -339,7 +346,7 @@ ${resolveScript(text)}`;
       const queried = join(dir, 'queried');
       const check = (
         run: Record<string, unknown>,
-        pulls: unknown[] = [pull('merge-queue')],
+        pulls: unknown[] = [pull('main')],
         extra: Record<string, string> = {},
       ) => {
         rmSync(outputPath, { force: true });
@@ -374,10 +381,10 @@ ${resolveScript(text)}`;
           const ok = check({ ...valid, event }, [
             pull('other'),
             pull('main', { state: 'closed' }),
-            pull('merge-queue'),
+            pull('main'),
           ]);
           expect(ok.status, ok.stderr + ok.stdout).toBe(0);
-          expect(ok.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=merge-queue\npr=7\n`);
+          expect(ok.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=main\npr=7\n`);
         }
         // The match on a later page counts: every page is read.
         const paged = check(valid, [pull('other')], {
@@ -386,19 +393,19 @@ ${resolveScript(text)}`;
         expect(paged.status, paged.stderr + paged.stdout).toBe(0);
         expect(paged.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=main\npr=7\n`);
         // A lagging association is looked up once more before any skip.
-        const late = check(valid, [], { PULLS_LATE: JSON.stringify([pull('merge-queue')]) });
+        const late = check(valid, [], { PULLS_LATE: JSON.stringify([pull('main')]) });
         expect(late.status, late.stderr + late.stdout).toBe(0);
-        expect(late.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=merge-queue\npr=7\n`);
-        const push = check({ ...valid, event: 'push', head_branch: 'merge-queue' }, []);
-        expect(push.status, push.stderr + push.stdout).toBe(0);
-        expect(push.outputs).toBe(`subject=${SHA}\nkind=push\nbase=main\npr=\n`);
+        expect(late.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=main\npr=7\n`);
+        const push = check({ ...valid, event: 'push', head_branch: 'main' }, []);
+        expect(push.status).not.toBe(0);
+        expect(push.outputs).toBe('');
         for (const [label, run, pulls] of [
           ['path', { ...valid, path: '.github/workflows/other.yml' }, undefined],
           ['fork', { ...valid, head_repository: { id: 43 } }, undefined],
           ['event', { ...valid, event: 'pull_request_target' }, undefined],
           ['head SHA shape', { ...valid, head_sha: 'not-a-sha' }, undefined],
           ['push branch', { ...valid, event: 'push', head_branch: 'main' }, undefined],
-          ['ambiguous PR', valid, [pull('main'), pull('merge-queue', { number: 8 })]],
+          ['ambiguous PR', valid, [pull('main'), pull('main', { number: 8 })]],
         ] as const) {
           const refused = check(run, pulls === undefined ? undefined : [...pulls]);
           expect(refused.status, `${label}: ${refused.stdout}`).toBe(1);
@@ -410,7 +417,7 @@ ${resolveScript(text)}`;
           ['no PR', []],
           ['fork PR', [pull('main', { head: { sha: SHA, repo: { id: 43 } } })]],
           ['stale PR head', [pull('main', { head: { sha: 'f'.repeat(40), repo: { id: 42 } } })]],
-          ['closed PR', [pull('merge-queue', { state: 'closed' })]],
+          ['closed PR', [pull('main', { state: 'closed' })]],
           ['another base', [pull('codex/stack')]],
         ] as const) {
           const skipped = check(valid, [...pulls]);
@@ -481,7 +488,7 @@ ${resolveScript(text)}`;
       const dir = mkdtempSync(join(tmpdir(), 'cq-policy-post-'));
       const shell = `gh() { cp "$6" "$RUNNER_TEMP/posted.json"; echo https://example.test; }
 ${script}`;
-      const post = (verdict: string) => {
+      const post = (verdict: string, advisory = false) => {
         writeFileSync(join(dir, 'verdict.json'), verdict);
         rmSync(join(dir, 'posted.json'), { force: true });
         rmSync(join(dir, 'summary.md'), { force: true });
@@ -494,6 +501,7 @@ ${script}`;
             REPO: 'owner/repo',
             TRUST: 'a'.repeat(40),
             SUBJECT: SHA,
+            ADVISORY: String(advisory),
           },
         });
         const posted = existsSync(join(dir, 'posted.json'))
@@ -534,6 +542,10 @@ ${script}`;
           'protected-path policy/x\noverride: dormant',
         );
         expect(human.summary).toContain('override: dormant');
+        const mainHuman = post(ok('needs-human', ['advisory finding']), true);
+        expect(mainHuman.status, mainHuman.stderr).toBe(0);
+        expect(mainHuman.posted?.conclusion).toBe('neutral');
+        expect(mainHuman.posted?.output.summary).toContain('advisory finding');
         const fail = post(ok('fail', ['lint']));
         expect(fail.status, fail.stderr).toBe(0);
         expect(fail.posted?.conclusion).toBe('failure');
@@ -563,7 +575,6 @@ describe('App variable pairs are refused half-set (W1.10 Decisions 6, 7)', () =>
     ['cq-policy.yml', 'judge', VERDICT_STEP, false],
     ['cq-verify.yml', 'judge', VERDICT_STEP, false],
     ['cq-accept.yml', 'judge', VERDICT_STEP, false],
-    ['gate.yml', 'decide', BOTH_STEP, true],
     ['settings-drift.yml', 'drift', BOTH_STEP, true],
   ];
   const copies = CASES.flatMap(([file, job, step, promoter]) =>
@@ -655,7 +666,7 @@ describe('cq-accept serializes judge per PR (W1.10 Decision 10)', () => {
         state: 'open',
         draft: false,
         head: { sha: SHA, repo: { id: 42 } },
-        base: { ref: 'merge-queue' },
+        base: { ref: 'main' },
       };
       const shell = `gh() {
   [ "$1" = api ] || return 9
@@ -729,7 +740,7 @@ ${script}`;
         state: 'open',
         draft: false,
         head: { sha: SHA, repo: { id: 42 } },
-        base: { ref: 'merge-queue' },
+        base: { ref: 'main' },
         ...over,
       });
       const dir = mkdtempSync(join(tmpdir(), 'cq-accept-sweep-'));
@@ -905,23 +916,23 @@ ${script}`;
         // The PR on the SECOND page is judged anyway: every page is read,
         // so the target is emitted and judge locks pr-7.
         const paged = check([pull('other')], {
-          PULLS_PAGE2: JSON.stringify([pull('merge-queue')]),
+          PULLS_PAGE2: JSON.stringify([pull('main')]),
         });
         expect(paged.status, paged.stderr + paged.stdout).toBe(0);
         expect(paged.outputs).toBe(`targets=[{"pr":7,"subject":"${SHA}"}]\nlock=pr-7\n`);
         // The one match split across the two pages is still one match.
-        const split = check([], { PULLS_PAGE2: JSON.stringify([pull('merge-queue')]) });
+        const split = check([], { PULLS_PAGE2: JSON.stringify([pull('main')]) });
         expect(split.status, split.stderr + split.stdout).toBe(0);
         expect(split.outputs).toBe(`targets=[{"pr":7,"subject":"${SHA}"}]\nlock=pr-7\n`);
         // Two matches across the pages refuse: the slurped array is one.
-        const ambiguous = check([pull('merge-queue')], {
-          PULLS_PAGE2: JSON.stringify([pull('merge-queue', { number: 8 })]),
+        const ambiguous = check([pull('main')], {
+          PULLS_PAGE2: JSON.stringify([pull('main', { number: 8 })]),
         });
         expect(ambiguous.status, ambiguous.stdout).toBe(1);
         expect(ambiguous.outputs).toBe('');
         // An API error fails closed: the step refuses, no targets are
         // emitted, judge never runs.
-        const failed = check([pull('merge-queue')], { PULLS_FAIL: '1' });
+        const failed = check([pull('main')], { PULLS_FAIL: '1' });
         expect(failed.status, failed.stdout).not.toBe(0);
         expect(failed.outputs).toBe('');
       } finally {
@@ -1030,7 +1041,7 @@ gh() {
         expect(payload['started_at']).toBe(judged);
         // completed_at is the snapshot time too, never GitHub's POST time.
         expect(payload['completed_at']).toBe(judged);
-        expect(payload['conclusion']).toBe('success');
+        expect(payload['conclusion']).toBe('neutral');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

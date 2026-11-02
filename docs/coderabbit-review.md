@@ -15,8 +15,9 @@ owner rulings as context. DEC1 (2026-10-27) additionally approves the durable
 vendor-debt path in §6, including continued ready/merge progress before
 vendor recovery. This does not change what counts as vendor completion.
 Non-author means an independent reviewer agent or human. Reviewer and author
-agents may use the same GitHub account; the enabled same-account path records
-distinct agent identities and a review attestation bound to the exact PR head.
+agents may use the same GitHub account. Post a plain PR comment with the reviewer
+agent identity, exact head SHA and `PASS`; no marker syntax or opt-in is required.
+Automation ignores Bot authors and logins ending in `[bot]`.
 
 Configuration lives in `.coderabbit.yaml` (chill profile, repo path
 invariants, low-noise settings). Sources current as of 2026-09-16 —
@@ -92,9 +93,8 @@ tracked; staging is sufficient for uncommitted work.
 
 The review must cover the coherent full intended PR diff:
 
-1. Name the task's **explicit intended PR target** — `origin/merge-queue`
-   per the documented queue flow (`policy/templates/README.md`), or
-   `origin/main` when that is the task's actual target. Check the repo's
+1. Name the task's **explicit intended PR target** — `origin/main` for this
+   repository, following [merge policy](promotion-policy.md). Check the repo's
    current PR-target convention rather than assuming; record the choice.
 2. `BASE=$(git merge-base <intended-target-ref> HEAD)` — an immutable sha.
    `--base <branch>` is a moving branch; do not use it. Do not blindly pin
@@ -151,7 +151,7 @@ review adds nothing beyond them. Use the immutable `BASE` from §3 and stage
 your own new files before these checks so they are covered. Pass the recorded
 SHA to `test:narrow` at both checkpoints; never recompute it from a moving
 target. For a direct-to-main PR, `BASE` must be the pin against `origin/main`
-from §3 rather than the runner's default `origin/merge-queue`:
+from §3 rather than the runner's default `origin/main`:
 
 ```bash
 git diff --check "$BASE" HEAD  # committed PR changes
@@ -331,7 +331,7 @@ additionally carries `policy/DOCTRINE.md` as a repo-wide guideline.
 ## 9. On the opened PR
 
 The App reviews the PR under `.coderabbit.yaml` (automatic review enabled
-for `merge-queue` and `main` targets; drafts and WIP-titled PRs excluded).
+for `main` targets; drafts and WIP-titled PRs excluded).
 To address App review comments, fetch the consolidated fix prompt. The
 following command was verified with CLI **0.7.7**. Before using it, run
 `coderabbit pullrequest --help` under the platform's 30-second timeout

@@ -2,7 +2,7 @@
 
 @camerontaylor/cq-toolkit is a portable code-quality toolkit: a TypeScript
 SDK of atomic code-quality operations, a deterministic plan runner, and
-adoptable merge-queue and doctrine policy templates. It is self-hosting —
+adoptable PR and doctrine policy templates. It is self-hosting —
 the toolkit's own quality gates run on the toolkit itself.
 
 ## Gates (focused locally, full-gate authority in CI)
@@ -34,13 +34,9 @@ cycle — (which are the cheap deterministic
 gates plus the affected tests, never the suite).
 The full suite — plus the build, the from-source smoke plan, the coverage
 ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
-**green required CI on the exact candidate SHA** (the `merge-queue` commit the
-promotion gate resolves) is the sole full-gate authority. A green PR head is
-not candidate evidence, because required status checks are not strict here
-(mechanism, the four required-set declarations and the one sanctioned CI skip:
-contract §1). No local full run exists any more, for workers or coordinators:
-a CI failure is reproduced with `pnpm test:narrow <failing test files>`, or by
-re-running the CI job.
+**green `static` and `denylist` on the exact PR head**, plus one independent
+exact-head review comment, is the merge bar for PRs directly to `main`.
+CRQ reviews after merge. See [merge policy](docs/promotion-policy.md).
 
 Escalate a shared interface, dependency/tooling or config change — and any
 impact you cannot classify — to the coordinator with the reason, rather than
@@ -64,8 +60,9 @@ the full suite and Knip; it is **not a local verification route** — it is
 CI-only, like the suite (contract §1).
 
 Any local timing cited as evidence carries a load stamp (host uptime + load
-average at measurement time), and no protocol or record cites `--maxWorkers`
-(mechanism, and the caveat that a later slice may change it: contract §5).
+average at measurement time). Do not cite `--maxWorkers` as worker-count
+tuning or as performance evidence in protocol steps or records. The runner
+documentation describes its fixed setting (contract §5).
 
 ## Local testing
 
@@ -75,20 +72,23 @@ suite (`pnpm run test`, `test:unit`, `test:e2e`, `check`, bare `vitest` or
 concurrency yourself (contract §2 is the selection it automates):
 
 - `pnpm test:narrow` — the tests for your changes since the merge-base with
-  `origin/merge-queue`, plus the working tree.
+  `origin/main`, plus the working tree.
 - `pnpm test:narrow <file...>` — named test files, or source files mapped to
   their tests. `--range <a>..<b>` selects a commit range; `--dry-run` prints
   the plan and runs nothing; `--help` lists the rest.
 
-It re-execs under `nice -n 5`, waits (bounded, visibly) for the host-wide
-lock, so there is one run per host, rebuilds dist only when stale, and runs
-one serial vitest invocation. It refuses more than 10 files, selections that
-fall back to every test, `integration`/`live` suites without
-`--include-integration`/`--include-live`, `--watch`, `--coverage` and every
-other vitest flag. A refusal is the answer: name a narrower set of files,
-never work around it. Quote the final `test:narrow result=…` line as
-evidence. Exit 75 means the lock stayed busy or ownership was lost before a child spawn:
-retry later, never bypass.
+It re-execs under `nice -n 5`, checks MemAvailable and exits 75 immediately
+below 2 GB, naming the top three memory users. Move to another host; no lock
+or waiting. Tests and builds try a systemd user scope (3 GB memory, no swap,
+CPUWeight50), retry without unsupported OOMScoreAdjust, and run directly
+with a visible warning if scopes are unavailable. Linux children inherit
+oom_score_adj500 where writable; Node uses a 2048 MB heap.
+Selected dist-dependent tests rebuild dist only when stale; source-only tests
+skip preparation. One serial Vitest invocation uses --maxWorkers=2 (Vitest
+currently reduces serial file runs to one worker). There is no file-count cap.
+Full-suite selections, watch, coverage and arbitrary Vitest flags remain
+refused; integration/live suites require their include flags. Quote the final
+`test:narrow result=…` line as evidence.
 
 ## GLM peak-hour blackout
 
@@ -109,8 +109,7 @@ outage (DEC1, 2026-10-27), then one independent head-bound review of the PR
 protocol: [docs/coderabbit-review.md](docs/coderabbit-review.md).
 
 - Pin ONE immutable base per task: the merge-base against the task's
-  EXPLICIT intended PR target (`origin/merge-queue` per documented policy;
-  `origin/main` when that is the task's actual target). Never a moving
+  EXPLICIT intended PR target (`origin/main` for this repository). Never a moving
   branch, never blindly task-start HEAD when the branch carries previous
   work. Record target, base, reviewed HEAD, and the dirty-diff identity
   when uncommitted work is in scope.
@@ -163,11 +162,11 @@ enabled exact-head attestation path documented in the policy templates.
 invariants. Workflow files under `.github/workflows/` are instantiated from
 `policy/templates/` — never edit them directly.
 
-Python modules in `apps/crq-python` use this same runner and host lock:
+Python modules in `apps/crq-python` use this same runner:
 `pnpm test:narrow apps/crq-python/test_status_summary.py`. Source modules map
 only to their matching `test_<module>.py`; unmapped changes and discovery-sized
 selections are refused. Named modules run in one `python3 -m unittest`
-invocation, serially with any selected TypeScript tests, under the same total
-10-file cap, nice priority, timeout and process-group cleanup. Local bare
+invocation, serially with any selected TypeScript tests, under the same
+nice priority, timeout and process-group cleanup. Local bare
 unittest and discovery are prohibited; full Python discovery runs only in CI
 on Python 3.14, the production minor reported by the owner.

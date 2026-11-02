@@ -1,46 +1,15 @@
 # instantiated from policy/templates/cq-measure.yml — edit the template, not this file
-# cq-measure — the HEAD-DEFINED measurement leg of the ratchet (ADR-0004
-# D-A.4, D-B "Ratchet: coverage (head-executed)"; W1.7).
-#
-# This workflow runs the HEAD's definition over the HEAD's code: a pull
-# request can edit this file, its tests, and its coverage config. So it
-# decides nothing. It is a wake-up and an UNTRUSTED producer:
-#   - a read-only fetch job bundles the subject's git objects without
-#     executing head code; the measurement job has `permissions: {}` and no
-#     `secrets.*` or `environment:`, so a head test can read no credential
-#     (ADR-0004 D-D.5). The split also works for private repositories;
-#   - the only artifact consumed by the verifier is the numbers-only
-#     `cq-measure` result, which the
-#     default-branch verifier (`cq-verify.yml`, `workflow_run`) downloads as
-#     DATA, validates against a strict schema, and judges against the trust
-#     ref's baselines. A head that edits this file or any measurement config
-#     is caught by the verifier's definition check (needs-human, D11).
-#   - Accepted residual (ADR-0004 D-J, owner-accepted at G1): the head
-#     executes here, so it can make this leg report ANY coverage value.
-#
-# The subject is the PR HEAD SHA (not the synthetic merge ref): the verdict
-# binds to `workflow_run.head_sha`, so the measured tree must be that commit.
-# On `push: merge-queue` the subject is the pushed tip.
-#
-# Not a required check (the verifier's App-created verdict is, from W1.10),
-# so the push branch filter is allowed here; the pull_request trigger stays
-# unfiltered so every PR is measured.
+# Advisory PR diagnostics for direct main development. No queue promotion carrier.
 name: cq-measure
 
 on:
   pull_request:
-  push:
-    branches:
-      - merge-queue
 
 permissions: {}
 
-# Every merge-queue push is a promotion subject that needs its own verdict,
-# so a merge-queue push run is keyed by its SHA and never superseded: a
-# cancelled measurement concludes 'cancelled' and becomes a failure verdict
-# the gate refuses on. PR and other branch runs still supersede by ref.
+# Supersede older diagnostics for the same event and ref.
 concurrency:
-  group: cq-measure-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'push' && github.ref == 'refs/heads/merge-queue' && format('-{0}', github.sha) || '' }}
+  group: cq-measure-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 # pnpm-workspace.yaml's global virtual store is a local-worktree speedup

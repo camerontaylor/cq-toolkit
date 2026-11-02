@@ -215,6 +215,7 @@ jobs:
           # never as interpolated text. Both are '' on schedule events.
           MAX_USD: ${{ inputs.max_usd }}
           DRY_RUN: ${{ inputs.dry_run }}
+          CQ_MERGE_BASE_BRANCH: main
           CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW: ${{ vars.CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW }}
         run: |
           # main()'s contract (src/selfhost/self-merge-prs.ts): ONE compact
@@ -255,4 +256,4 @@ jobs:
         if: always()
         with:
           path: .selfhost/journal
-          key: self-merge-prs-state-${{ github.run_id }}-${{ github.run_attempt }}
+          key: self-merge-prs-state-${{ github.run_id }}-${{ github.run_attempt }}-main

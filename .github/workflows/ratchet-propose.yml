@@ -14,8 +14,8 @@
 #     and no head code (the measurement ran credential-free in the measure
 #     leg);
 #   - reads the measurement artifact as size-capped, schema-validated DATA;
-#   - opens exactly one idempotent proposal PR **against `merge-queue`**,
-#     branched from the merge-queue tip and compared against the merge-queue
+#   - opens exactly one idempotent proposal PR **against `main`**,
+#     branched from the main tip and compared against the main
 #     tip's committed baselines, so the proposal goes through the queue's
 #     checks like any PR (it previously targeted main and bypassed them).
 #
@@ -145,7 +145,7 @@ jobs:
           private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
           permission-contents: write
           permission-pull-requests: write
-      - name: Propose baseline tightening against merge-queue
+      - name: Propose baseline tightening against main
         run: node scripts/ratchet-propose.mjs --measurement="${RUNNER_TEMP}/ratchet-propose/measurement.json"
         env:
           # The per-run minted App token (env name is the script's contract;

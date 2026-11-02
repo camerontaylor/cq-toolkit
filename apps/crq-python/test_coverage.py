@@ -42,6 +42,112 @@ def candidate(q, credit=None, **overrides):
 
 
 class CoverageRepairDebtTest(unittest.TestCase):
+    def test_historical_quota_deadline_recovery_is_scoped_and_immutable(self):
+        q = queue("pending")
+        old = q["items"][1]
+        old.update(coverage_source="source", pr=1, cycles=[], failures=0,
+                   attempts=[{"run_id": "quota", "outcome": "rate_limited", "at": policy._iso(NOW)}])
+        deadline = "2026-10-11T23:00:00Z"  # A delayed harvest happens after expiry.
+        evidence = {"quota_deadlines": {"quota": deadline}}
+        self.assertIn("historical vendor deadline unavailable", policy.legacy_retry_view(q, 1, AFFECTED, NOW)["reasons"])
+        policy.restore_legacy_quota_deadlines(q, 1, AFFECTED, NOW, "operator", "verified retained exit", evidence)
+        self.assertTrue(policy.legacy_retry_view(q, 1, AFFECTED, NOW)["allowed"])
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            policy.restore_legacy_quota_deadlines(q, 1, AFFECTED, NOW, "operator", "shorten", {
+                "quota_deadlines": {"quota": "2026-10-10T00:00:00Z"}})
+        self.assertNotIn("deadline", old["attempts"][0])
+
+    def test_legacy_unexplained_aggregate_and_missing_terminal_fields_hold(self):
+        q = queue("blocked")
+        old = q["items"][1]
+        old.update(coverage_source="source", pr=1, cycles=[], failures=2,
+                   attempts=[{"run_id": "r1", "outcome": "error", "counted": False,
+                              "at": policy._iso(NOW), "head": "a" * 40, "base": "b" * 40}])
+        view = policy.legacy_retry_view(q, 1, AFFECTED, NOW + dt.timedelta(days=2))
+        self.assertFalse(view["allowed"])
+        self.assertIn("unexplained item failure aggregate", view["reasons"])
+        old["failures"] = 1
+        del old["attempts"][0]["base"]
+        view = policy.legacy_retry_view(q, 1, AFFECTED, NOW + dt.timedelta(days=2))
+        self.assertFalse(view["allowed"])
+        self.assertIn("incomplete guarded harvest attempt", view["reasons"])
+        old["attempts"].append({"run_id": "quota", "outcome": "rate_limited", "at": policy._iso(NOW)})
+        self.assertIn("historical vendor deadline unavailable",
+                      policy.legacy_retry_view(q, 1, AFFECTED, NOW + dt.timedelta(days=2))["reasons"])
+
+    def test_stored_legacy_attempts_union_with_new_run_without_migration(self):
+        q = queue("blocked")
+        old = q["items"][1]
+        old.update(coverage_source="source", pr=1, cycles=[], failures=5,
+                   attempts=[{"run_id": f"old-{i}", "outcome": "error", "counted": False,
+                              "at": policy._iso(NOW - dt.timedelta(days=10-i)),
+                              "head": "a" * 40, "base": "b" * 40} for i in range(5)])
+        before = copy.deepcopy(q)
+        view = policy.legacy_retry_view(q, 1, AFFECTED, NOW)
+        self.assertTrue(view["allowed"])
+        self.assertEqual(view["failures"], 5)
+        self.assertEqual(q, before)
+        self.assertEqual(policy.legacy_retry_view(q, 1, AFFECTED, NOW), view)
+        policy.record_legacy_failure(q, old, policy._iso(NOW), "error", "new-1")
+        old["attempts"].append({"run_id": "new-1", "outcome": "error", "counted": False,
+                                "at": policy._iso(NOW), "head": "a" * 40, "base": "b" * 40})
+        old["failures"] = 6
+        view = policy.legacy_retry_view(q, 1, AFFECTED, NOW + dt.timedelta(days=3))
+        self.assertEqual(view["failures"], 6)
+        self.assertFalse(view["allowed"])
+        self.assertIn("family failure limit", view["reasons"])
+        q["legacy_coverage_failure_runs"]["new-1"]["outcome"] = "interrupted"
+        self.assertIn("conflicting run identity", policy.legacy_retry_view(q, 1, AFFECTED, NOW)["reasons"])
+
+    def test_partial_or_ambiguous_legacy_lineage_is_not_admissible(self):
+        q = queue("blocked")
+        old = q["items"][1]
+        old.update(coverage_source="source", coverage_paths=[AFFECTED, "unmapped.py"])
+        with self.assertRaises(ValueError):
+            policy._legacy_origins(q, old)
+        old["coverage_paths"] = [AFFECTED]
+        q["items"][0]["measure"]["files"].append({"path": "another.py", "now": AFFECTED})
+        with self.assertRaises(ValueError):
+            policy._legacy_origins(q, old)
+
+    def test_legacy_failed_scope_cools_down_then_quarantines_across_generations(self):
+        q = queue("blocked")
+        old = q["items"][1]; old.update(coverage_source="source", pr=1, cycles=[])
+        at = NOW
+        for number in range(6):
+            policy.record_legacy_failure(q, old, policy._iso(at), "error", "run-" + str(number))
+            policy.record_legacy_failure(q, old, policy._iso(at), "error", "run-" + str(number))
+            during = candidate(q, policy.new_ledger(), now=at)
+            self.assertEqual(during["coverage_paths"], [UNRELATED])
+            at += dt.timedelta(days=2)
+            later = candidate(q, policy.new_ledger(), now=at)
+            if number < 5:
+                self.assertIn(AFFECTED, later["coverage_paths"])
+            else:
+                self.assertEqual(later["coverage_paths"], [UNRELATED])
+        family = policy._legacy_family(1, AFFECTED)
+        self.assertEqual(q["backfill_families"][family]["failures"], 6)
+        self.assertTrue(q["backfill_families"][family]["quarantined"])
+        policy.record_legacy_success(q, old, [AFFECTED])
+        self.assertTrue(q["backfill_families"][family]["quarantined"])
+
+    def test_legacy_retry_history_follows_verified_source_alias(self):
+        q = queue("blocked")
+        old = q["items"][1]; old.update(coverage_source="source", pr=1, cycles=[])
+        policy.record_legacy_failure(q, old, policy._iso(NOW), "error", "run-1")
+        q["items"][0]["measure"]["files"][0]["now"] = "moved/template.md"
+        result = candidate(q, policy.new_ledger(), now=NOW)
+        self.assertEqual(result["coverage_paths"], [UNRELATED])
+        result = candidate(q, policy.new_ledger(), now=NOW + dt.timedelta(hours=2))
+        self.assertEqual(result["coverage_paths"], ["moved/template.md"])
+
+    def test_unreconciled_historical_failure_holds_only_its_scope(self):
+        q = queue("blocked")
+        q["items"][1].update(coverage_source="source", pr=1, cycles=[], attempts=[{"run_id": "old", "at": policy._iso(NOW), "outcome": "error"}])
+        result = candidate(q, policy.new_ledger(), now=NOW + dt.timedelta(days=10))
+        self.assertEqual(result["coverage_paths"], [UNRELATED])
+        self.assertNotIn("backfill_families", q)
+
     def test_terminal_counted_review_allows_unrelated_coverage(self):
         for state in ("repairing", "repair_failed"):
             with self.subTest(state=state):
@@ -54,10 +160,23 @@ class CoverageRepairDebtTest(unittest.TestCase):
         q["items"][0]["measure"]["files"] = q["items"][0]["measure"]["files"][:1]
         self.assertIsNone(candidate(q, min_age_hours=0))
 
-    def test_pending_active_deferred_blocked_and_unknown_states_hold_slot(self):
-        for state in ("pending", "reviewing", "deferred", "blocked", "unknown"):
+    def test_pending_active_deferred_and_unknown_states_hold_slot(self):
+        for state in ("pending", "reviewing", "deferred", "unknown"):
             with self.subTest(state=state):
                 self.assertIsNone(candidate(queue(state)))
+
+    def test_approved_backfill_spec_releases_terminal_blocked_failed_capacity(self):
+        # Approved revised protocol §7 and Stage1 deadlock acceptance supersede
+        # the old global blocked-item guard; independent oracle acceptance is
+        # required on the final head before merge (Q32).
+        for state in ("blocked", "failed", "quarantined"):
+            q = queue(state)
+            q["items"][1].update(cycles=[], attempts=[{"outcome": "error"}] * 3)
+            self.assertIsNotNone(candidate(q, policy.new_ledger()))
+            for ownership in ({"vendor_state": "unknown"}, {"run": {"run_id": "unreconciled"}}):
+                held = copy.deepcopy(q)
+                held["items"][1].update(ownership)
+                self.assertIsNone(candidate(held, policy.new_ledger()))
 
     def test_repair_path_cannot_reenter_as_a_synthetic_rename_alias(self):
         q = queue()

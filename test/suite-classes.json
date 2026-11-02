@@ -1,4 +1,5 @@
 {
+  "test/scripts/publication-scan.test.ts": "process",
   "test/adapters/forge-github/forge.test.ts": "pure",
   "test/adversarial/a14-privileged-workflow.test.ts": "process",
   "test/adversarial/a4-empty-commit-real-git.test.ts": "process",
@@ -157,7 +158,6 @@
   "test/scripts/affected-tests.test.ts": "pure",
   "test/scripts/demo-eval-axes.test.ts": "process",
   "test/scripts/github-settings.test.ts": "process",
-  "test/scripts/heavy-lock.test.ts": "pure",
   "test/scripts/knip.test.ts": "process",
   "test/scripts/oxlint-boundaries.test.ts": "process",
   "test/scripts/ratchet-baseline.test.ts": "process",
@@ -169,7 +169,6 @@
   "test/selfhost/candidates.test.ts": "process",
   "test/selfhost/config.test.ts": "pure",
   "test/selfhost/merge-recheck.test.ts": "process",
-  "test/selfhost/promote-gate.test.ts": "process",
   "test/selfhost/self-merge-prs-recheck.test.ts": "process",
   "test/selfhost/self-merge-prs.test.ts": "process",
   "test/selfhost/self-review-loop.test.ts": "process",

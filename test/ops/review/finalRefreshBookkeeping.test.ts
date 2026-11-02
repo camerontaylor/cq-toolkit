@@ -99,7 +99,7 @@ async function fixture(mode: Mode) {
     if (command === 'gh') return args[0] === 'api' ? 'author' : 'owner/repo';
     throw new Error('unexpected offline command: ' + command);
   });
-  const read = await readWorkState(real, { target: 'merge-queue' });
+  const read = await readWorkState(real, { target: 'main' });
   if (!read.ok) throw new Error(read.reason);
   const state = read.state;
   const pending: QueueStatus = {
@@ -134,7 +134,7 @@ async function fixture(mode: Mode) {
   });
   const store = real.openLedger(state.branch);
   store.save({ version: 2, branch: state.branch, records: [origin] });
-  const debt = await prepareDeferredVendorReview(real, 'merge-queue', state, client);
+  const debt = await prepareDeferredVendorReview(real, 'main', state, client);
   if (!debt) throw new Error('missing genuine persisted debt');
   // The authorized-ancestor mode adds a pending predecessor that only becomes terminal at the final
   // refresh, so its settlement is an APPEND this refresh legitimately owns.
@@ -560,7 +560,7 @@ test('a superseded older-head predecessor permits a clean run but never a clean 
   if (!currentDebt) throw new Error('missing current debt');
   const readiness = assembleReadiness({
     branch: f.state.branch,
-    target: 'merge-queue',
+    target: 'main',
     identity: {
       head: f.repo.git('rev-parse', 'HEAD').trim(),
       base: f.state.base,

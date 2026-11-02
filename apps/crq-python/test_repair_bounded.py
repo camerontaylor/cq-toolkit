@@ -40,7 +40,7 @@ class BoundedRepairTest(unittest.TestCase):
                          'verdict': 'still-valid', 'reviewer': 'independent-test-reviewer',
                          'reason': 'Pinned source retains the unstable initialization metadata comparison.'}
         self.git = mock.patch.object(bounded, 'git', side_effect=lambda clone, *args:
-                                     SOURCE if args == ('rev-parse', 'origin/merge-queue') else BLOB).start()
+                                     SOURCE if args == ('rev-parse', 'origin/main') else BLOB).start()
         self.addCleanup(mock.patch.stopall)
         self.c = SimpleNamespace(ROOT=self.root, STATE=self.root / 'state', CONFIG=self.config,
                                  CLONE=Path('/unused'), run=mock.Mock(return_value=SimpleNamespace(stdout='\nfirst\nsecond\n')),
@@ -86,13 +86,25 @@ class BoundedRepairTest(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, evidence)
         self.git.side_effect = lambda *args: HISTORICAL
-        with self.assertRaisesRegex(ValueError, 'current queue tip'):
+        with self.assertRaisesRegex(ValueError, 'current default-branch tip'):
             self.prepare()
 
     def test_round_ceiling_remains_authoritative(self):
         self.config['repair']['max_rounds_per_pin'] = 0
         with self.assertRaisesRegex(ValueError, 'ceiling'):
             self.prepare()
+
+    def test_backfill_round_limit_is_per_finding_not_shared_placeholder_pr(self):
+        self.old.update(pr=0, canonical_finding_id='finding-a')
+        self.queue['items'][0]['pr'] = 0
+        self.queue['items'][0]['repair_runs']['old-run']['pin'] = SOURCE
+        self.queue['items'].append({'id': 'backfill-finding-b', 'pr': 0, 'repair_runs': {
+            'b1': {'pin': SOURCE}, 'b2': {'pin': SOURCE}}})
+        atomic(bounded.job_path(self.root, OLD), self.old)
+        self.prepare()
+        new_evidence = {**self.evidence, 'reason': 'Independent revalidation of the same finding.'}
+        with self.assertRaisesRegex(ValueError, 'ceiling'):
+            repair_tick.prepare_current_job(self.c, self.queue, OLD, SOURCE, new_evidence)
 
     def test_historical_job_requires_tick_owned_lineage(self):
         self.queue['items'][0]['repair_runs'] = {}

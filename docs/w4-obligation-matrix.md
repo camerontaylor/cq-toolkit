@@ -1,3 +1,5 @@
+> Historical (before direct-main migration). Do not adopt the promotion procedures below. Current policy: [merge to main](promotion-policy.md).
+
 # W4 — the required-check obligation matrix and the required-contexts reconciliation
 
 Status: **proposal.** Two pieces have landed outside the phased change sets:

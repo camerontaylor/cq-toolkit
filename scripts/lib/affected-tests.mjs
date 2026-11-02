@@ -53,7 +53,6 @@ export const NON_IMPORT_MAP = [
   // acceptance entry points from disk; that closure crosses src/, so any
   // source can join it.
   [/^src\/.*\.ts$/, [/^test\/ops\/gates\/protectedPaths\.test\.ts$/]],
-  [/^src\/selfhost\/promote-gate\.ts$/, [/^test\/workflows\/default-ref-guards\.test\.ts$/]],
   // Entry points these suites only run in a child process (or a generated
   // fixture) by path: their closures, less what the suites import.
   [

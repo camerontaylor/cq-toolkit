@@ -567,6 +567,23 @@ describe('scanWorkflow: privilege', () => {
       false,
     );
   });
+
+  test('self-repository uses are normalised like dot-relative uses', () => {
+    const a = withJob(
+      ['permissions: {}'],
+      [
+        '    steps:',
+        '      - uses: $/.github/actions/setup/',
+        "      - uses: '$/tools/x'",
+        '      - uses: ./tools/x',
+        '      - uses: actions/checkout@v5',
+      ],
+    );
+    expect(a.localUses).toEqual(['.github/actions/setup', 'tools/x']);
+    expect(withJob(['permissions: {}'], ['    uses: $/.github/workflows/w.yml']).localUses).toEqual(
+      ['.github/workflows/w.yml'],
+    );
+  });
 });
 
 describe('producersOf', () => {

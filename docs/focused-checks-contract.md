@@ -42,33 +42,11 @@ suite; they do not revisit this contract.
   (doctrine I4 — no path, branch or tag filter; the sole sanctioned skip is the
   job-level `cq-state` settle-ledger exclusion in `.github/workflows/ci.yml`),
   and the `static` job runs `test:unit` + `test:e2e`. The `ratchet` job re-runs
-  the suite with coverage. The required set is split by where it is enforced
-  ([`protected-scope.md`](protected-scope.md), owner 2026-10-16). **At merge**
-  (ruleset R2 in `policy/templates/github-settings.json`): `cq/policy`,
-  `cq/acceptance` and `denylist`. **At promotion** (the gate, on the exact queue
-  tip): every job of `ci.yml` and `denylist.yml` green, by name the
-  `requiredJobs` in `policy/protected-paths.json` (`static`, `crq-python`,
-  `from-source`, `denylist`), plus the `cq/ratchet` verdict. `pack-audit` is
-  enforced at publication. `scripts/denylist-scan`'s `REQUIRED_WORKFLOW_CHECKS`
-  polices the I4 trigger shape of the required workflows, and
-  `protected-paths.json` `requiredChecks` names the D11-protected producers.
-- **Candidate evidence is green required CI on the exact candidate SHA.** On the
-  queue route — the sanctioned one (doctrine I3: `main` advances only by the
-  promotion gate's pure fast-forward) — the candidate is the `merge-queue`
-  commit the gate resolves. The protocol still permits a direct-to-`main` PR
-  when that is a task's actual target; there the candidate is the merge commit
-  (never a squash or a rewrite, per I3) that the merge would produce, and it
-  must be created and checked **before** `main` advances — for example a
-  throwaway merge branch carrying that merge commit. Required CI is read on
-  that exact SHA against the gate's own check list, failing closed on a skipped
-  or missing result. No gate workflow resolves such a commit today, so a
-  direct-to-`main` PR cannot claim readiness until that evidence exists; this
-  contract states the rule and does not add the mechanism. Either way the PR head is not the
-  candidate.
-- **A green PR head is not candidate evidence.**
-  `strict_required_status_checks_policy` is `false`
-  (`policy/templates/github-settings.json`), so a PR head can be green while
-  stale against its base. Only CI on the resolved candidate SHA counts.
+  the suite with coverage as an advisory measurement. Required merge checks
+  are `static` and `denylist` on the exact PR head. PRs target `main` and
+  merge with a merge commit after one independent head-bound PASS comment.
+  There is no separate queue candidate, throwaway merge branch or promotion
+  gate. See [merge policy](promotion-policy.md).
 
 **No local full run exists (owner rule, 2026-10-04).** The full suite is
 CI-only on the shared host, for workers and coordinators alike. The two
@@ -83,34 +61,26 @@ obligations with a named owner.
 
 `pnpm test:narrow` (`scripts/test-narrow.mjs`) performs this selection; do not
 make it by hand. `pnpm test:narrow --dry-run` prints it without running it.
-The runner checks its ownership token immediately before each build or test
-spawn; exit 75 means a busy lock or lost ownership, and requires retrying later.
-An owner that dies with `childPending` and no recorded `childPgid` leaves the
-lock busy **indefinitely**, even beyond `MAX_HOLD_MS`: the child cannot be
-identified. The waiter reports: "owner <pid> died between spawning a child and
-recording it; the child cannot be identified, so the lock is kept". To recover
-manually, pause all `test:narrow` callers, read
-`/tmp/cq-toolkit-heavy.lock/owner.json`, and inspect the host process list
-(`ps -axo pid,ppid,pgid,command` on macOS/Linux) for stray runners, builds and
-test workers. Stop any such processes and verify they have exited. **Only
-then** explicitly run `rm -rf /tmp/cq-toolkit-heavy.lock` and resume callers.
-On Windows the directory is `<os.tmpdir()>/cq-toolkit-heavy.lock`; inspect the
-host process list and remove that directory with your shell after the same
-checks. `pnpm test:narrow --help` prints the host's actual lock path.
-
-Every process-group signal (interrupt, timeout, exit cleanup and orphan reclaim)
-requires a live leader at the recorded pgid whose start time matches
-`childStartedAt` within two seconds. A gone or reused leader makes a still-live
-group unverifiable: it is never signalled, and the lock stays busy until that
-group exits. Waiting is safe.
+The runner re-execs under `nice -n 5`. Before work it reads Linux
+`MemAvailable`; below 2 GB it exits 75 immediately and names the top three
+memory users. Move to another host; there is no lock or waiting loop.
+When systemd user scopes support the requested properties, tests and builds
+run with MemoryMax=3G, MemorySwapMax=0, CPUWeight=50 and OOMScoreAdjust=500.
+If the scope rejects OOMScoreAdjust, they retry with the memory and CPU
+limits and set their own Linux OOM score to 500 (children inherit it). If neither scope works for any reason, the runner prints one warning and
+runs directly with the available OOM score and heap protection. Node uses a 2048 MB heap and Vitest --maxWorkers=2; serial file execution currently reduces this to
+one worker. Cancellation kills the runner's own child process group.
+Only selected tests referencing dist or in the reviewed indirect-dependency
+list require a fresh build; other tests
+skip dist preparation. Builds run only when dist is stale.
 
 Live drills also use this runner: export credentials first, then run
 `LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`.
 This drill is classified `integration`; suites classified `live` require
-`--include-live`. Neither class bypasses the host lock or bounded runtime.
+`--include-live`. Both classes retain bounded runtime.
 
 1. Start from the files the diff actually touches: by default the changes
-   since the merge-base with `origin/merge-queue` plus the working tree
+   since the merge-base with `origin/main` plus the working tree
    (`--base <ref>` and `--range <a>..<b>` change the range); explicit file
    arguments replace the range.
 2. Add the test files that statically import, or are imported by, the changed
@@ -120,8 +90,8 @@ This drill is classified `integration`; suites classified `live` require
    prompts, policy and workflow templates, generated docs, scripts. The
    reviewed map is `NON_IMPORT_MAP` in `scripts/lib/affected-tests.mjs`.
 4. **Escalate anything you cannot classify.** `test:narrow` refuses (exit 2)
-   when a changed file has no mapping, a source file was deleted, the
-   import-graph query failed, or the selection exceeds its file cap. That
+   when a changed file has no mapping, a source file was deleted, or the
+   import-graph query failed. That
    refusal is the escalation trigger: name the files you can justify
    explicitly, or escalate shared interfaces, dependency/tooling and
    cross-cutting config changes to the coordinator with the required check
@@ -165,7 +135,7 @@ Never invoke the leaf tools (`oxlint --fix`, `oxfmt`) directly: that bypasses
 the containment checks above, and an invocation that omits the file list or
 substitutes a repository-wide glob rewrites the whole tree. `pnpm run
 format:check` remains the read-only whole-tree formatting check — a
-candidate-level check, not per-turn feedback.
+required local checkpoint-level check (§1), not per-turn feedback.
 
 Read-only syntactic feedback on an explicit list is genuinely file-scoped and
 is the right default:
@@ -236,11 +206,11 @@ are the machinery that makes required CI trustworthy as the sole authority. The
 per-file spawn work and the required-contexts reconciliation are separate slices
 with their own change, their own review and their own records.
 
-Python modules in `apps/crq-python` use this same runner and host lock:
+Python modules in `apps/crq-python` use this same runner:
 `pnpm test:narrow apps/crq-python/test_status_summary.py`. Source modules map
 only to their matching `test_<module>.py`; unmapped changes and discovery-sized
 selections are refused. Named modules run in one `python3 -m unittest`
 invocation, serially with any selected TypeScript tests, under the same total
-10-file cap, nice priority, timeout and process-group cleanup. Local bare
+nice priority, timeout and process-group cleanup. Local bare
 unittest and discovery are prohibited; full Python discovery runs only in CI
 on Python 3.14, the production minor reported by the owner.

@@ -49,7 +49,7 @@ import type { Op, OpResult } from '../../kernel/types.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
@@ -423,7 +423,10 @@ function makeDevCycleCore(
   deps: DevCycleDeps,
   observe: DriverUsageObserver,
 ): Op<DevCycleCompositionInput, DevCycleCoreReport> {
-  return guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (input) => {
+  return guardDevOp('dev.cycle', DevCycleCompositionInputSchema, async (rawInput) => {
+    // Git uses this path as both cwd and -C; resolve it before binding any leg
+    // so a relative path is never interpreted from inside the repository again.
+    const input = { ...rawInput, repoRoot: resolve(rawInput.repoRoot) };
     // ONE run budget across the legs (S7 attempt H): the run started here,
     // and every token a default leg's driver spends is metered here.
     const cycleStarted = Date.now();

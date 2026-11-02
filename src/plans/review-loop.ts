@@ -364,6 +364,8 @@ export const defaultLoopClassifyConfig: ClassifyConfig = deepFreeze({
 
 /** Everything runReviewLoop needs — plain data plus the injected seams. */
 export interface ReviewLoopOpts {
+  /** Refuse before any forge action or worker dispatch if the fetched head moved. */
+  expectedHead?: string;
   /** Repository owner (org or user login). */
   owner: string;
   /** Repository name. */
@@ -501,6 +503,8 @@ export interface ReviewLoopOpts {
 
 /** The loop's terminal report. Plain JSON; `ok` only when every stage came back clean. */
 export interface ReviewLoopOutcome {
+  /** Initial fetched head mismatched the caller admission; no actions ran. */
+  headRefused?: true;
   /** 'ok' only when no stage recorded a failure; 'needs-human' otherwise. */
   status: 'ok' | 'needs-human';
   /** One human-readable line per failure (empty when ok). */
@@ -936,6 +940,21 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
     ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
   });
+
+  if (opts.expectedHead) {
+    const fetched = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+    if (fetched.code !== 0 || fetched.stdout.trim() !== opts.expectedHead)
+      return {
+        status: 'needs-human',
+        reasons: ['PR head changed before dispatch'],
+        headRefused: true,
+        worktree: { path: worktree.path, branch: worktree.branch, reused: worktree.reused },
+        batches: [],
+        skipped,
+        plan: buildReviewLoopPlan([]),
+        actionsPosted: 0,
+      };
+  }
 
   // (2) Baseline snapshot, then the pure pipeline. The truncation refusal is
   // a fail-closed ENVIRONMENT condition (fresh threads are missing from the

@@ -73,7 +73,7 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   // The lint config (`.oxlintrc.json`/`.oxfmtrc.json`) is already an `rc`
   // file below and the lint rules are `lint/**`.
   /^scripts\/ratchet-[^/]+\.mjs$/i,
-  /^scripts\/(?:gen-op-docs|copy-prompt-assets)\.mjs$/i,
+  /^scripts\/(?:build|gen-op-docs|copy-prompt-assets|lib\/resource-scope)\.mjs$/i,
   /(?:^|\/)knip\.jsonc?$/i,
   // D11 protected paths (ADR-0004 D-G.1): policy templates instantiate the
   // repository's workflows and the doctrine, and lint rules define what the

@@ -140,6 +140,30 @@ async function okReport(op: ReturnType<typeof makeRunReport>, input: RunReportIn
 // ---------------------------------------------------------------------------
 
 describe('the three-valued readiness matrix', () => {
+  test.each([
+    [{ state: 'fail' }, { state: 'approved' }, 'checks failing'],
+    [{ state: 'pass' }, { state: 'changes-requested' }, 'changes requested'],
+  ] as const)(
+    'unknown merge state preserves an independently established block (%j, %j)',
+    async (checks, review, reason) => {
+      const fake = fakeGh({
+        checks: new Map([[11, checks]]),
+        reviews: new Map([[11, review]]),
+        statuses: new Map([[11, 'unknown']]),
+      });
+      const report = await okReport(
+        makeRunReport(fake.gh),
+        inputOf({ packages: [{ name: 'core', number: 11 }] }),
+      );
+      expect(report.rows[0]).toMatchObject({
+        readiness: 'blocked',
+        checks: checks.state,
+        review: review.state,
+      });
+      expect(report.rows[0]?.reason).toContain(reason);
+    },
+  );
+
   const MATRIX: Array<[PrChecks, PrReviewState, 'ready' | 'blocked' | 'unknown', string]> = [
     [{ state: 'pass' }, { state: 'approved' }, 'ready', 'green checks + approval'],
     [

@@ -77,8 +77,8 @@ export const DEV_LEDGER_VERSION = 2;
  * authoritative here and are NOT copied into any policy file.
  */
 
-/** The default intended PR target — the documented queue flow's branch. */
-export const DEFAULT_DEV_TARGET = 'merge-queue';
+/** The default intended PR target for direct development. */
+export const DEFAULT_DEV_TARGET = 'main';
 
 /** The severities a disposition must close before dev.ready reports ready. */
 export const DEFAULT_BLOCKING_SEVERITIES: readonly string[] = ['critical', 'major'];
@@ -1142,7 +1142,7 @@ export function assembleReadiness(
     const stale: string[] = [];
     // The check's RECORDED TARGET must be the requested one: when two
     // targets share a merge-base, identity alone cannot tell the evidence
-    // apart, and relabeling merge-queue evidence as main-target readiness
+    // apart, and relabeling another target as main-target readiness
     // would be fabrication.
     if (check.target !== input.target) {
       stale.push(`recorded for target '${check.target}', not '${input.target}'`);

@@ -291,9 +291,13 @@ async function denylistGate(
     if (scanSecrets !== undefined) {
       return scanVerdict(await scanSecrets(await treeComponents(tree, excludedPaths)), startedAt);
     }
-    const result = await effects.runCommand('node', [join(tree, 'scripts', 'denylist-scan')], {
-      timeoutMs: DENYLIST_TIMEOUT_MS,
-    });
+    const result = await effects.runCommand(
+      'node',
+      [join(tree, 'scripts', 'denylist-scan'), '--tree'],
+      {
+        timeoutMs: DENYLIST_TIMEOUT_MS,
+      },
+    );
     return classifyGate('denylist-scan', result, startedAt);
   } catch (err) {
     return {

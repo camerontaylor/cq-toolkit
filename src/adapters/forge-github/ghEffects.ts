@@ -47,9 +47,9 @@ const GH_OUTPUT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 /**
  * The explicit search ceiling (PR-165 r1#4, I11): gh's pr list defaults to
  * `--limit 30`, silently truncating — a search that misses its own PR
- * because 31 PRs share the head would mint a duplicate. 200 is far past
- * any real fleet's history for one head+base pair; the argument's presence
- * is pinned by argv test.
+ * because 31 PRs share the head would mint a duplicate. A result reaching
+ * this ceiling is potentially truncated and must fault before selection;
+ * even a visible match cannot establish the canonical choice in a partial set.
  */
 const GH_PR_LIST_LIMIT = '200';
 
@@ -420,8 +420,8 @@ export function bodyOf(payload: { body?: unknown }): string {
  * `repoRoot`, every effect a fresh lazy gh call. Argv shapes:
  *   - searchPrByHead:    gh pr list --head <head> --base <base> --state all
  *                        --limit 200 --json number,url,state,isCrossRepository
- *                        — the explicit generous limit (gh's default 30
- *                        truncates), the deterministic {@link selectPrMatch}
+ *                        — saturated results fault rather than risk truncation;
+ *                        the deterministic {@link selectPrMatch}
  *                        (same-repo open first, else lowest number) and the
  *                        op's cross-repository refusal keep adoption I11-honest
  *   - createPr:          gh pr create --head … --base … --title … --body-file - [--draft]
@@ -448,29 +448,34 @@ export function makeSubprocessPrEffects(
 ): PrEffects {
   const timeoutMs = timeouts?.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
   return {
-    searchPrByHead: async (head, base) =>
-      selectPrMatch(
-        parsePrList(
-          await runGh(
-            [
-              'pr',
-              'list',
-              '--head',
-              head,
-              '--base',
-              base,
-              '--state',
-              'all',
-              '--limit',
-              GH_PR_LIST_LIMIT,
-              '--json',
-              'number,url,state,isCrossRepository,isDraft',
-            ],
-            repoRoot,
-            timeoutMs,
-          ),
+    searchPrByHead: async (head, base) => {
+      const matches = parsePrList(
+        await runGh(
+          [
+            'pr',
+            'list',
+            '--head',
+            head,
+            '--base',
+            base,
+            '--state',
+            'all',
+            '--limit',
+            GH_PR_LIST_LIMIT,
+            '--json',
+            'number,url,state,isCrossRepository,isDraft',
+          ],
+          repoRoot,
+          timeoutMs,
         ),
-      ),
+      );
+      if (matches.length >= Number(GH_PR_LIST_LIMIT)) {
+        throw new Error(
+          `gh pr list reached its ${GH_PR_LIST_LIMIT}-row limit — results may be incomplete; refusing PR adoption or creation`,
+        );
+      }
+      return selectPrMatch(matches);
+    },
     createPr: async (request) => {
       const args = [
         'pr',

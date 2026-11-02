@@ -151,7 +151,7 @@ export function markBuildComplete() {
  * identity, with the marker and dist newer than every build input.
  * False (rebuild) on any output fault — no
  * dist yet (CI cold checkout) or unreadable. test-narrow uses it to run the
- * build itself, as a child its host lock records.
+ * build itself, as its own child process group.
  */
 export function distIsFresh() {
   try {

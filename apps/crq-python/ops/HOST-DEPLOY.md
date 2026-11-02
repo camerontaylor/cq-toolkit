@@ -34,12 +34,10 @@ fallback when usage is unavailable; valid vendor remaining slots govern normal
 admission. A local slot prediction never authorizes spend without rechecking
 usage. Unknown external starts and vendor admission lag retry within a minute.
 
-Deploy the signer change too: its review argv includes `--deep` and its deadline
-is 120 minutes (stall alert 150 minutes). Signer custody, its existing independent admission policy and
-its service installation remain unchanged. The signer publishes an exact
-rate-limit deadline; the runner retains the latest global deadline on harvest.
-All reviews use `--deep`, and free slots can start concurrent isolated reviews
-in promotion → prioritize → rank order. See [README](../README.md).
+All reviews use `--deep`; free slots start concurrent isolated reviews in
+operator priority → rank order. The promotion signer is retired; follow
+[signer deployment](../signer/DEPLOY.md) to stop its old daemon while preserving
+the independent root review-ledger publisher. See [README](../README.md).
 
 ## Private overlay, schema 1
 
@@ -103,7 +101,7 @@ The reader host has its own private overlay and checkout paths.
 Use a dedicated full cq-toolkit clone, fetched anonymously from
 `https://github.com/camerontaylor/cq-toolkit.git`, never the review runtime clone.
 Never `git pull` the deployment clone. Fetch, verify the full SHA is reachable
-from `origin/main` (= `cq/promoted`), and verify its owner-approved annotated
+from `origin/main`, and verify its owner-approved annotated
 `crq-runner/YYYYMMDD-N` tag peels to that SHA. This tool does not create tags.
 Targets must descend from import C (`f748fd43`); earlier rollback needs the
 separate, recorded old-runner rollback below. Targets must also provide relocated
@@ -311,3 +309,33 @@ spool probes, and makes repair credentials optional for model-free handover.
 Under the proposed deployed-system protection narrowing (#328), P2 still touches
 protected `ops/prepare-host.py`, `ops/systemd/*` and `config.json`. The renderer
 and switch guard stay within the protected helper. No signer byte changes.
+
+## Background ledger publication
+
+Render/install `crq-publisher.service`, `crq-publisher.timer` and
+`crq-publisher.path` through the same immutable-target unit renderer. The path unit
+starts the worker as soon as a record lands in `state/backfill/publication/pending`;
+the timer retries every minute after completion as the fallback. Enable both
+(`systemctl --user enable --now crq-publisher.timer crq-publisher.path`) as part of
+the owner-controlled deployment. Stop/drain the path unit, timer and worker with the
+other `crq-*` units before a checkout switch.
+
+Ticks only write `state/backfill/publish-request.json`. The worker uses its own
+`state/backfill/publisher.git` bare clone and `publisher.lock`, but retains the
+normal `state/backfill/publication` outbox and durable artifact locations. It
+performs network publication and finding recovery outside `tick.lock`, then reloads
+the current queue for local acknowledgement bookkeeping. `backfill.py publish`
+invokes this same worker and lock. No queue snapshot is restored.
+
+Pending records and reconciliation intent survive failed pushes and crashes after
+remote acknowledgement. The timer scans pending records even without a request
+marker. A busy queue lock after a successful push is not a failure: the worker exits 0
+with `reconciliation-pending`, keeps the request marker and retries on the next
+trigger, with no failure marker or halt. `backfill_publication_error` reports a failed attempt; retry clears it only
+after verified remote reconciliation. Pending/live jobs retain ownership. The
+45-minute worker limit bounds each invocation without deleting pending evidence.
+Publication failures also retain `publication-failure.json`, which blocks new
+rank-4 admissions even when the queue lock is busy. Only successful validated
+queue reconciliation clears it. Operation-tagged inventory/request halts recover
+only after that operation succeeds; unrelated or unclassified legacy halts remain
+for operator reconciliation. A busy queue lock never reports publication reconciled.

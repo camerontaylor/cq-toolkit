@@ -27,7 +27,7 @@ q['coverage'] = coverage.record_review(
 For merged reviews, snapshot `measure.synthetic_paths` and `measure.merge_queue`
 in run metadata at launch; use them as `planned_paths` and `reviewed_tip` at
 harvest. For coverage use `coverage_paths` and `coverage_sha`. The synthetic head
-is not the merge-queue SHA. For ordinary reviews pass `focus_paths=None` and the
+is not the main SHA. For ordinary reviews pass `focus_paths=None` and the
 actual reviewed head. Missing historical reviewed-file evidence earns no credit;
 never infer coverage from findings, measurement timestamps, surviving lines,
 skipped items, unsuccessful attempts, or review launches. Backfill only counted
@@ -47,7 +47,7 @@ fallback for an explicit item filter. Do not let coverage bypass dependency,
 backoff, secret-scan, or failure handling.
 
 Refresh merged measurements through `measure_merged` against the current
-`origin/merge-queue` SHA, including supersession-skipped merged sources. Candidate
+`origin/main` SHA, including supersession-skipped merged sources. Candidate
 selection uses their surviving/current path and synthetic size data; it deliberately
 also admits paths excluded by the ordinary focus threshold, filling those gaps.
 Supply caller policy exclusions through `excluded_paths` (generated/secret/vendor
@@ -83,7 +83,7 @@ launch. Call existing `build_synthetic(candidate)` (its explicit nonempty
 `measure.synthetic_paths` override fits this API), then construct:
 
 ```python
-plan = dict(base=base, head=head, target='origin/merge-queue', cycle=None,
+plan = dict(base=base, head=head, target='origin/main', cycle=None,
             branch=None, notes=[], label='lowest-priority coverage review')
 ```
 

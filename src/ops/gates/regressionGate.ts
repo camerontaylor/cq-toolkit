@@ -62,7 +62,7 @@ export const regressionGate: Op<RegressionGateInput, RegressionReport> = async (
     return { status: 'indeterminate', detail: untrusted };
   }
   const basePairs = fingerprintPairs(input.base, input.config);
-  const finalPairs = fingerprintPairs(input.final, input.config);
+  const finalPairs = fingerprintPairs(input.final, input.config, input.base);
   const baseKeys = new Set(basePairs.map((pair) => pair.key));
   const finalKeys = new Set(finalPairs.map((pair) => pair.key));
   const novelFailures = finalPairs

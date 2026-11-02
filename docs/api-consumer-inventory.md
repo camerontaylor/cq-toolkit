@@ -1,3 +1,6 @@
+> Historical inventory. For current integration instructions see
+> [merge policy](promotion-policy.md); PRs target `main`.
+
 # W3.1 tooling and packed-consumer dependency inventory
 
 Status: preparation only, recorded 2026-10-02 on the preserved API-tooling

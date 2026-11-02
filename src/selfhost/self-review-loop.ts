@@ -730,6 +730,41 @@ export async function runSelfReviewLoop(
 }
 
 /**
+ * Best-effort diagnostic write to stderr (the Q34 transport policy). A
+ * broken stderr transport fails two ways: `write` can throw synchronously,
+ * or it can emit an *asynchronous* 'error' event (EPIPE) on the stream
+ * after this turn. A bare try/catch only catches the former; an unhandled
+ * 'error' event terminates the process despite finished work. This
+ * shares one swallowing listener across overlapping writes through
+ * their event turns, then removes it so failures on a live stderr still
+ * surface. Every post-sweep diagnostic write must go through this — not
+ * every caller can rely on the stdout-failure path having installed the
+ * listener first.
+ */
+let pendingStderrDiagnostics = 0;
+const onStderrDiagnosticError = (): void => {
+  // Best-effort: a stderr transport failure is ignored, not fatal.
+};
+const writeStderrDiagnostic = (line: string): void => {
+  const stderr = process.stderr;
+  if (pendingStderrDiagnostics === 0) stderr.on('error', onStderrDiagnosticError);
+  pendingStderrDiagnostics += 1;
+  try {
+    stderr.write(line);
+  } catch {
+    // A synchronous throw is equally non-fatal here.
+  }
+  // Share one listener even when many PR diagnostics fail in the same turn.
+  // Retain it until every overlapping write has passed its error event turn.
+  setImmediate(() => {
+    pendingStderrDiagnostics -= 1;
+    if (pendingStderrDiagnostics === 0) {
+      stderr.removeListener('error', onStderrDiagnosticError);
+    }
+  });
+};
+
+/**
  * Append the usage markdown table to the GitHub step summary. Best-effort
  * by contract: the run's real effects (replies, pushes, journal) are
  * already committed when this runs, so a summary write failure degrades to
@@ -741,7 +776,7 @@ const appendStepSummaryTable = (stepSummary: string | undefined, usage: SweepTok
   try {
     appendFileSync(stepSummary, sweepUsageMarkdown(usage));
   } catch (error) {
-    process.stderr.write(
+    writeStderrDiagnostic(
       `sweep-usage: could not append the step-summary table: ${
         error instanceof Error ? error.message : String(error)
       }\n`,
@@ -767,15 +802,14 @@ const writeSweepUsageFile = (
       `${JSON.stringify({ sweepUsage: usage, ...(error !== undefined ? { error } : {}) })}\n`,
     );
   } catch (error) {
-    try {
-      process.stderr.write(
-        `sweep-usage: could not write ${outPath}: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    } catch {
-      // Best-effort diagnostics must not mask the original whole-run error.
-    }
+    // Best-effort diagnostics must not mask the original whole-run error;
+    // writeStderrDiagnostic also swallows the asynchronous stderr 'error'
+    // event a bare try/catch cannot catch.
+    writeStderrDiagnostic(
+      `sweep-usage: could not write ${outPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
+    );
   }
 };
 
@@ -826,7 +860,12 @@ function runStartInstant(deps: SelfReviewLoopDeps): number {
  * artifact upload, both best-effort. Exit 0 even with failures — honest
  * outcomes are the contract (they are mirrored to stderr, prominently, for
  * the workflow log); only a whole-run throw (bad args, a failed listing)
- * exits 1.
+ * exits 1. Q34 adds a scoped policy: after a successful sweep and usage
+ * capture, ordinary stdout transport failures are best-effort. Await write
+ * callback settlement, attempt one bounded warning, and continue the table,
+ * per-PR diagnostics and usage artifact without a whole-run transport error.
+ * This does not establish successful stdout delivery. Payload construction
+ * and serialization, and all pre-sweep failure boundaries, still throw.
  */
 export async function main(
   deps: SelfReviewLoopDeps = {
@@ -917,24 +956,57 @@ export async function main(
       excluded: summary.excluded ?? [],
     };
 
-    // The sweep token-usage emission (D11b). ORDER MATTERS: every stdout
-    // write callback completes before the step-summary append. This drains
-    // Node's buffered output; a downstream tee must still finish separately
-    // before its own writes to the same summary file are known to be complete.
-    await new Promise<void>((resolve, reject) => {
-      process.stdout.write(
-        `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`,
-        (error) => {
-          if (error !== null && error !== undefined) reject(error);
-          else resolve();
-        },
+    // The sweep token-usage emission (D11b; scoped transport policy Q34).
+    // Await callback success/failure before appending the step summary; a
+    // callback does not establish delivery through a downstream tee. Keep
+    // serialization outside transport suppression so serialization still fails.
+    const stdoutPayload = `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const stdout = process.stdout;
+        const onError = (error: Error): void => {
+          reject(error);
+          // A failed write can call its callback before emitting its error.
+          // Keep the listener through that event turn, then remove it.
+          setImmediate(() => stdout.removeListener('error', onError));
+        };
+        stdout.on('error', onError);
+        try {
+          stdout.write(stdoutPayload, (error) => {
+            if (error !== null && error !== undefined) onError(error);
+            else {
+              stdout.removeListener('error', onError);
+              resolve();
+            }
+          });
+        } catch (error) {
+          stdout.removeListener('error', onError);
+          reject(error);
+        }
+      });
+    } catch (error) {
+      // Q34 newly classifies only this post-sweep transport failure as
+      // best-effort; oneLine bounds the warning detail to 500 characters.
+      // The fallback write itself can fail on the same closed pipes — both
+      // synchronously and via the asynchronous stderr 'error' event — and
+      // writeStderrDiagnostic swallows both.
+      writeStderrDiagnostic(
+        `sweep-usage: could not write stdout: ${oneLine(error instanceof Error ? error.message : String(error))}\n`,
       );
-    });
+    }
+    // Best-effort tail after a completed sweep: even when the payload
+    // write's callback succeeded, stderr can be a broken transport of its
+    // own (separate pipes whose reader already exited), so every remaining
+    // diagnostic write routes through writeStderrDiagnostic — a bare
+    // try/catch would only guard the synchronous throw, leaving the
+    // asynchronous 'error' event to kill the process after finished work.
+    // A failed diagnostic (step summary, per-PR failure echo) must not
+    // record a whole-run error against that finished work.
     appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
     // Prominent, not buried: every failure is echoed as its own stderr line —
     // a human scanning the workflow log must not parse JSON to find them.
     for (const failure of summary.failures) {
-      process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+      writeStderrDiagnostic(`pr ${String(failure.pr)}: ${failure.error}\n`);
     }
   } catch (error) {
     runError = oneLine(error instanceof Error ? error.message : String(error));

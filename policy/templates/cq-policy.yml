@@ -1,60 +1,8 @@
-# cq-policy — the DEFAULT-BRANCH protected-path policy verifier (D11;
-# ADR-0004 D-B, D-G; W1.9).
-#
-# Carrier (P1): `workflow_run` on `cq-signal` (plus `workflow_dispatch`,
-# honoured only on the default ref — ADR-0004 D-A.1). GitHub runs the DEFAULT
-# BRANCH's copy of this file for both, so a pull request cannot edit what
-# judges it (RS-4 T-2/T-8). Everything that decides comes from the trust ref
-# (`github.sha` here, the default-branch tip):
-#   - the verifier code: the toolkit built from the trust checkout with
-#     `pnpm install --frozen-lockfile --ignore-scripts` (never the head's
-#     dist/ or node_modules);
-#   - the protected-path lists, the ratchet definition set and the policy
-#     file, read by `gates.policyDiff` AT THE TRUST REF;
-#   - the posture: `vars.CQ_MERGE_PROTECTED_PATHS`, a repository variable
-#     read by this default-branch definition and mapped to the env key the
-#     resolver reads (RS-15 Annex B §B.6.3). Blank or unset is the
-#     conservative `human`; op input never carries the posture.
-#
-# DATA-ONLY: the head is fetched as git objects into the trust repository and
-# read with git plumbing — never checked out, never installed, never
-# executed. No head code runs anywhere in this workflow, so it needs no
-# compute/sign split (contrast `cq-verify.yml`, whose recompute runs `tsc`
-# over head content). The label records come from the PR timeline API, never
-# from anything the head authored.
-#
-# Jobs:
-#   - `resolve` verifies the triggering run (workflow path, event, repository
-#     id — fork runs are refused) and resolves the subject from `head_sha`,
-#     never `head_branch`; a PR subject's PR and base come from the
-#     commit→PR API. No open same-repo PR into merge-queue/main with that
-#     head (superseded, closed, merged or another base) is NOTHING TO
-#     JUDGE: a notice, no verdict, `judge` skipped, a green run.
-#   - `judge` builds the trusted toolkit, fetches the subject, the base and
-#     (when present) `cq-state` as objects with a step-scoped read-only
-#     credential, fetches the timeline label events, runs `gates.policyDiff`
-#     in-process (`trust/dist/selfhost/policy-diff.js`, never the CLI, so
-#     only protected code judges: residual R1, docs/protected-scope.md)
-#     and posts `cq/policy`. The run report — including every field of the
-#     `cq-override` label record it checked — is the check-run summary and
-#     the step summary. A fail or needs-human verdict is a RED CHECK RUN,
-#     not a red job (cq-accept's rule): the job fails only when the
-#     verifier crashed or the post failed.
-#
-# EXPAND (ADR-0004 D-H.2; W1.10 Decision 6): `cq/policy` is NOT a required
-# check yet. `judge` runs in environment `cq-verdict` and posts with a
-# verdict-App token when `vars.CQ_VERDICT_APP_CLIENT_ID` is set; otherwise
-# with this job's GITHUB_TOKEN, which ADR-0004 D-F says is not a trust anchor
-# (any workflow can forge one). C2 requires the App and makes `cq/policy`
-# required, pinned to it. All verdict posters (cq-policy, cq-verify,
-# cq-accept) switch together, so the gate's verdict selection and the
-# posters never disagree about the authoritative app. The `cq-override` label
-# stays DORMANT — logged, never honoured — until the C3 attestation
-# (ADR-0004 D-H.3) is on the trust ref. `external_id` binds
-# `<trust-sha>:<subject-sha>`.
+# Advisory PR diagnostics for direct main development. No queue promotion carrier.
 name: cq-policy
 
 on:
+  pull_request:
   workflow_run:
     workflows:
       - cq-signal
@@ -79,14 +27,23 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  main-advisory:
+    name: cq/policy (advisory)
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Report advisory policy
+        run: echo 'Direct main PRs use CI and denylist; this verdict is advisory.'
   resolve:
     name: resolve
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
     # dispatch on any other ref would run that ref's copy of this file.
     if: >-
+      github.event_name != 'pull_request' && (
       github.event_name == 'workflow_run' ||
       github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
+      format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -134,7 +91,7 @@ jobs:
               # The subject is head_sha; the PR (and its base) comes from
               # the commit→PR API, never from pull_requests[]
               # (ADR-0004 D-C.2). Exactly one open same-repo PR into
-              # merge-queue or main must carry the subject as its head:
+              # main must carry the subject as its head:
               # the label record is per PR, so an ambiguous PR is refused.
               # Every page, slurped into one array; an API error fails the
               # step (assignment under `set -e`, `pipefail`).
@@ -148,8 +105,7 @@ jobs:
                   '[.[] | select(.state == "open"
                      and .head.sha == $sha
                      and .head.repo.id == $repo
-                     and (.base.ref == "merge-queue"
-                       or .base.ref == "main"))
+                     and .base.ref == "main")
                      | {number, base: .base.ref}]' <<<"$pulls"
               }
               pulls="$(list_pulls)"
@@ -183,7 +139,7 @@ jobs:
                   if [ -z "$carriers" ]; then
                     msg="nothing to judge: commit→PR association unconfirmed: no same-repo PR lists ${subject} (looked twice)"
                   else
-                    msg="nothing to judge: no open same-repo PR into merge-queue/main has head ${subject} (same-repo PRs containing it: ${carriers})"
+                    msg="nothing to judge: no open same-repo PR into main has head ${subject} (same-repo PRs containing it: ${carriers})"
                   fi
                   echo "::notice title=cq-policy::${msg}"
                   echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -191,7 +147,7 @@ jobs:
                 1) ;;
                 *)
                   echo "refusing: ${count} open same-repo PRs"
-                  echo "into merge-queue/main have head ${subject}"
+                  echo "into main have head ${subject}"
                   exit 1;;
               esac
               pr="$(jq -r '.[0].number' <<<"$matches")"
@@ -199,12 +155,6 @@ jobs:
               [[ "$pr" =~ ^[0-9]+$ ]] || {
                 echo "refusing: PR number '$pr'"; exit 1; }
               kind='pr'
-              ;;
-            push)
-              [ "$branch" = "merge-queue" ] || {
-                echo "refusing: push run on '$branch'"; exit 1; }
-              kind='push'
-              base='main'
               ;;
             *) echo "refusing: event '$event'"; exit 1;;
           esac
@@ -218,8 +168,9 @@ jobs:
   judge:
     name: judge
     needs: resolve
+    continue-on-error: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
     # An empty subject is resolve's "nothing to judge" (no verdict owed).
-    if: needs.resolve.outputs.subject != ''
+    if: github.event_name != 'pull_request' && needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The verdict signer's environment (Decision 6): its only secret is the
@@ -404,6 +355,7 @@ jobs:
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
+          ADVISORY: ${{ needs.resolve.outputs.kind == 'pr' && needs.resolve.outputs.base == 'main' }}
         run: |
           set -euo pipefail
           # Anything but an ok result with verdict "pass" is a failure;
@@ -411,7 +363,7 @@ jobs:
           # report (where the cq-override label record is logged), fenced
           # so paths render verbatim, and capped under the API's limit.
           jq -n --slurpfile v "${RUNNER_TEMP}/verdict.json" \
-            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" '
+            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" --arg advisory "$ADVISORY" '
             ($v[0] // {}) as $r
             | ($r.value.verdict // "fail") as $verdict
             | (if $r.status == "ok" then ($r.value.report | join("\n"))
@@ -426,7 +378,7 @@ jobs:
                 head_sha: $sha,
                 external_id: $ext,
                 status: "completed",
-                conclusion: (if $r.status == "ok" and $verdict == "pass"
+                conclusion: (if $advisory == "true" then "neutral" elif $r.status == "ok" and $verdict == "pass"
                   then "success" else "failure" end),
                 output: {
                   title: (if $r.status != "ok"

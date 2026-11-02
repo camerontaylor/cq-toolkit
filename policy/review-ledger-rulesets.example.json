@@ -1,0 +1,48 @@
+[
+  {
+    "name": "cq review ledger immutable history",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "include": ["refs/heads/cq/review-ledger"],
+        "exclude": []
+      }
+    },
+    "bypass_actors": [],
+    "rules": [
+      {
+        "type": "deletion"
+      },
+      {
+        "type": "non_fast_forward"
+      }
+    ]
+  },
+  {
+    "name": "cq review ledger App writer only",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "include": ["refs/heads/cq/review-ledger"],
+        "exclude": []
+      }
+    },
+    "bypass_actors": [
+      {
+        "actor_id": "OWNER_SET_RUNNER_APP_ID",
+        "actor_type": "Integration",
+        "bypass_mode": "always"
+      }
+    ],
+    "rules": [
+      {
+        "type": "update"
+      },
+      {
+        "type": "creation"
+      }
+    ]
+  }
+]

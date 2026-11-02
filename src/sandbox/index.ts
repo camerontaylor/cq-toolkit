@@ -43,7 +43,7 @@ export function buildSandboxLauncherEnv(
     ...config.envPassthrough.map((name) => [name, 'passthrough'] as const),
     ...(config.declaredEnvNames ?? []).map((name) => [name, 'declared'] as const),
   ]) {
-    if (!ENV_NAME.test(name) || SANDBOX_POLICY_ENV_NAMES.has(name)) {
+    if (!ENV_NAME.test(name) || SANDBOX_POLICY_ENV_NAMES.has(name.toUpperCase())) {
       throw new Error(`sandbox: launcher env ${origin} name '${name}' is not permitted`);
     }
     const value = parent[name];

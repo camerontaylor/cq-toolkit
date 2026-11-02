@@ -20,6 +20,8 @@ page metadata or accurate deduplication counts.
 """
 from __future__ import annotations
 
+from runtime_target import DEFAULT_BRANCH, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
+
 import datetime as dt
 import hashlib
 import json
@@ -267,7 +269,7 @@ def _page(value, cursor, history):
 
 
 def reconcile(effects, page_fetch: Callable[[Optional[str]], Dict[str, Any]],
-              *, repo: str, after: str, before: str, page_budget: int, base="merge-queue", checkpoint_raw: Any = None,
+              *, repo: str, after: str, before: str, page_budget: int, base=DEFAULT_BRANCH, checkpoint_raw: Any = None,
               checkpoint_save=None, dry_run=False) -> Dict[str, Any]:
     """Inventory up to page_budget reads per invocation over immutable bounds.
 
@@ -459,7 +461,7 @@ def number_page(forge, source, cursor, *, repo, base):
         if node["__typename"] == "PullRequest":
             if not isinstance(node.get("baseRefName"), str) or "mergedAt" not in node:
                 raise ReconcileRefused("PR state metadata incomplete")
-            if node["mergedAt"] is not None and node["baseRefName"] == base:
+            if node["mergedAt"] is not None and node["baseRefName"] in (DISCOVERY_BRANCHES if base == DISCOVERY_SELECTOR else (base,)):
                 records.append(node)
     following = stop + 1 if stop < source["ceiling"] else None
     return {"records": records, "has_next_page": following is not None,
