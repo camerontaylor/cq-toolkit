@@ -245,7 +245,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       refuseOnLifetime(options, 'report manifest');
       const manifest = ManifestSchema.parse(
         z
-          .object({ page: ManifestSchema })
+          .object({ page: ManifestSchema, snapshot: QueueDigest.exactOptional() })
           .strict()
           .parse(await request('report', input, { receiptId, cursor: null }, options)).page,
       );
@@ -260,7 +260,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       for (let index = 0; index < manifest.chunks; index++) {
         refuseOnLifetime(options, 'report page');
         const page = z
-          .object({ page: ChunkSchema })
+          .object({ page: ChunkSchema, snapshot: QueueDigest.exactOptional() })
           .strict()
           .parse(
             await request('report', input, { receiptId, cursor: receiptId + ':' + index }, options),
