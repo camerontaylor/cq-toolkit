@@ -349,3 +349,31 @@ records may still project after the repair opt-in is turned off, but never while
 `queue.project_fixed` is off. This PR retains the widened strict status client and
 tests parsing both the compact remediation object and the Python-produced receipt.
 A blocked status has `fixed:false` and omits `remediation` entirely.
+
+### Advisory runner health
+
+`review.queueHealth` accepts `{requestId, binding: {repo, targetSelector}}`.
+This dedicated health binding cannot enqueue, bind, or read review receipts.
+The SDK client exposes `health(reference)`; queue-v1 uses `op: "health"`.
+It returns `lastCompletedTick`, `ageSeconds`, `discoveryComplete` (null before
+an enabled discovery tick), `incompleteTicks`, `pending`, `blocked`,
+`deployedSha` and `snapshot`. SHA is read from the runner checkout at tick
+completion, not from the reviewed repository or via a process per read.
+Reads use snapshot admission (two concurrent reads), never the tick lock.
+A changed snapshot or exhausted read slots return `{error: {code: "busy", retryable: true}}`.
+The typed health client preserves that result; `review.queueHealth` returns it
+in `status: "ok"` with the error payload as its value, so callers can retry.
+
+Deployment must retain the ordinary `read`, `repo` and `targets`
+permissions and explicitly add this queue-policy grant (binding is the exact
+client health binding, not a wildcard):
+
+```json
+{"health_reads":[{"principal":"CLIENT_PRINCIPAL","binding":{"repo":"camerontaylor/cq-toolkit","targetSelector":"promoted-main"}}]}
+```
+
+No enqueue or forge verification is needed. Use a stable requestId such as
+`health-client` with that binding. Health is advisory and grants no review credit.
+
+Health has no branch permission requirement. A `health_reads` grant authorizes
+only `health`; it grants no status/report or write authority.

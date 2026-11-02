@@ -75,6 +75,7 @@ import { FindingSchema } from './findings.js';
 import {
   QueueEnqueueInputSchema,
   QueueReferenceSchema,
+  QueueHealthReferenceSchema,
   QueueReportInputSchema,
 } from './internal/queueProtocol.js';
 
@@ -600,6 +601,12 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: QueueEnqueueInputSchema,
     importer: async () =>
       (await import('./queue.js')).makeQueueOps().enqueue as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.queueHealth',
+    inputSchema: QueueHealthReferenceSchema,
+    importer: async () =>
+      (await import('./queue.js')).makeQueueOps().queueHealth as Op<unknown, unknown>,
   },
   {
     name: 'review.queueStatus',

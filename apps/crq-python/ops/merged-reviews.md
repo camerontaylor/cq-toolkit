@@ -245,3 +245,35 @@ records may still project after the repair opt-in is turned off, but never while
 `queue.project_fixed` is off. This PR retains the widened strict status client and
 tests parsing both the compact remediation object and the Python-produced receipt.
 A blocked status has `fixed:false` and omits `remediation` entirely.
+
+## Client health advisory
+
+On deploy, add `health_reads` to the queue policy as documented in
+[queue-client.md](../../../docs/queue-client.md#advisory-runner-health).
+The principal still needs ordinary read/repository/selector permission, with no branch requirement.
+No deployment-controller change is needed.
+
+Runner config `discovery_incomplete_ticks` defaults to 3 (integer 1–1000000).
+Existing `merged_discovery.enabled: true` enables discovery health accounting.
+A completed tick stores a single `client_health` record in queue.json: timestamp,
+runner checkout HEAD, last discovery result, capped streak, issue number and
+settled issue state. Restarts retain the streak; no per-tick history grows.
+Skipped discovery (including `--only`) retains the last complete flag and streak;
+it does not trigger advisory work or close an existing advisory.
+
+At the threshold, crq finds its stable `crq: merged discovery incomplete` issue
+with marker `<!-- crq-discovery-health-v1 -->`, creates or updates it, and
+comments/closes on recovery. The issue body refreshes only at multiples of
+`discovery_incomplete_ticks` (3, 6, 9 by default), and on open/recovery transitions.
+Each attempt uses a separate fixed ForgeBudget of three calls and ten seconds,
+so exhausted discovery cannot starve the advisory. Skipped or failed attempts
+produce a tick log line. Before create, a durable opening marker is saved; a
+definite non-zero create exit clears the marker so later ticks can retry.
+Timeouts and other ambiguous outcomes retain it and log `opening marker unresolved`.
+The next attempt makes one bounded, non-search-index confirming issue-list call:
+if it finds the marker it adopts that issue; otherwise it clears the opening
+marker and may create within the remaining budget. If discovery has recovered,
+absence clears the marker without creating an issue. Failed confirmation retains
+the marker and logs the unresolved state. This remains advisory and never blocks dispatch.
+Budget exhaustion and forge failures never fail a tick. Existing gh credentials
+are reused. The advisory does not block dispatch or alter review credit.

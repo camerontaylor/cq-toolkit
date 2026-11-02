@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from runtime_target import DEFAULT_REF, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
+import client_health
 import status_summary
 import repair_tick
 import coverage
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent
+RUNNER_ROOT = ROOT.parents[1]
 STATE = ROOT / "state"
 RUNS = STATE / "runs"
 LEDGER = STATE / "ledger"
@@ -150,8 +152,12 @@ def forge_window(budget):
         _FORGE_BUDGET = previous
 
 
-def gh_json(args: List[str]) -> Any:
+def gh_json(args: List[str], *, definite_failure: bool = False) -> Any:
     timeout = _FORGE_BUDGET.take() if _FORGE_BUDGET is not None else 120
+    if definite_failure:
+        result = run(["gh", *args], cwd=CLONE, timeout=timeout, check=False)
+        result.check_returncode()
+        return json.loads(result.stdout)
     return json.loads(run(["gh", *args], cwd=CLONE, timeout=timeout).stdout)
 
 
@@ -2375,6 +2381,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             try:
                 interval = rolling_discovery_interval(q, discovery)
             except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
+                q.setdefault("merged_discovery", {})["complete"] = False
                 log.append("merged discovery disabled: invalid configured interval")
             else:
                 log += discover_merged(q, budget, interval=interval, recent=True)
@@ -2421,6 +2428,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
+        log.extend(client_health.record(sys.modules[__name__], q, discovery_enabled=(not only and
+            isinstance(CONFIG.get("merged_discovery"), dict) and
+            CONFIG["merged_discovery"].get("enabled") is True)))
         save_queue(q)
     return log
 

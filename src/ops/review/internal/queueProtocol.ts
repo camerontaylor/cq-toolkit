@@ -46,6 +46,13 @@ export const QueueReferenceSchema = z
   .object({ requestId: QueueToken, binding: QueueBindingSchema })
   .strict();
 export type QueueReference = z.infer<typeof QueueReferenceSchema>;
+export const QueueHealthBindingSchema = z
+  .object({ repo: QueueRepo, targetSelector: QueueTarget })
+  .strict();
+export const QueueHealthReferenceSchema = z
+  .object({ requestId: QueueToken, binding: QueueHealthBindingSchema })
+  .strict();
+export type QueueHealthReference = z.infer<typeof QueueHealthReferenceSchema>;
 export const QueueBindSchema = QueueReferenceSchema.extend({
   pr: z.number().int().positive(),
   mergeSha: QueueSha.exactOptional(),
@@ -136,6 +143,30 @@ export const QueueStatusSchema = z
     requestAlias: QueueRequestAliasSchema.nullable().exactOptional(),
   })
   .strict();
+export const QueueHealthSchema = z
+  .object({
+    lastCompletedTick: z.string().datetime().nullable(),
+    ageSeconds: z.number().nonnegative().nullable(),
+    discoveryComplete: z.boolean().nullable(),
+    incompleteTicks: z.number().int().nonnegative(),
+    pending: z.number().int().nonnegative(),
+    blocked: z.number().int().nonnegative(),
+    deployedSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .nullable(),
+    snapshot: z.string(),
+  })
+  .strict();
+export type QueueHealth = z.infer<typeof QueueHealthSchema>;
+export const QueueHealthResultSchema = z.union([
+  QueueHealthSchema,
+  z
+    .object({ error: z.object({ code: z.literal('busy'), retryable: z.literal(true) }).strict() })
+    .strict(),
+]);
+export type QueueHealthResult = z.infer<typeof QueueHealthResultSchema>;
+
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;
 
 /** Q6 persists the same immutable producer/head/target binding before publication.
