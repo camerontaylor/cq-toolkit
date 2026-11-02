@@ -1729,28 +1729,51 @@ describe('dev.cycle', () => {
     repo.commitAll('M7 cycle usage fixture');
   }
 
+  /**
+   * A helper the four default-review-leg M7 tests share: CI runners have no
+   * gitleaks binary, so the agent leg's pre-dispatch scan needs the hermetic
+   * scanner fixture on PATH. Returns the cleanup.
+   */
+  async function stubM7Scanner(): Promise<() => Promise<void>> {
+    const scanner = await makeGitleaksFixture();
+    vi.stubEnv('PATH', scanner.path);
+    return async () => {
+      vi.unstubAllEnvs();
+      await rm(scanner.root, { recursive: true, force: true });
+    };
+  }
+
   test('M7-cycle nominal evidence', async () => {
-    await seedM7Budget();
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    const opens: PrOpenInput[] = [];
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(),
-      drivers: measuredDriver(),
-      address: cleanAddress(state),
-      open: openFake(opens),
-      git: async (args) =>
-        args.includes('push')
-          ? { code: 0, stdout: '', stderr: '' }
-          : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
-    });
-    const result = await op({ repoRoot: repo.root });
-    expect(result.status, JSON.stringify(result)).toBe('ok');
-    if (result.status !== 'ok') return;
-    // Success settles the summary ONCE, on the ok value's existing carrier:
-    // one measured dispatch folded, the unmeasured one explicitly unknown.
-    expect(result.value.usageSummary).toEqual(MEASURED_SUMMARY);
+    const cleanup = await stubM7Scanner();
+    try {
+      await runNominal();
+    } finally {
+      await cleanup();
+    }
+
+    async function runNominal(): Promise<void> {
+      await seedM7Budget();
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      const opens: PrOpenInput[] = [];
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(),
+        drivers: measuredDriver(),
+        address: cleanAddress(state),
+        open: openFake(opens),
+        git: async (args) =>
+          args.includes('push')
+            ? { code: 0, stdout: '', stderr: '' }
+            : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
+      });
+      const result = await op({ repoRoot: repo.root });
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      if (result.status !== 'ok') return;
+      // Success settles the summary ONCE, on the ok value's existing carrier:
+      // the review session's one measured dispatch, folded per dispatch.
+      expect(result.value.usageSummary).toEqual(MEASURED_SUMMARY);
+    }
   });
 
   test('M7-cycle missing evidence', async () => {
@@ -1789,92 +1812,119 @@ describe('dev.cycle', () => {
   });
 
   test('M7-cycle failure evidence', async () => {
-    await seedM7Budget();
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(),
-      drivers: measuredDriver(),
-      address: cleanAddress(state),
-      // A failure AFTER the review leg metered its dispatches: the
-      // publication leg refuses, folding the op to failed with the settled
-      // usage still on the envelope.
-      open: async () => ({ status: 'failed', error: 'pr.open: forge down' }),
-      git: async (args) =>
-        args.includes('push')
-          ? { code: 0, stdout: '', stderr: '' }
-          : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
-    });
-    const result: OpResult<unknown> & {
-      report?: { usageSummary?: unknown };
-    } = await op({ repoRoot: repo.root });
-    expect(result.status, JSON.stringify(result)).toBe('failed');
-    if (result.status !== 'failed') return;
-    expect(result.error).toContain('pr.open');
-    expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+    const cleanup = await stubM7Scanner();
+    try {
+      await runFailure();
+    } finally {
+      await cleanup();
+    }
+
+    async function runFailure(): Promise<void> {
+      await seedM7Budget();
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(),
+        drivers: measuredDriver(),
+        address: cleanAddress(state),
+        // A failure AFTER the review leg metered its dispatches: the
+        // publication leg refuses, folding the op to failed with the settled
+        // usage still on the envelope.
+        open: async () => ({ status: 'failed', error: 'pr.open: forge down' }),
+        git: async (args) =>
+          args.includes('push')
+            ? { code: 0, stdout: '', stderr: '' }
+            : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
+      });
+      const result: OpResult<unknown> & {
+        report?: { usageSummary?: unknown };
+      } = await op({ repoRoot: repo.root });
+      expect(result.status, JSON.stringify(result)).toBe('failed');
+      if (result.status !== 'failed') return;
+      expect(result.error).toContain('pr.open');
+      expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+    }
   });
 
   test('M7-cycle evidence: a fault folded by the guard keeps settled usage once (thrown markers untouched)', async () => {
-    await seedM7Budget();
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    const fault = Object.assign(new Error('address exploded'), { marker: 'original fault' });
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(),
-      drivers: measuredDriver(),
-      // The injected address leg throws AFTER the review leg metered its
-      // dispatch; guardDevOp folds the fault to needs-human naming it, and
-      // the thrown object is never mutated.
-      address: async () => {
-        throw fault;
-      },
-    });
-    const result: OpResult<unknown> & {
-      report?: { usageSummary?: unknown };
-    } = await op({ repoRoot: repo.root });
-    expect(result.status).toBe('needs-human');
-    if (result.status !== 'needs-human') return;
-    expect(result.reason).toContain('address exploded');
-    expect(fault).toHaveProperty('marker', 'original fault');
-    // Only the review leg dispatched once: its measured usage folds once.
-    expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+    const cleanup = await stubM7Scanner();
+    try {
+      await runFoldedFault();
+    } finally {
+      await cleanup();
+    }
+
+    async function runFoldedFault(): Promise<void> {
+      await seedM7Budget();
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      const fault = Object.assign(new Error('address exploded'), { marker: 'original fault' });
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(),
+        drivers: measuredDriver(),
+        // The injected address leg throws AFTER the review leg metered its
+        // dispatch; guardDevOp folds the fault to needs-human naming it, and
+        // the thrown object is never mutated.
+        address: async () => {
+          throw fault;
+        },
+      });
+      const result: OpResult<unknown> & {
+        report?: { usageSummary?: unknown };
+      } = await op({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('address exploded');
+      expect(fault).toHaveProperty('marker', 'original fault');
+      // Only the review leg dispatched once: its measured usage folds once.
+      expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+    }
   });
 
   test('M7-cycle exhaustion evidence', async () => {
-    await seedM7Budget();
-    // A one-dispatch token budget: the measured review dispatch spends it
-    // exactly, so the address leg's remainder is <= 0 and the cycle exits
-    // budget-exhausted AFTER settled usage exists.
-    await repo.write(
-      'cq.json',
-      JSON.stringify({
-        schemaVersion: 2,
-        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
-        roles: { reviewer: { provider: 'mock', model: 'mock' } },
-        budgets: { run: { maxTokens: 160, wallMs: 3_600_000 } },
-        review: { reviewers: ['agent'] },
-      }),
-    );
-    repo.commitAll('M7 exhaustion fixture');
-    const state = await seed(repo);
-    await seedReadyLedger(state);
-    const op = makeDevCycle({
-      effects: effects(),
-      check: greenCheck(),
-      drivers: measuredDriver(),
-      address: async () => {
-        throw new Error('address must not run after token exhaustion');
-      },
-    });
-    const result: OpResult<unknown> & {
-      report?: { usageSummary?: unknown };
-    } = await op({ repoRoot: repo.root });
-    // The typed exhaustion carries the settled summary once: the spent
-    // dispatch is KNOWN (its measured declaration), never dropped.
-    expect(result, JSON.stringify(result)).toMatchObject({ status: 'budget-exhausted' });
-    expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+    const cleanup = await stubM7Scanner();
+    try {
+      await runExhaustion();
+    } finally {
+      await cleanup();
+    }
+
+    async function runExhaustion(): Promise<void> {
+      await seedM7Budget();
+      // A one-dispatch token budget: the measured review dispatch spends it
+      // exactly, so the address leg's remainder is <= 0 and the cycle exits
+      // budget-exhausted AFTER settled usage exists.
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 160, wallMs: 3_600_000 } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
+      repo.commitAll('M7 exhaustion fixture');
+      const state = await seed(repo);
+      await seedReadyLedger(state);
+      const op = makeDevCycle({
+        effects: effects(),
+        check: greenCheck(),
+        drivers: measuredDriver(),
+        address: async () => {
+          throw new Error('address must not run after token exhaustion');
+        },
+      });
+      const result: OpResult<unknown> & {
+        report?: { usageSummary?: unknown };
+      } = await op({ repoRoot: repo.root });
+      // The typed exhaustion carries the settled summary once: the spent
+      // dispatch is KNOWN (its measured declaration), never dropped.
+      expect(result, JSON.stringify(result)).toMatchObject({ status: 'budget-exhausted' });
+      expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+    }
   });
 
   test('M7-cycle cancellation evidence', async () => {
@@ -1886,14 +1936,10 @@ describe('dev.cycle', () => {
           lane: 'ai-sdk' as const,
           modelSpec: { provider: 'mock', model: 'mock' },
           driver: {
-            run: async (): Promise<WorkerResult> => {
-              console.log('RUN at', Date.now() % 100000);
-              return new Promise((_resolve, reject) => {
-                // Outlives the wall budget on purpose: the pending drain at
-                // close (not this handler) is what the test exercises.
-                setTimeout(() => reject(new Error('driver outlived the wall')), 30_000);
-              });
-            },
+            // Never settles: it ignores the abort signal on purpose, so the
+            // ONLY close path is the cycle's pending drain (the reviewer's
+            // wall race returns without awaiting this run).
+            run: async (): Promise<WorkerResult> => new Promise(() => {}),
           },
         };
       },
@@ -1922,16 +1968,7 @@ describe('dev.cycle', () => {
     vi.stubEnv('PATH', scanner.path);
     try {
       const op = makeDevCycle({
-        effects: repoEffects(repo, (command) =>
-          command === 'coderabbit'
-            ? {
-                exitCode: 0,
-                stdout: `${JSON.stringify({ type: 'complete', status: 'review_completed' })}\n`,
-                stderr: '',
-                timedOut: false,
-              }
-            : undefined,
-        ),
+        effects: effects(),
         check: greenCheck(),
         drivers: never,
       });
