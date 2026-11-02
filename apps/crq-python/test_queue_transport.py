@@ -148,6 +148,49 @@ class QueueTransportTests(unittest.TestCase):
         return json.loads(transport.handle(receipts.canonical(req), self.runner, principal="developer",
             policy=self.policy, verify_source=None, receipt_root=self.tmp.name))["result"]
 
+    def test_inventory_stale_cursor_and_snapshot_identity(self):
+        self.inventory_fixture()
+        first = self.inventory_call()
+        self.q["snapshot-change"] = True
+        changed = self.inventory_call()
+        self.assertNotEqual(first["snapshot"], changed["snapshot"])
+        self.assertEqual(self.inventory_call(cursor=first["nextCursor"])["error"],
+                         {"code": "stale-cursor", "retryable": False, "restart": True})
+        self.assertEqual(self.inventory_call(cursor="invalid")["error"]["code"], "stale-cursor")
+
+    def test_reads_do_not_lock_or_save_queue(self):
+        rid, _ = self.receipt()
+        before = copy.deepcopy(self.q)
+        with mock.patch.object(self.runner, "with_lock", side_effect=AssertionError("tick held")), \
+                mock.patch.object(self.runner, "save_queue", side_effect=AssertionError("read wrote queue")):
+            self.assertIn("snapshot", self.call("status"))
+            self.assertIn("snapshot", self.call("report", receiptId=rid, cursor=None))
+        self.assertEqual(self.q, before)
+
+    def test_inventory_saved_queue_read_while_real_tick_lock_held(self):
+        self.inventory_fixture()
+        queue = Path(self.tmp.name) / "queue.json"
+        queue.write_bytes(receipts.canonical(self.q))
+        self.runner.QUEUE = queue
+        with (Path(self.tmp.name) / "tick.lock").open("a") as tick:
+            transport.fcntl.flock(tick, transport.fcntl.LOCK_EX | transport.fcntl.LOCK_NB)
+            with mock.patch.object(self.runner, "load_queue", side_effect=lambda: json.loads(queue.read_text())), \
+                    mock.patch.object(self.runner, "with_lock", side_effect=AssertionError("tick held")):
+                first = self.inventory_call()
+                self.assertEqual(first["proof"]["count"], 3)
+                replacement = queue.with_suffix(".new")
+                replacement.write_bytes(queue.read_bytes())
+                replacement.replace(queue)
+                self.assertEqual(self.inventory_call(cursor=first["nextCursor"])["error"]["code"], "stale-cursor")
+
+    def test_dispatcher_real_permission_failure_remains_nonzero(self):
+        with mock.patch.object(dispatcher, "queue_main", side_effect=ValueError("denied")), \
+                mock.patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": "queue-v1"}), \
+                mock.patch.object(sys, "argv", ["dispatcher"]), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(dispatcher.main(), 2)
+            self.assertEqual(stderr.getvalue(), "queue capability refused; no permission\n")
+
     def test_inventory_missing_pagination_digest_and_read_only(self):
         self.inventory_fixture()
         before = copy.deepcopy(self.q)
@@ -179,6 +222,7 @@ class QueueTransportTests(unittest.TestCase):
             blocked = self.inventory_call(states=["blocked"])["entries"][0]
             self.assertEqual(blocked["reason"]["code"], "inventory-receipt-budget")
         self.call("status")
+        self.call("enqueue")
         self.q["queue_client_requests"][self.request_id]["consumed"] = receipt_id
         self.q["merged_current_requests"]["aaa-unowned"] = copy.deepcopy(
             self.q["merged_current_requests"][self.request_id])
@@ -260,7 +304,7 @@ class QueueTransportTests(unittest.TestCase):
 
     def test_inventory_isolation_denied_interval_busy_and_incomplete(self):
         path = self.inventory_fixture()
-        self.call("status")
+        self.call("enqueue")
         self.q["queue_client_requests"][self.request_id]["principal"] = "someone-else"
         result = self.inventory_call(states=["pending"])
         self.assertEqual(result["entries"], [])
@@ -268,7 +312,7 @@ class QueueTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "denied"):
             self.inventory_call(binding={**self.inventory_scope, "before": "2026-11-01T00:00:00Z"})
         with mock.patch.object(self.runner, "with_lock", return_value=None):
-            self.assertEqual(self.inventory_call(), {"error": {"code": "busy", "retryable": True}})
+            self.assertEqual(self.inventory_call()["proof"]["count"], 3)
         doc = json.loads(path.read_text())
         doc["checkpoint"]["digest"] = "0" * 64
         path.write_text(json.dumps(doc))
@@ -318,7 +362,7 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(self.call("status")["state"], "pending")
         with self.assertRaises(ValueError):
             self.call("ack", receiptId="a" * 64, sha256="a" * 64, chunks=1, bytes=1)
-        self.q["queue_client_requests"][self.request_id]["principal"] = "other"
+        self.q["queue_client_requests"] = {self.request_id: {"principal": "other", "binding": self.b}}
         with self.assertRaisesRegex(ValueError, "principal mismatch"):
             self.call("status")
 
@@ -572,7 +616,9 @@ class QueueTransportTests(unittest.TestCase):
         policy_path = Path(self.tmp.name) / "policy.json"
         policy_path.write_text(json.dumps(self.policy))
         request = receipts.canonical({"v": 1, "op": "status", "requestId": "request-1", "binding": self.b})
-        fake = SimpleNamespace(REPO="owner/repo", STATE=Path(self.tmp.name), enqueue_merged=lambda: None)
+        self.call("enqueue")
+        fake = SimpleNamespace(REPO="owner/repo", STATE=Path(self.tmp.name), enqueue_merged=lambda: None,
+                               load_queue=self.runner.load_queue)
         for principal in ("developer", "stranger"):
             output = io.BytesIO()
             with mock.patch.dict(os.environ, {"CRQ_QUEUE_POLICY": str(policy_path),
@@ -588,8 +634,8 @@ class QueueTransportTests(unittest.TestCase):
                     supervised.assert_not_called()
                 else:
                     self.assertEqual(dispatcher.queue_main(), 0)
-                    self.assertEqual(json.loads(output.getvalue())["result"],
-                                     {"error": {"code": "busy", "retryable": True}})
+                    self.assertEqual(json.loads(output.getvalue())["result"]["state"], "awaiting-pr")
+                    supervised.assert_not_called()
 
     def test_large_receipt_restart_order_snapshot_and_ack(self):
         rid, doc = self.receipt()
@@ -625,10 +671,13 @@ class QueueTransportTests(unittest.TestCase):
                 ("report", {"receiptId": rid, "cursor": rid + ":0"}, first)]:
             stream = mock.MagicMock(wraps=io.BytesIO(data))
             stream.__enter__.return_value = stream
-            with mock.patch.object(Path, "open", return_value=stream) as opened, \
+            original_open = Path.open
+            def open_selected(path, *args, **kwargs):
+                return stream if path == Path(self.tmp.name, rid + ".json") else original_open(path, *args, **kwargs)
+            with mock.patch.object(Path, "open", autospec=True, side_effect=open_selected) as opened, \
                     mock.patch.object(receipts, "read_receipt", side_effect=AssertionError("per-page reread")):
                 result = self.call(op, **extra)
-            opened.assert_called_once_with("rb")
+            self.assertEqual(sum(call.args == (Path(self.tmp.name, rid + ".json"), "rb") for call in opened.call_args_list), 1)
             stream.read.assert_called_once_with(transport.MAX_RECEIPT_BYTES + 1)
             if expected is not None:
                 self.assertEqual(result["page"], expected)

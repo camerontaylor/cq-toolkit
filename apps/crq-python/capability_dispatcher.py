@@ -52,7 +52,9 @@ def queue_main():
                     "target": source["base"]["ref"], "mergeSha": source.get("merge_commit_sha"),
                     "state": "MERGED" if source.get("merged") else source["state"].upper()}
 
-        result = supervised(lambda runner: queue_transport.handle(
+        read_only = queue_transport.decode(raw)["op"] in queue_transport.READ | {"inventory"}
+        execute = (lambda work, runner: work(runner)) if read_only else supervised
+        result = execute(lambda runner: queue_transport.handle(
             raw, runner, principal=principal, policy=policy, verify_source=verify,
             receipt_root=crq.STATE / "receipts"), crq)
         if not isinstance(result, bytes):

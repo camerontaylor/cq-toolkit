@@ -8,6 +8,9 @@ import contextlib
 import copy
 import io
 import hashlib
+import fcntl
+import os
+import tempfile
 from pathlib import Path
 import json
 import re
@@ -184,7 +187,7 @@ def _inventory_binding(value):
     return value
 
 
-def _inventory(req, runner, q, principal, receipt_root):
+def _inventory(req, runner, q, principal, receipt_root, snapshot_id):
     b = req["binding"]
     interval = {k: b[k] for k in ("after", "before")}
     key = receipts.digest({"repo": b["repo"], "base": DISCOVERY_SELECTOR, **interval})
@@ -195,6 +198,8 @@ def _inventory(req, runner, q, principal, receipt_root):
     if not isinstance(checkpoint, dict):
         raise ValueError("inventory checkpoint unavailable")
     wrapper = runner._read_reconcile_wrapper(path, interval, checkpoint.get("page_budget"))
+    if json.loads(path.read_text()) != raw:
+        return {"error": {"code": "busy", "retryable": True}}
     cp = wrapper["checkpoint"]
     if not cp["complete"] or cp["dry_run"]:
         raise ValueError("complete durable inventory required")
@@ -266,17 +271,18 @@ def _inventory(req, runner, q, principal, receipt_root):
             break
         rows.append(row)
     rows.sort(key=lambda row: (row["pr"] or 0, row["mergeSha"] or ""))
-    digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"], "states": req["states"], "entries": rows})
+    digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"], "snapshot": snapshot_id, "states": req["states"], "entries": rows})
     selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]]
     start = 0
     if req["cursor"] is not None:
         match = re.fullmatch(re.escape(digest) + r":(0|[1-9][0-9]{0,5})", req["cursor"])
         if not match or int(match[1]) >= len(selected):
-            raise ValueError("stale or invalid inventory cursor; restart")
+            return {"error": {"code": "stale-cursor", "retryable": False, "restart": True}}
         start = int(match[1])
     end = min(start + req["limit"], len(selected))
     return {"entries": selected[start:end], "terminal": end == len(selected),
             "nextCursor": None if end == len(selected) else digest + ":" + str(end),
+            "snapshot": receipts.digest({"queue": snapshot_id, "checkpoint": cp["digest"]}),
             "proof": {"checkpoint": cp["digest"], "completeThrough": cp["before"],
                       "count": len(rows), "digest": digest, "selectedCount": len(selected),
                       "intervalConvention": "(after,before]"}}
@@ -445,13 +451,28 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
 
+    read_only = op in READ or op == "inventory"
+
     def locked():
         # Work on a copy so rejected requests cannot leak partial mutations to test runners.
-        q = copy.deepcopy(runner.load_queue())
+        queue_path = getattr(runner, "QUEUE", None)
+        generation = queue_path.stat() if read_only and queue_path is not None else None
+        q = runner.load_queue()
+        if not read_only:
+            q = copy.deepcopy(q)
         if type(q) is not dict:
             raise ValueError("invalid queue object")
+        snapshot_id = receipts.digest({"principal": principal, "queue":
+            [generation.st_dev, generation.st_ino, generation.st_size, generation.st_mtime_ns]
+            if generation is not None else q}) if read_only else None
+        def encode(result):
+            if read_only:
+                result = {"snapshot": snapshot_id, **result}
+            if generation is not None and queue_path.stat() != generation:
+                return _encode(req, {"error": {"code": "busy", "retryable": True}})
+            return _encode(req, result)
         if op == "inventory":
-            return _encode(req, _inventory(req, runner, q, principal, receipt_root))
+            return encode(_inventory(req, runner, q, principal, receipt_root, snapshot_id))
         entries = q.setdefault("queue_client_requests", {})
         if type(entries) is not dict:
             raise ValueError("invalid queue client requests")
@@ -460,7 +481,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             raise ValueError("invalid queue client entry")
         if entry is not None and (entry.get("binding") != b or entry.get("principal") != principal):
             raise ValueError("request binding or principal mismatch")
-        if op in READ and entry is None and any(
+        if op in READ | {"ack"} and principal in policy.get("read", []) and entry is None and any(
                 grant == {"principal": principal, "requestId": rid, "binding": b}
                 for grant in policy.get("reconciled_reads", [])):
             # Adopt only an existing exact subject; never call enroll or dispatch.
@@ -560,6 +581,11 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                 raise ValueError("receipt/request mismatch")
             manifest = snapshot.page()
             progress = entry.setdefault("deliveries", {}).setdefault(receipt_id, {"manifest": False, "next": 0})
+            journal = Path(receipt_root) / "deliveries" / (receipts.digest(
+                {"principal": principal, "requestId": rid, "binding": b, "receiptId": receipt_id}) + ".json")
+            journal.parent.mkdir(exist_ok=True)
+            if journal.exists():
+                progress = json.loads(journal.read_text())
             if op == "report":
                 page = snapshot.page(req["cursor"])
                 if page["kind"] == "manifest":
@@ -568,18 +594,36 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                     if not progress["manifest"] or page["index"] > progress["next"]:
                         raise ValueError("out-of-order receipt delivery")
                     progress["next"] = max(progress["next"], page["index"] + 1)
+                # A separate, short journal lock never acquires or blocks tick.lock.
+                with journal.with_suffix(".lock").open("a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    if journal.exists():
+                        previous = json.loads(journal.read_text())
+                        progress["manifest"] |= previous["manifest"]
+                        progress["next"] = max(progress["next"], previous["next"])
+                    fd, temporary = tempfile.mkstemp(dir=journal.parent)
+                    try:
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(receipts.canonical(progress))
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temporary, journal)
+                    finally:
+                        if os.path.exists(temporary):
+                            os.unlink(temporary)
                 result = {"page": page}
             else:
                 if not progress["manifest"] or progress["next"] != manifest["chunks"] or any(req[k] != manifest[k] for k in ("sha256", "chunks", "bytes")):
                     raise ValueError("complete verified receipt required before acknowledgement")
                 entry["consumed"] = receipt_id
                 result["consumed"] = True
-        encoded = _encode(req, result)
-        runner.save_queue(q)
+        encoded = encode(result)
+        if not read_only:
+            runner.save_queue(q)
         return encoded
 
     with contextlib.redirect_stdout(io.StringIO()):
-        result = runner.with_lock(locked)
+        result = locked() if read_only else runner.with_lock(locked)
     if not isinstance(result, bytes):
         return _encode(req, {"error": {"code": "busy", "retryable": True}})
     return result

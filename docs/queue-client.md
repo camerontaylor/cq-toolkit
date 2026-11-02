@@ -235,7 +235,7 @@ Repeat with `nextCursor` until `terminal:true` and `nextCursor:null`.
 The cursor binds the principal, interval, filter, checkpoint and visible state
 digest; state changes refuse stale cursors, requiring a restart. The digest is
 SHA256 of receipt-canonical JSON containing `principal`, `binding`,
-`checkpoint`, `states` and the complete sorted `entries` list (PR then SHA).
+`checkpoint`, `snapshot`, `states` and the complete sorted `entries` list (PR then SHA).
 Filters are sorted and deduplicated before digesting and paging.
 Count covers the unfiltered view; selectedCount covers the filter. Page size
 does not change the digest. The proof establishes coverage of the trusted,
@@ -244,13 +244,29 @@ snapshot, review completion for missing/pending rows, historical promotion,
 remediation, quota discharge or readiness. Incomplete, corrupt, absent or
 dry-run checkpoints refuse rather than claim completeness.
 
-Scheduler contention returns the ordinary echoed envelope with
-`result:{"error":{"code":"busy","retryable":true}}` (including contention
-before the supervised child starts). Retry the identical request with bounded
-backoff. A typed `busy` response means the operation did not run because the
-scheduler lock was held. A lost response is a separate delivery-unknown case;
-immutable request IDs make replay safe. Permission refusals retain the transport's nonzero refusal and
-never return this typed busy result.
+Read-only status, report and inventory bypass the scheduler lock and read the last
+atomically saved queue. Each response includes a principal-bound opaque `snapshot`
+identity; inventory also binds its validated checkpoint. Queue replacement during
+a read, or checkpoint replacement during validation, returns typed retryable `busy`.
+An active tick does not prevent reads of the saved generation. These reads never
+save the queue. Reports store delivery progress in a separate per-principal,
+request, binding and receipt journal under `receipts/deliveries`; acknowledgements
+retain scheduler locking and require complete delivery. Existing queue delivery
+progress remains usable. Writes still return typed `busy` on scheduler contention.
+
+Inventory cursors bind the saved queue generation as well as the checkpoint and
+visible projection. An invalid or changed cursor returns
+`result:{"error":{"code":"stale-cursor","retryable":false,"restart":true}}`
+(with snapshot identity). Discard accumulated pages and restart with `cursor:null`;
+do not retry the continuation or combine pages across snapshots. Real authorization
+failures retain the nonzero `queue capability refused; no permission` response.
+The observed M3 continuation stderr contains no exception detail: the old dispatcher
+mapped every exception, including stale-cursor ValueError, to that message, so the
+historical cause cannot be established from that stderr alone.
+
+Deployment requires transport and dispatcher together and a writable receipts
+journal directory. No scheduler, signer or promotion configuration changes are
+required. No deployment was performed.
 
 Inventory indexes subjects/items once and verifies at most 64 MiB of receipt
 bytes per request. Rows beyond that budget return blocked with
