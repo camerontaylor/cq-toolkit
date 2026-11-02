@@ -1,8 +1,8 @@
 // Session-log correlation (preservation plan items 1.3–1.5): the ONE place a
-// lane turns an invocation's WorkCorrelation into its child's CQ_* env.
-// Every subprocess transport (claude-code CLI and SDK, ACP) applies it to
-// the env it already composed, so a governed job's work identity reaches the
-// harness however it is spawned. When a correlation is present it is
+// lane's WorkCorrelation reaches the CQ_* child-env names. Each subprocess
+// transport hands applyCorrelationEnv the env it has already composed for
+// its child, so a governed job's work identity reaches the harness however
+// it is spawned. When a correlation is present it is
 // authoritative: a field it lacks REMOVES any inherited value of that name
 // (the names are allowlisted, so an outer run's CQ_ROLE/CQ_TASK would
 // otherwise sit next to this job's CQ_WORK_ID). Absent correlation leaves

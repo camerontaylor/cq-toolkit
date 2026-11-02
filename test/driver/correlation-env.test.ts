@@ -92,6 +92,8 @@ describe('M5b1 nominal evidence', () => {
 describe('M5b1 missing evidence', () => {
   it('a direct invocation with no inbound identity leaves the env untouched', () => {
     const env = { PATH: '/bin', ANTHROPIC_BASE_URL: 'http://localhost:8080' };
+    // Identity (not deep-equality) is the guard: a returned-clone env leak
+    // would show up here (the sentinel test asserts the caller's map).
     expect(applyCorrelationEnv(env, undefined)).toBe(env);
     expect(Object.keys(env).sort()).toEqual(['ANTHROPIC_BASE_URL', 'PATH']);
   });

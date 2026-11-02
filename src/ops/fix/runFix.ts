@@ -274,8 +274,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       });
       accountPlanned();
       // The single observable write of the metric: every terminal return
-      // flows through finish(), so this is the value any test or consumer
-      // reads (the pre-assembly write below is superseded on every path).
+      // EXCEPT the report-persist failure above (which returns directly) flows
+      // through finish(), so this is the value any test or consumer reads
+      // (the pre-assembly write below is superseded on every finish() path).
       report.fixesPerRun = fixesPerRunOf(report.tasks);
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };

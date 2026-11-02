@@ -541,9 +541,11 @@ function makeReviewAddressManyCore(
           // A thrown settlement and a refused known settlement are handled
           // DIFFERENTLY, deliberately: a refusal (individually safe
           // measurement whose honest total exceeds MAX_SAFE_INTEGER) leaves
-          // the reservation `reserved` with stop: null — nothing is settled,
-          // so nothing may be marked unresolved — while a thrown total
-          // becomes `unresolved` with the sticky unknown-usage stop. Do NOT
+          // the reservation `reserved` with stop: null, which holds only
+          // while the ledger is not already stopped — the refused path
+          // returns state unchanged, so a ledger already carrying a sticky
+          // stop keeps it (state.stop ?? 'unknown-usage') — while a thrown
+          // total becomes `unresolved` with the sticky unknown-usage stop. Do NOT
           // fold these paths; that would change behavior outside this lane.
           let settled: ReturnType<typeof settleAddressMany>;
           try {
