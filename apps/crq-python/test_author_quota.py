@@ -707,7 +707,7 @@ class TickTest(unittest.TestCase):
         self.addCleanup(usage.stop)
         self.patches = [
             ("refresh_slot_deadline", mock.Mock()),
-            ("load_queue", lambda: self.q), ("fetch", mock.Mock()), ("enroll", lambda q, dry: []),
+            ("load_queue", lambda **kwargs: self.q), ("fetch", mock.Mock()), ("enroll", lambda q, dry: []),
             ("discover_merged", lambda q, budget: []),
 
             ("save_queue", mock.Mock()), ("write_status", mock.Mock()), ("write_heartbeat", mock.Mock()),

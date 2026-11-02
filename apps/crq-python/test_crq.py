@@ -1550,11 +1550,11 @@ class CurrentTest(unittest.TestCase):
              mock.patch.object(crq, "ForgeBudget", return_value=budget),              mock.patch.object(crq, "run", side_effect=fake_run),              mock.patch.object(crq, "prepare_current", side_effect=crq.NotReady("wait")):
             self.tick(discovery=True)
         q = crq.load_queue()
-        self.assertEqual(len(calls), 5)  # 2 recent-PR pages + 3 deferred reads
-        self.assertEqual(q["merged_reconcile"]["represented"], 125)
-        self.assertEqual(q["deferred_refresh_cursor"], "request-02")
-        self.assertEqual(q["queue_client_requests"]["request-03"], entry)
-        self.assertEqual(q["queue_client_requests"]["request-04"], entry)
+        self.assertEqual(len(calls), 5)  # Existing intents get the same shared allowance first.
+        self.assertEqual(q["merged_reconcile"]["represented"], 0)
+        self.assertFalse(q["merged_reconcile"]["complete"])
+        self.assertEqual(q["deferred_refresh_cursor"], "request-04")
+        self.assertTrue(all(e.get("refreshedAt") for e in q["queue_client_requests"].values()))
 
 
     def test_future_bound_refuses_before_forge_and_full_range_dispatch_is_committed(self):
@@ -1849,7 +1849,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                         effects["refresh_deferred"].side_effect = (
                                             lambda *a, **k: order.append("refresh") or [])
                                         crq.tick()
-                                        self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
+                                        self.assertEqual(order[:3], ["refresh", "bounds-save", "refusal-debt-save"])
                                         for name in ("harvest_review", "harvest", "enroll",
                                                       "read_slot_usage", "admit_available",
                                                      "write_status", "write_heartbeat"):
@@ -1860,8 +1860,10 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                         with self.assertRaisesRegex(crq.DiscoveryStorageFailed,
                                                                    "refusal-debt-save"):
                                             crq.tick()
-                                        for effect in effects.values():
-                                            effect.assert_not_called()
+                                        effects["refresh_deferred"].assert_called_once()
+                                        for name, effect in effects.items():
+                                            if name != "refresh_deferred":
+                                                effect.assert_not_called()
                                         self.assertEqual([event[1] for event in events],
                                                          ["bounds-save", "refusal-debt-save"])
                             # Shared parser restored before persisted reloads or digest checks.
@@ -2015,8 +2017,10 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
             with self.tick_effects() as effects, self.fault(stage=stage):
                 with self.assertRaisesRegex(crq.DiscoveryStorageFailed, stage):
                     crq.tick()
-                for effect in effects.values():
-                    effect.assert_not_called()
+                effects["refresh_deferred"].assert_called_once()
+                for name, effect in effects.items():
+                    if name != "refresh_deferred":
+                        effect.assert_not_called()
             self.assertEqual(self.q, baseline)
 
     def test_decode_refusal_allows_existing_tick_work_after_debt_commit(self):
@@ -2033,7 +2037,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                 mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
             effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
             crq.tick()
-            self.assertEqual(order[:3], ["bounds-save", "refusal-debt-save", "refresh"])
+            self.assertEqual(order[:3], ["refresh", "bounds-save", "refusal-debt-save"])
             for name in ("harvest_review", "harvest", "enroll",
                          "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
                 effects[name].assert_called_once()
@@ -2240,7 +2244,7 @@ class OptionalCycleAdmissionTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.q = {"created_at": crq.iso(), "items": [], "starts": [], "paused": False}
         for name, value in (
-                ("load_queue", lambda: self.q), ("fetch", mock.Mock()),
+                ("load_queue", lambda **kwargs: self.q), ("fetch", mock.Mock()),
                 ("gh_json", mock.Mock(side_effect=AssertionError("unmocked forge in admission fixture"))),
                 ("enroll", lambda q, dry: []), ("discover_merged", lambda q, budget: []),
 

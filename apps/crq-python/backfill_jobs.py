@@ -9,6 +9,7 @@ import datetime as dt
 from pathlib import Path
 
 import review_ledger as ledger
+import admission_history
 
 KIND = "backfill"
 RANK4 = ("coverage", KIND)
@@ -124,9 +125,9 @@ def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
     if not reason and len(inflight) >= 2:
         reason = "rank4-inflight-cap"
     decision = {"at": at, "item": item["id"], "ordinary_eligible": bool(ordinary_eligible),
-                "observation": copy.deepcopy(observation), "reservations": copy.deepcopy(holds),
+                "observation": observation, "reservations": holds,
                 "effective_remaining": effective, "decision": reason or "admit"}
-    queue.setdefault("backfill_admissions", []).append(decision)
+    decision = admission_history.append(queue, decision)
     if reason or not reserve:
         return decision
     item["attempt"] = item.get("attempt", 0) + 1
@@ -255,7 +256,11 @@ class Journal:
 
     def transact(self, operation):
         with ledger.locked(self.lock):
-            queue = ledger.loads(self.filename.read_bytes()) if self.filename.exists() else {"items": []}
+            before = self.filename.stat().st_size if self.filename.exists() else None
+            queue, compacted = (admission_history.load(self.filename, strict=True)
+                                if before is not None else ({"items": []}, False))
             result = operation(queue)
             ledger.atomic(self.filename, ledger.canonical(queue))
+            if compacted:
+                admission_history.log_compaction(self.filename, before)
             return result
