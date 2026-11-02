@@ -32,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import { deriveJobStatuses, openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
+import { createGovernor, currentJobContext, governorConfig } from '../../src/kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type {
   JobFinishedJournalEvent,
@@ -1337,98 +1338,72 @@ describe('runPlan — report shape and replay details', () => {
     expect('reasoning' in (report.usage as { reasoning?: number })).toBe(false);
   });
 
-  test('T-usage reasoning once: replayed additive reasoning rolls up exactly once', async () => {
-    const { op } = makeFake();
+  test('T-usage reasoning once: an EXECUTED job rolls additive reasoning once through the evidence gates', async () => {
+    // An executed job (never a replay): the op meters a reasoning-only
+    // dispatch through reportResult, then a mixed one. The usageTokens > 0
+    // evidence gates (the once-only flags, onResult and the completion
+    // fold) must keep BOTH measurements; reasoning counts exactly once.
+    const reasoningOnceOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportResult({
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 9 },
+      });
+      currentJobContext()?.reportResult({
+        usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, reasoning: 7 },
+      });
+      return { status: 'ok', value: (raw as { jobId: string }).jobId };
+    };
     const plan: Plan = {
-      id: 'plan-reasoning-once',
+      id: 'plan-reasoning-exec',
       jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
     };
-    const manifest = makeManifest(plan);
-    const log = openRunLog(dir);
-    const priorRunId = 'plan-reasoning-once--prior--beef';
-    await log.append(priorRunId, {
-      type: 'run-started',
-      runId: priorRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'plan-reasoning-once',
-    });
-    await log.append(priorRunId, {
-      type: 'job-finished',
-      runId: priorRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: manifest.jobs[0]?.inputsHash ?? '',
-      result: { status: 'ok', value: { jobId: 'j1' } },
-      usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, reasoning: 7 },
-    });
-    await log.append(priorRunId, {
-      type: 'run-finished',
-      runId: priorRunId,
-      at: '2026-01-01T00:00:02.000Z',
-      stoppedEarly: false,
-    });
-
     const report = await runPlan(
       plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', jobInputSchema, op)),
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', jobInputSchema, reasoningOnceOp)),
+      {
+        governor: createGovernor(governorConfig({ concurrency: 1, stopOnError: false }, {})),
+        allowAdvisory: true,
+      },
     );
     expect(report.jobs[0]?.usage).toEqual({
       input: 3,
       output: 4,
       cacheRead: 1,
       cacheWrite: 2,
-      reasoning: 7,
+      reasoning: 16,
     });
-    // Mixed rollup: reasoning counted ONCE in the run rollup (10+4+1+2+7 = 24).
     expect(report.usage).toEqual({
       input: 3,
       output: 4,
       cacheRead: 1,
       cacheWrite: 2,
-      reasoning: 7,
+      reasoning: 16,
     });
   });
 
-  test('T-usage reasoning-only: a reasoning-only measurement survives the evidence fold', async () => {
-    const { op } = makeFake();
+  test('T-usage reasoning-only: an executed reasoning-only measurement survives the evidence fold', async () => {
+    // The old fold (which excluded reasoning) computed 0 tokens for this
+    // usage and dropped the measurement at the usageTokens > 0 gates. The
+    // reasoning-inclusive fold keeps it: the job row, the run rollup and
+    // the persisted report all retain it (no replay involved).
+    const reasoningOnlyOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportResult({
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 9 },
+      });
+      return { status: 'ok', value: (raw as { jobId: string }).jobId };
+    };
     const plan: Plan = {
-      id: 'plan-reasoning-only',
+      id: 'plan-reasoning-only-exec',
       jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
     };
-    const manifest = makeManifest(plan);
-    const log = openRunLog(dir);
-    const priorRunId = 'plan-reasoning-only--prior--beef';
-    await log.append(priorRunId, {
-      type: 'run-started',
-      runId: priorRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'plan-reasoning-only',
-    });
-    await log.append(priorRunId, {
-      type: 'job-finished',
-      runId: priorRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: manifest.jobs[0]?.inputsHash ?? '',
-      result: { status: 'ok', value: { jobId: 'j1' } },
-      // Reasoning-only: every other field zero. The old fold (which excluded
-      // reasoning) saw 0 tokens and dropped the measurement entirely.
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 9 },
-    });
-    await log.append(priorRunId, {
-      type: 'run-finished',
-      runId: priorRunId,
-      at: '2026-01-01T00:00:02.000Z',
-      stoppedEarly: false,
-    });
-
     const report = await runPlan(
       plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', jobInputSchema, op)),
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', jobInputSchema, reasoningOnlyOp)),
+      {
+        governor: createGovernor(governorConfig({ concurrency: 1, stopOnError: false }, {})),
+        allowAdvisory: true,
+      },
     );
     expect(report.jobs[0]?.usage).toEqual({
       input: 0,

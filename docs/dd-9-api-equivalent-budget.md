@@ -142,6 +142,13 @@ rollup + api-equivalent USD` — six cases:
   basis without a cost, never fabricated); h asserts a present, finite
   `costUSD` labeled `costBasis: 'modeled'` for a priced model.
 
+Token-fold note (owner decision 2026-11-03, PR #815): the token rollup
+above counts `reasoning` exactly once, per the `Usage` contract
+(`src/driver/types.ts:40-45`) — the field is ADDITIVE only when the
+lane's SDK reports reasoning OUTSIDE `output`; a lane whose SDK counts
+thinking inside `output` omits the field, so every total that adds
+`(reasoning ?? 0)` never double-counts.
+
 ## 7. Disposition
 
 **CLOSED** per plan §6 ("a debt may ship unresolved, it may not ship

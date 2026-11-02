@@ -587,9 +587,12 @@ process.exitCode = failed ? 1 : 0;
   test('T-usage reasoning once: the runFix rollup counts additive reasoning once', async () => {
     const f = await fixture();
     try {
-      // A fault thrown after settlement carrying additive reasoning: the
-      // ledger (now including the reasoning-inclusive fold) is the only
-      // carrier, and the report retains the reasoning sum exactly once.
+      // Regression guard for the additive-once contract: the attempt fold
+      // (runFix.ts:289) already summed `reasoning` before the kernel folds
+      // were fixed, and the ledger adoption (report.usage = report.run?.usage)
+      // carries it once either way. A fault thrown after settlement carrying
+      // additive reasoning: the ledger is the only carrier, and the report
+      // retains the reasoning sum exactly once.
       // Four governed dispatches metered, so reasoning sums to 4×4 = 16.
       const result = await makeFixRun({ drivers: reasoningFaultDriver() })(input(f));
       expect(result.status).toBe('needs-human');

@@ -294,7 +294,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       // usage plus metered faults that left no surviving attempt evidence),
       // so it never double counts and preserves partial evidence the attempt
       // fold alone would drop. Without a rollup (no real dispatches observed,
-      // e.g. canned unit evidence), the attempt fold is the carrier.
+      // e.g. canned unit evidence), the attempt fold is the carrier. (This
+      // attempt fold already sums the reported `reasoning` field itself —
+      // kept as a regression guard for the additive-once contract.)
       report.usage = report.run?.usage ?? report.usage;
       if (escalationPolicy)
         report.escalation = {
