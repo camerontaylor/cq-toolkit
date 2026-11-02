@@ -90,8 +90,9 @@ def validate(overlay):
         raise ValueError('deploy records must be outside the checkout')
     for name, value in leaves(overlay['config']):
         if name == 'repair.enabled':
-            if value is not False:
-                raise ValueError('overlay cannot enable repair')
+            # Host kill switch. Spend authorization and roles stay committed policy.
+            if type(value) is not bool:
+                raise ValueError('repair.enabled must be JSON true or false')
         elif name == 'paseo_hosts':
             if (not isinstance(value, list)
                     or any(not isinstance(v, str) or not v for v in value)
@@ -165,9 +166,11 @@ def apply(config, overlay):
         for part in parts[:-1]:
             dest = dest[part]
         dest[parts[-1]] = value
-    # Spend authorization is policy, not an overlay escape hatch.
-    if config['repair']['enabled'] is not False:
-        raise ValueError('repair must remain disabled')
+    # Spend authorization is policy, not an overlay escape hatch: the overlay
+    # switch may turn repair on only when committed policy records a spend
+    # authorization (committed repair.enabled itself is not consulted).
+    if config['repair']['enabled'] is True and not config['repair'].get('spend_authorization'):
+        raise ValueError('repair enabled without committed spend authorization')
     return config
 
 

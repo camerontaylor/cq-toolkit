@@ -151,7 +151,7 @@ def harvest(c, q, item, dry=False):
                 finally:
                     c.remove_worktree(check_wt, branch)
                 predecessor = result['commits'][-1]
-            elif result.get('verdict') not in ('NOT-FIXED', 'FAILED'):
+            elif result.get('verdict') not in ('NOT-FIXED', 'FAILED', 'STALE'):
                 raise ValueError('unknown repair verdict')
             verdicts.append({**result, 'finding': expected['finding']})
         if len(verdicts) != len(record['jobs']):
@@ -377,7 +377,7 @@ def reconcile_fix_prs(c, q):
 def digest(root, queue):
     from crq_repair import utc
     import datetime as dt
-    counts = {k: 0 for k in ('fixed@A0', 'fixed@A1', 'fixed@A2', 'not-fixed', 'judged-valid', 'judged-invalid', 'failed')}
+    counts = {k: 0 for k in ('fixed@A0', 'fixed@A1', 'fixed@A2', 'not-fixed', 'stale', 'judged-valid', 'judged-invalid', 'failed')}
     fix_prs = []
     consumed = set()
     for item in queue['items']:
@@ -389,7 +389,7 @@ def digest(root, queue):
                 if value['verdict'] == 'FIXED':
                     counts['fixed@' + value['attempts'][-1]['rung']] += 1
                 else:
-                    counts['not-fixed' if value['verdict'] == 'NOT-FIXED' else 'failed'] += 1
+                    counts[{'NOT-FIXED': 'not-fixed', 'STALE': 'stale'}.get(value['verdict'], 'failed')] += 1
                 judged = (value.get('judge') or {}).get('verdict')
                 if judged in ('valid', 'invalid'):
                     counts['judged-' + judged] += 1

@@ -54,12 +54,11 @@
   "timeout_bin": "timeout",
   "paseo_hosts": [],
   "repair": {
-    "enabled": false,
-    "spend_authorization": null,
-    "max_concurrent": 3,
+    "enabled": true,
+    "spend_authorization": "owner 2026-11-02: turn on the fixers; cq/GLM only",
     "max_rounds_per_pin": 2,
     "fix_pr_cycles": 1,
-    "peak": {
+    "blackout": {
       "tz": "Asia/Singapore",
       "days": [
         1,
@@ -83,44 +82,20 @@
     "cq_bin": "@HOST_CQ_BIN@",
     "roles": {
       "fixer": {
-        "default": {
-          "driver": "cq",
-          "model": "zai/glm-5.3-flash"
-        },
-        "peak": {
-          "driver": "codex",
-          "model": "gpt-6-luna"
-        }
+        "driver": "cq",
+        "model": "zai/glm-5.3-flash"
       },
       "fixer_escalation": {
-        "default": {
-          "driver": "codex",
-          "model": "gpt-6.1-sol"
-        },
-        "peak": {
-          "driver": "codex",
-          "model": "gpt-6.1-sol"
-        }
+        "driver": "cq",
+        "model": "zai/glm-5.3"
       },
       "judge": {
-        "default": {
-          "driver": "cq",
-          "model": "zai/glm-5.3-flash"
-        },
-        "peak": {
-          "driver": "paseo",
-          "model": "pi/opencode-go/muse-spark-1.3-contributor"
-        }
+        "driver": "cq",
+        "model": "zai/glm-5.3-flash"
       },
       "judge_critical": {
-        "default": {
-          "driver": "codex",
-          "model": "gpt-6.1-sol"
-        },
-        "peak": {
-          "driver": "codex",
-          "model": "gpt-6.1-sol"
-        }
+        "driver": "cq",
+        "model": "zai/glm-5.3"
       }
     },
     "paseo_host": null,

@@ -45,8 +45,9 @@ Keep the JSON file outside the deployment checkout and outside every Git
 repository, mode 0600. Keep its private record directory outside Git, mode 0700.
 Host values are never committed. There is no policy override mechanism.
 `prepare-host.py` defines the closed allowlist in `HOST_KEYS`, `CONFIG_KEYS` and
-`PATH_KEYS`; unknown keys at any depth fail. `repair.enabled` must be exactly
-JSON `false`. Spend authorization, provider/model roles, checks, triggers, quotas
+`PATH_KEYS`; unknown keys at any depth fail. `repair.enabled` is a JSON boolean
+host switch: `false` keeps repair off; `true` is refused unless committed policy
+records a spend authorization. Spend authorization, provider/model roles, checks, triggers, quotas
 and backoffs remain committed policy. No model/provider is selected by this tool.
 
 Example only; replace every host value privately:

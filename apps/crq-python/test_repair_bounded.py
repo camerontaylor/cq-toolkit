@@ -164,20 +164,32 @@ class BoundedRepairTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding'):
             bounded.source_snapshot(self.config, job)
 
-    def test_service_disabled_and_unselected_never_dispatch(self):
+    def test_service_disabled_or_partial_selector_never_dispatch(self):
         atomic(self.root / 'config.json', self.config)
-        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'process_item') as dispatch:
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'process_item') as dispatch, mock.patch.object(service, 'drain') as drain:
             service.main([])
+            for authorization in (None, '', '  ', True):
+                self.config['repair'].update(enabled=True, spend_authorization=authorization)
+                atomic(self.root / 'config.json', self.config)
+                service.main([])
             self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
             atomic(self.root / 'config.json', self.config)
-            service.main([])
+            service.main(['--job', OLD])
             dispatch.assert_not_called()
+            drain.assert_not_called()
+
+    def test_service_without_selector_drains(self):
+        self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')
+        atomic(self.root / 'config.json', self.config)
+        with mock.patch.object(service, 'ROOT', self.root), mock.patch.object(service, 'drain') as drain:
+            service.main([])
+        drain.assert_called_once_with(self.config)
 
     def test_process_preserves_finding_digest_and_delivers_snapshot(self):
         _, job = self.prepare()
-        job['window'] = 'default'
         role = {'driver': 'cq', 'model': 'zai/glm-5.3-flash'}
-        self.config['repair']['roles'] = {name: {'default': role} for name in
+        self.config['repair']['roles'] = {name: role for name in
                                          ('fixer', 'fixer_escalation', 'judge', 'judge_critical')}
         report = {'stop': 'ok', 'changed': False, 'summary': 'No change warranted', 'commits': []}
         with mock.patch.object(service, 'ROOT', self.root), \

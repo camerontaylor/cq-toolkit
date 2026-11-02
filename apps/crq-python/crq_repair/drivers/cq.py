@@ -72,7 +72,8 @@ def invoke(config, role, job, wt, directory):
         error = str(data.get('error') or '')
         throttled = 'errorClass=rate-limit' in error or signals.get('httpStatus') == 429
         return {'stop': 'rate-limit' if throttled else 'budget' if data.get('status') == 'budget-exhausted' else 'error',
-                'changed': False, 'summary': str(data.get('reason') or error or data.get('status')), 'commits': []}
+                'changed': False, 'summary': str(data.get('reason') or error or data.get('status')), 'commits': [],
+                'retry_after_ms': signals.get('retryAfterMs')}
     result = data.get('value') or data.get('result') or {}
     return {**result, 'stop': 'ok'}  # session.json already written above
 

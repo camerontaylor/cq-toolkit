@@ -58,12 +58,48 @@ results cannot shorten an existing global cooldown.
 Completed reviews count only after terminal success.
 Secret scanning happens before upload; credits are never enabled automatically.
 
-`crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. It
+`crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. With
+no arguments it drains the inbox, oldest item first, under `service.lock`. It
 owns `state/repair/`, uses one worktree per item and serial findings within that
-item, with up to three items concurrently. It never writes the queue, pushes or
-calls GitHub. Runtime dispatch requires BOTH `repair.enabled` and a recorded
-`repair.spend_authorization`. Shipped config leaves these disabled/unverified.
-Never enable them merely because code or units have been installed.
+item, and runs items serially: the drivers' `CQ_*` session correlation is
+process environment, so concurrent items would need per-dispatch environments
+first. It never writes the queue, pushes or calls the GitHub API; each drain
+pass starts with `git fetch --prune origin` in the review clone (a failed fetch
+skips the pass). A job is drained only while its tick-owned repair run is
+`queued`. A job not yet started is skipped as `STALE` (terminal, no model call)
+when it is superseded:
+- ordinary/backfill job: the finding's file blob on `origin/main` differs from
+  the blob at the job pin (or the file is gone);
+- open-PR job: the reviewed head is already on `origin/main`, the PR branch is
+  gone from origin (closed or deleted; fork branches are never in origin), or
+  the branch tip changed the finding's file since the pin.
+
+The ordinary-job rule is deliberately coarse: ANY change to the file on main
+marks the finding `STALE`, even an unrelated edit far from the finding, so some
+still-valid findings are dropped. It is cheap, needs no model and never spends
+on a finding whose code has moved under it; dropped findings return when a later
+review reports them again. A closed PR whose branch still exists is not detected;
+publication then discards the result. Prepared (`repair-prepare`) jobs keep the
+strict one-job selector, so a moved tip makes them `STALE`.
+`--job/--source-sha/--finding-sha256` still repairs exactly one prepared job.
+
+Any provider rate limit (fixer or judge) atomically writes the global pause
+marker `state/repair/rate-limited-until` with the provider's retry time
+(`retryAfterMs`; 30 minutes if none, at most 24 hours, never shortened). The
+attempt or pending judge defers to that time and the drain stops. While the
+marker is in the future no pass makes any model call for any item; nothing is
+counted against jobs, so a long quota window fails nothing. The drain's
+`git fetch --prune` runs under the tick's own `state/tick.lock` (non-blocking
+flock, as `crq.with_lock`); if the tick holds it, the pass is skipped.
+Runtime dispatch requires `repair.enabled`, a recorded
+`repair.spend_authorization` string, and `ZAI_API_KEY` in the service environment
+(`EnvironmentFile=-%h/.config/crq/repair.env`). Roles are cq-driver GLM only
+(fixer `zai/glm-5.3-flash`, escalation `zai/glm-5.3`, judge `zai/glm-5.3-flash`,
+critical judge `zai/glm-5.3`). Inside `repair.blackout` (14:00-18:00
+Asia/Singapore, Mon-Fri) nothing is dispatched: the drain does not start, no new
+finding starts, and a running finding defers its next attempt or judge for 30
+minutes. The same applies to a dispatch whose `budget.wall_clock_min` would
+reach into the window, so nothing started at 13:45 runs into 14:00.
 
 `crq-watchdog.timer` checks completed tick heartbeat age and alerts at 36 minutes.
 Heartbeat and summary are atomic under `${XDG_STATE_HOME:-~/.local/state}/crq`.
