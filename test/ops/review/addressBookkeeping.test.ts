@@ -467,17 +467,29 @@ interface UsageHarness {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number } | null;
   /** When set, the Nth driver run (1-based) throws after settling usage. */
   throwOnRun?: number;
-  /**
-   * Token budget override for the caller's op input: after this many runs,
-   * the spent allowance genuinely trips the engine's own stop().
-   */
+  /** Token budget override for the caller's op input: after this many runs,
+   * the spent allowance genuinely trips the engine's own stop(). */
   exhaustAfterRuns?: number;
-  exhausted?: boolean;
+  /** When set, dispatches with this output schema name settle, then abort. */
+  abortSignal?: AbortSignal | undefined;
+  /**
+   * When set with abortSignal, every dispatch AFTER this 1-based run index
+   * pends until the abort lands and then rejects: dispatches that start,
+   * are cut down, and must settle as explicit unknowns. 0 = every dispatch.
+   */
+  holdUntilAbortAfter?: number | undefined;
+  /** Last completed dispatch's output schema name, for abort timing. */
+  lastSchema?: string | undefined;
   cleanup: () => Promise<void>;
 }
 
 async function usageHarness(
-  overrides: Partial<Pick<UsageHarness, 'usage' | 'throwOnRun' | 'exhaustAfterRuns'>> = {},
+  overrides: Partial<
+    Pick<
+      UsageHarness,
+      'usage' | 'throwOnRun' | 'exhaustAfterRuns' | 'abortSignal' | 'holdUntilAbortAfter'
+    >
+  > = {},
 ): Promise<UsageHarness & { start: number }> {
   const state: UsageHarness & { start: number } = {
     runs: 0,
@@ -489,6 +501,11 @@ async function usageHarness(
     ...(overrides.exhaustAfterRuns === undefined
       ? {}
       : { exhaustAfterRuns: overrides.exhaustAfterRuns }),
+    ...(overrides.abortSignal === undefined ? {} : { abortSignal: overrides.abortSignal }),
+    ...(overrides.holdUntilAbortAfter === undefined
+      ? {}
+      : { holdUntilAbortAfter: overrides.holdUntilAbortAfter }),
+    lastSchema: undefined,
     repoRoot: '',
     journalDir: '',
     op: undefined as unknown as ReturnType<typeof makeReviewAddress>,
@@ -548,19 +565,28 @@ async function usageHarness(
             // A REAL post-settlement fault: the dispatch itself throws.
             throw new Error(`driver run ${run} lost after settlement`);
           }
-          if (state.exhaustAfterRuns !== undefined && run > state.exhaustAfterRuns) {
-            // From here on every dispatch burns real wall time so the engine's
-            // own budget machinery observes the elapsed clock (only used when
-            // a caller drives exhaustion through wallMs).
-            state.exhausted = true;
+          if (state.abortSignal?.aborted === true) {
+            // A REAL dispatch cut down by the parent cancel: it rejects, so
+            // the engine settles it as an explicit unknown observation.
+            throw new Error('parent cancelled; dispatch aborted');
           }
-          if (state.exhausted) {
-            const waited = Date.now();
-            while (Date.now() - waited < 200) {
-              if (Date.now() - state.start >= (state.exhaustAfterRuns as number)) break;
-            }
+          if (
+            state.holdUntilAbortAfter !== undefined &&
+            run > state.holdUntilAbortAfter &&
+            state.abortSignal
+          ) {
+            // Hold the second dispatch IN FLIGHT until the cancel lands, then
+            // reject: the dispatch started, so its rejection is an explicit
+            // unknown, never a silent drop.
+            const signal = state.abortSignal;
+            if (!signal.aborted)
+              await new Promise<void>((done) =>
+                signal.addEventListener('abort', () => done(), { once: true }),
+              );
+            throw new Error('parent cancelled; dispatch aborted');
           }
           let structuredOutput: unknown;
+          state.lastSchema = input.outputSchema?.name;
           if (input.outputSchema?.name === 'review.agent/v3') {
             const serialized = JSON.stringify({
               prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
@@ -773,14 +799,17 @@ test('M7-address exhaustion evidence', async () => {
 
 test('M7-address cancellation evidence', async () => {
   return withUsageEnv(async () => {
-    // A REAL parent cancellation through the engine's own carrier: the governing
-    // runLadder's signal aborts while the first driver dispatch is in flight
-    // (after its ledger settlement is queued by the same synchronous account()
-    // slice that returns the result). The cancelled exit retains the settled
-    // spend exactly once, invents no usage, and the engine's terminal lifetime
-    // persists the same summary to the artifact.
+    // A REAL parent cancellation through the engine's own carrier: the first
+    // driver dispatch STARTS, is HELD IN FLIGHT until the governing
+    // runLadder's cancel lands, and then REJECTS — a genuinely cut-down
+    // dispatch. The engine settles that rejection as an explicit unknown
+    // (unknownCount 1, never a dropped or fabricated-measured dispatch), the
+    // cancelled exit is needs-human 'parent cancelled', and EXACT equality
+    // holds between the summary and the parent totals (a double count or an
+    // invented measurement fails). The engine's terminal lifetime persists
+    // the same summary to the artifact.
     const parent = new AbortController();
-    const f = await usageHarness();
+    const f = await usageHarness({ abortSignal: parent.signal, holdUntilAbortAfter: 0 });
     try {
       const opPromise = runLadder(
         () => f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir }),
@@ -788,10 +817,9 @@ test('M7-address cancellation evidence', async () => {
         { op: 'review.address', jobKey: 'm7-cancel', attempt: 1 },
         { signal: parent.signal },
       );
-      // Abort once the first driver dispatch has started; account() for that
-      // dispatch settles synchronously when its promise resolves, so the run
-      // then reaches the cancelled exit carrying its spend.
-      const cancelledWhileDispatched = new Promise<void>((done) => {
+      // Abort as soon as the first dispatch has STARTED (it is pending on the
+      // abort), so it is cut down mid-flight.
+      const cancelledOnceDispatched = new Promise<void>((done) => {
         const timer = setInterval(() => {
           if (f.runs >= 1) {
             clearInterval(timer);
@@ -800,7 +828,7 @@ test('M7-address cancellation evidence', async () => {
           }
         }, 1);
       });
-      await cancelledWhileDispatched;
+      await cancelledOnceDispatched;
       const ladder = await opPromise;
       expect(ladder.outcome).toBe('completed');
       if (ladder.outcome !== 'completed') throw new Error('ladder did not complete');
@@ -808,23 +836,24 @@ test('M7-address cancellation evidence', async () => {
       expect(result.status).toBe('needs-human');
       if (result.status === 'ok') throw new Error('expected needs-human');
       expect(result.report?.reasons.join('; ')).toContain('parent cancelled');
-      expect(f.runs).toBeGreaterThanOrEqual(1);
-      // Every dispatch that SETTLED is retained exactly once; a dispatch cut
-      // down by the abort settles as explicit unknown, never dropped.
+      // Exactly one dispatch started; the cancel cut it down.
+      expect(f.runs).toBe(1);
+      // The cut-down dispatch is an explicit unknown, never dropped and never
+      // a fabricated measured zero.
       const summary = result.report?.usageSummary;
-      expect(summary).toBeDefined();
-      expect(summary?.knownCount ?? 0).toBeLessThanOrEqual(f.runs);
-      expect((summary?.knownCount ?? 0) + (summary?.unknownCount ?? 0)).toBe(f.runs);
-      if (summary?.usage !== undefined) {
-        expect(summary.usage).toEqual({
-          input: 2 * summary.knownCount,
-          output: summary.knownCount,
-          cacheRead: 0,
-          cacheWrite: 0,
-        });
-        // Parent totals do not double count the retained spend.
-        expect(result.report?.usage.input).toBeGreaterThanOrEqual(summary.usage.input);
-      }
+      expect(summary).toEqual({
+        knownCount: 0,
+        unknownCount: 1,
+        unpricedCount: 1,
+      });
+      expect(summary?.usage).toBeUndefined();
+      // EXACT parent-total equality with the unknown-only summary.
+      expect(result.report?.usage).toEqual({
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
       // The engine's terminal lifetime persists the same summary to the artifact.
       const persisted = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
         usageSummary?: unknown;
