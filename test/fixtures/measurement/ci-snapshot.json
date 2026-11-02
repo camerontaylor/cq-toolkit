@@ -1,0 +1,53 @@
+{
+  "manifest": {
+    "fetched_at": "2026-11-02T09:00:00Z",
+    "head_sha": "6885bced3843260642aece2ff7b8b975ca293e30",
+    "attempt": { "501": 1, "502": 2 },
+    "pagination": { "actions_runs": 1, "attempts": 1, "jobs": 1, "check_runs": 1 }
+  },
+  "runs": [
+    {
+      "id": 501,
+      "head_sha": "6885bced3843260642aece2ff7b8b975ca293e30",
+      "name": "static",
+      "status": "completed",
+      "conclusion": "success",
+      "logs_url": "https://example.invalid/logs/501"
+    },
+    {
+      "id": 502,
+      "head_sha": "6885bced3843260642aece2ff7b8b975ca293e30",
+      "name": "verify",
+      "status": "completed",
+      "conclusion": "failure",
+      "logs_url": null,
+      "log_evidence": "unknown",
+      "logs_expired": true
+    }
+  ],
+  "attempts": {
+    "502": [
+      { "id": 900, "attempt": 1, "conclusion": "failure" },
+      { "id": 901, "attempt": 2, "conclusion": "failure" }
+    ]
+  },
+  "jobs": {
+    "501": [{ "id": 7001, "name": "typecheck", "status": "completed", "conclusion": "success" }],
+    "502": [{ "id": 7002, "name": "unit", "status": "completed", "conclusion": "failure" }]
+  },
+  "check_runs": [
+    { "name": "static", "conclusion": "success" },
+    { "name": "denylist", "conclusion": "failure" }
+  ],
+  "combined_status": {
+    "sha": "6885bced3843260642aece2ff7b8b975ca293e30",
+    "state": "failure",
+    "statuses": [{ "context": "cq/verify", "state": "failure" }]
+  },
+  "required_checks": {
+    "static": "success",
+    "denylist": "failure",
+    "from-source": "unknown",
+    "ratchet": "unknown"
+  }
+}
