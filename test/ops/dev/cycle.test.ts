@@ -1727,11 +1727,10 @@ describe('dev.cycle', () => {
     repo.commitAll('M7 cycle usage fixture');
   }
 
-  /**
-   * A helper the four default-review-leg M7 tests share: CI runners have no
-   * gitleaks binary, so the agent leg's pre-dispatch scan needs the hermetic
-   * scanner fixture on PATH. Returns the cleanup.
-   */
+  /** A helper every agent-leg test with a pre-dispatch scan shares (the four
+   * default-review-leg M7 tests plus the S7 probe and the M7 cancellation
+   * and usage tests): CI runners have no gitleaks binary, so the scan needs
+   * the hermetic scanner fixture on PATH. Returns the cleanup. */
   async function stubM7Scanner(): Promise<() => Promise<void>> {
     const scanner = await makeGitleaksFixture();
     vi.stubEnv('PATH', scanner.path);

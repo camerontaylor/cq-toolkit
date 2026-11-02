@@ -453,25 +453,23 @@ describe('M6b review commit evidence attribution (addressWorker)', () => {
   // configured worker role, so the failed pin must record what the driver
   // actually served (mock/served-configured), not the configured role.
   test('M6b failure evidence', async () => {
-    const f = await fixture(
-      async (input) => {
-        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'PARTIAL\n');
-        throw new Error('worker failed');
+    // The fixture driver below (set via engineDeps.drivers) writes PARTIAL and
+    // throws; the default fixture handler is not used, so pass undefined like
+    // the nominal test.
+    const f = await fixture(undefined, '', {
+      runPrefix: 'run/x',
+      configure: (config) => {
+        config.roles = {
+          worker: { provider: 'mock', model: 'configured' },
+          rescue: { ...role, model: 'rescue' },
+          reviewer: { ...role, model: 'reviewer' },
+        };
       },
-      '',
-      {
-        runPrefix: 'run/x',
-        configure: (config) => {
-          config.roles = {
-            worker: { provider: 'mock', model: 'configured' },
-            rescue: { ...role, model: 'rescue' },
-            reviewer: { ...role, model: 'reviewer' },
-          };
-        },
-      },
-    );
+    });
     // The fixture factory resolves each request to a distinct served model,
     // so the pin's model distinguishes the resolved value from configured.
+    // The driver writes PARTIAL and throws: a real failed dispatch that the
+    // engine retains as failed-attempt evidence.
     f.engineDeps.drivers = {
       resolve: (request) => ({
         lane: 'ai-sdk',
