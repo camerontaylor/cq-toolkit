@@ -6,11 +6,17 @@ const REPO_ROOT = join(import.meta.dirname, '..');
 const DOC_PATH = join(REPO_ROOT, 'docs/measurement/export-ci-snapshot.md');
 const FIXTURE_PATH = join(REPO_ROOT, 'test/fixtures/measurement/ci-snapshot.json');
 
+interface AttemptObject {
+  id: number;
+  run_attempt: number;
+  conclusion: string;
+}
+
 interface SnapshotFixture {
   manifest: {
     fetched_at: string;
     head_sha: string;
-    attempt: Record<string, number>;
+    attempt: Record<string, Record<string, AttemptObject>>;
     pagination: Record<string, number>;
   };
   runs: Array<{
@@ -19,12 +25,15 @@ interface SnapshotFixture {
     name: string;
     status: string;
     conclusion: string;
-    logs_url: string | null;
+    run_count: number;
+    logs_url: string;
     log_evidence?: string;
     logs_expired?: boolean;
   }>;
-  attempts: Record<string, Array<{ id: number; attempt: number; conclusion: string }>>;
-  jobs: Record<string, Array<{ id: number; name: string; conclusion: string }>>;
+  attempt_jobs: Record<
+    string,
+    Record<string, Array<{ id: number; name: string; run_attempt: number; conclusion: string }>>
+  >;
   check_runs: Array<{ name: string; conclusion: string }>;
   combined_status: {
     sha: string;
@@ -47,20 +56,39 @@ describe('M10a nominal evidence', () => {
     const doc = loadDoc();
     expect(doc).toContain('repos/{owner}/{repo}/actions/runs?head_sha={sha}&per_page=100');
     expect(doc).toContain('--paginate --slurp');
-    expect(doc).toContain('repos/{owner}/{repo}/actions/runs/{run_id}/attempts?per_page=100');
+    // Attempts have no collection endpoint (it 404s); each attempt number is
+    // fetched individually and its jobs are read under the attempt prefix.
+    expect(doc).toContain('repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}');
     expect(doc).toContain(
-      'repos/{owner}/{repo}/actions/runs/{run_id}/jobs?per_page=100&filter=all',
+      'repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=100&filter=all',
     );
     expect(doc).toContain(
       'repos/{owner}/{repo}/commits/{sha}/check-runs?filter=latest&per_page=100',
     );
-    expect(doc).toContain('repos/{owner}/{repo}/commits/{sha}/status');
+    // /status must carry explicit pagination: the default page holds 30 and
+    // would silently truncate `statuses`.
+    const statusLine = doc
+      .split('\n')
+      .find((line) => line.includes('repos/{owner}/{repo}/commits/{sha}/status?'));
+    expect(statusLine).toBeDefined();
+    expect(statusLine).toContain('per_page=100');
+    expect(statusLine).toContain('--paginate');
   });
 
   it('manifest fetch time/head/attempt/pagination', () => {
     const doc = loadDoc();
     for (const field of ['`fetched_at`', '`head_sha`', '`attempt`', '`pagination`']) {
       expect(doc).toContain(field);
+    }
+    // The manifest's attempt shape is keyed per run id and per attempt number,
+    // matching the fixture's objects under manifest.attempt.
+    const snap = loadFixture();
+    for (const run of snap.runs) {
+      const runAttempts = snap.manifest.attempt[String(run.id)];
+      expect(runAttempts).toBeDefined();
+      for (const [n, attempt] of Object.entries(runAttempts ?? {})) {
+        expect(attempt.run_attempt).toBe(Number(n));
+      }
     }
   });
 });
@@ -70,7 +98,9 @@ describe('M10a missing evidence', () => {
     const snap = loadFixture();
     const expired = snap.runs.find((run) => run.id === 502);
     expect(expired).toBeDefined();
-    expect(expired?.logs_url).toBeNull();
+    // logs_url persists after retention; expiry is probed, not derived from a
+    // null field, so the fixture keeps a live-shaped URL.
+    expect(expired?.logs_url).toContain('/logs');
     expect(expired?.log_evidence).toBe('unknown');
     expect(expired?.logs_expired).toBe(true);
     for (const state of Object.values(snap.required_checks)) {
@@ -86,15 +116,23 @@ describe('M10a failure evidence', () => {
     const snap = loadFixture();
     const failedRun = snap.runs.find((run) => run.id === 502);
     expect(failedRun?.conclusion).toBe('failure');
-    expect(snap.attempts['502']?.every((a) => a.conclusion === 'failure')).toBe(true);
-    expect(snap.jobs['502']?.some((job) => job.conclusion === 'failure')).toBe(true);
+    const attempts = snap.manifest.attempt['502'];
+    expect(attempts).toBeDefined();
+    expect(Object.values(attempts ?? {}).every((a) => a.conclusion === 'failure')).toBe(true);
+    expect(
+      Object.values(snap.attempt_jobs['502'] ?? {}).some((jobs) =>
+        jobs.some((job) => job.conclusion === 'failure'),
+      ),
+    ).toBe(true);
     expect(snap.check_runs.some((check) => check.conclusion === 'failure')).toBe(true);
     expect(snap.combined_status.state).toBe('failure');
   });
 
   it('no API execution in tests', () => {
+    // The suite reads only local files (readFileSync above); it never spawns a
+    // process or performs network I/O. The doc documents `gh api` invocations
+    // but nothing here executes them.
     const doc = loadDoc();
-    // The doc only documents `gh api` invocations; tests read local files only.
     expect(doc).toContain('gh api');
     expect(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).toContain(
       '@camerontaylor/cq-toolkit',
