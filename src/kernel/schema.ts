@@ -25,6 +25,14 @@
 import { z } from 'zod';
 import { assertJsonLossless } from '../shared/jsonLossless.js';
 import type {
+  AttemptBudget,
+  AttemptBudgetAmount,
+  AttemptError,
+  AttemptStopClass,
+  AttemptTimeout,
+  AvailabilityRecord,
+  AvailabilityState,
+  CorrelationRecord,
   GovernanceRecord,
   Job,
   JobOutcome,
@@ -36,10 +44,15 @@ import type {
   OpResult,
   OpResultArtifact,
   Plan,
+  ProvenanceRecord,
   RunCounts,
   RunEarlyStopReason,
   RunOptions,
   RunReport,
+  RunStartedV3JournalEvent,
+  WitnessesRecord,
+  AttemptFinishedJournalEvent,
+  AttemptFinishedPayload,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -68,7 +81,7 @@ export {
   WorkerResultSchema,
   WorkspaceBindingSchema,
 } from '../driver/schema.js';
-import { UsageSchema } from '../driver/schema.js';
+import { ModelSpecSchema, UsageSchema } from '../driver/schema.js';
 
 // ---------------------------------------------------------------------------
 // Kernel: op result taxonomy
@@ -92,6 +105,12 @@ export function opResultSchema<R>(value: z.ZodType<R>): z.ZodType<OpResult<R>> {
 export const OpResultSchema: z.ZodType<OpResult<unknown>> = opResultSchema(z.unknown());
 
 const NonnegativeSafeCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+/** Lowercase full Git object ID (ADR-0008 wire rule for SHA fields). */
+const ShaSchema = z.string().regex(/^[0-9a-f]{40}$/);
+
+/** `sha256:` + 64 lowercase hex characters over UTF-8 bytes (ADR-0008). */
+const HashSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 
 /** Typed, strict optional result envelope; absent usage stays distinct from zero. */
 export const KnownUsageSummarySchema: z.ZodType<KnownUsageSummary> = z
@@ -576,6 +595,197 @@ export const RunFinishedJournalEventSchema = z
       });
     }
   });
+
+// ---------------------------------------------------------------------------
+// Kernel: journal v3 header + attempt schemas (ADR-0008, T25 — schema only;
+// no writer is enabled by this slice)
+// ---------------------------------------------------------------------------
+
+export const AvailabilityStateSchema: z.ZodType<AvailabilityState> = z.enum([
+  'known-zero',
+  'not-collected',
+  'unavailable',
+  'partial',
+  'n-a',
+  'known',
+]);
+
+export const AvailabilityRecordSchema: z.ZodType<AvailabilityRecord> = z
+  .object({
+    state: AvailabilityStateSchema,
+    reason: z.string(),
+    source: z.string().nullable(),
+  })
+  .strict();
+
+/** Availability map keyed by JSON Pointer (empty or leading '/') relative to the containing payload. */
+export const AvailabilityMapSchema: z.ZodType<Record<string, AvailabilityRecord>> = z.record(
+  z.string().regex(/^$|^\//),
+  AvailabilityRecordSchema,
+);
+
+export const WitnessesRecordSchema: z.ZodType<WitnessesRecord> = z
+  .object({
+    base: ShaSchema,
+    admitted: ShaSchema.nullable(),
+    execution: ShaSchema.nullable(),
+    reviewed: ShaSchema.nullable(),
+    accepted: ShaSchema.nullable(),
+  })
+  .strict();
+
+export const ProvenanceRecordSchema: z.ZodType<ProvenanceRecord> = z
+  .object({
+    cqVersion: z.string(),
+    producerVersion: z.string(),
+    repoId: HashSchema.nullable(),
+    cqJsonHash: HashSchema,
+    baseSha: ShaSchema,
+    runPrefix: z.string(),
+    startedAt: z.iso.datetime(),
+    endedAt: z.iso.datetime().nullable(),
+    journalLink: z.string(),
+    reportLink: z.string(),
+    witnesses: WitnessesRecordSchema,
+  })
+  .strict();
+
+export const CorrelationRecordSchema: z.ZodType<CorrelationRecord> = z
+  .object({
+    workId: z.uuid(),
+    parentWorkId: z.uuid().nullable(),
+    branch: z.string(),
+    commitSha: ShaSchema.nullable(),
+    sessionId: z.string().min(1).nullable(),
+    agentId: z.string().min(1).nullable(),
+  })
+  .strict();
+
+export const RunStartedV3JournalEventSchema: z.ZodType<RunStartedV3JournalEvent> = z
+  .object({
+    type: z.literal('run-started'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    planId: z.string(),
+    journalVersion: z.literal(3),
+    seq: z.number().int().positive(),
+    governance: GovernanceRecordSchema.exactOptional(),
+    ungoverned: z
+      .object({ optIn: z.literal(true) })
+      .strict()
+      .exactOptional(),
+    provenance: ProvenanceRecordSchema,
+    correlation: CorrelationRecordSchema,
+    availability: AvailabilityMapSchema,
+  })
+  .strict()
+  // Envelope couplings (ADR-0008), encoded per the refinements policy:
+  // exactly one of governance/ungoverned, as in v2; the header's baseSha and
+  // witnesses.base must agree.
+  .superRefine((event, ctx) => {
+    const hasGovernance = event.governance !== undefined;
+    const hasUngoverned = event.ungoverned !== undefined;
+    if (hasGovernance && hasUngoverned) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'governance and ungoverned are mutually exclusive',
+        path: ['ungoverned'],
+      });
+    }
+    if (!hasGovernance && !hasUngoverned) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a v3 run-started requires exactly one of governance or ungoverned',
+        path: ['governance'],
+      });
+    }
+    if (event.provenance.baseSha !== event.provenance.witnesses.base) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'provenance.baseSha and provenance.witnesses.base must agree',
+        path: ['provenance'],
+      });
+    }
+  });
+
+export const AttemptStopClassSchema: z.ZodType<AttemptStopClass> = z.enum([
+  'retriable',
+  'terminal',
+  'infrastructure',
+  'budget',
+  'human',
+]);
+
+export const AttemptErrorSchema: z.ZodType<AttemptError> = z
+  .object({
+    type: z.string().nullable(),
+    code: z.string().nullable(),
+    providerFinishReason: z.string().nullable(),
+    source: z.string(),
+    certainty: z.enum(['observed', 'inferred', 'unknown']),
+  })
+  .strict();
+
+export const AttemptTimeoutSchema: z.ZodType<AttemptTimeout> = z
+  .object({
+    scope: z.enum(['request', 'step', 'attempt', 'run']),
+    boundMs: z.number().nonnegative(),
+    source: z.string(),
+  })
+  .strict();
+
+export const AttemptBudgetAmountSchema: z.ZodType<AttemptBudgetAmount> = z
+  .object({
+    tokens: NonnegativeSafeCountSchema.nullable(),
+    wallMs: z.number().nonnegative().nullable(),
+  })
+  .strict();
+
+export const AttemptBudgetSchema: z.ZodType<AttemptBudget> = z
+  .object({
+    allowed: AttemptBudgetAmountSchema,
+    spent: AttemptBudgetAmountSchema,
+    remaining: AttemptBudgetAmountSchema,
+  })
+  .strict();
+
+export const AttemptFinishedPayloadSchema: z.ZodType<AttemptFinishedPayload> = z
+  .object({
+    tier: z.enum(['worker', 'rescue']),
+    invocation: z.string(),
+    model: ModelSpecSchema.nullable(),
+    provider: z.string(),
+    requestedModel: z.string(),
+    servedModel: z.string().nullable(),
+    tokens: NonnegativeSafeCountSchema.nullable(),
+    usageChannels: z.record(z.string(), NonnegativeSafeCountSchema.nullable()),
+    requests: NonnegativeSafeCountSchema.nullable(),
+    wallMs: z.number().nonnegative().nullable(),
+    modeledUsd: z.number().nonnegative().nullable(),
+    priceTableRevision: z.string().nullable(),
+    priceCoverage: z.string().nullable(),
+    stopReason: z.string(),
+    stopCode: z.string(),
+    class: AttemptStopClassSchema,
+    error: AttemptErrorSchema.nullable(),
+    timeout: AttemptTimeoutSchema.nullable(),
+    budget: AttemptBudgetSchema,
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const AttemptFinishedJournalEventSchema: z.ZodType<AttemptFinishedJournalEvent> = z
+  .object({
+    type: z.literal('attempt-finished'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    unitId: z.string().min(1),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1),
+    attempt: z.number().int().min(1),
+    payload: AttemptFinishedPayloadSchema,
+  })
+  .strict();
 
 export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion('type', [
   RunStartedJournalEventSchema,
