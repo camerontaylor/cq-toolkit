@@ -184,3 +184,77 @@ No deployment is performed by this source change. Live D2 inventory/adoption
 acceptance must be recorded separately from quota discharge: pending inventory,
 a completed report, consumption acknowledgement and remediation remain distinct;
 adoption alone supplies no review, fixed-state or full-quota credit.
+
+## Interval inventory (M3)
+
+The wire-only `inventory` operation requires ordinary read access, an allowed
+target, and an exact operator `inventory_reads` grant. It grants no per-ID
+status/report/adoption, write or acknowledgement authority:
+
+```json
+{"principal":"developer","binding":{"repo":"owner/repo","targetSelector":"promoted-main","after":"2026-10-27T00:00:00Z","before":"2026-10-31T00:00:00Z"}}
+```
+
+Place that object in the policy's `inventory_reads` array. Deploy the reviewed
+transport and dispatcher with compatible runner reconciliation wrapper storage.
+A complete, non-dry-run all-number-slots reconciliation for that exact interval
+must already exist. This operation performs no forge/network read, queue save,
+adoption, enqueue or review start. It uses the reconciler's existing
+**(after, before]** convention, not the live demonstration's [after, before)
+calendar window; choose bounds accordingly.
+
+Exact request (all fields required; limit 1–10):
+
+```json
+{"v":1,"op":"inventory","requestId":"inventory-1","binding":{"repo":"owner/repo","targetSelector":"promoted-main","after":"2026-10-27T00:00:00Z","before":"2026-10-31T00:00:00Z"},"cursor":null,"limit":10,"states":null}
+```
+
+Response echoes `v`, `requestId` and `binding`, with this `result` shape:
+
+```json
+{"entries":[{"pr":506,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","requestId":null,"itemId":null,"state":"missing","reason":null}],"terminal":true,"nextCursor":null,"proof":{"checkpoint":"<checkpoint SHA256>","completeThrough":"2026-10-31T00:00:00Z","count":1,"digest":"<view SHA256>","selectedCount":1,"intervalConvention":"(after,before]"}}
+```
+
+States are `missing`, `pending`, `reviewed`, `reused`, `no-current-code`,
+`partial-scope`, `consumed`, or `blocked`
+(with bounded typed `reason`). The current merged-current receipt producer records
+remediation as `disabled/deferred`, so inventory never infers `fixed`. Durable
+receipt-bound remediation evidence is tracked in [#777](https://github.com/camerontaylor/cq-toolkit/issues/777). Pending includes work currently reviewing.
+Set `states:["pending","blocked"]` for the outstanding summary; null includes
+everything. Known PRs without a visible mapped request remain `missing`.
+Requests owned by another principal reveal neither IDs nor status; missing
+therefore means no representation visible to this principal, not global absence.
+Unowned reconciled mappings may be read through the interval grant without
+being adopted, after the same deterministic item ID, unique item, exact mapping,
+subject, kind, PR and merge-SHA checks used for per-ID reconciled adoption.
+Verified equivalent reused receipts follow the status operation’s equivalence
+checks; `reused` and `no-current-code` do not inflate pending/blocked counts.
+Unsupported reconciliation identities remain missing rows.
+
+Repeat with `nextCursor` until `terminal:true` and `nextCursor:null`.
+The cursor binds the principal, interval, filter, checkpoint and visible state
+digest; state changes refuse stale cursors, requiring a restart. The digest is
+SHA256 of receipt-canonical JSON containing `principal`, `binding`,
+`checkpoint`, `states` and the complete sorted `entries` list (PR then SHA).
+Filters are sorted and deduplicated before digesting and paging.
+Count covers the unfiltered view; selectedCount covers the filter. Page size
+does not change the digest. The proof establishes coverage of the trusted,
+validated reconciliation record and visible queue projection, not a live forge
+snapshot, review completion for missing/pending rows, historical promotion,
+remediation, quota discharge or readiness. Incomplete, corrupt, absent or
+dry-run checkpoints refuse rather than claim completeness.
+
+Scheduler contention returns the ordinary echoed envelope with
+`result:{"error":{"code":"busy","retryable":true}}` (including contention
+before the supervised child starts). Retry the identical request with bounded
+backoff. A typed `busy` response means the operation did not run because the
+scheduler lock was held. A lost response is a separate delivery-unknown case;
+immutable request IDs make replay safe. Permission refusals retain the transport's nonzero refusal and
+never return this typed busy result.
+
+Inventory indexes subjects/items once and verifies at most 64 MiB of receipt
+bytes per request. Rows beyond that budget return blocked with
+`{source:"queue",category:"capacity",code:"inventory-receipt-budget"}`,
+never an unverified verdict. This keeps wide intervals bounded without writing
+a snapshot or trusting cached receipt verdicts. The capacity reason describes
+this read's verification limit, not a scheduler/vendor failure.

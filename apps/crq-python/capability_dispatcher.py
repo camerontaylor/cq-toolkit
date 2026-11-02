@@ -34,6 +34,7 @@ def queue_main():
         policy = queue_transport.validate_policy(
             json.loads(Path(os.environ["CRQ_QUEUE_POLICY"]).read_text()))
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
+        queue_transport.authorize(queue_transport.decode(raw), principal, policy)
         if policy.get("enabled") is not True:
             sys.stdout.buffer.write(queue_transport.handle(raw, None, principal=principal,
                 policy=policy, verify_source=None, receipt_root=None))
@@ -55,7 +56,8 @@ def queue_main():
             raw, runner, principal=principal, policy=policy, verify_source=verify,
             receipt_root=crq.STATE / "receipts"), crq)
         if not isinstance(result, bytes):
-            raise ValueError("queue lock busy")
+            result = queue_transport._encode(queue_transport.decode(raw),
+                {"error": {"code": "busy", "retryable": True}})
         sys.stdout.buffer.write(result)
         return 0
     finally:
