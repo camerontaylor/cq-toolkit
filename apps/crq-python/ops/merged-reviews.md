@@ -147,10 +147,34 @@ their frozen bounds and cursor until complete. Resuming identical frozen bounds
 does not rewrite them, so a completed interval is never briefly persisted as
 `complete: false` (which client health would count as an incomplete tick); a
 refusal or transport failure still records `complete: false`. Automatic scans list closed PRs
-sorted by most recently updated, 100 per page, stopping once updates are older
-than the scan's lower bound. Both main and merge-queue merged PRs are eligible.
-Recent merges normally fit in one or two requests; an incomplete scan resumes
-next tick. Historical backfill remains the backfill controller's responsibility.
+sorted by most recently updated, at most 100 per request, stopping once updates
+are older than the scan's lower bound. Both main and merge-queue merged PRs are
+eligible. Recent merges normally fit in one request; an incomplete scan resumes
+next tick. Multi-request scans use an `updated_at` keyset rather than trusting
+page offsets, because an update moves a PR to the top and a reopen shifts later
+rows into already-read offsets. The cursor records the last processed update
+time and the PR numbers sharing that second. Each continuation window must
+start at or before that anchor; otherwise it backs off towards offset zero. A
+pass that needed more than one request is followed by a head pass over PRs
+updated since that pass began, until one request covers the head or a head pass
+finds nothing new. The tick's existing forge budget and four-page limit apply
+to every request. Same-second groups never refuse or need an operator. The
+cursor remembers the newest 100 processed PR numbers at the anchor second, and
+a forgotten row is reprocessed and deduplicated, never skipped. When more than
+100 PRs share a pass's head second, the next head pass reprocesses every row at
+that second, so a merge updated into it after the first read is still recorded.
+Only strictly newer rows count towards another pass, so the scan still ends.
+Cursors stay under 4 KB by the same reprocessing; only PR numbers of more than
+about 37 digits would refuse.
+
+Ordering assumption: GitHub must keep the order of closed PRs that share one
+`updated_at` second stable between requests. The overlap check relies on it. If GitHub reordered a same-second group
+of more than three rows that straddles a request boundary, an unprocessed row
+could sit above the next window's start and that merge could be missed; the
+five-minute watermark overlap does not cover it. This needs bursts of
+same-second updates, so it is unlikely, but a suspected miss should be replayed
+with the manual `reconcile-merged` command. A page-number cursor left by an
+earlier runner restarts the scan, and already-recorded sources deduplicate. Historical backfill remains the backfill controller's responsibility.
 
 The command prints one JSON discovery summary,
 holds the existing tick lock, and never dispatches a provider or repair. An
@@ -178,6 +202,24 @@ binds source and checkpoint with a corruption-detection digest; this is trusted
 local state, not an authorization signature. On complete discovery, enrollment
 is atomically saved before advancing the natural watermark. A crash after page completion or
 enrollment replays idempotently. Source-head loss stays explicit unsupported debt.
+
+Rolling automatic discovery writes one wrapper per tick (about 120 a day on the
+twelve-minute schedule). After a completed scan advances the watermark, the tick
+(at most once an hour, recorded as `merged_wrappers_pruned_at` in queue.json; a
+timestamp in the future is treated as stale)
+deletes completed `closed-updated-v1` wrappers whose upper bound is at or below
+the watermark and more than seven days old. Growth is therefore bounded at about
+seven days of wrappers. It keeps partial scans, dry runs and manual or inventory
+(`all-number-slots-v1`) wrappers. It also keeps the wrapper for the active
+`merged_discovery` interval, the one named by `merged_reconcile.checkpoint_key`,
+and any file it cannot read or bind to its own interval. Pruning is best effort
+and never aborts the tick.
+
+Abandoned scans are kept indefinitely. These are partial wrappers for intervals
+discovery moved past, and complete wrappers above the watermark, for example
+after the floor is raised. Their number grows only with such events, not with
+the schedule. An operator may delete one after checking that it is neither the
+active `merged_discovery` interval nor `merged_reconcile.checkpoint_key`.
 
 Discovery and deferred refresh share at most 24 requests / 30 seconds under the
 tick lock, with at most ten seconds per request and four discovery pages per tick.
