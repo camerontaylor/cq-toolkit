@@ -1,5 +1,6 @@
 """Tick-owned inbox, result harvesting and publication. No model dispatch."""
 from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
+import review_receipt
 import copy
 import json
 from pathlib import Path
@@ -63,7 +64,19 @@ def own_range(c, q, base, head):
     return bool(commits) and set(commits) <= owned
 
 
+def merged_current_enabled(c):
+    return ((c.CONFIG.get('repair') or {}).get('merged_current') or {}).get('enabled') is True
+
+
 def enqueue(c, q, item, meta, rdir):
+    if item['kind'] == review_receipt.KIND:
+        if not merged_current_enabled(c):
+            return False
+        # Require complete supported finding scope, not a partial repair of a mixed receipt.
+        doc = json.loads((c.STATE / 'receipts' / (item['receipt_id'] + '.json')).read_bytes())
+        if (doc.get('outcome') != 'terminal-with-findings' or not doc.get('findings')
+                or any(f.get('severity') not in ('critical', 'major') for f in doc['findings'])):
+            return False
     existing = item.setdefault('repair_runs', {}).get(meta['run_id'])
     if existing:
         return existing['state'] in ('queued', 'ready', 'publish_failed')
@@ -81,7 +94,8 @@ def enqueue(c, q, item, meta, rdir):
         item['last_error'] = 'repair round ceiling reached; needs human'
         return False
     open_pr = item['kind'] in ('open', 'delta') and bool(meta.get('pr_branch'))
-    base = meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', DEFAULT_REF)
+    base = (item['capture']['target'] if item['kind'] == review_receipt.KIND else
+            meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', DEFAULT_REF))
     record = {'jobs': [], 'pin': pin, 'base': base, 'branch': meta.get('pr_branch'),
               'open_pr': open_pr, 'round': count + 1, 'state': 'queued'}
     reviewed_diff = c.git('diff', meta['base'], meta['head'])
@@ -102,6 +116,10 @@ def enqueue(c, q, item, meta, rdir):
         for blocker in item.get('blocking', []):
             if blocker.get('run') == meta['run_id'] and blocker.get('run_finding') == n:
                 blocker['repair_job'] = job_id
+    if item['kind'] == review_receipt.KIND:
+        record['receipt_id'] = item['receipt_id']
+        record['receipt_findings'] = sorted(review_receipt.digest(f) for f in doc['findings'])
+        record['repair_findings'] = sorted(review_receipt.digest(f) for f in actionable)
     item['repair_runs'][meta['run_id']] = record
     return True
 
@@ -111,7 +129,11 @@ def harvest(c, q, item, dry=False):
     for run, record in item.get('repair_runs', {}).items():
         if record['state'] in ('published', 'done', 'failed', 'stale'):
             # Reconcile atomically persisted publication after a caller crash.
-            if item['kind'] != 'promotion' and item.get('state') == 'repairing':
+            if item['kind'] == review_receipt.KIND:
+                item['state'] = 'done'
+                item['repair_outcome'] = record['state']
+                item['last_error'] = None
+            elif item['kind'] != 'promotion' and item.get('state') == 'repairing':
                 item['state'] = 'repair_failed' if record['state'] == 'failed' else 'done'
             continue
         if record['state'] not in ('queued', 'ready', 'publish_failed'):
@@ -177,7 +199,11 @@ def harvest(c, q, item, dry=False):
                 record['state'] = 'publish_failed'
                 record['error'] = str(exc)[:300]
                 item['last_error'] = 'repair publish failed: ' + record['error']
-        if item['kind'] != 'promotion':
+        if item['kind'] == review_receipt.KIND:
+            item['state'] = 'done'
+            item['repair_outcome'] = record['state']
+            item['last_error'] = None
+        elif item['kind'] != 'promotion':
             item['state'] = 'repair_failed' if record['state'] in ('failed', 'publish_failed') else 'done'
         messages.append(item['id'] + ': repair ' + record['state'])
     return messages
@@ -276,6 +302,7 @@ def recover_publication(c, q, item, run, record, publication):
 
 
 def finalize_publication(c, q, item, run, record, publication):
+    record['publication'] = publication
     translated, head, branch = publication['commits'], publication['head'], publication['branch']
     owned = q.setdefault('repair_own_commits', [])
     owned.extend(sha for sha in translated if sha not in owned)
@@ -351,15 +378,94 @@ def archive_legacy(c, q):
     q['legacy_ledger_archived'] = c.iso()
 
 
+def reconcile_current_fix(c, item):
+    # Revalidate on every tick; a rewritten target must revoke old evidence.
+    item.pop('remediation', None)
+    if item.get('remediation_state') == 'fixed':
+        item['remediation_state'] = 'pending-merged-evidence'
+    rid = item.get('receipt_id')
+    records = [r for r in item.get('repair_runs', {}).values()
+               if r.get('receipt_id') == rid and r.get('state') == 'published'
+               and not r.get('not_fixed')]
+    if not rid or not records:
+        return
+    import hashlib
+    try:
+        data = (c.STATE / 'receipts' / (rid + '.json')).read_bytes()
+        if hashlib.sha256(data).hexdigest() != rid:
+            return
+        doc = json.loads(data)
+    except (OSError, ValueError):
+        return
+    for record in records:
+        pr = record.get('fix_pr')
+        publication = record.get('publication', {})
+        verdicts = record.get('verdicts', [])
+        if (not pr or not verdicts or record.get('state') != 'published'
+                or any(v.get('verdict') != 'FIXED' for v in verdicts)
+                or sorted(v.get('job', '') for v in verdicts) != sorted(record.get('jobs', []))
+                or record.get('receipt_id') != rid
+                or sorted(review_receipt.digest(v.get('finding')) for v in verdicts) != record.get('repair_findings')
+                or len(verdicts) != len(doc.get('findings', []))
+                or record.get('receipt_findings') != sorted(review_receipt.digest(f) for f in doc.get('findings', []))):
+            continue
+        # Merged PR identity is immutable; only target ancestry needs refreshing.
+        info = record.get('merged_fix')
+        if not info:
+            try:
+                info = c.pr_info(pr['number'])
+            except Exception:
+                continue
+        if (info.get('state') == 'CLOSED' or
+                info.get('state') == 'MERGED' and info.get('headRefOid') != publication.get('head')):
+            record['not_fixed'] = {'pr': pr['number'], 'state': info.get('state'),
+                                   'head': info.get('headRefOid'), 'reason': 'closed-or-head-mismatch'}
+            continue
+        if info.get('state') == 'MERGED' and info.get('number') == pr['number']:
+            record['merged_fix'] = copy.deepcopy(info)
+        selector = item['subject']['target_selector']
+        ref = review_receipt.SELECTORS[selector]
+        target = c.git('rev-parse', ref)
+        merge = (info.get('mergeCommit') or {}).get('oid')
+        if (info.get('state') != 'MERGED' or info.get('number') != pr['number']
+                or info.get('baseRefName') != ref.removeprefix('origin/')
+                or info.get('headRefOid') != publication.get('head') or not merge
+                or not c.is_ancestor(merge, target)
+                or not c.is_ancestor(doc['capture']['target'], publication.get('target', ''))):
+            continue
+        evidence = dict(receipt_id=rid, subject=item['subject'], capture_digest=review_receipt.digest(doc['capture']),
+                        findings=sorted(review_receipt.digest(f) for f in doc['findings']),
+                        fix_pr=pr['number'], merge=merge, head=info['headRefOid'], target=target)
+        item['remediation'] = evidence
+        if review_receipt.remediation_fixed(item, doc, rid):
+            item['remediation_state'] = 'fixed'
+            record['merged_fix'] = copy.deepcopy(info)
+            return
+        item.pop('remediation', None)
+
+
 def reconcile_fix_prs(c, q):
     for item in q['items']:
+        if item['kind'] == review_receipt.KIND:
+            try:
+                reconcile_current_fix(c, item)
+            except Exception as exc:
+                item.pop('remediation', None)
+                if item.get('remediation_state') == 'fixed':
+                    item['remediation_state'] = 'pending-merged-evidence'
+                item['repair_error'] = str(exc)[:300]
+            continue
         if item['kind'] != 'promotion':
             continue
         for record in item.get('repair_runs', {}).values():
             pr = record.get('fix_pr')
             if not pr or record.get('fix_merged'):
                 continue
-            info = c.pr_info(pr['number'])
+            try:
+                info = c.pr_info(pr['number'])
+            except Exception:
+                # Shared forge exhaustion must not abort queue persistence.
+                continue
             pr['state'] = info['state']
             if info['state'] == 'MERGED':
                 merge = (info.get('mergeCommit') or {}).get('oid')

@@ -436,6 +436,7 @@ const digestReceipt = (value: unknown) =>
 function terminalReport(
   f: Awaited<ReturnType<typeof fixture>>,
   findings: Record<string, unknown>[] = [],
+  fixed = false,
 ) {
   const paths = [
     {
@@ -498,6 +499,7 @@ function terminalReport(
       itemId: 'current-fixture',
       receiptId: receiptId || createHash('sha256').update(JSON.stringify(document)).digest('hex'),
       reviewed: true,
+      fixed,
       consumed,
     }),
     report: async (_ref: QueueReference, root: string): Promise<QueueEvidence> => {
@@ -511,6 +513,23 @@ function terminalReport(
   };
   return { client, document, deliveries: () => deliveries };
 }
+
+test('fixed true does not block verified receipt settlement or grant local remediation authority', async () => {
+  const f = await fixture();
+  const terminal = terminalReport(
+    f,
+    [{ severity: 'major', comment: 'repair already merged', fileName: 'src/a.ts' }],
+    true,
+  );
+  const completed = await loadCurrentDeferredVendorDebt(
+    f.effects,
+    'main',
+    f.state,
+    f.ledger,
+    terminal.client,
+  );
+  expect(completed).toMatchObject({ vendorCompleted: true, completion: { fixed: false } });
+});
 
 test('terminal status alone cannot settle; verified report clean settlement is durable, scoped and replayable', async () => {
   const f = await fixture();

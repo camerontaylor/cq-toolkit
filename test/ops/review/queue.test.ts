@@ -8,7 +8,11 @@ import {
   sshQueueTransport,
 } from '../../../src/ops/review/internal/queueClient.js';
 import * as queueClient from '../../../src/ops/review/internal/queueClient.js';
-import { readQueueEvidence, sha256 } from '../../../src/ops/review/internal/queueEvidence.js';
+import {
+  parseQueueReceipt,
+  readQueueEvidence,
+  sha256,
+} from '../../../src/ops/review/internal/queueEvidence.js';
 import { FindingsRecordSchema } from '../../../src/ops/review/findings.js';
 import { makeQueueOps } from '../../../src/ops/review/queue.js';
 import { registry } from '../../../src/ops/review/registry.js';
@@ -22,6 +26,24 @@ import {
   QueueBindingSchema,
   QueueBindSchema,
 } from '../../../src/ops/review/internal/queueProtocol.js';
+
+test('parseStatus accepts independent fixed evidence without replacing the receipt outcome', async () => {
+  const f = fixture(false, true);
+  const status = await makeQueueClient(f.transport).status(ref);
+  expect(status).toMatchObject({
+    state: 'terminal-with-findings',
+    fixed: true,
+    consumed: false,
+    remediation: {
+      receiptId: f.receiptId,
+      captureDigest: 'd'.repeat(64),
+      fixPr: 99,
+      mergeSha: 'e'.repeat(40),
+      headSha: 'f'.repeat(40),
+      targetSha: 'a'.repeat(40),
+    },
+  });
+});
 
 describe('queue pre-PR binding', () => {
   const binding = {
@@ -81,7 +103,7 @@ const pendingStatus = {
   reviewed: false,
   fixed: false,
 };
-function fixture(clean = false) {
+function fixture(clean = false, fixed = false) {
   const paths = [
     {
       source_path: 'src/a.ts',
@@ -158,7 +180,19 @@ function fixture(clean = false) {
     receiptId,
     consumed: false,
     reviewed: true,
-    fixed: false,
+    fixed,
+    ...(fixed
+      ? {
+          remediation: {
+            receiptId,
+            captureDigest: 'd'.repeat(64),
+            fixPr: 99,
+            mergeSha: 'e'.repeat(40),
+            headSha: 'f'.repeat(40),
+            targetSha: 'a'.repeat(40),
+          },
+        }
+      : {}),
   };
   const common = {
     version: 1,
@@ -344,7 +378,10 @@ describe('complete immutable queue result consumption', () => {
       status: 'ok',
       value: { consumed: true, reviewed: true, fixed: false },
     });
-    expect(await readdir(store)).toHaveLength(1);
+    const files = await readdir(store);
+    expect(files).toHaveLength(1);
+    const evidence = await readQueueEvidence(store, files[0]!.replace(/\.json$/, ''));
+    expect(parseQueueReceipt(evidence.document).remediation).toBe('disabled/deferred');
   });
 });
 

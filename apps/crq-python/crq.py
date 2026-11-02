@@ -1014,11 +1014,13 @@ def enqueue_merged(pr: int, merge_sha: str, request_id: str, target_selector: st
     result = review_receipt.enroll(q, repo=REPO, pr=pr, merge_sha=merge_sha, request_id=request_id,
                                    at=iso(), target_selector=target_selector)
     save_queue(q)
-    return review_receipt.status(q, request_id)
+    return review_receipt.status(q, request_id,
+        project_fixed=(CONFIG.get("queue") or {}).get("project_fixed") is True)
 
 
 def current_report(request_id: str, receipt_id: Optional[str] = None, cursor: Optional[str] = None) -> Dict[str, Any]:
-    status = review_receipt.status(load_queue(), request_id)
+    status = review_receipt.status(load_queue(), request_id,
+        project_fixed=(CONFIG.get("queue") or {}).get("project_fixed") is True)
     actual = status["receipt_id"]
     if receipt_id and receipt_id != actual:
         raise ValueError("receipt does not match request")
@@ -1729,7 +1731,15 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
-        # Separate from cycles: repair_tick.backfill must never enqueue these findings.
+        if outcome == "terminal-with-findings":
+            item["remediation_state"] = "pending-merged-evidence"
+        if (cls["counted"] and cls["findings"] and not partial
+                and repair_tick.merged_current_enabled(sys.modules[__name__])):
+            try:
+                repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+            except Exception as exc:
+                item["repair_error"] = str(exc)[:300]
+        # Separate from cycles: backfill must never duplicate these jobs.
         item["state"] = "done" if cls["counted"] else "blocked"
         item["last_error"] = cls.get("message")
         if cls["outcome"] == "rate_limited":
@@ -1738,7 +1748,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
         save_queue(q)
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
-        return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (no repair)"
+        return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (repair evidence tracked separately)"
     if item["kind"] == backfill_jobs.KIND:
         return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))
@@ -2348,8 +2358,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 q["backfill_halted"] = str(exc)[:300]
                 q["backfill_halt_operation"] = operation
             log.append("backfill halted: " + str(exc)[:300])
+    budget = ForgeBudget()
     if not dry and only is None:
-        budget = ForgeBudget()
         # Recover existing author intents before discovery checkpoint writes can
         # consume the shared deadline. Both paths retain the same one budget.
         with forge_window(budget):
@@ -2382,11 +2392,13 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             try:
                 log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
             except Exception as exc:
-                item["last_error"] = "repair harvest failed: " + str(exc)[:300]
+                key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
+                item[key] = "repair harvest failed: " + str(exc)[:300]
     if not dry:
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
-        repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
+        with forge_window(budget):
+            repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
     prev = parse_iso(q.get("last_tick"))
     stale_min = CONFIG.get("stale_alarm_min", 36)
     if prev and not dry and (now() - prev).total_seconds() / 60 > stale_min:

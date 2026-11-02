@@ -312,6 +312,74 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(pending["proof"]["selectedCount"], 1)
         self.assertTrue(pending["terminal"])
 
+    def test_fixed_status_and_inventory_share_exact_receipt_evidence(self):
+        self.runner.CONFIG = {"queue": {"project_fixed": True}}
+        self.inventory_fixture()
+        item = self.q["items"][0]
+        item["capture"] = {}
+        doc = dict(source=item["subject"], capture={}, findings=[{"comment": "fixture"}],
+                   counted=True, outcome="terminal-with-findings",
+                   classification={"counted": True, "outcome": "completed"})
+        rid = receipts.write_receipt(self.tmp.name, doc)
+        item.update(state="done", receipt_id=rid)
+        self.call("enqueue")
+        self.assertFalse(self.call("status")["fixed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+        item = self.q["items"][0]
+        item["remediation"] = dict(receipt_id=rid, subject=item["subject"], capture_digest=receipts.digest({}),
+                                   findings=[receipts.digest(doc["findings"][0])], fix_pr=8,
+                                   merge="a" * 40, head="b" * 40, target="c" * 40)
+        for config in ({}, {"queue": None}, {"queue": {"project_fixed": False}}):
+            self.runner.CONFIG = config
+            status = self.call("status")
+            self.assertFalse(status["fixed"])
+            self.assertNotIn("remediation", status)
+            report = self.call("report", receiptId=rid, cursor=None)
+            self.assertEqual(set(report) - {"snapshot"}, {"page"})
+            self.assertNotIn("remediation", report)
+            rows = self.inventory_call(states=["reviewed"])["entries"]
+            self.assertEqual(rows[0]["state"], "reviewed")
+            self.assertEqual(set(rows[0]), {"pr", "mergeSha", "requestId", "itemId", "state", "reason"})
+            self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+            self.assertIn("remediation", self.q["items"][0])
+        self.runner.CONFIG = {"queue": {"project_fixed": True}}
+        status = self.call("status")
+        self.assertEqual(status["state"], "terminal-with-findings")
+        self.assertTrue(status["fixed"] and status["reviewed"])
+        self.assertFalse(status["consumed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"][0]["state"], "fixed")
+        self.q["queue_client_requests"][self.request_id]["consumed"] = rid
+        row = self.inventory_call(states=["consumed"])["entries"][0]
+        self.assertEqual(row["state"], "consumed")
+        self.assertTrue(row["fixed"] and row["consumed"] and row["reviewed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"][0]["state"], "consumed")
+        self.assertEqual(self.call("status")["remediation"]["captureDigest"], receipts.digest({}))
+        self.runner.CONFIG = {"queue": {"project_fixed": False}}
+        legacy = self.inventory_call(states=["consumed"])["entries"][0]
+        self.assertEqual(legacy["state"], "consumed")
+        self.assertEqual(set(legacy), {"pr", "mergeSha", "requestId", "itemId", "state", "reason"})
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+        self.assertEqual(self.inventory_call(states=["reviewed"])["entries"], [])
+        self.assertFalse(self.call("status")["fixed"])
+        self.runner.CONFIG = {"queue": {"project_fixed": True}}
+        self.q["queue_client_requests"][self.request_id]["reason"] = {
+            "source": "queue", "category": "identity", "code": "forge-identity"}
+        blocked = self.call("status")
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertFalse(blocked["fixed"])
+        self.assertNotIn("remediation", blocked)
+        self.q["queue_client_requests"][self.request_id].pop("reason")
+        self.assertTrue(self.call("status")["fixed"])
+        self.q["items"][0]["remediation"]["receipt_id"] = "0" * 64
+        self.assertFalse(self.call("status")["fixed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+        doc['outcome'] = 'partial-scope'
+        self.q['items'][0]['receipt_id'] = receipts.write_receipt(self.tmp.name, doc)
+        status = self.call('status')
+        self.assertEqual(status['state'], 'partial-scope')
+        self.assertFalse(status['fixed'])
+        self.assertEqual(self.inventory_call(states=['fixed'])['entries'], [])
+
     def test_inventory_verified_review_consumed_and_blocked(self):
         self.inventory_fixture()
         item = self.q["items"][0]
@@ -1069,7 +1137,17 @@ def bridge(root, raw):
     queue_path = root / "queue.json"
     q = json.loads(queue_path.read_text()) if queue_path.exists() else {"items": []}
     if raw == b"fixture-tick":
-        document = json.loads((root / "fixture-document.json").read_text())
+        import crq
+        fixture = json.loads((root / "fixture-document.json").read_text())
+        item = q["items"][0]
+        item["capture"] = fixture["capture"]
+        rdir = root / "fixture-run"
+        rdir.mkdir(exist_ok=True)
+        (rdir / "review.ndjson").write_text("\n".join(
+            json.dumps({"type": "finding", **finding}) for finding in fixture["findings"]))
+        document = crq.current_document(item, fixture["outcome"],
+            meta={"run_id": fixture["run_id"], "started_at": fixture["started_at"]},
+            cls=fixture["classification"], rdir=rdir)
         receipt_id = receipts.write_receipt(root / "receipts", document)
         q["items"][0].update(state="done", receipt_id=receipt_id)
         queue_path.write_bytes(receipts.canonical(q))

@@ -2,6 +2,15 @@
 
 No reviewer starts, credentials, shell commands or author-grant mutations.
 Runner owns tick lock/load/save; Q1 owns immutable receipt storage.
+With queue.project_fixed enabled, inventory state filters use OR semantics:
+an exact row state matches, as does
+any requested true reviewed/consumed/fixed fact. Thus reviewed includes reused,
+consumed and fixed rows with review credit; fixed includes consumed repairs.
+Other names match only the row state. Filtering, cursor digest and proof all use
+the same selected rows; these are fact filters, not disjoint lifecycle buckets.
+By default projection is off: status fixed is false, remediation is omitted, and
+inventory retains its original row shape and exact-state filters (fixed matches
+nothing). Internal receipt-bound evidence recording is independent of this gate.
 """
 import base64
 import contextlib
@@ -188,7 +197,7 @@ def _inventory_binding(value):
     return value
 
 
-def _inventory(req, runner, q, principal, receipt_root):
+def _inventory(req, runner, q, principal, receipt_root, *, project_fixed=False):
     b = req["binding"]
     interval = {k: b[k] for k in ("after", "before")}
     key = receipts.digest({"repo": b["repo"], "base": DISCOVERY_SELECTOR, **interval})
@@ -222,6 +231,8 @@ def _inventory(req, runner, q, principal, receipt_root):
     for source in cp["inventory"]:
         row = {"pr": source.get("pr"), "mergeSha": source.get("merge_sha"),
                "requestId": None, "itemId": None, "state": "missing", "reason": None}
+        if project_fixed:
+            row.update(reviewed=False, consumed=False, fixed=False)
         subject = {"repo": b["repo"], "pr": row["pr"], "merge_sha": row["mergeSha"],
                    "target_selector": b["targetSelector"], "policy": receipts.POLICY}
         for rid, mapping in by_subject.get(receipts.digest(subject), []):
@@ -262,6 +273,13 @@ def _inventory(req, runner, q, principal, receipt_root):
                       and doc.get("classification", {}).get("outcome") == "completed"
                       and doc.get("outcome") in {"terminal-clean", "terminal-with-findings", "partial-scope"}):
                     row["state"] = "consumed" if entry and entry.get("consumed") == status["receipt_id"] else ("reused" if status.get("reused_from") else "reviewed")
+                    if project_fixed:
+                        row.update(reviewed=True, consumed=bool(entry and entry.get("consumed") == status["receipt_id"]),
+                                   fixed=receipts.remediation_fixed(item, doc, status["receipt_id"]))
+                        if row["fixed"]:
+                            row["remediation"] = receipts.remediation_summary(item)
+                            if not row["consumed"]:
+                                row["state"] = "fixed"
                 elif doc.get("outcome") in {"no-current-code", "partial-scope"}:
                     row["state"] = doc["outcome"]
                 else:
@@ -272,7 +290,8 @@ def _inventory(req, runner, q, principal, receipt_root):
             break
         rows.append(row)
     rows.sort(key=lambda row: (row["pr"] or 0, row["mergeSha"] or ""))
-    selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]]
+    selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]
+                or any(row.get(fact) is True and fact in req["states"] for fact in ("reviewed", "consumed", "fixed"))]
     digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"],
                               "states": req["states"], "entries": selected})
     start = 0
@@ -527,6 +546,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
 
+    project_fixed = (getattr(runner, "CONFIG", {}).get("queue") or {}).get("project_fixed") is True
     read_only = op in READ or op == "inventory"
 
     def locked():
@@ -547,7 +567,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                 return _encode(req, {"error": {"code": "busy", "retryable": True}})
             return _encode(req, result)
         if op == "inventory":
-            return encode(_inventory(req, runner, q, principal, receipt_root))
+            return encode(_inventory(req, runner, q, principal, receipt_root, project_fixed=project_fixed))
         entries = q.setdefault("queue_client_requests", {})
         if type(entries) is not dict:
             raise ValueError("invalid queue client requests")
@@ -614,7 +634,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         result = _status(q, rid, entry)
         receipt_id = result["receiptId"]
         if receipt_id:
-            item = receipts.status(q, rid)
+            item = receipts.status(q, rid, project_fixed=project_fixed)
             # Bounded status excludes capture/paths/findings. Full document goes through chunks.
             snapshot = _ReceiptSnapshot(receipt_root, receipt_id)
             document = snapshot.document
@@ -633,6 +653,9 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             result["reviewed"] = counted is True and isinstance(classification, dict) and classification.get("counted") is True and classification.get("outcome") == "completed" and outcome in {"terminal-clean", "terminal-with-findings", "partial-scope"}
             result["state"] = ("reused" if item.get("reused_from") else outcome) if result["reviewed"] else {
                 "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
+            result["fixed"] = project_fixed and receipts.remediation_fixed(item, document, receipt_id)
+            if result["fixed"]:
+                result["remediation"] = receipts.remediation_summary(item)
             if result["state"] == "blocked":
                 # Never upgrade a lossy first-error outcome into vendor authority.
                 result["reason"] = ({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
@@ -642,7 +665,8 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             result["reason"] = {"source": "queue", "category": "unknown", "code": "no-receipt"}
         if entry.get("reason") is not None:
             persisted = _status(q, rid, entry)
-            result.update(state="blocked", reviewed=False, reason=persisted["reason"])
+            result.update(state="blocked", reviewed=False, fixed=False, reason=persisted["reason"])
+            result.pop("remediation", None)
             if op in {"report", "ack"}:
                 raise ValueError("source revalidation required before receipt consumption")
         elif receipt_id and result["state"] == "blocked" and document.get("outcome") == "blocked-secret-scan":

@@ -191,3 +191,57 @@ coverage at today's target. Legacy done/skipped/synthetic entries cannot earn
 current-code review credit. Existing cycles/findings remain retained. Open work
 uses one review per proven equivalent full range; same-head or pure-restack
 inferences without versioned scope evidence conservatively require a full review.
+
+Merged-current remediation is stored separately from the immutable review receipt.
+The tick binds the exact subject, receipt, capture and every finding to published
+repair jobs, then verifies the fix PR head, selected base, merge commit ancestry
+and capture ancestry before retaining merge evidence. With `queue.project_fixed: true`, status preserves the receipt outcome and reports
+`fixed: true` with a compact
+`remediation` reference only for complete receipt-bound evidence. Inventory exposes
+`reviewed`, `consumed` and `fixed` facts separately; its `fixed` state applies only
+before consumption, so the consumed filter retains consumed repairs. Fact filters
+match independently: a consumed repair is returned by both consumed and fixed filters. Partial scope, partial repairs,
+unmerged or stale publication heads, and equivalent receipts reused by another
+subject receive no fixed credit. Reviewed and consumed remain independent facts;
+local `FIXED` verdicts and receipt acknowledgement alone grant no remediation credit.
+Evidence reflects the last tick's target observation and is revalidated each tick.
+
+Automatic merged-current repair requires `repair.merged_current.enabled: true`;
+the default is false, independently of the existing repair drain enablement.
+Receipt-bound repair records are written only when this repair opt-in is on.
+Existing bound records can still earn internal evidence after it is turned off;
+only `queue.project_fixed` controls whether that evidence is projected externally.
+Opt-in enqueue requires a complete receipt containing only critical/major findings;
+minor/trivial/info findings, including mixed receipts, are not automatically repaired
+and cannot earn partial fixed credit. Review state stays `done` when repair fails;
+repair outcomes and errors are recorded separately.
+
+Forge lookups share the tick's existing aggregate ForgeBudget and its 30-second
+allowance with recovery/discovery. Busy ticks can defer fix-PR polling until a
+later tick; this fails safe without granting fresh fixed credit. Closed-unmerged PRs
+and merged PRs whose head differs from the prepared publication are terminal
+not-fixed observations, not polled again. This also applies if crq itself pushes
+another repair onto the fix branch: the changed head receives no credit for the
+original receipt. Successful immutable merge metadata is cached; target ancestry
+is refreshed locally. Capture identity is stored as a digest, not a copied manifest.
+
+The producer gate `queue.project_fixed` defaults to false and is absent from
+`config.json`. With it off, status and acknowledgement always return `fixed:false` and omit
+`remediation`. Report wire responses retain the legacy chunk-only envelope;
+imported report evidence remains `fixed:false` and never grants remediation
+authority. Inventory retains the pre-PR row shape without reviewed/consumed/fixed
+fact fields and uses exact-state filtering. Its fixed filter matches nothing.
+Receipt-bound remediation evidence is still recorded internally. Receipts always
+retain `remediation: "disabled/deferred"` for compatibility with the existing TS
+receipt schema; pending/fixed merged evidence is tracked in queue state instead.
+
+Turn `queue.project_fixed` on only after TS consumers run a client from this PR or
+later, including `~/repos/cq-toolkit/dist` on triton and every deferred-ledger host.
+The default-off gate keeps the producer compatible with old strict clients during
+rollout; upgrading the producer does not require a consumer-first deploy sequence.
+With projection enabled, `fixed:true` requires bound repair records; those records
+are written only while `repair.merged_current.enabled` is on. Previously bound
+records may still project after the repair opt-in is turned off, but never while
+`queue.project_fixed` is off. This PR retains the widened strict status client and
+tests parsing both the compact remediation object and the Python-produced receipt.
+A blocked status has `fixed:false` and omits `remediation` entirely.
