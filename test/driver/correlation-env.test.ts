@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyCorrelationEnv } from '../../src/driver/correlation-env.js';
+import { applyCorrelationEnv, paseoParentWorkId } from '../../src/driver/correlation-env.js';
 import { buildChildEnv } from '../../src/shared/proc.js';
 import type { WorkCorrelation } from '../../src/driver/types.js';
 
@@ -12,7 +12,7 @@ import type { WorkCorrelation } from '../../src/driver/types.js';
 // host environment cannot reach the derivation, because it reads ONLY the
 // env passed in.
 
-describe('M5b1 nominal evidence', () => {
+describe('M5b1 direct-op derivation (nominal)', () => {
   it('a direct invocation inside a Paseo agent derives paseo:<PASEO_AGENT_ID> as CQ_PARENT_WORK_ID at the shared driver boundary', () => {
     // The lane-composed child env: the raw agent id is never forwarded;
     // buildChildEnv translates it into the derived link at composition.
@@ -87,7 +87,7 @@ describe('M5b1 nominal evidence', () => {
   });
 });
 
-describe('M5b1 missing evidence', () => {
+describe('M5b1 absent and blank identity (missing evidence)', () => {
   it('a direct invocation with no inbound identity leaves the env untouched', () => {
     const env = { PATH: '/bin', ANTHROPIC_BASE_URL: 'http://localhost:8080' };
     expect(applyCorrelationEnv(env, undefined)).toBe(env);
@@ -117,7 +117,7 @@ describe('M5b1 missing evidence', () => {
   });
 });
 
-describe('M5b1 failure evidence', () => {
+describe('M5b1 hostile and malformed inputs (failure evidence)', () => {
   it('PASEO_AGENT_ID is never forwarded: the raw id never rides, only the derived parent link', () => {
     // The real lane shape: buildChildEnv composes the child env from the
     // parent, and the raw agent id is NOT on the default allowlist — so it
@@ -145,15 +145,23 @@ describe('M5b1 failure evidence', () => {
     expect(blank['CQ_PARENT_WORK_ID']).toBeUndefined();
   });
 
-  it('the host environment cannot affect the fixtures: the derivation reads only the passed map', () => {
-    // No PASEO_AGENT_ID / CQ_* was seeded into this test process's env by
-    // the fixtures above — every assertion so far ran on literal maps. As a
-    // direct probe: an env with no identity keys derives nothing even if the
-    // test process itself runs inside a Paseo agent.
-    const env: Record<string, string> = { PATH: '/bin' };
-    applyCorrelationEnv(env, undefined);
-    expect(env['CQ_PARENT_WORK_ID']).toBeUndefined();
-    expect(env['CQ_WORK_ID']).toBeUndefined();
+  it('the host environment cannot affect the fixtures: a failing PASEO_AGENT_ID injection flips the no-derivation assertion', () => {
+    // The derivation reads ONLY the passed map, so a hostile or ambient
+    // PASEO_AGENT_ID in the TEST PROCESS's own env must not reach a fixture
+    // that never passes it. The discriminating form: inject a poisoned id
+    // into a fixture map that also carries no other identity — the link
+    // derives from the PASSED id and nothing else; an implementation that
+    // leaked process.env (or ignored the argument) would fail one side.
+    const derived = applyCorrelationEnv({ PATH: '/bin', PASEO_AGENT_ID: 'injected' }, undefined);
+    expect(derived['CQ_PARENT_WORK_ID']).toBe('paseo:injected');
+    // Same call shape WITHOUT the passed id: nothing derives, even if the
+    // test process itself runs inside a Paseo agent with a real id.
+    const bare: Record<string, string> = { PATH: '/bin' };
+    applyCorrelationEnv(bare, undefined);
+    expect(bare['CQ_PARENT_WORK_ID']).toBeUndefined();
+    expect(bare['CQ_WORK_ID']).toBeUndefined();
+    // And the helper itself never consults the host: a blank id is absent.
+    expect(paseoParentWorkId({ PASEO_AGENT_ID: '  ' })).toBeUndefined();
   });
 
   it('a malformed correlation field stays out of the child env (empty-string task/role removed, not stamped)', () => {
@@ -164,5 +172,33 @@ describe('M5b1 failure evidence', () => {
     expect(env['CQ_ROLE']).toBeUndefined();
     expect(env['CQ_TASK']).toBeUndefined();
     expect(env['CQ_WORK_ID']).toBe('w');
+  });
+
+  it('the shared driver boundary covers direct op invocations: applyCorrelationEnv alone derives the parent with no second precedence implementation', () => {
+    // The "shared driver boundary" clause: a direct op invocation's child
+    // env reaches the harness ONLY through applyCorrelationEnv (the CLI, SDK
+    // and ACP transports all compose through it). Prove the boundary ALONE
+    // derives the Paseo parent from a composed env — no src/cli/main.ts
+    // step, no parallel precedence ladder. The same env shape through each
+    // composing half yields one identical answer.
+    const composed = buildChildEnv(
+      { PATH: '/bin', PASEO_AGENT_ID: 'direct-op' },
+      { ANTHROPIC_BASE_URL: 'http://localhost:8080' },
+    );
+    applyCorrelationEnv(composed, undefined);
+    // The same env, composed WITHOUT the composition-time stamp's help:
+    // the boundary's own derivation still answers with the same link.
+    const withoutCompositionStamp: Record<string, string> = {
+      PATH: '/bin',
+      ANTHROPIC_BASE_URL: 'http://localhost:8080',
+      PASEO_AGENT_ID: 'direct-op',
+    };
+    applyCorrelationEnv(withoutCompositionStamp, undefined);
+    expect(withoutCompositionStamp['CQ_PARENT_WORK_ID']).toBe('paseo:direct-op');
+    expect(composed['CQ_PARENT_WORK_ID']).toBe(withoutCompositionStamp['CQ_PARENT_WORK_ID']);
+    // And the id shape is the helper's, spelled exactly once.
+    expect(withoutCompositionStamp['CQ_PARENT_WORK_ID']).toBe(
+      paseoParentWorkId({ PASEO_AGENT_ID: 'direct-op' }),
+    );
   });
 });
