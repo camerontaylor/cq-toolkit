@@ -1221,10 +1221,14 @@ async function readEvents(fileRunId: string, path: string): Promise<JournalEvent
         headerSeen = true;
         headerIsV3 = parsed.journalVersion === 3;
       }
-      if (headerSeen && headerIsV3 === false && V3_ONLY_TYPES.has(parsed.type)) {
+      // A v3-only line is evidence of the v3 era wherever it sits: under a
+      // v1/v2 header it is additive mixing, and BEFORE any header it is a
+      // broken stream (the header must be first) — both refuse.
+      if (headerIsV3 === false && V3_ONLY_TYPES.has(parsed.type)) {
         throw new Error(
           `journal: corrupt line ${i + 1} of ${path} — a v3-only event (${parsed.type}) cannot ` +
-            'follow a v1/v2 run-started header; strict schemas forbid additive mixing',
+            'appear in a v1/v2 kernel file (before or under its run-started header); ' +
+            'strict schemas forbid additive mixing',
         );
       }
       events.push(parsed);

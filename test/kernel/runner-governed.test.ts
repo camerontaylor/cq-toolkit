@@ -1579,7 +1579,15 @@ describe('governed journal v2 + resume', () => {
         planId: 'plan-gov-v3',
         journalVersion: 3,
         seq: 1,
-        governance: { capUsd: 5, attended: false },
+        governance: {
+          capUsd: 5,
+          attended: false,
+          // Discriminator for the seedRuns v1 tag (review P2-A): the reset
+          // names THIS run, so the exclusion filter (runner seed fold) has
+          // something to get wrong — if the v3 run were misfiled as v1, a
+          // legacyJournal=reset resume would silently drop its spend seed.
+          legacyJournal: { mode: 'reset', v1RunIds: ['plan-gov-v3--k--a'] },
+        },
         provenance: {
           cqVersion: '0.2.0',
           producerVersion: '0.2.0',
@@ -1609,11 +1617,36 @@ describe('governed journal v2 + resume', () => {
         },
         availability: {},
       };
-      // The kernel writer stays v1/v2 (dual reader first), so the v3 header
+      // Dispatch + spend evidence, so the v1-dispatch gate (runner :757) and
+      // the seedRuns v1 tag (:779) both have something to get wrong: a
+      // misfiled v1 run would refuse the resume (no v1 spend) and would not
+      // seed the ledger.
+      const dispatched: Array<Record<string, unknown>> = [
+        {
+          type: 'job-started',
+          runId: 'plan-gov-v3--k--a',
+          at: '2026-01-03T04:05:07.000Z',
+          jobId: 'j1',
+          op: 'fake',
+          attempt: 1,
+        },
+        {
+          type: 'job-finished',
+          runId: 'plan-gov-v3--k--a',
+          at: '2026-01-03T04:05:08.000Z',
+          jobId: 'j1',
+          opId: 'op-j1',
+          inputsHash: 'hash-j1',
+          result: { status: 'ok', value: 'j1' },
+          usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+          costUSD: 3,
+        },
+      ];
+      // The kernel writer stays v1/v2 (dual reader first), so the v3 history
       // is written RAW — operator-written evidence, read by the widened reader.
       await writeFile(
         join(dir, 'plan-gov-v3--k--a.ndjson'),
-        `${JSON.stringify(started)}\n`,
+        [started, ...dispatched].map((event) => `${JSON.stringify(event)}\n`).join(''),
         'utf8',
       );
 
@@ -1645,16 +1678,74 @@ describe('governed journal v2 + resume', () => {
       expect(raiseRefusal).toBeInstanceOf(GovernanceOptInRefusedError);
       expect((raiseRefusal as Error).message).toBe('runPlan: cap raised from 5 to 10');
 
-      // The v3 seq counts: the next run claims seq 2, not 1.
+      // The v3 seq counts: the next run claims seq 2, not 1. And the v3
+      // dispatch evidence is classified SEQUENCED (not v1): the resume does
+      // NOT hit the 'governed resume over v1 journals' refusal, and the
+      // prior 3 USD spend is seeded — a resume under a 2 USD cap trips at
+      // seed, before any dispatch.
+      const seededCalls: string[] = [];
+      const seededGovernor = createGovernor({ maxUsd: 2 });
+      const seededReport = await runPlan(
+        independentPlan('plan-gov-v3', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(seededCalls))),
+        { governor: seededGovernor, allowAdvisory: true },
+      );
+      expect(seededCalls).toEqual([]); // the seeded 3 USD overrun trips at seed
+      expect(seededGovernor.tripped).toBe(true);
+      expect(seededGovernor.tripKind).toBe('exhausted');
+      expect(seededReport.counts).toMatchObject({
+        queued: 0,
+        running: 0,
+        blocked: 0,
+        done: 0,
+        failed: 0,
+        'budget-exhausted': 1,
+      });
+      // And the reset discriminator: a legacyJournal=reset resume must NOT
+      // be able to wash out the v3 spend — the v3 run is not v1, so its
+      // spend stays in the seed even though the header's reset names it.
+      // (The ledger now holds the 3 + the tripped run's 2-cap history; a
+      // reset resume under 2 USD trips at seed exactly as before.)
+      const resetCalls: string[] = [];
+      const resetGovernor = createGovernor({ maxUsd: 2 });
+      const resetReport = await runPlan(
+        independentPlan('plan-gov-v3', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(resetCalls))),
+        {
+          governor: resetGovernor,
+          optIn: ['budget.legacyJournal=reset'],
+          allowAdvisory: true,
+        },
+      );
+      expect(resetCalls).toEqual([]); // the v3 spend survives the reset
+      expect(resetGovernor.tripped).toBe(true);
+      expect(resetReport.counts).toMatchObject({
+        queued: 0,
+        running: 0,
+        blocked: 0,
+        done: 0,
+        failed: 0,
+        'budget-exhausted': 1,
+      });
       const report = await runPlan(
         independentPlan('plan-gov-v3', 1),
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        {
+          governor: createGovernor({ maxUsd: 5 }),
+          // The seed-trip run above journaled its capUsd 2 header, so the
+          // ledger's latest cap is 2; restoring 5 is an intentional raise.
+          optIn: ['budget.raiseCap'],
+          allowAdvisory: true,
+        },
       );
       expect(calls).toEqual(['j1']);
       const events = await openRunLog(dir).read(report.runId);
-      expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 2 });
+      // seq 4: the seed-trip run consumed seq 2 and the reset run seq 3
+      // (maxPriorSeq counts the v3 header's seq 1, proving v3 seq continuity).
+      expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 4 });
     },
     journalEnclosure(3),
   );

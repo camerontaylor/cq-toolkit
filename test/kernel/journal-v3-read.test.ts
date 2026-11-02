@@ -362,6 +362,10 @@ describe('journal v3 read (T02)', () => {
       // A v2 header refuses a v3-only observational line.
       await writeRaw(dir, RUN_A, [v2Started(), approval()]);
       await expect(log.read(RUN_A)).rejects.toThrow(/corrupt line 2.*approval-granted/u);
+      // A v3-only line BEFORE any header is refused too (the header must be
+      // first; a leading observational line is a broken stream).
+      await writeRaw(dir, RUN_A, [approval(), v2Started()]);
+      await expect(log.read(RUN_A)).rejects.toThrow(/corrupt line 1.*approval-granted/u);
       // A v1 header refuses a v3 run-started (a second header of the new era).
       await writeRaw(dir, RUN_B, [v1Started(RUN_B), v3Header({ runId: RUN_B })]);
       await expect(log.read(RUN_B)).rejects.toThrow(/corrupt line 2/u);
