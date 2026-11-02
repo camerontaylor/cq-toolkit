@@ -136,6 +136,11 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
   let tail: Promise<void> = Promise.resolve();
   let closed = false;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
+  // Header-first discipline (ADR-0008: exactly one composition-started per
+  // stream, at its head) enforced at WRITE time too: a non-header first
+  // event or a duplicate header would produce a file the reader must
+  // reject — refuse before any byte lands.
+  let headerWritten = false;
 
   const write = async (line: string): Promise<void> => {
     if (streamPath === null) return; // memory-only
@@ -175,6 +180,20 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
             `does not match this stream's workId '${workId}'`,
         );
       }
+      if (parsed.type === 'composition-started') {
+        if (headerWritten) {
+          throw new Error(
+            `observation: stream '${compositionRunId}' already has its composition-started ` +
+              'header — a second is a concatenated stream, not evidence',
+          );
+        }
+        headerWritten = true;
+      } else if (!headerWritten) {
+        throw new Error(
+          `observation: stream '${compositionRunId}' must open with its composition-started ` +
+            `header — got ${parsed.type} first`,
+        );
+      }
       const line = `${JSON.stringify(parsed)}\n`;
       const next = tail.then(
         () => write(line),
@@ -185,6 +204,10 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
     },
 
     async close(): Promise<void> {
+      // Serial discipline: close runs AFTER every pending append settles, so
+      // no append creates the file (or datasyncs) through an already-closed
+      // handle.
+      await tail;
       closed = true;
       if (handle !== null) {
         const h = handle;
@@ -206,7 +229,12 @@ async function readStreamFile(
     if (isEnoent(err)) return { events: [], complete: true, exists: false };
     throw err;
   }
-  if (raw === '') return { events: [], complete: true, exists: true };
+  if (raw === '') {
+    // A crash after the exclusive create but before the first write leaves
+    // an empty file: its evidence is explicitly INCOMPLETE (the header never
+    // landed), not a complete empty stream.
+    return { events: [], complete: false, exists: true };
+  }
   // Torn tail (crash mid-append): only an UNTERMINATED final line may be
   // lost, and it makes the stream incomplete — partial evidence, never a
   // fabricated completion. Any complete-but-invalid line is corruption.
@@ -260,8 +288,14 @@ export async function readObservations(journalDir: string): Promise<ObservationS
     let files: string[];
     try {
       files = await readdir(dir);
-    } catch {
-      continue; // not a stream directory (e.g. stray file): skip silently
+    } catch (err) {
+      if (isEnoent(err)) {
+        continue; // removed during the scan: no streams to omit
+      }
+      // Unavailable evidence is not absent evidence: a permission or I/O
+      // failure on a stream directory propagates instead of silently
+      // omitting every stream under it.
+      throw err;
     }
     for (const file of files.sort()) {
       if (!file.endsWith('.ndjson')) continue;
@@ -278,32 +312,16 @@ export async function readObservations(journalDir: string): Promise<ObservationS
 /**
  * Stream identity couplings (ADR-0008), enforced on the read and fold paths
  * too (readObservations/foldObservations never parse through the schema, so
- * the schema's refinement alone does not cover on-disk streams): a COMPLETE
- * stream opens with exactly one composition-started header (an INCOMPLETE
- * stream is exempt — a crash during the header write leaves a torn prefix);
- * the header's correlation.workId matches the stream's directory workId; and
- * every event's runId matches the stream's compositionRunId.
+ * the schema's refinement alone does not cover on-disk streams):
+ *   - a COMPLETE stream opens with exactly one composition-started header
+ *     (this requirement alone is waived for an INCOMPLETE stream — a crash
+ *     during the header write leaves a torn or empty prefix);
+ *   - every event's runId matches the stream's compositionRunId;
+ *   - any present header's correlation.workId matches the stream's workId.
+ * Identity of the events ALREADY PRESENT in a torn stream is validated too:
+ * partial evidence is still attributed evidence.
  */
 function assertStreamIdentity(stream: ObservationStream): void {
-  if (!stream.complete) return;
-  const headers = stream.events.filter((e) => e.type === 'composition-started');
-  if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
-    throw new Error(
-      `observation: stream '${stream.workId}/${stream.compositionRunId}' must carry exactly ` +
-        `one composition-started header at its head, found ${headers.length}`,
-    );
-  }
-  const headerEvent = headers[0];
-  if (
-    headerEvent !== undefined &&
-    headerEvent.payload.correlation.workId !== stream.workId
-  ) {
-    throw new Error(
-      `observation: stream '${stream.workId}/${stream.compositionRunId}' header ` +
-        `correlation.workId '${headerEvent.payload.correlation.workId}' does not match ` +
-        `this stream's workId '${stream.workId}'`,
-    );
-  }
   for (const event of stream.events) {
     if (event.runId !== stream.compositionRunId) {
       throw new Error(
@@ -311,6 +329,23 @@ function assertStreamIdentity(stream: ObservationStream): void {
           `with runId '${event.runId}' that does not match its compositionRunId`,
       );
     }
+  }
+  const headers = stream.events.filter((e) => e.type === 'composition-started');
+  for (const headerEvent of headers) {
+    if (headerEvent.payload.correlation.workId !== stream.workId) {
+      throw new Error(
+        `observation: stream '${stream.workId}/${stream.compositionRunId}' header ` +
+          `correlation.workId '${headerEvent.payload.correlation.workId}' does not match ` +
+          `this stream's workId '${stream.workId}'`,
+      );
+    }
+  }
+  if (!stream.complete) return; // torn/empty prefix: header requirement waived
+  if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
+    throw new Error(
+      `observation: stream '${stream.workId}/${stream.compositionRunId}' must carry exactly ` +
+        `one composition-started header at its head, found ${headers.length}`,
+    );
   }
 }
 

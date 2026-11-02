@@ -1255,25 +1255,9 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
   //     (a mismatch would misattribute the whole stream at the join);
   //   - every event's runId matches the stream's compositionRunId.
   .superRefine((stream, ctx) => {
-    if (!stream.complete) return;
-    const headers = stream.events.filter((e) => e.type === 'composition-started');
-    if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'a complete stream must open with exactly one composition-started header',
-        path: ['events'],
-      });
-      return;
-    }
-    const headerEvent = headers[0];
-    if (headerEvent !== undefined && headerEvent.payload.correlation.workId !== stream.workId) {
-      ctx.addIssue({
-        code: 'custom',
-        message: `header correlation.workId '${headerEvent.payload.correlation.workId}' does not ` +
-          `match this stream's workId '${stream.workId}'`,
-        path: ['events'],
-      });
-    }
+    // Identity of the events ALREADY PRESENT is validated even in an
+    // incomplete stream: partial evidence is still attributed evidence. Only
+    // the required-header check is waived for a torn/empty prefix.
     stream.events.forEach((event, i) => {
       if (event.runId !== stream.compositionRunId) {
         ctx.addIssue({
@@ -1283,7 +1267,24 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
           path: ['events', i],
         });
       }
+      if (event.type === 'composition-started' && event.payload.correlation.workId !== stream.workId) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `header correlation.workId '${event.payload.correlation.workId}' does not ` +
+            `match this stream's workId '${stream.workId}'`,
+          path: ['events', i],
+        });
+      }
     });
+    if (!stream.complete) return;
+    const headers = stream.events.filter((e) => e.type === 'composition-started');
+    if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a complete stream must open with exactly one composition-started header',
+        path: ['events'],
+      });
+    }
   });
 
 /**

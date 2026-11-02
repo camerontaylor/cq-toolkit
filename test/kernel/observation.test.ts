@@ -320,8 +320,12 @@ describe('T29 unknown evidence', () => {
         'utf8',
       );
       // Identity is validated during READ (readObservations never parses
-      // through the schema), so a headerless complete stream throws there.
-      await expect(readObservations(dir2)).rejects.toThrow(/exactly one composition-started/);
+      // through the schema): the headerless stream's event carries a foreign
+      // runId, which is refused before the header check even fires. A
+      // headerless stream whose events DO carry the stream's own runId fails
+      // the header requirement instead (covered by the schema refinement and
+      // foldObservations).
+      await expect(readObservations(dir2)).rejects.toThrow(/does not match its compositionRunId/);
     } finally {
       await rm(dir2, { recursive: true, force: true });
     }
@@ -352,6 +356,32 @@ describe('T29 unknown evidence', () => {
       await expect(readObservations(dir3)).rejects.toThrow(/does not match/);
     } finally {
       await rm(dir3, { recursive: true, force: true });
+    }
+    // A non-header first event is refused at WRITE time: a file the reader
+    // must reject is never created. A duplicate header is refused too.
+    const dir4 = await tempDir();
+    try {
+      const badFirst = openObservationWriter({
+        journalDir: dir4,
+        workId: WORK_ID,
+        compositionRunId: 'cr-bad-first',
+      });
+      await expect(
+        badFirst.append(linked('plan-x', 1, { runId: 'cr-bad-first' })),
+      ).rejects.toThrow(/must open with its composition-started header/);
+      await badFirst.close();
+      const dupHeader = openObservationWriter({
+        journalDir: dir4,
+        workId: WORK_ID,
+        compositionRunId: 'cr-dup-header',
+      });
+      await dupHeader.append(header({ runId: 'cr-dup-header' }));
+      await expect(dupHeader.append(header({ runId: 'cr-dup-header' }))).rejects.toThrow(
+        /already has its composition-started/,
+      );
+      await dupHeader.close();
+    } finally {
+      await rm(dir4, { recursive: true, force: true });
     }
   });
 
