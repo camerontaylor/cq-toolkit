@@ -118,6 +118,12 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
       'src/test-utils/render.ts',
     ],
   '\\.(?:test|spec)\\.[cm]?[jt]sx?$': ['src/a.test.ts', 'src/b.spec.mts'],
+  '(?:^|\\/)(?:test_[^/]*|[^/]*_test)\\.py$': [
+    'test_widget.py',
+    'widget_test.py',
+    'apps/crq-python/test_crq.py',
+    'pkg/widget_test.py',
+  ],
   '\\.config\\.[^/]+$': ['vitest.config.ts', 'packages/a/vite.config.js'],
   '(?:^|\\/)(?:setupTests|globalSetup|global[-.]setup|conftest)\\.(?:[cm]?[jt]sx?|py)$': [
     'src/setupTests.ts',
@@ -126,6 +132,8 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
     'global-setup.ts',
     'global.setup.mjs',
     'conftest.py',
+    'pkg/conftest.py',
+    'tests/conftest.py',
   ],
   '(?:^|\\/)\\.env\\.test(?:\\.[^/]+)?$': ['.env.test', 'packages/a/.env.test.local'],
   '(?:^|\\/)(?:oxlint\\.json|karma\\.conf\\.[cm]?[jt]s)$': [
@@ -191,6 +199,26 @@ describe('worker gate pattern liveness (reverse direction)', () => {
   });
 });
 
+test.each([
+  'testing.py',
+  'contest.py',
+  'latest_test_data.json',
+  'apps/crq-python/ops/prepare-host.py',
+  'pkg/contest_widget.py',
+  'pkg/widget_testing.py',
+  'pkg/test_widget.py.bak',
+  'pkg/test_helpers/widget.py',
+])('%s remains ordinary Python source outside test roots', (path) => {
+  expect(isProtectedStagePath(path)).toBe(false);
+});
+
+test.each(['tests/widget.py', 'pkg/test/widget.py', 'pkg/__fixtures__/widget.py'])(
+  '%s remains protected by its root regardless of Python basename',
+  (path) => {
+    expect(isProtectedStagePath(path)).toBe(true);
+  },
+);
+
 // The project list is the PRIVILEGED list (advisory development posture,
 // 2026-10-20; docs/protected-scope.md "Advisory posture"): under
 // `CQ_MERGE_PROTECTED_PATHS=advisory` a path it names is a `privileged-path`
@@ -248,6 +276,8 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
     'lint/rules/no-vendor-sdk-in-kernel.mjs',
     '.github/workflows/ci.yml',
     'baselines/ratchets.json',
+    'pkg/conftest.py',
+    'tests/conftest.py',
   ])('%s is a protected policy path', (path) => {
     expect(isProtectedPolicyPath(path)).toBe(true);
   });
@@ -255,6 +285,10 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
   test.each([
     // Tests and snapshots are worker evidence, not enforcement definitions.
     'src/foo.test.ts',
+    'test_widget.py',
+    'widget_test.py',
+    'apps/crq-python/test_crq.py',
+    'pkg/widget_test.py',
     '__snapshots__/a.snap',
     'test/unit/a.ts',
     'src/index.ts',

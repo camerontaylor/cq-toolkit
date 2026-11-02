@@ -1,5 +1,35 @@
 # W1.8 methods note
 
+## Current clarification — 2026-10-30 (RI4)
+
+The September W1.8 account below is preserved as history. The owner-approved
+next-step specification (`toolkit-research/specs/cq-next-step-slice-spec.md`,
+acceptance criteria; approval `9fb78de0a`, 2026-10-24) later permits governed
+source and failing-test edits when commit, tamper and regression gates pass.
+Legacy sweep without `taskLoop` still defaults to denying test edits. A present
+`taskLoop` with omitted `protectTests` defaults false, as does `fix.run`;
+review addressing explicitly uses false through shared validation. Explicit true
+restores W1.8 test refusal. Configuration and snapshots stay protected in both
+modes. These are distinct caller contracts, not a global relaxation of W1.8.
+
+The shared filename taxonomy includes Python `test_*.py` and `*_test.py`
+basenames at any depth alongside existing test roots and JS/TS filename forms.
+Tests are evidence, not automatically D11 definitions; `conftest.py` remains
+configuration, including under test roots. Ordinary Python source remains ordinary.
+Custom detector `testFilePatterns` replace default deletion/removal path patterns;
+they do not replace the canonical path predicate used by added-line skip checks.
+Filename recognition does not recognize Python declarations or supply Python
+skip/skipif/xfail detection. Pytest marker policy remains unresolved; no detector
+or declaration-removal change is part of this clarification.
+
+Giles Q32 additionally distinguishes strengthened test coverage from changed
+existing expectations: an oracle change requires a finding specifically disputing
+the expectation, a current specification or owner ruling, and independent
+exact-head R4 acceptance. Otherwise retain the expectation and report the dispute.
+See current contract §10 for the reconciled caller distinction.
+
+## Historical September W1.8 account
+
 W1.8 applies a default-deny boundary at the point where a sweep worker changes become a
 commit. The worker still runs in its worktree, and the normal baseline/final regression gate
 still executes, but the staged set is first enumerated with a null-delimited name-status diff.
