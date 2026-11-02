@@ -176,9 +176,13 @@ export function makeReviewAddressMany(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
   } = {},
 ) {
-  const ledger = createKnownUsageLedger();
-  const run = makeReviewAddressManyCore(deps, (id, observation) => ledger.record(id, observation));
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
+    // A fresh ledger per invocation: the operation can be called repeatedly,
+    // and one run's observations must never leak into another's summary.
+    const ledger = createKnownUsageLedger();
+    const run = makeReviewAddressManyCore(deps, (id, observation) =>
+      ledger.record(id, observation),
+    );
     const result = await run(input);
     const usageSummary = ledger.snapshot();
     if (result.status === 'ok')
@@ -500,7 +504,14 @@ function makeReviewAddressManyCore(
           // never dispatched (a missed admission spends nothing). Not-admitted
           // legs are never recorded, so a refusal cannot invent spend.
           if (admitted)
-            record(identity.id, usage ? { usage } : dispatched ? {} : { usage: zeroUsage() });
+            record(
+              identity.id,
+              usage
+                ? { usage, ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }) }
+                : dispatched
+                  ? {}
+                  : { usage: zeroUsage() },
+            );
           const settled = usage
             ? settleAddressMany(budget, {
                 ...identity,
