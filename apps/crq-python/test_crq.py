@@ -1085,6 +1085,24 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual(crq.review_receipt.current_equivalence(reloaded), item["capture"]["equivalence"])
         self.assertEqual(crq.current_paths(self.merge, self.merge), rows)
 
+    def test_rename_to_non_utf8_target_name_is_unsupported_with_exact_rows(self):
+        item = self.enroll()
+        os.rename(self.repo / "rename.py", os.fsencode(self.repo) + b"/renamed-\xe9.py")
+        target = self.commit("rename valid UTF-8 source path to a non-UTF-8 name")
+        odd = b"renamed-\xe9.py".decode("utf-8", "surrogateescape")
+        self.g("update-ref", "refs/remotes/origin/main", target)
+        plan = self.plan_item(item)
+        rows = {r["source_path"]: r for r in item["capture"]["paths"]}
+        self.assertEqual(rows["rename.py"], {"source_path": "rename.py", "path": odd,
+                                             "resolution": "git-rename-M50", "disposition": "unsupported",
+                                             "reason": "path name is not valid UTF-8; never reviewed"})
+        self.assertEqual(rows["affected.py"]["disposition"], "included")
+        self.assertEqual(self.g("diff", "--name-status", plan["base"], plan["head"]).splitlines(), ["A\taffected.py"])
+        self.assertEqual(crq.current_paths(self.merge, target), item["capture"]["paths"])
+        reloaded = next(i for i in crq.load_queue()["items"] if i["id"] == item["id"])["capture"]
+        self.assertEqual(reloaded["paths"], item["capture"]["paths"])
+        self.assertEqual(crq.review_receipt.current_equivalence(reloaded), item["capture"]["equivalence"])
+
     def test_source_at_path_count_cap_is_scanned_normally(self):
         names = self.oversized_source()
         with mock.patch.object(crq, "CURRENT_PATH_CAP", len(names)):
