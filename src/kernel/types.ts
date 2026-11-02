@@ -15,7 +15,7 @@
 //     below is status-based, and the CLI layer owns any exit-code mapping
 //     (resolves design debt DD-7: per-op failure semantics).
 import type { z } from 'zod';
-import type { Usage } from '../driver/types.js';
+import type { ModelSpec, Usage } from '../driver/types.js';
 
 /**
  * The atomic-op contract: a typed, async function from a JSON-serializable
@@ -475,6 +475,158 @@ export interface BudgetTrippedJournalEvent {
   reason: string;
 }
 
+/**
+ * Availability of a nullable/partial measurement (ADR-0008): distinguishes
+ * absence from zero and inapplicability. Keyed by JSON Pointer relative to
+ * the containing payload/report.
+ */
+export type AvailabilityState =
+  | 'known-zero'
+  | 'not-collected'
+  | 'unavailable'
+  | 'partial'
+  | 'n-a'
+  | 'known';
+
+export interface AvailabilityRecord {
+  state: AvailabilityState;
+  reason: string;
+  /** Evidence URI for the state, or null when none exists. */
+  source: string | null;
+}
+
+/** Distinct boundary witnesses (ADR-0008); one boundary's SHA is never copied into an unobserved other. */
+export interface WitnessesRecord {
+  base: string;
+  admitted: string | null;
+  execution: string | null;
+  reviewed: string | null;
+  accepted: string | null;
+}
+
+/**
+ * Shared run provenance (ADR-0008). On a journal header `endedAt` is null;
+ * the report carries the observed completion time. Links are repo-relative
+ * artifact paths, never absolute host paths.
+ */
+export interface ProvenanceRecord {
+  cqVersion: string;
+  producerVersion: string;
+  /** Archive-safe opaque remote digest, or null when no remote exists. */
+  repoId: string | null;
+  cqJsonHash: string;
+  baseSha: string;
+  runPrefix: string;
+  startedAt: string;
+  endedAt: string | null;
+  journalLink: string;
+  reportLink: string;
+  witnesses: WitnessesRecord;
+}
+
+/** Shared run correlation (ADR-0008); work IDs are persisted UUIDs, restored on resume. */
+export interface CorrelationRecord {
+  workId: string;
+  parentWorkId: string | null;
+  branch: string;
+  commitSha: string | null;
+  sessionId: string | null;
+  agentId: string | null;
+}
+
+/**
+ * Journal: run started, v3 (ADR-0008). `E.type = 'run-started'`,
+ * `E.journalVersion = 3`; carries provenance, correlation and availability.
+ * Dispatch on run-started version: absent → v1, 2 → v2, 3 → v3. Writer
+ * disabled until the v3 dual-reader ships (schema-only, this slice).
+ */
+export interface RunStartedV3JournalEvent {
+  type: 'run-started';
+  runId: string;
+  /** UTC ISO-8601 with milliseconds. */
+  at: string;
+  journalVersion: 3;
+  provenance: ProvenanceRecord;
+  correlation: CorrelationRecord;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/** Stop classification class for a finished attempt (ADR-0008). */
+export type AttemptStopClass = 'retriable' | 'terminal' | 'infrastructure' | 'budget' | 'human';
+
+/** Sanitized structured underlying cause of a non-completed attempt (ADR-0008). */
+export interface AttemptError {
+  type: string | null;
+  code: string | null;
+  providerFinishReason: string | null;
+  source: string;
+  certainty: 'observed' | 'inferred' | 'unknown';
+}
+
+/** Observed timeout evidence (ADR-0008); never inferred from elapsed wall. */
+export interface AttemptTimeout {
+  scope: 'request' | 'step' | 'attempt' | 'run';
+  boundMs: number;
+  source: string;
+}
+
+export interface AttemptBudgetAmount {
+  tokens: number | null;
+  wallMs: number | null;
+}
+
+/** Canonical nested attempt accounting (ADR-0008); no cap/used aliases. */
+export interface AttemptBudget {
+  allowed: AttemptBudgetAmount;
+  spent: AttemptBudgetAmount;
+  remaining: AttemptBudgetAmount;
+}
+
+/** The `attempt-finished` payload (ADR-0008 attempt rows), all fields exact. */
+export interface AttemptFinishedPayload {
+  tier: 'worker' | 'rescue';
+  invocation: string;
+  model: ModelSpec | null;
+  provider: string;
+  requestedModel: string;
+  servedModel: string | null;
+  tokens: number | null;
+  usageChannels: Record<string, number | null>;
+  requests: number | null;
+  wallMs: number | null;
+  modeledUsd: number | null;
+  priceTableRevision: string | null;
+  priceCoverage: string | null;
+  stopReason: string;
+  /** Stable kebab-case classifier code; prose remains in `stopReason`. */
+  stopCode: string;
+  class: AttemptStopClass;
+  error: AttemptError | null;
+  timeout: AttemptTimeout | null;
+  budget: AttemptBudget;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one worker/rescue attempt finished (ADR-0008). The durable
+ * per-attempt carrier; emitted at every attempt boundary including
+ * unsuccessful spawn and cancellation. New-event envelope is exactly
+ * `{type,runId,at,unitId,jobId,taskId,attempt,payload}`; `unitId` and
+ * `taskId` are required here, `jobId` names the enclosing kernel job only
+ * when actually known. Writer disabled until T13/T14.
+ */
+export interface AttemptFinishedJournalEvent {
+  type: 'attempt-finished';
+  runId: string;
+  at: string;
+  /** Stable composition unit identifier, not a jobId alias. */
+  unitId: string;
+  jobId: string | null;
+  taskId: string;
+  attempt: number;
+  payload: AttemptFinishedPayload;
+}
+
 /** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
 export type JournalEvent =
   | RunStartedJournalEvent
@@ -486,7 +638,18 @@ export type JournalEvent =
   | ReservationRefusedJournalEvent
   | JobQuarantinedJournalEvent
   | QuarantineReleasedJournalEvent
-  | BudgetTrippedJournalEvent;
+  | BudgetTrippedJournalEvent
+  | AttemptFinishedJournalEvent;
+
+/**
+ * All journal v3 event shapes (ADR-0008). The v3 run-started header shares
+ * its `type` discriminator with the v1/v2 carrier, so it cannot join the
+ * zod discriminated union above; T02's dual reader dispatches on the
+ * run-started version (absent → v1, 2 → v2, 3 → v3). Until then the v3
+ * header parses only through {@link RunStartedV3JournalEventSchema} and no
+ * writer emits it.
+ */
+export type JournalEventV3 = RunStartedV3JournalEvent | AttemptFinishedJournalEvent;
 
 /**
  * Registry entry for one op. Runtime-only: never persisted (the importer is
