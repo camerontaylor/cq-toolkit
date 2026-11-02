@@ -2574,6 +2574,7 @@ test('a structural terminal binding never dispatches a driver or edits a file', 
   try {
     const result = await f.engine.fix(finding(), 1);
     expect(result.reason).toContain('forged worker association');
+    expect(f.attempts).toEqual([]);
     expect(f.calls()).toBe(0);
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
     expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);

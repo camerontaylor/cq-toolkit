@@ -9,6 +9,10 @@ import { makeGitMutex } from '../../../shared/gitMutex.js';
 import type { ReviewAddressInput, ReviewAddressResult, ReviewAddressReport } from '../address.js';
 import {
   recordAddressTerminalEvidence,
+  checkpointAddressTerminalEvidence,
+  noteAddressTerminalBookkeeping,
+  noteAddressOrdinaryReport,
+  removeAddressTerminalCandidate,
   settleAddressTerminalEvidence,
   persistAddressTerminalReport,
   type AddressTerminalAttempt,
@@ -84,6 +88,10 @@ interface TerminalInternals {
   track(promise: Promise<void>): void;
   record(participant: Participant, input: AddressTerminalAttemptInput): Promise<object>;
   defer(participant: Participant, attempt: object): boolean;
+  checkpoint(root: string, head: string): Promise<void>;
+  bookkeeping(root: string, entries: ReadonlyMap<string, string>): Promise<void>;
+  ordinaryReport(path: string, bytes: string): Promise<void>;
+  candidate(root: string, path: string, remove: boolean): Promise<void>;
 }
 const terminalInternals = new WeakMap<AddressOwnership, TerminalInternals>();
 const terminalAuthorities = new WeakMap<object, AddressOwnership>();
@@ -300,7 +308,42 @@ export class AddressOwnership {
       : this.controller.signal;
     this.guardPath = resolve(commonDir, 'cq-review-address-ownership.owner.json');
     this.registry = fileWorktreeRegistry(resolve(commonDir, 'cq-review-address-worktrees.json'));
+    const candidates = new Map<
+      string,
+      { root: string; directory: Identity; entry: Identity; link: string }
+    >();
     terminalInternals.set(this, {
+      checkpoint: (root, head) => checkpointAddressTerminalEvidence(this.terminalToken, root, head),
+      bookkeeping: (root, entries) =>
+        noteAddressTerminalBookkeeping(this.terminalToken, root, entries),
+      ordinaryReport: (path, bytes) => noteAddressOrdinaryReport(this.terminalToken, path, bytes),
+      candidate: async (root, path, remove) => {
+        await this.validateTerminal();
+        if (!remove) {
+          if ((await realpath(path)) !== path) throw new Error('address terminal: candidate alias');
+          const entry = await boundedFile(resolve(path, '.git'), 4096, 1);
+          candidates.set(path, {
+            root,
+            directory: await lstat(path),
+            entry: entry.identity,
+            link: entry.bytes.toString('base64'),
+          });
+          return;
+        }
+        const expected = candidates.get(path);
+        const entry = await boundedFile(resolve(path, '.git'), 4096, 1);
+        if (
+          !expected ||
+          expected.root !== root ||
+          (await realpath(path)) !== path ||
+          !same(expected.directory, await lstat(path)) ||
+          !same(expected.entry, entry.identity) ||
+          expected.link !== entry.bytes.toString('base64')
+        )
+          throw new Error('address terminal: unknown/replaced candidate');
+        await removeAddressTerminalCandidate(this.terminalToken, root, path);
+        candidates.delete(path);
+      },
       participant: (lease, action) => this.participant(lease, action),
       bindReport: (lease, report) => this.bindReport(lease, report),
       workerBinding: (lease) => this.workerBinding(lease),
@@ -1311,4 +1354,44 @@ export function noteAddressOpaqueInvocation(lease: AddressLease): void {
   const owner = liveLeases.get(lease);
   if (!owner) throw new Error('address terminal: forged opaque invocation lease');
   terminalInternals.get(owner)!.opaque(lease);
+}
+
+export function checkpointAddressTerminalWorker(
+  binding: object,
+  root: string,
+  head: string,
+): Promise<void> {
+  const association = terminalWorkers.get(binding);
+  if (!association || association.participant.closed)
+    throw new Error('address terminal: invalid worker checkpoint');
+  return terminalInternals.get(association.owner)!.checkpoint(root, head);
+}
+export function addressTerminalCandidate(
+  binding: object,
+  root: string,
+  path: string,
+  remove: boolean,
+): Promise<void> {
+  const association = terminalWorkers.get(binding);
+  if (!association || association.participant.closed)
+    throw new Error('address terminal: forged worker association');
+  return terminalInternals.get(association.owner)!.candidate(root, path, remove);
+}
+export function addressTerminalBookkeeping(
+  lease: AddressLease,
+  root: string,
+  entries: ReadonlyMap<string, string>,
+): Promise<void> {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: invalid bookkeeping lease');
+  return terminalInternals.get(owner)!.bookkeeping(root, entries);
+}
+export function addressOrdinaryReport(
+  lease: AddressLease,
+  path: string,
+  bytes: string,
+): Promise<void> {
+  const owner = liveLeases.get(lease);
+  if (!owner) throw new Error('address terminal: invalid report lease');
+  return terminalInternals.get(owner)!.ordinaryReport(path, bytes);
 }

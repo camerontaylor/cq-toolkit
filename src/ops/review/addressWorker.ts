@@ -1,5 +1,7 @@
 import {
   recordAddressTerminalAttempt,
+  checkpointAddressTerminalWorker,
+  addressTerminalCandidate,
   deferAddressTerminalAttempt,
 } from './internal/addressOwnership.js';
 import { randomUUID } from 'node:crypto';
@@ -456,8 +458,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       observedHead,
       wallMs: 0,
     };
-    deps.attempts.push(row);
     await onDispatch?.(row);
+    deps.attempts.push(row);
     const start = Date.now();
     const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
       (signal): signal is AbortSignal => signal !== undefined,
@@ -843,6 +845,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           const content = await readFile(await safeFile(root, file));
           const candidate = resolve(deps.journalDir, `failed-candidate-${randomUUID()}`);
           await git(root, ['worktree', 'add', '--detach', candidate, head]);
+          if (deps.terminalBinding)
+            await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
           try {
             await writeFile(await safeFile(candidate, file), content);
             await git(candidate, ['add', '--', file]);
@@ -899,7 +903,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               throw new Error('failed-attempt source changed before owned restore');
             await git(root, ['restore', `--source=${head}`, '--staged', '--worktree', '--', file]);
           } finally {
-            await git(root, ['worktree', 'remove', '--force', candidate]);
+            await (deps.terminalBinding
+              ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
+              : git(root, ['worktree', 'remove', '--force', candidate]));
           }
           touched = false;
         }).catch((error: unknown) => {
@@ -928,6 +934,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             throw new AddressRefusal('unexpected baseline head outside engine', true);
           const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
           await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
+          if (deps.terminalBinding)
+            await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
           let failure: { error: unknown } | undefined;
           try {
             await prepareBaseline(candidate, baselineHead, finding, admitMutation);
@@ -935,7 +943,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             failure = { error };
           }
           try {
-            await git(root, ['worktree', 'remove', '--force', candidate]);
+            await (deps.terminalBinding
+              ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
+              : git(root, ['worktree', 'remove', '--force', candidate]));
           } catch (cleanup) {
             if (failure) throw new BaselineCleanupError(failure.error, cleanup);
             throw cleanup;
@@ -1066,6 +1076,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               candidate,
               output.disposition === 'fixed' ? parent : observedHead,
             ]);
+            if (deps.terminalBinding)
+              await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
             try {
               // Candidate checks may invoke a package manager. Keep their
               // node_modules metadata private so relinking cannot corrupt the
@@ -1241,6 +1253,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               )
                 throw new AddressRefusal('commit does not match gated parent/tree', true);
               verifiedHeads.add(commit);
+              if (deps.terminalBinding)
+                await checkpointAddressTerminalWorker(deps.terminalBinding, root, commit);
               touched = false;
               for (let i = 0; i < baseline.length; i++)
                 state = recordFixedFailures(state, baseline[i]!, broader[i]!);
@@ -1259,7 +1273,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 failedAttempts: history,
               };
             } finally {
-              await git(root, ['worktree', 'remove', '--force', candidate]);
+              await (deps.terminalBinding
+                ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
+                : git(root, ['worktree', 'remove', '--force', candidate]));
             }
           }, admitMutation).catch(async (error: unknown) => {
             reason = error instanceof Error ? error.message : String(error);

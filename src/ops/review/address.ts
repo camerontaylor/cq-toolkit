@@ -73,6 +73,8 @@ import {
   addressCancelledResult,
   noteAddressOpaqueInvocation,
   bindAddressTerminalReport,
+  addressTerminalBookkeeping,
+  addressOrdinaryReport,
   addressTerminalWorkerBinding,
   isAddressOwnershipAdmissionRefusal,
   runAddressReviewLoop,
@@ -288,6 +290,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           .update(await readFile(canonical))
           .digest('hex'),
       );
+      if (addressLease) await addressTerminalBookkeeping(addressLease, input.repoRoot, bookkeeping);
       bookkeepingRevision++;
     };
     let worker: AddressWorker | undefined;
@@ -521,7 +524,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         await mkdir(journalDir, { recursive: true });
         if (parent?.aborted) return finish('needs-human', 'parent cancelled');
         if (addressLease) await addressLease.assertOwned();
-        await writeFile(report.reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+        const reportBytes = `${JSON.stringify(report, null, 2)}\n`;
+        await writeFile(report.reportPath, reportBytes, { mode: 0o600 });
+        if (addressLease) await addressOrdinaryReport(addressLease, report.reportPath, reportBytes);
       } catch (error) {
         return {
           status: 'failed',
@@ -747,6 +752,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           addressLease = lease;
 
           await bindAddressTerminalReport(lease, report);
+          await addressTerminalBookkeeping(lease, input.repoRoot, bookkeeping);
           try {
             await lease.assertOwned();
             await mkdir(journalDir, { recursive: true });
@@ -961,6 +967,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               if (!persistedBookkeeping)
                 throw new Error('durable queue evidence ownership unavailable');
               bookkeeping.set(expected, hash);
+              if (addressLease)
+                await addressTerminalBookkeeping(addressLease, input.repoRoot, bookkeeping);
               bookkeepingRevision++;
               // The caller sends ack immediately after this observer returns. Commit
               // ownership inline in the FIFO slot, before that irreversible boundary.

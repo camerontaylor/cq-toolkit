@@ -129,6 +129,8 @@ interface TerminalSession {
   bytes: number;
   records: number;
   expectedIndexes: Map<string, string>;
+  verifiedHeads?: Map<string, Set<string>>;
+  bookkeeping?: Map<string, string>;
 }
 const terminalSessions = new WeakMap<object, Promise<TerminalSession>>();
 export interface AddressTerminalAttemptInput {
@@ -264,9 +266,16 @@ async function terminalGit(
   session: TerminalSession,
   root: string,
   args: string[],
-  options: { input?: Buffer; index?: string; count?: { launches: number; deadline: number } } = {},
+  options: {
+    cleanup?: boolean;
+    input?: Buffer;
+    index?: string;
+    count?: { launches: number; deadline: number };
+  } = {},
 ): Promise<Buffer> {
-  await validateEvidenceAuthority(token, options.count !== undefined);
+  await (options.cleanup
+    ? validateAddressTerminalAuthority(token)
+    : validateEvidenceAuthority(token, options.count !== undefined));
   if (!sameFile(await lstat(session.bin), session.binary))
     throw new Error('terminal Git binary changed');
   for (const [path, identity] of [
@@ -344,7 +353,9 @@ async function terminalGit(
   const settled = new Promise<void>((done) => {
     resolveProcess = done;
   });
-  await validateEvidenceAuthority(token, options.count !== undefined);
+  await (options.cleanup
+    ? validateAddressTerminalAuthority(token)
+    : validateEvidenceAuthority(token, options.count !== undefined));
   trackAddressTerminalProcess(token, settled);
   const output = await new Promise<Buffer>((done, reject) => {
     let child: ReturnType<typeof spawn>;
@@ -426,7 +437,9 @@ async function terminalGit(
     });
     child.stdin!.end(options.input);
   });
-  await validateEvidenceAuthority(token, options.count !== undefined);
+  await (options.cleanup
+    ? validateAddressTerminalAuthority(token)
+    : validateEvidenceAuthority(token, options.count !== undefined));
   if (options.index === session.index) session.indexIdentity = await lstat(session.index);
   return output;
 }
@@ -447,6 +460,67 @@ async function terminalPath(root: string, file: string) {
   if (!stat.isFile() || stat.nlink !== 1 || stat.isSymbolicLink())
     throw new Error('terminal file refused');
   return { root: canonical, path, stat };
+}
+
+/** Called only by the private worker association after normal commit verification. */
+export async function checkpointAddressTerminalEvidence(token: object, root: string, head: string) {
+  const session = await terminalSession(token, root);
+  const git = (args: string[]) => terminalGit(token, session, root, args);
+  if ((await git(['rev-parse', 'HEAD'])).toString().trim() !== head)
+    throw new Error('terminal successor checkpoint changed');
+  const gitDir = await realpath((await git(['rev-parse', '--absolute-git-dir'])).toString().trim());
+  session.verifiedHeads ??= new Map();
+  const heads = session.verifiedHeads.get(root) ?? new Set<string>();
+  heads.add(head);
+  session.verifiedHeads.set(root, heads);
+  session.expectedIndexes.set(
+    gitDir,
+    digestBytes(await boundedBytes(join(gitDir, 'index'), OUTPUT_CAP)),
+  );
+}
+
+export async function noteAddressTerminalBookkeeping(
+  token: object,
+  root: string,
+  entries: ReadonlyMap<string, string>,
+) {
+  const session = await terminalSession(token, root);
+  session.bookkeeping = new Map(entries);
+}
+
+/** The private association admits only a candidate created by this worker. */
+export async function removeAddressTerminalCandidate(
+  token: object,
+  root: string,
+  candidate: string,
+) {
+  await validateAddressTerminalAuthority(token);
+  const pending = terminalSessions.get(token);
+  if (!pending) throw new Error('terminal cleanup session unavailable');
+  const session = await pending;
+  await terminalGit(token, session, root, ['worktree', 'remove', '--force', candidate], {
+    cleanup: true,
+  });
+}
+
+const ordinaryReports = new WeakMap<
+  object,
+  Map<string, { dev: number; ino: number; digest: string }>
+>();
+export async function noteAddressOrdinaryReport(token: object, path: string, bytes: string) {
+  await validateAddressTerminalAuthority(token);
+  const stat = await lstat(path);
+  const digest = digestBytes(Buffer.from(bytes));
+  if (
+    !stat.isFile() ||
+    stat.nlink !== 1 ||
+    digestBytes(await boundedBytes(path, REPORT_CAP)) !== digest
+  )
+    throw new Error('ordinary report changed before terminal adoption');
+  const reports =
+    ordinaryReports.get(token) ?? new Map<string, { dev: number; ino: number; digest: string }>();
+  reports.set(path, { dev: stat.dev, ino: stat.ino, digest });
+  ordinaryReports.set(token, reports);
 }
 
 export async function recordAddressTerminalEvidence(
@@ -595,8 +669,25 @@ export async function settleAddressTerminalEvidence(
         throw new Error('terminal source identity changed');
       if ((await git(['symbolic-ref', 'HEAD'])).toString().trim() !== attempt.branch)
         throw new Error('terminal source branch changed');
-      if ((await git(['rev-parse', 'HEAD'])).toString().trim() !== attempt.parent)
-        throw new Error('terminal source HEAD changed');
+      const head = (await git(['rev-parse', 'HEAD'])).toString().trim();
+      if (head !== attempt.parent) {
+        if (
+          !session.verifiedHeads?.get(attempt.root)?.has(head) ||
+          (
+            await git([
+              'diff',
+              ...HARDENED_DIFF_FLAGS,
+              '--name-only',
+              '-z',
+              attempt.parent,
+              head,
+              '--',
+              attempt.file,
+            ])
+          ).length
+        )
+          throw new Error('terminal source HEAD changed');
+      }
       const hash = digestBytes(await boundedBytes(join(attempt.gitDir, 'index'), OUTPUT_CAP));
       if (hash !== session.expectedIndexes.get(attempt.gitDir))
         throw new Error('terminal source index changed');
@@ -622,8 +713,20 @@ export async function settleAddressTerminalEvidence(
         )
           throw new Error('terminal foreign changed path; caller bytes retained');
       }
-      if ((await git(['ls-files', '--others', '--exclude-standard', '-z'])).length)
-        throw new Error('terminal unknown untracked path; caller bytes retained');
+      const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z']))
+        .toString()
+        .split('\0')
+        .filter(Boolean);
+      for (const file of untracked) {
+        const path = resolve(attempt.root, file);
+        const expected = session.bookkeeping?.get(path);
+        if (
+          !expected ||
+          (await realpath(path)) !== path ||
+          digestBytes(await boundedBytes(path, REPORT_CAP)) !== expected
+        )
+          throw new Error('terminal unknown untracked path; caller bytes retained');
+      }
       if (expected) {
         const hash = createHash(attempt.blob.length === 40 ? 'sha1' : 'sha256');
         hash.update(`blob ${expected.length}\0`);
@@ -779,9 +882,18 @@ export async function persistAddressTerminalReport(
     (await realpath(dirname(path))) !== dirname(path)
   )
     throw new Error('terminal report directory changed');
+  const ordinary = ordinaryReports.get(token)?.get(path);
+  if (
+    ordinary &&
+    (!sameFile(ordinary, await lstat(path)) ||
+      digestBytes(await boundedBytes(path, REPORT_CAP)) !== ordinary.digest)
+  )
+    throw new Error('ordinary report replaced before terminal finalization');
   const fd = await open(
     path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    constants.O_WRONLY |
+      constants.O_NOFOLLOW |
+      (ordinary ? 0 : constants.O_CREAT | constants.O_EXCL),
     0o600,
   );
   try {
@@ -792,7 +904,10 @@ export async function persistAddressTerminalReport(
       !sameFile(await lstat(dirname(path)), directoryIdentity)
     )
       throw new Error('terminal report path changed');
+    if (ordinary && !sameFile(created, ordinary))
+      throw new Error('ordinary report identity changed');
     await fd.writeFile(bytes);
+    await fd.truncate(bytes.length);
     await validateEvidenceAuthority(token, true);
     await fd.sync();
     if (!sameFile(created, await lstat(path))) throw new Error('terminal report replaced');
