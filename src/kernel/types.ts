@@ -748,6 +748,118 @@ export interface WriteObservationJournalEvent {
   payload: WriteObservationPayload;
 }
 
+/** Shared cross-run finding identity, fingerprint version 1 (ADR-0008). */
+export interface FindingFingerprint {
+  version: 1;
+  /** Configured check name. */
+  checkId: string;
+  /** Rule identifier, or null when the check has none. */
+  rule: string | null;
+  /** Repository-relative path with POSIX separators; empty when unknown. */
+  path: string;
+  /** Content hash of the pinned span, or null when unprovable (cannot match). */
+  spanContentHash: string | null;
+}
+
+/** The `finding-disposition` payload (ADR-0008 disposition row), all fields exact. */
+export interface DispositionPayload {
+  fingerprint: FindingFingerprint;
+  status: 'fixed' | 'rejected' | 'deferred';
+  reason: string;
+  owner: string;
+  evidence: string[];
+  /** Required nonempty when status is `deferred`. */
+  reviewTrigger: string | null;
+  observedHead: string;
+  observedAt: string;
+  acceptedRisk: string | null;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one finding disposition (ADR-0008). Required for new terminal
+ * dispositions; deferred requires a nonempty `reviewTrigger`. This schema
+ * adds no evidence importer and no acceptance authority (T20 stays
+ * deferred). Scope fields are nullable: a disposition is finding-scoped,
+ * not inherently task-scoped. Writer disabled until T19.
+ */
+export interface FindingDispositionJournalEvent {
+  type: 'finding-disposition';
+  runId: string;
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: DispositionPayload;
+}
+
+/** The `head-acceptance` payload (ADR-0008 acceptance row), all fields exact. */
+export interface AcceptancePayload {
+  headSha: string;
+  reviewedBaseSha: string;
+  reviewerId: string;
+  authorId: string;
+  /** Author closure is never independent acceptance; never inferred for legacy. */
+  independent: boolean;
+  verdict: 'PASS' | 'HOLD' | 'RETRACT';
+  evidence: string[];
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one independent head acceptance (ADR-0008). Import verified
+ * evidence only; stale head cannot accept a later head; author closure is
+ * never independent acceptance. No acceptance authority is added by this
+ * schema (T20 stays deferred). Scope fields nullable: acceptance is
+ * head-scoped, not task-scoped. Writer disabled with T19/T20.
+ */
+export interface HeadAcceptanceJournalEvent {
+  type: 'head-acceptance';
+  runId: string;
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: AcceptancePayload;
+}
+
+/** The `review-observed` payload (ADR-0008 review scope + population rows). */
+export interface ReviewObservedPayload {
+  baseSha: string;
+  headSha: string;
+  findingFingerprints: FindingFingerprint[];
+  coverage: string;
+  /** Known-empty population only when known empty; null when unknown. */
+  initialBlocking: FindingFingerprint[] | null;
+  reviewerId: string;
+  source: string;
+  round: number;
+  delivered: string[];
+  completed: string[];
+  omissions: string[];
+  vendorCompletion: 'completed' | 'not-completed' | 'unknown';
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one review population observation (ADR-0008). Append per
+ * source/head/round, never overwrite history; blocked vendor observations
+ * are recorded too. Scope fields nullable: a review is head-scoped, not
+ * task-scoped. Writer disabled until T21.
+ */
+export interface ReviewObservedJournalEvent {
+  type: 'review-observed';
+  runId: string;
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: ReviewObservedPayload;
+}
+
 /** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
 export type JournalEvent =
   | RunStartedJournalEvent
