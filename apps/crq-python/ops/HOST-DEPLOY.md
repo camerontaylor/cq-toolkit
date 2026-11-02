@@ -182,10 +182,20 @@ Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
 never claims the switch was undone. The controller lock
 is `state/controller.lock`, distinct from the runner's tick lock.
 
+Helper identity: the controller reads `--helper` (default
+`<root>/apps/crq-python/ops/prepare-host.py`) once, computes its sha256 and
+executes exactly those bytes. The digest is `helper_sha256` in the switch and
+rollback stdout artifacts and in every intent, recovery, deploy and rollback
+journal. The optional global `--expect-helper-sha256 HEX64` pins the reviewed
+helper: a mismatch (or a value that is not 64 lowercase hex) refuses with exit 2
+before the helper is imported, before the controller lock and before preflight.
+Order: identity check, then lock, then preflight.
+
 ```sh
 # Preflight, drain, helper switch, preservation, journal:
 python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
   --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  --expect-helper-sha256 REVIEWED_HELPER_SHA256 \
   switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
 # After the owner starts units (this document, step 6):
 python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
@@ -222,7 +232,9 @@ Ordering and guarantees:
    an explicit `"unmarked"` or unknown string is an explicit marker), no
    `author_*` state keys, and a readable queue — the one shape the recorded
    prior target is known to read. A present marker of any value, `author_*`
-   keys, an unreadable queue, a missing/unchecked record, or a malformed
+   keys, an unreadable queue (missing `queue.json`, invalid JSON, a non-object
+   root such as `null`/`[...]`/a string, or a non-array `items` — the same
+   evidence the drain refuses), a missing/unchecked record, or a malformed
    presence field (only literal boolean `false` proves absence) disables
    automatic rollback — fail stopped with an explicit operator recovery
    action, never an old-snapshot restore or an incompatible binary start.
@@ -235,9 +247,26 @@ Ordering and guarantees:
    advancing queue saves are intermediate evidence and never count. The
    heartbeat must name this checkout's `apps/crq-python` runner root and a
    strict UTC `YYYY-MM-DDTHH:MM:SSZ` tick; a missing, unreadable,
-   malformed or other-checkout heartbeat refuses assessment. Up to ten
-   `state/runs/*/meta.json` receipts are sampled for readability. Tick
-   advancement, service health and receipt readability are distinct
+   malformed or other-checkout heartbeat refuses assessment. Each
+   observation also carries two independent receipt verdicts that never
+   change `healthy` or the exit code (a bad sample is not a tick failure):
+   - `receipts_readable` — the ten most recently modified
+     `state/runs/*/meta.json` parse as JSON (counts under `receipts`);
+   - `receipts_valid` — the ten most recently modified retained
+     `state/receipts/<sha256>.json` receipts validate against the stable v1 receipt schema
+     (`review_receipt.py`, TS `QueueReceiptSchema`): content identity,
+     run identity (`item_id`, well-formed `run_id`), captured target (v1
+     source binding, 40-hex `capture.target`/`tree`, matching scope
+     digest) and terminal outcome (a counted receipt needs a completed,
+     classified run). Policy, version and target selectors come from this
+     deployment's own `review_receipt.py`/`runtime_target.py`, parsed
+     read-only (never executed); if they are unusable the builtin copy is
+     used. `receipt_validation.schema_source` records which, and why.
+     Details, with a reason per invalid receipt, are under
+     `receipt_validation`.
+   Each verdict is `true`, `false`, or `null` when nothing was sampled; the
+   top-level artifact repeats both, aggregated across observations. Tick
+   advancement, receipt readability and receipt validity are distinct
    checks; advancement alone is not acceptance.
 
 The deploy journal (schema 1) is the only validated rollback input: it

@@ -6,6 +6,7 @@ exercised against temporary detached git clones exactly as
 started; the controller never signals a process.
 """
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -16,6 +17,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+
+import review_receipt
 
 ROOT = Path(__file__).resolve().parent
 OPS = ROOT / "ops"
@@ -291,6 +294,19 @@ class DrainTests(ControllerFixture):
         with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
             dc.drain_check(self.effects, lambda *a: "harvest")
 
+    def test_non_object_queue_root_refuses_never_crashes(self):
+        for root in (None, [1], "str", 7, {"items": {"pr1": {}}}):
+            with self.subTest(root=root):
+                self.write_state("queue.json", root)
+                with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+                    dc.drain_check(self.effects, lambda *a: "harvest")
+
+    def test_non_object_queue_item_blocks_as_ambiguous(self):
+        self.write_state("queue.json", {"items": ["pr1"]})
+        result = dc.drain_check(self.effects, lambda *a: "harvest")
+        self.assertFalse(result["drained"])
+        self.assertEqual(result["blocked"][0]["state"], "ambiguous")
+
 
 class RunnerProbeTests(ControllerFixture):
     def write_probe(self, source):
@@ -407,6 +423,257 @@ class HealthTests(ControllerFixture):
         self.assertEqual(first["observed_tick"], "2026-10-28T00:05:00Z")
         self.assertEqual(second["observed_tick"], "2026-10-28T00:10:00Z")
         self.assertEqual(first["receipts"], {"sampled": 2, "readable": 1})
+        # Readability is its own verdict and never a tick failure (#550).
+        self.assertIs(first["receipts_readable"], False)
+        self.assertIs(result["receipts_readable"], False)
+        self.assertIsNone(first["receipts_valid"])  # no state/receipts sampled
+        self.assertIsNone(result["receipts_valid"])
+
+    def receipt_document(self, **overrides):
+        """A v1 merged-current receipt shaped exactly like crq.current_document."""
+        paths = [{"source_path": "src/a.ts", "path": "src/a.ts",
+                  "resolution": "same-path-current", "disposition": "included"}]
+        capture = {"target": "a" * 40, "tree": "b" * 40, "paths": paths,
+                   "scope_digest": review_receipt.digest(paths),
+                   "policy": review_receipt.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1",
+                   "reviewer_version": "0.3.4", "captured_at": "2026-10-28T00:00:00Z"}
+        capture["equivalence"] = review_receipt.current_equivalence(capture)
+        document = {"version": 1, "item_id": "current-0123", "request_id": "req-1",
+                    "source": {"repo": "o/r", "pr": 7, "merge_sha": "c" * 40,
+                               "target_selector": "promoted-main",
+                               "policy": review_receipt.POLICY},
+                    "capture": capture, "outcome": "terminal-clean",
+                    "classification": {"counted": True, "outcome": "completed"},
+                    "counted": True, "findings": [],
+                    "run_id": "current-0123-20261028T000000Z",
+                    "started_at": "2026-10-28T00:00:00Z",
+                    "artifacts": {"meta.json": "d" * 64},
+                    "remediation": "disabled/deferred",
+                    "independent_acceptance": False,
+                    "cli_functional_acceptance": "pending-D1"}
+        document.update(overrides)
+        return document
+
+    def write_receipt(self, document):
+        return review_receipt.write_receipt(self.runner / "state/receipts", document)
+
+    def write_raw_receipt(self, data):
+        root = self.runner / "state/receipts"
+        root.mkdir(parents=True, exist_ok=True)
+        name = hashlib.sha256(data).hexdigest()
+        (root / (name + ".json")).write_bytes(data)
+        return name
+
+    def test_receipt_fixtures_valid_wrong_target_terminal_missing_malformed(self):
+        valid = self.receipt_document()
+        # The fixture is a real reusable v1 receipt under the runner's own API.
+        self.assertTrue(review_receipt.reusable_current(valid, valid["capture"]))
+        wrong_target = self.receipt_document(
+            capture={**valid["capture"], "target": "main"})
+        unknown_selector = self.receipt_document(
+            source={**valid["source"], "target_selector": "feature/x"})
+        missing_outcome = self.receipt_document()
+        del missing_outcome["outcome"]
+        counted_unfinished = self.receipt_document(
+            classification={"counted": False, "outcome": "failed"})
+        no_run = self.receipt_document(run_id=None)
+        cases = {
+            "valid": (valid, None),
+            "uncounted": (self.receipt_document(
+                outcome="no-current-code", counted=False, classification=None,
+                run_id=None, started_at=None, artifacts={}), None),
+            "wrong-target": (wrong_target, "target"),
+            "unknown-selector": (unknown_selector, "target"),
+            "missing-terminal-outcome": (missing_outcome, "terminal outcome"),
+            "counted-unfinished": (counted_unfinished, "terminal outcome"),
+            "counted-without-run": (no_run, "terminal outcome"),
+            "missing-item": (self.receipt_document(item_id=""), "run identity"),
+            "scope-digest": (self.receipt_document(
+                capture={**valid["capture"], "scope_digest": "e" * 64}), "scope digest"),
+        }
+        for label, (document, expected) in cases.items():
+            with self.subTest(label=label):
+                data = review_receipt.canonical(document)
+                name = hashlib.sha256(data).hexdigest() + ".json"
+                problem = dc.receipt_problem(name, data)
+                if expected is None:
+                    self.assertIsNone(problem)
+                else:
+                    self.assertIn(expected, problem)
+        for raw, expected in ((b"{broken", "not valid JSON"), (b"[1]", "not a JSON object")):
+            with self.subTest(raw=raw):
+                name = hashlib.sha256(raw).hexdigest() + ".json"
+                self.assertIn(expected, dc.receipt_problem(name, raw))
+        data = review_receipt.canonical(valid)
+        self.assertIn("content identity", dc.receipt_problem("0" * 64 + ".json", data))
+
+    def test_invalid_receipt_sample_is_a_distinct_verdict_not_a_tick_failure(self):
+        good = self.write_receipt(self.receipt_document())
+        bad = self.write_receipt(self.receipt_document(
+            capture={**self.receipt_document()["capture"], "target": "main"}))
+        broken = self.write_raw_receipt(b"{broken")
+        missing = self.receipt_document()
+        del missing["outcome"]
+        terminal = self.write_receipt(missing)
+        # In-flight temporaries are not receipts and are never sampled.
+        (self.runner / "state/receipts/.receipt-tmp").write_bytes(b"partial")
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:05:00Z", "2026-10-28T00:10:00Z"]))
+        self.assertTrue(result["healthy"])
+        self.assertIs(result["receipts_valid"], False)
+        first = result["observations"][0]
+        self.assertIs(first["receipts_valid"], False)
+        validation = first["receipt_validation"]
+        self.assertEqual(validation["sampled"], 4)
+        self.assertEqual(validation["valid_count"], 1)
+        self.assertEqual(sorted(i["receipt"] for i in validation["invalid"]),
+                         sorted([bad, broken, terminal]))
+        self.assertNotIn(good, [i["receipt"] for i in validation["invalid"]])
+
+    def age(self, path, seconds_ago):
+        stamp = 1_800_000_000 - seconds_ago
+        os.utime(path, (stamp, stamp))
+
+    def test_receipt_sample_is_the_newest_by_mtime_not_lowest_hash(self):
+        root = self.runner / "state/receipts"
+        for index in range(dc.RECEIPT_SAMPLE + 2):
+            name = self.write_receipt(self.receipt_document(item_id="current-%d" % index))
+            self.age(root / (name + ".json"), 1000 + index)
+        bad = self.write_raw_receipt(b"{broken")
+        # Newest: written after the switch, so it must be sampled whatever its name.
+        self.age(root / (bad + ".json"), 0)
+        validation = dc.receipt_validation(self.effects)
+        self.assertEqual(validation["sampled"], dc.RECEIPT_SAMPLE)
+        self.assertEqual([i["receipt"] for i in validation["invalid"]], [bad])
+        # The same bad receipt, oldest of all, falls outside the bounded sample.
+        self.age(root / (bad + ".json"), 10**6)
+        validation = dc.receipt_validation(self.effects)
+        self.assertEqual(validation["sampled"], dc.RECEIPT_SAMPLE)
+        self.assertIs(validation["valid"], True)
+
+    def test_run_readability_sample_is_the_newest_by_mtime(self):
+        runs = self.runner / "state/runs"
+        for index in range(dc.RECEIPT_SAMPLE + 2):
+            run = runs / ("aaaa%04d-20261028T000000Z" % index)
+            run.mkdir(parents=True)
+            (run / "meta.json").write_text("{}\n")
+            self.age(run, 1000 + index)
+        broken = runs / "zzzz-20261028T000500Z"  # sorts last by name
+        broken.mkdir()
+        (broken / "meta.json").write_bytes(b"{broken")
+        self.age(broken, 0)
+        self.complete_tick("2026-10-28T00:05:00Z")
+        observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        self.assertEqual(observation["receipts"],
+                         {"sampled": dc.RECEIPT_SAMPLE, "readable": dc.RECEIPT_SAMPLE - 1})
+        self.assertIs(observation["receipts_readable"], False)
+        self.age(broken, 10**6)
+        observation = dc.health_observation(self.effects, "2026-10-28T00:00:00Z")
+        self.assertIs(observation["receipts_readable"], True)
+
+    def install_receipt_sources(self, selectors=None):
+        shutil.copy(ROOT / "runtime_target.py", self.runner / "runtime_target.py")
+        source = (ROOT / "review_receipt.py").read_text()
+        if selectors is not None:
+            old = 'SELECTORS = {"promoted-main": DEFAULT_REF, LEGACY_BRANCH: DEFAULT_REF}'
+            self.assertIn(old, source)
+            source = source.replace(old, selectors)
+        (self.runner / "review_receipt.py").write_text(source)
+
+    def test_schema_constants_come_from_the_deployment_tree_read_only(self):
+        self.install_receipt_sources(
+            'SELECTORS = {"promoted-main": DEFAULT_REF, LEGACY_BRANCH: DEFAULT_REF,'
+            ' "release-train": DEFAULT_REF}')
+        sentinel = self.base / "executed"
+        with (self.runner / "review_receipt.py").open("a") as out:
+            out.write("\nopen(%r, 'w').write('ran')\n" % str(sentinel))
+        schema = dc.receipt_schema(self.effects)
+        self.assertEqual(schema["schema_source"],
+                         "deployment:apps/crq-python/review_receipt.py")
+        self.assertEqual(schema["targets"], ("promoted-main", "merge-queue", "release-train"))
+        self.assertEqual((schema["policy"], schema["version"]),
+                         (review_receipt.POLICY, review_receipt.VERSION))
+        self.assertFalse(sentinel.exists())  # parsed, never executed
+        document = self.receipt_document(
+            source={**self.receipt_document()["source"], "target_selector": "release-train"})
+        self.write_receipt(document)
+        validation = dc.receipt_validation(self.effects)
+        self.assertIs(validation["valid"], True, validation["invalid"])
+        self.assertEqual(validation["schema_source"], schema["schema_source"])
+        # The builtin copy would have reported the new selector as invalid.
+        data = review_receipt.canonical(document)
+        self.assertIn("target", dc.receipt_problem(
+            hashlib.sha256(data).hexdigest() + ".json", data))
+
+    def test_unusable_deployment_sources_fall_back_to_recorded_builtin(self):
+        # Fixture checkouts carry no review_receipt.py: missing source.
+        schema = dc.receipt_schema(self.effects)
+        self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+        self.assertIn("FileNotFoundError", schema["schema_source"])
+        self.assertEqual(schema["targets"], dc.RECEIPT_TARGETS)
+        for broken in ("def (:\n", 'POLICY = 7\nVERSION = 1\nSELECTORS = {"a": 1}\n',
+                       "VERSION = 1\nSELECTORS = {UNKNOWN: 1}\n"):
+            with self.subTest(broken=broken):
+                self.install_receipt_sources()
+                (self.runner / "review_receipt.py").write_text(broken)
+                schema = dc.receipt_schema(self.effects)
+                self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+                self.assertEqual(schema["policy"], dc.RECEIPT_POLICY)
+        self.write_receipt(self.receipt_document())
+        validation = dc.receipt_validation(self.effects)
+        self.assertIs(validation["valid"], True)
+        self.assertTrue(validation["schema_source"].startswith("builtin"))
+
+    def test_later_non_literal_rebinding_makes_a_constant_unresolved(self):
+        for rebinding in ('POLICY = "-".join(["x", "y"])\n',
+                          'POLICY: str = "affected-current-additions-v1"\n',
+                          "POLICY += ''\n", "from os import sep as POLICY\n",
+                          "def POLICY():\n    pass\n",
+                          "if True:\n    POLICY = 'other'\n",
+                          "for POLICY in ():\n    pass\n", "del POLICY\n"):
+            with self.subTest(rebinding=rebinding):
+                self.install_receipt_sources()
+                with (self.runner / "review_receipt.py").open("a") as out:
+                    out.write("\n" + rebinding)
+                schema = dc.receipt_schema(self.effects)
+                self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+                self.assertIn("POLICY", schema["schema_source"])
+        # The same for an imported selector key rebound in runtime_target.
+        self.install_receipt_sources()
+        with (self.runner / "runtime_target.py").open("a") as out:
+            out.write("\nLEGACY_BRANCH = DEFAULT_BRANCH.upper()\n")
+        schema = dc.receipt_schema(self.effects)
+        self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+        self.assertIn("LEGACY_BRANCH", schema["schema_source"])
+
+    def test_only_the_needed_constants_are_resolved(self):
+        self.install_receipt_sources()
+        with (self.runner / "review_receipt.py").open("a") as out:
+            out.write("\nUNRELATED = {UNKNOWN_NAME: 1, f'{POLICY}': 2, (1, 2): 3}\n"
+                      "OTHER = compute()\nLATER = {**SELECTORS}\n"
+                      "def helper():\n    POLICY = 'local only'\n    return POLICY\n")
+        with (self.runner / "runtime_target.py").open("a") as out:
+            out.write("\nUNRELATED_TARGETS = {object(): 1}\n")
+        schema = dc.receipt_schema(self.effects)
+        self.assertEqual(schema["schema_source"],
+                         "deployment:apps/crq-python/review_receipt.py")
+        self.assertEqual(schema["targets"], ("promoted-main", "merge-queue"))
+        self.assertEqual(schema["policy"], review_receipt.POLICY)
+
+    def test_valid_bounded_receipt_sample_and_stalled_tick_stay_independent(self):
+        for index in range(dc.RECEIPT_SAMPLE + 2):
+            self.write_receipt(self.receipt_document(item_id="current-%d" % index))
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:00:00Z"]))
+        self.assertFalse(result["healthy"])  # tick stalled
+        self.assertIs(result["receipts_valid"], True)  # receipts still valid
+        validation = result["observations"][0]["receipt_validation"]
+        self.assertEqual((validation["sampled"], validation["valid_count"]),
+                         (dc.RECEIPT_SAMPLE, dc.RECEIPT_SAMPLE))
 
     def test_advancing_queue_saves_cannot_substitute_for_completion(self):
         self.complete_tick("2026-10-28T00:00:00Z")
@@ -588,6 +855,25 @@ class CompatibilityRecordTests(ControllerFixture):
                 self.assertIs(record["schema_marker_present"], True)
                 self.assertEqual(record["queue_schema"], marker)
                 # ANY explicit marker value disables rollback, even "unmarked".
+                self.assertFalse(dc.rollback_compatible(record))
+
+    def test_missing_queue_is_unreadable_never_empty_and_fails_closed(self):
+        (self.runner / "state").mkdir(exist_ok=True)
+        record = dc.compatibility_record(self.effects, self.target)
+        self.assertIn("unreadable", record["queue_schema"])
+        self.assertIs(record["schema_marker_present"], True)
+        self.assertFalse(dc.rollback_compatible(record))
+        # Same evidence, same verdict: the drain refuses it too.
+        with self.assertRaisesRegex(dc.Refused, "queue unreadable"):
+            dc.drain_check(self.effects, lambda *a: "harvest")
+
+    def test_non_object_queue_root_is_recorded_unreadable_not_raised(self):
+        for root in (None, [1], "str", 7):
+            with self.subTest(root=root):
+                self.write_state("queue.json", root)
+                record = dc.compatibility_record(self.effects, self.target)
+                self.assertIn("not a JSON object", record["queue_schema"])
+                self.assertIs(record["schema_marker_present"], True)
                 self.assertFalse(dc.rollback_compatible(record))
 
     def test_unreadable_queue_is_recorded_not_crashed_and_fails_closed(self):
@@ -800,7 +1086,7 @@ class DeployPlanTests(ControllerFixture):
             raise ValueError("helper failed before checkout")
 
         with mock.patch.object(host, "switch", side_effect=partial):
-            with mock.patch.object(dc, "_load_helper", return_value=host):
+            with mock.patch.object(dc, "_load_helper", return_value=(host, "0" * 64)):
                 with mock.patch.object(dc, "Effects", return_value=self.effects):
                     with mock.patch("builtins.print") as printed:
                         code = dc.main(["--root", str(self.root), "--overlay", str(self.overlay_path),
@@ -820,10 +1106,12 @@ class DeployPlanTests(ControllerFixture):
         # name it; the fixture provides one alongside the target tag.
         self.command("tag", "-a", "crq-runner/20261027-9", self.before,
                      "-m", "prior fixture approval")
+        digest = "ab" * 32
         with self.fake_switch():
             plan = dc.deploy_plan(self.effects, host, self.target, self.tag,
-                                  self.overlay_path)
+                                  self.overlay_path, helper_sha256=digest)
         self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
+        self.assertEqual(plan["helper_sha256"], digest)
         steps = {step["step"]: step for step in plan["steps"]}
         self.assertTrue(steps["drain"]["drained"])
         self.assertTrue(steps["preservation"]["preserved"])
@@ -837,6 +1125,7 @@ class DeployPlanTests(ControllerFixture):
         self.assertEqual(entry["prior_tag"], "crq-runner/20261027-9")
         self.assertEqual(entry["tag"], self.tag)
         self.assertEqual(entry["target"], self.target)
+        self.assertEqual(entry["helper_sha256"], digest)  # #549: what ran
         self.assertTrue(entry["rollback_compatibility"])
         self.assertTrue(dc.rollback_target(entry)["prior_head"] == self.before)
         self.assertTrue(plan["automatic_rollback_permitted"])
@@ -1079,12 +1368,14 @@ class RollbackPlanTests(ControllerFixture):
         self.at_target()
         with self.fake_switch():
             result = dc.rollback_plan(self.effects, host, self.prior,
-                                      self.overlay_path)
+                                      self.overlay_path, helper_sha256="cd" * 32)
         self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
         self.assertEqual(result["rolled_back_to"], self.before)
+        self.assertEqual(result["helper_sha256"], "cd" * 32)
         journals = [json.loads(p.read_text())
                     for p in self.record_dir.glob("controller-*.json")]
         self.assertEqual([j["operation"] for j in journals], ["rollback"])
+        self.assertEqual(journals[0]["helper_sha256"], "cd" * 32)
 
     def test_post_journal_author_requests_refuse_before_drain_or_switch(self):
         with self.fake_switch():
@@ -1248,7 +1539,29 @@ class CliTests(ControllerFixture):
     def test_switch_cli_drains_real_runner_without_pythonpath(self):
         self.switch_cli_fixture(recorded_run=True)
 
-    def switch_cli_fixture(self, recorded_run=False):
+    def test_switch_cli_with_matching_pinned_helper_digest_succeeds(self):
+        self.switch_cli_fixture(pin_helper=True)
+
+    def test_helper_digest_mismatch_refuses_before_import_lock_or_preflight(self):
+        self.write_state("queue.json", {"items": [], "starts": []})
+        lock = self.runner / "state" / dc.LOCK_NAME
+        for expected in ("0" * 64, "ABC", "0" * 63):
+            with self.subTest(expected=expected):
+                # A bad --sha would refuse in preflight; the identity check
+                # must refuse first, with the helper never imported.
+                result = self.run_cli("--expect-helper-sha256", expected,
+                                      "switch", "--sha", "nothex", "--tag", self.tag)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("refused:", result.stderr)
+                self.assertIn("helper", result.stderr)
+                self.assertNotIn("--sha", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(lock.exists())
+                self.assertEqual(list(self.record_dir.iterdir()), [])
+                self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+
+
+    def switch_cli_fixture(self, recorded_run=False, pin_helper=False):
         self.write_state("queue.json", {"items": [], "starts": []})
         if recorded_run:
             # Real probe and dependencies, tracked before the helper clean guard.
@@ -1309,7 +1622,9 @@ class CliTests(ControllerFixture):
         expected_status = [" M " + host.CONFIG]
         before_cli = self.command("status", "--porcelain", "--untracked-files=all").splitlines()
         self.assertEqual(before_cli, expected_status, before_cli[:10])
-        result = self.run_cli("switch", "--sha", pinned, "--tag", "crq-runner/20261028-2",
+        helper_digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+        pin = ["--expect-helper-sha256", helper_digest] if pin_helper else []
+        result = self.run_cli(*pin, "switch", "--sha", pinned, "--tag", "crq-runner/20261028-2",
                               env={"PATH": str(shim) + ":" + os.environ["PATH"],
                                    # Exercise -B even when inherited env does
                                    # not suppress bytecode (as in CI discovery).
@@ -1322,6 +1637,10 @@ class CliTests(ControllerFixture):
         self.assertEqual(artifact["operation"], "switch")
         self.assertEqual(artifact["target"], pinned)
         self.assertTrue(artifact["automatic_rollback_permitted"])
+        self.assertEqual(artifact["helper_sha256"], helper_digest)
+        journals = [json.loads(p.read_text())
+                    for p in self.record_dir.glob("controller-*.json")]
+        self.assertEqual([j["helper_sha256"] for j in journals], [helper_digest])
 
     def test_health_cli_missing_heartbeat_refuses_with_isolated_env(self):
         # The CLI subprocess resolves WATCHDOG_HOME from its own environment:
@@ -1360,6 +1679,39 @@ class CliTests(ControllerFixture):
         self.assertEqual(result.returncode, 2)
         self.assertIn("refused:", result.stderr)
         self.assertEqual(result.stdout, "")
+
+
+class HelperIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-helper-")
+        self.addCleanup(self.temp.cleanup)
+        self.sentinel = Path(self.temp.name) / "imported"
+        self.helper = Path(self.temp.name) / "prepare-host.py"
+        self.helper.write_text("from pathlib import Path\n"
+                               "Path(%r).write_text('ran')\nVALUE = 7\n"
+                               % str(self.sentinel))
+        self.digest = hashlib.sha256(self.helper.read_bytes()).hexdigest()
+
+    def test_digest_is_computed_and_returned_with_the_module(self):
+        module, digest = dc._load_helper(self.helper)
+        self.assertEqual(digest, self.digest)
+        self.assertEqual(module.VALUE, 7)
+
+    def test_matching_pin_loads_exactly_the_hashed_bytes(self):
+        module, digest = dc._load_helper(self.helper, self.digest)
+        self.assertEqual((module.VALUE, digest), (7, self.digest))
+        self.assertTrue(self.sentinel.exists())
+
+    def test_mismatch_or_malformed_pin_refuses_without_executing(self):
+        for expected in ("0" * 64, self.digest.upper(), self.digest[:-1], ""):
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(dc.Refused, "helper"):
+                    dc._load_helper(self.helper, expected)
+                self.assertFalse(self.sentinel.exists())
+
+    def test_unreadable_helper_refuses(self):
+        with self.assertRaisesRegex(dc.Refused, "helper unreadable"):
+            dc._load_helper(Path(self.temp.name) / "absent.py")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,10 @@ renderer, switcher or scheduler. The controller's additions:
   * two advancing completed-tick health observations AFTER owner activation,
     read only from the runner's completion heartbeat (crq.py replaces it
     after status publication; the earlier queue saves prove nothing), plus
-    representative receipt readability (distinct checks);
+    bounded receipt readability and receipt-schema validity samples (three
+    distinct verdicts);
+  * the helper's sha256 is computed from the exact bytes executed, recorded
+    in every journal, and optionally pinned by the owner before the lock;
   * fail-stopped, owner-approved automatic rollback, only to a recorded
     compatible previous target: same helper path, same drift/stopped-unit
     fence. A queue/receipt schema the prior target cannot read disables
@@ -37,6 +40,7 @@ no deployment, no signer or credential operations.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import datetime as dt
 import hashlib
@@ -52,12 +56,30 @@ import uuid
 from pathlib import Path
 
 
-def _load_helper(path: Path):
-    """Load the accepted helper as a module; never reimplement it."""
+def _load_helper(path: Path, expected_sha256: str | None = None):
+    """Load the accepted helper as a module; never reimplement it.
+
+    The helper's bytes are read ONCE and hashed before anything executes;
+    exactly those bytes are compiled, so the recorded digest is the code
+    that ran (#549). An owner-pinned ``expected_sha256`` that disagrees
+    refuses before any import, lock or preflight. Returns (module, digest).
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise Refused("helper unreadable: " + str(exc)[:200]) from exc
+    digest = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None:
+        if not HELPER_SHA_RE.fullmatch(expected_sha256):
+            raise Refused("--expect-helper-sha256 must be 64 lowercase hex")
+        if digest != expected_sha256:
+            raise Refused("helper " + str(path) + " sha256 " + digest
+                          + " does not match the owner-pinned "
+                          + expected_sha256 + "; nothing imported or run")
     spec = importlib.util.spec_from_file_location("crq_prepare_host", path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    exec(compile(data, str(path), "exec"), module.__dict__)  # noqa: S102 - bound bytes
+    return module, digest
 
 
 LOCK_NAME = "controller.lock"
@@ -65,6 +87,7 @@ JOURNAL_SCHEMA = 1
 
 TAG_RE = re.compile(r"crq-runner/[0-9]{8}-[0-9]+")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+HELPER_SHA_RE = re.compile(r"[0-9a-f]{64}")
 # launch(): item ID + UTC timestamp; author IDs add ._ and promotion retries +.
 # Retain legacy hex IDs, but accept only bounded ASCII filesystem components.
 RUN_ID_RE = re.compile(
@@ -232,6 +255,22 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def read_queue(effects: Effects) -> dict:
+    """The queue ledger's JSON-object root, or ValueError/OSError.
+
+    The single read both drain and rollback compatibility reason from: a
+    missing file (FileNotFoundError), invalid JSON or a non-object root
+    (``null``, a list, a bare string) is unreadable for both, never empty.
+    """
+    queue = effects.read_json("queue.json")
+    if not isinstance(queue, dict):
+        raise ValueError("queue.json root is " + type(queue).__name__
+                         + ", not a JSON object")
+    if not isinstance(queue.get("items", []), list):
+        raise ValueError("queue.json items is not a JSON array")
+    return queue
+
+
 def compatibility_record(effects: Effects, target_sha: str) -> dict:
     """Read-only rollback-compatibility evidence for the CURRENT->TARGET move.
 
@@ -246,22 +285,24 @@ def compatibility_record(effects: Effects, target_sha: str) -> dict:
     """
     record = {"checked": True, "schema_observations": [],
               "schema_marker_present": False, "queue_schema": None}
-    if effects.exists("queue.json"):
-        try:
-            queue = effects.read_json("queue.json")
-            if "schema_version" in queue:
-                # Presence is recorded separately from the value: ANY explicit
-                # marker (including the literal string "unmarked" or another
-                # unknown value) disables automatic rollback, because the
-                # prior target's reader was never proven against it.
-                record["schema_marker_present"] = True
-                record["queue_schema"] = queue["schema_version"]
-            for key in sorted(queue):
-                if key.startswith("author_"):
-                    record["schema_observations"].append(key)
-        except (ValueError, OSError) as exc:
-            record["queue_schema"] = "unreadable: " + str(exc)[:120]
-            record["schema_marker_present"] = True  # unprovable: fail closed
+    try:
+        # A missing queue or a non-object root is evidence never read: it is
+        # unreadable here exactly as drain_check refuses it (#548).
+        queue = read_queue(effects)
+    except (ValueError, OSError) as exc:
+        record["queue_schema"] = "unreadable: " + str(exc)[:120]
+        record["schema_marker_present"] = True  # unprovable: fail closed
+    else:
+        if "schema_version" in queue:
+            # Presence is recorded separately from the value: ANY explicit
+            # marker (including the literal string "unmarked" or another
+            # unknown value) disables automatic rollback, because the
+            # prior target's reader was never proven against it.
+            record["schema_marker_present"] = True
+            record["queue_schema"] = queue["schema_version"]
+        for key in sorted(queue):
+            if key.startswith("author_"):
+                record["schema_observations"].append(key)
     record["target_sha"] = target_sha
     return record
 
@@ -301,13 +342,17 @@ def drain_check(effects: Effects, liveness) -> dict:
     semantics identical to the runner's.
     """
     try:
-        queue = effects.read_json("queue.json")
+        queue = read_queue(effects)
     except (ValueError, OSError) as exc:
         raise Refused("queue unreadable, refusing to reason about drain: "
                       + str(exc)[:160]) from None
     runs = effects.state_dir() / "runs"
     blocked = []
     for item in queue.get("items", []):
+        if not isinstance(item, dict):
+            blocked.append({"item": None, "state": "ambiguous",
+                            "reason": "malformed queue item"})
+            continue
         if item.get("run") is None and "run" not in item:
             continue  # genuinely unstarted: no recorded run to probe
         r = item.get("run")
@@ -412,12 +457,274 @@ def _tick_value(effects: Effects) -> str:
     return value
 
 
+RECEIPT_SAMPLE = 10
+RECEIPT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json")
+# Builtin fallback only: the deployment's own review_receipt.py constants are
+# preferred (receipt_schema); this copy is used, and recorded as such, when
+# they cannot be read statically.
+RECEIPT_POLICY = "affected-current-additions-v1"
+RECEIPT_TARGETS = ("promoted-main", "merge-queue")
+RECEIPT_VERSION = 1
+RECEIPT_COUNTED_OUTCOMES = ("terminal-clean", "terminal-with-findings", "partial-scope")
+RECEIPT_RESOLUTIONS = ("same-path-current", "git-rename-M50")
+RECEIPT_DISPOSITIONS = ("included", "renamed", "deleted", "unsupported",
+                        "ambiguous", "excluded-with-reason")
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _hex(pattern, value) -> bool:
+    return isinstance(value, str) and bool(pattern.fullmatch(value))
+
+
+def _text(value) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _newest(entries, limit: int) -> list:
+    """The ``limit`` most recently modified entries (ties by name), so a
+    sample taken after a switch covers what the new runner wrote."""
+    def key(entry):
+        try:
+            mtime = entry.stat().st_mtime_ns
+        except OSError:
+            mtime = -1  # unstattable: still sampleable, never preferred
+        return (-mtime, entry.name)
+    return sorted(entries, key=key)[:limit]
+
+
+_NOT_LITERAL = ("not-literal",)
+
+
+def _store_names(node) -> list:
+    """Names a statement binds at module scope, without entering nested
+    function/class bodies (whose own names are bound, their locals not)."""
+    names, stack = [], [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(current.name)
+            continue
+        if isinstance(current, (ast.Import, ast.ImportFrom)):
+            names.extend((alias.asname or alias.name).split(".")[0]
+                         for alias in current.names)
+            continue
+        if isinstance(current, ast.Name) and isinstance(current.ctx, (ast.Store, ast.Del)):
+            names.append(current.id)
+        stack.extend(ast.iter_child_nodes(current))
+    return names
+
+
+def _module_bindings(path: Path) -> dict:
+    """The FINAL module-level binding of every name, read statically (never
+    executed): a literal assignment node, a ``from runtime_target import``,
+    or _NOT_LITERAL for anything else (a later non-literal rebinding makes an
+    earlier literal unresolved). Raises OSError/SyntaxError if unusable."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    bindings = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, (ast.Constant, ast.Dict))):
+            bindings[node.targets[0].id] = ("literal", node.value)
+            continue
+        if (isinstance(node, ast.ImportFrom) and node.level == 0
+                and node.module == "runtime_target"):
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = ("runtime_target", alias.name)
+            continue
+        for name in _store_names(node):
+            bindings[name] = _NOT_LITERAL
+    return bindings
+
+
+class _Constants:
+    """Lazily resolve only the requested names, so an unrelated module-level
+    value the parser cannot evaluate never affects the schema."""
+
+    def __init__(self, runner: Path):
+        self.runner = runner
+        self.modules = {}
+
+    def bindings(self, module: str) -> dict:
+        if module not in self.modules:
+            self.modules[module] = _module_bindings(self.runner / (module + ".py"))
+        return self.modules[module]
+
+    def resolve(self, module: str, name: str, depth: int = 0):
+        if depth > 8:
+            raise ValueError("constant resolution too deep at " + name)
+        binding = self.bindings(module).get(name)
+        if binding is None:
+            raise ValueError(module + "." + name + " is not defined")
+        if binding is _NOT_LITERAL:
+            raise ValueError(module + "." + name + " is not a module-level literal")
+        if binding[0] == "runtime_target":
+            return self.resolve("runtime_target", binding[1], depth + 1)
+        value = binding[1]
+        if isinstance(value, ast.Constant):
+            return value.value
+        keys = []
+        for key in value.keys:
+            if isinstance(key, ast.Constant):
+                keys.append(key.value)
+            elif isinstance(key, ast.Name):
+                keys.append(self.resolve(module, key.id, depth + 1))
+            else:
+                raise ValueError("unresolvable key in " + module + "." + name)
+        return {"keys": keys}
+
+
+def receipt_schema(effects: Effects) -> dict:
+    """Receipt policy/version/target selectors from THIS deployment's
+    review_receipt.py (and runtime_target.py), parsed read-only with ast so
+    nothing from the checkout executes outside the controller lock. Falls
+    back to the builtin copy with the reason recorded in ``schema_source``.
+    """
+    runner = effects.root / "apps/crq-python"
+    try:
+        constants = _Constants(runner)
+        policy = constants.resolve("review_receipt", "POLICY")
+        version = constants.resolve("review_receipt", "VERSION")
+        selectors = constants.resolve("review_receipt", "SELECTORS")
+        if not isinstance(selectors, dict):
+            raise ValueError("review_receipt.SELECTORS is not a dict literal")
+        targets = tuple(selectors["keys"])
+        if (not isinstance(policy, str) or type(version) is not int or not targets
+                or not all(isinstance(t, str) for t in targets)):
+            raise ValueError("unexpected constant types")
+        return {"schema_source": "deployment:apps/crq-python/review_receipt.py",
+                "policy": policy, "version": version, "targets": targets}
+    except (OSError, SyntaxError, ValueError, KeyError, TypeError) as exc:
+        return {"schema_source": "builtin (deployment constants unavailable: "
+                                 + type(exc).__name__ + ": " + str(exc)[:80] + ")",
+                "policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
+                "targets": RECEIPT_TARGETS}
+
+
+def receipt_problem(name: str, data: bytes, schema: dict | None = None) -> str | None:
+    """Why a retained receipt is not a valid v1 review receipt, or None.
+
+    Mirrors the stable receipt contract read-only and offline: the immutable
+    content identity (review_receipt.read_receipt), the TS QueueReceiptSchema
+    (src/ops/review/internal/queueEvidence.ts) and its scope-digest check.
+    Groups: run identity, captured target, terminal outcome. Never imports
+    runner code and never grants review credit. ``schema`` is
+    ``receipt_schema()`` output; the builtin copy when omitted.
+    """
+    schema = schema or {"policy": RECEIPT_POLICY, "version": RECEIPT_VERSION,
+                        "targets": RECEIPT_TARGETS}
+    if hashlib.sha256(data).hexdigest() + ".json" != name:
+        return "content identity: sha256 does not match the receipt name"
+    try:
+        doc = json.loads(data)
+    except ValueError:
+        return "malformed: not valid JSON"
+    if not isinstance(doc, dict):
+        return "malformed: not a JSON object"
+    if doc.get("version") != schema["version"]:
+        return "unsupported receipt version"
+    # Run identity: the queue item, and the run when one was launched.
+    run_id = doc.get("run_id")
+    if not _text(doc.get("item_id")):
+        return "run identity: missing item_id"
+    if run_id is not None and not (_text(run_id) and len(run_id) <= 255
+                                   and RUN_ID_RE.fullmatch(run_id)):
+        return "run identity: malformed run_id"
+    if not (doc.get("request_id") is None or isinstance(doc.get("request_id"), str)):
+        return "run identity: malformed request_id"
+    if not (doc.get("started_at") is None or isinstance(doc.get("started_at"), str)):
+        return "run identity: malformed started_at"
+    # Captured target: the bound source and the pinned capture it reviewed.
+    source, capture = doc.get("source"), doc.get("capture")
+    if not (isinstance(source, dict)
+            and _text(source.get("repo"))
+            and re.fullmatch(r"[\w.-]+/[\w.-]+", source["repo"])
+            and type(source.get("pr")) is int and source["pr"] > 0
+            and _hex(_HEX40, source.get("merge_sha"))
+            and source.get("target_selector") in schema["targets"]
+            and source.get("policy") == schema["policy"]):
+        return "target: source binding is not a v1 merged-current subject"
+    if not (isinstance(capture, dict)
+            and _hex(_HEX40, capture.get("target"))
+            and _hex(_HEX40, capture.get("tree"))):
+        return "target: captured target/tree is not a pinned 40-hex SHA"
+    paths = capture.get("paths")
+    if not (isinstance(paths, list) and all(
+            isinstance(entry, dict) and _text(entry.get("source_path"))
+            and _text(entry.get("path"))
+            and entry.get("resolution") in RECEIPT_RESOLUTIONS
+            and entry.get("disposition") in RECEIPT_DISPOSITIONS for entry in paths)):
+        return "target: malformed captured path manifest"
+    canonical = json.dumps(paths, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    if capture.get("scope_digest") != hashlib.sha256(canonical).hexdigest():
+        return "target: scope digest does not match the path manifest"
+    if not (_hex(_HEX64, capture.get("equivalence"))
+            and capture.get("policy") == schema["policy"]
+            and capture.get("projection")
+            == "current-affected-files/full-file-addition-projection"
+            and capture.get("reviewer") == "coderabbit-review-agent-committed-v1"
+            and _text(capture.get("reviewer_version"))
+            and isinstance(capture.get("captured_at"), str)):
+        return "target: unsupported capture policy/reviewer"
+    # Terminal outcome: a recorded verdict; counted credit needs a completed run.
+    outcome, counted, cls = doc.get("outcome"), doc.get("counted"), doc.get("classification")
+    if not _text(outcome) or outcome in ("pending", "reviewing"):
+        return "terminal outcome: missing or non-terminal outcome"
+    if not isinstance(counted, bool):
+        return "terminal outcome: counted is not a boolean"
+    if not (cls is None or isinstance(cls, dict)):
+        return "terminal outcome: malformed classification"
+    if counted and not (outcome in RECEIPT_COUNTED_OUTCOMES and run_id is not None
+                        and isinstance(cls, dict) and cls.get("counted") is True
+                        and cls.get("outcome") == "completed"):
+        return "terminal outcome: counted without a completed classified run"
+    artifacts = doc.get("artifacts")
+    if not (isinstance(doc.get("findings"), list)
+            and all(isinstance(f, dict) for f in doc["findings"])
+            and isinstance(artifacts, dict)
+            and all(_hex(_HEX64, v) for v in artifacts.values())
+            and doc.get("remediation") == "disabled/deferred"
+            and doc.get("independent_acceptance") is False
+            and doc.get("cli_functional_acceptance") == "pending-D1"):
+        return "malformed: findings/artifacts/acceptance fields"
+    return None
+
+
+def receipt_validation(effects: Effects) -> dict | None:
+    """Validate a bounded sample of retained receipts (state/receipts).
+
+    ``valid`` is its own verdict: None when nothing was sampled, never a
+    tick failure and never review credit.
+    """
+    root = effects.state_dir() / "receipts"
+    if not root.is_dir():
+        return None
+    names = [entry.name for entry in _newest(
+        [e for e in root.iterdir() if RECEIPT_NAME_RE.fullmatch(e.name)], RECEIPT_SAMPLE)]
+    schema = receipt_schema(effects)
+    invalid = []
+    for name in names:
+        try:
+            problem = receipt_problem(name, (root / name).read_bytes(), schema)
+        except OSError as exc:
+            problem = "unreadable: " + str(exc)[:80]
+        if problem:
+            invalid.append({"receipt": name[:-5], "reason": problem})
+    return {"sampled": len(names), "valid_count": len(names) - len(invalid),
+            "invalid": invalid, "valid": (not invalid) if names else None,
+            "schema_source": schema["schema_source"]}
+
+
 def health_observation(effects: Effects, prior_tick: str) -> dict:
     """One health observation against the requested prior tick.
 
     Advancement is lexicographic on the strict UTC timestamps (they sort
-    chronologically), never a wall-clock delta; receipts are sampled only for
-    readability, never for review credit.
+    chronologically), never a wall-clock delta. Two independent receipt
+    verdicts ride along: ``receipts_readable`` (state/runs/*/meta.json parse)
+    and ``receipts_valid`` (state/receipts schema sample). Neither affects
+    advancement; neither grants review credit.
     """
     _parse_iso(prior_tick)
     current = _tick_value(effects)
@@ -426,9 +733,9 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
     receipts = effects.state_dir() / "runs"
     receipt_sample = None
     if receipts.is_dir():
-        entries = sorted(receipts.iterdir())
+        entries = _newest(list(receipts.iterdir()), RECEIPT_SAMPLE)
         readable = 0
-        for entry in entries[:10]:
+        for entry in entries:
             meta = entry / "meta.json"
             if meta.is_file():
                 try:
@@ -436,9 +743,14 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
                     readable += 1
                 except (ValueError, OSError):
                     pass
-        receipt_sample = {"sampled": len(entries[:10]), "readable": readable}
+        receipt_sample = {"sampled": len(entries), "readable": readable}
+    validation = receipt_validation(effects)
     return {"observed_tick": current, "advanced": advanced,
-            "receipts": receipt_sample}
+            "receipts": receipt_sample,
+            "receipts_readable": (receipt_sample["readable"] == receipt_sample["sampled"]
+                                  if receipt_sample and receipt_sample["sampled"] else None),
+            "receipt_validation": validation,
+            "receipts_valid": validation["valid"] if validation else None}
 
 
 def two_slot_health(effects: Effects, observe) -> dict:
@@ -453,14 +765,29 @@ def two_slot_health(effects: Effects, observe) -> dict:
     if not first.get("advanced"):
         return {"healthy": False, "reason": "first observation did not advance past "
                                             + first_tick,
-                "observations": [first]}
+                "observations": [first], **_receipt_verdicts([first])}
     second_tick = first["observed_tick"]
     second = observe(second_tick)
     if not second.get("advanced"):
         return {"healthy": False, "reason": "second observation did not advance past "
                                             + second_tick,
-                "observations": [first, second]}
-    return {"healthy": True, "observations": [first, second]}
+                "observations": [first, second], **_receipt_verdicts([first, second])}
+    return {"healthy": True, "observations": [first, second],
+            **_receipt_verdicts([first, second])}
+
+
+def _verdict(values) -> bool | None:
+    """False if any observation failed, None if none observed, else True."""
+    seen = [value for value in values if value is not None]
+    if not seen:
+        return None
+    return all(value is True for value in seen)
+
+
+def _receipt_verdicts(observations) -> dict:
+    """Receipt verdicts, distinct from ``healthy`` (tick advancement only)."""
+    return {key: _verdict(o.get(key) for o in observations)
+            for key in ("receipts_readable", "receipts_valid")}
 
 
 # ----------------------------------------------------------------- rollback
@@ -492,7 +819,7 @@ def rollback_compatible(record: dict) -> bool:
 
 @contextlib.contextmanager
 def mutation_record(effects: Effects, operation: str, state: dict, target: str,
-                    tag: str, prior_tag: str | None):
+                    tag: str, prior_tag: str | None, helper_sha256: str | None = None):
     """Persist recovery identity BEFORE calling the mutating helper.
 
     Exception translation is confined to this mutation boundary: every failure
@@ -506,6 +833,7 @@ def mutation_record(effects: Effects, operation: str, state: dict, target: str,
                 "prior_head": state["prior_head"],
                 "prior_config_sha256": state["prior_config_sha256"],
                 "prior_tag": prior_tag, "target": target, "tag": tag,
+                "helper_sha256": helper_sha256,
                 "automatic_rollback_permitted": False,
                 "rollback_compatibility": {}}
     intent = {**identity, "operation": operation + "_pending", "outcome": "pending"}
@@ -538,7 +866,7 @@ def mutation_record(effects: Effects, operation: str, state: dict, target: str,
 
 
 def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
-                overlay_path: Path) -> dict:
+                overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Preflight -> drain -> durable intent -> helper -> proofs -> completion.
 
     Failures after helper entry require owner recovery; they never claim the
@@ -548,7 +876,7 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
         pre = preflight(effects, target, tag)
         effects.record_preflight()
         prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
-        plan = {"preflight": pre, "steps": []}
+        plan = {"preflight": pre, "steps": [], "helper_sha256": helper_sha256}
         drain = drain_check(effects, _runner_liveness(effects))
         plan["steps"].append({"step": "drain", **drain})
         if not drain["drained"]:
@@ -556,7 +884,8 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
         overlay, raw = helper_module.load_overlay(overlay_path)
-        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag) as tx:
+        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag,
+                             helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, target, tag)
             tx["phase"] = "preservation"
             post = preservation_check(effects, pre["state"])
@@ -610,6 +939,7 @@ def deploy_journal(prior_state: dict, target: str, tag: str, plan: dict,
             "prior_tag": prior_tag,
             "target": target,
             "tag": tag,
+            "helper_sha256": plan.get("helper_sha256"),
             "rollback_compatibility": plan.get("rollback_compatibility_after") or {},
             "automatic_rollback_permitted": plan.get("automatic_rollback_permitted"),
             "plan": plan}
@@ -684,7 +1014,7 @@ def _refusing_liveness(*_args, **_kwargs):
 
 
 def rollback_plan(effects: Effects, helper_module, prior: dict,
-                  overlay_path: Path) -> dict:
+                  overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Owner-approved rollback to the recorded prior target, through the SAME
     helper fence. Consumes exactly the journal ``deploy_plan`` wrote.
     Refuses when the compatibility record disables automatic rollback
@@ -715,7 +1045,7 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
         with mutation_record(effects, "rollback", state, record["prior_head"],
-                             record["tag"], prior_tag) as tx:
+                             record["tag"], prior_tag, helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, record["prior_head"],
                                  record["tag"])
             tx["phase"] = "preservation"
@@ -724,8 +1054,10 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
             effects.journal_replace(tx["path"], {
                 "schema_version": JOURNAL_SCHEMA, "operation": "rollback",
                 "outcome": "completed", "transaction_id": tx["id"], "at": now_iso(),
-                "to": record["prior_head"], "tag": record["tag"]})
-        return {"rolled_back_to": record["prior_head"], "tag": record["tag"]}
+                "to": record["prior_head"], "tag": record["tag"],
+                "helper_sha256": helper_sha256})
+        return {"rolled_back_to": record["prior_head"], "tag": record["tag"],
+                "helper_sha256": helper_sha256}
 
 
 # --------------------------------------------------------------------- main
@@ -741,6 +1073,9 @@ def main(argv=None) -> int:
                         help="private controller record directory (outside Git)")
     parser.add_argument("--helper", type=Path,
                         help="path to prepare-host.py (default: <root>/apps/crq-python/ops)")
+    parser.add_argument("--expect-helper-sha256", metavar="HEX64",
+                        help="owner-pinned sha256 of the helper; a mismatch refuses "
+                             "before import, lock and preflight")
     sub = parser.add_subparsers(dest="operation", required=True)
     switch = sub.add_parser("switch", help="preflight, drain, switch, verify, journal")
     switch.add_argument("--sha", required=True)
@@ -757,20 +1092,24 @@ def main(argv=None) -> int:
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
-    helper_module = _load_helper(helper_path)
     effects = Effects(root, args.record_dir.resolve())
 
     try:
+        # Identity first, then the controller lock, then preflight (#549).
+        helper_module, helper_sha256 = _load_helper(helper_path,
+                                                    args.expect_helper_sha256)
         if args.operation == "switch":
             plan = deploy_plan(effects, helper_module, args.sha, args.tag,
-                               args.overlay)
+                               args.overlay, helper_sha256)
             print(json.dumps({"operation": "switch", "target": plan["preflight"]["target"],
                               "automatic_rollback_permitted":
                                   plan["automatic_rollback_permitted"],
+                              "helper_sha256": helper_sha256,
                               "steps": plan["steps"]}, indent=2, sort_keys=True))
         elif args.operation == "rollback":
             prior = json.loads(args.prior_record.read_text())
-            result = rollback_plan(effects, helper_module, prior, args.overlay)
+            result = rollback_plan(effects, helper_module, prior, args.overlay,
+                                   helper_sha256)
             print(json.dumps({"operation": "rollback", **result}, indent=2,
                              sort_keys=True))
         else:
