@@ -1238,8 +1238,10 @@ def recent_merged_page(cursor, after):
 
     Same-second groups never refuse. The anchor keeps the newest
     RECENT_MAX_TIES processed numbers; a forgotten tie row is reprocessed
-    (deduplicated), never skipped. An oversized head-second group is recorded
-    as wholly seen, relying on stable same-second order like the overlap.
+    (deduplicated), never skipped. When a head-second group is too large to
+    remember, the next head pass reprocesses every row at that second (a merge
+    updated into it after the first read is recorded) and counts only strictly
+    newer rows as new, so the pass still ends.
     """
     state = _recent_state(cursor, after)
     size, page, start = _recent_window(state["o"])
@@ -1295,9 +1297,10 @@ def recent_merged_page(cursor, after):
             head_seen.add(row["number"])
             if len(head_seen) > RECENT_MAX_TIES:
                 head_seen, head_all = set(), True
-        if updated == floor and (state["fa"] or row["number"] in seen):
+        if updated == floor and row["number"] in seen:
             continue
-        nxt["c"] += 1
+        if not (updated == floor and state["fa"]):
+            nxt["c"] += 1
         if row["merged_at"] and (row.get("base") or {}).get("ref") in DISCOVERY_BRANCHES:
             records.append({"number": row["number"], "mergedAt": row["merged_at"],
                 "mergeCommit": {"oid": row.get("merge_commit_sha")},
@@ -1313,13 +1316,16 @@ def recent_merged_page(cursor, after):
                    o=max(0, start + len(rows) - 1 - RECENT_OVERLAP))
     encoded = json.dumps(nxt, separators=(",", ":"))
     if len(encoded.encode()) > merged_reconcile.MAX_CURSOR_BYTES:
-        # Only very large PR numbers get here. Degrade the same way as an
-        # oversized group: keep the overlap's anchors, mark head sets seen.
+        # Only very large PR numbers get here. Head-second sets degrade to the
+        # reprocess-everything flags, which are safe; the anchor ties are
+        # kept whole, since windows can start up to 50 rows before the overlap.
         for name, flag in (("fs", "fa"), ("hs", "ha")):
             if nxt[name]:
                 nxt[name], nxt[flag] = [], True
-        nxt["t"] = nxt["t"][-(RECENT_OVERLAP + 1):]
         encoded = json.dumps(nxt, separators=(",", ":"))
+        if len(encoded.encode()) > merged_reconcile.MAX_CURSOR_BYTES:
+            # 100 anchor numbers fit unless PR numbers exceed ~37 digits.
+            raise merged_reconcile.ReconcileRefused("closed-PR numbers too large for the keyset cursor")
     return {"records": records, "has_next_page": True, "next_cursor": encoded}
 
 
@@ -1328,8 +1334,10 @@ RECENT_PRUNE_INTERVAL = dt.timedelta(hours=1)
 
 
 def _prune_due(last):
+    """Due unless a valid record is under an hour old; a future one is stale."""
     try:
-        return not (isinstance(last, str) and now() - parse_iso(last) < RECENT_PRUNE_INTERVAL)
+        return not (isinstance(last, str) and
+                    dt.timedelta(0) <= now() - parse_iso(last) < RECENT_PRUNE_INTERVAL)
     except (TypeError, ValueError):
         return True
 

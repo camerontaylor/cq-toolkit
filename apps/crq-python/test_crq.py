@@ -2356,6 +2356,22 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         for size, page in self.calls:
             self.assertLessEqual(size, 100)
 
+    def test_merge_updated_into_head_second_among_read_rows_is_kept(self):
+        # Independent review reproduction (#822): the newest second holds a
+        # group of 100, 101 or 150 closed PRs. After the first read, unread
+        # merged #501 is updated into that second and sorts among group rows
+        # already read. The head pass must still record it.
+        for size in (100, 101, 150):
+            with self.subTest(group=size):
+                self.setUp()
+                self.closed(600)
+                self.tie(range(600, 600 - 2 * size, -2), 3000)
+                head = self.rows[600]["updated_at"]
+                self.hooks[1] = lambda: self.rows[501].update(updated_at=head)
+                self.until_complete()
+                self.assertIn(501, self.enrolled())
+                self.assertEqual(self.enrolled(), self.merged)
+
     def test_oversized_group_at_the_head_completes(self):
         self.closed(300)
         self.tie(range(1, 301), 600)
@@ -2454,6 +2470,13 @@ class RecentWrapperRetentionTest(unittest.TestCase):
             self.assertEqual(prune.call_count, 2)
         self.assertFalse(stale.exists())
         self.assertEqual(crq.load_queue()["merged_wrappers_pruned_at"], crq.iso(self.clock))
+        # A future record (clock skew, restored state) is stale, not a pause.
+        self.q["merged_wrappers_pruned_at"] = "2099-01-01T00:00:00Z"
+        self.clock += crq.dt.timedelta(minutes=12)
+        with mock.patch.object(crq, "prune_recent_wrappers", return_value=0) as prune:
+            self.tick()
+        prune.assert_called_once()
+        self.assertEqual(self.q["merged_wrappers_pruned_at"], crq.iso(self.clock))
 
     def test_unenrolled_or_referenced_complete_wrappers_are_retained(self):
         self.clock = crq.parse_iso("2026-10-20T00:00:00Z")

@@ -160,12 +160,15 @@ updated since that pass began, until one request covers the head or a head pass
 finds nothing new. The tick's existing forge budget and four-page limit apply
 to every request. Same-second groups never refuse or need an operator. The
 cursor remembers the newest 100 processed PR numbers at the anchor second, and
-a forgotten row is reprocessed and deduplicated, never skipped. A larger group
-at a pass's head second is recorded as wholly seen.
+a forgotten row is reprocessed and deduplicated, never skipped. When more than
+100 PRs share a pass's head second, the next head pass reprocesses every row at
+that second, so a merge updated into it after the first read is still recorded.
+Only strictly newer rows count towards another pass, so the scan still ends.
+Cursors stay under 4 KB by the same reprocessing; only PR numbers of more than
+about 37 digits would refuse.
 
 Ordering assumption: GitHub must keep the order of closed PRs that share one
-`updated_at` second stable between requests. The overlap check and the
-"wholly seen" head record rely on it. If GitHub reordered a same-second group
+`updated_at` second stable between requests. The overlap check relies on it. If GitHub reordered a same-second group
 of more than three rows that straddles a request boundary, an unprocessed row
 could sit above the next window's start and that merge could be missed; the
 five-minute watermark overlap does not cover it. This needs bursts of
@@ -202,7 +205,8 @@ enrollment replays idempotently. Source-head loss stays explicit unsupported deb
 
 Rolling automatic discovery writes one wrapper per tick (about 120 a day on the
 twelve-minute schedule). After a completed scan advances the watermark, the tick
-(at most once an hour, recorded as `merged_wrappers_pruned_at` in queue.json)
+(at most once an hour, recorded as `merged_wrappers_pruned_at` in queue.json; a
+timestamp in the future is treated as stale)
 deletes completed `closed-updated-v1` wrappers whose upper bound is at or below
 the watermark and more than seven days old. Growth is therefore bounded at about
 seven days of wrappers. It keeps partial scans, dry runs and manual or inventory
