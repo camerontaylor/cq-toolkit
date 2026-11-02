@@ -1638,6 +1638,44 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.forge = self.patch(crq, "gh_json", side_effect=self.forge_response)
         self.reset_case()
 
+    def test_large_queue_preparation_does_not_spend_forge_deadline(self):
+        self.q["backfill_admissions"] = [{"payload": "x" * 4096} for _ in range(512)]
+        clock = mock.Mock(return_value=0.0)
+        budget = crq.ForgeBudget(requests=2, seconds=30, clock=clock)
+        atomic = crq.repair_tick.atomic
+
+        def slow_save(path, value):
+            clock.return_value += 40
+            return atomic(path, value)
+
+        def read(args):
+            self.assertEqual(budget.take(), 10)
+            return []
+
+        self.forge.side_effect = read
+        with mock.patch.object(crq.repair_tick, "atomic", side_effect=slow_save):
+            crq.discover_merged(self.q, budget,
+                interval={"after": self.AFTER, "before": self.BEFORE}, recent=True)
+        self.assertTrue(self.q["merged_reconcile"]["complete"])
+        self.assertEqual(budget.remaining, 1)
+        self.assertEqual(self.q["merged_watermark"], self.BEFORE)
+
+    def test_budget_exhaustion_is_not_transport_failure(self):
+        for failure, reason, failures in (
+                (crq.deferred_refresh.RefreshExhausted("exhausted"), "budget-exhausted", 0),
+                (OSError("unavailable"), "transport-failure", 1)):
+            with self.subTest(reason=reason):
+                self.reset_case()
+                self.forge.side_effect = failure
+                log = crq.discover_merged(self.q, crq.ForgeBudget(),
+                    interval={"after": self.AFTER, "before": self.BEFORE}, recent=True)
+                summary = self.q["merged_reconcile"]
+                self.assertEqual(summary["reason"], reason)
+                self.assertEqual(summary["transient_failures"], failures)
+                self.assertFalse(summary["complete"])
+                self.assertEqual(self.q["merged_watermark"], self.AFTER)
+                self.assertIn("reason=" + reason, log[0])
+
     def reset_case(self, count=1):
         self.count = count
         self.q = {"created_at": self.AFTER, "items": [], "starts": [],

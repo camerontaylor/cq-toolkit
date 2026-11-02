@@ -25,6 +25,11 @@ def setUpModule():
 
 
 class SummaryTest(unittest.TestCase):
+    def test_discovery_budget_reason_visible(self):
+        result = adapter.merged_current({"items": [], "merged_reconcile": {
+            "reason": "budget-exhausted", "pages_read": 0, "transient_failures": 0}})
+        self.assertEqual(result["discovery"]["reason"], "budget-exhausted")
+
     def test_legacy_records_do_not_reserve_capacity_or_publish_alerts(self):
         queue = {"items": [{"kind": "promotion", "state": "reviewing"}],
                  "promotion_audit": {"alerts": [{"text": "obsolete"}]}}

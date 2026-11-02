@@ -48,6 +48,12 @@ class ReconcileRefused(Exception):
 
 class PageFailed(Exception):
     """Retryable page read failure; resume without advancing its cursor."""
+    reason = "transport-failure"
+
+
+class BudgetExhausted(PageFailed):
+    """Local aggregate allowance exhausted before a forge request."""
+    reason = "budget-exhausted"
 
 
 def _copy(value):
@@ -306,9 +312,10 @@ def reconcile(effects, page_fetch: Callable[[Optional[str]], Dict[str, Any]],
         try:
             page = page_fetch(cursor)
         except PageFailed as exc:
-            checkpoint["transient_failures"] += 1
+            if not isinstance(exc, BudgetExhausted):
+                checkpoint["transient_failures"] += 1
             checkpoint["steps"].append({"page": checkpoint["pages_read"] + 1,
-                                         "outcome": "transient-failure", "reason": str(exc)[:200],
+                                         "outcome": exc.reason, "reason": str(exc)[:200],
                                          "watermark_advanced": False})
             persist()
             break
@@ -331,6 +338,9 @@ def summarize(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     intents = sum(e.get("disposition") == "intent" for e in inventory)
     return {"version": VERSION, "after": checkpoint["after"], "before": checkpoint["before"],
             "pages_read": checkpoint["pages_read"], "transient_failures": checkpoint["transient_failures"],
+            **({"reason": checkpoint["steps"][-1]["outcome"]}
+               if checkpoint["steps"] and checkpoint["steps"][-1]["outcome"] in
+               ("budget-exhausted", "transport-failure") else {}),
             "complete": checkpoint["complete"], "next_cursor": checkpoint["cursor"],
             # Only complete discovery permits advancing the interval watermark.
             "complete_through": checkpoint["before"] if checkpoint["complete"] else None,

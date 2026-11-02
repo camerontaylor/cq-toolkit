@@ -120,13 +120,18 @@ class ForgeBudget:
     """One aggregate request/deadline allowance for locked recovery reads."""
     def __init__(self, requests=24, seconds=30, clock=None):
         self.clock = clock or time.monotonic
-        self.deadline = self.clock() + seconds
+        self.seconds = seconds
+        self.deadline = None
         self.remaining = requests
 
     def available(self):
-        return self.remaining > 0 and self.clock() < self.deadline
+        return self.remaining > 0 and self.seconds > 0 and (self.deadline is None or self.clock() < self.deadline)
 
     def take(self):
+        # Queue copies and durable checkpoint preparation precede forge work.
+        # Start once, at the first read; never replenish requests or restart it.
+        if self.deadline is None:
+            self.deadline = self.clock() + self.seconds
         if not self.available():
             raise deferred_refresh.RefreshExhausted("aggregate forge budget exhausted; debt retained")
         self.remaining -= 1
@@ -1067,7 +1072,9 @@ def reconcile_merged(q, *, after, before, page_budget, dry_run=False, recent=Fal
     def forge(query):
         try:
             return gh_json(["api", "graphql", "-f", "query=" + query])
-        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, deferred_refresh.RefreshExhausted):
+        except deferred_refresh.RefreshExhausted:
+            raise merged_reconcile.BudgetExhausted("aggregate forge budget exhausted; cursor retained") from None
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
             raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
 
     if wrapper is None:
@@ -1142,7 +1149,9 @@ def recent_merged_page(cursor, after):
         raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
     try:
         rows = gh_json(["api", f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}"])
-    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, deferred_refresh.RefreshExhausted):
+    except deferred_refresh.RefreshExhausted:
+        raise merged_reconcile.BudgetExhausted("aggregate forge budget exhausted; cursor retained") from None
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
         raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
     if not isinstance(rows, list) or len(rows) > 100:
         raise merged_reconcile.ReconcileRefused("invalid closed-PR page")
@@ -1195,9 +1204,11 @@ def discover_merged(q, budget, *, interval=None, recent=False):
             _save_discovery_queue(q, "watermark-save")
         caller.clear()
         caller.update(q)
-        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"]
+        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"
+                + (f" reason={result['reason']}" if result.get("reason") else "")]
     except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
         q["merged_discovery"]["error"] = str(exc)[:200]
+        q["merged_discovery"]["reason"] = exc.reason if isinstance(exc, merged_reconcile.PageFailed) else "reconcile-refused"
         _save_discovery_queue(q, "refusal-debt-save")
         caller.clear()
         caller.update(q)
