@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import {
   QueueBindSchema,
+  QueueRetryResultSchema,
   QueueDigest,
   QueueReferenceSchema,
   QueueStatusSchema,
@@ -77,6 +78,11 @@ const ChunkSchema = CommonPage.extend({
   next_cursor: z.string().nullable(),
 }).strict();
 
+export class QueueReadFault extends Error {
+  constructor(readonly code: 'busy' | 'stale-cursor') {
+    super(code);
+  }
+}
 export class QueueUnsupported extends Error {}
 export class QueueConfigurationError extends Error {}
 
@@ -93,7 +99,7 @@ export function makeConfiguredQueueClient() {
 /** Fixed capability only; alias is operator configured, never a request field. */
 export function sshQueueTransport(alias: string): QueueTransport {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(alias)) throw new Error('invalid queue SSH alias');
-  return (request) =>
+  return (request, options) =>
     new Promise((resolve, reject) => {
       if (Buffer.byteLength(request) > QUEUE_WIRE_BYTES) {
         reject(new Error('oversized queue request'));
@@ -125,10 +131,13 @@ export function sshQueueTransport(alias: string): QueueTransport {
       );
       const chunks: Buffer[] = [];
       let size = 0;
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        reject(new Error('queue delivery unknown: timeout'));
-      }, 45000);
+      const timer = setTimeout(
+        () => {
+          child.kill('SIGKILL');
+          reject(new Error('queue delivery unknown: timeout'));
+        },
+        Math.max(1, Math.min(45000, lifetimeRemaining(options) ?? 45000)),
+      );
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > QUEUE_WIRE_BYTES) {
@@ -155,6 +164,10 @@ export function sshQueueTransport(alias: string): QueueTransport {
 }
 
 export function makeQueueClient(transport: QueueTransport): DeferredQueueClient & {
+  retry(
+    input: QueueReference,
+    expectedReceiptId: string,
+  ): Promise<z.infer<typeof QueueRetryResultSchema>>;
   report(
     input: QueueReference,
     evidenceDir: string,
@@ -196,6 +209,11 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       throw new QueueUnsupported(
         'Compatible Q1 runner and reviewed D1C queue-v1 deployment required',
       );
+    const fault = z
+      .object({ error: z.object({ code: z.enum(['busy', 'stale-cursor']) }).passthrough() })
+      .passthrough()
+      .safeParse(envelope.result);
+    if (fault.success) throw new QueueReadFault(fault.data.error.code);
     return envelope.result;
   }
   function parseStatus(input: QueueReference, value: unknown) {
@@ -223,6 +241,8 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
   const status = async (input: QueueReference, options?: QueueLifetimeOptions) =>
     parseStatus(input, await request('status', input, {}, options));
   return {
+    retry: async (input, expectedReceiptId) =>
+      QueueRetryResultSchema.parse(await request('retry', input, { expectedReceiptId })),
     enqueue: async (input, options) =>
       parseStatus(input, await request('enqueue', input, {}, options)),
     status,

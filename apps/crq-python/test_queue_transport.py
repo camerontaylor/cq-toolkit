@@ -10,6 +10,8 @@ import subprocess
 from types import SimpleNamespace
 from unittest import mock
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # This entire fixture module needs no child processes, including local Git.
@@ -960,6 +962,77 @@ class QueueTransportTests(unittest.TestCase):
                     self.assertEqual(result["reason"]["source"], "queue")
                     self.assertEqual(result["reason"]["category"], "unknown")
                     self.assertFalse(result["reviewed"])
+
+    def retry_fixture(self):
+        self.b = {"kind": "merged-current", "repo": "owner/repo", "pr": 12,
+                  "mergeSha": "b" * 40, "targetSelector": "promoted-main"}
+        self.call("enqueue")
+        item = self.q["items"][0]
+        doc = {"source": item["subject"], "outcome": "rate_limited", "counted": False, "classification": {
+            "outcome": "rate_limited", "counted": False, "exit": 1, "bad_lines": 0,
+            "failure_provenance": {"version": 1, "complete": True, "causes": [
+                {"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}]}}}
+        receipt = receipts.write_receipt(self.tmp.name, doc)
+        item.update(state="blocked", receipt_id=receipt, run=None,
+                    attempts=[{"run_id": "run-1", "receipt_id": receipt, "counted": False}])
+        self.runner.read_pidfile = lambda path: {"pid": 123}
+        self.runner.RUNS = Path(self.tmp.name)
+        (self.runner.RUNS / "run-1").mkdir()
+        (self.runner.RUNS / "run-1" / "exit.json").write_text('{"exit":1}')
+        self.runner.run_liveness = lambda *args: "harvest"
+        self.policy["transient_retries"] = [{"principal": "developer", "requestId": "request-1", "binding": self.b}]
+        return receipt
+
+    def test_retry_durable_replay_and_serialized_competitors(self):
+        receipt = self.retry_fixture()
+        before = copy.deepcopy(self.q["items"][0])
+        lock = threading.Lock()
+        def serialized(fn):
+            with lock:
+                return fn()
+        self.runner.with_lock = serialized
+        with ThreadPoolExecutor(max_workers=2) as callers:
+            results = list(callers.map(lambda _: self.call("retry", expectedReceiptId=receipt), range(2)))
+        self.assertEqual(sum(result["accepted"] for result in results), 1)
+        # Lost response and the second caller both replay the same durable decision.
+        for _ in range(2):
+            self.assertEqual(self.call("retry", expectedReceiptId=receipt)["action"], "already-accepted")
+        item = self.q["items"][0]
+        self.assertEqual(item["subject"], before["subject"])
+        self.assertEqual(item["attempts"], [{**before["attempts"][0], "retry_requested": True}])
+        self.assertEqual(item["state"], "pending")
+
+    def test_author_retry_never_renews_consumed_dispatch(self):
+        self.call("enqueue")
+        self.policy["transient_retries"] = [{"principal": "developer", "requestId": "request-1", "binding": self.b}]
+        self.q["queue_client_requests"]["request-1"]["consumed"] = "a" * 64
+        before = copy.deepcopy(self.q)
+        result = self.call("retry", expectedReceiptId="a" * 64)
+        self.assertEqual(result, {"action": "needs-human", "accepted": False, "reason": "author-dispatch"})
+        self.assertEqual(self.q, before)
+
+    def test_retry_refusals(self):
+        for refusal in ("alive", "ambiguous", "consumed", "permanent", "grant"):
+            with self.subTest(refusal=refusal):
+                self.q = {"items": []}
+                receipt = self.retry_fixture()
+                if refusal in ("alive", "ambiguous"):
+                    self.runner.run_liveness = lambda *args: refusal
+                elif refusal == "consumed":
+                    self.q["queue_client_requests"]["request-1"]["consumed"] = receipt
+                elif refusal == "permanent":
+                    self.q["items"][0]["state"] = "done"
+                else:
+                    self.policy.pop("transient_retries")
+                before = copy.deepcopy(self.q)
+                if refusal == "grant":
+                    with self.assertRaisesRegex(ValueError, "capability denied"):
+                        self.call("retry", expectedReceiptId=receipt)
+                else:
+                    self.assertFalse(self.call("retry", expectedReceiptId=receipt)["accepted"])
+                self.assertEqual(self.q, before)
+                (self.runner.RUNS / "run-1" / "exit.json").unlink()
+                (self.runner.RUNS / "run-1").rmdir()
 
     def test_vendor_provenance_requires_complete_all_causes_proof(self):
         rid, doc = self.receipt()

@@ -377,3 +377,31 @@ No enqueue or forge verification is needed. Use a stable requestId such as
 
 Health has no branch permission requirement. A `health_reads` grant authorizes
 only `health`; it grants no status/report or write authority.
+
+
+### Bounded observation and explicit transient retry (Q3R)
+
+`review.drain` takes `requests` (requestId/binding references), `waitMs` (0–3600000)
+and optional `pollMs` (10–60000, default 1000). It only reads status, returns
+`{action:"observed",accepted:false,unfinished:[...requestIds]}`, and can resume
+with the same references after disconnect. Busy and stale reads are revisited
+on the next poll; status reads carry no cursor. It never starts a tick.
+
+`review.retry` defaults to inspection (`action:"observed"`, `accepted:false`,
+`current` status). An explicit `transient:true` requires `expectedReceiptId`.
+Only a complete typed vendor rate-limit receipt on a blocked merged-current
+item can be retried after the existing ownership probe proves its owner empty.
+Subject, attempts, failure counts and global cooldown remain intact. No credit
+is granted. Author dispatch, consumed evidence, scan and permanent failures,
+and live or ambiguous owners return `action:"needs-human"`.
+
+The exact additional operator policy grant is
+`transient_retries: [{principal, requestId, binding}]`, with an exact queue-v1
+binding. It is required in addition to the existing `write` principal and
+repository/target permissions; read permission alone grants no retry authority.
+No policy is activated by this change.
+
+A successful durable transition returns `action:"accepted",accepted:true`.
+Replay of the same expected receipt (including a lost response or a competing
+caller) returns `action:"already-accepted",accepted:false`. Retain the same
+request ID, binding and expected receipt after an uncertain response.

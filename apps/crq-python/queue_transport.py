@@ -43,7 +43,7 @@ SHA = r"[0-9a-f]{40}"
 # U+FEFF is forbidden.
 REFNAME_FORBIDDEN = re.compile(r"[~^:?*\[\]\\]")
 READ = {"status", "report", "health"}
-WRITE = {"enqueue", "bind", "cancel", "ack"}
+WRITE = {"enqueue", "bind", "cancel", "ack", "retry"}
 
 
 def _pairs(pairs):
@@ -115,6 +115,15 @@ def validate_policy(policy):
             raise ValueError("invalid queue policy allowlist")
     if any(target not in receipts.SELECTORS for target in policy.get("targets", [])):
         raise ValueError("invalid queue policy target")
+    grants = policy.get("transient_retries", [])
+    if type(grants) is not list:
+        raise ValueError("invalid transient retry grants")
+    for grant in grants:
+        if (type(grant) is not dict or set(grant) != {"principal", "requestId", "binding"}
+                or not isinstance(grant["principal"], str) or not grant["principal"]
+                or not _match(TOKEN, grant["requestId"])
+                or binding(grant["binding"])["repo"] != policy["repo"]):
+            raise ValueError("invalid transient retry grant")
     grants = policy.get("reconciled_reads", [])
     if type(grants) is not list:
         raise ValueError("invalid reconciled read grants")
@@ -352,7 +361,7 @@ def decode(raw):
         if request["states"] is not None:
             request["states"] = sorted(set(request["states"]))
         return request
-    extra = {"bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
+    extra = {"retry": {"expectedReceiptId"}, "bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
              "ack": {"receiptId", "sha256", "chunks", "bytes"}}.get(op, set())
     if op not in READ | WRITE or set(request) != {"v", "op", "requestId", "binding"} | extra:
         raise ValueError("invalid queue operation/fields")
@@ -362,6 +371,8 @@ def decode(raw):
     if op == "bind" and (type(request["pr"]) is not int or request["pr"] <= 0 or
                          request["mergeSha"] is not None and not _match(SHA, request["mergeSha"])):
         raise ValueError("invalid PR binding")
+    if op == "retry" and not _match(r"[0-9a-f]{64}", request["expectedReceiptId"]):
+        raise ValueError("retry requires expected receipt")
     return request
 
 
@@ -555,6 +566,9 @@ def authorize(req, principal, policy):
         raise ValueError("queue capability denied")
     if op == "health" and {"principal": principal, "binding": b} not in policy.get("health_reads", []):
         raise ValueError("health capability denied")
+
+    if op == "retry" and {"principal": principal, "requestId": rid, "binding": b} not in policy.get("transient_retries", []):
+        raise ValueError("transient retry capability denied")
     if op == "inventory" and {"principal": principal, "binding": b} not in policy.get("inventory_reads", []):
         raise ValueError("inventory capability denied")
     if op not in {"inventory", "health"} and b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
@@ -638,6 +652,48 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             entries[rid] = entry
         if entry is None:
             raise ValueError("unknown queue request")
+        if op == "retry":
+            expected = req["expectedReceiptId"]
+            result = {"action": "needs-human", "accepted": False, "reason": "not-transient"}
+            mapping = q.get("merged_current_requests", {}).get(rid, {})
+            items = [i for i in q.get("items", []) if i.get("id") == mapping.get("item")]
+            if b["kind"] == "deferred-author":
+                result["reason"] = "author-dispatch"
+            elif len(items) == 1:
+                item = items[0]
+                if any(a.get("receipt_id") == expected and a.get("retry_requested") is True
+                       for a in item.get("attempts", [])):
+                    result = {"action": "already-accepted", "accepted": False, "reason": "durable-replay"}
+                elif entry.get("consumed") or item.get("consumed"):
+                    result["reason"] = "consumed"
+                elif (item.get("receipt_id") == expected and item.get("kind") == receipts.KIND
+                      and item.get("state") == "blocked" and not entry.get("reason")):
+                    document = _ReceiptSnapshot(receipt_root, expected).document
+                    run = item.get("run")
+                    attempts = item.get("attempts", [])
+                    if not attempts or attempts[-1].get("receipt_id") != expected:
+                        return _encode(req, {**result, "reason": "ambiguous-lineage"})
+                    if run is None and attempts and attempts[-1].get("receipt_id") == expected:
+                        run = {"run_id": attempts[-1].get("run_id")}
+                        if _match(TOKEN, run["run_id"]) and hasattr(runner, "RUNS") and hasattr(runner, "read_pidfile"):
+                            identity = runner.read_pidfile(runner.RUNS / run["run_id"]) or {}
+                            run["pid"] = identity.get("pid")
+                    if document.get("source") != item.get("subject") or not _vendor_rate_limit(document):
+                        result["reason"] = "not-transient"
+                    elif (not isinstance(run, dict) or not _match(TOKEN, run.get("run_id"))
+                          or not hasattr(runner, "RUNS") or not hasattr(runner, "run_liveness")):
+                        result["reason"] = "ambiguous-owner"
+                    else:
+                        rdir = runner.RUNS / run["run_id"]
+                        if not (rdir / "exit.json").is_file() or runner.run_liveness(rdir, item, run, True) != "harvest":
+                            result["reason"] = "live-or-ambiguous-owner"
+                        else:
+                            attempts[-1]["retry_requested"] = True
+                            item.update(state="pending", run=None)
+                            item.pop("receipt_id", None)
+                            result = {"action": "accepted", "accepted": True, "reason": "vendor-rate-limited"}
+            runner.save_queue(q)
+            return _encode(req, result)
         if op == "bind":
             if b["kind"] != "deferred-author" or entry["state"] == "cancelled":
                 raise ValueError("intent cannot be bound")

@@ -74,6 +74,8 @@ import type { ReviewAddressInput } from './address.js';
 import { FindingSchema } from './findings.js';
 import {
   QueueEnqueueInputSchema,
+  QueueRetryInputSchema,
+  QueueDrainInputSchema,
   QueueReferenceSchema,
   QueueHealthReferenceSchema,
   QueueReportInputSchema,
@@ -596,6 +598,16 @@ export const registry: OpRegistryEntry[] = [
       (await import('./addressMany.js')).makeReviewAddressMany() as Op<unknown, unknown>,
   },
   // ./queue.js owns queue-v1; ./internal/queueEvidence.js is isolated from findings v1.
+  {
+    name: 'review.retry',
+    inputSchema: QueueRetryInputSchema,
+    importer: async () => (await import('./queue.js')).makeQueueOps().retry as Op<unknown, unknown>,
+  },
+  {
+    name: 'review.drain',
+    inputSchema: QueueDrainInputSchema,
+    importer: async () => (await import('./queue.js')).makeQueueOps().drain as Op<unknown, unknown>,
+  },
   {
     name: 'review.enqueue',
     inputSchema: QueueEnqueueInputSchema,
