@@ -1248,9 +1248,9 @@ def rolling_discovery_interval(q, config):
 
 
 RECENT_PAGE = 100
-RECENT_OVERLAP = 2
+RECENT_OVERLAP = 20
 RECENT_MAX_TIES = 100
-RECENT_ANCHORS = 5
+RECENT_ANCHORS = 40
 RECENT_LOOKAHEAD = 25
 RECENT_VERSION = 2
 RECENT_FIELDS = {"v", "n", "p", "f", "fs", "fa", "h", "hs", "ha", "o", "a", "x", "k", "c"}
@@ -1317,20 +1317,28 @@ def recent_merged_page(cursor, after):
     updated_at: a comment can advance updated_at while the PR keeps its old
     position (live #750 sorted at its merge time, 76 minutes below its
     updated_at). Rows are therefore never refused for order, and updated_at
-    is only data. Each continuation window must contain one of the last rows
-    passed, unchanged (number and updated_at), and resumes after it: removals
-    above shift that row and its successors together, and a changed row moves
-    to the top. Without such an anchor the window backs off, and at offset
-    zero the pass re-reads from the top; repeats deduplicate.
+    is only data. Each continuation window starts RECENT_OVERLAP rows above
+    the last row passed and must contain one of the last RECENT_ANCHORS rows
+    passed, unchanged (number and updated_at): removals above shift those rows
+    and their successors together, and a changed row moves to the top. Every
+    window row not remembered is processed, including rows above the resume
+    point, so a same-sort-key group of up to about RECENT_OVERLAP rows may be
+    reordered between requests (repeats deduplicate). Larger groups reordered
+    across a request boundary still rely on GitHub's stable tie order. Without
+    an anchor the window backs off, and at offset zero the pass re-reads from
+    the top.
 
-    A pass ends after RECENT_LOOKAHEAD consecutive rows at or below its floor,
-    so nearby disorder is still read. This relies on a merge setting the sort
-    key at or after merged_at, and on a key never decreasing (both match live
-    data); rows below such a run cannot hold a merge inside the interval. A
-    pass that needed more than one request is followed by a head pass over
-    rows at or above the newest updated_at its first request saw, until one
-    request covers the head or a head pass finds nothing strictly newer. A
-    head-second group too large to remember is reprocessed, never assumed seen.
+    The stop rule and head pass rely on three properties that match live data:
+    a sort key never decreases (A1), a merge sets it at or after merged_at
+    (A2), and the returned updated_at is at or after it (A3). By A3 one row
+    updated at or before the floor bounds every key below it, and by A2 no
+    merge below it is inside the interval. A pass ends after RECENT_LOOKAHEAD
+    consecutive such rows (or the list end): the margin covers short stretches
+    where A3 fails. A pass that needed more than one request is followed by a
+    head pass over rows at or above the newest updated_at its first request
+    saw, until one request covers the head or a head pass finds nothing
+    strictly newer. A head-second group too large to remember is reprocessed,
+    never assumed seen.
     """
     state = _recent_state(cursor, after)
     size, page, start = _recent_window(state["o"])
@@ -1370,23 +1378,21 @@ def recent_merged_page(cursor, after):
     head_seen, head_all = set(state["hs"]), state["ha"]
     records = []
     ended = len(rows) < size
-    for row in rows[cut + 1:]:
+
+    def below(row):
+        return row["updated_at"] < floor or (row["updated_at"] == floor and state["p"] == 0)
+
+    def take(row):
+        # Idempotent per row: a repeat classifies and deduplicates the same way.
+        nonlocal head_seen, head_all
         updated, number = row["updated_at"], row["number"]
-        passed = (passed + [[number, updated]])[-RECENT_ANCHORS:]
-        if updated < floor or (updated == floor and state["p"] == 0):
-            nxt["x"] += 1
-            if nxt["x"] >= RECENT_LOOKAHEAD:
-                ended = True
-                break
-            continue
-        nxt["x"] = 0
         if updated == head and not head_all:
             head_seen.add(number)
             if len(head_seen) > RECENT_MAX_TIES:
                 head_seen, head_all = set(), True
         if state["p"] and updated == floor:
             if number in seen:
-                continue
+                return
             if not state["fa"]:
                 nxt["c"] += 1
         else:
@@ -1395,6 +1401,23 @@ def recent_merged_page(cursor, after):
             records.append({"number": number, "mergedAt": row["merged_at"],
                 "mergeCommit": {"oid": row.get("merge_commit_sha")},
                 "headRefOid": (row.get("head") or {}).get("sha")})
+
+    # Rows above the resume point that are not remembered may be same-key rows
+    # GitHub reordered since the last request: process them too.
+    remembered = {tuple(a) for a in passed}
+    for row in rows[:cut + 1]:
+        if (row["number"], row["updated_at"]) not in remembered and not below(row):
+            take(row)
+    for row in rows[cut + 1:]:
+        passed = (passed + [[row["number"], row["updated_at"]]])[-RECENT_ANCHORS:]
+        if below(row):
+            nxt["x"] += 1
+            if nxt["x"] >= RECENT_LOOKAHEAD:
+                ended = True
+                break
+            continue
+        nxt["x"] = 0
+        take(row)
     if ended:
         if state["k"] == 0 or (state["p"] > 0 and nxt["c"] == 0):
             return {"records": records, "has_next_page": False, "next_cursor": None}

@@ -1586,17 +1586,17 @@ class CurrentTest(unittest.TestCase):
         self.assertTrue(forge.call_args.args[0][1].endswith("per_page=100&page=1"))
         self.assertEqual(len(page["records"]), 100)
         cursor = json.loads(page["next_cursor"])
-        self.assertEqual(cursor["a"], [[r["number"], r["updated_at"]] for r in rows[-5:]])
-        self.assertEqual((cursor["o"], cursor["h"]), (97, rows[0]["updated_at"]))
-        # The continuation resumes after the last passed row found in it.
-        with mock.patch.object(crq, "gh_json", return_value=rows[97:]) as forge:
+        self.assertEqual(cursor["a"], [[r["number"], r["updated_at"]] for r in rows[-40:]])
+        self.assertEqual((cursor["o"], cursor["h"]), (79, rows[0]["updated_at"]))
+        # The continuation overlaps 20 rows and resumes after the last row passed.
+        with mock.patch.object(crq, "gh_json", return_value=rows[79:]) as forge:
             page = crq.recent_merged_page(page["next_cursor"], "2026-10-27T00:00:00Z")
-        self.assertTrue(forge.call_args.args[0][1].endswith("per_page=97&page=2"))
+        self.assertTrue(forge.call_args.args[0][1].endswith("per_page=79&page=2"))
         self.assertEqual(page["records"], [])
         head = page["next_cursor"]
         self.assertEqual(json.loads(head)["p"], 1)
         # A window holding no passed row backs off; so does a changed anchor.
-        changed = [{**r, "updated_at": "2026-10-30T00:00:00Z"} for r in rows[97:]]
+        changed = [{**r, "updated_at": "2026-10-30T00:00:00Z"} for r in rows[79:]]
         for window in ([], changed):
             with self.subTest(window=len(window)), mock.patch.object(crq, "gh_json", return_value=window):
                 gap = crq.recent_merged_page(json.dumps({**cursor, "n": 5}, separators=(",", ":")),
@@ -2420,9 +2420,10 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.hooks.pop(len(self.calls), lambda: None)()
         self.calls.append((size, page))
         # GitHub sorts by its own key (_sort when set), not the returned field.
-        ordered = sorted(self.rows.values(), key=lambda r: (r.get("_sort", r["updated_at"]), r["number"]),
-                         reverse=True)
-        return [{k: v for k, v in copy.deepcopy(r).items() if k != "_sort"}
+        # Equal keys break by _tie when set, so a test can reorder them.
+        ordered = sorted(self.rows.values(), key=lambda r: (r.get("_sort", r["updated_at"]),
+                                                            r.get("_tie", r["number"])), reverse=True)
+        return [{k: v for k, v in copy.deepcopy(r).items() if k not in ("_sort", "_tie")}
                 for r in ordered[(page - 1) * size:page * size]]
 
     def move(self, number):
@@ -2482,7 +2483,7 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.closed(250)
         self.bump(230)()
         self.bump(120)()
-        self.assertIn("complete=True", self.tick()[0])
+        self.until_complete()
         self.assertEqual(self.enrolled(), self.merged)
 
     def test_stale_sort_position_across_a_page_boundary(self):
@@ -2491,7 +2492,7 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.closed(250)
         self.bump(150)()
         self.hooks[1] = self.bump(151, "2026-10-03T00:00:05Z")
-        self.assertIn("complete=True", self.tick()[0])
+        self.until_complete()
         self.assertEqual(self.enrolled(), self.merged)
 
     def test_stale_row_at_the_anchor(self):
@@ -2501,7 +2502,7 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         for n in (151, 152, 153):
             self.bump(n, "2026-10-02T23:00:00Z")()
         self.hooks[1] = lambda: (self.bump(151)(), self.reopen(152)())
-        self.assertIn("complete=True", self.tick()[0])
+        self.until_complete()
         self.assertEqual(self.enrolled(), self.merged)
 
     def test_stale_row_inside_a_same_second_group(self):
@@ -2512,6 +2513,17 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.bump(180)()
         self.hooks[1] = lambda: (self.bump(120)(), self.move(200)())
         self.until_complete()
+        self.assertEqual(self.enrolled(), self.merged)
+
+    def test_same_second_merges_swapping_across_a_request_boundary(self):
+        # Independent review (#829): merge-queue merges #151 and #150 share a
+        # second and straddle the page boundary (offsets 99 and 100). On the
+        # next request GitHub returns #150 above #151, the last row read.
+        self.closed(250)
+        self.tie((150, 151), 150)
+        self.hooks[1] = lambda: self.rows[150].update(_tie=10 ** 6)
+        self.until_complete()
+        self.assertIn(150, self.enrolled())
         self.assertEqual(self.enrolled(), self.merged)
 
     def test_single_page_scan_stays_one_request(self):
@@ -2528,7 +2540,7 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.closed(250, unmerged={200})
         self.hooks[1] = self.reopen(200)
         self.hooks[2] = self.move(10)
-        self.assertIn("complete=True", self.tick()[0])
+        self.until_complete()
         self.assertEqual(self.enrolled(), self.merged)
         self.assertEqual(self.q["merged_watermark"], self.BEFORE)
         self.assertNotIn((100, 2), self.calls)
@@ -2552,14 +2564,15 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.assertEqual(self.q["merged_watermark"], self.BEFORE)
 
     def test_large_reopen_burst_backs_off_to_a_verified_window(self):
-        self.closed(250, unmerged=set(range(191, 201)))
-        # Ten reopens of already-read rows exceed the overlap: the window at
-        # offset 97 would begin at #143, past unread #150..#144, so it backs off.
-        self.hooks[1] = lambda: [self.reopen(n)() for n in range(191, 201)]
+        self.closed(250, unmerged=set(range(171, 201)))
+        # Thirty reopens of already-read rows exceed the 20-row overlap: the
+        # window at offset 79 would begin at #141, past unread #150..#142 and
+        # with no remembered row in it, so it backs off.
+        self.hooks[1] = lambda: [self.reopen(n)() for n in range(171, 201)]
         self.assertIn("complete=False", self.tick()[0])
-        self.assertEqual(self.calls[:3], [(100, 1), (97, 2), (100, 1)])
+        self.assertEqual(self.calls[:3], [(100, 1), (79, 2), (100, 1)])
         self.assertEqual(self.enrolled(), set())
-        self.assertIn("complete=True", self.tick()[0])
+        self.until_complete()
         self.assertEqual(self.enrolled(), self.merged)
         self.assertEqual(self.q["merged_watermark"], self.BEFORE)
 

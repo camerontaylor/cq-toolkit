@@ -159,29 +159,48 @@ fixture `fixtures/closed-page-20261103.json` keeps that page. The scan
 therefore never refuses rows for their order, and uses `updated_at` only as
 data:
 
-- Continuation is by row identity, not by time or bare offset. The cursor
-  keeps the last five rows passed, by number and `updated_at`. The next window
-  must contain one of them unchanged, and the scan resumes after it. A reopen
-  above shifts that row and its successors together; a changed row moves to
-  the top. Without such an anchor the window backs off, and at offset zero the
-  pass re-reads from the top. Repeats deduplicate.
+- Continuation is by row identity, not by time or bare offset. Each
+  continuation window starts 20 rows above the last row passed. The cursor
+  keeps the last 40 rows passed, by number and `updated_at`, and the window
+  must contain one of them unchanged. A reopen above shifts those rows and
+  their successors together; a changed row moves to the top. Every window row
+  that is not remembered is processed, including rows above the resume point.
+  So PRs sharing a sort key (for example a merge-queue batch merged in one
+  second) may come back in a different order on the next request, as long as
+  the group is no larger than the overlap. Without a remembered row the window
+  backs off, and at offset zero the pass re-reads from the top. Repeats
+  deduplicate.
 - A pass ends after 25 consecutive rows updated at or before its floor, or at
-  the end of the list. Out-of-order rows near the boundary are still read.
+  the end of the list. Under A3 below, one such row is enough; the other 24
+  guard against short stretches where A3 fails.
 - A pass that needed more than one request is followed by a head pass over
   rows at or above the newest `updated_at` its first request saw. Head passes
   repeat until one request covers the head or a pass finds nothing strictly
   newer. When more than 100 PRs share that second, the next head pass
   reprocesses every row at it, never assuming them seen.
 - The tick's forge budget and four-page limit apply to every request. Cursors
-  stay under 4 KB; only PR numbers of more than about 37 digits would refuse.
+  stay under 4 KB; only PR numbers of more than about 70 digits would refuse.
+  The 20-row overlap makes a multi-request scan cost about a quarter more
+  requests, so a 250-PR catch-up may take a second tick. The usual one-page
+  scan is still one request.
 
-Remaining assumptions, both consistent with the live data: a PR's sort key
-never decreases, and a merge sets it at or after `merged_at`. Rows below 25
-consecutive rows at or before the floor therefore cannot hold a merge inside
-the interval. If GitHub ever set the sort key before the merge, a merge sitting
-more than 25 rows below the boundary could be missed. Offline, that took
-same-second groups hundreds of rows wide. Replay a suspected miss with the
-manual `reconcile-merged` command.
+Remaining assumptions. The live list (469 closed PRs, checked by the #829
+review) is consistent with all four:
+
+- A1: a PR's sort key never decreases.
+- A2: a merge sets it at or after `merged_at`.
+- A3: the returned `updated_at` is at or after the sort key. The stop rule and
+  the head pass rely on it: a row updated at or before the floor bounds every
+  key below it, so by A2 nothing below holds a merge inside the interval.
+- Tie order: PRs sharing a sort key keep their relative order between
+  requests when the group is larger than the 20-row overlap and straddles a
+  request boundary. Smaller groups may reorder freely. The live order was
+  identical across page sizes.
+
+If A2 or A3 failed for more than 25 rows, or GitHub reshuffled a larger
+same-second group across a request boundary, a merge could be missed. Offline,
+that needed same-key groups of tens to hundreds of rows. Replay a suspected miss
+with the manual `reconcile-merged` command.
 
 An offset cursor (f25b328c) or a first-keyset cursor (#822) left by an earlier
 runner restarts the scan, and already-recorded sources deduplicate. Historical
