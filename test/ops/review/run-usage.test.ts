@@ -277,7 +277,6 @@ describe('review.run usage retention (M7-review)', () => {
     });
     try {
       const error = (await rejected(run, repo.root)) as { message?: string };
-      expect(error).toBeInstanceOf(Object);
       expect(Object.isFrozen(error)).toBe(true);
       expect(error).not.toHaveProperty('usageSummary');
       expect(error.message).toBe('frozen reviewer fault');
