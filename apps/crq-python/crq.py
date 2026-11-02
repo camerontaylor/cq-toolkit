@@ -851,19 +851,36 @@ def build_synthetic(item: Dict[str, Any], target: str) -> Tuple[str, str, int]:
 CURRENT_PATH_CAP = 1000
 
 
+def git_z(*args: str) -> List[str]:
+    """NUL-delimited git output read as bytes, so paths stay exact.
+
+    Text mode would translate \\r and \\r\\n, collapsing distinct paths.
+    surrogateescape keeps undecodable bytes distinct and round-trips them to git.
+    """
+    p = subprocess.run(["git", *args], cwd=CLONE, capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args[:5])} … exit {p.returncode}: "
+                           f"{p.stderr.decode('utf-8', 'replace').strip()[:400]}")
+    out = p.stdout
+    return [f.decode("utf-8", "surrogateescape") for f in out.rstrip(b"\0").split(b"\0")] if out else []
+
+
 def oversized_current_paths(names: List[str]) -> List[Dict[str, Any]]:
     """Bounded, truthful manifest for a source over CURRENT_PATH_CAP paths.
 
     Nothing is scanned or selected, so the subject is unsupported and never
-    claims coverage. The first CAP sorted source paths are retained; the reason
-    names the full count and the digest of every sorted source path, so the
-    omission is explicit and distinct sources never share a scope identity.
+    claims coverage. The first CAP sorted source paths are retained. The first
+    row states the full count and the digest of every sorted source path, so
+    the omission is explicit and distinct sources never share a scope identity;
+    later rows refer to it.
     """
-    reason = (f"source path count {len(names)} exceeds cap {CURRENT_PATH_CAP}; not scanned; "
-              f"first {CURRENT_PATH_CAP} sorted source paths listed; all-source-paths sha256 "
-              f"{review_receipt.digest(names)}")
+    first = (f"source path count {len(names)} exceeds cap {CURRENT_PATH_CAP}; not scanned; "
+             f"first {CURRENT_PATH_CAP} sorted source paths listed; all-source-paths sha256 "
+             f"{review_receipt.digest(names)}")
+    rest = "source path count exceeds cap; not scanned; see first manifest row"
     return [{"source_path": name, "path": name, "resolution": "same-path-current",
-             "disposition": "unsupported", "reason": reason} for name in names[:CURRENT_PATH_CAP]]
+             "disposition": "unsupported", "reason": rest if n else first}
+            for n, name in enumerate(names[:CURRENT_PATH_CAP])]
 
 
 def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
@@ -872,12 +889,10 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
         raise NotReady("not-yet-promoted: source merge is not an ancestor of selected target")
     # An explicit first parent is required. Never guess at missing source history.
     pre = git("rev-parse", f"{merge}^1")
-    source = run(["git", "diff", "--name-only", "--no-renames", "-z", pre, merge], cwd=CLONE).stdout
-    names = sorted(set(source.rstrip("\0").split("\0"))) if source else []
+    names = sorted(set(git_z("diff", "--name-only", "--no-renames", "-z", pre, merge)))
     if len(names) > CURRENT_PATH_CAP:
         return oversized_current_paths(names)
-    raw = run(["git", "diff", "--name-status", "-M50%", "-z", merge, target], cwd=CLONE).stdout
-    fields = raw.rstrip("\0").split("\0") if raw else []
+    fields = git_z("diff", "--name-status", "-M50%", "-z", merge, target)
     renames = {}
     removed = []
     added = []
@@ -916,8 +931,7 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
             row.update(disposition="unsupported", reason="path cannot be safely scanned")
             result.append(row)
             continue
-        ls = run(["git", "ls-tree", "-z", target, "--", ":(literal)" + path], cwd=CLONE).stdout
-        entries = [e for e in ls.split("\0") if e]
+        entries = [e for e in git_z("ls-tree", "-z", target, "--", ":(literal)" + path) if e]
         if not entries:
             row.update(disposition="deleted", reason="no current path or evidenced rename")
         elif len(entries) != 1:

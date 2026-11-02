@@ -985,6 +985,17 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual(next(r for r in rows if r["source_path"] == "affected.py")["reason"],
                          "non-regular file; never dereferenced")
 
+    def source_names(self):
+        out = subprocess.run(["git", "diff", "--name-only", "--no-renames", "-z", self.merge + "^1", self.merge],
+                             cwd=self.repo, check=True, capture_output=True).stdout
+        return sorted(name.decode("utf-8", "surrogateescape") for name in out.rstrip(b"\0").split(b"\0"))
+
+    def new_source(self, message):
+        self.merge = self.commit(message)
+        self.info["mergeCommit"]["oid"] = self.merge
+        self.g("update-ref", "refs/remotes/origin/main", self.merge)
+        return self.source_names()
+
     def oversized_source(self):
         """Source of 9 cheap paths: empty, deleted, symlinked and unsupported names."""
         for n in range(4):
@@ -994,39 +1005,58 @@ class CurrentTest(unittest.TestCase):
         (self.repo / "affected.py").unlink()
         (self.repo / "rename.py").unlink()
         self.write("unrelated.py", "")
-        self.merge = self.commit("many tiny, empty, deleted and unsupported paths")
-        self.info["mergeCommit"]["oid"] = self.merge
-        self.g("update-ref", "refs/remotes/origin/main", self.merge)
-        return sorted(self.g("diff", "--name-only", "--no-renames", "-z", self.merge + "^1",
-                             self.merge).rstrip("\0").split("\0"))
+        return self.new_source("many tiny, empty, deleted and unsupported paths")
 
-    def test_oversized_source_path_count_is_unsupported_before_per_path_work(self):
-        names = self.oversized_source()
-        self.assertEqual(len(names), 9)
-        item = self.enroll()
-        real_git = crq.git
+    def assert_oversized_without_per_path_work(self, item, cap):
+        real_git, real_git_z = crq.git, crq.git_z
         def no_per_path_git(*args, **kw):
-            self.assertNotIn(args[0], ("ls-tree", "cat-file"))
             self.assertFalse(args[0] == "rev-parse" and ":" in args[-1], args)
             return real_git(*args, **kw)
-        with mock.patch.object(crq, "CURRENT_PATH_CAP", 4), \
+        def source_listing_only(*args):
+            self.assertEqual(args[:4], ("diff", "--name-only", "--no-renames", "-z"),
+                             "rename diff and ls-tree are skipped for an oversized source")
+            return real_git_z(*args)
+        with mock.patch.object(crq, "CURRENT_PATH_CAP", cap), \
              mock.patch.object(crq, "git", side_effect=no_per_path_git), \
+             mock.patch.object(crq, "git_z", side_effect=source_listing_only) as listing, \
              mock.patch.object(crq, "path_exists", side_effect=AssertionError("per-path work")):
             self.assertIsNone(self.plan_item(item))
-        rows = item["capture"]["paths"]
-        self.assertEqual([r["source_path"] for r in rows], names[:4])
-        reason = ("source path count 9 exceeds cap 4; not scanned; first 4 sorted source paths listed; "
-                  "all-source-paths sha256 " + crq.review_receipt.digest(names))
-        self.assertEqual(rows, [{"source_path": n, "path": n, "resolution": "same-path-current",
-                                 "disposition": "unsupported", "reason": reason} for n in names[:4]])
+        self.assertEqual(listing.call_count, 1)
         self.assertEqual(item["state"], "unsupported")
         self.assertEqual(self.document(item)["outcome"], "unsupported")
         self.assertFalse(self.document(item)["counted"])
         self.assertNotIn("base", item["capture"])
         self.assertEqual(self.q["starts"], [])
         self.assertFalse((self.repo / ".git" / "refs" / "crq").exists())
-        self.assertEqual(item["capture"]["scope_digest"], crq.review_receipt.digest(rows))
+        self.assertEqual(item["capture"]["scope_digest"], crq.review_receipt.digest(item["capture"]["paths"]))
         self.assertEqual(item["capture"]["equivalence"], crq.review_receipt.current_equivalence(item["capture"]))
+        return item["capture"]["paths"]
+
+    def oversized_rows(self, names, cap):
+        first = (f"source path count {len(names)} exceeds cap {cap}; not scanned; first {cap} sorted "
+                 "source paths listed; all-source-paths sha256 " + crq.review_receipt.digest(names))
+        rest = "source path count exceeds cap; not scanned; see first manifest row"
+        return [{"source_path": n, "path": n, "resolution": "same-path-current",
+                 "disposition": "unsupported", "reason": rest if i else first} for i, n in enumerate(names[:cap])]
+
+    def test_oversized_source_path_count_is_unsupported_before_per_path_work(self):
+        names = self.oversized_source()
+        self.assertEqual(len(names), 9)
+        rows = self.assert_oversized_without_per_path_work(self.enroll(), 4)
+        self.assertEqual(rows, self.oversized_rows(names, 4))
+
+    def test_carriage_return_and_newline_path_variants_count_exactly_against_cap(self):
+        for name in ("crlf\r.py", "crlf\n.py", "crlf\r\n.py", "plain.py"):
+            self.write(name, "distinct path\n")
+        names = self.new_source("paths differing only by CR/LF")
+        self.assertEqual(names, sorted(["crlf\n.py", "crlf\r.py", "crlf\r\n.py", "plain.py"]))
+        # Text-mode decoding collapsed these to two names, under a cap of 3, and dispatched plain.py.
+        rows = self.assert_oversized_without_per_path_work(self.enroll(), 3)
+        self.assertEqual(rows, self.oversized_rows(names, 3))
+        with mock.patch.object(crq, "CURRENT_PATH_CAP", 4):
+            exact = crq.current_paths(self.merge, self.merge)
+        self.assertEqual([r["source_path"] for r in exact], names)
+        self.assertEqual([r["disposition"] for r in exact], ["unsupported"] * 3 + ["included"])
 
     def test_source_at_path_count_cap_is_scanned_normally(self):
         names = self.oversized_source()
