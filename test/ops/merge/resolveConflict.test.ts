@@ -1377,12 +1377,19 @@ describe('forward governed invocation correlation (M5b5)', () => {
       },
     );
     expect(outcome.outcome).toBe('completed'); // the op maps non-complete honestly, it does not throw
+    // stopReason 'aborted' maps FIRST (§2.9 row f): the settled value is
+    // indeterminate — neither success nor failure.
+    if (outcome.outcome === 'completed') {
+      expect(outcome.value.status).toBe('indeterminate');
+    }
     expect(driver.invocations).toHaveLength(1);
     expect(firstInvocation(driver).correlation).toEqual({
       workId: 'run:j3:2',
       runId: 'run',
       role: 'fixer',
     });
-    expect(firstInvocation(driver).correlation?.role).not.toBe('merge.resolveConflict');
+    // Direct: the missing role falls back to the shared helper's 'fixer'
+    // default, never the op's own role.
+    expect(firstInvocation(driver).correlation?.role).toBe('fixer');
   });
 });
