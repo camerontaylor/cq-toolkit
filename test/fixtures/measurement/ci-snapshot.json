@@ -25,7 +25,7 @@
       "name": "static",
       "status": "completed",
       "conclusion": "success",
-      "run_count": 1,
+      "run_attempt": 1,
       "logs_url": "https://api.github.com/repos/camerontaylor/cq-toolkit/actions/runs/501/logs"
     },
     {
@@ -34,7 +34,7 @@
       "name": "verify",
       "status": "completed",
       "conclusion": "failure",
-      "run_count": 2,
+      "run_attempt": 2,
       "logs_url": "https://api.github.com/repos/camerontaylor/cq-toolkit/actions/runs/502/logs",
       "log_evidence": "unknown",
       "logs_expired": true

@@ -8,7 +8,7 @@ pagination cursors. Read-only; no mutation, no credentials beyond the caller's
 existing `gh` auth, and no verdict interpretation here — consumers decide.
 Every endpoint below was verified against the live API at authoring time;
 there is no collection at `actions/runs/{id}/attempts` (it 404s), so attempts
-are read per attempt number.
+are enumerated from each run's `run_attempt` field.
 
 ## Recipe
 
@@ -24,20 +24,19 @@ the same rows as long as the underlying data has not changed.
    ```
 
 2. **Run attempts** for each run id from step 1: the API has no attempts
-   listing; attempt numbers are read from each run's `run_count` (attempt
-   numbers are `1..run_count`), and each attempt is fetched individually:
+   listing; the workflow-run object carries `run_attempt` (its latest attempt
+   number), so attempt numbers are enumerated as `1..run_attempt`:
 
    ```bash
    gh api "repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}"
    ```
 
-3. **Jobs per run attempt** (`actions/runs/{id}/attempts/{n}/jobs`).
-   `filter=all` widens the window to include executions GitHub would otherwise
-   collapse across older attempts of the same run, so the page reflects the
-   attempt's own executions rather than a filtered subset:
+3. **Jobs per run attempt** (`actions/runs/{id}/attempts/{n}/jobs`,
+   attempt-scoped, so no filter is needed — the page already holds only that
+   attempt's jobs):
 
    ```bash
-   gh api "repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=100&filter=all" \
+   gh api "repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=100" \
      --paginate --slurp
    ```
 
@@ -61,12 +60,12 @@ the same rows as long as the underlying data has not changed.
 Each export records a manifest so any snapshot can be re-derived byte-for-byte
 at the field level:
 
-| field        | meaning                                                                                                           |
-| ------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `fetched_at` | UTC instant of the export (ISO 8601)                                                                              |
-| `head_sha`   | the commit the snapshot covers                                                                                    |
-| `attempt`    | per run id: the attempt numbers fetched, each as `actions/runs/{id}/attempts/{n}` objects keyed by attempt number |
-| `pagination` | last `page` cursor observed per endpoint in step order 1, 3, 4, 5                                                 |
+| field        | meaning                                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `fetched_at` | UTC instant of the export (ISO 8601)                                                                       |
+| `head_sha`   | the commit the snapshot covers                                                                             |
+| `attempt`    | per run id: attempt objects keyed by attempt number, each as fetched from `actions/runs/{id}/attempts/{n}` |
+| `pagination` | last `page` cursor observed per endpoint in step order 1, 3, 4, 5                                          |
 
 An empty page result at cursor N means the endpoint was exhausted at N; record
 N even when it is 1 so a re-export does not under- or over-read.
