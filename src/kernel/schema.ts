@@ -61,6 +61,13 @@ import type {
   TaskFinishedPayload,
   WriteObservationJournalEvent,
   WriteObservationPayload,
+  AcceptancePayload,
+  DispositionPayload,
+  FindingDispositionJournalEvent,
+  FindingFingerprint,
+  HeadAcceptanceJournalEvent,
+  ReviewObservedJournalEvent,
+  ReviewObservedPayload,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -885,6 +892,112 @@ export const WriteObservationJournalEventSchema: z.ZodType<WriteObservationJourn
     taskId: z.string().min(1).nullable(),
     attempt: z.number().int().min(1).nullable(),
     payload: WriteObservationPayloadSchema,
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Kernel: journal v3 disposition/acceptance/review schemas (ADR-0008, T27 —
+// schema only; no evidence importer and no acceptance authority added)
+// ---------------------------------------------------------------------------
+
+export const FindingFingerprintSchema: z.ZodType<FindingFingerprint> = z
+  .object({
+    version: z.literal(1),
+    checkId: z.string().min(1),
+    rule: z.string().min(1).nullable(),
+    path: z.string(),
+    spanContentHash: HashSchema.nullable(),
+  })
+  .strict();
+
+export const DispositionPayloadSchema: z.ZodType<DispositionPayload> = z
+  .object({
+    fingerprint: FindingFingerprintSchema,
+    status: z.enum(['fixed', 'rejected', 'deferred']),
+    reason: z.string(),
+    owner: z.string().min(1),
+    evidence: z.array(z.string()),
+    reviewTrigger: z.string().min(1).nullable(),
+    observedHead: ShaSchema,
+    observedAt: z.iso.datetime({ precision: 3 }),
+    acceptedRisk: z.string().nullable(),
+    availability: AvailabilityMapSchema,
+  })
+  .strict()
+  .refine(
+    (payload) =>
+      payload.status !== 'deferred' ||
+      (payload.reviewTrigger !== null && payload.reviewTrigger.length > 0),
+    { message: 'a deferred disposition requires a nonempty reviewTrigger' },
+  );
+
+export const FindingDispositionJournalEventSchema: z.ZodType<FindingDispositionJournalEvent> = z
+  .object({
+    type: z.literal('finding-disposition'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: DispositionPayloadSchema,
+  })
+  .strict();
+
+export const AcceptancePayloadSchema: z.ZodType<AcceptancePayload> = z
+  .object({
+    headSha: ShaSchema,
+    reviewedBaseSha: ShaSchema,
+    reviewerId: z.string().min(1),
+    authorId: z.string().min(1),
+    independent: z.boolean(),
+    verdict: z.enum(['PASS', 'HOLD', 'RETRACT']),
+    evidence: z.array(z.string()),
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const HeadAcceptanceJournalEventSchema: z.ZodType<HeadAcceptanceJournalEvent> = z
+  .object({
+    type: z.literal('head-acceptance'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: AcceptancePayloadSchema,
+  })
+  .strict();
+
+export const ReviewObservedPayloadSchema: z.ZodType<ReviewObservedPayload> = z
+  .object({
+    baseSha: ShaSchema,
+    headSha: ShaSchema,
+    findingFingerprints: z.array(FindingFingerprintSchema),
+    coverage: z.string(),
+    initialBlocking: z.array(FindingFingerprintSchema).nullable(),
+    reviewerId: z.string().min(1),
+    source: z.string().min(1),
+    round: NonnegativeSafeCountSchema,
+    delivered: z.array(z.string()),
+    completed: z.array(z.string()),
+    omissions: z.array(z.string()),
+    vendorCompletion: z.enum(['completed', 'not-completed', 'unknown']),
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const ReviewObservedJournalEventSchema: z.ZodType<ReviewObservedJournalEvent> = z
+  .object({
+    type: z.literal('review-observed'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: ReviewObservedPayloadSchema,
   })
   .strict();
 
