@@ -1,5 +1,6 @@
 """Tick-owned inbox, result harvesting and publication. No model dispatch."""
 from runtime_target import DEFAULT_BRANCH, DEFAULT_REF
+import review_receipt
 import copy
 import json
 from pathlib import Path
@@ -81,7 +82,8 @@ def enqueue(c, q, item, meta, rdir):
         item['last_error'] = 'repair round ceiling reached; needs human'
         return False
     open_pr = item['kind'] in ('open', 'delta') and bool(meta.get('pr_branch'))
-    base = meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', DEFAULT_REF)
+    base = (item['capture']['target'] if item['kind'] == review_receipt.KIND else
+            meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', DEFAULT_REF))
     record = {'jobs': [], 'pin': pin, 'base': base, 'branch': meta.get('pr_branch'),
               'open_pr': open_pr, 'round': count + 1, 'state': 'queued'}
     reviewed_diff = c.git('diff', meta['base'], meta['head'])
@@ -102,6 +104,19 @@ def enqueue(c, q, item, meta, rdir):
         for blocker in item.get('blocking', []):
             if blocker.get('run') == meta['run_id'] and blocker.get('run_finding') == n:
                 blocker['repair_job'] = job_id
+    if item['kind'] == review_receipt.KIND:
+        record['receipt_id'] = item['receipt_id']
+        raw = []
+        for line in (rdir / 'review.ndjson').read_text().splitlines():
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                raw.append(value)
+        record['receipt_findings'] = sorted(review_receipt.digest(f) for f in raw
+                                            if f.get('type') == 'finding')
+        record['repair_findings'] = sorted(review_receipt.digest(f) for f in actionable)
     item['repair_runs'][meta['run_id']] = record
     return True
 
@@ -276,6 +291,7 @@ def recover_publication(c, q, item, run, record, publication):
 
 
 def finalize_publication(c, q, item, run, record, publication):
+    record['publication'] = publication
     translated, head, branch = publication['commits'], publication['head'], publication['branch']
     owned = q.setdefault('repair_own_commits', [])
     owned.extend(sha for sha in translated if sha not in owned)
@@ -351,8 +367,54 @@ def archive_legacy(c, q):
     q['legacy_ledger_archived'] = c.iso()
 
 
+def reconcile_current_fix(c, item):
+    # Revalidate on every tick; a rewritten target must revoke old evidence.
+    item.pop('remediation', None)
+    rid = item.get('receipt_id')
+    if not rid:
+        return
+    data = (c.STATE / 'receipts' / (rid + '.json')).read_bytes()
+    import hashlib
+    if hashlib.sha256(data).hexdigest() != rid:
+        return
+    doc = json.loads(data)
+    for record in item.get('repair_runs', {}).values():
+        pr = record.get('fix_pr')
+        publication = record.get('publication', {})
+        verdicts = record.get('verdicts', [])
+        if (not pr or not verdicts or record.get('state') != 'published'
+                or any(v.get('verdict') != 'FIXED' for v in verdicts)
+                or sorted(v.get('job', '') for v in verdicts) != sorted(record.get('jobs', []))
+                or record.get('receipt_id') != rid
+                or sorted(review_receipt.digest(v.get('finding')) for v in verdicts) != record.get('repair_findings')
+                or len(verdicts) != len(doc.get('findings', []))
+                or record.get('receipt_findings') != sorted(review_receipt.digest(f) for f in doc.get('findings', []))):
+            continue
+        info = c.pr_info(pr['number'])
+        selector = item['subject']['target_selector']
+        ref = review_receipt.SELECTORS[selector]
+        target = c.git('rev-parse', ref)
+        merge = (info.get('mergeCommit') or {}).get('oid')
+        if (info.get('state') != 'MERGED' or info.get('number') != pr['number']
+                or info.get('baseRefName') != ref.removeprefix('origin/')
+                or info.get('headRefOid') != publication.get('head') or not merge
+                or not c.is_ancestor(merge, target)
+                or not c.is_ancestor(doc['capture']['target'], publication.get('target', ''))):
+            continue
+        evidence = dict(receipt_id=rid, subject=item['subject'], capture=doc['capture'],
+                        findings=sorted(review_receipt.digest(f) for f in doc['findings']),
+                        fix_pr=pr['number'], merge=merge, head=info['headRefOid'], target=target)
+        item['remediation'] = evidence
+        if review_receipt.remediation_fixed(item, doc, rid):
+            return
+        item.pop('remediation', None)
+
+
 def reconcile_fix_prs(c, q):
     for item in q['items']:
+        if item['kind'] == review_receipt.KIND:
+            reconcile_current_fix(c, item)
+            continue
         if item['kind'] != 'promotion':
             continue
         for record in item.get('repair_runs', {}).values():

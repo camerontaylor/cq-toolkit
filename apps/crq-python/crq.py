@@ -942,7 +942,7 @@ def current_document(item: Dict[str, Any], outcome: str, *, meta=None, cls=None,
             "capture": item["capture"], "outcome": outcome, "classification": cls,
             "counted": bool(cls and cls["counted"]), "findings": findings,
             "run_id": (meta or {}).get("run_id"), "started_at": (meta or {}).get("started_at"),
-            "artifacts": artifacts, "remediation": "disabled/deferred", "independent_acceptance": False,
+            "artifacts": artifacts, "remediation": "pending-merged-evidence", "independent_acceptance": False,
             "cli_functional_acceptance": "pending-D1"}
 
 
@@ -1729,7 +1729,9 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
-        # Separate from cycles: repair_tick.backfill must never enqueue these findings.
+        if cls["counted"] and not partial:
+            repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+        # Separate from cycles: backfill must never duplicate these jobs.
         item["state"] = "done" if cls["counted"] else "blocked"
         item["last_error"] = cls.get("message")
         if cls["outcome"] == "rate_limited":
@@ -1738,7 +1740,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             q.update(paused=True, pause_reason=f"{cls['outcome']} on {r['run_id']}; owner action needed")
         save_queue(q)
         remove_worktree(Path(meta["worktree"]), meta["wt_branch"])
-        return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (no repair)"
+        return f"{item['id']}: {outcome}; receipt {item['receipt_id']} (repair evidence tracked separately)"
     if item["kind"] == backfill_jobs.KIND:
         return backfill_runtime.harvest(sys.modules[__name__], q, item, rdir, meta, cls, exit_code,
                                         terminal_verified=(state == "harvest"))

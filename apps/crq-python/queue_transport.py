@@ -262,6 +262,8 @@ def _inventory(req, runner, q, principal, receipt_root):
                       and doc.get("classification", {}).get("outcome") == "completed"
                       and doc.get("outcome") in {"terminal-clean", "terminal-with-findings", "partial-scope"}):
                     row["state"] = "consumed" if entry and entry.get("consumed") == status["receipt_id"] else ("reused" if status.get("reused_from") else "reviewed")
+                    if receipts.remediation_fixed(item, doc, status["receipt_id"]):
+                        row["state"] = "fixed"
                 elif doc.get("outcome") in {"no-current-code", "partial-scope"}:
                     row["state"] = doc["outcome"]
                 else:
@@ -633,6 +635,9 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             result["reviewed"] = counted is True and isinstance(classification, dict) and classification.get("counted") is True and classification.get("outcome") == "completed" and outcome in {"terminal-clean", "terminal-with-findings", "partial-scope"}
             result["state"] = ("reused" if item.get("reused_from") else outcome) if result["reviewed"] else {
                 "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
+            result["fixed"] = receipts.remediation_fixed(item, document, receipt_id)
+            if result["fixed"]:
+                result["state"] = "fixed"
             if result["state"] == "blocked":
                 # Never upgrade a lossy first-error outcome into vendor authority.
                 result["reason"] = ({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
@@ -642,7 +647,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             result["reason"] = {"source": "queue", "category": "unknown", "code": "no-receipt"}
         if entry.get("reason") is not None:
             persisted = _status(q, rid, entry)
-            result.update(state="blocked", reviewed=False, reason=persisted["reason"])
+            result.update(state="blocked", reviewed=False, fixed=False, reason=persisted["reason"])
             if op in {"report", "ack"}:
                 raise ValueError("source revalidation required before receipt consumption")
         elif receipt_id and result["state"] == "blocked" and document.get("outcome") == "blocked-secret-scan":

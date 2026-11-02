@@ -312,6 +312,31 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(pending["proof"]["selectedCount"], 1)
         self.assertTrue(pending["terminal"])
 
+    def test_fixed_status_and_inventory_share_exact_receipt_evidence(self):
+        self.inventory_fixture()
+        item = self.q["items"][0]
+        item["capture"] = {}
+        doc = dict(source=item["subject"], capture={}, findings=[{"comment": "fixture"}],
+                   counted=True, outcome="terminal-with-findings",
+                   classification={"counted": True, "outcome": "completed"})
+        rid = receipts.write_receipt(self.tmp.name, doc)
+        item.update(state="done", receipt_id=rid)
+        self.call("enqueue")
+        self.assertFalse(self.call("status")["fixed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+        item = self.q["items"][0]
+        item["remediation"] = dict(receipt_id=rid, subject=item["subject"], capture={},
+                                   findings=[receipts.digest(doc["findings"][0])], fix_pr=8,
+                                   merge="a" * 40, head="b" * 40, target="c" * 40)
+        status = self.call("status")
+        self.assertEqual(status["state"], "fixed")
+        self.assertTrue(status["fixed"] and status["reviewed"])
+        self.assertFalse(status["consumed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"][0]["state"], "fixed")
+        self.q["items"][0]["remediation"]["receipt_id"] = "0" * 64
+        self.assertFalse(self.call("status")["fixed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+
     def test_inventory_verified_review_consumed_and_blocked(self):
         self.inventory_fixture()
         item = self.q["items"][0]

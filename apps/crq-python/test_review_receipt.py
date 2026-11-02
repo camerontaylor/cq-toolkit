@@ -10,6 +10,49 @@ import review_receipt as receipt
 
 
 class ReceiptTest(unittest.TestCase):
+    def test_merged_remediation_complete_and_incomplete(self):
+        from types import SimpleNamespace
+        import repair_tick
+        finding = {"type": "finding", "severity": "major", "comment": "fix"}
+        normalized = {"severity": "major", "body": "fix"}
+        doc = dict(source={"repo": "o/r", "target_selector": "promoted-main"},
+                   capture={"target": "a" * 40}, findings=[finding], counted=True,
+                   classification={"counted": True, "outcome": "completed"},
+                   outcome="terminal-with-findings")
+        with tempfile.TemporaryDirectory() as td:
+            rid = receipt.write_receipt(Path(td) / "receipts", doc)
+            record = dict(state="published", receipt_id=rid, jobs=["j"],
+                          verdicts=[dict(job="j", verdict="FIXED", finding=normalized)],
+                          receipt_findings=[receipt.digest(finding)],
+                          repair_findings=[receipt.digest(normalized)], fix_pr={"number": 9},
+                          publication={"head": "b" * 40, "target": "a" * 40})
+            item = dict(kind=receipt.KIND, subject=doc["source"], capture=doc["capture"],
+                        receipt_id=rid, repair_runs={"run": record})
+            info = dict(number=9, state="MERGED", baseRefName="main", headRefOid="b" * 40,
+                        mergeCommit={"oid": "c" * 40})
+            c = SimpleNamespace(STATE=Path(td), pr_info=lambda _: info,
+                                git=lambda *args: "d" * 40, is_ancestor=lambda *args: True)
+            repair_tick.reconcile_current_fix(c, item)
+            self.assertTrue(receipt.remediation_fixed(item, doc, rid))
+            complete = copy.deepcopy(item)
+            for field, value in (("receipt_id", "0" * 64), ("subject", {}), ("capture", {})):
+                changed = copy.deepcopy(complete)
+                changed[field] = value
+                self.assertFalse(receipt.remediation_fixed(changed, doc, changed["receipt_id"]))
+            for field, value in (("state", "OPEN"), ("baseRefName", "other"), ("headRefOid", "e" * 40)):
+                old = info[field]
+                info[field] = value
+                repair_tick.reconcile_current_fix(c, item)
+                self.assertNotIn("remediation", item)
+                info[field] = old
+            record["verdicts"][0]["verdict"] = "NOT-FIXED"
+            repair_tick.reconcile_current_fix(c, item)
+            self.assertNotIn("remediation", item)
+            record["verdicts"][0]["verdict"] = "FIXED"
+            c.is_ancestor = lambda *args: False
+            repair_tick.reconcile_current_fix(c, item)
+            self.assertNotIn("remediation", item)
+
     def test_binding_idempotence_and_conflict(self):
         q = {"items": []}
         args = dict(repo="owner/repo", pr=42, merge_sha="a" * 40, request_id="r1", at="now")

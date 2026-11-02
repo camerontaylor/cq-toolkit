@@ -191,3 +191,13 @@ coverage at today's target. Legacy done/skipped/synthetic entries cannot earn
 current-code review credit. Existing cycles/findings remain retained. Open work
 uses one review per proven equivalent full range; same-head or pure-restack
 inferences without versioned scope evidence conservatively require a full review.
+
+Merged-current remediation is stored separately from the immutable review receipt.
+The tick binds the exact subject, receipt, capture and every finding to published
+repair jobs, then verifies the fix PR head, selected base, merge commit ancestry
+and capture ancestry before retaining merge evidence. Status and interval inventory
+emit `fixed` only for complete receipt-bound evidence. Partial scope, partial repairs,
+unmerged or stale publication heads, and equivalent receipts reused by another
+subject receive no fixed credit. Reviewed and consumed remain independent facts;
+local `FIXED` verdicts and receipt acknowledgement alone grant no remediation credit.
+Evidence reflects the last tick's target observation and is revalidated each tick.
