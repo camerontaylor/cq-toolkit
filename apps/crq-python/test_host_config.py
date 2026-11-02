@@ -130,6 +130,25 @@ class HostConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'spend authorization'):
             host.apply(committed, overlay)
 
+    def test_overlay_blackout_switch_is_optional_boolean(self):
+        committed = host.committed(self.root)
+        self.assertIs(committed['repair']['blackout']['enabled'], False)
+        host.validate(self.overlay)  # optional: absent keeps the committed value
+        self.assertIs(host.apply(committed, self.overlay)['repair']['blackout']['enabled'], False)
+        overlay = copy.deepcopy(self.overlay)
+        overlay['config']['repair']['blackout'] = {'enabled': True}
+        host.validate(overlay)
+        rendered = host.apply(committed, overlay)['repair']['blackout']
+        self.assertIs(rendered['enabled'], True)
+        self.assertEqual(rendered['start'], committed['repair']['blackout']['start'])
+        for value in [0, 1, None, 'true']:
+            overlay['config']['repair']['blackout'] = {'enabled': value}
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host.validate(overlay)
+        overlay['config']['repair']['blackout'] = {'start': '00:00'}
+        with self.assertRaises(ValueError):
+            host.validate(overlay)
+
     def test_schema_and_unit_injection_and_clone_sharing_refused(self):
         for key, value in [('schema_version', 2), ('schema_version', True),
                            ('deploy_root', '/srv/%h'), ('record_dir', str(self.root / 'records'))]:

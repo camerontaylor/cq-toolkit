@@ -29,8 +29,10 @@ CONFIG_KEYS = {
     'promotion.alert_agent_id',
     'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
     'promotion.signer.spool.ssh_key', 'repair.enabled', 'repair.cq_bin',
-    'repair.paseo_host',
+    'repair.paseo_host', 'repair.blackout.enabled',
 }
+# Allowlisted but optional: absent means the committed value applies.
+OPTIONAL_KEYS = {'promotion.signer.spool.dir', 'promotion.alert_agent_id', 'repair.blackout.enabled'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
              'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_key'}
@@ -89,7 +91,11 @@ def validate(overlay):
     if not outside(records, deploy):
         raise ValueError('deploy records must be outside the checkout')
     for name, value in leaves(overlay['config']):
-        if name == 'repair.enabled':
+        if name == 'repair.blackout.enabled':
+            # Host switch for the GLM peak blackout; window and times stay committed.
+            if type(value) is not bool:
+                raise ValueError('repair.blackout.enabled must be JSON true or false')
+        elif name == 'repair.enabled':
             # Host kill switch. Spend authorization and roles stay committed policy.
             if type(value) is not bool:
                 raise ValueError('repair.enabled must be JSON true or false')
@@ -116,7 +122,7 @@ def validate(overlay):
             raise ValueError('overlay host values must be nonempty strings')
     # Paths/endpoints needed by the model-free runner must be explicit.
     supplied = dict(leaves(overlay['config']))
-    required = CONFIG_KEYS - {'promotion.signer.spool.dir', 'promotion.alert_agent_id'}
+    required = CONFIG_KEYS - OPTIONAL_KEYS
     if not required <= supplied.keys():
         raise ValueError('missing host config keys: ' + ', '.join(sorted(required - supplied.keys())))
     try:

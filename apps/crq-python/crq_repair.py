@@ -58,7 +58,9 @@ def paused(now=None):
 def blackout(repair, now=None):
     """GLM peak hours: no repair dispatch at all (no peak role switch)."""
     window = repair.get('blackout')
-    if not window:
+    # `enabled: false` suspends the window (owner switch, e.g. when GLM quota is
+    # plentiful); a missing flag keeps the window in force.
+    if not window or window.get('enabled', True) is False:
         return False
     t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ZoneInfo(window['tz']))
     return t.isoweekday() in window['days'] and window['start'] <= t.strftime('%H:%M') < window['end']
