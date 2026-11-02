@@ -861,15 +861,14 @@ function addUsage(a: Usage, b: Usage): Usage {
 }
 
 /**
- * Σ of the frozen Usage fields — the same fold the drivers totalTokens
- * report (DD-9 token rollup). `reasoning` is an `output` breakdown and must
- * already be included in `output`; adding reasoning here would double-count
- * it, so the fold counts the total once, via output — a producer must not
- * report additive reasoning. Reasoning stays a reported Usage field —
- * addUsage still sums the field itself.
+ * Σ of the frozen Usage fields plus ADDITIVE `reasoning` — the same fold
+ * the drivers totalTokens report (DD-9 token rollup). `reasoning` counts
+ * exactly once: a lane whose SDK includes thinking inside `output` omits
+ * the field (never double-counts), while an additive lane's reasoning-only
+ * measurement still counts toward the total.
  */
 function totalTokensOf(usage: Usage): number {
-  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
 /**

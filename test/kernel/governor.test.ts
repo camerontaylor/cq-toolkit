@@ -1574,17 +1574,119 @@ describe('observeCost rejects invalid USD before mutating the rollup (#15-1)', (
   });
 });
 
-describe('totalTokensOf counts reasoning once, via output (#14-6)', () => {
-  test('reasoning is NOT added on top of output: the token-cap fold', () => {
+describe('totalTokensOf counts ADDITIVE reasoning once (T-usage reasoning conflict)', () => {
+  // The old comment here claimed a producer must never report additive
+  // reasoning, contradicting the Usage type docs (src/driver/types.ts).
+  // Owner decision 2026-11-03: the declared contract is additive-only —
+  // reasoning counts once; an output-includes-reasoning lane omits the
+  // field, so adding it on top never double-counts.
+  test('reasoning IS added on top of output: the token-cap fold', () => {
     const usage = { input: 10, output: 20, cacheRead: 5, cacheWrite: 0, reasoning: 8 };
-    // Boundary: the fold is 35 (10+20+5+0) — NOT 43 (reasoning double-counted).
-    const atCap = new BudgetGovernor({ maxTokens: 35 });
+    // Boundary: the fold is 43 (10+20+5+0+8) — counted exactly once.
+    const atCap = new BudgetGovernor({ maxTokens: 43 });
     atCap.observeUsage('j1', usage);
-    expect(atCap.tripped).toBe(false); // 35 ≤ 35 — the same exceeds semantics
-    const overCap = new BudgetGovernor({ maxTokens: 34 });
+    expect(atCap.tripped).toBe(false); // 43 ≤ 43 — the same exceeds semantics
+    const overCap = new BudgetGovernor({ maxTokens: 42 });
     overCap.observeUsage('j1', usage);
     expect(overCap.tripped).toBe(true);
-    expect(overCap.tripReason).toMatch(/token rollup 35 exceeded cap 34/);
+    expect(overCap.tripReason).toMatch(/token rollup 43 exceeded cap 42/);
+  });
+
+  test('an omitting lane (no reasoning field) folds the same total — no double count', () => {
+    // The lane whose SDK counts thinking INSIDE output omits the field;
+    // the same figures land at the same 43-token boundary through the
+    // observeResult gate alone (no observeUsage on this instance).
+    const under = new BudgetGovernor({ maxTokens: 43 });
+    under.observeResult('j2', { usage: { input: 10, output: 28, cacheRead: 5, cacheWrite: 0 } });
+    expect(under.tripped).toBe(false); // 43 ≤ 43
+    const over = new BudgetGovernor({ maxTokens: 42 });
+    over.observeResult('j3', { usage: { input: 10, output: 28, cacheRead: 5, cacheWrite: 0 } });
+    expect(over.tripped).toBe(true); // 43 > 42
+  });
+
+  test('T-usage reasoning-only: a reasoning-only measurement trips maxTokens through observeResult', () => {
+    // Reasoning-only usage: the old fold computed 0 tokens, so the
+    // hasRealUsage gate saw NO real usage and the cap could not bind.
+    // The reasoning-inclusive fold counts 9 tokens: under a tight cap it
+    // trips, proving the reasoning-only measurement is real evidence.
+    const under = new BudgetGovernor({ maxTokens: 9 });
+    under.observeResult('j1', {
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 9 },
+    });
+    expect(under.tripped).toBe(false); // 9 ≤ 9
+    const over = new BudgetGovernor({ maxTokens: 8 });
+    over.observeResult('j1', {
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 9 },
+    });
+    expect(over.tripped).toBe(true);
+    expect(over.tripReason).toMatch(/token rollup 9 exceeded cap 8/);
+  });
+
+  test('T-usage reasoning once: two executed jobs — one reasoning-bearing, one omitting — roll up once', async () => {
+    // Mixed run: j1 meters {3,4,1,2,reasoning:7} (additive lane), j2
+    // meters {10,28,5,0} (omitting lane, thinking inside output). The
+    // run rollup keeps reasoning 7 exactly once, and the governor's
+    // token total (3+4+1+2+7 + 10+28+5+0 = 60) trips at the boundary.
+    const mixedThenPlainOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+      const jobId = (raw as { jobId: string }).jobId;
+      currentJobContext()?.reportResult({
+        usage:
+          jobId === 'j1'
+            ? { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, reasoning: 7 }
+            : { input: 10, output: 28, cacheRead: 5, cacheWrite: 0 },
+      });
+      return { status: 'ok', value: jobId };
+    };
+    const plan: Plan = {
+      id: 'plan-reasoning-mixed',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' }, dependsOn: [] },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+      ],
+    };
+    const governor = createGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 60 }, {}),
+    );
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', mixedThenPlainOp)),
+      { governor, allowAdvisory: true },
+    );
+    expect(report.jobs.map((row) => row.usage)).toEqual([
+      { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, reasoning: 7 },
+      { input: 10, output: 28, cacheRead: 5, cacheWrite: 0 },
+    ]);
+    expect(report.usage).toEqual({
+      input: 13,
+      output: 32,
+      cacheRead: 6,
+      cacheWrite: 2,
+      reasoning: 7,
+    });
+    // Governor total 60 ≤ cap 60: no trip — the boundary proves reasoning
+    // entered the cap fold exactly once.
+    expect(governor.tripped).toBe(false);
+    // A tight 59 cap (one under the 60-token total) trips on the fold —
+    // the boundary proof that reasoning entered the cap exactly once.
+    const tight = createGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 59 }, {}),
+    );
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', mixedThenPlainOp)),
+      { governor: tight, allowAdvisory: true },
+    );
+    expect(tight.tripped).toBe(true);
+    expect(tight.tripReason).toMatch(/token rollup 60 exceeded cap 59/);
+    expect(tight.usage).toEqual({
+      input: 13,
+      output: 32,
+      cacheRead: 6,
+      cacheWrite: 2,
+      reasoning: 7,
+    });
   });
 });
 

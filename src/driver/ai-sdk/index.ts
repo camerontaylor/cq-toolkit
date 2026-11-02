@@ -2304,15 +2304,17 @@ function addUsage(a: Usage, b: Usage): Usage {
 }
 
 /**
- * Σ of the frozen Usage fields — the Budget.maxTokens cap fold. `reasoning`
- * is NOT added on top: the frozen `output` field already includes reasoning
- * tokens (outputTokenDetails.reasoningTokens is a breakdown OF output), so
- * the fold counts them once, via output — output + reasoning would
- * double-count. The field stays on Usage as reported evidence; the
- * per-step accumulation (addUsage) still sums it.
+ * Σ of the frozen Usage fields plus ADDITIVE `reasoning` — the Budget.maxTokens
+ * cap fold. This lane's SDK counts reasoning INSIDE `output`
+ * (outputTokenDetails.reasoningTokens is a breakdown OF output) and never
+ * emits the field, so the term is a no-op here — kept so the fold matches
+ * the kernel and claude-code folds exactly: reasoning counts once, whether
+ * the lane omits the field (this lane, output already includes it) or
+ * reports it additive to output. The per-step accumulation (addUsage)
+ * still sums the field.
  */
 function totalTokensOf(usage: Usage): number {
-  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
 /**

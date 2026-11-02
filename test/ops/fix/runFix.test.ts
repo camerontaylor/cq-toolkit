@@ -462,6 +462,25 @@ process.exitCode = failed ? 1 : 0;
     }),
   });
 
+  /** Like meterThenFaultDriver, but the metered usage carries ADDITIVE reasoning. */
+  const reasoningFaultDriver = (): DriverFactory => ({
+    resolve: ({ modelSpec }) => ({
+      modelSpec,
+      lane: 'ai-sdk',
+      driver: {
+        run: async () => {
+          const usage = { input: 7, output: 3, cacheRead: 2, cacheWrite: 1, reasoning: 4 };
+          currentJobContext()?.reportResult({ usage });
+          const error = new Error('fixture: dispatch fault after settlement') as Error & {
+            usage?: typeof usage;
+          };
+          error.usage = usage;
+          throw error;
+        },
+      },
+    }),
+  });
+
   test('M7-fix nominal evidence', async () => {
     const f = await fixture();
     try {
@@ -560,6 +579,30 @@ process.exitCode = failed ? 1 : 0;
       const report = reportOf(result);
       expect(report.usage).toEqual({ input: 5, output: 5, cacheRead: 0, cacheWrite: 0 });
       expect(report.fixesPerRun).toBe(2);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('T-usage reasoning once: the runFix rollup counts additive reasoning once', async () => {
+    const f = await fixture();
+    try {
+      // Regression guard for the additive-once contract: the attempt fold
+      // (runFix.ts:289) already summed `reasoning` before the kernel folds
+      // were fixed, and the ledger adoption (report.usage = report.run?.usage)
+      // carries it once either way. A fault thrown after settlement carrying
+      // additive reasoning: the ledger is the only carrier, and the report
+      // retains the reasoning sum exactly once.
+      // Four governed dispatches metered, so reasoning sums to 4×4 = 16.
+      const result = await makeFixRun({ drivers: reasoningFaultDriver() })(input(f));
+      expect(result.status).toBe('needs-human');
+      expect(result.report?.usage).toEqual({
+        input: 28,
+        output: 12,
+        cacheRead: 8,
+        cacheWrite: 4,
+        reasoning: 16,
+      });
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
