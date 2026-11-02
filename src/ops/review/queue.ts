@@ -2,11 +2,20 @@
 import { ZodError } from 'zod';
 import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
-import { makeQueueClient, QueueUnsupported, sshQueueTransport } from './internal/queueClient.js';
+import {
+  makeQueueClient,
+  QueueReadFault,
+  QueueUnsupported,
+  sshQueueTransport,
+} from './internal/queueClient.js';
 import {
   QueueHealthReferenceSchema,
   type QueueHealthReference,
   QueueEnqueueInputSchema,
+  QueueRetryInputSchema,
+  QueueDrainInputSchema,
+  type QueueRetryInput,
+  type QueueDrainInput,
   QueueReferenceSchema,
   QueueReportInputSchema,
   type QueueEnqueueInput,
@@ -42,6 +51,8 @@ export type {
 
 type Unsupported = { state: 'unsupported'; reason: string };
 export function makeQueueOps(transport?: QueueTransport): {
+  retry: Op<QueueRetryInput, unknown>;
+  drain: Op<QueueDrainInput, unknown>;
   enqueue: Op<QueueEnqueueInput, QueueStatus | Unsupported>;
   queueStatus: Op<QueueReference, QueueStatus | Unsupported>;
   queueHealth: Op<QueueHealthReference, QueueHealthResult | Unsupported>;
@@ -120,6 +131,74 @@ export function makeQueueOps(transport?: QueueTransport): {
     };
   }
   return {
+    retry: wrap(
+      (input: QueueRetryInput) => QueueRetryInputSchema.parse(input),
+      async (client, i) => {
+        const ref = { requestId: i.requestId, binding: i.binding };
+        if (!i.transient)
+          return { action: 'observed', accepted: false, current: await client.status(ref) };
+        try {
+          return await client.retry(ref, i.expectedReceiptId!);
+        } catch (error) {
+          if (error instanceof QueueReadFault && error.code === 'busy')
+            return { action: 'busy', accepted: false, reason: 'not-applied' };
+          throw error;
+        }
+      },
+    ),
+    drain: wrap(
+      (input: QueueDrainInput) => QueueDrainInputSchema.parse(input),
+      async (client, i) => {
+        const deadline = Date.now() + i.waitMs;
+        let pending = [...i.requests];
+        const observations: Record<string, QueueStatus> = {};
+        const errors: Record<string, string> = {};
+        while (pending.length && Date.now() < deadline) {
+          const unfinished: QueueReference[] = [];
+          for (const ref of pending) {
+            if (Date.now() >= deadline) {
+              unfinished.push(ref);
+              continue;
+            }
+            try {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              const current = await Promise.race([
+                client.status(ref, { remainingMs: () => deadline - Date.now() }),
+                new Promise<null>((resolve) => {
+                  timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+                }),
+              ]).finally(() => clearTimeout(timer));
+              if (current) {
+                observations[ref.requestId] = current;
+                delete errors[ref.requestId];
+              } else errors[ref.requestId] = 'deadline';
+              if (
+                !current ||
+                (!current.reviewed && !['cancelled', 'no-current-code'].includes(current.state))
+              )
+                unfinished.push(ref);
+            } catch (error) {
+              if (error instanceof QueueUnsupported) throw error;
+              errors[ref.requestId] =
+                error instanceof QueueReadFault ? error.code : messageOf(error);
+              unfinished.push(ref);
+            }
+          }
+          pending = unfinished;
+          if (pending.length && Date.now() < deadline)
+            await new Promise((resolve) =>
+              setTimeout(resolve, Math.max(0, Math.min(i.pollMs, deadline - Date.now()))),
+            );
+        }
+        return {
+          action: 'observed',
+          accepted: false,
+          unfinished: pending.map((ref) => ref.requestId),
+          observations,
+          errors,
+        };
+      },
+    ),
     enqueue: wrap(enqueueCommand, async (client, command) => {
       if (command.kind === 'bind')
         return client.bind({

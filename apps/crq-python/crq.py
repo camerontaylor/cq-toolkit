@@ -528,6 +528,22 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         res.update(outcome="malformed", message="stream contains an unrecognized status")
     res["failure_provenance"] = {"version": 1, "complete": proof_complete, "causes": causes}
     res["counted"] = res["outcome"] == "completed"
+    # Recovery authority is separate from vendor-only continuation authority.
+    # Prose and an absent exit never establish a transient failure.
+    transient = None
+    clean_failure = (proof_complete and not bad_lines and not actions and not complete
+                     and not any(f.get("severity") in BLOCKING_SEVERITIES for f in findings))
+    if clean_failure and res["counted"] is False:
+        if errors and all(e.get("errorType") == "rate_limit" and e.get("recoverable") is True for e in errors) and exit_code in (0, 1):
+            transient = "vendor-rate-limited"
+        elif errors and all(e.get("errorType") in ("network_error", "transport_error") and e.get("recoverable") is True for e in errors) and exit_code in (0, 1):
+            transient = "transport"
+        elif not errors and exit_code == 124:
+            transient = "timeout"
+        elif not errors and exit_code in (-2, -9, -15, 130, 137, 143):
+            transient = "interrupted"
+    if transient:
+        res["retry_transient"] = {"version": 1, "category": transient}
     return res
 
 

@@ -47,6 +47,8 @@ interface LooseResult {
 /** The review producer plus six loop entries, in registry order. */
 const ENTRY_NAMES = [
   'review.addressMany',
+  'review.retry',
+  'review.drain',
   'review.enqueue',
   'review.queueStatus',
   'review.queueHealth',
@@ -124,6 +126,8 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
       targetSelector: 'promoted-main',
     },
   }),
+  'review.retry': () => minimalInputs['review.enqueue']!(),
+  'review.drain': () => ({ requests: [minimalInputs['review.enqueue']!()], waitMs: 0 }),
   'review.queueStatus': () => minimalInputs['review.enqueue']!(),
   'review.queueHealth': () => ({
     requestId: 'health-client',

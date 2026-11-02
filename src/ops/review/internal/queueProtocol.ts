@@ -190,3 +190,29 @@ export const QueueReportInputSchema = QueueReferenceSchema.extend({
 }).strict();
 export type QueueEnqueueInput = z.infer<typeof QueueEnqueueInputSchema>;
 export type QueueReportInput = z.infer<typeof QueueReportInputSchema>;
+
+export const QueueRetryInputSchema = QueueReferenceSchema.extend({
+  transient: z.boolean().default(false),
+  expectedReceiptId: QueueDigest.exactOptional(),
+})
+  .strict()
+  .refine(
+    (i) => !i.transient || i.expectedReceiptId !== undefined,
+    'transient retry requires expectedReceiptId',
+  );
+export type QueueRetryInput = z.input<typeof QueueRetryInputSchema>;
+export const QueueRetryResultSchema = z
+  .object({
+    action: z.enum(['accepted', 'already-accepted', 'needs-human', 'denied']),
+    accepted: z.boolean(),
+    reason: z.string(),
+  })
+  .strict();
+export const QueueDrainInputSchema = z
+  .object({
+    requests: z.array(QueueReferenceSchema).min(1).max(100),
+    waitMs: z.number().int().nonnegative().max(3600000),
+    pollMs: z.number().int().min(1000).max(60000).default(1000),
+  })
+  .strict();
+export type QueueDrainInput = z.input<typeof QueueDrainInputSchema>;

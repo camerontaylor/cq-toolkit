@@ -43,7 +43,7 @@ SHA = r"[0-9a-f]{40}"
 # U+FEFF is forbidden.
 REFNAME_FORBIDDEN = re.compile(r"[~^:?*\[\]\\]")
 READ = {"status", "report", "health"}
-WRITE = {"enqueue", "bind", "cancel", "ack"}
+WRITE = {"enqueue", "bind", "cancel", "ack", "retry", "retry-capability"}
 
 
 def _pairs(pairs):
@@ -115,6 +115,17 @@ def validate_policy(policy):
             raise ValueError("invalid queue policy allowlist")
     if any(target not in receipts.SELECTORS for target in policy.get("targets", [])):
         raise ValueError("invalid queue policy target")
+    grants = policy.get("transient_retries", [])
+    if type(grants) is not list:
+        raise ValueError("invalid transient retry grants")
+    for grant in grants:
+        if (type(grant) is not dict or not {"principal", "requestId", "binding"} <= set(grant)
+                or set(grant) - {"principal", "requestId", "binding", "maxRetries"}
+                or type(grant.get("maxRetries", 3)) is not int or not 1 <= grant.get("maxRetries", 3) <= 100
+                or not isinstance(grant["principal"], str) or not grant["principal"]
+                or not _match(TOKEN, grant["requestId"])
+                or binding(grant["binding"])["repo"] != policy["repo"]):
+            raise ValueError("invalid transient retry grant")
     grants = policy.get("reconciled_reads", [])
     if type(grants) is not list:
         raise ValueError("invalid reconciled read grants")
@@ -352,7 +363,7 @@ def decode(raw):
         if request["states"] is not None:
             request["states"] = sorted(set(request["states"]))
         return request
-    extra = {"bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
+    extra = {"retry": {"expectedReceiptId"}, "bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
              "ack": {"receiptId", "sha256", "chunks", "bytes"}}.get(op, set())
     if op not in READ | WRITE or set(request) != {"v", "op", "requestId", "binding"} | extra:
         raise ValueError("invalid queue operation/fields")
@@ -362,6 +373,8 @@ def decode(raw):
     if op == "bind" and (type(request["pr"]) is not int or request["pr"] <= 0 or
                          request["mergeSha"] is not None and not _match(SHA, request["mergeSha"])):
         raise ValueError("invalid PR binding")
+    if op == "retry" and not _match(r"[0-9a-f]{64}", request["expectedReceiptId"]):
+        raise ValueError("retry requires expected receipt")
     return request
 
 
@@ -502,6 +515,39 @@ def _vendor_rate_limit(document):
     return all(type(cause) is dict and cause == allowed for cause in proof["causes"])
 
 
+def _retry_transient(document):
+    if _vendor_rate_limit(document):
+        return "vendor-rate-limited"
+    cls = document.get("classification")
+    if (type(cls) is not dict or document.get("counted") is not False
+            or cls.get("counted") is not False or document.get("outcome") != cls.get("outcome")
+            or cls.get("outcome") not in {"error", "interrupted"}
+            or type(cls.get("bad_lines")) is not int or cls["bad_lines"] != 0
+            or type(cls.get("exit")) is not int):
+        return None
+    typed = cls.get("retry_transient")
+    if (type(typed) is not dict or set(typed) != {"version", "category"}
+            or type(typed.get("version")) is not int or typed["version"] != 1):
+        return None
+    category = typed.get("category")
+    allowed = {"transport": (0, 1), "timeout": (124,), "interrupted": (-2, -9, -15, 130, 137, 143)}
+    if type(category) is not str or category not in allowed or cls["exit"] not in allowed[category]:
+        return None
+    proof = cls.get("failure_provenance")
+    if (type(proof) is not dict or type(proof.get("version")) is not int or proof["version"] != 1
+            or proof.get("complete") is not True or type(proof.get("causes")) is not list
+            or not proof["causes"]):
+        return None
+    codes = {"network_error", "transport_error", "unexpected-exit"} if category == "transport" else {"unexpected-exit", "nonterminal-review"}
+    if not all(type(c) is dict and set(c) == {"source", "category", "code"}
+               and c["source"] == "queue" and c["category"] == "unknown" and type(c["code"]) is str and c["code"] in codes
+               for c in proof["causes"]):
+        return None
+    if category == "transport" and not any(c["code"] in {"network_error", "transport_error"} for c in proof["causes"]):
+        return None
+    return category
+
+
 def _request_alias(q, req, entry, document, receipt_id):
     """Project identity only from authenticated locked state and verified bytes.
 
@@ -555,6 +601,9 @@ def authorize(req, principal, policy):
         raise ValueError("queue capability denied")
     if op == "health" and {"principal": principal, "binding": b} not in policy.get("health_reads", []):
         raise ValueError("health capability denied")
+
+    if op in {"retry", "retry-capability"} and not any(g["principal"] == principal and g["requestId"] == rid and g["binding"] == b for g in policy.get("transient_retries", [])):
+        raise ValueError("transient retry capability denied")
     if op == "inventory" and {"principal": principal, "binding": b} not in policy.get("inventory_reads", []):
         raise ValueError("inventory capability denied")
     if op not in {"inventory", "health"} and b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
@@ -564,10 +613,18 @@ def authorize(req, principal, policy):
 def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     policy = validate_policy(policy)
     req = decode(raw)
-    authorize(req, principal, policy)
+    try:
+        authorize(req, principal, policy)
+    except ValueError:
+        if req["op"] == "retry-capability":
+            return _encode(req, {"denied": "no-permission"})
+        raise
     b, op, rid = req["binding"], req["op"], req["requestId"]
     if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
+
+    if op == "retry-capability":
+        return _encode(req, {"retry": 1})
 
     project_fixed = (getattr(runner, "CONFIG", {}).get("queue") or {}).get("project_fixed") is True
     read_only = op in READ or op == "inventory"
@@ -638,6 +695,56 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             entries[rid] = entry
         if entry is None:
             raise ValueError("unknown queue request")
+        if op == "retry":
+            expected = req["expectedReceiptId"]
+            result = {"action": "needs-human", "accepted": False, "reason": "not-transient"}
+            mapping = q.get("merged_current_requests", {}).get(rid, {})
+            items = [i for i in q.get("items", []) if i.get("id") == mapping.get("item")]
+            if b["kind"] == "deferred-author":
+                result["reason"] = "author-dispatch"
+            elif len(items) == 1:
+                item = items[0]
+                if any(a.get("receipt_id") == expected and a.get("retry_requested") is True
+                       for a in item.get("attempts", [])):
+                    result = {"action": "already-accepted", "accepted": False, "reason": "durable-replay"}
+                elif entry.get("retry_count", 0) >= next(g.get("maxRetries", 3) for g in policy["transient_retries"]
+                        if g["principal"] == principal and g["requestId"] == rid and g["binding"] == b):
+                    result["reason"] = "retry-limit"
+                elif (entry.get("consumed") or item.get("consumed") or any(
+                        entries.get(alias_id, {}).get("consumed")
+                        for alias_id, alias in q.get("merged_current_requests", {}).items()
+                        if alias.get("item") == item.get("id"))):
+                    result["reason"] = "consumed"
+                elif (item.get("receipt_id") == expected and item.get("kind") == receipts.KIND
+                      and item.get("state") == "blocked" and not entry.get("reason")):
+                    document = _ReceiptSnapshot(receipt_root, expected).document
+                    run = item.get("run")
+                    attempts = item.get("attempts", [])
+                    if not attempts or attempts[-1].get("receipt_id") != expected:
+                        return _encode(req, {**result, "reason": "ambiguous-lineage"})
+                    if run is None and attempts and attempts[-1].get("receipt_id") == expected:
+                        run = {"run_id": attempts[-1].get("run_id")}
+                        if _match(TOKEN, run["run_id"]) and hasattr(runner, "RUNS") and hasattr(runner, "read_pidfile"):
+                            identity = runner.read_pidfile(runner.RUNS / run["run_id"]) or {}
+                            run["pid"] = identity.get("pid")
+                    transient = _retry_transient(document)
+                    if document.get("source") != item.get("subject") or not transient:
+                        result["reason"] = "not-transient"
+                    elif (not isinstance(run, dict) or not _match(TOKEN, run.get("run_id"))
+                          or not hasattr(runner, "RUNS") or not hasattr(runner, "run_liveness")):
+                        result["reason"] = "ambiguous-owner"
+                    else:
+                        rdir = runner.RUNS / run["run_id"]
+                        if not (rdir / "exit.json").is_file() or runner.run_liveness(rdir, item, run, True) != "harvest":
+                            result["reason"] = "live-or-ambiguous-owner"
+                        else:
+                            attempts[-1]["retry_requested"] = True
+                            entry["retry_count"] = entry.get("retry_count", 0) + 1
+                            item.update(state="pending", run=None)
+                            item.pop("receipt_id", None)
+                            result = {"action": "accepted", "accepted": True, "reason": transient}
+            runner.save_queue(q)
+            return _encode(req, result)
         if op == "bind":
             if b["kind"] != "deferred-author" or entry["state"] == "cancelled":
                 raise ValueError("intent cannot be bound")
