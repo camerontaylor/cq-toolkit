@@ -711,7 +711,8 @@ class CurrentTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(crq, name))
             for name in ("enroll",):
                 stack.enter_context(mock.patch.object(crq, name, return_value=[]))
-            stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs"))
+            stack.enter_context(mock.patch.object(crq.repair_tick, "reconcile_fix_prs",
+                side_effect=lambda *args: self.assertIsNotNone(crq._FORGE_BUDGET)))
             stack.enter_context(mock.patch.object(crq, "make_worktree", return_value=(self.root / "wt", "fixture")))
             stack.enter_context(mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})))
             child = stack.enter_context(mock.patch.object(crq.subprocess, "Popen", side_effect=fake_child))
@@ -751,12 +752,67 @@ class CurrentTest(unittest.TestCase):
              mock.patch.object(crq.repair_tick, "enqueue") as repair:
             result = crq.harvest_review(self.q, item, False)
             doc = self.document(item)
-            if doc["counted"] and doc["findings"] and doc["outcome"] != "partial-scope":
+            if (crq.repair_tick.merged_current_enabled(crq) and doc["counted"]
+                    and doc["findings"] and doc["outcome"] != "partial-scope"):
                 repair.assert_called_once()
                 self.assertEqual(repair.call_args.args[2]["receipt_id"], item["receipt_id"])
             else:
                 repair.assert_not_called()
             return result
+
+    def test_merged_current_repair_opt_in_and_complete_supported_scope(self):
+        for enabled, severities in ((False, ['major']), (True, ['major']),
+                                    (True, ['major', 'minor']), (True, ['minor'])):
+            with self.subTest(enabled=enabled, severities=severities):
+                item = self.enroll('repair-' + str(enabled) + '-'.join(severities))
+                self.launch_item(item)
+                events = [{"type": "finding", "severity": severity, "fileName": "affected.py",
+                           "comment": "fix this"} for severity in severities]
+                self.terminal_artifacts(item, events + [COMPLETE])
+                config = {**crq.CONFIG, 'repair': {'merged_current': {'enabled': enabled}}}
+                with mock.patch.object(crq, 'CONFIG', config), \
+                     mock.patch.object(crq, 'git', return_value='fixture patch'), \
+                     mock.patch.object(crq, 'pid_alive', return_value=False), \
+                     mock.patch.object(crq, 'group_alive', return_value=False), \
+                     mock.patch.object(crq, 'remove_worktree'):
+                    crq.harvest_review(self.q, item, False)
+                records = list(item.get('repair_runs', {}).values())
+                if enabled and severities == ['major']:
+                    self.assertEqual(len(records), 1)
+                    record = records[0]
+                    self.assertEqual(record['base'], item['capture']['target'])
+                    self.assertEqual(record['receipt_id'], item['receipt_id'])
+                    self.assertEqual(record['receipt_findings'], [crq.review_receipt.digest(events[0])])
+                    self.assertEqual(len(record['repair_findings']), 1)
+                else:
+                    self.assertEqual(records, [])
+                self.assertEqual(item['state'], 'done')
+                run = item['attempts'][-1]['run_id']
+                (crq.RUNS / run).rename(crq.RUNS / (run + '-' + str(enabled) + '-'.join(severities)))
+                self.q['items'].remove(item)
+                self.q['merged_current_requests'] = {}
+                crq.save_queue(self.q)
+
+    def test_repair_enqueue_error_does_not_lose_counted_receipt(self):
+        item = self.enroll()
+        self.launch_item(item)
+        self.terminal_artifacts(item, [{"type": "finding", "severity": "major", "comment": "fix"}, COMPLETE])
+        with mock.patch.object(crq, 'CONFIG', {**crq.CONFIG, 'repair': {'merged_current': {'enabled': True}}}), \
+             mock.patch.object(crq.repair_tick, 'enqueue', side_effect=UnicodeError('bad review bytes')), \
+             mock.patch.object(crq, 'pid_alive', return_value=False), \
+             mock.patch.object(crq, 'group_alive', return_value=False), \
+             mock.patch.object(crq, 'remove_worktree'):
+            crq.harvest_review(self.q, item, False)
+        self.assertEqual(item['state'], 'done')
+        self.assertIn('bad review bytes', item['repair_error'])
+        self.assertEqual(crq.load_queue()['items'][0]['receipt_id'], item['receipt_id'])
+        self.assertTrue(self.document(item)['counted'])
+
+    def test_fix_pr_lookup_honors_exhausted_forge_budget(self):
+        with crq.forge_window(crq.ForgeBudget(requests=0)), mock.patch.object(crq, 'run') as process:
+            with self.assertRaises(crq.deferred_refresh.RefreshExhausted):
+                crq.pr_info(9)
+            process.assert_not_called()
 
     def test_enqueue_and_request_conflict_are_verified_without_launch(self):
         item = self.enroll()

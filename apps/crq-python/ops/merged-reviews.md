@@ -195,9 +195,27 @@ inferences without versioned scope evidence conservatively require a full review
 Merged-current remediation is stored separately from the immutable review receipt.
 The tick binds the exact subject, receipt, capture and every finding to published
 repair jobs, then verifies the fix PR head, selected base, merge commit ancestry
-and capture ancestry before retaining merge evidence. Status and interval inventory
-emit `fixed` only for complete receipt-bound evidence. Partial scope, partial repairs,
+and capture ancestry before retaining merge evidence. Status preserves the receipt outcome and reports `fixed: true` with a compact
+`remediation` reference only for complete receipt-bound evidence. Inventory exposes
+`reviewed`, `consumed` and `fixed` facts separately; its `fixed` state applies only
+before consumption, so the consumed filter retains consumed repairs. Fact filters
+match independently: a consumed repair is returned by both consumed and fixed filters. Partial scope, partial repairs,
 unmerged or stale publication heads, and equivalent receipts reused by another
 subject receive no fixed credit. Reviewed and consumed remain independent facts;
 local `FIXED` verdicts and receipt acknowledgement alone grant no remediation credit.
 Evidence reflects the last tick's target observation and is revalidated each tick.
+
+Automatic merged-current repair requires `repair.merged_current.enabled: true`;
+the default is false, independently of the existing repair drain enablement.
+With the flag off, existing published repair records can still earn evidence.
+Opt-in enqueue requires a complete receipt containing only critical/major findings;
+minor/trivial/info findings, including mixed receipts, are not automatically repaired
+and cannot earn partial fixed credit. Review state stays `done` when repair fails;
+repair outcomes and errors are recorded separately.
+
+Forge lookups share the tick's existing aggregate ForgeBudget. Closed-unmerged PRs
+and merged PRs whose head differs from the prepared publication are terminal
+not-fixed observations, not polled again. This also applies if crq itself pushes
+another repair onto the fix branch: the changed head receives no credit for the
+original receipt. Successful immutable merge metadata is cached; target ancestry
+is refreshed locally. Capture identity is stored as a digest, not a copied manifest.

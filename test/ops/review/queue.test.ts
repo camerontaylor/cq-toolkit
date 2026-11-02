@@ -23,6 +23,12 @@ import {
   QueueBindSchema,
 } from '../../../src/ops/review/internal/queueProtocol.js';
 
+test('parseStatus accepts independent fixed evidence without replacing the receipt outcome', async () => {
+  const f = fixture(false, true);
+  const status = await makeQueueClient(f.transport).status(ref);
+  expect(status).toMatchObject({ state: 'terminal-with-findings', fixed: true, consumed: false });
+});
+
 describe('queue pre-PR binding', () => {
   const binding = {
     kind: 'deferred-author',
@@ -81,7 +87,7 @@ const pendingStatus = {
   reviewed: false,
   fixed: false,
 };
-function fixture(clean = false) {
+function fixture(clean = false, fixed = false) {
   const paths = [
     {
       source_path: 'src/a.ts',
@@ -158,7 +164,7 @@ function fixture(clean = false) {
     receiptId,
     consumed: false,
     reviewed: true,
-    fixed: false,
+    fixed,
   };
   const common = {
     version: 1,

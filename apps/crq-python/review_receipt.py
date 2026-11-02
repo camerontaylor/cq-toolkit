@@ -129,7 +129,7 @@ def remediation_fixed(item, document, receipt_id):
         return False
     return (evidence.get("receipt_id") == receipt_id == digest(document)
             and evidence.get("subject") == item.get("subject") == document.get("source")
-            and evidence.get("capture") == document.get("capture") == item.get("capture")
+            and evidence.get("capture_digest") == digest(document.get("capture")) == digest(item.get("capture"))
             and evidence.get("findings") == sorted(digest(f) for f in findings)
             and type(evidence.get("fix_pr")) is int and evidence["fix_pr"] > 0
             and all(isinstance(evidence.get(k), str) and re.fullmatch(r"[0-9a-f]{40}", evidence[k])
@@ -188,3 +188,10 @@ def read_receipt(root, receipt_id, cursor=None):
             "chunk_sha256": hashlib.sha256(chunk).hexdigest(),
             "data": base64.b64encode(chunk).decode("ascii"),
             "next_cursor": receipt_id + ":" + str(index + 1) if index + 1 < count else None}
+
+
+def remediation_summary(item):
+    evidence = item["remediation"]
+    return {"receiptId": evidence["receipt_id"], "captureDigest": evidence["capture_digest"],
+            "fixPr": evidence["fix_pr"], "mergeSha": evidence["merge"],
+            "headSha": evidence["head"], "targetSha": evidence["target"]}

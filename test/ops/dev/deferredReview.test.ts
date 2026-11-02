@@ -108,6 +108,19 @@ function fake() {
   return { client, saved, calls: () => calls };
 }
 
+test('refresh accepts fixed true while preserving the terminal receipt outcome', async () => {
+  const f = fake();
+  const debt = await deferVendorReview(f.client, reference, 'unavailable', deferral, origin());
+  f.saved.set(reference.requestId, {
+    ...status,
+    state: 'terminal-with-findings',
+    fixed: true,
+    reviewed: true,
+  });
+  const refreshed = await refreshDeferredVendorDebt(f.client, debt);
+  expect(refreshed.queue).toMatchObject({ state: 'terminal-with-findings', fixed: true });
+});
+
 describe('deferred vendor policy', () => {
   test('origin must match one genuine retained blocked vendor cycle and structured failure', () => {
     const proof = origin();

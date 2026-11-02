@@ -117,7 +117,18 @@ export const QueueStatusSchema = z
     consumed: z.boolean(),
     enqueued: z.boolean().exactOptional(),
     reviewed: z.boolean(),
-    fixed: z.literal(false),
+    fixed: z.boolean(),
+    remediation: z
+      .object({
+        receiptId: QueueDigest,
+        captureDigest: QueueDigest,
+        fixPr: z.number().int().positive(),
+        mergeSha: QueueSha,
+        headSha: QueueSha,
+        targetSha: QueueSha,
+      })
+      .strict()
+      .exactOptional(),
     reason: QueueReasonSchema.nullable().exactOptional(),
     reusedFrom: z.string().nullable().exactOptional(),
     receiptSource: MergedBindingSchema.nullable().exactOptional(),

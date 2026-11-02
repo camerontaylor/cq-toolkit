@@ -221,7 +221,8 @@ def _inventory(req, runner, q, principal, receipt_root):
     receipt_budget = MAX_RECEIPT_BYTES
     for source in cp["inventory"]:
         row = {"pr": source.get("pr"), "mergeSha": source.get("merge_sha"),
-               "requestId": None, "itemId": None, "state": "missing", "reason": None}
+               "requestId": None, "itemId": None, "state": "missing", "reason": None,
+               "reviewed": False, "consumed": False, "fixed": False}
         subject = {"repo": b["repo"], "pr": row["pr"], "merge_sha": row["mergeSha"],
                    "target_selector": b["targetSelector"], "policy": receipts.POLICY}
         for rid, mapping in by_subject.get(receipts.digest(subject), []):
@@ -262,8 +263,12 @@ def _inventory(req, runner, q, principal, receipt_root):
                       and doc.get("classification", {}).get("outcome") == "completed"
                       and doc.get("outcome") in {"terminal-clean", "terminal-with-findings", "partial-scope"}):
                     row["state"] = "consumed" if entry and entry.get("consumed") == status["receipt_id"] else ("reused" if status.get("reused_from") else "reviewed")
-                    if receipts.remediation_fixed(item, doc, status["receipt_id"]):
-                        row["state"] = "fixed"
+                    row.update(reviewed=True, consumed=bool(entry and entry.get("consumed") == status["receipt_id"]),
+                               fixed=receipts.remediation_fixed(item, doc, status["receipt_id"]))
+                    if row["fixed"]:
+                        row["remediation"] = receipts.remediation_summary(item)
+                        if not row["consumed"]:
+                            row["state"] = "fixed"
                 elif doc.get("outcome") in {"no-current-code", "partial-scope"}:
                     row["state"] = doc["outcome"]
                 else:
@@ -274,7 +279,8 @@ def _inventory(req, runner, q, principal, receipt_root):
             break
         rows.append(row)
     rows.sort(key=lambda row: (row["pr"] or 0, row["mergeSha"] or ""))
-    selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]]
+    selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]
+                or any(row.get(fact) is True and fact in req["states"] for fact in ("reviewed", "consumed", "fixed"))]
     digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"],
                               "states": req["states"], "entries": selected})
     start = 0
@@ -637,7 +643,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                 "no-current-code": "no-current-code", "partial-scope": "partial-scope"}.get(outcome, "blocked")
             result["fixed"] = receipts.remediation_fixed(item, document, receipt_id)
             if result["fixed"]:
-                result["state"] = "fixed"
+                result["remediation"] = receipts.remediation_summary(item)
             if result["state"] == "blocked":
                 # Never upgrade a lossy first-error outcome into vendor authority.
                 result["reason"] = ({"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}

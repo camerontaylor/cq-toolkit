@@ -82,7 +82,7 @@ def verify(wt, base, commits, job):
 
 def findings(path):
     result = []
-    for line in Path(path).read_text().splitlines():
+    for line in Path(path).read_text(errors="replace").splitlines():
         try:
             e = json.loads(line)
         except ValueError:

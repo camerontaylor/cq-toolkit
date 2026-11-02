@@ -325,17 +325,29 @@ class QueueTransportTests(unittest.TestCase):
         self.assertFalse(self.call("status")["fixed"])
         self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
         item = self.q["items"][0]
-        item["remediation"] = dict(receipt_id=rid, subject=item["subject"], capture={},
+        item["remediation"] = dict(receipt_id=rid, subject=item["subject"], capture_digest=receipts.digest({}),
                                    findings=[receipts.digest(doc["findings"][0])], fix_pr=8,
                                    merge="a" * 40, head="b" * 40, target="c" * 40)
         status = self.call("status")
-        self.assertEqual(status["state"], "fixed")
+        self.assertEqual(status["state"], "terminal-with-findings")
         self.assertTrue(status["fixed"] and status["reviewed"])
         self.assertFalse(status["consumed"])
         self.assertEqual(self.inventory_call(states=["fixed"])["entries"][0]["state"], "fixed")
+        self.q["queue_client_requests"][self.request_id]["consumed"] = rid
+        row = self.inventory_call(states=["consumed"])["entries"][0]
+        self.assertEqual(row["state"], "consumed")
+        self.assertTrue(row["fixed"] and row["consumed"] and row["reviewed"])
+        self.assertEqual(self.inventory_call(states=["fixed"])["entries"][0]["state"], "consumed")
+        self.assertEqual(self.call("status")["remediation"]["captureDigest"], receipts.digest({}))
         self.q["items"][0]["remediation"]["receipt_id"] = "0" * 64
         self.assertFalse(self.call("status")["fixed"])
         self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])
+        doc['outcome'] = 'partial-scope'
+        self.q['items'][0]['receipt_id'] = receipts.write_receipt(self.tmp.name, doc)
+        status = self.call('status')
+        self.assertEqual(status['state'], 'partial-scope')
+        self.assertFalse(status['fixed'])
+        self.assertEqual(self.inventory_call(states=['fixed'])['entries'], [])
 
     def test_inventory_verified_review_consumed_and_blocked(self):
         self.inventory_fixture()

@@ -1729,8 +1729,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
-        if cls["counted"] and cls["findings"] and not partial:
-            repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+        if (cls["counted"] and cls["findings"] and not partial
+                and repair_tick.merged_current_enabled(sys.modules[__name__])):
+            try:
+                repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+            except Exception as exc:
+                item["repair_error"] = str(exc)[:300]
         # Separate from cycles: backfill must never duplicate these jobs.
         item["state"] = "done" if cls["counted"] else "blocked"
         item["last_error"] = cls.get("message")
@@ -2350,8 +2354,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 q["backfill_halted"] = str(exc)[:300]
                 q["backfill_halt_operation"] = operation
             log.append("backfill halted: " + str(exc)[:300])
+    budget = ForgeBudget()
     if not dry and only is None:
-        budget = ForgeBudget()
         # Recover existing author intents before discovery checkpoint writes can
         # consume the shared deadline. Both paths retain the same one budget.
         with forge_window(budget):
@@ -2384,11 +2388,13 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             try:
                 log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
             except Exception as exc:
-                item["last_error"] = "repair harvest failed: " + str(exc)[:300]
+                key = "repair_error" if item["kind"] == review_receipt.KIND else "last_error"
+                item[key] = "repair harvest failed: " + str(exc)[:300]
     if not dry:
         repair_tick.backfill(sys.modules[__name__], q)
         repair_tick.archive_legacy(sys.modules[__name__], q)
-        repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
+        with forge_window(budget):
+            repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
     prev = parse_iso(q.get("last_tick"))
     stale_min = CONFIG.get("stale_alarm_min", 36)
     if prev and not dry and (now() - prev).total_seconds() / 60 > stale_min:

@@ -45,6 +45,7 @@ class ReceiptTest(unittest.TestCase):
                 self.assertFalse(receipt.remediation_fixed(changed, doc, changed["receipt_id"]))
             for field, value in (("state", "OPEN"), ("baseRefName", "other"), ("headRefOid", "e" * 40)):
                 record.pop("merged_fix", None)
+                record.pop("not_fixed", None)
                 old = info[field]
                 info[field] = value
                 repair_tick.reconcile_current_fix(c, item)
@@ -54,6 +55,7 @@ class ReceiptTest(unittest.TestCase):
             repair_tick.reconcile_current_fix(c, item)
             self.assertNotIn("remediation", item)
             receipt.write_receipt(Path(td) / "receipts", doc)
+            record.pop("not_fixed", None)
             record["verdicts"][0]["verdict"] = "NOT-FIXED"
             repair_tick.reconcile_current_fix(c, item)
             self.assertNotIn("remediation", item)
@@ -61,6 +63,74 @@ class ReceiptTest(unittest.TestCase):
             c.is_ancestor = lambda *args: False
             repair_tick.reconcile_current_fix(c, item)
             self.assertNotIn("remediation", item)
+
+    def test_partial_repairs_terminal_negatives_and_item_isolation(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import repair_tick
+        with tempfile.TemporaryDirectory() as td:
+            doc = dict(source={"target_selector": "promoted-main"}, capture={"target": "a" * 40},
+                       findings=[{"comment": "one"}, {"comment": "two"}], counted=True,
+                       classification={"counted": True, "outcome": "completed"}, outcome="terminal-with-findings")
+            rid = receipt.write_receipt(Path(td) / "receipts", doc)
+            record = dict(state="published", receipt_id=rid, jobs=["one", "two"],
+                          verdicts=[dict(job=n, verdict="FIXED", finding={"body": n}) for n in ('one', 'two')],
+                          receipt_findings=sorted(receipt.digest(f) for f in doc['findings']),
+                          repair_findings=sorted(receipt.digest({"body": n}) for n in ('one', 'two')),
+                          fix_pr={"number": 9}, publication={"head": "b" * 40, "target": "a" * 40})
+            item = dict(kind=receipt.KIND, state='done', receipt_id=rid, subject=doc['source'],
+                        capture=doc['capture'], repair_runs={'r': record})
+            info = dict(number=9, state="MERGED", baseRefName="main", headRefOid="b" * 40,
+                        mergeCommit={"oid": "c" * 40})
+            c = SimpleNamespace(STATE=Path(td), pr_info=mock.Mock(return_value=info),
+                                git=mock.Mock(return_value="d" * 40), is_ancestor=lambda *args: True)
+            original = copy.deepcopy(item)
+            for verdicts in (record['verdicts'][:1], [record['verdicts'][0],
+                            {**record['verdicts'][1], 'verdict': 'NOT-FIXED'}]):
+                changed = copy.deepcopy(original)
+                changed['repair_runs']['r']['verdicts'] = verdicts
+                repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+                self.assertNotIn('remediation', changed)
+            c.pr_info.assert_not_called()
+            for observation in ({**info, 'state': 'CLOSED'}, {**info, 'headRefOid': 'e' * 40}):
+                changed = copy.deepcopy(original)
+                c.pr_info = mock.Mock(return_value=observation)
+                repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+                self.assertIn('not_fixed', changed['repair_runs']['r'])
+                repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+                c.pr_info.assert_called_once()
+                self.assertNotIn('remediation', changed)
+            changed = copy.deepcopy(original)
+            c.pr_info = mock.Mock(return_value={**info, 'baseRefName': 'other'})
+            repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+            repair_tick.reconcile_fix_prs(c, {'items': [changed]})
+            c.pr_info.assert_called_once()
+            self.assertNotIn('remediation', changed)
+            broken = copy.deepcopy(original)
+            broken['subject'] = {}
+            c.pr_info = mock.Mock(return_value=info)
+            good = copy.deepcopy(original)
+            repair_tick.reconcile_fix_prs(c, {'items': [broken, good]})
+            self.assertIn('repair_error', broken)
+            self.assertTrue(receipt.remediation_fixed(good, doc, rid))
+            c.git.side_effect = RuntimeError('git unavailable')
+            repair_tick.reconcile_fix_prs(c, {'items': [good]})
+            self.assertNotIn('remediation', good)
+            self.assertIn('repair_error', good)
+            c.pr_info.side_effect = RuntimeError('forge budget exhausted')
+            promotion = {'kind': 'promotion', 'repair_runs': {'r': {'fix_pr': {'number': 9}}}}
+            repair_tick.reconcile_fix_prs(c, {'items': [promotion, copy.deepcopy(original)]})
+            self.assertNotIn('fix_merged', promotion['repair_runs']['r'])
+            no_repairs = {**original, 'repair_runs': {}}
+            with mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('unnecessary receipt read')):
+                repair_tick.reconcile_fix_prs(c, {'items': [no_repairs]})
+            self.assertNotIn('repair_error', no_repairs)
+            failed = {**original, 'state': 'repair_failed', 'last_error': 'old repair error',
+                      'repair_runs': {'r': {'state': 'failed'}}}
+            repair_tick.harvest(c, {}, failed)
+            self.assertEqual(failed['state'], 'done')
+            self.assertIsNone(failed['last_error'])
+            self.assertEqual(failed['repair_outcome'], 'failed')
 
     def test_binding_idempotence_and_conflict(self):
         q = {"items": []}
