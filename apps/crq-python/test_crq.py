@@ -1020,6 +1020,33 @@ class CurrentTest(unittest.TestCase):
             self.assertEqual(crq.main(), 0)
             self.assertIsNone(json.loads(output.getvalue())["receipt_id"])
 
+    def test_cli_requeue_of_merged_current_refuses_needs_human_without_mutation(self):
+        item = self.enroll()
+        before = crq.QUEUE.read_bytes()
+        with mock.patch.object(sys, "argv", ["crq", "requeue", item["id"], "retry"]), \
+             mock.patch.object(crq, "write_status"), \
+             contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(crq.main(), 3)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("requeue refused: merged-current retries require explicit lineage", err.getvalue())
+        self.assertIn("needs-human", err.getvalue())
+        self.assertEqual(crq.QUEUE.read_bytes(), before)
+
+    def test_cli_admin_malformed_queue_and_unrelated_value_errors_still_fail(self):
+        item = self.enroll()
+        with mock.patch.object(sys, "argv", ["crq", "prioritize", item["id"]]), \
+             mock.patch.object(crq, "write_status"), contextlib.redirect_stdout(io.StringIO()):
+            item["state"] = "done"
+            crq.save_queue(self.q)
+            with self.assertRaisesRegex(ValueError, "operator priority requires a pending item"):
+                crq.main()
+        crq.QUEUE.write_text("{not json")
+        with mock.patch.object(sys, "argv", ["crq", "requeue", item["id"]]), \
+             mock.patch.object(crq, "write_status"), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(json.JSONDecodeError):
+                crq.main()
+        self.assertEqual(crq.QUEUE.read_text(), "{not json")
+
     def test_ambiguous_rename_keeps_explicit_partial_scope(self):
         self.write("duplicate.py", "rename survives\n" * 10)
         self.merge = self.commit("source includes identical rename candidates")
