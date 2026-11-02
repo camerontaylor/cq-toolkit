@@ -63,6 +63,61 @@ class OperatorTest(unittest.TestCase):
                         self.assertEqual(saved[0]["backfill_idle_with_candidate"], 3)
                         self.assertEqual(saved[0]["backfill_last_manifest"]["target"], "a" * 40)
 
+    def test_inventory_skips_cleanly_when_queue_lock_stays_busy(self):
+        with tempfile.TemporaryDirectory() as td:
+            saved = []
+            q = {"items": []}
+            busy_at = {"snapshot": 1, "merge": 2}
+            for phase, busy_call in busy_at.items():
+                calls = []
+                def lock(fn, *a, lock_wait=0, **kw):
+                    calls.append(lock_wait)
+                    return None if len(calls) == busy_call else fn(*a, **kw)
+                c = SimpleNamespace(STATE=Path(td), with_lock=lock, load_queue=lambda: copy.deepcopy(q),
+                                    save_queue=saved.append)
+                prepared = {"queue": {}, "manifest": {}, "ranked": {}, "report": {}, "event_items": []}
+                with self.subTest(phase=phase), \
+                     mock.patch.object(backfill.runtime, "settings", return_value={}), \
+                     mock.patch.object(backfill.runtime, "run_inventory", return_value=prepared) as run:
+                    result = backfill.inventory_unlocked(c, SimpleNamespace(report_only=True))
+                    self.assertEqual(result["inventory"], "skipped")
+                    self.assertIn(phase, result["reason"])
+                    self.assertFalse(saved)
+                    self.assertEqual(run.called, phase == "merge")
+                    self.assertEqual(calls[0], backfill.SNAPSHOT_LOCK_WAIT)
+                    self.assertGreaterEqual(min(calls), 180)
+                    self.assertFalse((Path(td) / "backfill/latest-report.json").exists())
+                    self.assertFalse((Path(td) / "backfill/latest-ranked.json").exists())
+
+    def test_inventory_skips_merge_when_run_budget_is_spent(self):
+        with tempfile.TemporaryDirectory() as td:
+            saved, waits = [], []
+            def lock(fn, *a, lock_wait=0, **kw):
+                waits.append(lock_wait)
+                return fn(*a, **kw)
+            c = SimpleNamespace(STATE=Path(td), with_lock=lock, load_queue=lambda: {"items": []},
+                                save_queue=saved.append)
+            prepared = {"queue": {}, "manifest": {}, "ranked": {}, "report": {}, "event_items": []}
+            ticks = iter([0, backfill.RUN_BUDGET_S - 30])  # prepare used nearly the whole budget
+            with mock.patch.object(backfill.runtime, "settings", return_value={}), \
+                 mock.patch.object(backfill.runtime, "run_inventory", return_value=prepared):
+                result = backfill.inventory_unlocked(c, SimpleNamespace(report_only=True), clock=lambda: next(ticks))
+            self.assertEqual(result["inventory"], "skipped")
+            self.assertIn("budget", result["reason"])
+            self.assertEqual(waits, [backfill.SNAPSHOT_LOCK_WAIT])  # merge lock never requested
+            self.assertFalse(saved)
+
+    def test_operator_command_reports_busy_lock_as_error(self):
+        import io, sys
+        fake = SimpleNamespace(with_lock=lambda *a, **kw: None)
+        out = io.StringIO()
+        with mock.patch.dict(sys.modules, {"crq": fake}), \
+             mock.patch.object(sys, "argv", ["backfill.py", "baseline"]), \
+             mock.patch("sys.stdout", out), self.assertRaises(SystemExit) as raised:
+            backfill.main()
+        self.assertEqual(raised.exception.code, 3)
+        self.assertIn("queue lock busy", out.getvalue())
+
     def test_legacy_quarantine_release_binds_scope_history_and_ownership(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

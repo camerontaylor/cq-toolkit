@@ -5,6 +5,7 @@ import argparse
 import copy
 import hashlib
 import json
+import time
 from pathlib import Path
 
 import backfill_jobs as jobs
@@ -142,10 +143,25 @@ def inventory_guard(queue):
     return guarded
 
 
-def inventory_unlocked(c, args):
+# Ticks and slots routinely hold tick.lock for a minute or more. Wait longer than
+# they do; if the lock is still busy, skip cleanly (exit 0) and let the next timer
+# run retry, instead of crashing and leaving a failed unit behind.
+SNAPSHOT_LOCK_WAIT = 180
+MERGE_LOCK_WAIT = 600
+# crq-backfill.service has TimeoutStartSec=45min. Finish (or skip) well inside it
+# so systemd never kills the unit mid-merge.
+RUN_BUDGET_S = 40 * 60
+MIN_MERGE_WAIT_S = 60
+
+
+def inventory_unlocked(c, args, clock=time.monotonic):
+    started = clock()
     def snapshot():
         return copy.deepcopy(c.load_queue()), runtime.settings(c.STATE)
-    original, config = c.with_lock(snapshot, lock_wait=30)
+    taken = c.with_lock(snapshot, lock_wait=SNAPSHOT_LOCK_WAIT)
+    if taken is None:
+        return {"inventory": "skipped", "reason": "queue lock busy before snapshot; next run retries"}
+    original, config = taken
     prepared = runtime.run_inventory(c, copy.deepcopy(original), enqueue=not args.report_only, prepare_only=True)
 
     def merge():
@@ -172,7 +188,13 @@ def inventory_unlocked(c, args):
         runtime.clear_operation_halt(current, "inventory")
         c.save_queue(current)
         return prepared["report"]
-    return c.with_lock(merge, lock_wait=30)
+    wait = min(MERGE_LOCK_WAIT, RUN_BUDGET_S - (clock() - started))
+    if wait < MIN_MERGE_WAIT_S:
+        return {"inventory": "skipped", "reason": "run budget spent before merge; nothing saved, next run retries"}
+    merged = c.with_lock(merge, lock_wait=wait)
+    if merged is None:
+        return {"inventory": "skipped", "reason": "queue lock busy at merge; nothing saved, next run retries"}
+    return merged
 
 
 def main():
@@ -202,6 +224,10 @@ def main():
         else:
             result = (inventory_unlocked(crq, args) if args.command == "inventory"
                       else crq.with_lock(execute, crq, args, lock_wait=30))
+            if result is None:
+                # with_lock returns None only when the queue lock stayed busy.
+                print(json.dumps({"error": "queue lock busy; retry"}))
+                raise SystemExit(3)
         print(json.dumps(result, sort_keys=True))
     except (ValueError, OSError, KeyError) as exc:
         print(json.dumps({"error": str(exc)}))
