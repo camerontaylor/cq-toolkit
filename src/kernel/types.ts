@@ -768,7 +768,7 @@ export interface DispositionPayload {
   reason: string;
   owner: string;
   evidence: string[];
-  /** Required nonempty exactly when status is `deferred`. */
+  /** Required nonempty when status is `deferred`. */
   reviewTrigger: string | null;
   observedHead: string;
   observedAt: string;

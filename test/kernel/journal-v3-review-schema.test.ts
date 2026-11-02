@@ -163,6 +163,14 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
     const r = review();
     expect(ReviewObservedJournalEventSchema.parse(r)).toEqual(r);
 
+    // A run-level disposition (all scope fields null) parses too.
+    const runLevel = disposition();
+    runLevel.unitId = null;
+    runLevel.jobId = null;
+    runLevel.taskId = null;
+    runLevel.attempt = null;
+    expect(FindingDispositionJournalEventSchema.parse(runLevel)).toEqual(runLevel);
+
     // Empty population only when known empty; null when unknown.
     const knownEmpty = review({ initialBlocking: [] });
     expect(ReviewObservedJournalEventSchema.parse(knownEmpty)).toEqual(knownEmpty);
@@ -208,6 +216,26 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
       fingerprint: { ...FINGERPRINT, spanContentHash: null },
     });
     expect(FindingDispositionJournalEventSchema.safeParse(unknownSpan).success).toBe(true);
+    // spanContentHash spelling is exact: uppercase hex, missing sha256:
+    // prefix and truncated digests all fail.
+    for (const badSpan of [
+      `sha256:${'B'.repeat(64)}`,
+      'b'.repeat(64),
+      `sha256:${'b'.repeat(63)}`,
+    ]) {
+      const badSpanDisposition = disposition({
+        fingerprint: { ...FINGERPRINT, spanContentHash: badSpan },
+      });
+      expect(FindingDispositionJournalEventSchema.safeParse(badSpanDisposition).success).toBe(
+        false,
+      );
+    }
+    // Fingerprint version propagates into review populations: version 2 is
+    // rejected there too (different versions never silently match).
+    const v2Review = review({
+      findingFingerprints: [{ ...FINGERPRINT, version: 2 as 1 }],
+    });
+    expect(ReviewObservedJournalEventSchema.safeParse(v2Review).success).toBe(false);
     // Uppercase SHA is rejected (lowercase repository-native rule).
     const upperHead = acceptance();
     upperHead.payload.headSha = HEAD.toUpperCase();
@@ -215,6 +243,17 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
     const upperObserved = disposition();
     upperObserved.payload.observedHead = HEAD.toUpperCase();
     expect(FindingDispositionJournalEventSchema.safeParse(upperObserved).success).toBe(false);
+    // Uppercase reviewedBaseSha and review baseSha/headSha are rejected too
+    // (all SHA fields share the lowercase rule).
+    const upperBaseAcceptance = acceptance();
+    upperBaseAcceptance.payload.reviewedBaseSha = BASE.toUpperCase();
+    expect(HeadAcceptanceJournalEventSchema.safeParse(upperBaseAcceptance).success).toBe(false);
+    const upperReviewBase = review();
+    upperReviewBase.payload.baseSha = BASE.toUpperCase();
+    expect(ReviewObservedJournalEventSchema.safeParse(upperReviewBase).success).toBe(false);
+    const upperReviewHead = review();
+    upperReviewHead.payload.headSha = HEAD.toUpperCase();
+    expect(ReviewObservedJournalEventSchema.safeParse(upperReviewHead).success).toBe(false);
     // A deferred disposition without a nonempty reviewTrigger fails.
     expect(
       FindingDispositionJournalEventSchema.safeParse(disposition({ status: 'deferred' })).success,
@@ -228,6 +267,13 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
       FindingDispositionJournalEventSchema.safeParse(
         disposition({ status: 'deferred', reviewTrigger: '' }),
       ).success,
+    ).toBe(false);
+    // attempt is a positive integer where present: zero fails.
+    expect(
+      FindingDispositionJournalEventSchema.safeParse({ ...disposition(), attempt: 0 }).success,
+    ).toBe(false);
+    expect(
+      HeadAcceptanceJournalEventSchema.safeParse({ ...acceptance(), attempt: 0 }).success,
     ).toBe(false);
     // Unknown availability state fails.
     const badAvailability = acceptance();
