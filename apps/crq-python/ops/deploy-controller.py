@@ -22,7 +22,8 @@ renderer, switcher or scheduler. The controller's additions:
   * two advancing completed-tick health observations AFTER owner activation,
     read only from the runner's completion heartbeat (crq.py replaces it
     after status publication; the earlier queue saves prove nothing), plus
-    representative receipt readability (distinct checks);
+    bounded receipt readability and receipt-schema validity samples (three
+    distinct verdicts);
   * the helper's sha256 is computed from the exact bytes executed, recorded
     in every journal, and optionally pinned by the owner before the lock;
   * fail-stopped, owner-approved automatic rollback, only to a recorded
@@ -455,12 +456,144 @@ def _tick_value(effects: Effects) -> str:
     return value
 
 
+RECEIPT_SAMPLE = 10
+RECEIPT_NAME_RE = re.compile(r"[0-9a-f]{64}\.json")
+RECEIPT_POLICY = "affected-current-additions-v1"
+RECEIPT_TARGETS = ("promoted-main", "merge-queue")
+RECEIPT_COUNTED_OUTCOMES = ("terminal-clean", "terminal-with-findings", "partial-scope")
+RECEIPT_RESOLUTIONS = ("same-path-current", "git-rename-M50")
+RECEIPT_DISPOSITIONS = ("included", "renamed", "deleted", "unsupported",
+                        "ambiguous", "excluded-with-reason")
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _hex(pattern, value) -> bool:
+    return isinstance(value, str) and bool(pattern.fullmatch(value))
+
+
+def _text(value) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def receipt_problem(name: str, data: bytes) -> str | None:
+    """Why a retained receipt is not a valid v1 review receipt, or None.
+
+    Mirrors the stable receipt contract read-only and offline: the immutable
+    content identity (review_receipt.read_receipt), the TS QueueReceiptSchema
+    (src/ops/review/internal/queueEvidence.ts) and its scope-digest check.
+    Groups: run identity, captured target, terminal outcome. Never imports
+    runner code and never grants review credit.
+    """
+    if hashlib.sha256(data).hexdigest() + ".json" != name:
+        return "content identity: sha256 does not match the receipt name"
+    try:
+        doc = json.loads(data)
+    except ValueError:
+        return "malformed: not valid JSON"
+    if not isinstance(doc, dict):
+        return "malformed: not a JSON object"
+    if doc.get("version") != 1:
+        return "unsupported receipt version"
+    # Run identity: the queue item, and the run when one was launched.
+    run_id = doc.get("run_id")
+    if not _text(doc.get("item_id")):
+        return "run identity: missing item_id"
+    if run_id is not None and not (_text(run_id) and len(run_id) <= 255
+                                   and RUN_ID_RE.fullmatch(run_id)):
+        return "run identity: malformed run_id"
+    if not (doc.get("request_id") is None or isinstance(doc.get("request_id"), str)):
+        return "run identity: malformed request_id"
+    if not (doc.get("started_at") is None or isinstance(doc.get("started_at"), str)):
+        return "run identity: malformed started_at"
+    # Captured target: the bound source and the pinned capture it reviewed.
+    source, capture = doc.get("source"), doc.get("capture")
+    if not (isinstance(source, dict)
+            and _text(source.get("repo"))
+            and re.fullmatch(r"[\w.-]+/[\w.-]+", source["repo"])
+            and type(source.get("pr")) is int and source["pr"] > 0
+            and _hex(_HEX40, source.get("merge_sha"))
+            and source.get("target_selector") in RECEIPT_TARGETS
+            and source.get("policy") == RECEIPT_POLICY):
+        return "target: source binding is not a v1 merged-current subject"
+    if not (isinstance(capture, dict)
+            and _hex(_HEX40, capture.get("target"))
+            and _hex(_HEX40, capture.get("tree"))):
+        return "target: captured target/tree is not a pinned 40-hex SHA"
+    paths = capture.get("paths")
+    if not (isinstance(paths, list) and all(
+            isinstance(entry, dict) and _text(entry.get("source_path"))
+            and _text(entry.get("path"))
+            and entry.get("resolution") in RECEIPT_RESOLUTIONS
+            and entry.get("disposition") in RECEIPT_DISPOSITIONS for entry in paths)):
+        return "target: malformed captured path manifest"
+    canonical = json.dumps(paths, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("utf-8")
+    if capture.get("scope_digest") != hashlib.sha256(canonical).hexdigest():
+        return "target: scope digest does not match the path manifest"
+    if not (_hex(_HEX64, capture.get("equivalence"))
+            and capture.get("policy") == RECEIPT_POLICY
+            and capture.get("projection")
+            == "current-affected-files/full-file-addition-projection"
+            and capture.get("reviewer") == "coderabbit-review-agent-committed-v1"
+            and _text(capture.get("reviewer_version"))
+            and isinstance(capture.get("captured_at"), str)):
+        return "target: unsupported capture policy/reviewer"
+    # Terminal outcome: a recorded verdict; counted credit needs a completed run.
+    outcome, counted, cls = doc.get("outcome"), doc.get("counted"), doc.get("classification")
+    if not _text(outcome) or outcome in ("pending", "reviewing"):
+        return "terminal outcome: missing or non-terminal outcome"
+    if not isinstance(counted, bool):
+        return "terminal outcome: counted is not a boolean"
+    if not (cls is None or isinstance(cls, dict)):
+        return "terminal outcome: malformed classification"
+    if counted and not (outcome in RECEIPT_COUNTED_OUTCOMES and run_id is not None
+                        and isinstance(cls, dict) and cls.get("counted") is True
+                        and cls.get("outcome") == "completed"):
+        return "terminal outcome: counted without a completed classified run"
+    artifacts = doc.get("artifacts")
+    if not (isinstance(doc.get("findings"), list)
+            and all(isinstance(f, dict) for f in doc["findings"])
+            and isinstance(artifacts, dict)
+            and all(_hex(_HEX64, v) for v in artifacts.values())
+            and doc.get("remediation") == "disabled/deferred"
+            and doc.get("independent_acceptance") is False
+            and doc.get("cli_functional_acceptance") == "pending-D1"):
+        return "malformed: findings/artifacts/acceptance fields"
+    return None
+
+
+def receipt_validation(effects: Effects) -> dict | None:
+    """Validate a bounded sample of retained receipts (state/receipts).
+
+    ``valid`` is its own verdict: None when nothing was sampled, never a
+    tick failure and never review credit.
+    """
+    root = effects.state_dir() / "receipts"
+    if not root.is_dir():
+        return None
+    names = sorted(entry.name for entry in root.iterdir()
+                   if RECEIPT_NAME_RE.fullmatch(entry.name))[:RECEIPT_SAMPLE]
+    invalid = []
+    for name in names:
+        try:
+            problem = receipt_problem(name, (root / name).read_bytes())
+        except OSError as exc:
+            problem = "unreadable: " + str(exc)[:80]
+        if problem:
+            invalid.append({"receipt": name[:-5], "reason": problem})
+    return {"sampled": len(names), "valid_count": len(names) - len(invalid),
+            "invalid": invalid, "valid": (not invalid) if names else None}
+
+
 def health_observation(effects: Effects, prior_tick: str) -> dict:
     """One health observation against the requested prior tick.
 
     Advancement is lexicographic on the strict UTC timestamps (they sort
-    chronologically), never a wall-clock delta; receipts are sampled only for
-    readability, never for review credit.
+    chronologically), never a wall-clock delta. Two independent receipt
+    verdicts ride along: ``receipts_readable`` (state/runs/*/meta.json parse)
+    and ``receipts_valid`` (state/receipts schema sample). Neither affects
+    advancement; neither grants review credit.
     """
     _parse_iso(prior_tick)
     current = _tick_value(effects)
@@ -480,8 +613,13 @@ def health_observation(effects: Effects, prior_tick: str) -> dict:
                 except (ValueError, OSError):
                     pass
         receipt_sample = {"sampled": len(entries[:10]), "readable": readable}
+    validation = receipt_validation(effects)
     return {"observed_tick": current, "advanced": advanced,
-            "receipts": receipt_sample}
+            "receipts": receipt_sample,
+            "receipts_readable": (receipt_sample["readable"] == receipt_sample["sampled"]
+                                  if receipt_sample and receipt_sample["sampled"] else None),
+            "receipt_validation": validation,
+            "receipts_valid": validation["valid"] if validation else None}
 
 
 def two_slot_health(effects: Effects, observe) -> dict:
@@ -496,14 +634,29 @@ def two_slot_health(effects: Effects, observe) -> dict:
     if not first.get("advanced"):
         return {"healthy": False, "reason": "first observation did not advance past "
                                             + first_tick,
-                "observations": [first]}
+                "observations": [first], **_receipt_verdicts([first])}
     second_tick = first["observed_tick"]
     second = observe(second_tick)
     if not second.get("advanced"):
         return {"healthy": False, "reason": "second observation did not advance past "
                                             + second_tick,
-                "observations": [first, second]}
-    return {"healthy": True, "observations": [first, second]}
+                "observations": [first, second], **_receipt_verdicts([first, second])}
+    return {"healthy": True, "observations": [first, second],
+            **_receipt_verdicts([first, second])}
+
+
+def _verdict(values) -> bool | None:
+    """False if any observation failed, None if none observed, else True."""
+    seen = [value for value in values if value is not None]
+    if not seen:
+        return None
+    return all(value is True for value in seen)
+
+
+def _receipt_verdicts(observations) -> dict:
+    """Receipt verdicts, distinct from ``healthy`` (tick advancement only)."""
+    return {key: _verdict(o.get(key) for o in observations)
+            for key in ("receipts_readable", "receipts_valid")}
 
 
 # ----------------------------------------------------------------- rollback

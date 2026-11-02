@@ -18,6 +18,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import review_receipt
+
 ROOT = Path(__file__).resolve().parent
 OPS = ROOT / "ops"
 
@@ -421,6 +423,127 @@ class HealthTests(ControllerFixture):
         self.assertEqual(first["observed_tick"], "2026-10-28T00:05:00Z")
         self.assertEqual(second["observed_tick"], "2026-10-28T00:10:00Z")
         self.assertEqual(first["receipts"], {"sampled": 2, "readable": 1})
+        # Readability is its own verdict and never a tick failure (#550).
+        self.assertIs(first["receipts_readable"], False)
+        self.assertIs(result["receipts_readable"], False)
+        self.assertIsNone(first["receipts_valid"])  # no state/receipts sampled
+        self.assertIsNone(result["receipts_valid"])
+
+    def receipt_document(self, **overrides):
+        """A v1 merged-current receipt shaped exactly like crq.current_document."""
+        paths = [{"source_path": "src/a.ts", "path": "src/a.ts",
+                  "resolution": "same-path-current", "disposition": "included"}]
+        capture = {"target": "a" * 40, "tree": "b" * 40, "paths": paths,
+                   "scope_digest": review_receipt.digest(paths),
+                   "policy": review_receipt.POLICY,
+                   "projection": "current-affected-files/full-file-addition-projection",
+                   "reviewer": "coderabbit-review-agent-committed-v1",
+                   "reviewer_version": "0.3.4", "captured_at": "2026-10-28T00:00:00Z"}
+        capture["equivalence"] = review_receipt.current_equivalence(capture)
+        document = {"version": 1, "item_id": "current-0123", "request_id": "req-1",
+                    "source": {"repo": "o/r", "pr": 7, "merge_sha": "c" * 40,
+                               "target_selector": "promoted-main",
+                               "policy": review_receipt.POLICY},
+                    "capture": capture, "outcome": "terminal-clean",
+                    "classification": {"counted": True, "outcome": "completed"},
+                    "counted": True, "findings": [],
+                    "run_id": "current-0123-20261028T000000Z",
+                    "started_at": "2026-10-28T00:00:00Z",
+                    "artifacts": {"meta.json": "d" * 64},
+                    "remediation": "disabled/deferred",
+                    "independent_acceptance": False,
+                    "cli_functional_acceptance": "pending-D1"}
+        document.update(overrides)
+        return document
+
+    def write_receipt(self, document):
+        return review_receipt.write_receipt(self.runner / "state/receipts", document)
+
+    def write_raw_receipt(self, data):
+        root = self.runner / "state/receipts"
+        root.mkdir(parents=True, exist_ok=True)
+        name = hashlib.sha256(data).hexdigest()
+        (root / (name + ".json")).write_bytes(data)
+        return name
+
+    def test_receipt_fixtures_valid_wrong_target_terminal_missing_malformed(self):
+        valid = self.receipt_document()
+        # The fixture is a real reusable v1 receipt under the runner's own API.
+        self.assertTrue(review_receipt.reusable_current(valid, valid["capture"]))
+        wrong_target = self.receipt_document(
+            capture={**valid["capture"], "target": "main"})
+        unknown_selector = self.receipt_document(
+            source={**valid["source"], "target_selector": "feature/x"})
+        missing_outcome = self.receipt_document()
+        del missing_outcome["outcome"]
+        counted_unfinished = self.receipt_document(
+            classification={"counted": False, "outcome": "failed"})
+        no_run = self.receipt_document(run_id=None)
+        cases = {
+            "valid": (valid, None),
+            "uncounted": (self.receipt_document(
+                outcome="no-current-code", counted=False, classification=None,
+                run_id=None, started_at=None, artifacts={}), None),
+            "wrong-target": (wrong_target, "target"),
+            "unknown-selector": (unknown_selector, "target"),
+            "missing-terminal-outcome": (missing_outcome, "terminal outcome"),
+            "counted-unfinished": (counted_unfinished, "terminal outcome"),
+            "counted-without-run": (no_run, "terminal outcome"),
+            "missing-item": (self.receipt_document(item_id=""), "run identity"),
+            "scope-digest": (self.receipt_document(
+                capture={**valid["capture"], "scope_digest": "e" * 64}), "scope digest"),
+        }
+        for label, (document, expected) in cases.items():
+            with self.subTest(label=label):
+                data = review_receipt.canonical(document)
+                name = hashlib.sha256(data).hexdigest() + ".json"
+                problem = dc.receipt_problem(name, data)
+                if expected is None:
+                    self.assertIsNone(problem)
+                else:
+                    self.assertIn(expected, problem)
+        for raw, expected in ((b"{broken", "not valid JSON"), (b"[1]", "not a JSON object")):
+            with self.subTest(raw=raw):
+                name = hashlib.sha256(raw).hexdigest() + ".json"
+                self.assertIn(expected, dc.receipt_problem(name, raw))
+        data = review_receipt.canonical(valid)
+        self.assertIn("content identity", dc.receipt_problem("0" * 64 + ".json", data))
+
+    def test_invalid_receipt_sample_is_a_distinct_verdict_not_a_tick_failure(self):
+        good = self.write_receipt(self.receipt_document())
+        bad = self.write_receipt(self.receipt_document(
+            capture={**self.receipt_document()["capture"], "target": "main"}))
+        broken = self.write_raw_receipt(b"{broken")
+        missing = self.receipt_document()
+        del missing["outcome"]
+        terminal = self.write_receipt(missing)
+        # In-flight temporaries are not receipts and are never sampled.
+        (self.runner / "state/receipts/.receipt-tmp").write_bytes(b"partial")
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:05:00Z", "2026-10-28T00:10:00Z"]))
+        self.assertTrue(result["healthy"])
+        self.assertIs(result["receipts_valid"], False)
+        first = result["observations"][0]
+        self.assertIs(first["receipts_valid"], False)
+        validation = first["receipt_validation"]
+        self.assertEqual(validation["sampled"], 4)
+        self.assertEqual(validation["valid_count"], 1)
+        self.assertEqual(sorted(i["receipt"] for i in validation["invalid"]),
+                         sorted([bad, broken, terminal]))
+        self.assertNotIn(good, [i["receipt"] for i in validation["invalid"]])
+
+    def test_valid_bounded_receipt_sample_and_stalled_tick_stay_independent(self):
+        for index in range(dc.RECEIPT_SAMPLE + 2):
+            self.write_receipt(self.receipt_document(item_id="current-%d" % index))
+        self.complete_tick("2026-10-28T00:00:00Z")
+        result = dc.two_slot_health(self.effects, self.observe_after(
+            ["2026-10-28T00:00:00Z"]))
+        self.assertFalse(result["healthy"])  # tick stalled
+        self.assertIs(result["receipts_valid"], True)  # receipts still valid
+        validation = result["observations"][0]["receipt_validation"]
+        self.assertEqual((validation["sampled"], validation["valid_count"]),
+                         (dc.RECEIPT_SAMPLE, dc.RECEIPT_SAMPLE))
 
     def test_advancing_queue_saves_cannot_substitute_for_completion(self):
         self.complete_tick("2026-10-28T00:00:00Z")

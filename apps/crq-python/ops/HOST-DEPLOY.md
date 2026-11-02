@@ -247,9 +247,22 @@ Ordering and guarantees:
    advancing queue saves are intermediate evidence and never count. The
    heartbeat must name this checkout's `apps/crq-python` runner root and a
    strict UTC `YYYY-MM-DDTHH:MM:SSZ` tick; a missing, unreadable,
-   malformed or other-checkout heartbeat refuses assessment. Up to ten
-   `state/runs/*/meta.json` receipts are sampled for readability. Tick
-   advancement, service health and receipt readability are distinct
+   malformed or other-checkout heartbeat refuses assessment. Each
+   observation also carries two independent receipt verdicts that never
+   change `healthy` or the exit code (a bad sample is not a tick failure):
+   - `receipts_readable` — up to ten `state/runs/*/meta.json` parse as JSON
+     (counts under `receipts`);
+   - `receipts_valid` — up to ten retained `state/receipts/<sha256>.json`
+     receipts validate against the stable v1 receipt schema
+     (`review_receipt.py`, TS `QueueReceiptSchema`): content identity,
+     run identity (`item_id`, well-formed `run_id`), captured target (v1
+     source binding, 40-hex `capture.target`/`tree`, matching scope
+     digest) and terminal outcome (a counted receipt needs a completed,
+     classified run). Details, with a reason per invalid receipt, are under
+     `receipt_validation`.
+   Each verdict is `true`, `false`, or `null` when nothing was sampled; the
+   top-level artifact repeats both, aggregated across observations. Tick
+   advancement, receipt readability and receipt validity are distinct
    checks; advancement alone is not acceptance.
 
 The deploy journal (schema 1) is the only validated rollback input: it
