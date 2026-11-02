@@ -1337,6 +1337,115 @@ describe('runPlan — report shape and replay details', () => {
     expect('reasoning' in (report.usage as { reasoning?: number })).toBe(false);
   });
 
+  test('T-usage reasoning once: replayed additive reasoning rolls up exactly once', async () => {
+    const { op } = makeFake();
+    const plan: Plan = {
+      id: 'plan-reasoning-once',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const manifest = makeManifest(plan);
+    const log = openRunLog(dir);
+    const priorRunId = 'plan-reasoning-once--prior--beef';
+    await log.append(priorRunId, {
+      type: 'run-started',
+      runId: priorRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'plan-reasoning-once',
+    });
+    await log.append(priorRunId, {
+      type: 'job-finished',
+      runId: priorRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: manifest.jobs[0]?.inputsHash ?? '',
+      result: { status: 'ok', value: { jobId: 'j1' } },
+      usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, reasoning: 7 },
+    });
+    await log.append(priorRunId, {
+      type: 'run-finished',
+      runId: priorRunId,
+      at: '2026-01-01T00:00:02.000Z',
+      stoppedEarly: false,
+    });
+
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('fake', jobInputSchema, op)),
+    );
+    expect(report.jobs[0]?.usage).toEqual({
+      input: 3,
+      output: 4,
+      cacheRead: 1,
+      cacheWrite: 2,
+      reasoning: 7,
+    });
+    // Mixed rollup: reasoning counted ONCE in the run rollup (10+4+1+2+7 = 24).
+    expect(report.usage).toEqual({
+      input: 3,
+      output: 4,
+      cacheRead: 1,
+      cacheWrite: 2,
+      reasoning: 7,
+    });
+  });
+
+  test('T-usage reasoning-only: a reasoning-only measurement survives the evidence fold', async () => {
+    const { op } = makeFake();
+    const plan: Plan = {
+      id: 'plan-reasoning-only',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const manifest = makeManifest(plan);
+    const log = openRunLog(dir);
+    const priorRunId = 'plan-reasoning-only--prior--beef';
+    await log.append(priorRunId, {
+      type: 'run-started',
+      runId: priorRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'plan-reasoning-only',
+    });
+    await log.append(priorRunId, {
+      type: 'job-finished',
+      runId: priorRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: manifest.jobs[0]?.inputsHash ?? '',
+      result: { status: 'ok', value: { jobId: 'j1' } },
+      // Reasoning-only: every other field zero. The old fold (which excluded
+      // reasoning) saw 0 tokens and dropped the measurement entirely.
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 9 },
+    });
+    await log.append(priorRunId, {
+      type: 'run-finished',
+      runId: priorRunId,
+      at: '2026-01-01T00:00:02.000Z',
+      stoppedEarly: false,
+    });
+
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('fake', jobInputSchema, op)),
+    );
+    expect(report.jobs[0]?.usage).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 9,
+    });
+    expect(report.usage).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 9,
+    });
+  });
+
   test('journal-less runs (no journalDir) produce the same report semantics', async () => {
     const { state, op } = makeFake();
     const plan = chainPlan('plan-mem', 3);

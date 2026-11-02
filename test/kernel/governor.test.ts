@@ -1574,17 +1574,28 @@ describe('observeCost rejects invalid USD before mutating the rollup (#15-1)', (
   });
 });
 
-describe('totalTokensOf counts reasoning once, via output (#14-6)', () => {
-  test('reasoning is NOT added on top of output: the token-cap fold', () => {
+describe('totalTokensOf counts ADDITIVE reasoning once (T-usage reasoning conflict)', () => {
+  // The old comment here claimed a producer must never report additive
+  // reasoning, contradicting the Usage type docs (src/driver/types.ts).
+  // Owner decision 2026-11-03: the declared contract is additive-only —
+  // reasoning counts once; an output-includes-reasoning lane omits the
+  // field, so adding it on top never double-counts.
+  test('reasoning IS added on top of output: the token-cap fold', () => {
     const usage = { input: 10, output: 20, cacheRead: 5, cacheWrite: 0, reasoning: 8 };
-    // Boundary: the fold is 35 (10+20+5+0) — NOT 43 (reasoning double-counted).
-    const atCap = new BudgetGovernor({ maxTokens: 35 });
+    // Boundary: the fold is 43 (10+20+5+0+8) — counted exactly once.
+    const atCap = new BudgetGovernor({ maxTokens: 43 });
     atCap.observeUsage('j1', usage);
-    expect(atCap.tripped).toBe(false); // 35 ≤ 35 — the same exceeds semantics
-    const overCap = new BudgetGovernor({ maxTokens: 34 });
+    expect(atCap.tripped).toBe(false); // 43 ≤ 43 — the same exceeds semantics
+    const overCap = new BudgetGovernor({ maxTokens: 42 });
     overCap.observeUsage('j1', usage);
     expect(overCap.tripped).toBe(true);
-    expect(overCap.tripReason).toMatch(/token rollup 35 exceeded cap 34/);
+    expect(overCap.tripReason).toMatch(/token rollup 43 exceeded cap 42/);
+  });
+
+  test('an omitting lane (no reasoning field) folds the same total — no double count', () => {
+    const usage = { input: 10, output: 28, cacheRead: 5, cacheWrite: 0 }; // 28 includes the 8
+    expect(new BudgetGovernor({ maxTokens: 43 }).observeUsage('j2', usage)).toBeUndefined();
+    expect(new BudgetGovernor({ maxTokens: 43 }).tripped).toBe(false);
   });
 });
 

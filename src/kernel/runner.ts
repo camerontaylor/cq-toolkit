@@ -217,13 +217,15 @@ interface OutcomeEntry {
 }
 
 /**
- * Σ of the frozen Usage fields — the DD-9 token rollup (`reasoning` is an
- * `output` breakdown already included in it, never added on top). Identical
- * to the governor's private fold; kept local so the runner's once-only
- * evidence flags mark exactly what the governor will fold.
+ * Σ of the frozen Usage fields plus ADDITIVE `reasoning` — the DD-9 token
+ * rollup (`reasoning` counts exactly once: a lane whose SDK includes
+ * thinking inside `output` omits the field, so adding it on top is safe
+ * and a reasoning-only measurement counts). Identical to the governor's
+ * private fold; kept local so the runner's once-only evidence flags mark
+ * exactly what the governor will fold.
  */
 function usageTokens(usage: Usage): number {
-  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
 /** Sum two Usage rollups (the governed per-job evidence sums). */
