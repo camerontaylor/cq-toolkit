@@ -8,6 +8,11 @@ import { resolve, dirname } from 'node:path';
 import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { ReviewAddressManyInputSchema } from './registry.js';
 import type { OpResult } from '../../kernel/types.js';
+import {
+  createKnownUsageLedger,
+  type KnownUsageSummary,
+  type UsageObservation,
+} from '../../shared/knownUsage.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { makeReviewAddress, type ReviewAddressInput, type ReviewAddressResult } from './address.js';
 import {
@@ -54,11 +59,15 @@ export interface ReviewAddressManyInput {
   wallMs?: number;
   push?: boolean;
 }
-export type ReviewAddressManyResult = OpResult<AddressManyAggregate> & {
-  report?: AddressManyAggregate;
+export type ReviewAddressManyResult = OpResult<
+  AddressManyAggregate & { usageSummary: KnownUsageSummary }
+> & {
+  report?: AddressManyAggregate & { usageSummary: KnownUsageSummary };
 };
 
 class IsolationRefusal extends Error {}
+
+const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
 /** Independent object store and common directory; caller receipts remain durable. */
 export async function isolateAddressMany(
@@ -150,6 +159,14 @@ export async function isolateAddressMany(
     throw error;
   }
 }
+/**
+ * Retain exit spend across every terminal result. Each admitted leg's settled
+ * usage is recorded once (known from its report, unknown when the leg was
+ * dispatched without a measurement, measured zero when it never dispatched),
+ * and the folded summary is attached to EVERY exit, including failure,
+ * budget exhaustion, needs-human and an input-schema refusal, so a bulk run
+ * never loses the spend it already paid for on a non-ok exit.
+ */
 export function makeReviewAddressMany(
   deps: {
     gh?: GhFn;
@@ -159,7 +176,43 @@ export function makeReviewAddressMany(
     address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
   } = {},
 ) {
+  const ledger = createKnownUsageLedger();
+  const run = makeReviewAddressManyCore(deps, (id, observation) => ledger.record(id, observation));
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
+    const result = await run(input);
+    const usageSummary = ledger.snapshot();
+    if (result.status === 'ok')
+      return { status: 'ok' as const, value: { ...result.value, usageSummary } };
+    // A schema refusal exits before any dispatch: no spend exists to retain,
+    // so there is no report to extend.
+    if (result.report === undefined) return result as ReviewAddressManyResult;
+    return {
+      status: result.status,
+      ...('error' in result ? { error: result.error } : {}),
+      ...('reason' in result ? { reason: result.reason } : {}),
+      ...('detail' in result ? { detail: result.detail } : {}),
+      report: { ...result.report, usageSummary },
+    } as ReviewAddressManyResult;
+  };
+}
+
+/** The aggregate the core returns; the wrapper stamps the retained usage summary. */
+type AddressManyAggregateCore = Omit<AddressManyAggregate, never>;
+type ReviewAddressManyCoreResult = OpResult<AddressManyAggregateCore> & {
+  report?: AddressManyAggregateCore;
+};
+
+function makeReviewAddressManyCore(
+  deps: {
+    gh?: GhFn;
+    isolate?: typeof isolateAddressMany;
+    coordinationRoot?: string;
+    enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
+    address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
+  } = {},
+  record: (id: string, observation: UsageObservation) => void = () => {},
+) {
+  return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyCoreResult> => {
     const valid = ReviewAddressManyInputSchema.safeParse(input);
     if (!valid.success) return { status: 'failed', error: valid.error.message };
     const gh =
@@ -331,6 +384,7 @@ export function makeReviewAddressMany(
             continue;
           }
           budget = admission.state;
+          let admitted = true;
           let result: ReviewAddressResult | undefined;
           let dispatched = false;
           let enrollment: AddressManyEnrollment = requestedEnrollment(candidate.number);
@@ -439,6 +493,14 @@ export function makeReviewAddressMany(
           }
           const report = result?.status === 'ok' ? result.value : result?.report;
           const usage = report?.usage;
+          // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
+          // settlement point: measured usage when the settled report carried a
+          // measurement, an explicit unknown observation when the leg was
+          // dispatched without one, and a measured zero for a settled leg that
+          // never dispatched (a missed admission spends nothing). Not-admitted
+          // legs are never recorded, so a refusal cannot invent spend.
+          if (admitted)
+            record(identity.id, usage ? { usage } : dispatched ? {} : { usage: zeroUsage() });
           const settled = usage
             ? settleAddressMany(budget, {
                 ...identity,
@@ -532,15 +594,16 @@ export function makeReviewAddressMany(
             }),
         ],
       };
-      if (report.status === 'ok') return { status: 'ok', value: report };
+      if (report.status === 'ok') return { status: 'ok' as const, value: report };
       if (report.status === 'failed')
-        return { status: 'failed', error: report.reasons.join('; '), report };
+        return { status: 'failed' as const, error: report.reasons.join('; '), report };
       if (report.status === 'indeterminate')
-        return { status: 'indeterminate', detail: report.reasons.join('; '), report };
-      if (report.status === 'budget-exhausted') return { status: 'budget-exhausted', report };
-      return { status: 'needs-human', reason: report.reasons.join('; '), report };
+        return { status: 'indeterminate' as const, detail: report.reasons.join('; '), report };
+      if (report.status === 'budget-exhausted')
+        return { status: 'budget-exhausted' as const, report };
+      return { status: 'needs-human' as const, reason: report.reasons.join('; '), report };
     } catch (error) {
-      return { status: 'failed', error: String(error) };
+      return { status: 'failed' as const, error: String(error) };
     }
   };
 }

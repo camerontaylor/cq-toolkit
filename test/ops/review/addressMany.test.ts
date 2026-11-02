@@ -632,3 +632,74 @@ test('refuses prepared roots outside the PR selection before dispatch', async ()
   expect(address).not.toHaveBeenCalled();
   expect(isolate).not.toHaveBeenCalled();
 });
+
+test('M7-many nominal evidence', async () => {
+  const address = vi.fn(async () => ({ status: 'ok' as const, value: report() }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.status).toBe('ok');
+  if (result.status !== 'ok') throw new Error('expected success');
+  // Two legs, each with measured usage 10: success retains settled usage once.
+  expect(result.value.usageSummary).toEqual({
+    usage: { input: 20, output: 0, cacheRead: 0, cacheWrite: 0 },
+    knownCount: 2,
+    unknownCount: 0,
+    unpricedCount: 2,
+  });
+  expect(result.value.accounting.observedTokens).toBe(20);
+});
+
+test('M7-many missing evidence', async () => {
+  // A dispatched leg whose settled report carries no usage measurement is
+  // explicit unknown spend, never measured zero, and never dropped; its
+  // measured sibling is retained once.
+  const noUsage = report();
+  delete (noUsage as { usage?: unknown }).usage;
+  const address = vi.fn(async ({ source }: { source: string }) =>
+    source === 'pr:1'
+      ? { status: 'ok' as const, value: noUsage }
+      : { status: 'ok' as const, value: report() },
+  );
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })({ ...input, pulls: [1, 2, 3], tokensPerPr: 25, concurrency: 2 });
+  expect(result.report?.accounting.stop).toBe('unknown-usage');
+  expect(result.report?.usageSummary).toEqual({
+    usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 },
+    knownCount: 1,
+    unknownCount: 1,
+    unpricedCount: 2,
+  });
+});
+
+test('M7-many failure evidence', async () => {
+  // The first leg settles with measured usage, the second throws: failure and
+  // thrown exits retain the first leg's usage exactly once, and parent totals
+  // do not double count it.
+  let calls = 0;
+  const address = vi.fn(async () => {
+    if (++calls === 1) return { status: 'ok' as const, value: report() };
+    throw new Error('leg two lost');
+  });
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.status).toBe('failed');
+  expect(result.report?.usageSummary).toEqual({
+    usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 },
+    knownCount: 1,
+    unknownCount: 1,
+    unpricedCount: 2,
+  });
+  expect(result.report?.accounting.observedTokens).toBe(10);
+});
