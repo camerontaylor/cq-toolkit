@@ -39,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const AT = '2026-01-03T04:05:06.789Z';
+const AT_NO_MILLIS = '2026-01-03T04:05:06Z';
 const HASH = `sha256:${'b'.repeat(64)}`;
 
 function gateVerdict(overrides?: Partial<GateVerdictJournalEvent>): GateVerdictJournalEvent {
@@ -202,6 +203,16 @@ describe('journal v3 gate/task/approval/write schemas (T26)', () => {
     expect(GateVerdictJournalEventSchema.safeParse(gateVerdict({ attempt: 0 })).success).toBe(
       false,
     );
+    // Seconds-only `at` fails on every v3 envelope: UTC ISO-8601 WITH
+    // milliseconds is the envelope rule.
+    for (const at of [
+      { schema: GateVerdictJournalEventSchema, event: gateVerdict({ at: AT_NO_MILLIS }) },
+      { schema: TaskFinishedJournalEventSchema, event: taskFinished({ at: AT_NO_MILLIS }) },
+      { schema: ApprovalJournalEventSchema, event: approval({ at: AT_NO_MILLIS }) },
+      { schema: WriteObservationJournalEventSchema, event: writeDenied({ at: AT_NO_MILLIS }) },
+    ] as const) {
+      expect(at.schema.safeParse(at.event).success).toBe(false);
+    }
   });
 
   test('T26 failure boundary', async () => {
@@ -220,16 +231,23 @@ describe('journal v3 gate/task/approval/write schemas (T26)', () => {
     (aliasedTask.payload as unknown as Record<string, unknown>).outcome = 'fixed';
     expect(TaskFinishedJournalEventSchema.safeParse(aliasedTask).success).toBe(false);
 
-    // Strict v2 rejection of v3, directly on the v1/v2 union: all four
-    // carriers fail JournalEventSchema (the schema behind append and the
-    // read-back).
-    expect(JournalEventSchema.safeParse(gateVerdict()).success).toBe(false);
-    expect(JournalEventSchema.safeParse(taskFinished()).success).toBe(false);
-    expect(JournalEventSchema.safeParse(approval()).success).toBe(false);
-    expect(JournalEventSchema.safeParse(writeDenied()).success).toBe(false);
+    // Strict v2 rejection of v3, directly on the v1/v2 union: all six v3
+    // carrier variants fail JournalEventSchema (the schema behind append and
+    // the read-back).
+    const variants = [
+      gateVerdict(),
+      taskFinished(),
+      approval(),
+      approval({ type: 'approval-expired' }),
+      writeDenied(),
+      writeDenied({ type: 'write-path-cap-tripped' }),
+    ] as const;
+    for (const variant of variants) {
+      expect(JournalEventSchema.safeParse(variant).success).toBe(false);
+    }
 
     // The kernel v1/v2 RunLog validates through JournalEventSchema (append
-    // AND read-back), so the carriers must fail there; old shapes still
+    // AND read-back), so every variant must fail there; old shapes still
     // write and read back unchanged.
     let dir: string | undefined;
     try {
@@ -237,10 +255,11 @@ describe('journal v3 gate/task/approval/write schemas (T26)', () => {
       const log = openRunLog(dir);
       const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
       await log.append('plan-x--k--a', JournalEventSchema.parse(v1));
-      await expect(
-        log.append('plan-x--k--a', approval() as unknown as JournalEvent),
-      ).rejects.toThrow();
-      await expect(log.append('plan-x--k--a', gateVerdict() as never)).rejects.toThrow();
+      for (const variant of variants) {
+        await expect(
+          log.append('plan-x--k--a', variant as unknown as JournalEvent),
+        ).rejects.toThrow();
+      }
       const read = await log.read('plan-x--k--a');
       expect(read).toEqual([v1]);
     } finally {

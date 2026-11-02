@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const AT = '2026-01-03T04:05:06.789Z';
+const AT_NO_MILLIS = '2026-01-03T04:05:06Z';
 const BASE = 'a'.repeat(40);
 const HASH = `sha256:${'b'.repeat(64)}`;
 
@@ -206,6 +207,14 @@ describe('journal v3 header/attempt schemas (T25)', () => {
     const upperSha = header();
     upperSha.provenance.baseSha = BASE.toUpperCase();
     expect(RunStartedV3JournalEventSchema.safeParse(upperSha).success).toBe(false);
+    // Seconds-only `at` fails on both v3 envelopes: UTC ISO-8601 WITH
+    // milliseconds is the envelope rule (ADR-0008).
+    expect(
+      RunStartedV3JournalEventSchema.safeParse(header({ at: AT_NO_MILLIS })).success,
+    ).toBe(false);
+    expect(
+      AttemptFinishedJournalEventSchema.safeParse(attemptFinished({ at: AT_NO_MILLIS })).success,
+    ).toBe(false);
   });
 
   test('T25 failure boundary', async () => {

@@ -673,7 +673,7 @@ export const RunStartedV3JournalEventSchema: z.ZodType<RunStartedV3JournalEvent>
   .object({
     type: z.literal('run-started'),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     planId: z.string(),
     journalVersion: z.literal(3),
     seq: z.number().int().positive(),
@@ -786,7 +786,7 @@ export const AttemptFinishedJournalEventSchema: z.ZodType<AttemptFinishedJournal
   .object({
     type: z.literal('attempt-finished'),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     unitId: z.string().min(1),
     jobId: z.string().min(1).nullable(),
     taskId: z.string().min(1),
@@ -814,7 +814,7 @@ export const GateVerdictJournalEventSchema: z.ZodType<GateVerdictJournalEvent> =
   .object({
     type: z.literal('gate-verdict'),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     unitId: z.string().min(1),
     jobId: z.string().min(1).nullable(),
     taskId: z.string().min(1),
@@ -835,7 +835,7 @@ export const TaskFinishedJournalEventSchema: z.ZodType<TaskFinishedJournalEvent>
   .object({
     type: z.literal('task-finished'),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     unitId: z.string().min(1),
     jobId: z.string().min(1).nullable(),
     taskId: z.string().min(1),
@@ -856,7 +856,7 @@ export const ApprovalJournalEventSchema: z.ZodType<ApprovalJournalEvent> = z
   .object({
     type: z.enum(['approval-granted', 'approval-expired']),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     unitId: z.string().min(1).nullable(),
     jobId: z.string().min(1).nullable(),
     taskId: z.string().min(1).nullable(),
@@ -879,7 +879,7 @@ export const WriteObservationJournalEventSchema: z.ZodType<WriteObservationJourn
   .object({
     type: z.enum(['write-path-denied', 'write-path-cap-tripped']),
     runId: z.string(),
-    at: z.iso.datetime(),
+    at: z.iso.datetime({ precision: 3 }),
     unitId: z.string().min(1).nullable(),
     jobId: z.string().min(1).nullable(),
     taskId: z.string().min(1).nullable(),
