@@ -378,8 +378,7 @@ export interface ReviewLoopOpts {
   pr: number;
   /** The PR's head branch name (origin truth, from the fetch upstream). */
   headRefName: string;
-  /** Optional coordinator freshness fence and lifetime identity checks. */
-  expectedHead?: string;
+  /** Lifetime identity checks around worktree resolution. */
   beforeWorktreeResolve?: () => Promise<void>;
   onWorktreeResolved?: (info: { path: string; branch: string }) => Promise<void>;
   /**
@@ -959,18 +958,38 @@ async function runOwnedReviewLoop(
 
   // (1) THE per-PR worktree — origin head is truth, re-verified inside.
   await opts.beforeWorktreeResolve?.();
-  const worktree = await resolvePrWorktree({
-    repoRoot: opts.repoRoot,
-    pr: opts.pr,
-    headRefName: opts.headRefName,
-    run: opts.git,
-    registry: opts.registry,
-    nowMs: opts.nowMs,
-    ...(opts.expectedHead !== undefined ? { expectedHead: opts.expectedHead } : {}),
-    ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
-    ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
-    ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
-  });
+  let worktree: Awaited<ReturnType<typeof resolvePrWorktree>>;
+  try {
+    worktree = await resolvePrWorktree({
+      repoRoot: opts.repoRoot,
+      pr: opts.pr,
+      headRefName: opts.headRefName,
+      run: opts.git,
+      registry: opts.registry,
+      nowMs: opts.nowMs,
+      ...(opts.expectedHead !== undefined ? { expectedHead: opts.expectedHead } : {}),
+      ...(opts.worktreeRoot !== undefined ? { worktreeRoot: opts.worktreeRoot } : {}),
+      ...(opts.onWorktreeCreated ? { onCreated: opts.onWorktreeCreated } : {}),
+      ...(opts.onWorktreeStaleRefresh ? { onStaleRefresh: opts.onWorktreeStaleRefresh } : {}),
+    });
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      error.message !== 'PR fetched head changed since admission; checkout left untouched'
+    )
+      throw error;
+    return {
+      status: 'needs-human',
+      reasons: ['PR head changed before dispatch'],
+      headRefused: true,
+      // No checkout was admitted or resolved.
+      worktree: { path: '', branch: '', reused: false },
+      batches: [],
+      skipped,
+      plan: buildReviewLoopPlan([]),
+      actionsPosted: 0,
+    };
+  }
   await opts.onWorktreeResolved?.(worktree);
 
   if (opts.expectedHead) {

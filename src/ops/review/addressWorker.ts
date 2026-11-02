@@ -1008,18 +1008,23 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 prior,
                 async (row) => {
                   if (deps.terminalBinding) {
-                    terminalAttempt = await recordAddressTerminalAttempt(deps.terminalBinding, {
-                      root,
-                      file,
-                      parent: observedHead,
-                      executionHead: observedHead,
-                      runPrefix,
-                      finding: finding.id,
-                      slug: dispatch!.slug,
-                      ordinal: dispatch!.ordinal,
-                      tier,
-                      model: row.model,
-                    });
+                    terminalAttempt = await withMutation(async () => {
+                      const parent = await git(root, ['rev-parse', 'HEAD']);
+                      if (!verifiedHeads.has(parent))
+                        throw new AddressRefusal('unexpected terminal capture head', true);
+                      return recordAddressTerminalAttempt(deps.terminalBinding!, {
+                        root,
+                        file,
+                        parent,
+                        executionHead: observedHead,
+                        runPrefix,
+                        finding: finding.id,
+                        slug: dispatch!.slug,
+                        ordinal: dispatch!.ordinal,
+                        tier,
+                        model: row.model,
+                      });
+                    }, admitMutation);
                   }
                   touched = true;
                   editingRow = row;
