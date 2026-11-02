@@ -3,17 +3,21 @@
 //
 // Pinned here:
 //   1. Round-trip: the measurement-summary carrier and the report v2 root
-//      compose the previously landed T25–T27 payload schemas (attempt, gate,
-//      task, approval, write, disposition, acceptance, review) and parse
+//      compose the previously landed T25–T27 carrier/payload schemas (report
+//      attempts/gates/approvals/writeDecisions mirror the full journal
+//      ENVELOPE + payload per ADR-0008 registry rows 199/202/203/204;
+//      tasks/dispositions/acceptances/reviews are payload-only) and parse
 //      byte-identically through their standalone strict schemas. Writer and
 //      assembler stay disabled (T23/T36/T37 own the producers).
-//   2. Unknown evidence: an unknown fixesPerRun alias shape, a negative
-//      count, a non-lowercase SHA, an unknown availability state, an unknown
-//      reportVersion and a negative attempt ordinal fail explicitly.
-//   3. Failure boundary: strict extras rejection (including a cap/used
-//      alias in the metric); the v1/v2 kernel RunLog (JournalEventSchema)
-//      must keep REJECTING the v3 measurement-summary carrier — strict v2
-//      rejection of v3 (ADR acceptance).
+//   2. Unknown evidence: null metric values without availability, an unknown
+//      denominator with an unknown baseline count, non-unique or non-projected
+//      verifiedCommits, unknown availability states, unknown reportVersion,
+//      payload-only envelope rows, bad JSON Pointers, non-uuid correlation and
+//      non-lowercase SHAs fail explicitly.
+//   3. Failure boundary: strict extras rejection (including cap/used aliases
+//      in the metric); the v1/v2 kernel RunLog (JournalEventSchema) must keep
+//      REJECTING the v3 measurement-summary carrier — strict v2 rejection of
+//      v3 (ADR acceptance).
 //
 // Determinism: fixed ISO timestamps and fixture SHAs, no Date.now().
 import { describe, expect, test } from 'vitest';
@@ -25,20 +29,22 @@ import {
 } from '../../src/kernel/schema.js';
 import type {
   AcceptancePayload,
-  AttemptFinishedPayload,
+  ApprovalJournalEvent,
+  AttemptFinishedJournalEvent,
   AvailabilityRecord,
   BaselineFailureRecord,
   ClosureRecord,
   CorrelationRecord,
   DispositionPayload,
   FindingFingerprint,
-  GateVerdictPayload,
+  GateVerdictJournalEvent,
   MeasurementSummaryJournalEvent,
   MetricRecord,
   ProvenanceRecord,
   ReportV2,
   ReviewObservedPayload,
   TaskFinishedPayload,
+  WriteObservationJournalEvent,
 } from '../../src/kernel/types.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -47,6 +53,7 @@ import { join } from 'node:path';
 const AT = '2026-01-03T04:05:06.789Z';
 const HASH = `sha256:${'b'.repeat(64)}`;
 const HEAD = 'a'.repeat(40);
+const HEAD2 = 'd'.repeat(40);
 const BASE = 'c'.repeat(40);
 
 const FINGERPRINT: FindingFingerprint = {
@@ -146,10 +153,92 @@ function correlation(): CorrelationRecord {
   };
 }
 
+function envelopeApproval(): ApprovalJournalEvent {
+  return {
+    type: 'approval-granted',
+    runId: 'plan-x--k--a',
+    at: AT,
+    unitId: null,
+    jobId: null,
+    taskId: null,
+    attempt: null,
+    payload: { approvalId: HASH, reason: 'lease granted', availability: {} },
+  };
+}
+
+function envelopeAttempt(): AttemptFinishedJournalEvent {
+  return {
+    type: 'attempt-finished',
+    runId: 'plan-x--k--a',
+    at: AT,
+    unitId: 'unit-1',
+    jobId: null,
+    taskId: 'task-1',
+    attempt: 1,
+    payload: {
+      tier: 'worker',
+      invocation: 'inv-1',
+      model: null,
+      provider: 'fake',
+      requestedModel: 'fake-model',
+      servedModel: null,
+      tokens: null,
+      usageChannels: {},
+      requests: null,
+      wallMs: 100,
+      modeledUsd: null,
+      priceTableRevision: null,
+      priceCoverage: null,
+      stopReason: 'done',
+      stopCode: 'completed',
+      class: 'terminal',
+      error: null,
+      timeout: null,
+      budget: {
+        allowed: { tokens: null, wallMs: null },
+        spent: { tokens: null, wallMs: null },
+        remaining: { tokens: null, wallMs: null },
+      },
+      availability: {},
+    },
+  };
+}
+
+function envelopeGate(): GateVerdictJournalEvent {
+  return {
+    type: 'gate-verdict',
+    runId: 'plan-x--k--a',
+    at: AT,
+    unitId: 'unit-1',
+    jobId: null,
+    taskId: 'task-1',
+    attempt: 1,
+    payload: {
+      gate: 'lint',
+      verdict: 'pass',
+      fingerprintVersion: null,
+      availability: {},
+    },
+  };
+}
+
+function envelopeWrite(): WriteObservationJournalEvent {
+  return {
+    type: 'write-path-denied',
+    runId: 'plan-x--k--a',
+    at: AT,
+    unitId: null,
+    jobId: null,
+    taskId: null,
+    attempt: null,
+    payload: { path: 'src/x.ts', reason: 'denied', cap: null, observed: null, availability: {} },
+  };
+}
+
 function report(metricOverrides?: Partial<MetricRecord>): ReportV2 {
-  const attempts: AttemptFinishedPayload[] = [];
-  const tasks: TaskFinishedPayload[] = [];
-  const gates: GateVerdictPayload[] = [];
+  const tasks: TaskFinishedPayload[] = [{ taskId: 'task-1', changed: true, availability: {} }];
+  const attempts: AttemptFinishedJournalEvent[] = [envelopeAttempt()];
+  const gates: GateVerdictJournalEvent[] = [envelopeGate()];
   const dispositions: DispositionPayload[] = [
     {
       fingerprint: FINGERPRINT,
@@ -164,10 +253,37 @@ function report(metricOverrides?: Partial<MetricRecord>): ReportV2 {
       availability: {},
     },
   ];
-  const acceptances: AcceptancePayload[] = [];
-  const reviews: ReviewObservedPayload[] = [];
-  const approvals: ReportV2['approvals'] = [];
-  const writeDecisions: ReportV2['writeDecisions'] = [];
+  const acceptances: AcceptancePayload[] = [
+    {
+      headSha: HEAD,
+      reviewedBaseSha: BASE,
+      reviewerId: 'critic',
+      authorId: 'author',
+      independent: true,
+      verdict: 'PASS',
+      evidence: ['pr:819'],
+      availability: {},
+    },
+  ];
+  const reviews: ReviewObservedPayload[] = [
+    {
+      baseSha: BASE,
+      headSha: HEAD,
+      findingFingerprints: [],
+      coverage: 'full',
+      initialBlocking: null,
+      reviewerId: 'critic',
+      source: 'coderabbit',
+      round: 1,
+      delivered: [],
+      completed: [],
+      omissions: [],
+      vendorCompletion: 'unknown',
+      availability: {},
+    },
+  ];
+  const approvals: ApprovalJournalEvent[] = [envelopeApproval()];
+  const writeDecisions: WriteObservationJournalEvent[] = [envelopeWrite()];
   return {
     reportVersion: 2,
     provenance: provenance(),
@@ -192,29 +308,132 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
     expect(parsed).toEqual(m);
     expect(JSON.parse(JSON.stringify(parsed))).toEqual(m);
 
+    // One valid row in EVERY report array: tasks, attempts, gates,
+    // dispositions, acceptances, reviews, approvals, writeDecisions.
     const r = report();
     const parsedReport = ReportV2Schema.parse(r);
     expect(parsedReport).toEqual(r);
     expect(JSON.parse(JSON.stringify(parsedReport))).toEqual(r);
-
-    // Composition sanity: previously landed payload schemas appear intact
-    // inside the report root (the disposition came from T27's strict schema).
+    expect(parsedReport.tasks[0]?.taskId).toBe('task-1');
+    expect(parsedReport.attempts[0]?.type).toBe('attempt-finished');
+    expect(parsedReport.gates[0]?.type).toBe('gate-verdict');
     expect(parsedReport.dispositions[0]?.fingerprint).toEqual(FINGERPRINT);
+    expect(parsedReport.acceptances[0]?.verdict).toBe('PASS');
+    expect(parsedReport.reviews[0]?.round).toBe(1);
+    expect(parsedReport.approvals[0]?.type).toBe('approval-granted');
+    expect(parsedReport.writeDecisions[0]?.type).toBe('write-path-denied');
   });
 
   test('T28 unknown evidence', () => {
-    // Unknown stays unknown: null count/denominator with availability, never
-    // fabricated zero; legacy scalar fixesPerRun shape is rejected.
+    // Unknown stays unknown: null with availability parses; the legacy scalar
+    // fixesPerRun shape is rejected.
+    const unknownOk = measurement({
+      payload: {
+        metric: metric({
+          fixesPerRun: { numerator: null, denominator: null },
+          baselineFailures: [
+            baseline({
+              count: null,
+              unknownReason: 'probe bailed',
+              probeHead: null,
+              completed: false,
+            }),
+          ],
+        }),
+        availability: {
+          ...AVAILABILITY,
+          '/metric/fixesPerRun/numerator': {
+            state: 'not-collected',
+            reason: 'no verified closures',
+            source: null,
+          },
+          '/metric/baselineFailures/0/count': {
+            state: 'unavailable',
+            reason: 'probe bailed',
+            source: null,
+          },
+        },
+      },
+    });
+    expect(MeasurementSummaryJournalEventSchema.safeParse(unknownOk).success).toBe(true);
+
+    // P1-2: each null without its availability pointer fails — numerator,
+    // denominator, baselineFailures[i].count — and an unknown baseline count
+    // with a known denominator fails.
+    const nullCases: MetricRecord[] = [
+      { ...metric(), fixesPerRun: { numerator: null, denominator: 3 } },
+      { ...metric(), fixesPerRun: { numerator: 1, denominator: null } },
+      { ...metric(), baselineFailures: [baseline({ count: null })] },
+    ];
+    for (const m of nullCases) {
+      expect(
+        MeasurementSummaryJournalEventSchema.safeParse({
+          ...measurement(),
+          payload: { metric: m, availability: {} },
+        }).success,
+      ).toBe(false);
+    }
+    const unknownCountKnownDenominator = {
+      ...measurement(),
+      payload: {
+        metric: metric({ baselineFailures: [baseline({ count: null })] }),
+        availability: {
+          ...AVAILABILITY,
+          '/metric/baselineFailures/0/count': { state: 'unavailable', reason: 'r', source: null },
+        },
+      },
+    };
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse(unknownCountKnownDenominator).success,
+    ).toBe(false);
+    // Same three null cases on the report root (empty availability map so
+    // only the refinement is exercised).
+    for (const m of nullCases) {
+      const r = report(m);
+      (r as unknown as Record<string, unknown>).availability = {};
+      expect(ReportV2Schema.safeParse(r).success).toBe(false);
+    }
+
+    // P2-4: verifiedCommits is the deduplicated projection of verified
+    // non-todo closures — duplicate, absent and todo-only entries fail.
+    expect(ReportV2Schema.safeParse(report({ verifiedCommits: [HEAD, HEAD] })).success).toBe(false);
+    expect(ReportV2Schema.safeParse(report({ verifiedCommits: [HEAD2] })).success).toBe(false);
+    expect(
+      ReportV2Schema.safeParse(
+        report({ verifiedCommits: [HEAD], closures: [closure({ todo: true })] }),
+      ).success,
+    ).toBe(false);
+
+    // Legacy scalar fixesPerRun shape rejected (unknown evidence).
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: { ...metric(), fixesPerRun: 3 } as unknown as MetricRecord,
+          availability: AVAILABILITY,
+        },
+      }).success,
+    ).toBe(false);
+
+    // Negative count, non-lowercase SHA, unknown availability state, unknown
+    // reportVersion, negative attempt ordinal, non-boolean todo.
     expect(
       MeasurementSummaryJournalEventSchema.safeParse(
         measurement({
           payload: {
-            metric: {
-              ...metric(),
-              fixesPerRun: 3,
-            } as unknown as MetricRecord['fixesPerRun'] as unknown as never,
+            metric: { ...metric(), baselineFailures: [baseline({ count: -1 })] },
             availability: AVAILABILITY,
-          } as never,
+          },
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse(
+        measurement({
+          payload: {
+            metric: { ...metric(), verifiedCommits: [HEAD.toUpperCase()] },
+            availability: AVAILABILITY,
+          },
         }),
       ).success,
     ).toBe(false);
@@ -222,85 +441,166 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
       MeasurementSummaryJournalEventSchema.safeParse({
         ...measurement(),
         payload: {
+          metric: metric(),
+          // Only the enum fails: otherwise-valid record shape.
+          availability: {
+            '/metric': {
+              state: 'maybe',
+              reason: 'x',
+              source: null,
+            } as unknown as AvailabilityRecord,
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(ReportV2Schema.safeParse({ ...report(), reportVersion: 3 }).success).toBe(false);
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse(measurement({ attempt: 0 })).success,
+    ).toBe(false);
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
           metric: {
             ...metric(),
-            fixesPerRun: { numerator: null, denominator: null },
-            baselineFailures: [
-              baseline({
-                count: null,
-                unknownReason: 'probe bailed',
-                probeHead: null,
-                completed: false,
-              }),
-            ],
+            closures: [{ ...closure(), todo: 'no' } as unknown as ClosureRecord],
           },
           availability: AVAILABILITY,
         },
       }).success,
-    ).toBe(true);
-    const cases = [
-      // Negative count.
-      measurement({
-        payload: {
-          metric: { ...metric(), baselineFailures: [baseline({ count: -1 })] },
-          availability: AVAILABILITY,
-        },
-      }),
-      // Non-lowercase SHA in verifiedCommits.
-      measurement({
-        payload: {
-          metric: { ...metric(), verifiedCommits: [HEAD.toUpperCase()] },
-          availability: AVAILABILITY,
-        },
-      }),
-      // Unknown availability state.
-      measurement({
-        payload: {
-          metric: metric(),
-          availability: { '/metric': { state: 'maybe' } as never as AvailabilityRecord },
-        },
-      }),
-      // Unknown reportVersion.
-      { ...report(), reportVersion: 3 },
-      // Negative closure count via baseline ordinal is covered; a negative
-      // attempt ordinal fails (envelope invariant).
-      measurement({ attempt: 0 }),
-      // Closure with a negative verification count shape: empty taskIds with
-      // empty fingerprints is still valid, but an unknown todo fails.
-      measurement({
-        payload: {
-          metric: {
-            ...metric(),
-            closures: [{ ...closure(), todo: 'no' } as never as ClosureRecord],
-          },
-          availability: AVAILABILITY,
-        },
-      }),
-    ] as const;
-    for (const c of cases) {
-      expect(
-        MeasurementSummaryJournalEventSchema.safeParse(c).success ??
-          ReportV2Schema.safeParse(c).success,
-      ).toBe(false);
-    }
+    ).toBe(false);
   });
 
   test('T28 failure boundary', async () => {
-    // Strict extras rejection; no cap/used aliases in the metric.
-    const extraMetric = measurement();
-    (extraMetric.payload.metric as unknown as Record<string, unknown>).cap = 10;
-    expect(MeasurementSummaryJournalEventSchema.safeParse(extraMetric).success).toBe(false);
+    // Strict extras rejection; no cap/used aliases in the metric (P2-2:
+    // otherwise-valid metric shapes).
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: { ...metric(), cap: 10 } as unknown as MetricRecord,
+          availability: AVAILABILITY,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      ReportV2Schema.safeParse(
+        report({
+          fixesPerRun: {
+            numerator: 1,
+            denominator: 1,
+            used: 1,
+          } as unknown as MetricRecord['fixesPerRun'],
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      ReportV2Schema.safeParse(
+        report({
+          fixesPerRun: {
+            numerator: 1,
+            denominator: 1,
+            cap: 1,
+          } as unknown as MetricRecord['fixesPerRun'],
+        }),
+      ).success,
+    ).toBe(false);
+    // Strict extras rejection on the report root itself.
     const extraReport = report();
     (extraReport as unknown as Record<string, unknown>).fixesPerRun = {
       numerator: 1,
       denominator: 1,
     };
     expect(ReportV2Schema.safeParse(extraReport).success).toBe(false);
-    // FixesPerRun alias shape on the report root's metric.
-    const aliasedRatio = report({
-      fixesPerRun: { used: 1 } as never as MetricRecord['fixesPerRun'],
+
+    // P1-1: report envelope rows mirror the journal carriers — a payload-only
+    // approval row fails; the envelope row parses.
+    const payloadOnlyApproval = report();
+    (payloadOnlyApproval.approvals as unknown as ReportV2['approvals']) = [
+      { approvalId: HASH, reason: 'r', availability: {} },
+    ] as unknown as ReportV2['approvals'];
+    expect(ReportV2Schema.safeParse(payloadOnlyApproval).success).toBe(false);
+    expect(ReportV2Schema.safeParse({ ...report(), approvals: [envelopeApproval()] }).success).toBe(
+      true,
+    );
+
+    // P2-3: seconds-only `at` on the measurement-summary carrier.
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        at: '2026-01-03T04:05:06Z',
+      }).success,
+    ).toBe(false);
+
+    // P2-3: bad JSON-Pointer availability keys on payload and report.
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: metric(),
+          availability: { 'metric/x': { state: 'known', reason: 'r', source: null } },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      ReportV2Schema.safeParse({
+        ...report(),
+        availability: { 'metric/x': { state: 'known', reason: 'r', source: null } },
+      }).success,
+    ).toBe(false);
+
+    // P2-3: non-uuid correlation.workId on the report.
+    expect(
+      ReportV2Schema.safeParse({
+        ...report(),
+        correlation: { ...correlation(), workId: 'not-a-uuid' },
+      }).success,
+    ).toBe(false);
+
+    // P2-3: uppercase sha256: hashes (closure fingerprint spanContentHash,
+    // provenance.cqJsonHash).
+    const upperHash = `sha256:${'B'.repeat(64)}`;
+    const upperSpan = report({
+      closures: [
+        { ...closure(), findingFingerprints: [{ ...FINGERPRINT, spanContentHash: upperHash }] },
+      ],
     });
-    expect(ReportV2Schema.safeParse(aliasedRatio).success).toBe(false);
+    expect(ReportV2Schema.safeParse(upperSpan).success).toBe(false);
+    const upperCqJson = report();
+    (upperCqJson.provenance as unknown as Record<string, unknown>).cqJsonHash = upperHash;
+    expect(ReportV2Schema.safeParse(upperCqJson).success).toBe(false);
+
+    // P2-3: unknown metric name (nested fixesPerRun.ratio, top-level
+    // fixesPerRunRatio) via strict rejection.
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: {
+            ...metric(),
+            fixesPerRun: { numerator: 1, denominator: 3, ratio: 0.33 },
+          } as unknown as MetricRecord,
+          availability: AVAILABILITY,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      MeasurementSummaryJournalEventSchema.safeParse({
+        ...measurement(),
+        payload: {
+          metric: {
+            ...metric(),
+            fixesPerRunRatio: { numerator: 1, denominator: 3 },
+          } as unknown as MetricRecord,
+          availability: AVAILABILITY,
+        },
+      }).success,
+    ).toBe(false);
+
+    // P2-3: unknown nested enum in a report row (gate verdict).
+    const badGate = report();
+    (badGate.gates[0]!.payload as unknown as Record<string, unknown>).verdict = 'green';
+    expect(ReportV2Schema.safeParse(badGate).success).toBe(false);
 
     // Strict v2 rejection of the v3 measurement-summary carrier on the
     // v1/v2 union, directly and through the kernel RunLog (append and

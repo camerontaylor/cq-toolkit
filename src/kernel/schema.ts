@@ -1046,12 +1046,79 @@ export const MetricRecordSchema: z.ZodType<MetricRecord> = z
   })
   .strict();
 
+/**
+ * ADR-0008 availability discipline over a metric paired with its containing
+ * availability map: every null in `fixesPerRun.numerator`/`.denominator` and
+ * `baselineFailures[i].count` requires an availability record at its JSON
+ * Pointer (relative to the containing payload/report), unknown never becomes
+ * zero, and any unknown baseline count makes the aggregate denominator
+ * unknown. The count/unknownReason coupling on BaselineFailureRecord is left
+ * to T34; the ADR does not state it, so it is not refined here.
+ * `verifiedCommits` uniqueness and closure projection are enforced too: it is
+ * the deduplicated projection of verified non-todo closures.
+ */
+function checkMetric(
+  metric: MetricRecord,
+  availability: Record<string, AvailabilityRecord>,
+  ctx: {
+    addIssue: (issue: { code: 'custom'; message: string; path?: (string | number)[] }) => void;
+  },
+): void {
+  const pointer = (p: string): void => {
+    if (availability[p] === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `a null metric value requires an availability entry at ${p}`,
+        path: ['metric'],
+      });
+    }
+  };
+  if (metric.fixesPerRun.numerator === null) pointer('/metric/fixesPerRun/numerator');
+  if (metric.fixesPerRun.denominator === null) pointer('/metric/fixesPerRun/denominator');
+  let unknownCount = false;
+  metric.baselineFailures.forEach((row, i) => {
+    if (row.count === null) {
+      pointer(`/metric/baselineFailures/${i}/count`);
+      unknownCount = true;
+    }
+  });
+  if (unknownCount && metric.fixesPerRun.denominator !== null) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'an unknown baselineFailures count requires a null denominator',
+      path: ['metric', 'fixesPerRun', 'denominator'],
+    });
+  }
+  const closureCommits = new Set(metric.closures.filter((c) => !c.todo).map((c) => c.commitSha));
+  const seen = new Set<string>();
+  metric.verifiedCommits.forEach((sha, i) => {
+    if (seen.has(sha)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'verifiedCommits must be unique (deduplicated projection)',
+        path: ['metric', 'verifiedCommits', i],
+      });
+    }
+    seen.add(sha);
+    if (!closureCommits.has(sha)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'each verifiedCommits entry must be the commitSha of a non-todo closure',
+        path: ['metric', 'verifiedCommits', i],
+      });
+    }
+  });
+}
+
 export const MeasurementSummaryPayloadSchema: z.ZodType<MeasurementSummaryPayload> = z
   .object({
     metric: MetricRecordSchema,
     availability: AvailabilityMapSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((payload, ctx) => {
+    checkMetric(payload.metric, payload.availability, ctx);
+  });
 
 export const MeasurementSummaryJournalEventSchema: z.ZodType<MeasurementSummaryJournalEvent> = z
   .object({
@@ -1072,17 +1139,20 @@ export const ReportV2Schema: z.ZodType<ReportV2> = z
     provenance: ProvenanceRecordSchema,
     correlation: CorrelationRecordSchema,
     tasks: z.array(TaskFinishedPayloadSchema),
-    attempts: z.array(AttemptFinishedPayloadSchema),
-    gates: z.array(GateVerdictPayloadSchema),
+    attempts: z.array(AttemptFinishedJournalEventSchema),
+    gates: z.array(GateVerdictJournalEventSchema),
     dispositions: z.array(DispositionPayloadSchema),
     acceptances: z.array(AcceptancePayloadSchema),
     reviews: z.array(ReviewObservedPayloadSchema),
-    approvals: z.array(ApprovalPayloadSchema),
-    writeDecisions: z.array(WriteObservationPayloadSchema),
+    approvals: z.array(ApprovalJournalEventSchema),
+    writeDecisions: z.array(WriteObservationJournalEventSchema),
     metric: MetricRecordSchema,
     availability: AvailabilityMapSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((report, ctx) => {
+    checkMetric(report.metric, report.availability, ctx);
+  });
 
 export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion('type', [
   RunStartedJournalEventSchema,

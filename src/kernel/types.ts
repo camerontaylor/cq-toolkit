@@ -925,13 +925,14 @@ export interface ReportV2 {
   provenance: ProvenanceRecord;
   correlation: CorrelationRecord;
   tasks: TaskFinishedPayload[];
-  attempts: AttemptFinishedPayload[];
-  gates: GateVerdictPayload[];
+  /** Envelope + payload rows per ADR-0008 registry rows 199/202/203/204 (mirrors the journal carriers). */
+  attempts: AttemptFinishedJournalEvent[];
+  gates: GateVerdictJournalEvent[];
   dispositions: DispositionPayload[];
   acceptances: AcceptancePayload[];
   reviews: ReviewObservedPayload[];
-  approvals: ApprovalPayload[];
-  writeDecisions: WriteObservationPayload[];
+  approvals: ApprovalJournalEvent[];
+  writeDecisions: WriteObservationJournalEvent[];
   metric: MetricRecord;
   availability: Record<string, AvailabilityRecord>;
 }
