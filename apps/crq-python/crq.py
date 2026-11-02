@@ -1206,24 +1206,19 @@ def recent_merged_page(cursor, after):
     return {"records": records, "has_next_page": more, "next_cursor": str(page + 1) if more else None}
 
 
-def discover_merged(q, budget, *, interval=None, recent=False):
-    """Persist a bounded discovery scan; resume it before rolling the next upper."""
+def discover_merged(q, budget, *, interval, recent=False):
+    """Persist one caller-frozen discovery scan; tick supplies validated bounds."""
     caller = q
     q = json.loads(json.dumps(q))
-    active = q.get("merged_discovery") or {}
-    if interval is not None:
-        after, before = interval["after"], interval["before"]
-    elif active and not active.get("complete"):
-        after, before = active["after"], active["before"]
-    else:
-        watermark = q.get("merged_watermark") or q["created_at"]
-        after = iso(parse_iso(watermark) - dt.timedelta(minutes=5))
-        before = iso(now() - dt.timedelta(seconds=1))
+    after, before = interval["after"], interval["before"]
     if after >= before:
         return []
     # Record the frozen bounds in queue too: a crash after source pinning but
     # before page one must not cause the next tick to choose a different upper.
-    if interval is not None or not active or active.get("complete"):
+    # Identical persisted bounds are already durable; rewriting them would
+    # briefly report a completed interval as complete:false.
+    active = q.get("merged_discovery") or {}
+    if (active.get("after"), active.get("before")) != (after, before):
         q["merged_discovery"] = {"after": after, "before": before, "complete": False}
         _save_discovery_queue(q, "bounds-save")
     try:
@@ -1239,6 +1234,7 @@ def discover_merged(q, budget, *, interval=None, recent=False):
         return [f"merged discovery: complete={result['complete']} represented={result['represented']}"
                 + (f" reason={result['reason']}" if result.get("reason") else "")]
     except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
+        q["merged_discovery"]["complete"] = False
         q["merged_discovery"]["error"] = str(exc)[:200]
         q["merged_discovery"]["reason"] = exc.reason if isinstance(exc, merged_reconcile.PageFailed) else "reconcile-refused"
         _save_discovery_queue(q, "refusal-debt-save")

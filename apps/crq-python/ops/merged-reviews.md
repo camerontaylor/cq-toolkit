@@ -134,13 +134,19 @@ python3 apps/crq-python/crq.py reconcile-merged --after=2026-10-01T00:00:00Z --b
 
 Remove `--dry-run` to persist and enroll; repeat the same flags to resume.
 Manual bounds mean `(after, before]`; `before` must precede scan startup.
-Automatic discovery is enabled with committed `merged_discovery` settings:
+Automatic discovery is enabled by the `merged_discovery` key of the host
+configuration, installed as `apps/crq-python/config.json` in the runner checkout
+(rendered from the committed file; see [HOST-DEPLOY.md](HOST-DEPLOY.md)):
 `{"enabled": true, "after": "2026-11-01T00:00:00Z"}`. Set `enabled` to false
-to pause. The lower bound prevents historical re-flooding. Each completed scan
+to pause. Only the tick runs automatic discovery, and it always passes one
+validated, frozen `(after, before]` interval; there is no unbounded mode. The lower bound prevents historical re-flooding. Each completed scan
 advances the watermark; the next scan overlaps it by five minutes, bounded by
 the floor, and rolls the upper bound to one second before startup. A legacy
 configured `before` no longer freezes automatic discovery. Partial scans retain
-their frozen bounds and cursor until complete. Automatic scans list closed PRs
+their frozen bounds and cursor until complete. Resuming identical frozen bounds
+does not rewrite them, so a completed interval is never briefly persisted as
+`complete: false` (which client health would count as an incomplete tick); a
+refusal or transport failure still records `complete: false`. Automatic scans list closed PRs
 sorted by most recently updated, 100 per page, stopping once updates are older
 than the scan's lower bound. Both main and merge-queue merged PRs are eligible.
 Recent merges normally fit in one or two requests; an incomplete scan resumes
@@ -226,7 +232,7 @@ original receipt. Successful immutable merge metadata is cached; target ancestry
 is refreshed locally. Capture identity is stored as a digest, not a copied manifest.
 
 The producer gate `queue.project_fixed` defaults to false and is absent from
-`config.json`. With it off, status and acknowledgement always return `fixed:false` and omit
+the host configuration (`apps/crq-python/config.json`). With it off, status and acknowledgement always return `fixed:false` and omit
 `remediation`. Report wire responses retain the legacy chunk-only envelope;
 imported report evidence remains `fixed:false` and never grants remediation
 authority. Inventory retains the pre-PR row shape without reviewed/consumed/fixed
@@ -253,7 +259,7 @@ On deploy, add `health_reads` to the queue policy as documented in
 The principal still needs ordinary read/repository/selector permission, with no branch requirement.
 No deployment-controller change is needed.
 
-Runner config `discovery_incomplete_ticks` defaults to 3 (integer 1–1000000).
+Host configuration (`apps/crq-python/config.json`) key `discovery_incomplete_ticks` defaults to 3 (integer 1–1000000).
 Existing `merged_discovery.enabled: true` enables discovery health accounting.
 A completed tick stores a single `client_health` record in queue.json: timestamp,
 runner checkout HEAD, last discovery result, capped streak, issue number and
