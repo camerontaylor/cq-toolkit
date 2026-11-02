@@ -250,15 +250,19 @@ Ordering and guarantees:
    malformed or other-checkout heartbeat refuses assessment. Each
    observation also carries two independent receipt verdicts that never
    change `healthy` or the exit code (a bad sample is not a tick failure):
-   - `receipts_readable` — up to ten `state/runs/*/meta.json` parse as JSON
-     (counts under `receipts`);
-   - `receipts_valid` — up to ten retained `state/receipts/<sha256>.json`
-     receipts validate against the stable v1 receipt schema
+   - `receipts_readable` — the ten most recently modified
+     `state/runs/*/meta.json` parse as JSON (counts under `receipts`);
+   - `receipts_valid` — the ten most recently modified retained
+     `state/receipts/<sha256>.json` receipts validate against the stable v1 receipt schema
      (`review_receipt.py`, TS `QueueReceiptSchema`): content identity,
      run identity (`item_id`, well-formed `run_id`), captured target (v1
      source binding, 40-hex `capture.target`/`tree`, matching scope
      digest) and terminal outcome (a counted receipt needs a completed,
-     classified run). Details, with a reason per invalid receipt, are under
+     classified run). Policy, version and target selectors come from this
+     deployment's own `review_receipt.py`/`runtime_target.py`, parsed
+     read-only (never executed); if they are unusable the builtin copy is
+     used. `receipt_validation.schema_source` records which, and why.
+     Details, with a reason per invalid receipt, are under
      `receipt_validation`.
    Each verdict is `true`, `false`, or `null` when nothing was sampled; the
    top-level artifact repeats both, aggregated across observations. Tick
