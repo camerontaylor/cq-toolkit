@@ -1026,6 +1026,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     return implementation.fix(finding, round);
                   }),
                 escalation: () => implementation.escalation(),
+                ...(implementation.preconditionFailure
+                  ? { preconditionFailure: () => implementation.preconditionFailure!() }
+                  : {}),
+                ...(implementation.preconditions
+                  ? { preconditions: () => implementation.preconditions!() }
+                  : {}),
                 ...(implementation.withVerifiedHead
                   ? {
                       withVerifiedHead: <T>(action: (head: string) => Promise<T>) =>
