@@ -91,7 +91,7 @@ existing strict author admission is unchanged.
 
 The v1 document contains original `request_id`, `item_id`, `source`, `capture`,
 `outcome`, `classification`, `counted`, complete `findings`, `run_id`, `started_at`,
-artifact byte digests, `remediation=disabled/deferred`,
+artifact byte digests, `remediation=pending-merged-evidence`,
 `independent_acceptance=false`, and `cli_functional_acceptance=pending-D1`.
 Aliases bind through the durable request index; a reused receipt retains its
 original source/request identity and `reused_from` remains visible in status.
