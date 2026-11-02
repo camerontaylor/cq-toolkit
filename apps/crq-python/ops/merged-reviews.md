@@ -147,34 +147,64 @@ their frozen bounds and cursor until complete. Resuming identical frozen bounds
 does not rewrite them, so a completed interval is never briefly persisted as
 `complete: false` (which client health would count as an incomplete tick); a
 refusal or transport failure still records `complete: false`. Automatic scans list closed PRs
-sorted by most recently updated, at most 100 per request, stopping once updates
-are older than the scan's lower bound. Both main and merge-queue merged PRs are
-eligible. Recent merges normally fit in one request; an incomplete scan resumes
-next tick. Multi-request scans use an `updated_at` keyset rather than trusting
-page offsets, because an update moves a PR to the top and a reopen shifts later
-rows into already-read offsets. The cursor records the last processed update
-time and the PR numbers sharing that second. Each continuation window must
-start at or before that anchor; otherwise it backs off towards offset zero. A
-pass that needed more than one request is followed by a head pass over PRs
-updated since that pass began, until one request covers the head or a head pass
-finds nothing new. The tick's existing forge budget and four-page limit apply
-to every request. Same-second groups never refuse or need an operator. The
-cursor remembers the newest 100 processed PR numbers at the anchor second, and
-a forgotten row is reprocessed and deduplicated, never skipped. When more than
-100 PRs share a pass's head second, the next head pass reprocesses every row at
-that second, so a merge updated into it after the first read is still recorded.
-Only strictly newer rows count towards another pass, so the scan still ends.
-Cursors stay under 4 KB by the same reprocessing; only PR numbers of more than
-about 37 digits would refuse.
+with GitHub's `sort=updated`, at most 100 per request. Both main and
+merge-queue merged PRs are eligible. Recent merges normally fit in one
+request; an incomplete scan resumes next tick.
 
-Ordering assumption: GitHub must keep the order of closed PRs that share one
-`updated_at` second stable between requests. The overlap check relies on it. If GitHub reordered a same-second group
-of more than three rows that straddles a request boundary, an unprocessed row
-could sit above the next window's start and that merge could be missed; the
-five-minute watermark overlap does not cover it. This needs bursts of
-same-second updates, so it is unlikely, but a suspected miss should be replayed
-with the manual `reconcile-merged` command. A page-number cursor left by an
-earlier runner restarts the scan, and already-recorded sources deduplicate. Historical backfill remains the backfill controller's responsibility.
+GitHub's order is not the returned `updated_at`. The list is sorted by
+GitHub's own key: a comment can advance `updated_at` while the PR keeps its
+old position. Deploy 20261103-1 met this on the live first page: #750 sorted at
+its 09:34 merge, below #753 (09:43:46Z), with `updated_at` 10:50:03Z. The
+fixture `fixtures/closed-page-20261103.json` keeps that page. The scan
+therefore never refuses rows for their order, and uses `updated_at` only as
+data:
+
+- Continuation is by row identity, not by time or bare offset. Each
+  continuation window starts 20 rows above the last row passed. The cursor
+  keeps the last 40 rows passed, by number and `updated_at`, and the window
+  must contain one of them unchanged. A reopen above shifts those rows and
+  their successors together; a changed row moves to the top. Every window row
+  that is not remembered is processed, including rows above the resume point.
+  So PRs sharing a sort key (for example a merge-queue batch merged in one
+  second) may come back in a different order on the next request, as long as
+  the group is no larger than the overlap. Without a remembered row the window
+  backs off, and at offset zero the pass re-reads from the top. Repeats
+  deduplicate.
+- A pass ends after 25 consecutive rows updated at or before its floor, or at
+  the end of the list. Under A3 below, one such row is enough; the other 24
+  guard against short stretches where A3 fails.
+- A pass that needed more than one request is followed by a head pass over
+  rows at or above the newest `updated_at` its first request saw. Head passes
+  repeat until one request covers the head or a pass finds nothing strictly
+  newer. When more than 100 PRs share that second, the next head pass
+  reprocesses every row at it, never assuming them seen.
+- The tick's forge budget and four-page limit apply to every request. Cursors
+  stay under 4 KB; only PR numbers of more than about 70 digits would refuse.
+  The 20-row overlap makes a multi-request scan cost about a quarter more
+  requests, so a 250-PR catch-up may take a second tick. The usual one-page
+  scan is still one request.
+
+Remaining assumptions. The live list (469 closed PRs, checked by the #829
+review) is consistent with all four:
+
+- A1: a PR's sort key never decreases.
+- A2: a merge sets it at or after `merged_at`.
+- A3: the returned `updated_at` is at or after the sort key. The stop rule and
+  the head pass rely on it: a row updated at or before the floor bounds every
+  key below it, so by A2 nothing below holds a merge inside the interval.
+- Tie order: PRs sharing a sort key keep their relative order between
+  requests when the group is larger than the 20-row overlap and straddles a
+  request boundary. Smaller groups may reorder freely. The live order was
+  identical across page sizes.
+
+If A2 or A3 failed for more than 25 rows, or GitHub reshuffled a larger
+same-second group across a request boundary, a merge could be missed. Offline,
+that needed same-key groups of tens to hundreds of rows. Replay a suspected miss
+with the manual `reconcile-merged` command.
+
+An offset cursor (f25b328c) or a first-keyset cursor (#822) left by an earlier
+runner restarts the scan, and already-recorded sources deduplicate. Historical
+backfill remains the backfill controller's responsibility.
 
 The command prints one JSON discovery summary,
 holds the existing tick lock, and never dispatches a provider or repair. An
