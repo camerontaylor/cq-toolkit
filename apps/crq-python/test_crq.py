@@ -750,7 +750,12 @@ class CurrentTest(unittest.TestCase):
              mock.patch.object(crq, "remove_worktree"), \
              mock.patch.object(crq.repair_tick, "enqueue") as repair:
             result = crq.harvest_review(self.q, item, False)
-            repair.assert_not_called()
+            doc = self.document(item)
+            if doc["counted"] and doc["findings"] and doc["outcome"] != "partial-scope":
+                repair.assert_called_once()
+                self.assertEqual(repair.call_args.args[2]["receipt_id"], item["receipt_id"])
+            else:
+                repair.assert_not_called()
             return result
 
     def test_enqueue_and_request_conflict_are_verified_without_launch(self):
@@ -812,7 +817,7 @@ class CurrentTest(unittest.TestCase):
         doc = self.document(item)
         self.assertEqual(doc["outcome"], "terminal-with-findings")
         self.assertTrue(doc["counted"])
-        self.assertEqual(doc["remediation"], "disabled/deferred")
+        self.assertEqual(doc["remediation"], "pending-merged-evidence")
         self.assertEqual(item["cycles"], [])
         manifest = crq.current_report("missed")
         self.assertEqual(manifest, crq.current_report("missed"))

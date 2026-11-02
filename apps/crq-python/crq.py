@@ -1729,7 +1729,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
-        if cls["counted"] and not partial:
+        if cls["counted"] and cls["findings"] and not partial:
             repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
         # Separate from cycles: backfill must never duplicate these jobs.
         item["state"] = "done" if cls["counted"] else "blocked"
