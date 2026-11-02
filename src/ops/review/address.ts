@@ -651,10 +651,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               run: (input, options) => {
                 if (!addressLease) throw new Error('address ownership: driver before acquisition');
                 return addressLease.track(() =>
-                  resolved.driver.run(input, {
-                    ...options,
-                    signal: options?.signal ? AbortSignal.any([parent, options.signal]) : parent,
-                  }),
+                  resolved.driver
+                    .run(input, {
+                      ...options,
+                      signal: options?.signal ? AbortSignal.any([parent, options.signal]) : parent,
+                    })
+                    .catch((error) => {
+                      // A rejected dispatch settles as an explicit unknown,
+                      // never vanishes: the spend may already have been paid
+                      // upstream (M7-address).
+                      usageLedger.record(`dispatch-${++dispatchSequence}`, {});
+                      throw error;
+                    }),
                 );
               },
             },
@@ -677,10 +685,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 // KERNEL reads the job context; the shared driver helper
                 // stays pure over the correlation value (ADR-0002
                 // one-directional rule). Absent outside a governed dispatch.
+                const correlation = correlationInvocation(currentJobContext()?.info?.correlation);
                 const result = await resolved.driver.run(
                   {
                     ...invocation,
-                    ...correlationInvocation(currentJobContext()?.info?.correlation),
+                    ...correlation,
                   },
                   options,
                 );

@@ -637,7 +637,8 @@ test('M7-address failure evidence', async () => {
   // The FIRST dispatch throws; the loop's retry then settles measured usage
   // (2 in / 1 out) before the run still exits needs-human carrying the thrown
   // fault. The settled spend is retained exactly once on the failure exit,
-  // the thrown run invents no spend, and parent totals match the summary.
+  // the THROWN dispatch settles as an explicit unknown (it may already have
+  // been paid upstream), and parent totals match the measured run only.
   const f = await usageHarness({ throwOnRun: 1 });
   try {
     const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
@@ -647,8 +648,8 @@ test('M7-address failure evidence', async () => {
     expect(result.report?.usageSummary).toEqual({
       usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
       knownCount: 1,
-      unknownCount: 0,
-      unpricedCount: 1,
+      unknownCount: 1,
+      unpricedCount: 2,
     });
     // Parent totals do not double count the settled run's usage.
     expect(result.report?.usage).toEqual({
