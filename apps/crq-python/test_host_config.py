@@ -112,11 +112,23 @@ class HostConfigTests(unittest.TestCase):
                 dest[path[-1]] = 1
                 with self.assertRaises(ValueError):
                     host.validate(overlay)
-        for enabled in [True, 0, None, 'false']:
+        for enabled in [0, 1, None, 'false', 'true']:
             overlay = copy.deepcopy(self.overlay)
             overlay['config']['repair']['enabled'] = enabled
             with self.assertRaises(ValueError):
                 host.validate(overlay)
+
+    def test_overlay_repair_switch_is_boolean_and_needs_committed_authorization(self):
+        overlay = copy.deepcopy(self.overlay)
+        overlay['config']['repair']['enabled'] = True
+        host.validate(overlay)
+        committed = host.committed(self.root)
+        self.assertTrue(committed['repair']['enabled'])
+        self.assertTrue(host.apply(committed, overlay)['repair']['enabled'])
+        self.assertFalse(host.apply(committed, self.overlay)['repair']['enabled'])
+        committed['repair']['spend_authorization'] = None
+        with self.assertRaisesRegex(ValueError, 'spend authorization'):
+            host.apply(committed, overlay)
 
     def test_schema_and_unit_injection_and_clone_sharing_refused(self):
         for key, value in [('schema_version', 2), ('schema_version', True),

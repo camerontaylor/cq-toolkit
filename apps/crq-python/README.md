@@ -58,12 +58,26 @@ results cannot shorten an existing global cooldown.
 Completed reviews count only after terminal success.
 Secret scanning happens before upload; credits are never enabled automatically.
 
-`crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. It
+`crq-repair.path` and a ten-minute fallback timer activate `crq_repair.py`. With
+no arguments it drains the inbox, oldest item first, under `service.lock`. It
 owns `state/repair/`, uses one worktree per item and serial findings within that
-item, with up to three items concurrently. It never writes the queue, pushes or
-calls GitHub. Runtime dispatch requires BOTH `repair.enabled` and a recorded
-`repair.spend_authorization`. Shipped config leaves these disabled/unverified.
-Never enable them merely because code or units have been installed.
+item, and runs items serially: the drivers' `CQ_*` session correlation is
+process environment, so concurrent items would need per-dispatch environments
+first. It never writes the queue, pushes or calls GitHub. A job is drained only
+while its tick-owned repair run is `queued`. A job not yet started is skipped as
+`STALE` (terminal, no model call) when it is superseded on `origin/main`: the
+finding's file changed since the job pin, or an open-PR job's reviewed head is
+already merged. Prepared (`repair-prepare`) jobs keep the strict one-job
+selector, so a moved tip makes them `STALE`. `--job/--source-sha/--finding-sha256`
+still repairs exactly one prepared job.
+Runtime dispatch requires `repair.enabled`, a recorded
+`repair.spend_authorization` string, and `ZAI_API_KEY` in the service environment
+(`EnvironmentFile=-%h/.config/crq/repair.env`). Roles are cq-driver GLM only
+(fixer `zai/glm-5.3-flash`, escalation `zai/glm-5.3`, judge `zai/glm-5.3-flash`,
+critical judge `zai/glm-5.3`). Inside `repair.blackout` (14:00-18:00
+Asia/Singapore, Mon-Fri) nothing is dispatched: the drain does not start, no new
+finding starts, and a running finding defers its next attempt or judge for 30
+minutes.
 
 `crq-watchdog.timer` checks completed tick heartbeat age and alerts at 36 minutes.
 Heartbeat and summary are atomic under `${XDG_STATE_HOME:-~/.local/state}/crq`.

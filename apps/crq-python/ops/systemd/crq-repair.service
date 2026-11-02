@@ -4,6 +4,9 @@ Description=CRQ detached repair inbox drain
 Type=simple
 Nice=10
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Private, mode 0600, outside Git: exactly ZAI_API_KEY=... for the cq fixer/judge.
+# Without it crq_repair.py refuses to dispatch rather than failing every job.
+EnvironmentFile=-%h/.config/crq/repair.env
 WorkingDirectory=@CRQ_ROOT@
 ExecStart=/usr/bin/env python3 @CRQ_ROOT@/crq_repair.py
 Restart=on-failure

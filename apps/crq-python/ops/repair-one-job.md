@@ -1,9 +1,22 @@
-# Explicit one-job preparation and repair (held, not activated)
+# Explicit one-job preparation and repair
 
-This source adds an operator-only path. It does not authorize spend, verify a
-launcher, wire a credential, enroll anything during installation, or resolve an
-old finding. The shipped `repair.enabled=false` and null authorization remain.
-Automatic path/timer invocations with no exact selector refuse even if enabled.
+Since 2026-11-02 (owner: "turn on the fixers; cq/GLM only") committed policy
+enables repair, and path/timer invocations with no selector drain the inbox
+automatically (see the crq-python README). This document covers the separate
+operator path: preparing a revalidated current-tip job from a historical one,
+then repairing exactly that job. Sections below that describe Codex/Paseo lanes
+or a held activation are historical; no committed role uses those drivers now.
+
+## Activating the drain on a host
+
+1. Deploy a runner containing this change; set the private overlay's
+   `repair.enabled` to `true` (it is a host switch; `false` keeps repair off).
+2. Write `~/.config/crq/repair.env` (mode 0600, outside Git) containing exactly
+   `ZAI_API_KEY=...`. Without it the service refuses before any dispatch.
+3. `repair.cq_bin` must point at a built cq `dist/cli.js` whose directory also
+   holds `driver/ai-sdk/index.js` and `driver/served-model.js` (judge bridge).
+4. Install the rendered units, then:
+   `systemctl --user daemon-reload && systemctl --user enable --now crq-repair.timer crq-repair.path`.
 
 ## Prepare a new current-tip job
 

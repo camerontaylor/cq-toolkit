@@ -12,15 +12,18 @@ import random
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, utc, verify
 from crq_repair.drivers import cq, codex, paseo
-from crq_repair.bounded import select_job, source_snapshot
+from crq_repair.bounded import drain_job, drain_order, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
 
 
-def window(repair):
-    peak = repair['peak']
-    t = dt.datetime.now(ZoneInfo(peak['tz']))
-    return 'peak' if t.isoweekday() in peak['days'] and peak['start'] <= t.strftime('%H:%M') < peak['end'] else 'default'
+def blackout(repair, now=None):
+    """GLM peak hours: no repair dispatch at all (no peak role switch)."""
+    window = repair.get('blackout')
+    if not window:
+        return False
+    t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ZoneInfo(window['tz']))
+    return t.isoweekday() in window['days'] and window['start'] <= t.strftime('%H:%M') < window['end']
 
 
 def mechanical(config, wt, base, commits, job, directory):
@@ -90,18 +93,12 @@ def process(config, job, wt):
         prior = json.loads(result_path.read_text())
         if not prior.get('retry_after') or dt.datetime.fromisoformat(prior['retry_after'].replace('Z', '+00:00')) > dt.datetime.now(dt.timezone.utc):
             return prior
-    saved_job = directory / 'job.json'
-    if saved_job.exists():
-        saved = json.loads(saved_job.read_text())
-        job['window'] = saved['window']
-    selected = job.get('window') or window(repair)
-    job['window'] = selected
-    roles = {name: copy.deepcopy(values[selected]) for name, values in repair['roles'].items()}
+    roles = copy.deepcopy(repair['roles'])
     result = {'job': job['job'], 'item': job['item'], 'repair_base': job['repair_base'],
               'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
-              'origin_job': job['origin_job'],
+              'origin_job': job.get('origin_job'),
               'verdict': 'FAILED', 'reason': '', 'commits': [], 'attempts': [], 'judge': None,
-              'worktree': str(wt), 'started_at': utc(), 'window': selected}
+              'worktree': str(wt), 'started_at': utc()}
     if result_path.exists():
         result = json.loads(result_path.read_text())
         result.pop('retry_after', None)
@@ -131,6 +128,9 @@ def process(config, job, wt):
             if result.get('pending_judge'):
                 reason = result['pending_judge']['fixer_reason']
             else:
+                if blackout(repair):
+                    result['next_rung'] = rung
+                    return defer('GLM peak blackout; attempt deferred')
                 if rung == 2:
                     # Escalation gets a fresh worktree, not A0/A1 files or harness state.
                     git(config['clone'], 'worktree', 'remove', '--force', str(wt))
@@ -168,6 +168,8 @@ def process(config, job, wt):
                 current['review_diff'] = job.get('review_diff', '')
                 result['pending_judge'] = {'fixer_reason': reason, 'rung': rung}
                 result['next_rung'] = rung
+                if blackout(repair):
+                    return defer('GLM peak blackout; judge deferred without repeating fixer')
                 result['dispatch_pending'] = {'rung': 'J', 'role': judge_role}
                 atomic(progress_path, result)
                 try:
@@ -221,6 +223,73 @@ def process(config, job, wt):
     return result
 
 
+def finding_order(job):
+    # Review jobs end in -F<n>; backfill jobs (crq-backfill-<key>) carry none.
+    suffix = job['job'].rsplit('-F', 1)
+    return job['run'], int(suffix[1]) if len(suffix) == 2 and suffix[1].isdigit() else 0
+
+
+def pending(job_id):
+    """True unless the job already has a terminal (non-deferred) result."""
+    path = ROOT / 'state/repair' / job_id / 'result.json'
+    if not path.exists():
+        return True
+    prior = json.loads(path.read_text())
+    return bool(prior.get('retry_after'))
+
+
+def mark_stale(job, reason):
+    """Terminal, spend-free verdict for a superseded job; the tick harvests it."""
+    directory = ROOT / 'state/repair' / job['job']
+    atomic(directory / 'result.json', {
+        'job': job['job'], 'item': job['item'], 'repair_base': job.get('repair_base'),
+        'source_sha': job.get('source_sha'), 'finding_sha256': job.get('finding_sha256'),
+        'origin_job': job.get('origin_job'), 'verdict': 'STALE', 'reason': reason,
+        'commits': [], 'attempts': [], 'judge': None, 'started_at': utc(), 'finished_at': utc()})
+
+
+def drain(config):
+    """Automatic inbox drain, oldest first. Items run serially: one item
+    worktree at a time, serial findings within it (see README for why)."""
+    repair = config['repair']
+    groups = {}  # item -> job ids, items in order of their oldest job
+    for job_id in drain_order(ROOT):
+        try:
+            item = json.loads((ROOT / 'state/repair/inbox' / (job_id + '.json')).read_text()).get('item')
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(item, str):
+            groups.setdefault(item, []).append(job_id)
+    for item, job_ids in groups.items():
+        if blackout(repair):
+            print('repair drain paused: GLM peak blackout')
+            return
+        # Re-read the queue per item: the tick may harvest or the tip may move
+        # while an earlier item runs.
+        queue_path = ROOT / 'state/queue.json'
+        queue = json.loads(queue_path.read_text()) if queue_path.exists() else {'items': []}
+        jobs = []
+        for job_id in job_ids:
+            status, job, reason = drain_job(ROOT, config, queue, job_id)
+            if not job or job.get('item') != item:
+                continue
+            if status == 'stale':
+                mark_stale(job, reason)
+                print('repair ' + job_id + ': stale, not dispatched: ' + reason)
+                # It stays in its run's chain; process() returns the terminal result.
+                jobs.append(job)
+            elif status == 'run':
+                jobs.append(job)
+            elif reason != 'no queued tick-owned repair run':
+                print('repair ' + job_id + ': skipped: ' + reason)
+        if not any(pending(job['job']) for job in jobs):
+            continue
+        try:
+            process_item(config, jobs)
+        except Exception as exc:  # one bad item must not stop the drain
+            print('repair item ' + item + ' failed: ' + str(exc)[:300])
+
+
 def process_item(config, jobs):
     # One item worktree, serial findings; each successful commit range is pinned
     # and the next finding starts at its verified predecessor.
@@ -231,9 +300,11 @@ def process_item(config, jobs):
         p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
         if p.returncode:
             raise RuntimeError('repair worktree creation failed')
-    jobs.sort(key=lambda j: (j['run'], int(j['job'].rsplit('-F', 1)[1])))
+    jobs.sort(key=finding_order)
     last_run = None
     for job in jobs:
+        if blackout(config['repair']):
+            break  # never start a new finding inside the GLM peak window
         if job['run'] != last_run:
             base = job['repair_base']
             last_run = job['run']
@@ -246,22 +317,24 @@ def process_item(config, jobs):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Explicit one-job repair only; never drain the inbox')
+    parser = argparse.ArgumentParser(description='Drain eligible repair inbox jobs, or repair one explicit prepared job')
     parser.add_argument('--job')
     parser.add_argument('--source-sha')
     parser.add_argument('--finding-sha256')
     args = parser.parse_args(argv)
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
-    if not repair.get('enabled') or not repair.get('spend_authorization'):
-        print('repair dispatch disabled: existing spend authorization not verified')
+    authorization = repair.get('spend_authorization')
+    if repair.get('enabled') is not True or not isinstance(authorization, str) or not authorization.strip():
+        print('repair dispatch disabled: repair.enabled and a recorded spend_authorization are required')
         return
-    if not args.job or not args.source_sha or not args.finding_sha256:
-        print('repair dispatch disabled: explicit job/source/finding selection required; no automatic inbox drain')
+    selectors = (args.job, args.source_sha, args.finding_sha256)
+    if any(selectors) and not all(selectors):
+        print('repair dispatch refused: --job, --source-sha and --finding-sha256 go together')
         return
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
-    drivers = {role['driver'] for windows in repair['roles'].values() for role in windows.values()}
+    drivers = {role['driver'] for role in repair['roles'].values()}
     for driver in ('codex', 'paseo'):
         if driver in drivers and (not repair.get(driver + '_budget_launcher') or
                                   not repair.get(driver + '_budget_launcher_verified')):
@@ -270,6 +343,14 @@ def main(argv=None):
     if 'paseo' in drivers and (not repair.get('paseo_host') or not repair.get('paseo_read_only_mode')):
         print('repair dispatch disabled: verified Paseo endpoint and read-only mode required')
         return
+    # A missing key would otherwise turn every attempt into a FAILED verdict.
+    if any(role['driver'] == 'cq' and role['model'].startswith('zai/') for role in repair['roles'].values()) \
+            and not os.environ.get('ZAI_API_KEY'):
+        print('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
+        return
+    if blackout(repair):
+        print('repair dispatch paused: GLM peak blackout')
+        return
     directory = ROOT / 'state/repair'
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'service.lock').open('a') as lock:
@@ -277,8 +358,11 @@ def main(argv=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
-        process_item(config, [job])
+        if all(selectors):
+            job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
+            process_item(config, [job])
+            return
+        drain(config)
 
 
 if __name__ == '__main__':
