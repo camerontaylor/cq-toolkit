@@ -21,6 +21,8 @@ import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
 import { PolicyDiffInputObject } from './policyDiffInput.js';
 import type { RegressionGateInput } from './regressionGate.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
+// gates.hackDetector helper, reached through './hackDetector.js': the Python
+// skip/xfail marker scanner './pythonSkipMarkers.js' (#774).
 // gates.policyDiff helpers (W1.9), reached through './policyDiff.js': the
 // workflow scanner './workflowScan.js', the override record
 // './overrideRecord.js' and the D11 authorization predicate
