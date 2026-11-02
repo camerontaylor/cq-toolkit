@@ -48,6 +48,27 @@ describe('M5b1 nominal evidence', () => {
     // Neither explicit name: the Paseo agent becomes the parent.
     const paseoOnly = applyCorrelationEnv({ PASEO_AGENT_ID: 'a1' }, undefined);
     expect(paseoOnly['CQ_PARENT_WORK_ID']).toBe('paseo:a1');
+    // The same precedence holds through the COMPOSED lane env
+    // (buildChildEnv): with an inherited CQ_WORK_ID but no inherited
+    // parent, composition still derives the Paseo parent (the Paseo tier
+    // answers — the work id names the run itself, not its parent).
+    const composedWithWork = buildChildEnv({
+      PASEO_AGENT_ID: 'a1',
+      CQ_WORK_ID: 'outer-run:w:1',
+      PATH: '/bin',
+    });
+    expect(composedWithWork['CQ_WORK_ID']).toBe('outer-run:w:1');
+    expect(composedWithWork['CQ_PARENT_WORK_ID']).toBe('paseo:a1');
+    applyCorrelationEnv(composedWithWork, undefined);
+    expect(composedWithWork['CQ_PARENT_WORK_ID']).toBe('paseo:a1');
+    // A BLANK inherited CQ_PARENT_WORK_ID counts as absent: composition
+    // derives the Paseo link over it (and the boundary re-derives nothing).
+    const composedBlank = buildChildEnv({
+      PASEO_AGENT_ID: 'a1',
+      CQ_PARENT_WORK_ID: '   ',
+      PATH: '/bin',
+    });
+    expect(composedBlank['CQ_PARENT_WORK_ID']).toBe('paseo:a1');
   });
 
   it('a governed correlation is applied verbatim: the direct-path derivation never runs', () => {

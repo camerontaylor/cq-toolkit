@@ -253,7 +253,7 @@ export function buildChildEnv(
   // CQ_PARENT_WORK_ID is the higher precedence tier and is NOT clobbered;
   // the composition is best-effort: no agent id in the parent env means
   // no link, exactly as before.
-  if (child['CQ_PARENT_WORK_ID'] === undefined) {
+  if (child['CQ_PARENT_WORK_ID'] === undefined || child['CQ_PARENT_WORK_ID'].trim() === '') {
     const paseoAgentId = parentEnv['PASEO_AGENT_ID']?.trim();
     if (paseoAgentId !== undefined && paseoAgentId !== '') {
       child['CQ_PARENT_WORK_ID'] = `paseo:${paseoAgentId}`;
