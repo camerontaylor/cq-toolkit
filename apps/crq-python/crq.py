@@ -35,6 +35,7 @@ import merged_reconcile
 import usage_slots
 import backfill_runtime
 import backfill_jobs
+import admission_history
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -225,8 +226,13 @@ def live_items(q):
     return [item for item in q["items"] if item.get("kind") != "promotion"]
 
 
-def load_queue() -> Dict[str, Any]:
-    q = json.loads(QUEUE.read_text())
+def load_queue(*, persist_compaction=False) -> Dict[str, Any]:
+    before_bytes = QUEUE.stat().st_size
+    q, compacted = admission_history.load(QUEUE)
+    # Only lock-owning mutators may replace the snapshot; status/report stay read-only.
+    if compacted and persist_compaction:
+        save_queue(q)
+        print(f"admission compaction v{admission_history.VERSION}: before_bytes={before_bytes} after_bytes={QUEUE.stat().st_size}", file=sys.stderr)
     # Idempotently retire the superseded second-cycle debt. Explicit optional
     # requeues survive reload; running reviews still have to be harvested.
     for item in live_items(q):
@@ -2308,7 +2314,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     log: List[str] = []
     if (STATE / "runner-disabled").exists():
         return ["runner disabled for host handover"]
-    q = load_queue()
+    q = load_queue(persist_compaction=not dry)
     fetch()
     if not dry:
         operation = "publication-request"
@@ -2326,14 +2332,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             log.append("backfill halted: " + str(exc)[:300])
     if not dry and only is None:
         budget = ForgeBudget()
-        discovery = CONFIG.get("merged_discovery")
-        if isinstance(discovery, dict) and discovery.get("enabled") is True:
-            try:
-                interval = rolling_discovery_interval(q, discovery)
-            except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
-                log.append("merged discovery disabled: invalid configured interval")
-            else:
-                log += discover_merged(q, budget, interval=interval, recent=True)
+        # Recover existing author intents before discovery checkpoint writes can
+        # consume the shared deadline. Both paths retain the same one budget.
         with forge_window(budget):
             refreshed = deferred_refresh.refresh_deferred(q,
                 verify_source=verify_deferred_source, find_source=find_deferred_source,
@@ -2342,6 +2342,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             # Binding/enrollment must survive a crash before reservation/dispatch.
             save_queue(q)
             log.append(f"refreshed {len(refreshed)} deferred author intent(s)")
+        discovery = CONFIG.get("merged_discovery")
+        if isinstance(discovery, dict) and discovery.get("enabled") is True:
+            try:
+                interval = rolling_discovery_interval(q, discovery)
+            except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
+                log.append("merged discovery disabled: invalid configured interval")
+            else:
+                log += discover_merged(q, budget, interval=interval, recent=True)
     starts_before = len(q.get("starts", []))
     for item in list(live_items(q)):
         if item["state"] == "reviewing":
