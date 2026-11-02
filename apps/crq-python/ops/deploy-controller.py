@@ -111,6 +111,18 @@ class Refused(Exception):
     """A controller refusal: nothing was changed; the reason is terminal."""
 
 
+class NoChangeRefused(Refused):
+    """A helper refusal with every deployment surface observed unchanged.
+
+    ``record`` is the ``refused_no_change`` evidence (with its observations),
+    emitted on stdout as well so it survives a failed journal write.
+    """
+
+    def __init__(self, message: str, record: dict):
+        super().__init__(message)
+        self.record = record
+
+
 class RecoveryRequired(Exception):
     """The helper was entered: mutation occurred or cannot be excluded.
 
@@ -171,6 +183,25 @@ class Effects:
         if not isinstance(payload, dict):
             raise Refused("completion heartbeat is not a JSON object")
         return payload
+
+    def unit_digests(self) -> dict:
+        """Read-only observation of installed CRQ user units and their
+        enablement links ($XDG_CONFIG_HOME/systemd/user, default
+        ~/.config): file digests and link targets, never systemctl."""
+        home = Path(os.environ.get("XDG_CONFIG_HOME",
+                                   str(Path.home() / ".config"))) / "systemd/user"
+        units = {}
+        if not home.is_dir():
+            return units
+        for path in sorted([*home.glob("crq-*"), *home.glob("*.wants/crq-*")]):
+            name = str(path.relative_to(home))
+            if path.is_symlink():
+                units[name] = "link:" + os.readlink(path)
+            elif path.is_file():
+                units[name] = _sha256(path)
+            else:
+                units[name] = "other"
+        return units
 
     def git(self, *args: str) -> str:
         result = subprocess.run(["git", "-C", str(self.root), *args],
@@ -248,7 +279,60 @@ def captured_state(effects: Effects) -> dict:
     for rel in PRESERVED:
         state["preserved/" + rel] = (_sha256(effects.state_dir() / rel)
                                      if effects.exists(rel) else None)
+    state["checkout_status"] = effects.git("status", "--porcelain",
+                                           "--untracked-files=all")
+    state["units"] = effects.unit_digests()
     return state
+
+
+def no_change_observation(effects: Effects, before: dict) -> dict:
+    """Re-observe every deployment surface the helper's switch can change.
+
+    ``unchanged`` is True only when HEAD, the rendered config bytes, the
+    checkout status, the installed units and the preserved state all equal
+    the retained pre-helper identity. Observation errors propagate: an
+    unobservable surface is never proof of no change.
+    """
+    try:
+        config = _sha256(effects.config_path)
+    except FileNotFoundError:
+        config = None
+    observed = {"head": effects.git("rev-parse", "HEAD"),
+                "config_sha256": config,
+                "checkout_status": effects.git("status", "--porcelain",
+                                               "--untracked-files=all"),
+                "units": effects.unit_digests()}
+    for rel in PRESERVED:
+        observed["preserved/" + rel] = (_sha256(effects.state_dir() / rel)
+                                        if effects.exists(rel) else None)
+    expected = {"head": before.get("prior_head"),
+                "config_sha256": before.get("prior_config_sha256"),
+                "checkout_status": before.get("checkout_status"),
+                "units": before.get("units")}
+    expected.update({"preserved/" + rel: before.get("preserved/" + rel)
+                     for rel in PRESERVED})
+    changed = sorted(key for key in expected if observed[key] != expected[key])
+    return {"unchanged": not changed, "changed": changed, "observed": observed}
+
+
+def helper_precheck(helper_module, root: Path, overlay: dict, target: str,
+                    tag: str) -> None:
+    """The helper's own pure input validation (root/overlay binding, target
+    SHA, annotated-tag pattern and binding, destination config render),
+    run BEFORE the durable intent so a bad input is a plain no-change
+    refusal. Calls the accepted helper's functions; never re-implements
+    its patterns. Read-only: git reads and an in-memory render."""
+    try:
+        helper_module.root_check(root, overlay)
+        helper_module.verify_target(root, target, tag)
+        helper_module.render(root, overlay, target)
+    except (ValueError, KeyError, TypeError, AttributeError, OSError,
+            subprocess.CalledProcessError) as exc:
+        detail = str(exc) or type(exc).__name__
+        if isinstance(exc, subprocess.CalledProcessError):
+            detail = "git check failed: " + " ".join(map(str, exc.cmd[3:6]))
+        raise Refused("helper input validation refused before any change: "
+                      + detail[:300]) from exc
 
 
 def _sha256(path: Path) -> str:
@@ -311,7 +395,7 @@ def preflight(effects: Effects, target: str, tag: str) -> dict:
     """Everything checked before the helper is invoked. No mutation."""
     if not SHA_RE.match(target or ""):
         raise Refused("--sha must be a full 40-hex commit SHA")
-    if not TAG_RE.match(tag or ""):
+    if not TAG_RE.fullmatch(tag or ""):
         raise Refused("--tag must be an owner-approved annotated runner tag "
                       "like crq-runner/20261028-1")
     ref = "refs/tags/" + tag
@@ -845,6 +929,8 @@ def mutation_record(effects: Effects, operation: str, state: dict, target: str,
     try:
         yield transaction
     except (Exception, KeyboardInterrupt) as exc:
+        if transaction["phase"] == "helper" and isinstance(exc, Exception):
+            _refuse_if_unchanged(effects, identity, state, path, exc)
         recovery = {**identity, "operation": "recovery_required",
                     "outcome": "recovery_required", "failed_phase": transaction["phase"],
                     "reason": type(exc).__name__ + ": " + str(exc)[:400],
@@ -863,6 +949,37 @@ def mutation_record(effects: Effects, operation: str, state: dict, target: str,
             recovery["record_write_error"] = (type(record_error).__name__ + ": "
                                                + str(record_error)[:400])
         raise RecoveryRequired(recovery) from exc
+
+
+def _refuse_if_unchanged(effects: Effects, identity: dict, state: dict,
+                         path: Path, exc: Exception) -> None:
+    """A helper exception with every surface observed unchanged is a
+    no-change refusal (#832): record ``refused_no_change`` with the
+    observations and raise Refused. Returns (so the caller reports
+    recovery_required) on any observed change or observation failure."""
+    try:
+        observation = no_change_observation(effects, state)
+    except Exception:  # unobservable: never an absence proof
+        return
+    if not observation["unchanged"]:
+        return
+    reason = type(exc).__name__ + ": " + str(exc)[:400]
+    refused = {**identity, "operation": identity["intended_operation"] + "_refused",
+               "outcome": "refused_no_change", "failed_phase": "helper",
+               "reason": reason, "observations": observation["observed"],
+               "record_path": str(path), "record_persisted": False}
+    try:
+        effects.journal_replace(path, {**refused, "record_persisted": True})
+        refused["record_persisted"] = True
+        where = "recorded refused_no_change at " + str(path)
+    except (Exception, KeyboardInterrupt) as record_error:
+        refused["record_write_error"] = (type(record_error).__name__ + ": "
+                                         + str(record_error)[:200])
+        where = ("could not record refused_no_change (" + refused["record_write_error"]
+                 + "); pending intent retained at " + str(path))
+    raise NoChangeRefused("helper refused with HEAD, config, checkout, units and "
+                          "preserved state observed unchanged: " + reason + "; "
+                          + where, refused) from exc
 
 
 def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
@@ -884,6 +1001,7 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
         overlay, raw = helper_module.load_overlay(overlay_path)
+        helper_precheck(helper_module, effects.root, overlay, target, tag)
         with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag,
                              helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, target, tag)
@@ -959,7 +1077,7 @@ def rollback_target(prior: dict) -> dict:
     if not target or not SHA_RE.match(target):
         raise Refused("no recorded prior target SHA; refusing blind rollback")
     tag = prior.get("prior_tag")
-    if not tag or not TAG_RE.match(tag):
+    if not tag or not TAG_RE.fullmatch(tag):
         raise Refused("prior record lacks the prior target's own annotated runner "
                       "tag (prior_tag); owner must approve and supply it")
     compat = prior.get("rollback_compatibility")
@@ -1044,6 +1162,8 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         state = captured_state(effects)
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
+        helper_precheck(helper_module, effects.root, overlay, record["prior_head"],
+                        record["tag"])
         with mutation_record(effects, "rollback", state, record["prior_head"],
                              record["tag"], prior_tag, helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, record["prior_head"],
@@ -1127,6 +1247,10 @@ def main(argv=None) -> int:
         print(json.dumps(exc.recovery, indent=2, sort_keys=True))
         print("recovery required: " + str(exc), file=sys.stderr)
         return 3
+    except NoChangeRefused as exc:
+        print(json.dumps(exc.record, indent=2, sort_keys=True))
+        print("refused: " + str(exc), file=sys.stderr)
+        return 2
     except Refused as exc:
         print("refused: " + str(exc), file=sys.stderr)
         return 2
