@@ -1428,25 +1428,51 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual({i["pr"] for i in self.q["items"]}, {750, 751, 752})
 
     def test_recent_pages_stop_at_floor_and_resume(self):
-        row = {"number": 750, "base": {"ref": "main"},
-               "updated_at": "2026-10-29T00:00:00Z", "merged_at": "2026-10-29T00:00:00Z",
-               "merge_commit_sha": self.merge, "head": {"sha": self.merge}}
-        with mock.patch.object(crq, "gh_json", return_value=[row] * 100):
+        rows = [{"number": 900 - n, "base": {"ref": "main"},
+                 "updated_at": f"2026-10-29T00:{59 - n // 60:02d}:{59 - n % 60:02d}Z",
+                 "merged_at": "2026-10-29T00:00:00Z",
+                 "merge_commit_sha": self.merge, "head": {"sha": self.merge}} for n in range(100)]
+        with mock.patch.object(crq, "gh_json", return_value=rows) as forge:
             page = crq.recent_merged_page(None, "2026-10-27T00:00:00Z")
-        self.assertEqual(page["next_cursor"], "2")
-        with mock.patch.object(crq, "gh_json", return_value=[row] * 100) as forge:
-            page = crq.recent_merged_page("2", "2026-10-30T00:00:00Z")
+        self.assertTrue(forge.call_args.args[0][1].endswith("per_page=100&page=1"))
+        self.assertEqual(len(page["records"]), 100)
+        cursor = json.loads(page["next_cursor"])
+        self.assertEqual((cursor["u"], cursor["t"], cursor["o"]), (rows[-1]["updated_at"], [801], 97))
+        # The continuation overlaps the anchor; a window past it backs off.
+        with mock.patch.object(crq, "gh_json", return_value=rows[97:]) as forge:
+            page = crq.recent_merged_page(page["next_cursor"], "2026-10-27T00:00:00Z")
+        self.assertTrue(forge.call_args.args[0][1].endswith("per_page=97&page=2"))
+        self.assertEqual(page["records"], [])
+        head = page["next_cursor"]
+        self.assertEqual(json.loads(head)["p"], 1)
+        with mock.patch.object(crq, "gh_json", return_value=[]):
+            gap = crq.recent_merged_page(json.dumps({**cursor, "n": 5}, separators=(",", ":")),
+                                         "2026-10-27T00:00:00Z")
+        self.assertEqual((gap["records"], json.loads(gap["next_cursor"])["o"]), ([], 0))
+        with mock.patch.object(crq, "gh_json", return_value=rows) as forge:
+            page = crq.recent_merged_page(head, "2026-10-27T00:00:00Z")
         self.assertIsNone(page["next_cursor"])
-        self.assertTrue(forge.call_args.args[0][1].endswith("page=2"))
+        self.assertEqual(page["records"], [])
+        # A legacy page-number cursor restarts safely; malformed cursors refuse.
+        with mock.patch.object(crq, "gh_json", return_value=rows[:1]) as forge:
+            self.assertIsNone(crq.recent_merged_page("2", "2026-10-29T00:59:58Z")["next_cursor"])
+        self.assertTrue(forge.call_args.args[0][1].endswith("per_page=100&page=1"))
+        for bad in ("{", "[]", json.dumps({**cursor, "f": "2026-10-28T00:00:00Z"}), "02"):
+            with self.subTest(cursor=bad), mock.patch.object(crq, "gh_json") as forge:
+                with self.assertRaises(crq.merged_reconcile.ReconcileRefused):
+                    crq.recent_merged_page(bad, "2026-10-27T00:00:00Z")
+                forge.assert_not_called()
 
     def forge_inventory(self, count=125):
         def forge(args):
             if len(args) == 2 and "/pulls?" in args[1]:
-                page = int(args[1].rsplit("page=", 1)[1])
+                size = int(re.search(r"[?&]per_page=(\d+)", args[1]).group(1))
+                page = int(re.search(r"[?&]page=(\d+)", args[1]).group(1))
+                # One shared update second: the keyset tie group spans pages.
                 return [{"number": n, "base": {"ref": "merge-queue"},
                          "updated_at": "2026-10-02T00:00:00Z", "merged_at": "2026-10-02T00:00:00Z",
                          "merge_commit_sha": self.merge, "head": {"sha": self.merge}}
-                        for n in range((page - 1) * 100 + 1, min(page * 100, count) + 1)]
+                        for n in range((page - 1) * size + 1, min(page * size, count) + 1)]
             query = args[-1]
             repository = {"id": "repo-id", "nameWithOwner": crq.REPO}
             if "issues(last:" in query:
@@ -2179,6 +2205,195 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                         with self.assertRaisesRegex(crq.DiscoveryStorageFailed, stage):
                             self.manual()
                     self.assertEqual(self.q, baseline)
+
+
+class RecentKeysetDiscoveryTest(unittest.TestCase):
+    """Offline closed-PR list that changes between page reads and ticks."""
+
+    AFTER = "2026-10-01T00:00:00Z"
+    BEFORE = "2026-10-03T00:00:00Z"
+    LATER = "2026-10-03T00:00:00Z"
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="recent-keyset-")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        for name, value in (("STATE", root), ("QUEUE", root / "queue.json")):
+            patcher = mock.patch.object(crq, name, new=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(crq, "now", return_value=crq.parse_iso("2026-10-03T00:00:01Z"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.calls = []
+        self.hooks = {}
+        self.q = {"created_at": self.AFTER, "items": [], "starts": [], "merged_watermark": self.AFTER}
+        crq.save_queue(self.q)
+
+    def closed(self, count, unmerged=()):
+        base = crq.parse_iso("2026-10-02T00:00:00Z")
+        self.rows = {n: {"number": n, "base": {"ref": "main"},
+                         "updated_at": crq.iso(base + crq.dt.timedelta(seconds=n)),
+                         "merged_at": None if n in unmerged else crq.iso(base + crq.dt.timedelta(seconds=n)),
+                         "merge_commit_sha": f"{n:040x}", "head": {"sha": f"{n:040x}"}}
+                     for n in range(1, count + 1)}
+        self.merged = {n for n in self.rows if n not in unmerged}
+
+    def forge(self, args):
+        size = int(re.search(r"[?&]per_page=(\d+)", args[1]).group(1))
+        page = int(re.search(r"[?&]page=(\d+)", args[1]).group(1))
+        self.hooks.pop(len(self.calls), lambda: None)()
+        self.calls.append((size, page))
+        ordered = sorted(self.rows.values(), key=lambda r: (r["updated_at"], r["number"]), reverse=True)
+        return copy.deepcopy(ordered[(page - 1) * size:page * size])
+
+    def move(self, number):
+        """An update (label, comment, edit) moves a closed PR to the top."""
+        return lambda: self.rows[number].update(updated_at=self.LATER)
+
+    def reopen(self, number):
+        """A reopened PR leaves the closed list; later rows shift up."""
+        return lambda: self.rows.pop(number)
+
+    def tick(self):
+        with mock.patch.object(crq, "gh_json", side_effect=self.forge):
+            log = crq.discover_merged(self.q, crq.ForgeBudget(),
+                                      interval={"after": self.AFTER, "before": self.BEFORE}, recent=True)
+        self.assertEqual(crq.load_queue(), self.q)
+        return log
+
+    def enrolled(self):
+        return {item["pr"] for item in self.q["items"]}
+
+    def test_single_page_scan_stays_one_request(self):
+        self.closed(40)
+        self.assertIn("complete=True", self.tick()[0])
+        self.assertEqual(self.calls, [(100, 1)])
+        self.assertEqual(self.enrolled(), self.merged)
+
+    def test_merge_moving_between_pages_is_not_missed(self):
+        # Page one is numbers 250..151. Before the second read, reopening
+        # read #200 shifts merged #150 from offset 100 into offset 99; before
+        # the third read, unread merged #10 is updated to the top. Fixed
+        # page=2/page=3 offsets (the previous adapter) miss both #150 and #10.
+        self.closed(250, unmerged={200})
+        self.hooks[1] = self.reopen(200)
+        self.hooks[2] = self.move(10)
+        self.assertIn("complete=True", self.tick()[0])
+        self.assertEqual(self.enrolled(), self.merged)
+        self.assertEqual(self.q["merged_watermark"], self.BEFORE)
+        self.assertNotIn((100, 2), self.calls)
+
+    def test_moves_and_reopens_between_ticks_never_lose_a_merge(self):
+        self.closed(450, unmerged={420, 300})
+        # Tick one spends its four pages; changes land before tick two resumes.
+        self.hooks[4] = lambda: (self.move(5)(), self.move(380)(), self.reopen(420)(),
+                                 self.reopen(300)())
+        self.assertIn("complete=False", self.tick()[0])
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(self.q["merged_watermark"], self.AFTER)
+        self.assertEqual(self.enrolled(), set())
+        self.assertFalse(self.q["merged_discovery"]["complete"])
+        for _ in range(3):
+            if self.q["merged_discovery"]["complete"]:
+                break
+            self.tick()
+        self.assertTrue(self.q["merged_discovery"]["complete"])
+        self.assertEqual(self.enrolled(), self.merged)
+        self.assertEqual(self.q["merged_watermark"], self.BEFORE)
+
+    def test_large_reopen_burst_backs_off_to_a_verified_window(self):
+        self.closed(250, unmerged=set(range(191, 201)))
+        # Ten reopens of already-read rows exceed the overlap: the window at
+        # offset 97 would begin at #143, past unread #150..#144, so it backs off.
+        self.hooks[1] = lambda: [self.reopen(n)() for n in range(191, 201)]
+        self.assertIn("complete=False", self.tick()[0])
+        self.assertEqual(self.calls[:3], [(100, 1), (97, 2), (100, 1)])
+        self.assertEqual(self.enrolled(), set())
+        self.assertIn("complete=True", self.tick()[0])
+        self.assertEqual(self.enrolled(), self.merged)
+        self.assertEqual(self.q["merged_watermark"], self.BEFORE)
+
+
+class RecentWrapperRetentionTest(unittest.TestCase):
+    """Rolling discovery leaves one wrapper per tick; growth stays bounded."""
+
+    FLOOR = "2026-10-01T00:00:00Z"
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="recent-retention-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.clock = crq.parse_iso("2026-10-01T01:00:00Z")
+        for name, kwargs in (("STATE", {"new": self.root}), ("QUEUE", {"new": self.root / "queue.json"}),
+                             ("now", {"side_effect": lambda: self.clock}),
+                             ("gh_json", {"return_value": []})):
+            patcher = mock.patch.object(crq, name, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.q = {"created_at": self.FLOOR, "items": [], "starts": []}
+        crq.save_queue(self.q)
+
+    def key(self, after, before, method="closed-updated-v1"):
+        return review_receipt.digest({"repo": crq.REPO, "base": "main-or-merge-queue", "after": after,
+                                      "before": before, **({"method": method} if method else {})})
+
+    def put(self, name, *, method="closed-updated-v1", complete=True, after=None, before=None, raw=None):
+        path = self.root / "reconcile" / (name + ".json")
+        path.parent.mkdir(exist_ok=True)
+        if raw is None:
+            value = {"source": {"method": method},
+                     "checkpoint": {"after": after, "before": before, "complete": complete, "dry_run": False}}
+            value["digest"] = review_receipt.digest(value)
+            raw = json.dumps(value)
+        path.write_text(raw)
+        return path
+
+    def tick(self):
+        interval = crq.rolling_discovery_interval(self.q, {"enabled": True, "after": self.FLOOR})
+        return crq.discover_merged(self.q, crq.ForgeBudget(), interval=interval, recent=True)
+
+    def test_completed_rolling_wrappers_are_pruned_after_retention(self):
+        old = ("2026-09-01T00:00:00Z", "2026-09-01T00:12:00Z")
+        partial = ("2026-09-02T00:00:00Z", "2026-09-02T00:12:00Z")
+        retained = [
+            # Manual/inventory evidence, a partial scan, a wrapper whose name
+            # does not bind its interval, and unreadable bytes all stay.
+            self.put(self.key(*old, method=None), method="all-number-slots-v1", after=old[0], before=old[1]),
+            self.put(self.key(*partial), complete=False, after=partial[0], before=partial[1]),
+            self.put("f" * 64, after=old[0], before=old[1]),
+            self.put(self.key(*old), raw="{"),
+        ]
+        sizes = []
+        for _ in range(9 * 12):  # nine days of two-hour ticks
+            self.clock += crq.dt.timedelta(hours=2)
+            self.assertIn("complete=True", self.tick()[0])
+            sizes.append(len(list((self.root / "reconcile").glob("*.json"))))
+        # Seven days of rolling wrappers (84 two-hour ticks) plus the retained set.
+        self.assertEqual(max(sizes), 84 + len(retained))
+        self.assertEqual(sizes[-12:], [84 + len(retained)] * 12)
+        self.assertTrue(all(path.exists() for path in retained))
+        reference = self.root / "reconcile" / (self.q["merged_reconcile"]["checkpoint_key"] + ".json")
+        self.assertTrue(reference.exists())
+        befores = [json.loads(p.read_text())["checkpoint"]["before"]
+                   for p in (self.root / "reconcile").glob("*.json") if p not in retained]
+        self.assertGreaterEqual(min(befores), crq.iso(self.clock - crq.RECENT_WRAPPER_RETENTION))
+
+    def test_unenrolled_or_referenced_complete_wrappers_are_retained(self):
+        self.clock = crq.parse_iso("2026-10-20T00:00:00Z")
+        old = ("2026-10-01T00:00:00Z", "2026-10-01T00:12:00Z")
+        above = self.put(self.key(*old), after=old[0], before=old[1])
+        # Watermark below the interval: enrollment may still replay from it.
+        self.q.update(merged_watermark=old[0])
+        self.assertEqual(crq.prune_recent_wrappers(self.q), 0)
+        self.q.update(merged_watermark=old[1], merged_discovery={"after": old[0], "before": old[1], "complete": True})
+        self.assertEqual(crq.prune_recent_wrappers(self.q), 0)
+        self.q.update(merged_discovery={}, merged_reconcile={"checkpoint_key": self.key(*old)})
+        self.assertEqual(crq.prune_recent_wrappers(self.q), 0)
+        self.assertTrue(above.exists())
+        self.q.pop("merged_reconcile")
+        self.assertEqual(crq.prune_recent_wrappers(self.q), 1)
+        self.assertFalse(above.exists())
 
 
 class DeferredSourceSearchTest(unittest.TestCase):

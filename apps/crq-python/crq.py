@@ -1174,36 +1174,191 @@ def rolling_discovery_interval(q, config):
     return merged_reconcile.normalize_interval(after, before)
 
 
-def recent_merged_page(cursor, after):
-    """Newest closed PRs first; stop at the history floor, with resumable pages."""
-    page = 1 if cursor is None else int(cursor)
-    if page < 1 or (cursor is not None and str(page) != cursor):
-        raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
+RECENT_PAGE = 100
+RECENT_OVERLAP = 2
+RECENT_MAX_TIES = 250
+RECENT_FIELDS = {"n", "p", "f", "fs", "h", "hs", "o", "u", "t", "k", "c"}
+
+
+def _recent_state(cursor, after):
+    """Decode a keyset cursor; a legacy page-number cursor restarts the scan."""
+    fresh = {"n": 0, "p": 0, "f": after, "fs": [], "h": None, "hs": [], "o": 0,
+             "u": None, "t": [], "k": 0, "c": 0}
+    if cursor is None or (cursor.isdigit() and cursor == str(int(cursor)) and int(cursor) >= 1):
+        return fresh
     try:
-        rows = gh_json(["api", f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}"])
+        state = json.loads(cursor)
+    except (ValueError, RecursionError):
+        state = None
+
+    def ts(value, nullable=False):
+        if value is None:
+            return nullable
+        try:
+            merged_reconcile.normalize_interval("1970-01-01T00:00:00Z", value)
+        except (merged_reconcile.ReconcileRefused, TypeError, ValueError):
+            return False
+        return True
+
+    def numbers(value):
+        return (type(value) is list and len(value) <= RECENT_MAX_TIES and len(set(value)) == len(value)
+                and all(type(n) is int and n > 0 for n in value))
+
+    if (type(state) is not dict or set(state) != RECENT_FIELDS
+            or any(type(state[k]) is not int or state[k] < 0 for k in ("n", "p", "o", "k", "c"))
+            or not ts(state["f"]) or not ts(state["h"], True) or not ts(state["u"], True)
+            or not all(numbers(state[k]) for k in ("fs", "hs", "t"))
+            or (state["p"] == 0 and (state["f"] != after or state["fs"]))
+            or (state["k"] == 0 and (state["h"] is not None or state["o"] or state["u"] is not None))
+            or (state["o"] and state["u"] is None)):
+        raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
+    return state
+
+
+def _recent_window(offset):
+    """Largest REST window (per_page <= 100) that starts at or before offset."""
+    if offset <= 0:
+        return RECENT_PAGE, 1, 0
+    end, size = max(((offset // w) * w + w, w) for w in range(1, RECENT_PAGE + 1))
+    return size, (end - size) // size + 1, end - size
+
+
+def recent_merged_page(cursor, after):
+    """Newest closed PRs first, as an updated_at keyset with verified overlap.
+
+    Offsets alone are unsafe: a reopen above the read position shifts unread
+    rows into already-read offsets, and an update moves a row to the top. Each
+    continuation window must start at or before the last processed row (the
+    anchor); otherwise it backs off towards offset zero. A pass that needed
+    more than one request is followed by a head pass over rows updated since
+    that pass began, until one request covers the head (an atomic snapshot) or
+    a head pass finds nothing new. Single-page scans stay one request.
+    """
+    state = _recent_state(cursor, after)
+    size, page, start = _recent_window(state["o"])
+    try:
+        rows = gh_json(["api", f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc"
+                               f"&per_page={size}&page={page}"])
     except deferred_refresh.RefreshExhausted:
         raise merged_reconcile.BudgetExhausted("aggregate forge budget exhausted; cursor retained") from None
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
         raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
-    if not isinstance(rows, list) or len(rows) > 100:
+    if not isinstance(rows, list) or len(rows) > size:
         raise merged_reconcile.ReconcileRefused("invalid closed-PR page")
-    records = []
-    older = False
+    prior = None
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] <= 0:
             raise merged_reconcile.ReconcileRefused("invalid closed-PR record")
         updated = row.get("updated_at")
         merged_reconcile.normalize_interval("1970-01-01T00:00:00Z", updated)
-        if updated <= after:
-            older = True
+        if prior is not None and updated > prior:
+            raise merged_reconcile.ReconcileRefused("closed-PR page is not sorted by update")
+        prior = updated
         if "merged_at" not in row:
             raise merged_reconcile.ReconcileRefused("missing merge metadata")
+    anchor, ties = state["u"], set(state["t"])
+
+    def covered(row):
+        return anchor is not None and (row["updated_at"] > anchor or
+                                       (row["updated_at"] == anchor and row["number"] in ties))
+
+    nxt = {**state, "n": state["n"] + 1, "k": state["k"] + 1}
+    if start > 0 and not (rows and covered(rows[0])):
+        # Rows left the list above the anchor: this window may begin past
+        # unread rows. Re-read from earlier; offset zero is always safe.
+        nxt["o"] = max(0, start - RECENT_PAGE)
+        return {"records": [], "has_next_page": True, "next_cursor": json.dumps(nxt, separators=(",", ":"))}
+    floor, seen = state["f"], set(state["fs"])
+    head = state["h"] if state["k"] else (rows[0]["updated_at"] if rows else None)
+    head_seen = set(state["hs"])
+    records = []
+    ended = len(rows) < size
+    for row in rows:
+        if covered(row):
+            continue
+        updated = row["updated_at"]
+        if updated < floor or (updated == floor and state["p"] == 0):
+            ended = True
+            break
+        if anchor is None or updated < anchor:
+            anchor, ties = updated, set()
+        ties.add(row["number"])
+        if updated == head:
+            head_seen.add(row["number"])
+        if updated == floor and row["number"] in seen:
+            continue
+        nxt["c"] += 1
         if row["merged_at"] and (row.get("base") or {}).get("ref") in DISCOVERY_BRANCHES:
-            records.append({"number": row.get("number"), "mergedAt": row["merged_at"],
+            records.append({"number": row["number"], "mergedAt": row["merged_at"],
                 "mergeCommit": {"oid": row.get("merge_commit_sha")},
                 "headRefOid": (row.get("head") or {}).get("sha")})
-    more = len(rows) == 100 and not older
-    return {"records": records, "has_next_page": more, "next_cursor": str(page + 1) if more else None}
+    if len(ties) > RECENT_MAX_TIES or len(head_seen) > RECENT_MAX_TIES:
+        raise merged_reconcile.ReconcileRefused("closed-PR update tie group exceeds cursor capacity")
+    if ended:
+        if state["k"] == 0 or (state["p"] > 0 and nxt["c"] == 0):
+            return {"records": records, "has_next_page": False, "next_cursor": None}
+        # Rows updated during this multi-request pass moved above its anchor.
+        nxt = {"n": state["n"] + 1, "p": state["p"] + 1, "f": head, "fs": sorted(head_seen), "h": None,
+               "hs": [], "o": 0, "u": None, "t": [], "k": 0, "c": 0}
+    else:
+        nxt.update(h=head, hs=sorted(head_seen), u=anchor, t=sorted(ties),
+                   o=max(0, start + len(rows) - 1 - RECENT_OVERLAP))
+    encoded = json.dumps(nxt, separators=(",", ":"))
+    if len(encoded.encode()) > merged_reconcile.MAX_CURSOR_BYTES:
+        raise merged_reconcile.ReconcileRefused("closed-PR update tie group exceeds cursor capacity")
+    return {"records": records, "has_next_page": True, "next_cursor": encoded}
+
+
+RECENT_WRAPPER_RETENTION = dt.timedelta(days=7)
+
+
+def prune_recent_wrappers(q):
+    """Delete completed rolling-scan wrappers once enrolled and past retention.
+
+    Kept: partial scans, dry runs, manual/inventory (all-number-slots) wrappers,
+    anything unreadable or not provably a closed-updated-v1 wrapper for its own
+    interval, intervals above the watermark (enrollment may still replay), and
+    the wrappers the queue references. Best effort: never aborts the tick.
+    """
+    watermark = q.get("merged_watermark")
+    if not isinstance(watermark, str):
+        return 0
+    cutoff = iso(now() - RECENT_WRAPPER_RETENTION)
+
+    def key(after, before):
+        return review_receipt.digest({"repo": REPO, "base": DISCOVERY_SELECTOR, "after": after,
+                                      "before": before, "method": "closed-updated-v1"})
+
+    active = q.get("merged_discovery") or {}
+    keep = {(q.get("merged_reconcile") or {}).get("checkpoint_key")}
+    if isinstance(active.get("after"), str) and isinstance(active.get("before"), str):
+        keep.add(key(active["after"], active["before"]))
+    removed = 0
+    try:
+        paths = sorted((STATE / "reconcile").glob("*.json"))
+    except OSError:
+        return 0
+    for path in paths:
+        if path.stem in keep:
+            continue
+        try:
+            wrapper = json.loads(path.read_text())
+            checkpoint = wrapper["checkpoint"]
+            after, before = checkpoint["after"], checkpoint["before"]
+            if not (type(wrapper) is dict and set(wrapper) == {"source", "checkpoint", "digest"}
+                    and wrapper["source"].get("method") == "closed-updated-v1"
+                    and wrapper["digest"] == review_receipt.digest(
+                        {k: v for k, v in wrapper.items() if k != "digest"})
+                    and checkpoint.get("complete") is True and checkpoint.get("dry_run") is False
+                    and isinstance(after, str) and isinstance(before, str)
+                    and path.stem == key(after, before)
+                    and before <= watermark and before < cutoff):
+                continue
+            path.unlink()
+            removed += 1
+        except (OSError, ValueError, RecursionError, TypeError, KeyError, AttributeError):
+            continue
+    return removed
 
 
 def discover_merged(q, budget, *, interval, recent=False):
@@ -1226,13 +1381,17 @@ def discover_merged(q, budget, *, interval, recent=False):
             result = reconcile_merged(q, after=after, before=before, page_budget=4, recent=recent)
         q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
         _save_discovery_queue(q, "discovery-summary-save")
+        pruned = 0
         if result["complete"]:
             q["merged_watermark"] = before
             _save_discovery_queue(q, "watermark-save")
+            if recent:
+                pruned = prune_recent_wrappers(q)
         caller.clear()
         caller.update(q)
-        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"
-                + (f" reason={result['reason']}" if result.get("reason") else "")]
+        return ([f"merged discovery: complete={result['complete']} represented={result['represented']}"
+                 + (f" reason={result['reason']}" if result.get("reason") else "")]
+                + ([f"pruned {pruned} completed rolling discovery checkpoint(s)"] if pruned else []))
     except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
         q["merged_discovery"]["complete"] = False
         q["merged_discovery"]["error"] = str(exc)[:200]
