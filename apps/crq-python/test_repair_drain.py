@@ -184,6 +184,15 @@ class RepairDrainTest(unittest.TestCase):
         self.assertFalse(service.blackout(repair, utc('2026-11-07T07:00:00')))  # Sat 15:00 SGT
         self.assertFalse(service.blackout({}, utc('2026-11-02T07:00:00')))
 
+    def test_blackout_switch_suspends_window_and_blocked(self):
+        off = {'blackout': {**BLACKOUT, 'enabled': False}, 'budget': {'wall_clock_min': 20}}
+        on = {'blackout': {**BLACKOUT, 'enabled': True}, 'budget': {'wall_clock_min': 20}}
+        inside = utc('2026-11-02T07:00:00')  # Mon 15:00 SGT
+        self.assertFalse(service.blackout(off, inside))
+        self.assertFalse(service.blocked(off, inside))
+        self.assertTrue(service.blackout(on, inside))
+        self.assertTrue(service.blocked(on, inside))
+
     def test_main_refuses_without_zai_key_and_inside_blackout(self):
         atomic(self.root / 'config.json', self.config)
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(service, 'drain') as drain:
@@ -407,7 +416,7 @@ class RepairDrainTest(unittest.TestCase):
         self.assertIsInstance(repair['spend_authorization'], str)
         self.assertIn('2026-11-02', repair['spend_authorization'])
         self.assertEqual(repair['roles'], ROLES)
-        self.assertEqual(repair['blackout'], BLACKOUT)
+        self.assertEqual(repair['blackout'], {'enabled': False, **BLACKOUT})  # suspended 2026-11-02
         self.assertNotIn('peak', repair)
         self.assertEqual(repair['budget'], {'wall_clock_min': 20, 'max_tokens': 400000})
         self.assertEqual(repair['max_rounds_per_pin'], 2)

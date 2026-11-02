@@ -95,7 +95,10 @@ Runtime dispatch requires `repair.enabled`, a recorded
 `repair.spend_authorization` string, and `ZAI_API_KEY` in the service environment
 (`EnvironmentFile=-%h/.config/crq/repair.env`). Roles are cq-driver GLM only
 (fixer `zai/glm-5.3-flash`, escalation `zai/glm-5.3`, judge `zai/glm-5.3-flash`,
-critical judge `zai/glm-5.3`). Inside `repair.blackout` (14:00-18:00
+critical judge `zai/glm-5.3`). `repair.blackout.enabled` switches the window on
+or off (committed `false` since 2026-11-02: GLM quota is plentiful); the host
+overlay may set it to `true`/`false` and a `live-config` render applies it. While
+enabled, inside `repair.blackout` (14:00-18:00
 Asia/Singapore, Mon-Fri) nothing is dispatched: the drain does not start, no new
 finding starts, and a running finding defers its next attempt or judge for 30
 minutes. The same applies to a dispatch whose `budget.wall_clock_min` would
