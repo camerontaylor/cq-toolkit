@@ -51,6 +51,12 @@ import type {
   RunReport,
   RunStartedV3JournalEvent,
   WitnessesRecord,
+  CompositionStartedJournalEvent,
+  CompositionStartedPayload,
+  KernelRunLinkedJournalEvent,
+  KernelRunLinkedPayload,
+  ObservationEvent,
+  ObservationStream,
   AttemptFinishedJournalEvent,
   AttemptFinishedPayload,
   ApprovalJournalEvent,
@@ -1164,6 +1170,81 @@ export const ReportV2Schema: z.ZodType<ReportV2> = z
   .superRefine((report, ctx) => {
     checkMetric(report.metric, report.availability, ctx);
   });
+
+// ---------------------------------------------------------------------------
+// Kernel: journal v3 composition header/link schemas (ADR-0008, T29 — the
+// composition stream carries exactly one composition-started header; the
+// kernel RunLog never carries these composition-only carriers)
+// ---------------------------------------------------------------------------
+
+export const CompositionStartedPayloadSchema: z.ZodType<CompositionStartedPayload> = z
+  .object({
+    journalVersion: z.literal(3),
+    provenance: ProvenanceRecordSchema,
+    correlation: CorrelationRecordSchema,
+  })
+  .strict()
+  // Envelope coupling (ADR-0008): the header's baseSha and witnesses.base
+  // must agree, as on the kernel v3 header.
+  .superRefine((payload, ctx) => {
+    if (payload.provenance.baseSha !== payload.provenance.witnesses.base) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'provenance.baseSha and provenance.witnesses.base must agree',
+        path: ['provenance'],
+      });
+    }
+  });
+
+export const CompositionStartedJournalEventSchema: z.ZodType<CompositionStartedJournalEvent> = z
+  .object({
+    type: z.literal('composition-started'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    payload: CompositionStartedPayloadSchema,
+  })
+  .strict();
+
+export const KernelRunLinkedPayloadSchema: z.ZodType<KernelRunLinkedPayload> = z
+  .object({
+    kernelRunId: z.string().min(1),
+    planId: z.string().min(1),
+    round: z.number().int().positive(),
+  })
+  .strict();
+
+export const KernelRunLinkedJournalEventSchema: z.ZodType<KernelRunLinkedJournalEvent> = z
+  .object({
+    type: z.literal('kernel-run-linked'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    payload: KernelRunLinkedPayloadSchema,
+  })
+  .strict();
+
+/** One observation stream line (ADR-0008): composition carriers plus the v3 observational carriers. */
+export const ObservationEventSchema: z.ZodType<ObservationEvent> = z.union([
+  CompositionStartedJournalEventSchema,
+  KernelRunLinkedJournalEventSchema,
+  AttemptFinishedJournalEventSchema,
+  GateVerdictJournalEventSchema,
+  TaskFinishedJournalEventSchema,
+  ApprovalJournalEventSchema,
+  WriteObservationJournalEventSchema,
+  FindingDispositionJournalEventSchema,
+  HeadAcceptanceJournalEventSchema,
+  ReviewObservedJournalEventSchema,
+  MeasurementSummaryJournalEventSchema,
+]);
+
+export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
+  .object({
+    workId: z.uuid(),
+    compositionRunId: z.string().min(1),
+    events: z.array(ObservationEventSchema),
+    complete: z.boolean(),
+  })
+  .strict();
 
 /**
  * The v1/v2 kernel event union exactly as it stood before the v3 dual reader
