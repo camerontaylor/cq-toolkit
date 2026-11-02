@@ -1397,18 +1397,38 @@ describe('M5b3 forward governed invocation correlation (review.address)', () => 
   test.each(correlationCases)(
     'table: $name does not silently inherit the outer job',
     async ({ correlation }) => {
+      // The review-leg forwarding is asserted through the REAL reviewDrivers
+      // path: a committed cq.json repo, injected drivers, no deps.review —
+      // deleting the forwarding at src/ops/review/address.ts fails here.
       const f = await fixture();
+      const repo = await withCommittedConfig();
       try {
-        const invocations: Array<Record<string, unknown>> = [];
-        const result = await runLadder(
-          () =>
-            makeReviewAddress({
-              ...f.deps,
-              review: (input) => {
-                invocations.push({ shape: input.repoRoot });
-                return f.deps.review!(input);
+        const seen: Array<{ prompt: string; correlation?: unknown }> = [];
+        const drivers: DriverFactory = {
+          resolve: (request) => ({
+            lane: 'ai-sdk',
+            modelSpec: request.modelSpec,
+            driver: {
+              run: async (invocation) => {
+                seen.push({ prompt: invocation.prompt, correlation: invocation.correlation });
+                return {
+                  stopReason: 'complete' as const,
+                  structuredOutput: { findings: [] },
+                  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                  denials: [],
+                };
               },
-            })(f.input),
+            },
+          }),
+        };
+        const expected = correlationInvocation({ ...correlation }).correlation;
+        const outcome = await runLadder(
+          () =>
+            makeReviewAddress(depsForReviewLeg(f, repo, drivers))({
+              repoRoot: repo.root,
+              source: 'local',
+              journalDir: f.input.journalDir,
+            }),
           { wallClockMs: 20000 },
           {
             op: 'review.address',
@@ -1417,12 +1437,14 @@ describe('M5b3 forward governed invocation correlation (review.address)', () => 
             correlation: { ...correlation },
           },
         );
-        // The outer job's correlation must not surface as a fabricated run /
-        // work / parent / role on the composition's own bookkeeping: the leg
-        // completes with the same calls as un-governed.
-        expect(result.outcome).toBe('completed');
-        expect(f.calls.filter((call) => call.startsWith('fix:'))).toEqual(['fix:a']);
+        expect(outcome.outcome).toBe('completed');
+        expect(seen.length).toBeGreaterThan(0);
+        // The invocation carries the SHARED HELPER's result: the preserved
+        // 'fixer' default applies when the minted correlation lacks a role
+        // (M5b0 semantics, not a new role here).
+        for (const row of seen) expect(row.correlation).toEqual(expected);
       } finally {
+        await repo.cleanup();
         await f.cleanup();
       }
     },

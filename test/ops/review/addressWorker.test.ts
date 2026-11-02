@@ -2839,3 +2839,39 @@ test('a capture release failure after commit does not restore or retain a failed
     await f.cleanup();
   }
 });
+
+describe('M5b3 feedback invocation correlation', () => {
+  // The feedback leg (related-check confirm after a real candidate edit)
+  // goes through the SAME invoke() site: the forwarded correlation rides
+  // every invocation kind, not just the first edit dispatch.
+  test('the feedback invocation carries the forwarded correlation', async () => {
+    const seen: Array<{ kind: string; correlation?: unknown }> = [];
+    const f = await fixture(async (input) => {
+      const kind = input.prompt.startsWith('related-check feedback')
+        ? 'feedback'
+        : input.outputSchema?.name === 'review.address.closure/v1'
+          ? 'closure'
+          : 'edit';
+      seen.push({ kind, correlation: input.correlation });
+      if (input.outputSchema?.name === 'review.address.closure/v1')
+        return { closed: true, reason: 'candidate fixed' };
+      if (kind === 'edit') await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+      return { disposition: 'fixed', reason: 'fixed', evidence: [] };
+    });
+    try {
+      const correlation = { workId: 'run:jfb:1', runId: 'run', role: 'review.address' } as const;
+      const expected = correlationInvocation({ ...correlation }).correlation;
+      const outcome = await runLadder(
+        () => f.engine.fix(finding(), 1),
+        { wallClockMs: 20000 },
+        { op: 'review.address', jobKey: 'jfb', attempt: 1, correlation: { ...correlation } },
+      );
+      expect(outcome.outcome).toBe('completed');
+      // The real worker path ran edit AND feedback through invoke().
+      expect(seen.map((row) => row.kind)).toContain('feedback');
+      for (const row of seen) expect(row.correlation).toEqual(expected);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
