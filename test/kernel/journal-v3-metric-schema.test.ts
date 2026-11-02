@@ -24,6 +24,7 @@ import { describe, expect, test } from 'vitest';
 import { openRunLog } from '../../src/kernel/journal.js';
 import {
   JournalEventSchema,
+  JournalEventV1V2Schema,
   MeasurementSummaryJournalEventSchema,
   ReportV2Schema,
 } from '../../src/kernel/schema.js';
@@ -653,10 +654,13 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
     (badGate.gates[0]!.payload as unknown as Record<string, unknown>).verdict = 'green';
     expect(ReportV2Schema.safeParse(badGate).success).toBe(false);
 
-    // Strict v2 rejection of the v3 measurement-summary carrier on the
-    // v1/v2 union, directly and through the kernel RunLog (append and
-    // read-back); old shapes still write and read back unchanged.
-    expect(JournalEventSchema.safeParse(measurement()).success).toBe(false);
+    // The kernel RunLog's append still validates v1/v2 shapes only (dual
+    // reader first — ADR-0008 Migration §1): the measurement-summary carrier
+    // fails there, while the widened READER accepts it (pinned in
+    // journal-v3-read.test.ts). Old shapes still write and read back
+    // unchanged.
+    expect(JournalEventV1V2Schema.safeParse(measurement()).success).toBe(false);
+    expect(JournalEventSchema.safeParse(measurement()).success).toBe(true);
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t28-'));

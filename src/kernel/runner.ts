@@ -730,27 +730,34 @@ async function runPlanUnderLease(
       if (priorPlanId !== plan.id) continue;
       matching.push({ runId: priorRunId, events: priorEvents });
     }
-    // THE FOLD ORDER (annex §3): v1 runs by (at, runId), all before every
-    // v2 run; v2 runs by `seq` — `at` is display-only for v2, so an
+    // THE FOLD ORDER (annex §3; v3 joins the sequenced era per ADR-0008
+    // T02): v1 runs by (at, runId), all before every v2/v3 run; v2 and v3
+    // runs by `seq` — `at` is display-only for sequenced runs, so an
     // injected clock can no longer reorder the fold. Corruption is loud
-    // (a v2 run without seq, or a duplicate seq, throws from foldOrderRuns).
+    // (a sequenced run without seq, or a duplicate seq, throws from
+    // foldOrderRuns).
     priorRuns = foldOrderRuns(matching);
     for (const prior of priorRuns) {
       const started = prior.events.find(
-        (event): event is RunStartedJournalEvent => event.type === 'run-started',
+        (event): event is Extract<JournalEvent, { type: 'run-started' }> =>
+          event.type === 'run-started',
       );
       if (started === undefined) continue; // unreachable — the matcher required one
-      const isV2 = started.journalVersion === 2;
-      if (isV2) {
+      // v3 joins the existing sequenced v2 ordering: governance/ungoverned
+      // classification, cap inheritance and seq continuity treat it exactly
+      // like v2 (ADR-0008 Migration §1). Only a v1 header (no journalVersion)
+      // is the legacy era.
+      const isSequenced = started.journalVersion === 2 || started.journalVersion === 3;
+      if (isSequenced) {
         if (started.governance !== undefined) governedRunIds.push(prior.runId);
         if (started.ungoverned !== undefined) ungovernedRunIds.push(prior.runId);
         if (started.seq !== undefined && started.seq > maxPriorSeq) maxPriorSeq = started.seq;
       }
       if (gov !== undefined) {
-        if (!isV2 && prior.events.some((event) => event.type === 'job-started')) {
+        if (!isSequenced && prior.events.some((event) => event.type === 'job-started')) {
           v1DispatchRuns.push(prior.runId);
         }
-        if (isV2 && started.governance !== undefined) {
+        if (isSequenced && started.governance !== undefined) {
           // The LAST governed v2 run THAT SET A CAP owns the previous cap:
           // an uncapped governed run (an opt-in-only handle) journals no
           // capUsd, and letting that undefined clobber prevCapUsd would let
@@ -769,7 +776,7 @@ async function runPlanUnderLease(
         // The seed fold itself (below) decides what enters the ledger; each
         // run rides with its version tag so the reset filter can exclude a
         // v1 run's spend without dropping its attempt/dispatch seeds.
-        seedRuns.push({ runId: prior.runId, v1: !isV2, events: prior.events });
+        seedRuns.push({ runId: prior.runId, v1: !isSequenced, events: prior.events });
       }
       if (opts.resume === true) {
         for (const event of prior.events) {

@@ -539,9 +539,10 @@ export interface CorrelationRecord {
  * `E.journalVersion = 3`; carries the preserved v2 envelope fields (`planId`,
  * `seq`, exactly one of `governance`/`ungoverned` — v3 joins the existing
  * sequenced v2 ordering) plus provenance, correlation and availability.
- * Dispatch on run-started version: absent → v1, 2 → v2, 3 → v3. Writer
- * disabled until the v3 dual-reader ships (schema-only, this slice); the
- * v1/v2 RunLog must keep rejecting this shape.
+ * Dispatch on run-started version: absent → v1, 2 → v2, 3 → v3. The dual
+ * READER (T02) accepts this shape; the kernel RunLog's append still
+ * validates v1/v2 shapes only — the v3 header writer arrives with T04, so
+ * a v3 header in a kernel file today is operator-written evidence.
  */
 export interface RunStartedV3JournalEvent {
   type: 'run-started';
@@ -937,7 +938,13 @@ export interface ReportV2 {
   availability: Record<string, AvailabilityRecord>;
 }
 
-/** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
+/** NDJSON journal event union, discriminated on `type`. All members plain serializable data.
+ *
+ * v3 (ADR-0008, T02) joins the observational carriers to the sequenced v2
+ * kernel events in one union: the dual reader dispatches on the run-started
+ * version (absent → v1, 2 → v2, 3 → v3) and observational events never alter
+ * reservations, sequence claims or job statuses.
+ */
 export type JournalEvent =
   | RunStartedJournalEvent
   | JobStartedJournalEvent
@@ -948,7 +955,17 @@ export type JournalEvent =
   | ReservationRefusedJournalEvent
   | JobQuarantinedJournalEvent
   | QuarantineReleasedJournalEvent
-  | BudgetTrippedJournalEvent;
+  | BudgetTrippedJournalEvent
+  | RunStartedV3JournalEvent
+  | AttemptFinishedJournalEvent
+  | GateVerdictJournalEvent
+  | TaskFinishedJournalEvent
+  | ApprovalJournalEvent
+  | WriteObservationJournalEvent
+  | FindingDispositionJournalEvent
+  | HeadAcceptanceJournalEvent
+  | ReviewObservedJournalEvent
+  | MeasurementSummaryJournalEvent;
 
 /**
  * Registry entry for one op. Runtime-only: never persisted (the importer is

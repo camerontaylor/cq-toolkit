@@ -23,14 +23,15 @@ import {
   ApprovalJournalEventSchema,
   GateVerdictJournalEventSchema,
   JournalEventSchema,
+  JournalEventV1V2Schema,
   TaskFinishedJournalEventSchema,
   WriteObservationJournalEventSchema,
 } from '../../src/kernel/schema.js';
 import type {
   ApprovalJournalEvent,
+  JournalEvent,
   AvailabilityState,
   GateVerdictJournalEvent,
-  JournalEvent,
   TaskFinishedJournalEvent,
   WriteObservationJournalEvent,
 } from '../../src/kernel/types.js';
@@ -232,8 +233,9 @@ describe('journal v3 gate/task/approval/write schemas (T26)', () => {
     expect(TaskFinishedJournalEventSchema.safeParse(aliasedTask).success).toBe(false);
 
     // Strict v2 rejection of v3, directly on the v1/v2 union: all six v3
-    // carrier variants fail JournalEventSchema (the schema behind append and
-    // the read-back).
+    // carrier variants fail the v1/v2 kernel union (JournalEventV1V2Schema);
+    // the full JournalEventSchema accepts them once T02 assembles the v3
+    // union (pinned in journal-v3-read.test.ts).
     const variants = [
       gateVerdict(),
       taskFinished(),
@@ -243,12 +245,14 @@ describe('journal v3 gate/task/approval/write schemas (T26)', () => {
       writeDenied({ type: 'write-path-cap-tripped' }),
     ] as const;
     for (const variant of variants) {
-      expect(JournalEventSchema.safeParse(variant).success).toBe(false);
+      expect(JournalEventV1V2Schema.safeParse(variant).success).toBe(false);
+      expect(JournalEventSchema.safeParse(variant).success).toBe(true);
     }
 
-    // The kernel v1/v2 RunLog validates through JournalEventSchema (append
-    // AND read-back), so every variant must fail there; old shapes still
-    // write and read back unchanged.
+    // The kernel RunLog's append still validates v1/v2 shapes only (dual
+    // reader first — ADR-0008 Migration §1): every variant fails there;
+    // the widened READER accepts them (pinned in journal-v3-read.test.ts).
+    // Old shapes still write and read back unchanged.
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t26-'));

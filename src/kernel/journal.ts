@@ -5,8 +5,9 @@
 //     asserts runIds are filesystem-safe (they become `<runId>.ndjson` file
 //     names) and that the event's own `runId` matches the file it lands in.
 //   - Append-only: one validated JSON line per event, never rewritten. Every
-//     event is validated against the frozen JournalEventSchema BEFORE it hits
-//     disk — an invalid event is a loud error, not silent evidence rot.
+//     event is validated BEFORE it hits disk (the v1/v2 kernel union — the
+//     dual reader's widened union governs reads; ADR-0008 Migration §1) — an
+//     invalid event is a loud error, not silent evidence rot.
 //   - Status is derived at READ time (`statusOf`): the file stores facts
 //     (started, finished with result X); states are a fold over those facts,
 //     so a corrupted or stale derived view can always be recomputed.
@@ -42,7 +43,7 @@ import type { LockOptions, lock } from 'proper-lockfile';
 import { z } from 'zod';
 import { PlanLockRefusedError } from './errors.js';
 import { runLadder } from './governor.js';
-import { JournalEventSchema } from './schema.js';
+import { JournalEventSchema, JournalEventV1V2Schema } from './schema.js';
 import type { JobState, JobStatus, JournalEvent } from './types.js';
 
 /**
@@ -849,8 +850,14 @@ export function openRunLog(journalDir: string): RunLog {
     async append(runId, event, opts): Promise<void> {
       assertSafeRunId(runId);
       // Validate BEFORE writing: the journal only ever contains facts that
-      // parse. The parsed value is what lands on disk.
-      const parsed: JournalEvent = JournalEventSchema.parse(event);
+      // parse. The kernel RunLog is the KERNEL stream: ADR-0008 Migration §1
+      // ships the dual READER first and the v3 writer arrives with T04 (v3
+      // headers via RunOptions provenance/correlation) and T29 (observational
+      // events only in the separate composition stream — the RunLog is not
+      // exposed to ops). Until those writers exist, append accepts exactly
+      // the v1/v2 shapes; the READER (readEvents → JournalEventSchema) is
+      // already widened to the v3 carriers.
+      const parsed: JournalEvent = JournalEventV1V2Schema.parse(event) as JournalEvent;
       if (parsed.runId !== runId) {
         throw new Error(
           `journal: event.runId '${parsed.runId}' does not match target run '${runId}'`,
@@ -1058,9 +1065,10 @@ export async function assertNoSeqGap(
 }
 
 /**
- * THE FOLD ORDER (ADR-0003 annex §3, r1 m4): v1 runs (run-started without
- * `journalVersion`) ordered by `at` then runId, ALL before every v2 run; v2
- * runs ordered by `seq`. The injected clock can no longer reorder the fold —
+ * THE FOLD ORDER (ADR-0003 annex §3, r1 m4; v3 per ADR-0008 T02): v1 runs
+ * (run-started without `journalVersion`) ordered by `at` then runId, ALL
+ * before every v2/v3 run; v2 and v3 runs ordered by `seq` (v3 joins the
+ * existing sequenced ordering, never a new era). The injected clock can no longer reorder the fold —
  * `at` is display-only for v2 runs. Corruption is loud: a v2 run without
  * `seq`, two v2 runs of the plan sharing one `seq`, or a SURVIVING run file
  * whose line count disagrees with its `run-finished.eventCount` all throw
@@ -1100,13 +1108,21 @@ export function foldOrderRuns(runs: readonly FoldRun[]): FoldRun[] {
     }
     if (started.journalVersion === undefined) {
       v1.push({ run, at: started.at });
-    } else {
+    } else if (started.journalVersion === 2 || started.journalVersion === 3) {
+      // ADR-0008 T02 dispatch: v3 joins the existing sequenced v2 ordering —
+      // same seq claim, same duplicate-seq refusal — never a new era.
       if (started.seq === undefined) {
         throw new Error(
-          `journal: corrupt — v2 run '${run.runId}' (plan '${started.planId}') has no seq`,
+          `journal: corrupt — v${started.journalVersion} run '${run.runId}' (plan '${started.planId}') has no seq`,
         );
       }
       v2.push({ run, seq: started.seq });
+    } else {
+      // Unknown future versions fail explicitly (dual-reader rule 1).
+      throw new Error(
+        `journal: corrupt — run '${run.runId}' (plan '${started.planId}') declares unsupported ` +
+          `journalVersion ${started.journalVersion}; this reader understands v1, v2 and v3 (ADR-0008) only`,
+      );
     }
   }
   v1.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.run.runId < b.run.runId ? -1 : 1));
@@ -1160,6 +1176,28 @@ async function readEvents(fileRunId: string, path: string): Promise<JournalEvent
     lines.pop();
   }
   const events: JournalEvent[] = [];
+  // Per-file version strictness (ADR-0008 T02 review P1-3): the file's
+  // run-started header fixes its journal version. A v1/v2 kernel file must
+  // never contain a v3-only line (v3 header or any observational carrier);
+  // any file must contain exactly one run-started (a second one is a
+  // concatenated or forged stream, not evidence). A v3-header kernel file
+  // accepts the v3 carriers defensively here — whether kernel files may
+  // carry them at all is T29's call, and deriveJobStatuses ignores them.
+  const V3_ONLY_TYPES: ReadonlySet<string> = new Set([
+    'attempt-finished',
+    'approval-expired',
+    'approval-granted',
+    'finding-disposition',
+    'gate-verdict',
+    'head-acceptance',
+    'measurement-summary',
+    'review-observed',
+    'task-finished',
+    'write-path-cap-tripped',
+    'write-path-denied',
+  ]);
+  let headerSeen = false;
+  let headerIsV3 = false;
   for (const [i, line] of lines.entries()) {
     const parsed = parseLine(line);
     if (parsed !== null) {
@@ -1171,6 +1209,26 @@ async function readEvents(fileRunId: string, path: string): Promise<JournalEvent
         throw new Error(
           `journal: corrupt line ${i + 1} of ${path} — event.runId '${parsed.runId}' does not ` +
             `match this file's run '${fileRunId}'`,
+        );
+      }
+      if (parsed.type === 'run-started') {
+        if (headerSeen) {
+          throw new Error(
+            `journal: corrupt line ${i + 1} of ${path} — a second run-started in one file is a ` +
+              "concatenated or forged stream, not one run's evidence",
+          );
+        }
+        headerSeen = true;
+        headerIsV3 = parsed.journalVersion === 3;
+      }
+      // A v3-only line is evidence of the v3 era wherever it sits: under a
+      // v1/v2 header it is additive mixing, and BEFORE any header it is a
+      // broken stream (the header must be first) — both refuse.
+      if (headerIsV3 === false && V3_ONLY_TYPES.has(parsed.type)) {
+        throw new Error(
+          `journal: corrupt line ${i + 1} of ${path} — a v3-only event (${parsed.type}) cannot ` +
+            'appear in a v1/v2 kernel file (before or under its run-started header); ' +
+            'strict schemas forbid additive mixing',
         );
       }
       events.push(parsed);
@@ -1265,6 +1323,22 @@ export function deriveJobStatuses(events: readonly JournalEvent[]): JobStatus[] 
       case 'quarantine-released':
       case 'budget-tripped':
         break; // no per-job VERDICT facts (a quarantine is not a terminal verdict; the governed runner owns it)
+      case 'attempt-finished':
+      case 'approval-expired':
+      case 'approval-granted':
+      case 'finding-disposition':
+      case 'gate-verdict':
+      case 'head-acceptance':
+      case 'measurement-summary':
+      case 'review-observed':
+      case 'task-finished':
+      case 'write-path-cap-tripped':
+      case 'write-path-denied':
+        // ADR-0008 T02: the v3 observational carriers are evidence for
+        // reports and offline analysis only — they NEVER alter job outcome
+        // derivation, reservations or sequence claims. Kernel replay
+        // semantics are unchanged.
+        break;
     }
   }
   return [...states].map(([jobId, state]) => ({ jobId, state }));
