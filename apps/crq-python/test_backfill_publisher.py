@@ -89,17 +89,20 @@ class PublisherTest(unittest.TestCase):
         outbox = self.prepare()
         lock = self.c.with_lock
         self.c.with_lock = lambda fn, **kwargs: None
-        with self.assertRaisesRegex(ledger.IntegrityError, "queue lock busy"):
-            worker.run(self.c)
+        self.assertEqual(worker.run(self.c)["publication"], "reconciliation-pending")
         self.assertFalse(outbox.pending())  # Remote ack is not queue reconciliation.
+        self.assertNotIn("review_ledger_head", self.q)
         self.assertTrue((self.state / "backfill/publish-request.json").exists())
-        self.assertTrue((self.state / "backfill/publication-failure.json").exists())
-        with mock.patch.object(runtime, "services", side_effect=AssertionError("admission passed halt")):
-            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        # A routinely busy lock is not a publication failure and must not halt rank 4.
+        self.assertFalse((self.state / "backfill/publication-failure.json").exists())
+        self.assertNotIn("backfill_publication_error", self.q)
+        self.assertNotEqual(self.q.get("backfill_halt_operation"), "publication")
         self.c.with_lock = lock
         self.q["backfill_halted"] = "unrelated operator halt"
-        worker.run(self.c)
+        self.assertEqual(worker.run(self.c)["publication"], "reconciled")
         self.assertEqual(len(self.pushes), 1)
+        self.assertEqual(self.q["review_ledger_head"], self.pushes[0])
+        self.assertFalse((self.state / "backfill/publish-request.json").exists())
         self.assertFalse((self.state / "backfill/publication-failure.json").exists())
         self.assertEqual(self.q["backfill_halted"], "unrelated operator halt")
 
@@ -191,6 +194,9 @@ class PublisherTest(unittest.TestCase):
         self.assertIn("@CRQ_ROOT@/backfill_publisher.py", service)
         self.assertIn("KillMode=control-group", service)
         self.assertIn("OnUnitInactiveSec=1min", (root / "crq-publisher.timer").read_text())
+        path = (root / "crq-publisher.path").read_text()
+        self.assertIn("PathChanged=@CRQ_ROOT@/state/backfill/publication/pending", path)
+        self.assertIn("Unit=crq-publisher.service", path)
 
     def test_live_owner_is_never_completed_by_reconciliation(self):
         self.prepare()

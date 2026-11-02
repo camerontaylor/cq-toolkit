@@ -63,7 +63,11 @@ def run(c):
                     ledger.fsync_dir(request.parent)
                 return True
             if c.with_lock(merge, lock_wait=30) is not True:
-                raise ledger.IntegrityError("publication queue lock busy; reconciliation pending")
+                # Remote publication succeeded; only local bookkeeping waits. The
+                # request marker survives, so the next path trigger or timer run
+                # reconciles. A busy lock is routine (spools happen under it), so it
+                # is neither a failure marker nor a rank-4 halt.
+                return {"ledger_head": head, "publication": "reconciliation-pending"}
             return {"ledger_head": head, "publication": "reconciled"}
         except Exception as exc:
             # These are independent persistence paths. A marker failure must not
@@ -89,5 +93,7 @@ def run(c):
 
 
 if __name__ == "__main__":
+    import json
     import crq
-    run(crq)
+    # Journal the outcome so recurring reconciliation-pending runs are visible.
+    print(json.dumps(run(crq), sort_keys=True))

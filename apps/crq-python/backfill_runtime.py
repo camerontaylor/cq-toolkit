@@ -82,15 +82,20 @@ def state_event(c, queue, item, at, reason, operator=None, state=None):
 def usage_context(c, queue, usage, reserved):
     """Bind a fresh usage read to existing local holds before selection."""
     # Vendor progress proves run ownership, not that the usage counter includes
-    # a particular reservation. Only explicit observation evidence can do that.
-    reflected = (usage or {}).get("reflected_reservations", [])
+    # a particular reservation. A vendor-terminal hold does: its start preceded
+    # this successful probe and is still inside the vendor's rolling window, so
+    # subtracting it again would count the same start twice.
+    reflected = list((usage or {}).get("reflected_reservations", []))
     if usage is not None:
         import datetime as dt
         window = dt.timedelta(milliseconds=usage.get("rollingWindowMs") or 3600000)
         observed = ledger.timestamp(c.iso())
-        for hold in queue.get("backfill_reservations", {}).values():
+        for key, hold in queue.get("backfill_reservations", {}).items():
             if hold.get("terminal_at") and observed >= ledger.timestamp(hold["terminal_at"]) + window:
                 hold["quota_state"] = "expired"
+            elif (hold.get("terminal_at") and hold.get("quota_state") not in ("released", "expired")
+                  and ledger.timestamp(hold["terminal_at"]) <= observed and key not in reflected):
+                reflected.append(key)
     # Legacy/non-backfill reservations share the effective quota arithmetic.
     represented = sum(1 for i in queue.get("items", []) if i.get("attempt_id") in queue.get("backfill_reservations", {})
                       and (i.get("run") or {}).get("started_at") in reserved)
