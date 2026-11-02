@@ -153,10 +153,68 @@ class QueueTransportTests(unittest.TestCase):
         first = self.inventory_call()
         self.q["snapshot-change"] = True
         changed = self.inventory_call()
-        self.assertNotEqual(first["snapshot"], changed["snapshot"])
+        self.assertEqual(first["snapshot"], changed["snapshot"])
+        self.assertIn("entries", self.inventory_call(cursor=first["nextCursor"]))
+        self.q["queue_client_requests"] = {self.request_id: {"principal": "other", "binding": self.b}}
         self.assertEqual(self.inventory_call(cursor=first["nextCursor"])["error"],
                          {"code": "stale-cursor", "retryable": False, "restart": True})
         self.assertEqual(self.inventory_call(cursor="invalid")["error"]["code"], "stale-cursor")
+
+    def test_filtered_inventory_ignores_changes_outside_selected_rows(self):
+        self.inventory_fixture()
+        first = self.inventory_call(states=["missing"])
+        self.q["items"][0]["last_error"] = "unrelated pending detail"
+        second = self.inventory_call(states=["missing"], cursor=first["nextCursor"])
+        self.assertEqual(first["snapshot"], second["snapshot"])
+        self.assertTrue(second["terminal"])
+
+    def test_read_slots_refuse_before_queue_load_and_release_after_error(self):
+        self.call("enqueue")
+        with transport._read_slot(self.tmp.name) as first, transport._read_slot(self.tmp.name) as second:
+            self.assertTrue(first and second)
+            with mock.patch.object(self.runner, "load_queue", side_effect=AssertionError("capacity")):
+                self.assertEqual(self.call("status"), {"error": {"code": "busy", "retryable": True}})
+        with mock.patch.object(self.runner, "load_queue", side_effect=ValueError("bad queue")):
+            with self.assertRaisesRegex(ValueError, "bad queue"):
+                self.call("status")
+        self.assertIn("snapshot", self.call("status"))
+
+    def test_reconciled_forge_cache_survives_reads_expires_and_is_principal_scoped(self):
+        item = self.reconciled_fixture()
+        doc = {"version": 1, "source": item["subject"], "capture": {}, "counted": False,
+               "outcome": "no-current-code", "classification": {"counted": False, "outcome": "no-current-code"}}
+        rid = receipts.write_receipt(self.tmp.name, doc)
+        item.update(state="done", receipt_id=rid)
+        with mock.patch.object(transport, "_forge", wraps=transport._forge) as forge, \
+                mock.patch.object(transport.time, "time", return_value=1000):
+            for _ in range(3):
+                self.call("status")
+                manifest = self.call("report", receiptId=rid, cursor=None)["page"]
+                for index in range(manifest["chunks"]):
+                    self.call("report", receiptId=rid, cursor=f"{rid}:{index}")
+            self.assertEqual(forge.call_count, 1)
+            self.policy["read"] = []
+            with self.assertRaisesRegex(ValueError, "denied"):
+                self.call("status")
+            self.assertEqual(forge.call_count, 1)
+            self.policy["read"] = ["developer"]
+            with mock.patch.object(transport.time, "time", return_value=1301):
+                self.call("status")
+            self.assertEqual(forge.call_count, 2)
+            transport._cached_forge(self.tmp.name, "other", self.request_id, self.b,
+                                    lambda repo, pr: self.forge, self.policy)
+            self.assertEqual(forge.call_count, 3)
+        self.assertEqual(len(list(Path(self.tmp.name, "deliveries").glob("*.lock"))), 1)
+        self.assertEqual(self.q.get("queue_client_requests", {}), {})
+
+    def test_forge_cache_capacity_is_bounded(self):
+        self.reconciled_fixture()
+        with mock.patch.object(transport, "FORGE_CACHE_LIMIT", 2):
+            for index in range(5):
+                transport._cached_forge(self.tmp.name, "developer", f"request-{index}", self.b,
+                                        lambda repo, pr: self.forge, self.policy)
+        cache = json.loads(Path(self.tmp.name, "read-forge-cache.json").read_text())
+        self.assertEqual(len(cache), 2)
 
     def test_reads_do_not_lock_or_save_queue(self):
         rid, _ = self.receipt()
@@ -178,10 +236,17 @@ class QueueTransportTests(unittest.TestCase):
                     mock.patch.object(self.runner, "with_lock", side_effect=AssertionError("tick held")):
                 first = self.inventory_call()
                 self.assertEqual(first["proof"]["count"], 3)
-                replacement = queue.with_suffix(".new")
-                replacement.write_bytes(queue.read_bytes())
-                replacement.replace(queue)
-                self.assertEqual(self.inventory_call(cursor=first["nextCursor"])["error"]["code"], "stale-cursor")
+                cursor = first["nextCursor"]
+                for _ in range(2):
+                    for revision in range(20):
+                        unrelated = {**self.q, "unrelated": revision}
+                        replacement = queue.with_suffix(".new")
+                        replacement.write_bytes(receipts.canonical(unrelated))
+                        replacement.replace(queue)
+                    page = self.inventory_call(cursor=cursor)
+                    self.assertEqual(page["snapshot"], first["snapshot"])
+                    cursor = page["nextCursor"]
+                self.assertTrue(page["terminal"])
 
     def test_dispatcher_real_permission_failure_remains_nonzero(self):
         with mock.patch.object(dispatcher, "queue_main", side_effect=ValueError("denied")), \

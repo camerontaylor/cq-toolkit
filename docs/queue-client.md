@@ -235,7 +235,7 @@ Repeat with `nextCursor` until `terminal:true` and `nextCursor:null`.
 The cursor binds the principal, interval, filter, checkpoint and visible state
 digest; state changes refuse stale cursors, requiring a restart. The digest is
 SHA256 of receipt-canonical JSON containing `principal`, `binding`,
-`checkpoint`, `snapshot`, `states` and the complete sorted `entries` list (PR then SHA).
+`checkpoint`, `states` and the selected sorted `entries` list (PR then SHA).
 Filters are sorted and deduplicated before digesting and paging.
 Count covers the unfiltered view; selectedCount covers the filter. Page size
 does not change the digest. The proof establishes coverage of the trusted,
@@ -246,16 +246,26 @@ dry-run checkpoints refuse rather than claim completeness.
 
 Read-only status, report and inventory bypass the scheduler lock and read the last
 atomically saved queue. Each response includes a principal-bound opaque `snapshot`
-identity; inventory also binds its validated checkpoint. Queue replacement during
+identity; inventory uses its selected-view digest, including the validated checkpoint. Queue replacement during
 a read, or checkpoint replacement during validation, returns typed retryable `busy`.
 An active tick does not prevent reads of the saved generation. These reads never
 save the queue. Reports store delivery progress in a separate per-principal,
 request, binding and receipt journal under `receipts/deliveries`; acknowledgements
 retain scheduler locking and require complete delivery. Existing queue delivery
-progress remains usable. Writes still return typed `busy` on scheduler contention.
+progress remains usable. Reports reuse one delivery lock rather than retaining a
+lock per receipt. Writes still return typed `busy` on scheduler contention.
 
-Inventory cursors bind the saved queue generation as well as the checkpoint and
-visible projection. An invalid or changed cursor returns
+Read admission has two cross-process nonblocking slots under the receipts directory;
+when both are occupied, reads return typed `busy` before loading the queue. These
+slots are independent of tick.lock. Reconciled source verification is cached for
+five minutes in a bounded 128-entry durable cache. Keys bind principal, request,
+full binding (including merge SHA) and allowed branches. Every read still checks
+current authorization and exact queue identity; cache hits never grant access.
+An `ack` may adopt a reconciled request only with read and write permission plus
+the exact reconciled-read grant, matching queue identity and complete delivery.
+
+Inventory cursors bind the checkpoint and selected visible projection. Unrelated
+queue saves and changes outside the selected rows do not invalidate pagination. An invalid or changed cursor returns
 `result:{"error":{"code":"stale-cursor","retryable":false,"restart":true}}`
 (with snapshot identity). Discard accumulated pages and restart with `cursor:null`;
 do not retry the continuation or combine pages across snapshots. Real authorization

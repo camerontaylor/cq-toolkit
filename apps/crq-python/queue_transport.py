@@ -11,6 +11,7 @@ import hashlib
 import fcntl
 import os
 import tempfile
+import time
 from pathlib import Path
 import json
 import re
@@ -187,7 +188,7 @@ def _inventory_binding(value):
     return value
 
 
-def _inventory(req, runner, q, principal, receipt_root, snapshot_id):
+def _inventory(req, runner, q, principal, receipt_root):
     b = req["binding"]
     interval = {k: b[k] for k in ("after", "before")}
     key = receipts.digest({"repo": b["repo"], "base": DISCOVERY_SELECTOR, **interval})
@@ -271,8 +272,9 @@ def _inventory(req, runner, q, principal, receipt_root, snapshot_id):
             break
         rows.append(row)
     rows.sort(key=lambda row: (row["pr"] or 0, row["mergeSha"] or ""))
-    digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"], "snapshot": snapshot_id, "states": req["states"], "entries": rows})
     selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]]
+    digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"],
+                              "states": req["states"], "entries": selected})
     start = 0
     if req["cursor"] is not None:
         match = re.fullmatch(re.escape(digest) + r":(0|[1-9][0-9]{0,5})", req["cursor"])
@@ -284,7 +286,7 @@ def _inventory(req, runner, q, principal, receipt_root, snapshot_id):
         return {"error": {"code": "busy", "retryable": True}}
     return {"entries": selected[start:end], "terminal": end == len(selected),
             "nextCursor": None if end == len(selected) else digest + ":" + str(end),
-            "snapshot": receipts.digest({"queue": snapshot_id, "checkpoint": cp["digest"]}),
+            "snapshot": digest,
             "proof": {"checkpoint": cp["digest"], "completeThrough": cp["before"],
                       "count": len(rows), "digest": digest, "selectedCount": len(selected),
                       "intervalConvention": "(after,before]"}}
@@ -334,6 +336,62 @@ def _forge(verify_source, b, pr, merge_sha, policy):
         raise ValueError("forge producer/head/target mismatch")
     if merge_sha is not None and (actual.get("mergeSha") != merge_sha or actual.get("state") != "MERGED"):
         raise ValueError("forge merge mismatch")
+
+
+READ_SLOTS = 2
+FORGE_CACHE_TTL = 300
+FORGE_CACHE_LIMIT = 128
+
+
+@contextlib.contextmanager
+def _read_slot(root):
+    """Cross-process admission before queue loading; never acquire tick.lock."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        for index in range(READ_SLOTS):
+            slot = stack.enter_context((root / f"read-slot-{index}.lock").open("a"))
+            try:
+                fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            yield True
+            return
+        yield False
+
+
+def _atomic_json(path, value):
+    fd, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(receipts.canonical(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _cached_forge(root, principal, rid, b, verify_source, policy):
+    """Cache only successful exact-binding checks; ACL and queue checks precede this."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "read-forge-cache.json"
+    key = receipts.digest({"principal": principal, "requestId": rid, "binding": b,
+                           "branches": policy.get("branches", [])})
+    with (root / "read-forge-cache.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        now = time.time()
+        cache = json.loads(path.read_text()) if path.exists() else {}
+        cache = {k: stamp for k, stamp in cache.items() if 0 <= now - stamp < FORGE_CACHE_TTL}
+        if key in cache:
+            return
+        _forge(verify_source, b, b["pr"], b["mergeSha"], policy)
+        if len(cache) >= FORGE_CACHE_LIMIT:
+            del cache[min(cache, key=cache.get)]
+        cache[key] = now
+        _atomic_json(path, cache)
 
 
 def _enroll(q, b, request_id, pr, merge_sha, at):
@@ -474,7 +532,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                 return _encode(req, {"error": {"code": "busy", "retryable": True}})
             return _encode(req, result)
         if op == "inventory":
-            return encode(_inventory(req, runner, q, principal, receipt_root, snapshot_id))
+            return encode(_inventory(req, runner, q, principal, receipt_root))
         entries = q.setdefault("queue_client_requests", {})
         if type(entries) is not dict:
             raise ValueError("invalid queue client requests")
@@ -503,7 +561,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                 raise ValueError("reconciled request/source mismatch")
             if len(entries) >= policy.get("max_requests", 10000):
                 raise ValueError("queue request capacity refused")
-            _forge(verify_source, b, b["pr"], b["mergeSha"], policy)
+            _cached_forge(receipt_root, principal, rid, b, verify_source, policy)
             entry = {"binding": b, "principal": principal, "state": "ready-current",
                      "pr": b["pr"], "mergeSha": b["mergeSha"], "createdAt": runner.iso()}
             entries[rid] = entry
@@ -597,22 +655,13 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
                         raise ValueError("out-of-order receipt delivery")
                     progress["next"] = max(progress["next"], page["index"] + 1)
                 # A separate, short journal lock never acquires or blocks tick.lock.
-                with journal.with_suffix(".lock").open("a") as lock:
+                with (journal.parent / "delivery.lock").open("a") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                     if journal.exists():
                         previous = json.loads(journal.read_text())
                         progress["manifest"] |= previous["manifest"]
                         progress["next"] = max(progress["next"], previous["next"])
-                    fd, temporary = tempfile.mkstemp(dir=journal.parent)
-                    try:
-                        with os.fdopen(fd, "wb") as stream:
-                            stream.write(receipts.canonical(progress))
-                            stream.flush()
-                            os.fsync(stream.fileno())
-                        os.replace(temporary, journal)
-                    finally:
-                        if os.path.exists(temporary):
-                            os.unlink(temporary)
+                    _atomic_json(journal, progress)
                 result = {"page": page}
             else:
                 if not progress["manifest"] or progress["next"] != manifest["chunks"] or any(req[k] != manifest[k] for k in ("sha256", "chunks", "bytes")):
@@ -625,7 +674,11 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         return encoded
 
     with contextlib.redirect_stdout(io.StringIO()):
-        result = locked() if read_only else runner.with_lock(locked)
+        if read_only:
+            with _read_slot(receipt_root) as admitted:
+                result = locked() if admitted else None
+        else:
+            result = runner.with_lock(locked)
     if not isinstance(result, bytes):
         return _encode(req, {"error": {"code": "busy", "retryable": True}})
     return result
