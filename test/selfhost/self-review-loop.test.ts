@@ -1121,6 +1121,44 @@ describe('main — usage reporting', () => {
     expect(process.stdout.listenerCount('error')).toBe(originalErrorListeners);
   });
 
+  test.each([1, 12])(
+    'Q34 shares stderr protection across %i diagnostics, handles late errors and cleans up',
+    async (writes) => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const baseline = process.stderr.listenerCount('error');
+      const { out, stepSummary } = setup();
+      const warning = vi.spyOn(process, 'emitWarning');
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+        throw new Error('stdout failed');
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      await Promise.all(
+        Array.from({ length: writes }, () =>
+          main(
+            baseDeps(
+              fakeGh([]),
+              fakeLoop([], async () => fakeOutcome(1)),
+            ),
+          ),
+        ),
+      );
+      expect(stderr).toHaveBeenCalledTimes(writes);
+      expect(process.stderr.listenerCount('error')).toBe(baseline + 1);
+      // Node can emit the stream error after the write and main have returned.
+      await new Promise<void>((resolve) => {
+        process.nextTick(() => {
+          expect(process.stderr.emit('error', new Error('late stderr EPIPE'))).toBe(true);
+          resolve();
+        });
+      });
+      expect(existsSync(out)).toBe(true);
+      expect(existsSync(stepSummary)).toBe(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(process.stderr.listenerCount('error')).toBe(baseline);
+      expect(warning).not.toHaveBeenCalled();
+    },
+  );
+
   test('Q34 retains payload serialization failure as a whole-run error before stdout', async () => {
     const { out, stepSummary } = setup();
     const stringify = JSON.stringify;

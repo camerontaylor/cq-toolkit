@@ -735,27 +735,33 @@ export async function runSelfReviewLoop(
  * or it can emit an *asynchronous* 'error' event (EPIPE) on the stream
  * after this turn. A bare try/catch only catches the former; an unhandled
  * 'error' event terminates the process despite finished work. This
- * installs a swallowing listener around the write and keeps it through
- * that event turn, then removes it so failures on a live stderr still
+ * shares one swallowing listener across overlapping writes through
+ * their event turns, then removes it so failures on a live stderr still
  * surface. Every post-sweep diagnostic write must go through this — not
  * every caller can rely on the stdout-failure path having installed the
  * listener first.
  */
+let pendingStderrDiagnostics = 0;
+const onStderrDiagnosticError = (): void => {
+  // Best-effort: a stderr transport failure is ignored, not fatal.
+};
 const writeStderrDiagnostic = (line: string): void => {
   const stderr = process.stderr;
-  const onStderrError = (): void => {
-    // Best-effort: a stderr transport failure is ignored, not fatal.
-  };
-  stderr.on('error', onStderrError);
+  if (pendingStderrDiagnostics === 0) stderr.on('error', onStderrDiagnosticError);
+  pendingStderrDiagnostics += 1;
   try {
     stderr.write(line);
   } catch {
     // A synchronous throw is equally non-fatal here.
   }
-  // The stream can only emit the failed write's error event after this
-  // synchronous call returns; keep the listener through that event turn,
-  // then remove it so later stderr failures still surface.
-  setImmediate(() => stderr.removeListener('error', onStderrError));
+  // Share one listener even when many PR diagnostics fail in the same turn.
+  // Retain it until every overlapping write has passed its error event turn.
+  setImmediate(() => {
+    pendingStderrDiagnostics -= 1;
+    if (pendingStderrDiagnostics === 0) {
+      stderr.removeListener('error', onStderrDiagnosticError);
+    }
+  });
 };
 
 /**
