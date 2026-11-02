@@ -535,64 +535,89 @@ export async function noteAddressOrdinaryReport(token: object, path: string, byt
   ordinaryReports.set(token, reports);
 }
 
+// Each capture owns exactly one reservation until its participant releases it.
+const terminalReservations = new WeakMap<object, () => void>();
+export function releaseAddressTerminalEvidence(attempt: object): void {
+  const release = terminalReservations.get(attempt);
+  if (!release) return;
+  terminalReservations.delete(attempt);
+  release();
+}
+
 export async function recordAddressTerminalEvidence(
   token: object,
   input: AddressTerminalAttemptInput,
 ): Promise<AddressTerminalAttempt> {
   const session = await terminalSession(token, input.root);
-  if (++session.records > 64) throw new Error('terminal receipt bound reached');
-  const path = await terminalPath(input.root, input.file);
-  // Reserve before allocation, including concurrent captures. No refund/replay.
-  if (path.stat.size > SOURCE_CAP || session.bytes + path.stat.size > TOTAL_CAP)
-    throw new Error('terminal source snapshot/total bound reached');
-  session.bytes += path.stat.size;
-  const baseline = await boundedBytes(path.path, path.stat.size);
-  const git = (args: string[]) => terminalGit(token, session, path.root, args);
-  const gitDir = await realpath((await git(['rev-parse', '--absolute-git-dir'])).toString().trim());
-  const common = await realpath(
-    (await git(['rev-parse', '--path-format=absolute', '--git-common-dir'])).toString().trim(),
-  );
-  if (common !== session.common) throw new Error('terminal checkout common-dir changed');
-  await validateEvidenceAuthority(token, false);
-  const directory = await lstat(gitDir),
-    gitEntry = await lstat(join(path.root, '.git'));
-  if (!directory.isDirectory() || (!gitEntry.isFile() && !gitEntry.isDirectory()))
-    throw new Error('terminal checkout entry refused');
-  if (!session.checkouts.has(path.root))
-    session.checkouts.set(path.root, {
+  if (session.records >= 64) throw new Error('terminal receipt bound reached');
+  session.records++;
+  let bytes = 0;
+  try {
+    const path = await terminalPath(input.root, input.file);
+    // Reserve before allocation, including concurrent captures.
+    if (path.stat.size > SOURCE_CAP || session.bytes + path.stat.size > TOTAL_CAP)
+      throw new Error('terminal source snapshot/total bound reached');
+    session.bytes += path.stat.size;
+    bytes = path.stat.size;
+    const baseline = await boundedBytes(path.path, path.stat.size);
+    const git = (args: string[]) => terminalGit(token, session, path.root, args);
+    const gitDir = await realpath(
+      (await git(['rev-parse', '--absolute-git-dir'])).toString().trim(),
+    );
+    const common = await realpath(
+      (await git(['rev-parse', '--path-format=absolute', '--git-common-dir'])).toString().trim(),
+    );
+    if (common !== session.common) throw new Error('terminal checkout common-dir changed');
+    await validateEvidenceAuthority(token, false);
+    const directory = await lstat(gitDir),
+      gitEntry = await lstat(join(path.root, '.git'));
+    if (!directory.isDirectory() || (!gitEntry.isFile() && !gitEntry.isDirectory()))
+      throw new Error('terminal checkout entry refused');
+    if (!session.checkouts.has(path.root))
+      session.checkouts.set(path.root, {
+        gitDir,
+        directory,
+        entry: gitEntry,
+        ...(gitEntry.isFile()
+          ? { link: digestBytes(await boundedBytes(join(path.root, '.git'), 4096)) }
+          : {}),
+      });
+    const head = (await git(['rev-parse', 'HEAD'])).toString().trim();
+    const branch = (await git(['symbolic-ref', 'HEAD'])).toString().trim();
+    if (head !== input.parent) throw new Error('terminal baseline HEAD changed');
+    const entry = (await git(['ls-files', '--stage', '-z', '--', input.file])).toString();
+    const match = /^(100644|100755) ([a-f0-9]{40,64}) 0\t([^\0]+)\0$/.exec(entry);
+    if (!match || match[3] !== input.file) throw new Error('terminal baseline index entry refused');
+    if (
+      !baseline.equals(await git(['cat-file', 'blob', `${head}:${input.file}`])) ||
+      !baseline.equals(await git(['cat-file', 'blob', match[2]!]))
+    )
+      throw new Error('terminal RAW baseline differs from committed blob');
+    const mode = path.stat.mode & 0o111 ? '100755' : '100644';
+    if (mode !== match[1]) throw new Error('terminal baseline mode refused');
+    await validateEvidenceAuthority(token, false);
+    const attempt: AddressTerminalAttempt = {
+      ...input,
+      model: { ...input.model },
+      root: path.root,
+      baseline,
       gitDir,
-      directory,
-      entry: gitEntry,
-      ...(gitEntry.isFile()
-        ? { link: digestBytes(await boundedBytes(join(path.root, '.git'), 4096)) }
-        : {}),
+      branch,
+      mode,
+      blob: match[2]!,
+      pathIdentity: path.stat,
+      cancelled: false,
+    };
+    terminalReservations.set(attempt, () => {
+      session.records--;
+      session.bytes -= bytes;
     });
-  const head = (await git(['rev-parse', 'HEAD'])).toString().trim();
-  const branch = (await git(['symbolic-ref', 'HEAD'])).toString().trim();
-  if (head !== input.parent) throw new Error('terminal baseline HEAD changed');
-  const entry = (await git(['ls-files', '--stage', '-z', '--', input.file])).toString();
-  const match = /^(100644|100755) ([a-f0-9]{40,64}) 0\t([^\0]+)\0$/.exec(entry);
-  if (!match || match[3] !== input.file) throw new Error('terminal baseline index entry refused');
-  if (
-    !baseline.equals(await git(['cat-file', 'blob', `${head}:${input.file}`])) ||
-    !baseline.equals(await git(['cat-file', 'blob', match[2]!]))
-  )
-    throw new Error('terminal RAW baseline differs from committed blob');
-  const mode = path.stat.mode & 0o111 ? '100755' : '100644';
-  if (mode !== match[1]) throw new Error('terminal baseline mode refused');
-  await validateEvidenceAuthority(token, false);
-  return {
-    ...input,
-    model: { ...input.model },
-    root: path.root,
-    baseline,
-    gitDir,
-    branch,
-    mode,
-    blob: match[2]!,
-    pathIdentity: path.stat,
-    cancelled: false,
-  };
+    return attempt;
+  } catch (error) {
+    session.records--;
+    session.bytes -= bytes;
+    throw error;
+  }
 }
 
 // Hash worktree bytes directly: even a hardened worktree `git diff` can run

@@ -2423,6 +2423,9 @@ test('terminal binding rejects structural, replayed and retired capabilities wit
         expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(false);
       },
     );
+    expect(() => ownershipModule.releaseAddressTerminalAttempt(binding!, attempt!)).toThrow(
+      'after close',
+    );
     await expect(
       ownershipModule.recordAddressTerminalAttempt(binding!, terminalInput(f.repo)),
     ).rejects.toThrow('after close');
@@ -2436,6 +2439,48 @@ test('terminal binding rejects structural, replayed and retired capabilities wit
     await f.repo.cleanup();
   }
 });
+
+test.each([false, true])(
+  'terminal reservations recycle sequential captures (large=%s)',
+  async (large) => {
+    const f = await fixture();
+    try {
+      if (large) {
+        await f.repo.write('src/a.ts', Buffer.alloc(4 * 1024 * 1024, 65));
+        f.repo.commitAll('large baseline');
+      }
+      await withAddressOwnership(
+        { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+        async (lease) => {
+          const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+          for (let index = 0; index < (large ? 9 : 65); index++) {
+            // Failure after reserving bytes must return both reservations.
+            await expect(
+              ownershipModule.recordAddressTerminalAttempt(binding, {
+                ...terminalInput(f.repo),
+                parent: '0'.repeat(40),
+              }),
+            ).rejects.toThrow('HEAD changed');
+            const attempt = await ownershipModule.recordAddressTerminalAttempt(
+              binding,
+              terminalInput(f.repo),
+            );
+            expect(() => ownershipModule.releaseAddressTerminalAttempt({}, attempt)).toThrow(
+              'forged worker',
+            );
+            ownershipModule.releaseAddressTerminalAttempt(binding, attempt);
+            expect(() => ownershipModule.releaseAddressTerminalAttempt(binding, attempt)).toThrow(
+              'stale',
+            );
+          }
+        },
+      );
+    } finally {
+      await f.repo.cleanup();
+    }
+  },
+  120_000,
+);
 
 test.each(['snapshot', 'total', 'receipts', 'report'] as const)(
   'terminal bounds refuse before retaining excess evidence or writing a report: %s',
@@ -2575,6 +2620,9 @@ test.each([
           };
           parent.abort();
           expect(ownershipModule.deferAddressTerminalAttempt(binding, attempt)).toBe(true);
+          expect(() => ownershipModule.releaseAddressTerminalAttempt(binding, attempt)).toThrow(
+            'cancelled release',
+          );
           return ownershipModule.addressCancelledResult(lease);
         },
       );
