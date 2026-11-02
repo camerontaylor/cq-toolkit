@@ -15,6 +15,8 @@ from crq_repair.drivers import cq, codex, paseo
 from crq_repair.bounded import drain_job, drain_order, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
+# A job still rate limited after this many 30-minute deferrals ends FAILED.
+MAX_RATE_LIMIT_DEFERRALS = 3
 
 
 def blackout(repair, now=None):
@@ -24,6 +26,14 @@ def blackout(repair, now=None):
         return False
     t = (now or dt.datetime.now(dt.timezone.utc)).astimezone(ZoneInfo(window['tz']))
     return t.isoweekday() in window['days'] and window['start'] <= t.strftime('%H:%M') < window['end']
+
+
+def blocked(repair, now=None):
+    """No dispatch inside the blackout, nor one whose wall clock would reach it.
+    Checking both ends suffices while wall_clock_min is shorter than the window."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    reach = dt.timedelta(minutes=repair.get('budget', {}).get('wall_clock_min', 0))
+    return blackout(repair, now) or blackout(repair, now + reach)
 
 
 def mechanical(config, wt, base, commits, job, directory):
@@ -114,11 +124,23 @@ def process(config, job, wt):
     base = job['repair_base']
     evidence = result.get('evidence', '')
     rung = result.get('next_rung', max((int(a['rung'][1:]) + 1 for a in result['attempts']), default=0))
-    def defer(reason):
+    def defer(reason, rate_limited=False):
+        if rate_limited:
+            count = result.get('rate_limit_deferrals', 0) + 1
+            result['rate_limit_deferrals'] = count
+            if count > MAX_RATE_LIMIT_DEFERRALS:
+                if result.pop('pending_judge', None):
+                    result['judge'] = {'stop': 'rate-limit', 'verdict': 'unsure', 'reason': reason}
+                result.update(verdict='FAILED', finished_at=utc(),
+                              reason=reason + '; still rate limited after ' + str(MAX_RATE_LIMIT_DEFERRALS)
+                              + ' deferrals; needs human')
+                atomic(result_path, result)
+                return {**result, 'rate_limited': True}
         result['retry_after'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
         result['reason'] = reason
         atomic(result_path, result)
-        return result
+        # The flag is returned, never persisted: it tells the drain to stop this pass.
+        return {**result, 'rate_limited': True} if rate_limited else result
     while rung < 3:
         role = roles['fixer' if rung < 2 else 'fixer_escalation']
         attempt_dir = directory / ('A' + str(rung))
@@ -128,7 +150,7 @@ def process(config, job, wt):
             if result.get('pending_judge'):
                 reason = result['pending_judge']['fixer_reason']
             else:
-                if blackout(repair):
+                if blocked(repair):
                     result['next_rung'] = rung
                     return defer('GLM peak blackout; attempt deferred')
                 if rung == 2:
@@ -144,7 +166,7 @@ def process(config, job, wt):
                 result.pop('dispatch_pending', None)
                 if report.get('stop') == 'rate-limit':
                     result['next_rung'] = rung
-                    return defer('provider rate limit; attempt deferred')
+                    return defer('provider rate limit; attempt deferred', rate_limited=True)
                 attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
                            'driver': role['driver'], 'model': role['model'], 'stop': report.get('stop'),
                            'changed': report.get('changed', False)}
@@ -168,7 +190,7 @@ def process(config, job, wt):
                 current['review_diff'] = job.get('review_diff', '')
                 result['pending_judge'] = {'fixer_reason': reason, 'rung': rung}
                 result['next_rung'] = rung
-                if blackout(repair):
+                if blocked(repair):
                     return defer('GLM peak blackout; judge deferred without repeating fixer')
                 result['dispatch_pending'] = {'rung': 'J', 'role': judge_role}
                 atomic(progress_path, result)
@@ -181,7 +203,7 @@ def process(config, job, wt):
                 finally:
                     result.pop('dispatch_pending', None)
                 if judged.get('stop') == 'rate-limit':
-                    return defer('judge rate limit; resume judge without repeating fixer')
+                    return defer('judge rate limit; resume judge without repeating fixer', rate_limited=True)
                 result.pop('pending_judge', None)
                 result['judge'] = judged
                 if judged.get('verdict') == 'valid' and judged.get('stop') == 'ok':
@@ -252,6 +274,16 @@ def drain(config):
     """Automatic inbox drain, oldest first. Items run serially: one item
     worktree at a time, serial findings within it (see README for why)."""
     repair = config['repair']
+    # Stale checks read origin refs; refresh them first. Fetch only: the worker
+    # never pushes or calls the GitHub API. A failed fetch skips this pass.
+    try:
+        fetched = command(['git', 'fetch', '--prune', '--quiet', 'origin'], cwd=config['clone'], timeout=300)
+        error = fetched.stderr.strip() if fetched.returncode else None
+    except Exception as exc:  # timeout: command() already killed its process group
+        error = str(exc)
+    if error is not None:
+        print('repair drain skipped: clone fetch failed: ' + error[:200])
+        return
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
         try:
@@ -261,7 +293,7 @@ def drain(config):
         if isinstance(item, str):
             groups.setdefault(item, []).append(job_id)
     for item, job_ids in groups.items():
-        if blackout(repair):
+        if blocked(repair):
             print('repair drain paused: GLM peak blackout')
             return
         # Re-read the queue per item: the tick may harvest or the tip may move
@@ -285,9 +317,13 @@ def drain(config):
         if not any(pending(job['job']) for job in jobs):
             continue
         try:
-            process_item(config, jobs)
+            outcome = process_item(config, jobs)
         except Exception as exc:  # one bad item must not stop the drain
             print('repair item ' + item + ' failed: ' + str(exc)[:300])
+            continue
+        if outcome == 'rate-limit':
+            print('repair drain stopped: provider rate limit; the next timer pass retries')
+            return
 
 
 def process_item(config, jobs):
@@ -303,17 +339,20 @@ def process_item(config, jobs):
     jobs.sort(key=finding_order)
     last_run = None
     for job in jobs:
-        if blackout(config['repair']):
+        if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
         if job['run'] != last_run:
             base = job['repair_base']
             last_run = job['run']
         job['repair_base'] = base
         res = process(config, job, wt)
+        if res.get('rate_limited'):
+            return 'rate-limit'
         if res.get('retry_after'):
             break
         if res['verdict'] == 'FIXED':
             base = res['commits'][-1]
+    return None
 
 
 def main(argv=None):
@@ -348,7 +387,7 @@ def main(argv=None):
             and not os.environ.get('ZAI_API_KEY'):
         print('repair dispatch disabled: ZAI_API_KEY is not in the service environment')
         return
-    if blackout(repair):
+    if blocked(repair):
         print('repair dispatch paused: GLM peak blackout')
         return
     directory = ROOT / 'state/repair'

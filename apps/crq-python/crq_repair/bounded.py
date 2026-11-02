@@ -145,6 +145,18 @@ def drain_job(root, config, queue, job_id):
             # head is on main the PR has merged and the tick would mark it stale.
             if command(['git', 'merge-base', '--is-ancestor', pin, DEFAULT_REF], cwd=config['clone']).returncode == 0:
                 return 'stale', job, 'reviewed PR head is already on the default branch'
+            # The drain fetched with --prune: a missing branch means the PR was
+            # closed (or its branch deleted); publication would discard the work.
+            branch = record.get('branch')
+            head = None
+            if isinstance(branch, str) and branch and not branch.startswith('-'):
+                p = command(['git', 'rev-parse', '--verify', '--quiet',
+                             'refs/remotes/origin/' + branch + '^{commit}'], cwd=config['clone'])
+                head = p.stdout.strip() if p.returncode == 0 else None
+            if head is None:
+                return 'stale', job, 'PR branch is gone from origin (closed or deleted)'
+            if head != pin and blob_at(config, head, path) != blob:
+                return 'stale', job, 'PR branch changed the finding source since the pin'
         elif blob_at(config, DEFAULT_REF, path) != blob:
             return 'stale', job, 'finding source changed on the default branch since the pin'
     bound = {**job, 'source_sha': pin, 'finding_sha256': identity(finding), 'source_blob_sha': blob}

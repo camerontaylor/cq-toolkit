@@ -166,8 +166,9 @@ def apply(config, overlay):
         for part in parts[:-1]:
             dest = dest[part]
         dest[parts[-1]] = value
-    # Spend authorization is policy, not an overlay escape hatch: an overlay can
-    # only switch repair off, or on where committed policy already enables it.
+    # Spend authorization is policy, not an overlay escape hatch: the overlay
+    # switch may turn repair on only when committed policy records a spend
+    # authorization (committed repair.enabled itself is not consulted).
     if config['repair']['enabled'] is True and not config['repair'].get('spend_authorization'):
         raise ValueError('repair enabled without committed spend authorization')
     return config
