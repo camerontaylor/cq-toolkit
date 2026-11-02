@@ -121,8 +121,9 @@ export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
  * `mark.skip`/`mark.skipif`/`mark.xfail`, `pytest.skip`/`pytest.xfail`,
  * `pytest.importorskip` inside a test body, and unittest
  * `skip`/`skipIf`/`skipUnless`/`expectedFailure`, `skipTest(...)` and
- * `raise SkipTest`, through import aliases, ignoring strings and comments
- * (see `pythonSkipMarkers.ts`). A caller-supplied `skipOnlyPattern`
+ * `raise SkipTest`, through visible import aliases and import-free syntactic
+ * fallbacks, ignoring strings and comments and failing closed on an unknown
+ * string state at a hunk start (see `pythonSkipMarkers.ts`). A caller-supplied `skipOnlyPattern`
  * replaces the whole shipped taxonomy, Python recognition included.
  */
 export const DEFAULT_SKIP_ONLY_PATTERN =
@@ -296,16 +297,19 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let removedTestDeclarations = 0;
   let removedFailingTestDeclarations = 0;
   let python: PythonSectionScanner | null = null;
+  // New-file lines of this section the skip/only regex already flagged:
+  // one skip finding per line, checked in O(1).
+  const regexSkipLines = new Set<number>();
   const flushPython = (): void => {
-    if (python === null || newPath === null) return;
-    const file = newPath;
-    for (const marker of python.markers()) {
-      if (
-        findings.some(
-          (f) => f.kind === 'new-skip-only' && f.file === file && f.line === marker.line,
-        )
-      ) {
-        continue; // one skip finding per line: the regex marker already reported it
+    const scanner = python;
+    python = null;
+    if (scanner !== null && newPath !== null) reportPythonMarkers(scanner, newPath);
+    regexSkipLines.clear();
+  };
+  const reportPythonMarkers = (scanner: PythonSectionScanner, file: string): void => {
+    for (const marker of scanner.markers()) {
+      if (regexSkipLines.has(marker.line)) {
+        continue; // the regex marker already reported this line
       }
       findings.push({
         kind: 'new-skip-only',
@@ -316,7 +320,6 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
         message: 'added line marks a Python test as skipped or expected to fail',
       });
     }
-    python = null;
   };
   const flushRemovedTest = (): void => {
     if (
@@ -410,7 +413,9 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
     }
     if (line.startsWith('+')) {
       if (isExecutableTestDeclaration(line.slice(1))) addedTestDeclarations += 1;
-      scanAddedLine(findings, config, newPath, newLine, line.slice(1));
+      if (scanAddedLine(findings, config, newPath, newLine, line.slice(1))) {
+        regexSkipLines.add(newLine);
+      }
       python?.line(line.slice(1), true, newLine);
       newLine++;
       continue;
@@ -518,8 +523,9 @@ function scanAddedLine(
   newPath: string | null,
   line: number,
   content: string,
-): void {
+): boolean {
   const file = newPath ?? 'unknown';
+  let skipFlagged = false;
   const snippet = content.trim();
   for (const suppression of config.suppressions) {
     const match = suppression.regex.exec(content);
@@ -549,6 +555,7 @@ function scanAddedLine(
       snippet,
       message: 'added line marks a test as skipped or focused',
     });
+    skipFlagged = true;
   }
   if (config.detectTautologies && newPath !== null && isProtectedTestPath(newPath)) {
     for (const tautology of content.matchAll(TAUTOLOGY_RE)) {
@@ -567,6 +574,7 @@ function scanAddedLine(
       }
     }
   }
+  return skipFlagged;
 }
 
 /**

@@ -6,35 +6,57 @@
 // Pure text analysis over the lines a diff section shows in NEW-file order
 // (context and added lines; removed lines belong to the old file and never
 // feed this state). Per line it:
-//   - blanks string literals and `#` comments, carrying triple-quoted string
-//     state across lines (reset at every hunk header, where the state is
-//     unknowable), so a marker named in a docstring, string or comment never
-//     flags;
+//   - blanks string-literal contents and `#` comments, carrying
+//     triple-quoted string state across lines, so a marker named in a
+//     docstring, string or comment does not flag;
 //   - records import aliases (`import pytest as pt`, `from pytest import
-//     mark`, `from unittest import skip as s`, …) from every visible line;
+//     mark`, `from unittest.case import skip as s`, …) from every visible
+//     line;
 //   - tracks the enclosing `def` stack by indentation, seeded by the hunk
 //     header's function context, to decide whether a line is in a test body.
 //
+// FAIL CLOSED ON UNKNOWN STRING STATE: a hunk that does not start at line 1
+// may start inside a multi-line string, so its first triple quote could open
+// OR close one. The scanner keeps every live hypothesis (outside a string,
+// inside `"""`, inside `'''`) and an added line flags when ANY hypothesis
+// reads a marker in it. A marker is therefore never hidden by a guessed
+// string state; the accepted cost is that prose in a docstring of such a
+// hunk can flag.
+//
 // Added lines are only CANDIDATES until the section ends, so an alias
 // imported anywhere in the visible section resolves a marker in an earlier
-// hunk. Without a visible import the canonical module names `pytest` and
-// `unittest` always resolve, and `@mark.skip`/`@mark.skipif`/`@mark.xfail`
-// resolves in decorator position; any other alias imported outside the
-// visible hunks is not resolvable from the diff and does not flag.
+// hunk. Imports usually sit outside the visible hunks, so these syntactic
+// forms flag with no visible import:
+//   - `mark.skip`/`mark.skipif`/`mark.xfail` anywhere, after any receiver
+//     (`pytest.mark.skip`, `pt.mark.xfail`, `pytestmark = mark.skip`,
+//     `marks=mark.xfail`);
+//   - decorators `@skip`, `@skipIf`, `@skipUnless`, `@expectedFailure`,
+//     bare or through any attribute path (`@ut.skip`, `@unittest.case.skip`);
+//   - `raise SkipTest` through any attribute path, and
+//     `raise <x>.skip.Exception`;
+//   - `<x>.skipTest(...)`, any `xfail(...)` call, `pytest.skip(...)`, and a
+//     `<x>.skip(...)` statement whose first argument is a string literal or
+//     `reason=`/`msg=`/`allow_module_level=`.
+// What still needs the import visible: a bare `skip(...)` call (imported
+// from pytest) and an aliased `skip(...)`/`importorskip(...)` call whose
+// alias is not one of the forms above.
 //
-// `pytest.importorskip` (and an imported `importorskip`) flags only inside
-// a test function body — the innermost visible enclosing `def` chain
-// contains a `test*` function. At module level, in a fixture or helper, or
-// with no visible enclosing function it is a dependency guard, not a
-// skipped test, and does not flag. Every other marker flags wherever it is
-// added in the file, including module-level `pytestmark` and
-// `pytest.skip(..., allow_module_level=True)`.
+// `importorskip` flags only inside a test function body — the visible
+// enclosing `def` chain contains a `test*` function. At module level, in a
+// fixture or helper, or with no visible enclosing function it is a
+// dependency guard, not a skipped test, and does not flag. Every other
+// marker flags wherever it is added in the file, including module-level
+// `pytestmark` and `pytest.skip(..., allow_module_level=True)`.
+
+/** Triple-quoted string state: outside (`null`) or inside `"""` / `'''`. */
+type StringState = null | '"""' | "'''";
 
 /** One added line awaiting evaluation at the end of its section. */
 interface Candidate {
   line: number;
   content: string;
-  code: string;
+  /** The line's code under every live string-state hypothesis (distinct). */
+  codes: string[];
   inTestBody: boolean;
 }
 
@@ -54,12 +76,52 @@ const UNITTEST_IMPORTABLE = new Set([
   'expectedFailure',
   'SkipTest',
 ]);
+const UNITTEST_MODULES = new Set(['unittest', 'unittest.case']);
 
 const IDENT = '[A-Za-z_][A-Za-z0-9_]*';
+const DOTTED = `${IDENT}(?:\\.${IDENT})*`;
+/** Regex prefix: an identifier start, not an attribute access or a longer name. */
+const PRE = '(?<![A-Za-z0-9_.])';
+/** Regex suffix: the identifier ends here. */
+const POST = '(?![A-Za-z0-9_])';
+/** Zero or more `name.` receivers, never a `mark.` (that is pytest's path). */
+const RECEIVERS = `(?:(?!mark${POST})${IDENT}\\s*\\.\\s*)*`;
+
 const DEF_RE = new RegExp(`^(\\s*)(?:async\\s+)?def\\s+(${IDENT})`);
 const CLASS_RE = new RegExp(`^(\\s*)class\\s+${IDENT}`);
-const IMPORT_AS_RE = new RegExp(`^\\s*import\\s+(.+)$`);
-const FROM_IMPORT_RE = new RegExp(`^\\s*from\\s+(${IDENT})\\s+import\\s+\\(?([^)]*)\\)?\\s*$`);
+const IMPORT_RE = /^\s*import\s+(.+)$/;
+const FROM_IMPORT_RE = new RegExp(`^\\s*from\\s+(${DOTTED})\\s+import\\s+\\(?([^)]*)\\)?\\s*$`);
+const HUNK_START_RE = /^@@ -\d+(?:,\d+)? \+(\d+)/;
+const ALL_STATES: readonly StringState[] = [null, '"""', "'''"];
+
+/** Shipped syntactic forms that need no visible import (see the module comment). */
+const FALLBACKS: readonly { re: RegExp; marker: (m: RegExpExecArray) => string }[] = [
+  {
+    re: new RegExp(`(?<![A-Za-z0-9_])mark\\s*\\.\\s*(skipif|skip|xfail)${POST}`, 'g'),
+    marker: (m) => `pytest.mark.${m[1]!}`,
+  },
+  {
+    re: new RegExp(`@\\s*${RECEIVERS}(skipIf|skipUnless|skip|expectedFailure)${POST}`, 'g'),
+    marker: (m) => `unittest.${m[1]!}`,
+  },
+  {
+    re: new RegExp(`\\braise\\s+${RECEIVERS}SkipTest${POST}`, 'g'),
+    marker: () => 'unittest.SkipTest',
+  },
+  {
+    re: new RegExp(`\\braise\\s+${RECEIVERS}skip\\s*\\.\\s*Exception${POST}`, 'g'),
+    marker: () => 'pytest.skip',
+  },
+  { re: /\.\s*skipTest\s*\(/g, marker: () => 'self.skipTest' },
+  { re: /(?<![A-Za-z0-9_])xfail\s*\(/g, marker: () => 'pytest.xfail' },
+  {
+    re: new RegExp(
+      `^\\s*(?:${IDENT}\\s*\\.\\s*)+skip\\s*\\(\\s*(?:[rRbBuUfF]{0,2}["']|(?:reason|msg|allow_module_level)\\s*=)`,
+      'g',
+    ),
+    marker: () => 'pytest.skip',
+  },
+];
 
 /** Python test-file section scanner; one instance per diff section. */
 export class PythonSectionScanner {
@@ -69,14 +131,20 @@ export class PythonSectionScanner {
   /** local name → canonical `pytest.X` / `unittest.X` imported function. */
   private readonly importedFunctions = new Map<string, string>();
   private readonly candidates: Candidate[] = [];
-  private openTriple: string | null = null;
+  /** Live string-state hypotheses; a section starts outside any string. */
+  private states: StringState[] = [null];
   /** Module of an open parenthesized `from M import (` spanning lines. */
   private pendingFrom: string | null = null;
   private defs: { name: string; indent: number }[] = [];
 
-  /** A hunk header: string state is unknowable; seed the def stack from its context. */
+  /**
+   * A hunk header. Unless the hunk starts at line 1, the string state is
+   * unknown, so every hypothesis goes live; the def stack is seeded from
+   * the header's function context.
+   */
   hunk(header: string): void {
-    this.openTriple = null;
+    const start = Number(HUNK_START_RE.exec(header)?.[1] ?? '0');
+    this.states = start <= 1 ? [null] : [...ALL_STATES];
     this.pendingFrom = null;
     this.defs = [];
     const context = /^@@ [^@]* @@ ?(.*)$/.exec(header)?.[1] ?? '';
@@ -88,17 +156,22 @@ export class PythonSectionScanner {
 
   /** A context or added line, in new-file order. */
   line(content: string, added: boolean, lineNumber: number): void {
-    const startedInString = this.openTriple !== null;
-    const code = this.codeOf(content);
-    if (!startedInString && code.trim() !== '') {
-      this.trackDefs(code);
-      this.trackImports(code);
+    const lexed = this.states.map((state) => ({ start: state, ...lex(content, state) }));
+    this.states = [...new Set(lexed.map((l) => l.end))];
+    // Def and import tracking reads the line as code only under a hypothesis
+    // in which the line starts outside a string.
+    const asCode = lexed.find((l) => l.start === null)?.code;
+    if (asCode !== undefined && asCode.trim() !== '') {
+      this.trackDefs(asCode);
+      this.trackImports(asCode);
     }
-    if (added && code.trim() !== '') {
+    if (!added) return;
+    const codes = [...new Set(lexed.map((l) => l.code))].filter((code) => code.trim() !== '');
+    if (codes.length > 0) {
       this.candidates.push({
         line: lineNumber,
         content,
-        code,
+        codes,
         inTestBody: this.defs.some((d) => /^test/.test(d.name)),
       });
     }
@@ -106,65 +179,68 @@ export class PythonSectionScanner {
 
   /** Resolve every candidate against the section's final alias set. */
   markers(): PythonSkipMarker[] {
+    const rules = this.aliasRules();
     const found: PythonSkipMarker[] = [];
     for (const candidate of this.candidates) {
-      const marker = this.markerOf(candidate);
-      if (marker !== null) {
-        found.push({ line: candidate.line, content: candidate.content, marker });
+      for (const code of candidate.codes) {
+        const marker = markerOf(code, candidate.inTestBody, rules);
+        if (marker !== null) {
+          found.push({ line: candidate.line, content: candidate.content, marker });
+          break;
+        }
       }
     }
     return found;
   }
 
-  private markerOf(candidate: Candidate): string | null {
-    const { code, inTestBody } = candidate;
-    const hits: { index: number; marker: string }[] = [];
-    const add = (re: RegExp, marker: (m: RegExpExecArray) => string | null): void => {
-      for (const m of code.matchAll(new RegExp(re.source, 'g'))) {
-        const name = marker(m);
-        if (name !== null) hits.push({ index: m.index, marker: name });
-      }
-    };
+  /** Rules that depend on the visible imports, plus the shipped fallbacks. */
+  private aliasRules(): Rule[] {
     const pytest = alternation(this.pytestNames);
     const unittest = alternation(this.unittestNames);
-    add(
-      new RegExp(`${pre}(?:${pytest})\\s*\\.\\s*mark\\s*\\.\\s*(skipif|skip|xfail)${post}`),
-      (m) => `pytest.mark.${m[1]!}`,
-    );
+    const rules: Rule[] = FALLBACKS.map((f) => ({ re: f.re, marker: f.marker }));
+    rules.push({
+      re: new RegExp(`${PRE}(?:${pytest})\\s*\\.\\s*(skip|xfail)\\s*\\(`, 'g'),
+      marker: (m) => `pytest.${m[1]!}`,
+    });
+    rules.push({
+      re: new RegExp(`(?<![A-Za-z0-9_])importorskip\\s*\\(`, 'g'),
+      marker: () => 'pytest.importorskip',
+      testBodyOnly: true,
+    });
+    rules.push({
+      re: new RegExp(
+        `${PRE}(?:${unittest})(?:\\s*\\.\\s*case)?\\s*\\.\\s*(skipIf|skipUnless|skip|expectedFailure)${POST}`,
+        'g',
+      ),
+      marker: (m) => `unittest.${m[1]!}`,
+    });
     if (this.markNames.size > 0) {
-      add(
-        new RegExp(`${pre}(?:${alternation(this.markNames)})\\s*\\.\\s*(skipif|skip|xfail)${post}`),
-        (m) => `pytest.mark.${m[1]!}`,
-      );
+      rules.push({
+        re: new RegExp(
+          `${PRE}(?:${alternation(this.markNames)})\\s*\\.\\s*(skipif|skip|xfail)${POST}`,
+          'g',
+        ),
+        marker: (m) => `pytest.mark.${m[1]!}`,
+      });
     }
-    add(/@\s*mark\s*\.\s*(skipif|skip|xfail)(?![A-Za-z0-9_])/, (m) => `pytest.mark.${m[1]!}`);
-    add(new RegExp(`${pre}(?:${pytest})\\s*\\.\\s*(skip|xfail|importorskip)\\s*\\(`), (m) =>
-      m[1] === 'importorskip' && !inTestBody ? null : `pytest.${m[1]!}`,
-    );
-    add(
-      new RegExp(`${pre}(?:${unittest})\\s*\\.\\s*(skipIf|skipUnless|skip|expectedFailure)${post}`),
-      (m) => `unittest.${m[1]!}`,
-    );
-    add(
-      new RegExp(`\\braise\\s+(?:(?:${unittest})\\s*\\.\\s*)SkipTest${post}`),
-      () => 'unittest.SkipTest',
-    );
-    add(/\.\s*skipTest\s*\(/, () => 'self.skipTest');
     for (const [local, canonical] of this.importedFunctions) {
       const name = escapeRe(local);
       if (canonical === 'unittest.SkipTest') {
-        add(new RegExp(`\\braise\\s+${name}${post}`), () => canonical);
-      } else if (canonical === 'pytest.importorskip') {
-        add(new RegExp(`${pre}${name}\\s*\\(`), () => (inTestBody ? canonical : null));
+        rules.push({ re: new RegExp(`\\braise\\s+${name}${POST}`, 'g'), marker: () => canonical });
       } else if (canonical.startsWith('unittest.')) {
-        add(new RegExp(`@\\s*${name}${post}|${pre}${name}\\s*\\(`), () => canonical);
+        rules.push({
+          re: new RegExp(`@\\s*${name}${POST}|${PRE}${name}\\s*\\(`, 'g'),
+          marker: () => canonical,
+        });
       } else {
-        add(new RegExp(`${pre}${name}\\s*\\(`), () => canonical);
+        rules.push({
+          re: new RegExp(`${PRE}${name}\\s*\\(`, 'g'),
+          marker: () => canonical,
+          testBodyOnly: canonical === 'pytest.importorskip',
+        });
       }
     }
-    if (hits.length === 0) return null;
-    hits.sort((a, b) => a.index - b.index);
-    return hits[0]!.marker;
+    return rules;
   }
 
   private trackDefs(code: string): void {
@@ -194,11 +270,12 @@ export class PythonSectionScanner {
       this.bindFrom(from[1]!, from[2]!);
       return;
     }
-    const plain = IMPORT_AS_RE.exec(code);
+    const plain = IMPORT_RE.exec(code);
     if (plain) {
       for (const [name, local] of importedNames(plain[1]!)) {
+        if (local.includes('.')) continue; // `import a.b` binds `a`, a default name
         if (name === 'pytest') this.pytestNames.add(local);
-        else if (name === 'unittest') this.unittestNames.add(local);
+        else if (UNITTEST_MODULES.has(name)) this.unittestNames.add(local);
       }
     }
   }
@@ -208,52 +285,74 @@ export class PythonSectionScanner {
       if (module === 'pytest' && PYTEST_IMPORTABLE.has(name)) {
         if (name === 'mark') this.markNames.add(local);
         else this.importedFunctions.set(local, `pytest.${name}`);
-      } else if (module === 'unittest' && UNITTEST_IMPORTABLE.has(name)) {
+      } else if (UNITTEST_MODULES.has(module) && UNITTEST_IMPORTABLE.has(name)) {
         this.importedFunctions.set(local, `unittest.${name}`);
       }
     }
   }
-
-  /** The line with string contents and comments blanked; updates triple-quote state. */
-  private codeOf(content: string): string {
-    let out = '';
-    let i = 0;
-    while (i < content.length) {
-      if (this.openTriple !== null) {
-        const close = findClose(content, i, this.openTriple);
-        if (close === -1) return out;
-        out += ' '.repeat(close + 3 - i);
-        i = close + 3;
-        this.openTriple = null;
-        continue;
-      }
-      const ch = content[i]!;
-      if (ch === '#') return out;
-      if (ch === '"' || ch === "'") {
-        const triple = ch.repeat(3);
-        if (content.startsWith(triple, i)) {
-          this.openTriple = triple;
-          out += '   ';
-          i += 3;
-          continue;
-        }
-        const close = findClose(content, i + 1, ch);
-        const end = close === -1 ? content.length : close + 1;
-        out += ' '.repeat(end - i);
-        i = end;
-        continue;
-      }
-      out += ch;
-      i++;
-    }
-    return out;
-  }
 }
 
-/** Regex prefix: an identifier start, not an attribute access or a longer name. */
-const pre = '(?<![A-Za-z0-9_.])';
-/** Regex suffix: the identifier ends here. */
-const post = '(?![A-Za-z0-9_])';
+/** One marker rule: a global regex and the canonical name a match reports. */
+interface Rule {
+  re: RegExp;
+  marker: (m: RegExpExecArray) => string;
+  /** Only inside a visible test function body (`importorskip`). */
+  testBodyOnly?: boolean;
+}
+
+/** The earliest marker on one line of code, or null. */
+function markerOf(code: string, inTestBody: boolean, rules: readonly Rule[]): string | null {
+  let best: { index: number; marker: string } | null = null;
+  for (const rule of rules) {
+    if (rule.testBodyOnly === true && !inTestBody) continue;
+    // matchAll clones the regex, so no lastIndex state leaks between lines.
+    for (const m of code.matchAll(rule.re)) {
+      if (best === null || m.index < best.index) best = { index: m.index, marker: rule.marker(m) };
+      break;
+    }
+  }
+  return best?.marker ?? null;
+}
+
+/**
+ * One line lexed under a starting string state: string contents (all but
+ * each literal's opening quote character) and `#` comments become spaces.
+ * Returns the code and the triple-quote state at the end of the line.
+ */
+function lex(content: string, start: StringState): { code: string; end: StringState } {
+  let state = start;
+  let out = '';
+  let i = 0;
+  while (i < content.length) {
+    if (state !== null) {
+      const close = findClose(content, i, state);
+      if (close === -1) return { code: out, end: state };
+      out += ' '.repeat(close + 3 - i);
+      i = close + 3;
+      state = null;
+      continue;
+    }
+    const ch = content[i]!;
+    if (ch === '#') return { code: out, end: null };
+    if (ch === '"' || ch === "'") {
+      const triple = ch === '"' ? '"""' : "'''";
+      if (content.startsWith(triple, i)) {
+        state = triple;
+        out += `${ch}  `;
+        i += 3;
+        continue;
+      }
+      const close = findClose(content, i + 1, ch);
+      const end = close === -1 ? content.length : close + 1;
+      out += ch + ' '.repeat(end - i - 1);
+      i = end;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return { code: out, end: state };
+}
 
 function alternation(names: ReadonlySet<string>): string {
   return [...names].map(escapeRe).join('|');
@@ -263,11 +362,11 @@ function escapeRe(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** `a, b as c` → [[a, a], [b, c]]; dotted `import a.b` yields nothing usable. */
+/** `a, b.c as d` → [[a, a], [b.c, d]]; unparseable parts are dropped. */
 function importedNames(list: string): [string, string][] {
   const pairs: [string, string][] = [];
   for (const part of list.split(',')) {
-    const m = new RegExp(`^\\s*(${IDENT})(?:\\s+as\\s+(${IDENT}))?\\s*$`).exec(part);
+    const m = new RegExp(`^\\s*(${DOTTED})(?:\\s+as\\s+(${IDENT}))?\\s*$`).exec(part);
     if (m) pairs.push([m[1]!, m[2] ?? m[1]!]);
   }
   return pairs;

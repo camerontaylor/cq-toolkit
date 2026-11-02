@@ -898,12 +898,116 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     ['self.skip_cache()'],
     ['result = skipper(1)'],
     ['@pytest.mark.skipping_is_not_a_marker'],
-    ['mark.skip = 1'],
+    ['iterator.skip(3)'],
+    ['rows.skip(count)'],
+    ['self.mark_skip()'],
+    ['remark.skip(1)'],
     ['except unittest.SkipTest:'],
-    ['@skip("not imported here")'],
     ['skip("not imported here")'],
   ])('false-positive control: %s does not flag', async (line) => {
     expect(await markersOf(pyDiff([line]))).toEqual([]);
+  });
+
+  /** A real-diff-shaped modification whose hunk starts at `start` (> 1). */
+  function midFileDiff(start: number, header: string, body: readonly string[]): string {
+    const old = body.filter((line) => !line.startsWith('+')).length;
+    const added = body.filter((line) => !line.startsWith('-')).length;
+    return [
+      `diff --git a/${PY} b/${PY}`,
+      'index 1111111..2222222 100644',
+      `--- a/${PY}`,
+      `+++ b/${PY}`,
+      `@@ -${start},${old} +${start},${added} @@${header}`,
+      ...body,
+    ].join('\n');
+  }
+
+  test('P1 regression: a hunk starting mid-docstring never hides a following added skip', async () => {
+    const diff = midFileDiff(22, ' def test_a():', [
+      '     line four',
+      '     line five',
+      '     """',
+      '+    pytest.skip("flaky")',
+      '     assert 1',
+    ]);
+    expect(await findingsOf(diff)).toEqual([
+      {
+        kind: 'new-skip-only',
+        file: PY,
+        line: 25,
+        pattern: 'pytest.skip',
+        snippet: 'pytest.skip("flaky")',
+        message: 'added line marks a Python test as skipped or expected to fail',
+      },
+    ]);
+  });
+
+  test.each([
+    ['    self.skipTest("later")', 'self.skipTest'],
+    ['@unittest.skip("later")', 'unittest.skip'],
+    ["    pytest.xfail('known')", 'pytest.xfail'],
+  ])("P1: a hunk starting inside a ''' string still flags %s", async (line, marker) => {
+    const diff = midFileDiff(40, '', ['     tail of a string', "     '''", `+${line}`]);
+    expect(await markersOf(diff)).toEqual([marker]);
+  });
+
+  test('P1: an added line in a hunk starting at line 1 is lexed from a known state', async () => {
+    // Known start: the docstring prose is a string, so it never flags.
+    const diff = midFileDiff(1, '', [
+      ' def test_a():',
+      '     """Docs.',
+      '+    pytest.skip("prose") is mentioned here',
+      '     """',
+    ]);
+    expect(await markersOf(diff)).toEqual([]);
+  });
+
+  test.each([
+    ['pytestmark = mark.skip(reason="x")', 'pytest.mark.skip'],
+    ['    pytest.param(1, marks=mark.xfail),', 'pytest.mark.xfail'],
+    ['mark.skip = 1', 'pytest.mark.skip'],
+    ['@pt.mark.skipif(True, reason="x")', 'pytest.mark.skipif'],
+    ['pytestmark = [pt.mark.xfail]', 'pytest.mark.xfail'],
+    ['@skip("x")', 'unittest.skip'],
+    ['@skipIf(True, "x")', 'unittest.skipIf'],
+    ['@skipUnless(X, "x")', 'unittest.skipUnless'],
+    ['@expectedFailure', 'unittest.expectedFailure'],
+    ['@ut.skipIf(True, "x")', 'unittest.skipIf'],
+    ['    raise SkipTest("x")', 'unittest.SkipTest'],
+    ['    raise ut.SkipTest("x")', 'unittest.SkipTest'],
+    ['    raise pt.skip.Exception("x")', 'pytest.skip'],
+    ['    pt.skip("x")', 'pytest.skip'],
+    ['    pt.skip(reason="x")', 'pytest.skip'],
+    ['pt.skip("module", allow_module_level=True)', 'pytest.skip'],
+    ['    pt.xfail("x")', 'pytest.xfail'],
+    ['    xfail("x")', 'pytest.xfail'],
+    ['    cls.skipTest("x")', 'self.skipTest'],
+  ])('P2 fallback without a visible import: %s → %s', async (line, marker) => {
+    const diff = midFileDiff(120, ' def test_a():', ['     x = 1', `+${line}`]);
+    expect(await markersOf(diff)).toEqual([marker]);
+  });
+
+  test('P2: importorskip under any alias flags only inside a test body', async () => {
+    expect(
+      await markersOf(
+        midFileDiff(120, ' def test_a():', ['     x = 1', '+    pt.importorskip("np")']),
+      ),
+    ).toEqual(['pytest.importorskip']);
+    expect(
+      await markersOf(
+        midFileDiff(120, ' def helper():', ['     x = 1', '+    pt.importorskip("np")']),
+      ),
+    ).toEqual([]);
+  });
+
+  test.each([
+    [[], '@unittest.case.skip("x")', 'unittest.skip'],
+    [[], '@unittest.case.skipIf(True, "x")', 'unittest.skipIf'],
+    [['from unittest.case import skip as s'], '@s("x")', 'unittest.skip'],
+    [['from unittest.case import SkipTest as ST'], '    raise ST("x")', 'unittest.SkipTest'],
+    [['import unittest.case as uc'], '@uc.expectedFailure', 'unittest.expectedFailure'],
+  ])('P3 unittest.case: %j then %s → %s', async (imports, line, marker) => {
+    expect(await markersOf(pyDiff([line], imports))).toEqual([marker]);
   });
 
   test('a multi-line docstring hides markers on its inner lines', async () => {
