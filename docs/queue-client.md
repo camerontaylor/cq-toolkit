@@ -215,21 +215,28 @@ Response echoes `v`, `requestId` and `binding`, with this `result` shape:
 {"entries":[{"pr":506,"mergeSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","requestId":null,"itemId":null,"state":"missing","reason":null}],"terminal":true,"nextCursor":null,"proof":{"checkpoint":"<checkpoint SHA256>","completeThrough":"2026-10-31T00:00:00Z","count":1,"digest":"<view SHA256>","selectedCount":1,"intervalConvention":"(after,before]"}}
 ```
 
-States are `missing`, `pending`, `reviewed`, `consumed`, or `blocked`
-(with bounded typed `reason`). No receipt supplies remediation proof, so
-inventory never infers `fixed`. Pending includes work currently reviewing.
+States are `missing`, `pending`, `reviewed`, `reused`, `no-current-code`,
+`partial-scope`, `consumed`, or `blocked`
+(with bounded typed `reason`). The current merged-current receipt producer records
+remediation as `disabled/deferred`, so inventory never infers `fixed`. Durable
+receipt-bound remediation evidence is tracked in [#777](https://github.com/camerontaylor/cq-toolkit/issues/777). Pending includes work currently reviewing.
 Set `states:["pending","blocked"]` for the outstanding summary; null includes
 everything. Known PRs without a visible mapped request remain `missing`.
 Requests owned by another principal reveal neither IDs nor status; missing
 therefore means no representation visible to this principal, not global absence.
 Unowned reconciled mappings may be read through the interval grant without
-being adopted. Unsupported reconciliation identities remain missing rows.
+being adopted, after the same deterministic item ID, unique item, exact mapping,
+subject, kind, PR and merge-SHA checks used for per-ID reconciled adoption.
+Verified equivalent reused receipts follow the status operation’s equivalence
+checks; `reused` and `no-current-code` do not inflate pending/blocked counts.
+Unsupported reconciliation identities remain missing rows.
 
 Repeat with `nextCursor` until `terminal:true` and `nextCursor:null`.
 The cursor binds the principal, interval, filter, checkpoint and visible state
 digest; state changes refuse stale cursors, requiring a restart. The digest is
 SHA256 of receipt-canonical JSON containing `principal`, `binding`,
 `checkpoint`, `states` and the complete sorted `entries` list (PR then SHA).
+Filters are sorted and deduplicated before digesting and paging.
 Count covers the unfiltered view; selectedCount covers the filter. Page size
 does not change the digest. The proof establishes coverage of the trusted,
 validated reconciliation record and visible queue projection, not a live forge
@@ -240,8 +247,9 @@ dry-run checkpoints refuse rather than claim completeness.
 Scheduler contention returns the ordinary echoed envelope with
 `result:{"error":{"code":"busy","retryable":true}}` (including contention
 before the supervised child starts). Retry the identical request with bounded
-backoff; for writes, delivery remains unknown and immutable request IDs make
-replay safe. Permission refusals retain the transport's nonzero refusal and
+backoff. A typed `busy` response means the operation did not run because the
+scheduler lock was held. A lost response is a separate delivery-unknown case;
+immutable request IDs make replay safe. Permission refusals retain the transport's nonzero refusal and
 never return this typed busy result.
 
 Inventory indexes subjects/items once and verifies at most 64 MiB of receipt

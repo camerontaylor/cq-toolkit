@@ -200,12 +200,18 @@ def _inventory(req, runner, q, principal, receipt_root):
         raise ValueError("complete durable inventory required")
     rows = []
     entries = q.get("queue_client_requests", {})
+    queue_items = q.get("items")
+    if (type(entries) is not dict or type(q.get("merged_current_requests", {})) is not dict
+            or type(queue_items) is not list or any(type(item) is not dict for item in queue_items)):
+        raise ValueError("invalid reconciled queue mappings/items")
     mapped = sorted(q.get("merged_current_requests", {}).items(),
                     key=lambda pair: (entries.get(pair[0], {}).get("principal") != principal, pair[0]))
     by_subject = {}
     for rid, mapping in mapped:
         by_subject.setdefault(receipts.digest(mapping["binding"]), []).append((rid, mapping))
-    items = {item["id"]: item for item in q.get("items", [])}
+    items = {}
+    for item in queue_items:
+        items.setdefault(item.get("id"), []).append(item)
     receipt_budget = MAX_RECEIPT_BYTES
     for source in cp["inventory"]:
         row = {"pr": source.get("pr"), "mergeSha": source.get("merge_sha"),
@@ -218,12 +224,15 @@ def _inventory(req, runner, q, principal, receipt_root):
             entry = entries.get(rid)
             if entry is not None and entry.get("principal") != principal:
                 continue
-            item = items.get(mapping.get("item"))
-            if item is None:
-                raise ValueError("inventory mapping item missing")
+            item_id = "current-" + receipts.digest(subject)[:32]
+            matches = items.get(item_id, [])
+            if (mapping != {"binding": subject, "item": item_id} or len(matches) != 1
+                    or matches[0].get("subject") != subject or matches[0].get("kind") != receipts.KIND
+                    or matches[0].get("pr") != subject["pr"]
+                    or matches[0].get("merge_commit") != subject["merge_sha"]):
+                raise ValueError("reconciled request/source mismatch")
+            item = matches[0]
             status = receipts.status({**q, "items": [item]}, rid)
-            if status is None:
-                continue
             row.update(requestId=rid, itemId=status["item_id"], state="pending")
             if entry and entry.get("reason"):
                 row.update(state="blocked", reason=_status(q, rid, entry)["reason"])
@@ -236,12 +245,19 @@ def _inventory(req, runner, q, principal, receipt_root):
                 snapshot = _ReceiptSnapshot(receipt_root, status["receipt_id"], receipt_budget)
                 receipt_budget -= len(snapshot.data)
                 doc = snapshot.document
-                if doc.get("source") != subject:
+                receipt_source = doc.get("source", {})
+                source_matches = (receipt_source.get("repo") == subject["repo"]
+                                  and receipt_source.get("target_selector") == subject["target_selector"])
+                equivalent = (status.get("reused_from")
+                              and receipts.reusable_current(doc, status.get("capture")))
+                if not source_matches or doc.get("source") != subject and not equivalent:
                     row.update(state="blocked", reason={"source": "queue", "category": "identity", "code": "receipt-source"})
                 elif (doc.get("counted") is True and doc.get("classification", {}).get("counted") is True
                       and doc.get("classification", {}).get("outcome") == "completed"
                       and doc.get("outcome") in {"terminal-clean", "terminal-with-findings", "partial-scope"}):
-                    row["state"] = "consumed" if entry and entry.get("consumed") == status["receipt_id"] else "reviewed"
+                    row["state"] = "consumed" if entry and entry.get("consumed") == status["receipt_id"] else ("reused" if status.get("reused_from") else "reviewed")
+                elif doc.get("outcome") in {"no-current-code", "partial-scope"}:
+                    row["state"] = doc["outcome"]
                 else:
                     row.update(state="blocked", reason={"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
                                if _vendor_rate_limit(doc) else {"source": "queue", "category": "unknown", "code": "unclassified"})
@@ -280,9 +296,11 @@ def decode(raw):
                 or not 1 <= request["limit"] <= 10
                 or request["cursor"] is not None and not isinstance(request["cursor"], str)
                 or request["states"] is not None and (type(request["states"]) is not list
-                    or any(state not in {"pending", "reviewed", "consumed", "fixed", "blocked", "missing"}
+                    or any(state not in {"pending", "reviewed", "reused", "no-current-code", "partial-scope", "consumed", "fixed", "blocked", "missing"}
                            for state in request["states"]))):
             raise ValueError("invalid inventory pagination/filter")
+        if request["states"] is not None:
+            request["states"] = sorted(set(request["states"]))
         return request
     extra = {"bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
              "ack": {"receiptId", "sha256", "chunks", "bytes"}}.get(op, set())

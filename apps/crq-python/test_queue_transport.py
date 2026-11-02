@@ -38,6 +38,7 @@ def tearDownModule():
     _process_boundary_active = False
 
 
+import crq
 import merged_reconcile as reconcile
 import queue_transport as transport
 import review_receipt as receipts
@@ -129,10 +130,15 @@ class QueueTransportTests(unittest.TestCase):
         key = receipts.digest({"repo": "owner/repo", "base": transport.DISCOVERY_SELECTOR, **interval})
         path = self.runner.STATE / "reconcile" / (key + ".json")
         path.parent.mkdir()
-        path.write_text(json.dumps({"checkpoint": cp}))
+        source = {"version": 1, "method": "all-number-slots-v1", "repo": "owner/repo",
+                  "base": transport.DISCOVERY_SELECTOR, "repository_id": "synthetic-repository",
+                  "ceiling": 512, "window": reconcile.NUMBER_WINDOW}
+        wrapper = {"source": source, "checkpoint": cp}
+        wrapper["digest"] = receipts.digest(wrapper)
+        path.write_text(json.dumps(wrapper))
         def read(path, interval, budget):
-            return {"checkpoint": reconcile.load_checkpoint(json.loads(path.read_text())["checkpoint"],
-                interval, budget, repo="owner/repo", base=transport.DISCOVERY_SELECTOR, allow_complete=True)}
+            with mock.patch.object(crq, "REPO", "owner/repo"):
+                return crq._read_reconcile_wrapper(path, interval, budget)
         self.runner._read_reconcile_wrapper = read
         return path
 
@@ -181,6 +187,76 @@ class QueueTransportTests(unittest.TestCase):
             "source": "queue", "category": "identity", "code": "forge-identity"}
         blocked = self.inventory_call(states=["blocked"])["entries"][0]
         self.assertEqual(blocked["reason"]["code"], "forge-identity")
+
+    def test_inventory_reused_and_no_current_code_are_not_blocked(self):
+        retained = self.alias_fixture()
+        self.q = {"items": []}
+        self.inventory_fixture()
+        item = self.q["items"][0]
+        item["capture"] = retained["capture"]
+        retained["source"] = {**item["subject"], "pr": 505}
+        item.update(state="done", reused_from="original-review",
+                    receipt_id=receipts.write_receipt(self.tmp.name, retained))
+        self.assertEqual(self.inventory_call(states=["reused"])["entries"][0]["state"], "reused")
+        self.assertEqual(self.inventory_call(states=["pending", "blocked"])["entries"], [])
+        self.q["queue_client_requests"] = {self.request_id: {
+            "principal": "developer", "binding": self.b, "state": "ready-current",
+            "pr": 506, "mergeSha": "b" * 40, "consumed": item["receipt_id"]}}
+        self.assertEqual(self.inventory_call(states=["consumed"])["entries"][0]["state"], "consumed")
+        retained["capture"]["tree"] = "f" * 40
+        item["receipt_id"] = receipts.write_receipt(self.tmp.name, retained)
+        self.assertEqual(self.inventory_call(states=["blocked"])["entries"][0]["reason"]["code"], "receipt-source")
+        doc = {"source": item["subject"], "outcome": "no-current-code", "counted": False,
+               "classification": {"outcome": "no-current-code", "counted": False}}
+        item.pop("reused_from")
+        item["receipt_id"] = receipts.write_receipt(self.tmp.name, doc)
+        self.assertEqual(self.inventory_call(states=["no-current-code"])["entries"][0]["state"], "no-current-code")
+        self.assertEqual(self.inventory_call(states=["pending", "blocked"])["entries"], [])
+
+    def test_inventory_real_wrapper_refuses_incomplete_dry_run_and_corruption(self):
+        path = self.inventory_fixture()
+        valid = json.loads(path.read_text())
+        self.assertEqual(self.inventory_call()["proof"]["count"], 3)
+        for fault in ("incomplete", "dry_run", "source", "wrapper_digest"):
+            wrapper = copy.deepcopy(valid)
+            cp = wrapper["checkpoint"]
+            if fault == "incomplete":
+                cp.update(complete=False, cursor="next", cursor_history=["next"])
+            elif fault == "dry_run":
+                cp["dry_run"] = True
+            elif fault == "source":
+                wrapper["source"]["repo"] = "other/repo"
+            cp["summary"] = reconcile.summarize(cp)
+            cp["digest"] = reconcile.checkpoint_digest(cp)
+            wrapper["digest"] = receipts.digest({k: v for k, v in wrapper.items() if k != "digest"})
+            if fault == "wrapper_digest":
+                wrapper["digest"] = "0" * 64
+            path.write_text(json.dumps(wrapper))
+            with self.subTest(fault=fault), self.assertRaises((ValueError, reconcile.ReconcileRefused)):
+                self.inventory_call()
+
+    def test_inventory_validates_unowned_mapping_and_item(self):
+        self.inventory_fixture()
+        valid = copy.deepcopy(self.q)
+        def mapping(q): q["merged_current_requests"][self.request_id]["item"] = "other"
+        def subject(q): q["items"][0]["subject"] = {**q["items"][0]["subject"], "policy": "wrong"}
+        def kind(q): q["items"][0]["kind"] = "promotion"
+        def pr(q): q["items"][0]["pr"] = 999
+        def merge(q): q["items"][0]["merge_commit"] = "f" * 40
+        def duplicate(q): q["items"].append(copy.deepcopy(q["items"][0]))
+        for fault in (mapping, subject, kind, pr, merge, duplicate):
+            self.q = copy.deepcopy(valid)
+            fault(self.q)
+            with self.subTest(fault=fault.__name__), self.assertRaisesRegex(ValueError, "mismatch"):
+                self.inventory_call()
+
+    def test_inventory_filter_order_and_duplicates_preserve_cursor(self):
+        self.inventory_fixture()
+        first = self.inventory_call(states=["pending", "missing", "pending"])
+        canonical = self.inventory_call(states=["missing", "pending"])
+        self.assertEqual(first, canonical)
+        second = self.inventory_call(states=["pending", "missing"], cursor=first["nextCursor"])
+        self.assertEqual(second["entries"][0]["pr"], 506)
 
     def test_inventory_isolation_denied_interval_busy_and_incomplete(self):
         path = self.inventory_fixture()
