@@ -256,6 +256,18 @@ class QueueTransportTests(unittest.TestCase):
             self.assertEqual(dispatcher.main(), 2)
             self.assertEqual(stderr.getvalue(), "queue capability refused; no permission\n")
 
+    def test_queue_access_time_change_does_not_return_busy(self):
+        self.inventory_fixture()
+        queue = Path(self.tmp.name) / "queue.json"
+        queue.write_bytes(receipts.canonical(self.q))
+        self.runner.QUEUE = queue
+        def load():
+            stat = queue.stat()
+            os.utime(queue, ns=(stat.st_atime_ns + 1000000000, stat.st_mtime_ns))
+            return json.loads(queue.read_text())
+        with mock.patch.object(self.runner, "load_queue", side_effect=load):
+            self.assertEqual(self.inventory_call()["proof"]["count"], 3)
+
     def test_checkpoint_replacement_during_projection_returns_busy(self):
         path = self.inventory_fixture()
         original = receipts.status

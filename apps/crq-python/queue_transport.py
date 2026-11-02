@@ -338,6 +338,11 @@ def _forge(verify_source, b, pr, merge_sha, policy):
         raise ValueError("forge merge mismatch")
 
 
+def _queue_generation(path):
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
 READ_SLOTS = 2
 FORGE_CACHE_TTL = 300
 FORGE_CACHE_LIMIT = 128
@@ -516,19 +521,18 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     def locked():
         # Work on a copy so rejected requests cannot leak partial mutations to test runners.
         queue_path = getattr(runner, "QUEUE", None)
-        generation = queue_path.stat() if read_only and queue_path is not None else None
+        generation = _queue_generation(queue_path) if read_only and queue_path is not None else None
         q = runner.load_queue()
         if not read_only:
             q = copy.deepcopy(q)
         if type(q) is not dict:
             raise ValueError("invalid queue object")
         snapshot_id = receipts.digest({"principal": principal, "queue":
-            [generation.st_dev, generation.st_ino, generation.st_size, generation.st_mtime_ns]
-            if generation is not None else q}) if read_only else None
+            generation if generation is not None else q}) if read_only else None
         def encode(result):
             if read_only:
                 result = {"snapshot": snapshot_id, **result}
-            if generation is not None and queue_path.stat() != generation:
+            if generation is not None and _queue_generation(queue_path) != generation:
                 return _encode(req, {"error": {"code": "busy", "retryable": True}})
             return _encode(req, result)
         if op == "inventory":
