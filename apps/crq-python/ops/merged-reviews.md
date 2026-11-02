@@ -147,34 +147,45 @@ their frozen bounds and cursor until complete. Resuming identical frozen bounds
 does not rewrite them, so a completed interval is never briefly persisted as
 `complete: false` (which client health would count as an incomplete tick); a
 refusal or transport failure still records `complete: false`. Automatic scans list closed PRs
-sorted by most recently updated, at most 100 per request, stopping once updates
-are older than the scan's lower bound. Both main and merge-queue merged PRs are
-eligible. Recent merges normally fit in one request; an incomplete scan resumes
-next tick. Multi-request scans use an `updated_at` keyset rather than trusting
-page offsets, because an update moves a PR to the top and a reopen shifts later
-rows into already-read offsets. The cursor records the last processed update
-time and the PR numbers sharing that second. Each continuation window must
-start at or before that anchor; otherwise it backs off towards offset zero. A
-pass that needed more than one request is followed by a head pass over PRs
-updated since that pass began, until one request covers the head or a head pass
-finds nothing new. The tick's existing forge budget and four-page limit apply
-to every request. Same-second groups never refuse or need an operator. The
-cursor remembers the newest 100 processed PR numbers at the anchor second, and
-a forgotten row is reprocessed and deduplicated, never skipped. When more than
-100 PRs share a pass's head second, the next head pass reprocesses every row at
-that second, so a merge updated into it after the first read is still recorded.
-Only strictly newer rows count towards another pass, so the scan still ends.
-Cursors stay under 4 KB by the same reprocessing; only PR numbers of more than
-about 37 digits would refuse.
+with GitHub's `sort=updated`, at most 100 per request. Both main and
+merge-queue merged PRs are eligible. Recent merges normally fit in one
+request; an incomplete scan resumes next tick.
 
-Ordering assumption: GitHub must keep the order of closed PRs that share one
-`updated_at` second stable between requests. The overlap check relies on it. If GitHub reordered a same-second group
-of more than three rows that straddles a request boundary, an unprocessed row
-could sit above the next window's start and that merge could be missed; the
-five-minute watermark overlap does not cover it. This needs bursts of
-same-second updates, so it is unlikely, but a suspected miss should be replayed
-with the manual `reconcile-merged` command. A page-number cursor left by an
-earlier runner restarts the scan, and already-recorded sources deduplicate. Historical backfill remains the backfill controller's responsibility.
+GitHub's order is not the returned `updated_at`. The list is sorted by
+GitHub's own key: a comment can advance `updated_at` while the PR keeps its
+old position. Deploy 20261103-1 met this on the live first page: #750 sorted at
+its 09:34 merge, below #753 (09:43:46Z), with `updated_at` 10:50:03Z. The
+fixture `fixtures/closed-page-20261103.json` keeps that page. The scan
+therefore never refuses rows for their order, and uses `updated_at` only as
+data:
+
+- Continuation is by row identity, not by time or bare offset. The cursor
+  keeps the last five rows passed, by number and `updated_at`. The next window
+  must contain one of them unchanged, and the scan resumes after it. A reopen
+  above shifts that row and its successors together; a changed row moves to
+  the top. Without such an anchor the window backs off, and at offset zero the
+  pass re-reads from the top. Repeats deduplicate.
+- A pass ends after 25 consecutive rows updated at or before its floor, or at
+  the end of the list. Out-of-order rows near the boundary are still read.
+- A pass that needed more than one request is followed by a head pass over
+  rows at or above the newest `updated_at` its first request saw. Head passes
+  repeat until one request covers the head or a pass finds nothing strictly
+  newer. When more than 100 PRs share that second, the next head pass
+  reprocesses every row at it, never assuming them seen.
+- The tick's forge budget and four-page limit apply to every request. Cursors
+  stay under 4 KB; only PR numbers of more than about 37 digits would refuse.
+
+Remaining assumptions, both consistent with the live data: a PR's sort key
+never decreases, and a merge sets it at or after `merged_at`. Rows below 25
+consecutive rows at or before the floor therefore cannot hold a merge inside
+the interval. If GitHub ever set the sort key before the merge, a merge sitting
+more than 25 rows below the boundary could be missed. Offline, that took
+same-second groups hundreds of rows wide. Replay a suspected miss with the
+manual `reconcile-merged` command.
+
+An offset cursor (f25b328c) or a first-keyset cursor (#822) left by an earlier
+runner restarts the scan, and already-recorded sources deduplicate. Historical
+backfill remains the backfill controller's responsibility.
 
 The command prints one JSON discovery summary,
 holds the existing tick lock, and never dispatches a provider or repair. An

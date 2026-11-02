@@ -1586,27 +1586,35 @@ class CurrentTest(unittest.TestCase):
         self.assertTrue(forge.call_args.args[0][1].endswith("per_page=100&page=1"))
         self.assertEqual(len(page["records"]), 100)
         cursor = json.loads(page["next_cursor"])
-        self.assertEqual((cursor["u"], cursor["t"], cursor["o"]), (rows[-1]["updated_at"], [801], 97))
-        # The continuation overlaps the anchor; a window past it backs off.
+        self.assertEqual(cursor["a"], [[r["number"], r["updated_at"]] for r in rows[-5:]])
+        self.assertEqual((cursor["o"], cursor["h"]), (97, rows[0]["updated_at"]))
+        # The continuation resumes after the last passed row found in it.
         with mock.patch.object(crq, "gh_json", return_value=rows[97:]) as forge:
             page = crq.recent_merged_page(page["next_cursor"], "2026-10-27T00:00:00Z")
         self.assertTrue(forge.call_args.args[0][1].endswith("per_page=97&page=2"))
         self.assertEqual(page["records"], [])
         head = page["next_cursor"]
         self.assertEqual(json.loads(head)["p"], 1)
-        with mock.patch.object(crq, "gh_json", return_value=[]):
-            gap = crq.recent_merged_page(json.dumps({**cursor, "n": 5}, separators=(",", ":")),
-                                         "2026-10-27T00:00:00Z")
-        self.assertEqual((gap["records"], json.loads(gap["next_cursor"])["o"]), ([], 0))
+        # A window holding no passed row backs off; so does a changed anchor.
+        changed = [{**r, "updated_at": "2026-10-30T00:00:00Z"} for r in rows[97:]]
+        for window in ([], changed):
+            with self.subTest(window=len(window)), mock.patch.object(crq, "gh_json", return_value=window):
+                gap = crq.recent_merged_page(json.dumps({**cursor, "n": 5}, separators=(",", ":")),
+                                             "2026-10-27T00:00:00Z")
+            self.assertEqual((gap["records"], json.loads(gap["next_cursor"])["o"]), ([], 0))
         with mock.patch.object(crq, "gh_json", return_value=rows) as forge:
             page = crq.recent_merged_page(head, "2026-10-27T00:00:00Z")
         self.assertIsNone(page["next_cursor"])
         self.assertEqual(page["records"], [])
-        # A legacy page-number cursor restarts safely; malformed cursors refuse.
-        with mock.patch.object(crq, "gh_json", return_value=rows[:1]) as forge:
-            self.assertIsNone(crq.recent_merged_page("2", "2026-10-29T00:59:58Z")["next_cursor"])
-        self.assertTrue(forge.call_args.args[0][1].endswith("per_page=100&page=1"))
-        for bad in ("{", "[]", json.dumps({**cursor, "f": "2026-10-28T00:00:00Z"}), "02"):
+        # Offset (f25b328c) and first keyset (#822) cursors restart safely.
+        v1 = json.dumps({"n": 3, "p": 0, "f": "2026-10-29T00:59:58Z", "fs": [], "fa": False, "h": None,
+                         "hs": [], "ha": False, "o": 0, "u": None, "t": [], "k": 0, "c": 0})
+        for legacy in ("2", v1):
+            with self.subTest(legacy=legacy), mock.patch.object(crq, "gh_json", return_value=rows[:1]) as forge:
+                self.assertIsNone(crq.recent_merged_page(legacy, "2026-10-29T00:59:58Z")["next_cursor"])
+            self.assertTrue(forge.call_args.args[0][1].endswith("per_page=100&page=1"))
+        for bad in ("{", "[]", json.dumps({**cursor, "f": "2026-10-28T00:00:00Z"}), "02",
+                    json.dumps({**cursor, "v": 1}), json.dumps({**cursor, "a": [[0, "x"]]})):
             with self.subTest(cursor=bad), mock.patch.object(crq, "gh_json") as forge:
                 with self.assertRaises(crq.merged_reconcile.ReconcileRefused):
                     crq.recent_merged_page(bad, "2026-10-27T00:00:00Z")
@@ -2411,12 +2419,24 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         page = int(re.search(r"[?&]page=(\d+)", args[1]).group(1))
         self.hooks.pop(len(self.calls), lambda: None)()
         self.calls.append((size, page))
-        ordered = sorted(self.rows.values(), key=lambda r: (r["updated_at"], r["number"]), reverse=True)
-        return copy.deepcopy(ordered[(page - 1) * size:page * size])
+        # GitHub sorts by its own key (_sort when set), not the returned field.
+        ordered = sorted(self.rows.values(), key=lambda r: (r.get("_sort", r["updated_at"]), r["number"]),
+                         reverse=True)
+        return [{k: v for k, v in copy.deepcopy(r).items() if k != "_sort"}
+                for r in ordered[(page - 1) * size:page * size]]
 
     def move(self, number):
-        """An update (label, comment, edit) moves a closed PR to the top."""
-        return lambda: self.rows[number].update(updated_at=self.LATER)
+        """A PR update (label, edit, merge) moves a closed PR to the top."""
+        return lambda: self.rows[number].update(updated_at=self.LATER, _sort=self.LATER)
+
+    def bump(self, number, at=None):
+        """A comment advances updated_at only; the PR keeps its sort position
+        (live #750: sorted at its 09:34 merge, updated_at 10:50)."""
+        def apply():
+            row = self.rows[number]
+            row.setdefault("_sort", row["updated_at"])
+            row["updated_at"] = at or self.LATER
+        return apply
 
     def reopen(self, number):
         """A reopened PR leaves the closed list; later rows shift up."""
@@ -2431,6 +2451,68 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
 
     def enrolled(self):
         return {item["pr"] for item in self.q["items"]}
+
+    def real_page(self):
+        path = Path(__file__).resolve().parent / "fixtures" / "closed-page-20261103.json"
+        rows = json.loads(path.read_text())
+        merged = {750: "2026-11-01T09:34:43Z"}
+        return [{**row, "base": {"ref": "main"}, "merged_at": merged.get(row["number"], row["updated_at"]),
+                 "merge_commit_sha": f"{row['number']:040x}", "head": {"sha": f"{row['number']:040x}"}}
+                for row in rows]
+
+    def test_real_closed_page_with_github_inversion_is_read_not_refused(self):
+        # Deploy 20261103-1 refused this live first page: #753 (09:43:46Z) is
+        # followed by #750 (10:50:03Z), 3977 s newer, at index 61/62.
+        rows = self.real_page()
+        self.assertEqual([r["number"] for r in rows[61:63]], [753, 750])
+        self.assertGreater(rows[62]["updated_at"], rows[61]["updated_at"])
+        for after in ("2026-11-02T00:00:00Z", "2026-11-01T10:00:00Z"):
+            with self.subTest(after=after), mock.patch.object(crq, "gh_json", return_value=rows) as forge:
+                page = crq.recent_merged_page(None, after)
+            forge.assert_called_once()
+            self.assertIsNone(page["next_cursor"])
+            expected = {r["number"] for r in rows if r["updated_at"] > after}
+            self.assertEqual({r["number"] for r in page["records"]}, expected)
+        # #750 sits below the floor crossing (#754 at 09:56) but is still read.
+        self.assertIn(750, expected)
+
+    def test_stale_sort_position_inside_a_page(self):
+        # #230 (page one) and #120 (page two) keep their merge-time positions
+        # while comments push updated_at above every row read before them.
+        self.closed(250)
+        self.bump(230)()
+        self.bump(120)()
+        self.assertIn("complete=True", self.tick()[0])
+        self.assertEqual(self.enrolled(), self.merged)
+
+    def test_stale_sort_position_across_a_page_boundary(self):
+        # #150 opens page two with an updated_at newer than all of page one;
+        # a comment on #151, the last row read, lands mid-scan.
+        self.closed(250)
+        self.bump(150)()
+        self.hooks[1] = self.bump(151, "2026-10-03T00:00:05Z")
+        self.assertIn("complete=True", self.tick()[0])
+        self.assertEqual(self.enrolled(), self.merged)
+
+    def test_stale_row_at_the_anchor(self):
+        # The last rows passed on page one are stale-position rows; one is
+        # commented again before the continuation and one is reopened.
+        self.closed(250, unmerged={152})
+        for n in (151, 152, 153):
+            self.bump(n, "2026-10-02T23:00:00Z")()
+        self.hooks[1] = lambda: (self.bump(151)(), self.reopen(152)())
+        self.assertIn("complete=True", self.tick()[0])
+        self.assertEqual(self.enrolled(), self.merged)
+
+    def test_stale_row_inside_a_same_second_group(self):
+        # A 150-row same-second group spans pages; one member is commented
+        # (position kept, newer updated_at) and another moves to the top.
+        self.closed(400)
+        self.tie(range(100, 250), 900)
+        self.bump(180)()
+        self.hooks[1] = lambda: (self.bump(120)(), self.move(200)())
+        self.until_complete()
+        self.assertEqual(self.enrolled(), self.merged)
 
     def test_single_page_scan_stays_one_request(self):
         self.closed(40)

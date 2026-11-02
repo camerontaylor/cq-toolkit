@@ -1250,19 +1250,26 @@ def rolling_discovery_interval(q, config):
 RECENT_PAGE = 100
 RECENT_OVERLAP = 2
 RECENT_MAX_TIES = 100
-RECENT_FIELDS = {"n", "p", "f", "fs", "fa", "h", "hs", "ha", "o", "u", "t", "k", "c"}
+RECENT_ANCHORS = 5
+RECENT_LOOKAHEAD = 25
+RECENT_VERSION = 2
+RECENT_FIELDS = {"v", "n", "p", "f", "fs", "fa", "h", "hs", "ha", "o", "a", "x", "k", "c"}
+# Cursor shape written by the first keyset adapter (#822); it restarts safely.
+RECENT_V1_FIELDS = {"n", "p", "f", "fs", "fa", "h", "hs", "ha", "o", "u", "t", "k", "c"}
 
 
 def _recent_state(cursor, after):
-    """Decode a keyset cursor; a legacy page-number cursor restarts the scan."""
-    fresh = {"n": 0, "p": 0, "f": after, "fs": [], "fa": False, "h": None, "hs": [], "ha": False,
-             "o": 0, "u": None, "t": [], "k": 0, "c": 0}
+    """Decode a scan cursor; earlier offset or keyset cursors restart the scan."""
+    fresh = {"v": RECENT_VERSION, "n": 0, "p": 0, "f": after, "fs": [], "fa": False, "h": None, "hs": [],
+             "ha": False, "o": 0, "a": [], "x": 0, "k": 0, "c": 0}
     if cursor is None or (cursor.isdigit() and cursor == str(int(cursor)) and int(cursor) >= 1):
         return fresh
     try:
         state = json.loads(cursor)
     except (ValueError, RecursionError):
         state = None
+    if type(state) is dict and set(state) == RECENT_V1_FIELDS:
+        return fresh
 
     def ts(value, nullable=False):
         if value is None:
@@ -1277,15 +1284,20 @@ def _recent_state(cursor, after):
         return (type(value) is list and len(value) <= RECENT_MAX_TIES and len(set(value)) == len(value)
                 and all(type(n) is int and n > 0 for n in value))
 
-    if (type(state) is not dict or set(state) != RECENT_FIELDS
-            or any(type(state[k]) is not int or state[k] < 0 for k in ("n", "p", "o", "k", "c"))
-            or not ts(state["f"]) or not ts(state["h"], True) or not ts(state["u"], True)
-            or not all(numbers(state[k]) for k in ("fs", "hs", "t"))
+    def anchors(value):
+        return (type(value) is list and len(value) <= RECENT_ANCHORS and
+                all(type(a) is list and len(a) == 2 and type(a[0]) is int and a[0] > 0 and ts(a[1])
+                    for a in value))
+
+    if (type(state) is not dict or set(state) != RECENT_FIELDS or state["v"] != RECENT_VERSION
+            or any(type(state[k]) is not int or state[k] < 0 for k in ("n", "p", "o", "x", "k", "c"))
+            or not ts(state["f"]) or not ts(state["h"], True) or not anchors(state["a"])
+            or not all(numbers(state[k]) for k in ("fs", "hs"))
             or type(state["fa"]) is not bool or type(state["ha"]) is not bool
             or (state["fa"] and state["fs"]) or (state["ha"] and state["hs"])
             or (state["p"] == 0 and (state["f"] != after or state["fs"] or state["fa"]))
-            or (state["k"] == 0 and (state["h"] is not None or state["o"] or state["u"] is not None))
-            or (state["o"] and state["u"] is None)):
+            or (state["k"] == 0 and (state["h"] is not None or state["o"] or state["a"] or state["x"]))
+            or (state["o"] and not state["a"])):
         raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
     return state
 
@@ -1299,22 +1311,26 @@ def _recent_window(offset):
 
 
 def recent_merged_page(cursor, after):
-    """Newest closed PRs first, as an updated_at keyset with verified overlap.
+    """Newest closed PRs first, continued by row identity, never by updated_at.
 
-    Offsets alone are unsafe: a reopen above the read position shifts unread
-    rows into already-read offsets, and an update moves a row to the top. Each
-    continuation window must start at or before the last processed row (the
-    anchor); otherwise it backs off towards offset zero. A pass that needed
-    more than one request is followed by a head pass over rows updated since
-    that pass began, until one request covers the head (an atomic snapshot) or
-    a head pass finds nothing new. Single-page scans stay one request.
+    GitHub's sort=updated order is its own hidden sort key, not the returned
+    updated_at: a comment can advance updated_at while the PR keeps its old
+    position (live #750 sorted at its merge time, 76 minutes below its
+    updated_at). Rows are therefore never refused for order, and updated_at
+    is only data. Each continuation window must contain one of the last rows
+    passed, unchanged (number and updated_at), and resumes after it: removals
+    above shift that row and its successors together, and a changed row moves
+    to the top. Without such an anchor the window backs off, and at offset
+    zero the pass re-reads from the top; repeats deduplicate.
 
-    Same-second groups never refuse. The anchor keeps the newest
-    RECENT_MAX_TIES processed numbers; a forgotten tie row is reprocessed
-    (deduplicated), never skipped. When a head-second group is too large to
-    remember, the next head pass reprocesses every row at that second (a merge
-    updated into it after the first read is recorded) and counts only strictly
-    newer rows as new, so the pass still ends.
+    A pass ends after RECENT_LOOKAHEAD consecutive rows at or below its floor,
+    so nearby disorder is still read. This relies on a merge setting the sort
+    key at or after merged_at, and on a key never decreasing (both match live
+    data); rows below such a run cannot hold a merge inside the interval. A
+    pass that needed more than one request is followed by a head pass over
+    rows at or above the newest updated_at its first request saw, until one
+    request covers the head or a head pass finds nothing strictly newer. A
+    head-second group too large to remember is reprocessed, never assumed seen.
     """
     state = _recent_state(cursor, after)
     size, page, start = _recent_window(state["o"])
@@ -1327,78 +1343,78 @@ def recent_merged_page(cursor, after):
         raise merged_reconcile.PageFailed("forge read unavailable; cursor retained") from None
     if not isinstance(rows, list) or len(rows) > size:
         raise merged_reconcile.ReconcileRefused("invalid closed-PR page")
-    prior = None
     for row in rows:
         if not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] <= 0:
             raise merged_reconcile.ReconcileRefused("invalid closed-PR record")
-        updated = row.get("updated_at")
-        merged_reconcile.normalize_interval("1970-01-01T00:00:00Z", updated)
-        if prior is not None and updated > prior:
-            raise merged_reconcile.ReconcileRefused("closed-PR page is not sorted by update")
-        prior = updated
+        merged_reconcile.normalize_interval("1970-01-01T00:00:00Z", row.get("updated_at"))
         if "merged_at" not in row:
             raise merged_reconcile.ReconcileRefused("missing merge metadata")
-    anchor, ties = state["u"], list(state["t"])
-
-    def covered(row):
-        return anchor is not None and (row["updated_at"] > anchor or
-                                       (row["updated_at"] == anchor and row["number"] in ties))
-
     nxt = {**state, "n": state["n"] + 1, "k": state["k"] + 1}
-    if start > 0 and not (rows and covered(rows[0])):
-        # Rows left the list above the anchor: this window may begin past
-        # unread rows. Re-read from earlier; offset zero is always safe.
-        nxt["o"] = max(0, start - RECENT_PAGE)
-        return {"records": [], "has_next_page": True, "next_cursor": json.dumps(nxt, separators=(",", ":"))}
+    passed = [list(a) for a in state["a"]]
+    cut = -1
+    if passed:
+        position = {(row["number"], row["updated_at"]): i for i, row in reversed(list(enumerate(rows)))}
+        found = [position[tuple(a)] for a in passed if tuple(a) in position]
+        if found:
+            cut = max(found)
+        elif start > 0:
+            # Rows left the list above the anchor, or it changed and moved:
+            # this window may begin past unread rows. Re-read from earlier.
+            nxt["o"] = max(0, start - RECENT_PAGE)
+            return {"records": [], "has_next_page": True, "next_cursor": json.dumps(nxt, separators=(",", ":"))}
+        else:
+            # No anchor survives even at the top: re-read this pass from row 0.
+            passed, nxt["x"] = [], 0
     floor, seen = state["f"], set(state["fs"])
-    head = state["h"] if state["k"] else (rows[0]["updated_at"] if rows else None)
+    head = state["h"] if state["k"] else max((row["updated_at"] for row in rows), default=None)
     head_seen, head_all = set(state["hs"]), state["ha"]
     records = []
     ended = len(rows) < size
-    for row in rows:
-        if covered(row):
-            continue
-        updated = row["updated_at"]
+    for row in rows[cut + 1:]:
+        updated, number = row["updated_at"], row["number"]
+        passed = (passed + [[number, updated]])[-RECENT_ANCHORS:]
         if updated < floor or (updated == floor and state["p"] == 0):
-            ended = True
-            break
-        if anchor is None or updated < anchor:
-            anchor, ties = updated, []
-        if row["number"] not in ties:
-            ties = (ties + [row["number"]])[-RECENT_MAX_TIES:]
+            nxt["x"] += 1
+            if nxt["x"] >= RECENT_LOOKAHEAD:
+                ended = True
+                break
+            continue
+        nxt["x"] = 0
         if updated == head and not head_all:
-            head_seen.add(row["number"])
+            head_seen.add(number)
             if len(head_seen) > RECENT_MAX_TIES:
                 head_seen, head_all = set(), True
-        if updated == floor and row["number"] in seen:
-            continue
-        if not (updated == floor and state["fa"]):
+        if state["p"] and updated == floor:
+            if number in seen:
+                continue
+            if not state["fa"]:
+                nxt["c"] += 1
+        else:
             nxt["c"] += 1
         if row["merged_at"] and (row.get("base") or {}).get("ref") in DISCOVERY_BRANCHES:
-            records.append({"number": row["number"], "mergedAt": row["merged_at"],
+            records.append({"number": number, "mergedAt": row["merged_at"],
                 "mergeCommit": {"oid": row.get("merge_commit_sha")},
                 "headRefOid": (row.get("head") or {}).get("sha")})
     if ended:
         if state["k"] == 0 or (state["p"] > 0 and nxt["c"] == 0):
             return {"records": records, "has_next_page": False, "next_cursor": None}
-        # Rows updated during this multi-request pass moved above its anchor.
-        nxt = {"n": state["n"] + 1, "p": state["p"] + 1, "f": head, "fs": sorted(head_seen), "fa": head_all,
-               "h": None, "hs": [], "ha": False, "o": 0, "u": None, "t": [], "k": 0, "c": 0}
+        # Rows changed during this multi-request pass moved above its anchor.
+        nxt = {"v": RECENT_VERSION, "n": state["n"] + 1, "p": state["p"] + 1, "f": head,
+               "fs": sorted(head_seen), "fa": head_all, "h": None, "hs": [], "ha": False,
+               "o": 0, "a": [], "x": 0, "k": 0, "c": 0}
     else:
-        nxt.update(h=head, hs=sorted(head_seen), ha=head_all, u=anchor, t=ties,
+        nxt.update(h=head, hs=sorted(head_seen), ha=head_all, a=passed,
                    o=max(0, start + len(rows) - 1 - RECENT_OVERLAP))
     encoded = json.dumps(nxt, separators=(",", ":"))
     if len(encoded.encode()) > merged_reconcile.MAX_CURSOR_BYTES:
         # Only very large PR numbers get here. Head-second sets degrade to the
-        # reprocess-everything flags, which are safe; the anchor ties are
-        # kept whole, since windows can start up to 50 rows before the overlap.
+        # reprocess-everything flags, which are safe.
         for name, flag in (("fs", "fa"), ("hs", "ha")):
             if nxt[name]:
                 nxt[name], nxt[flag] = [], True
         encoded = json.dumps(nxt, separators=(",", ":"))
         if len(encoded.encode()) > merged_reconcile.MAX_CURSOR_BYTES:
-            # 100 anchor numbers fit unless PR numbers exceed ~37 digits.
-            raise merged_reconcile.ReconcileRefused("closed-PR numbers too large for the keyset cursor")
+            raise merged_reconcile.ReconcileRefused("closed-PR numbers too large for the scan cursor")
     return {"records": records, "has_next_page": True, "next_cursor": encoded}
 
 
