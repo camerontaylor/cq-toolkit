@@ -1014,11 +1014,13 @@ def enqueue_merged(pr: int, merge_sha: str, request_id: str, target_selector: st
     result = review_receipt.enroll(q, repo=REPO, pr=pr, merge_sha=merge_sha, request_id=request_id,
                                    at=iso(), target_selector=target_selector)
     save_queue(q)
-    return review_receipt.status(q, request_id)
+    return review_receipt.status(q, request_id,
+        project_fixed=(CONFIG.get("queue") or {}).get("project_fixed") is True)
 
 
 def current_report(request_id: str, receipt_id: Optional[str] = None, cursor: Optional[str] = None) -> Dict[str, Any]:
-    status = review_receipt.status(load_queue(), request_id)
+    status = review_receipt.status(load_queue(), request_id,
+        project_fixed=(CONFIG.get("queue") or {}).get("project_fixed") is True)
     actual = status["receipt_id"]
     if receipt_id and receipt_id != actual:
         raise ValueError("receipt does not match request")

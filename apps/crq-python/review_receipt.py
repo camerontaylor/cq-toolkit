@@ -106,15 +106,18 @@ def enroll(q, *, repo, pr, merge_sha, request_id, at, target_selector="promoted-
     return {"version": VERSION, "created": created, "item": item}
 
 
-def status(q, request_id):
+def status(q, request_id, *, project_fixed=False):
     request = q.get("merged_current_requests", {}).get(request_id)
     if request is None:
         raise ValueError("unknown merged-current request")
     item = next(i for i in q["items"] if i["id"] == request["item"])
-    return {"version": VERSION, "request_id": request_id, "item_id": item["id"],
+    result = {"version": VERSION, "request_id": request_id, "item_id": item["id"],
             "subject": request["binding"], "state": item["state"],
             "capture": item.get("capture"), "receipt_id": item.get("receipt_id"),
-            "remediation": item.get("remediation"), "reused_from": item.get("reused_from"), "reason": item.get("last_error") or item.get("wait_reason")}
+            "reused_from": item.get("reused_from"), "reason": item.get("last_error") or item.get("wait_reason")}
+    if project_fixed:
+        result["remediation"] = item.get("remediation")
+    return result
 
 
 def remediation_fixed(item, document, receipt_id):

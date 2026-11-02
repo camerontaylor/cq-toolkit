@@ -546,7 +546,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
 
-    project_fixed = getattr(runner, "CONFIG", {}).get("queue", {}).get("project_fixed") is True
+    project_fixed = (getattr(runner, "CONFIG", {}).get("queue") or {}).get("project_fixed") is True
     read_only = op in READ or op == "inventory"
 
     def locked():
@@ -634,7 +634,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         result = _status(q, rid, entry)
         receipt_id = result["receiptId"]
         if receipt_id:
-            item = receipts.status(q, rid)
+            item = receipts.status(q, rid, project_fixed=project_fixed)
             # Bounded status excludes capture/paths/findings. Full document goes through chunks.
             snapshot = _ReceiptSnapshot(receipt_root, receipt_id)
             document = snapshot.document

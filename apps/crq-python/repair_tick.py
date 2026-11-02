@@ -65,7 +65,7 @@ def own_range(c, q, base, head):
 
 
 def merged_current_enabled(c):
-    return c.CONFIG.get('repair', {}).get('merged_current', {}).get('enabled') is True
+    return ((c.CONFIG.get('repair') or {}).get('merged_current') or {}).get('enabled') is True
 
 
 def enqueue(c, q, item, meta, rdir):

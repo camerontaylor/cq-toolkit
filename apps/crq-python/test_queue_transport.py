@@ -329,7 +329,7 @@ class QueueTransportTests(unittest.TestCase):
         item["remediation"] = dict(receipt_id=rid, subject=item["subject"], capture_digest=receipts.digest({}),
                                    findings=[receipts.digest(doc["findings"][0])], fix_pr=8,
                                    merge="a" * 40, head="b" * 40, target="c" * 40)
-        for config in ({}, {"queue": {"project_fixed": False}}):
+        for config in ({}, {"queue": None}, {"queue": {"project_fixed": False}}):
             self.runner.CONFIG = config
             status = self.call("status")
             self.assertFalse(status["fixed"])

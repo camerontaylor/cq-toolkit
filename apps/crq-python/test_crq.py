@@ -760,6 +760,28 @@ class CurrentTest(unittest.TestCase):
                 repair.assert_not_called()
             return result
 
+    def test_local_pending_status_respects_projection_gate_and_null_sections(self):
+        item = self.enroll()
+        item['remediation'] = {'fixture': 'retained internal evidence'}
+        crq.save_queue(self.q)
+        for queue, enabled in ((None, False), ({}, False), ({'project_fixed': False}, False),
+                               ({'project_fixed': True}, True)):
+            with self.subTest(queue=queue), \
+                 mock.patch.object(crq, 'CONFIG', {**crq.CONFIG, 'queue': queue}), \
+                 mock.patch.object(crq, 'pr_info', return_value=self.info):
+                enrolled = crq.enqueue_merged(42, self.merge, 'missed')
+                pending = crq.current_report('missed')
+                for result in (enrolled, pending):
+                    self.assertEqual('remediation' in result, enabled)
+                    if enabled:
+                        self.assertEqual(result['remediation'], item['remediation'])
+                self.assertEqual(crq.load_queue()['items'][0]['remediation'], item['remediation'])
+        for repair in (None, {}, {'merged_current': None}, {'merged_current': {}},
+                       {'merged_current': {'enabled': False}}, {'merged_current': {'enabled': True}}):
+            with self.subTest(repair=repair), mock.patch.object(crq, 'CONFIG', {'repair': repair}):
+                self.assertEqual(crq.repair_tick.merged_current_enabled(crq),
+                                 repair == {'merged_current': {'enabled': True}})
+
     def test_current_receipts_pin_legacy_remediation_literal(self):
         item = {'id': 'fixture', 'request_id': 'request', 'subject': {}, 'capture': {}}
         for outcome in ('terminal-clean', 'terminal-with-findings', 'partial-scope', 'no-current-code'):
