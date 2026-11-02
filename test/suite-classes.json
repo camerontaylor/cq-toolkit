@@ -80,6 +80,7 @@
   "test/ops/analyze/renderAnalysisReport.test.ts": "pure",
   "test/ops/analyze/run.test.ts": "pure",
   "test/ops/analyze/standaloneSlice.test.ts": "process",
+  "test/ops/fix/runFix.test.ts": "process",
   "test/ops/gates/adapters.test.ts": "process",
   "test/ops/gates/baselineProbe.test.ts": "process",
   "test/ops/gates/commitGate.test.ts": "pure",

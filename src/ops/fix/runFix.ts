@@ -145,6 +145,17 @@ export function githubCompareBaseUrl(remote: string, revision: string): string |
   return `https://github.com/${match[1]}/compare/${safeRef(revision)}...`;
 }
 
+/**
+ * The run's fixes-per-run metric: the count of distinct verified commit SHAs
+ * across fixed tasks (see src/ops/review/README.md:97). One commit that
+ * resolves two sibling rows counts once; non-fixed rows never contribute,
+ * even when attempt evidence carries SHAs.
+ */
+export function fixesPerRunOf(tasks: readonly FixTaskReport[]): number {
+  return new Set(tasks.filter((task) => task.outcome === 'fixed').flatMap((task) => task.commits))
+    .size;
+}
+
 /** Two-phase sweep composition; no kernel policy or taxonomy changes. */
 export function makeFixRun(deps: FixRunDeps = {}) {
   return async (input: FixRunInput): Promise<FixRunResult> => {
@@ -262,7 +273,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             ];
       });
       accountPlanned();
-      report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
+      // The single observable write of the metric: every terminal return
+      // flows through finish(), so this is the value any test or consumer
+      // reads (the pre-assembly write below is superseded on every path).
+      report.fixesPerRun = fixesPerRunOf(report.tasks);
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       for (const task of report.tasks)
@@ -595,7 +609,11 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           });
         }
       }
-      report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
+      // Pre-assembly write: the PR-body leg below reads report state before
+      // finish() recomputes the metric; the field itself is not read in
+      // between today, so finish()'s write above is the observable one and
+      // the composition tests pin THIS value, not this line.
+      report.fixesPerRun = fixesPerRunOf(report.tasks);
       report.usage = report.run.usage ?? report.usage;
       const human =
         parentSignal?.aborted ||
