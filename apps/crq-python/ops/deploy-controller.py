@@ -493,32 +493,86 @@ def _newest(entries, limit: int) -> list:
     return sorted(entries, key=key)[:limit]
 
 
-def _module_constants(path: Path, imported: dict | None = None) -> dict:
-    """Module-level literal assignments, read statically: never executed.
+_NOT_LITERAL = ("not-literal",)
 
-    Names imported ``from runtime_target`` resolve through ``imported``.
-    Raises OSError/SyntaxError/ValueError when the source is unusable.
-    """
-    tree = ast.parse(path.read_text(), filename=str(path))
-    values = dict(imported or {})
-    for node in tree.body:
-        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)):
+
+def _store_names(node) -> list:
+    """Names a statement binds at module scope, without entering nested
+    function/class bodies (whose own names are bound, their locals not)."""
+    names, stack = [], [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(current.name)
             continue
-        value = node.value
+        if isinstance(current, (ast.Import, ast.ImportFrom)):
+            names.extend((alias.asname or alias.name).split(".")[0]
+                         for alias in current.names)
+            continue
+        if isinstance(current, ast.Name) and isinstance(current.ctx, (ast.Store, ast.Del)):
+            names.append(current.id)
+        stack.extend(ast.iter_child_nodes(current))
+    return names
+
+
+def _module_bindings(path: Path) -> dict:
+    """The FINAL module-level binding of every name, read statically (never
+    executed): a literal assignment node, a ``from runtime_target import``,
+    or _NOT_LITERAL for anything else (a later non-literal rebinding makes an
+    earlier literal unresolved). Raises OSError/SyntaxError if unusable."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    bindings = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, (ast.Constant, ast.Dict))):
+            bindings[node.targets[0].id] = ("literal", node.value)
+            continue
+        if (isinstance(node, ast.ImportFrom) and node.level == 0
+                and node.module == "runtime_target"):
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = ("runtime_target", alias.name)
+            continue
+        for name in _store_names(node):
+            bindings[name] = _NOT_LITERAL
+    return bindings
+
+
+class _Constants:
+    """Lazily resolve only the requested names, so an unrelated module-level
+    value the parser cannot evaluate never affects the schema."""
+
+    def __init__(self, runner: Path):
+        self.runner = runner
+        self.modules = {}
+
+    def bindings(self, module: str) -> dict:
+        if module not in self.modules:
+            self.modules[module] = _module_bindings(self.runner / (module + ".py"))
+        return self.modules[module]
+
+    def resolve(self, module: str, name: str, depth: int = 0):
+        if depth > 8:
+            raise ValueError("constant resolution too deep at " + name)
+        binding = self.bindings(module).get(name)
+        if binding is None:
+            raise ValueError(module + "." + name + " is not defined")
+        if binding is _NOT_LITERAL:
+            raise ValueError(module + "." + name + " is not a module-level literal")
+        if binding[0] == "runtime_target":
+            return self.resolve("runtime_target", binding[1], depth + 1)
+        value = binding[1]
         if isinstance(value, ast.Constant):
-            values[node.targets[0].id] = value.value
-        elif isinstance(value, ast.Dict):
-            keys = []
-            for key in value.keys:
-                if isinstance(key, ast.Constant):
-                    keys.append(key.value)
-                elif isinstance(key, ast.Name) and key.id in values:
-                    keys.append(values[key.id])
-                else:
-                    raise ValueError("unresolvable key in " + node.targets[0].id)
-            values[node.targets[0].id] = {"keys": keys}
-    return values
+            return value.value
+        keys = []
+        for key in value.keys:
+            if isinstance(key, ast.Constant):
+                keys.append(key.value)
+            elif isinstance(key, ast.Name):
+                keys.append(self.resolve(module, key.id, depth + 1))
+            else:
+                raise ValueError("unresolvable key in " + module + "." + name)
+        return {"keys": keys}
 
 
 def receipt_schema(effects: Effects) -> dict:
@@ -529,10 +583,13 @@ def receipt_schema(effects: Effects) -> dict:
     """
     runner = effects.root / "apps/crq-python"
     try:
-        target = _module_constants(runner / "runtime_target.py")
-        constants = _module_constants(runner / "review_receipt.py", target)
-        policy, version = constants["POLICY"], constants["VERSION"]
-        targets = tuple(constants["SELECTORS"]["keys"])
+        constants = _Constants(runner)
+        policy = constants.resolve("review_receipt", "POLICY")
+        version = constants.resolve("review_receipt", "VERSION")
+        selectors = constants.resolve("review_receipt", "SELECTORS")
+        if not isinstance(selectors, dict):
+            raise ValueError("review_receipt.SELECTORS is not a dict literal")
+        targets = tuple(selectors["keys"])
         if (not isinstance(policy, str) or type(version) is not int or not targets
                 or not all(isinstance(t, str) for t in targets)):
             raise ValueError("unexpected constant types")

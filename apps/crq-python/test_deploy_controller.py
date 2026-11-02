@@ -627,6 +627,42 @@ class HealthTests(ControllerFixture):
         self.assertIs(validation["valid"], True)
         self.assertTrue(validation["schema_source"].startswith("builtin"))
 
+    def test_later_non_literal_rebinding_makes_a_constant_unresolved(self):
+        for rebinding in ('POLICY = "-".join(["x", "y"])\n',
+                          'POLICY: str = "affected-current-additions-v1"\n',
+                          "POLICY += ''\n", "from os import sep as POLICY\n",
+                          "def POLICY():\n    pass\n",
+                          "if True:\n    POLICY = 'other'\n",
+                          "for POLICY in ():\n    pass\n", "del POLICY\n"):
+            with self.subTest(rebinding=rebinding):
+                self.install_receipt_sources()
+                with (self.runner / "review_receipt.py").open("a") as out:
+                    out.write("\n" + rebinding)
+                schema = dc.receipt_schema(self.effects)
+                self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+                self.assertIn("POLICY", schema["schema_source"])
+        # The same for an imported selector key rebound in runtime_target.
+        self.install_receipt_sources()
+        with (self.runner / "runtime_target.py").open("a") as out:
+            out.write("\nLEGACY_BRANCH = DEFAULT_BRANCH.upper()\n")
+        schema = dc.receipt_schema(self.effects)
+        self.assertTrue(schema["schema_source"].startswith("builtin"), schema)
+        self.assertIn("LEGACY_BRANCH", schema["schema_source"])
+
+    def test_only_the_needed_constants_are_resolved(self):
+        self.install_receipt_sources()
+        with (self.runner / "review_receipt.py").open("a") as out:
+            out.write("\nUNRELATED = {UNKNOWN_NAME: 1, f'{POLICY}': 2, (1, 2): 3}\n"
+                      "OTHER = compute()\nLATER = {**SELECTORS}\n"
+                      "def helper():\n    POLICY = 'local only'\n    return POLICY\n")
+        with (self.runner / "runtime_target.py").open("a") as out:
+            out.write("\nUNRELATED_TARGETS = {object(): 1}\n")
+        schema = dc.receipt_schema(self.effects)
+        self.assertEqual(schema["schema_source"],
+                         "deployment:apps/crq-python/review_receipt.py")
+        self.assertEqual(schema["targets"], ("promoted-main", "merge-queue"))
+        self.assertEqual(schema["policy"], review_receipt.POLICY)
+
     def test_valid_bounded_receipt_sample_and_stalled_tick_stay_independent(self):
         for index in range(dc.RECEIPT_SAMPLE + 2):
             self.write_receipt(self.receipt_document(item_id="current-%d" % index))
