@@ -1441,6 +1441,10 @@ def discover_merged(q, budget, *, interval, recent=False):
 # ----------------------------------------------------------- planning a review
 
 
+class AdminRefused(Exception):
+    """An admin command safely refused mutation; the operator must decide (exit 3)."""
+
+
 class NotReady(Exception):
     pass
 
@@ -2829,7 +2833,7 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str], *,
         if not item:
             sys.exit(f"no item {item_id}")
         if action == "requeue" and item["kind"] == review_receipt.KIND:
-            raise ValueError("merged-current retries require explicit lineage/ownership authorization; needs-human")
+            raise AdminRefused("merged-current retries require explicit lineage/ownership authorization; needs-human")
         if action in ("prioritize", "deprioritize"):
             if item["state"] != "pending":
                 raise ValueError("operator priority requires a pending item")
@@ -3067,7 +3071,11 @@ def main() -> int:
     elif args.cmd == "author-observe":
         with_lock(author_observe, args.manifest)
     else:
-        with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
+        try:
+            with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
+        except AdminRefused as exc:
+            print(f"{args.cmd} refused: {exc}", file=sys.stderr)
+            return 3
     return 0
 
 
