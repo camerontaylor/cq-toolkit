@@ -59,6 +59,7 @@ import {
   addressFailureFeedback,
   type AddressFailedAttempt,
 } from './internal/addressEvidence.js';
+import { formatCqTrailers } from '../../shared/cqTrailers.js';
 import type { FailedAttemptGate } from '../sweep/taskLoop.js';
 
 const OutcomeSchema = z
@@ -1183,7 +1184,23 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               if (feedback.disposition !== 'fixed')
                 throw new Error(`feedback did not confirm fix: ${feedback.reason}`);
               const broader = await runChecks(candidate, finding, false);
-              const message = `fix(review): Address ${finding.id.replace(/[\r\n]/g, ' ')}\n\nOutcome: code-bug\nConfidence: 90\nTested: configured related and broader checks`;
+              const message = `fix(review): Address ${finding.id.replace(/[\r\n]/g, ' ')}\n\nOutcome: code-bug\nConfidence: 90\nTested: configured related and broader checks\n${formatCqTrailers(
+                [
+                  ['Cq-Run', runPrefix],
+                  ['Cq-Unit', `review/${dispatch!.slug}`],
+                  // Review finding ids are caller-supplied paths that may
+                  // contain newlines (existing commits sanitize the subject
+                  // the same way); a trailer is a single physical line, so
+                  // sanitize before the shared writer.
+                  ['Cq-Task', finding.id.replace(/[\r\n]+/g, ' ')],
+                  ['Cq-Attempt', String(dispatch!.ordinal)],
+                  ['Cq-Tier', tier],
+                  // Attribution must record the model the driver actually
+                  // resolved, not the configured role (invoke() stamps
+                  // editingRow.model from resolved.modelSpec).
+                  ['Cq-Model', `${editingRow!.model.provider}/${editingRow!.model.model}`],
+                ],
+              )}`;
               const gates = await Promise.all(
                 baseline.map((base, index) =>
                   validateFix({
