@@ -921,28 +921,35 @@ describe('runAgentReviewer correlation forwarding (M5b2)', () => {
       { workId: 'w-other', runId: 'r-9' },
       { workId: 'w-third', role: 'observer', task: 'review a diff' },
     ] as const;
-    let i = 0;
-    for (const governed of rows) {
+    const invocationsPerRow: Array<typeof fake.invocations> = [];
+    for (const [i, governed] of rows.entries()) {
+      const before = fake.invocations.length;
       const result = await runLadder(
         () => runAgentReviewer(fake.drivers, reviewerInput()),
         {},
         {
           op: 'review.run',
-          jobKey: `m5b2-table-${i++}`,
+          jobKey: `m5b2-table-${i}`,
           attempt: 1,
           correlation: { ...governed },
         },
       );
       expect(result.outcome).toBe('completed');
+      invocationsPerRow.push(fake.invocations.slice(before));
     }
-    expect(fake.invocations.length).toBeGreaterThanOrEqual(rows.length);
-    for (const invocation of fake.invocations) {
-      const governed = rows.find((row) => invocation.correlation?.workId === row.workId);
-      expect(governed).toBeDefined();
-      expect(invocation.correlation).toEqual({
-        ...governed,
-        role: ('role' in governed! ? governed.role : undefined) ?? 'fixer',
-      });
+    // Independently-constructed expected row: the expected correlation is
+    // built from the fixture's own inputs, never from the produced output.
+    for (const [i, governed] of rows.entries()) {
+      const rowInvocations = invocationsPerRow[i]!;
+      expect(rowInvocations.length).toBeGreaterThan(0);
+      for (const invocation of rowInvocations)
+        expect(invocation.correlation).toEqual({
+          workId: governed.workId,
+          ...('parentWorkId' in governed && { parentWorkId: governed.parentWorkId }),
+          ...('runId' in governed && { runId: governed.runId }),
+          ...('task' in governed && { task: governed.task }),
+          role: 'role' in governed ? governed.role : 'fixer',
+        });
     }
   });
 });
