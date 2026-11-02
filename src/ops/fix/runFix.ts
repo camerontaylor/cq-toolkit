@@ -274,6 +274,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       });
       accountPlanned();
       report.fixesPerRun = fixesPerRunOf(report.tasks);
+      // The needs-human terminal leg above and this failed/ok terminal write
+      // are each load-bearing: deleting either one fails the composition
+      // tests below (the needs-human run asserts 2, not the init 0).
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       for (const task of report.tasks)
@@ -606,6 +609,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           });
         }
       }
+      // Distinctness is load-bearing in the tests below: with two fixed rows
+      // sharing one commit SHA, the old task-count formula would read 4.
       report.fixesPerRun = fixesPerRunOf(report.tasks);
       report.usage = report.run.usage ?? report.usage;
       const human =
