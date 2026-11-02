@@ -58,6 +58,15 @@ residual ownership rules: [CRQ contract](../apps/crq-python/README.md#runtime-ow
 
 Class key from consolidation.md §3: **C** = carry into the next step, **P** = park (issue filed), **R** = retire with a note ([Retirements](#retirements-2026-10-24)).
 
+**Backlog delta (2026-11-02):** [ADR-0008](adr/0008-journal-v3-report-v2.md)
+proposes the single journal v3/report v2 amendment before 0.2.0: shared cross-run
+fingerprints, content-keyed replay, provenance, classed attempts and budgets,
+structured gate/bail evidence, observed approval/write-path events, durable finding
+dispositions, exact-head acceptance and honest per-run fixes numerators/denominators.
+Implementation and legacy-reader migration remain backlog work; the I1 five-status
+union, two-tier ladder and existing authorization stay unchanged, with no new required
+check, lock or approval. ADR-0007 remains the task-ref identity rule.
+
 ### Carried (C)
 
 | Item                                                                                  | Notes                                                                                      |

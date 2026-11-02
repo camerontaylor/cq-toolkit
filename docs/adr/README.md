@@ -27,6 +27,7 @@ code disagree with an ADR, the code and the notes are current.
 | [ADR-0004 — Policy-check trust boundaries](0004-policy-check-trust-boundaries.md)                   | Where policy checks get their code and definitions, credentials and identities, and promotion              |
 | [ADR-0005 — Architecture revision](0005-architecture-revision.md)                                   | The layered monorepo, policy foundation, driver lanes and TypeScript queue rewrite                         |
 | [ADR-0006 — Fix engine and address-review as CLI compositions](0006-fix-engine-cli-compositions.md) | The developer-loop commands as registered ops owning their dataflow, with `cq.json` as the policy file     |
+| [ADR-0008 — Journal v3 + report v2](0008-journal-v3-report-v2.md)                                   | Proposed batched provenance, identity, attempt accounting and measurement contract amendment               |
 
 ## Terms and identifiers
 
