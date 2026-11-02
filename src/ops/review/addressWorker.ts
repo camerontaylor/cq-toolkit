@@ -19,6 +19,7 @@ import type { DriverFactory } from '../../driver/factory.js';
 import type { ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import type { GhFn } from '../../adapters/forge-github/gh.js';
@@ -497,6 +498,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             invocation === 'closure'
               ? toOutputSchema('review.address.closure/v1', ClosureSchema)
               : toOutputSchema('review.address.outcome/v1', OutcomeSchema),
+          // Session-log correlation (M5b3): forward the governed job's minted
+          // work identity onto every worker invocation so the lane stamps the
+          // child's CQ_* env. The KERNEL reads the job context; the shared
+          // driver helper stays pure over the correlation value (ADR-0002
+          // one-directional rule). Absent outside a governed dispatch.
+          ...correlationInvocation(currentJobContext()?.info?.correlation),
         },
         { signal: deadline.signal },
       );
