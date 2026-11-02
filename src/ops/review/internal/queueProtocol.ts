@@ -108,6 +108,7 @@ export const QueueRequestAliasSchema = z
 export type QueueRequestAlias = z.infer<typeof QueueRequestAliasSchema>;
 export const QueueStatusSchema = z
   .object({
+    snapshot: QueueDigest.exactOptional(),
     state: QueueStateSchema,
     pr: z.number().int().positive().nullable(),
     mergeSha: QueueSha.nullable(),
