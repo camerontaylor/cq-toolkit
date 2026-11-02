@@ -1097,6 +1097,22 @@ describe('hackDetector: Python skip/xfail markers (#774)', () => {
     ]);
   });
 
+  test('a line matched by both the JS/TS regex and a Python marker yields one finding', async () => {
+    // `model.fit(` matches the shipped JS/TS `fit(` focus marker and
+    // `pytest.skip(` the Python recognition: the regex finding stands alone.
+    const line = '    pytest.skip("x"); model.fit(data)';
+    expect(await findingsOf(pyDiff([line]))).toEqual([
+      {
+        kind: 'new-skip-only',
+        file: PY,
+        line: 1,
+        pattern: DEFAULT_SKIP_ONLY_PATTERN,
+        snippet: line.trim(),
+        message: 'added line marks a test as skipped or focused',
+      },
+    ]);
+  });
+
   test('detectNewSkipOnly: false mutes Python markers', async () => {
     expect(await markersOf(pyDiff(['@pytest.mark.skip']), { detectNewSkipOnly: false })).toEqual(
       [],
