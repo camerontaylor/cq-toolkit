@@ -14,14 +14,14 @@ import type { WorkCorrelation } from '../../src/driver/types.js';
 
 describe('M5b1 nominal evidence', () => {
   it('a direct invocation inside a Paseo agent derives paseo:<PASEO_AGENT_ID> as CQ_PARENT_WORK_ID at the shared driver boundary', () => {
+    // The lane-composed child env: the raw agent id is never forwarded;
+    // buildChildEnv translates it into the derived link at composition.
     const env = buildChildEnv(
       { PATH: '/bin', PASEO_AGENT_ID: '61f19a9d' },
-      // The overrides map a lane composes (auth/base-url); PASEO_AGENT_ID
-      // rides only via the allowlist pass-through of the PARENT map here.
+      // The overrides map a lane composes (auth/base-url).
       { ANTHROPIC_BASE_URL: 'http://localhost:8080' },
-      ['PASEO_AGENT_ID'],
     );
-    expect('PASEO_AGENT_ID' in env).toBe(true);
+    expect('PASEO_AGENT_ID' in env).toBe(false);
     applyCorrelationEnv(env, undefined);
     expect(env['CQ_PARENT_WORK_ID']).toBe('paseo:61f19a9d');
     // The derivation links the child WITHOUT minting a work identity:
@@ -97,14 +97,31 @@ describe('M5b1 missing evidence', () => {
 });
 
 describe('M5b1 failure evidence', () => {
-  it('PASEO_AGENT_ID is never forwarded: it is not on the default child allowlist and the derivation consumes it', () => {
-    expect('PASEO_AGENT_ID' in buildChildEnv({ PATH: '/bin', PASEO_AGENT_ID: 'a1' })).toBe(false);
-    // And on a default-allowlist child env (the real lane shape) the raw id
-    // still never rides, while the derived parent link does.
+  it('PASEO_AGENT_ID is never forwarded: the raw id never rides, only the derived parent link', () => {
+    // The real lane shape: buildChildEnv composes the child env from the
+    // parent, and the raw agent id is NOT on the default allowlist — so it
+    // is translated into the derived `paseo:<id>` link AT COMPOSITION TIME
+    // (review major: without this, the driver boundary could never derive
+    // the parent, because the raw id was already gone).
     const env = buildChildEnv({ PASEO_AGENT_ID: 'a1', PATH: '/bin' });
-    applyCorrelationEnv(env, undefined);
     expect('PASEO_AGENT_ID' in env).toBe(false);
-    expect(env['CQ_PARENT_WORK_ID']).toBeUndefined();
+    expect(env['CQ_PARENT_WORK_ID']).toBe('paseo:a1');
+    // The driver boundary then finds no raw id to derive from (already
+    // translated) and leaves the composed link alone.
+    applyCorrelationEnv(env, undefined);
+    expect(env['CQ_PARENT_WORK_ID']).toBe('paseo:a1');
+    expect('PASEO_AGENT_ID' in env).toBe(false);
+    // An explicit inherited CQ_PARENT_WORK_ID survives composition (higher
+    // precedence tier, never clobbered).
+    const explicit = buildChildEnv({
+      PASEO_AGENT_ID: 'a1',
+      CQ_PARENT_WORK_ID: 'outer-parent',
+      PATH: '/bin',
+    });
+    expect(explicit['CQ_PARENT_WORK_ID']).toBe('outer-parent');
+    // Blank agent id: no link invented.
+    const blank = buildChildEnv({ PASEO_AGENT_ID: '  ', PATH: '/bin' });
+    expect(blank['CQ_PARENT_WORK_ID']).toBeUndefined();
   });
 
   it('the host environment cannot affect the fixtures: the derivation reads only the passed map', () => {

@@ -244,6 +244,21 @@ export function buildChildEnv(
   if (overrides !== undefined) {
     for (const [name, value] of Object.entries(overrides)) child[name] = value;
   }
+  // Direct op parent correlation (measurement M5b1): translate the
+  // enclosing Paseo agent id into the derived `paseo:<id>` parent-work
+  // link HERE, at composition time — PASEO_AGENT_ID is NOT on the
+  // allowlist, so without this the raw id is dropped before the driver
+  // boundary can derive the link. Only the derived id lands in the child
+  // env; the raw agent id never rides. An explicit inherited
+  // CQ_PARENT_WORK_ID is the higher precedence tier and is NOT clobbered;
+  // the composition is best-effort: no agent id in the parent env means
+  // no link, exactly as before.
+  if (child['CQ_PARENT_WORK_ID'] === undefined) {
+    const paseoAgentId = parentEnv['PASEO_AGENT_ID']?.trim();
+    if (paseoAgentId !== undefined && paseoAgentId !== '') {
+      child['CQ_PARENT_WORK_ID'] = `paseo:${paseoAgentId}`;
+    }
+  }
   return child;
 }
 
