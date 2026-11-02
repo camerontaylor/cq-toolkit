@@ -536,16 +536,26 @@ export interface CorrelationRecord {
 
 /**
  * Journal: run started, v3 (ADR-0008). `E.type = 'run-started'`,
- * `E.journalVersion = 3`; carries provenance, correlation and availability.
+ * `E.journalVersion = 3`; carries the preserved v2 envelope fields (`planId`,
+ * `seq`, exactly one of `governance`/`ungoverned` — v3 joins the existing
+ * sequenced v2 ordering) plus provenance, correlation and availability.
  * Dispatch on run-started version: absent → v1, 2 → v2, 3 → v3. Writer
- * disabled until the v3 dual-reader ships (schema-only, this slice).
+ * disabled until the v3 dual-reader ships (schema-only, this slice); the
+ * v1/v2 RunLog must keep rejecting this shape.
  */
 export interface RunStartedV3JournalEvent {
   type: 'run-started';
   runId: string;
   /** UTC ISO-8601 with milliseconds. */
   at: string;
+  planId: string;
   journalVersion: 3;
+  /** Fold-order ordinal: 1 + max(prior seq) for this plan; v3 is sequenced. */
+  seq: number;
+  /** Exactly one of governance/ungoverned (same coupling as v2). */
+  governance?: GovernanceRecord;
+  /** Exactly one of governance/ungoverned (same coupling as v2). */
+  ungoverned?: { optIn: true };
   provenance: ProvenanceRecord;
   correlation: CorrelationRecord;
   availability: Record<string, AvailabilityRecord>;
@@ -638,18 +648,7 @@ export type JournalEvent =
   | ReservationRefusedJournalEvent
   | JobQuarantinedJournalEvent
   | QuarantineReleasedJournalEvent
-  | BudgetTrippedJournalEvent
-  | AttemptFinishedJournalEvent;
-
-/**
- * All journal v3 event shapes (ADR-0008). The v3 run-started header shares
- * its `type` discriminator with the v1/v2 carrier, so it cannot join the
- * zod discriminated union above; T02's dual reader dispatches on the
- * run-started version (absent → v1, 2 → v2, 3 → v3). Until then the v3
- * header parses only through {@link RunStartedV3JournalEventSchema} and no
- * writer emits it.
- */
-export type JournalEventV3 = RunStartedV3JournalEvent | AttemptFinishedJournalEvent;
+  | BudgetTrippedJournalEvent;
 
 /**
  * Registry entry for one op. Runtime-only: never persisted (the importer is

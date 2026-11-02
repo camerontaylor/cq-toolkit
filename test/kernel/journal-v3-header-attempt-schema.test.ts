@@ -1,19 +1,21 @@
 // Journal v3 header + attempt schemas (ADR-0008, T25) — schema-only slice.
 //
 // Pinned here:
-//   1. Round-trip: a v3 run-started header (journalVersion 3, provenance,
-//      correlation, availability) and an attempt-finished event parse via the
-//      discriminated union and come back byte-identical; old v1/v2 run-started
-//      shapes stay readable through the same union (no writer is enabled by
-//      this slice — schema only).
-//   2. Unknown evidence: unknown future journalVersion and unknown event
-//      kinds fail explicitly; a v3 header with an unknown availability state
-//      or a v2 run-started reclassified to version 3 fails.
-//   3. Failure boundary: strict extras rejection and the schema-only writer
-//      rule — the v3 schemas are parseable but the existing v2 writer path
-//      (openRunLog append with the frozen v2 run-started) is untouched, and
-//      append still validates through the union (a v3 header would only be
-//      writable by the future v3 writer, which this slice does not add).
+//   1. Round-trip: a v3 run-started header (journalVersion 3, the preserved
+//      v2 envelope fields planId/seq plus exactly one governance marker, and
+//      provenance/correlation/availability) and an attempt-finished event
+//      parse through their standalone strict schemas byte-identically; old
+//      v1/v2 run-started shapes stay readable through the existing v1/v2
+//      union. No writer is enabled by this slice.
+//   2. Unknown evidence: unknown future journalVersion, unknown availability
+//      state and unknown event kinds fail explicitly; a v2 record
+//      reclassified to version 3 fails the v3 schema (no additive sleight of
+//      hand), and a v3 header with disagreeing baseSha/witnesses.base fails.
+//   3. Failure boundary: strict extras rejection; the v1/v2 kernel RunLog
+//      (JournalEventSchema via append/parseLine) must keep REJECTING both v3
+//      carriers — strict v2 rejection of v3 (ADR acceptance); attempt-finished
+//      and the v3 header are observation-stream carriers until T02 assembles
+//      the v3 union and dual reader.
 //
 // Determinism: fixed ISO timestamps and fixture SHAs, no Date.now().
 import { describe, expect, test } from 'vitest';
@@ -27,6 +29,7 @@ import type {
   AttemptFinishedJournalEvent,
   AttemptStopClass,
   AvailabilityState,
+  JournalEvent,
   RunStartedV3JournalEvent,
 } from '../../src/kernel/types.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -42,7 +45,10 @@ function header(overrides?: Partial<RunStartedV3JournalEvent>): RunStartedV3Jour
     type: 'run-started',
     runId: 'plan-x--k--a',
     at: AT,
+    planId: 'plan-x',
     journalVersion: 3,
+    seq: 1,
+    governance: { attended: false },
     provenance: {
       cqVersion: '0.2.0',
       producerVersion: '0.2.0',
@@ -125,10 +131,10 @@ describe('journal v3 header/attempt schemas (T25)', () => {
 
     const a = attemptFinished();
     expect(AttemptFinishedJournalEventSchema.parse(a)).toEqual(a);
-    expect(JournalEventSchema.parse(a)).toEqual(a);
 
-    // Old versions stay readable through the same strict union: a v1-shaped
-    // run-started (no journalVersion) and a full v2 record parse unchanged.
+    // Old versions stay readable through the existing strict union: a
+    // v1-shaped run-started (no journalVersion) and a full v2 record parse
+    // unchanged.
     const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
     expect(JournalEventSchema.parse(v1)).toEqual(v1);
     const v2 = {
@@ -144,14 +150,29 @@ describe('journal v3 header/attempt schemas (T25)', () => {
   });
 
   test('T25 unknown evidence', () => {
-    // Unknown future journal version fails explicitly (the v3 header is its
-    // own strict schema; T02's reader will dispatch run-started by version).
+    // Unknown future journal version fails explicitly.
     const v4 = { ...header(), journalVersion: 4 };
     expect(RunStartedV3JournalEventSchema.safeParse(v4).success).toBe(false);
     // A v3 header cannot omit the version (an old v1 record is not a v3 one).
     expect(
-      RunStartedV3JournalEventSchema.safeParse({ ...header(), journalVersion: undefined }).success,
+      RunStartedV3JournalEventSchema.safeParse({
+        ...header(),
+        journalVersion: undefined,
+      } as unknown as RunStartedV3JournalEvent).success,
     ).toBe(false);
+    // A v2 run-started reclassified to version 3 fails: it lacks the v3-only
+    // provenance/correlation/availability carriers (no additive sleight of
+    // hand — strict schemas forbid it).
+    const v2AsV3 = {
+      type: 'run-started',
+      runId: 'plan-x--k--c',
+      at: AT,
+      planId: 'plan-x',
+      journalVersion: 3,
+      seq: 1,
+      ungoverned: { optIn: true },
+    };
+    expect(RunStartedV3JournalEventSchema.safeParse(v2AsV3).success).toBe(false);
     // Unknown availability state fails explicitly.
     const badAvailability = header({
       availability: {
@@ -159,7 +180,18 @@ describe('journal v3 header/attempt schemas (T25)', () => {
       },
     });
     expect(RunStartedV3JournalEventSchema.safeParse(badAvailability).success).toBe(false);
-    // Unknown event kind fails explicitly.
+    // A non-JSON-Pointer availability key fails (empty or leading '/' only).
+    const badPointer = header({
+      availability: {
+        tokens: { state: 'not-collected', reason: 'x', source: null },
+      },
+    });
+    expect(RunStartedV3JournalEventSchema.safeParse(badPointer).success).toBe(false);
+    // A non-UUID workId fails (work ids are UUIDs, ADR-0008).
+    const badWorkId = header();
+    badWorkId.correlation.workId = 'not-a-uuid';
+    expect(RunStartedV3JournalEventSchema.safeParse(badWorkId).success).toBe(false);
+    // Unknown event kind fails explicitly on the v1/v2 union.
     expect(
       JournalEventSchema.safeParse({ type: 'attempt-started', runId: 'r', at: AT }).success,
     ).toBe(false);
@@ -192,16 +224,39 @@ describe('journal v3 header/attempt schemas (T25)', () => {
     expect(
       AttemptFinishedJournalEventSchema.safeParse(attemptFinished({ attempt: 0 })).success,
     ).toBe(false);
+    // Exactly-one governance coupling, as in v2.
+    expect(
+      RunStartedV3JournalEventSchema.safeParse({
+        ...header(),
+        ungoverned: { optIn: true },
+      }).success,
+    ).toBe(false);
+    expect(
+      RunStartedV3JournalEventSchema.safeParse({
+        ...header(),
+        governance: undefined,
+      } as unknown as RunStartedV3JournalEvent).success,
+    ).toBe(false);
+    // The header's baseSha and witnesses.base must agree (ADR envelope rule).
+    const disagreeing = header();
+    disagreeing.provenance.witnesses.base = 'c'.repeat(40);
+    expect(RunStartedV3JournalEventSchema.safeParse(disagreeing).success).toBe(false);
 
-    // Writer disabled: the v2 append path is untouched. Appending a v2
-    // run-started still validates and persists; nothing in this slice writes
-    // v3 (schema-only).
+    // Strict v2 rejection of v3: the kernel v1/v2 RunLog validates through
+    // JournalEventSchema (append AND read-back), so both v3 carriers must
+    // fail there — attempt-finished and the v3 header are observation-stream
+    // carriers until T02 assembles the v3 union and dual reader. Old shapes
+    // still write and read back unchanged.
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t25-'));
       const log = openRunLog(dir);
       const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
       await log.append('plan-x--k--a', JournalEventSchema.parse(v1));
+      await expect(
+        log.append('plan-x--k--a', attemptFinished() as unknown as JournalEvent),
+      ).rejects.toThrow();
+      await expect(log.append('plan-x--k--a', header() as never)).rejects.toThrow();
       const read = await log.read('plan-x--k--a');
       expect(read).toEqual([v1]);
     } finally {

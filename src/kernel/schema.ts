@@ -49,7 +49,10 @@ import type {
   RunEarlyStopReason,
   RunOptions,
   RunReport,
+  RunStartedV3JournalEvent,
   WitnessesRecord,
+  AttemptFinishedJournalEvent,
+  AttemptFinishedPayload,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -615,9 +618,9 @@ export const AvailabilityRecordSchema: z.ZodType<AvailabilityRecord> = z
   })
   .strict();
 
-/** Availability map keyed by JSON Pointer relative to the containing payload. */
+/** Availability map keyed by JSON Pointer (empty or leading '/') relative to the containing payload. */
 export const AvailabilityMapSchema: z.ZodType<Record<string, AvailabilityRecord>> = z.record(
-  z.string(),
+  z.string().regex(/^$|^\//),
   AvailabilityRecordSchema,
 );
 
@@ -649,8 +652,8 @@ export const ProvenanceRecordSchema: z.ZodType<ProvenanceRecord> = z
 
 export const CorrelationRecordSchema: z.ZodType<CorrelationRecord> = z
   .object({
-    workId: z.string().min(1),
-    parentWorkId: z.string().min(1).nullable(),
+    workId: z.uuid(),
+    parentWorkId: z.uuid().nullable(),
     branch: z.string(),
     commitSha: ShaSchema.nullable(),
     sessionId: z.string().min(1).nullable(),
@@ -658,17 +661,52 @@ export const CorrelationRecordSchema: z.ZodType<CorrelationRecord> = z
   })
   .strict();
 
-export const RunStartedV3JournalEventSchema = z
+export const RunStartedV3JournalEventSchema: z.ZodType<RunStartedV3JournalEvent> = z
   .object({
     type: z.literal('run-started'),
     runId: z.string(),
     at: z.iso.datetime(),
+    planId: z.string(),
     journalVersion: z.literal(3),
+    seq: z.number().int().positive(),
+    governance: GovernanceRecordSchema.exactOptional(),
+    ungoverned: z
+      .object({ optIn: z.literal(true) })
+      .strict()
+      .exactOptional(),
     provenance: ProvenanceRecordSchema,
     correlation: CorrelationRecordSchema,
     availability: AvailabilityMapSchema,
   })
-  .strict();
+  .strict()
+  // Envelope couplings (ADR-0008), encoded per the refinements policy:
+  // exactly one of governance/ungoverned, as in v2; the header's baseSha and
+  // witnesses.base must agree.
+  .superRefine((event, ctx) => {
+    const hasGovernance = event.governance !== undefined;
+    const hasUngoverned = event.ungoverned !== undefined;
+    if (hasGovernance && hasUngoverned) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'governance and ungoverned are mutually exclusive',
+        path: ['ungoverned'],
+      });
+    }
+    if (!hasGovernance && !hasUngoverned) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a v3 run-started requires exactly one of governance or ungoverned',
+        path: ['governance'],
+      });
+    }
+    if (event.provenance.baseSha !== event.provenance.witnesses.base) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'provenance.baseSha and provenance.witnesses.base must agree',
+        path: ['provenance'],
+      });
+    }
+  });
 
 export const AttemptStopClassSchema: z.ZodType<AttemptStopClass> = z.enum([
   'retriable',
@@ -711,7 +749,7 @@ export const AttemptBudgetSchema: z.ZodType<AttemptBudget> = z
   })
   .strict();
 
-export const AttemptFinishedPayloadSchema = z
+export const AttemptFinishedPayloadSchema: z.ZodType<AttemptFinishedPayload> = z
   .object({
     tier: z.enum(['worker', 'rescue']),
     invocation: z.string(),
@@ -736,7 +774,7 @@ export const AttemptFinishedPayloadSchema = z
   })
   .strict();
 
-export const AttemptFinishedJournalEventSchema = z
+export const AttemptFinishedJournalEventSchema: z.ZodType<AttemptFinishedJournalEvent> = z
   .object({
     type: z.literal('attempt-finished'),
     runId: z.string(),
@@ -760,5 +798,4 @@ export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion(
   JobQuarantinedJournalEventSchema,
   QuarantineReleasedJournalEventSchema,
   BudgetTrippedJournalEventSchema,
-  AttemptFinishedJournalEventSchema,
 ]);

@@ -1264,7 +1264,6 @@ export function deriveJobStatuses(events: readonly JournalEvent[]): JobStatus[] 
       case 'job-quarantined':
       case 'quarantine-released':
       case 'budget-tripped':
-      case 'attempt-finished':
         break; // no per-job VERDICT facts (a quarantine is not a terminal verdict; the governed runner owns it)
     }
   }
