@@ -95,9 +95,9 @@ def merged_current(queue, receipt_root=None):
             counts["unverified"] += 1
     discovery = queue.get("merged_reconcile") or {}
     allowed = ("after", "before", "complete", "complete_through", "next_cursor", "represented",
-               "intents", "unsupported", "duplicates_seen", "records_read", "inventory_digest")
+               "intents", "unsupported", "duplicates_seen", "records_read", "inventory_digest", "reason", "pages_read", "transient_failures")
     natural = queue.get("merged_discovery") or {}
-    return {"natural_discovery": {key: natural[key] for key in ("after", "before", "complete", "error") if key in natural},
+    return {"natural_discovery": {key: natural[key] for key in ("after", "before", "complete", "error", "reason") if key in natural},
             "discovery": {key: discovery[key] for key in allowed if key in discovery},
             "watermark": queue.get("merged_watermark"), "receipts": counts,
             "path_exclusions": exclusions, "captured_targets": sorted(targets)[:32],
