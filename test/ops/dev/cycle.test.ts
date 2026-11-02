@@ -1049,8 +1049,7 @@ describe('dev.cycle', () => {
   });
 
   test("S7 H (D2): tokens the review leg spent through the cycle's drivers are gone from the address leg's budget", async () => {
-    const scanner = await makeGitleaksFixture();
-    vi.stubEnv('PATH', scanner.path);
+    const scanner = await stubM7Scanner();
     try {
       await repo.write('package.json', JSON.stringify({ name: 'fixture-cycle' }));
       await repo.write(
@@ -1111,7 +1110,7 @@ describe('dev.cycle', () => {
       expect(spent % 150).toBe(0);
     } finally {
       vi.unstubAllEnvs();
-      await rm(scanner.root, { recursive: true, force: true });
+      await scanner();
     }
   });
 
@@ -1206,13 +1205,12 @@ describe('dev.cycle', () => {
     // any driver role; CI's coverage runner has no gitleaks binary, so the
     // probe binds the SAME hermetic gitleaks fixture the e2e address tests
     // use (process-backed clean scanner, never a production override).
-    const scanner = await makeGitleaksFixture();
-    vi.stubEnv('PATH', scanner.path);
+    const scanner = await stubM7Scanner();
     try {
       await runProbe();
     } finally {
       vi.unstubAllEnvs();
-      await rm(scanner.root, { recursive: true, force: true });
+      await scanner();
     }
 
     async function runProbe(): Promise<void> {
@@ -1729,11 +1727,10 @@ describe('dev.cycle', () => {
     repo.commitAll('M7 cycle usage fixture');
   }
 
-  /**
-   * A helper the four default-review-leg M7 tests share: CI runners have no
-   * gitleaks binary, so the agent leg's pre-dispatch scan needs the hermetic
-   * scanner fixture on PATH. Returns the cleanup.
-   */
+  /** A helper every agent-leg test with a pre-dispatch scan shares (the four
+   * default-review-leg M7 tests plus the S7 probe and the M7 cancellation
+   * and usage tests): CI runners have no gitleaks binary, so the scan needs
+   * the hermetic scanner fixture on PATH. Returns the cleanup. */
   async function stubM7Scanner(): Promise<() => Promise<void>> {
     const scanner = await makeGitleaksFixture();
     vi.stubEnv('PATH', scanner.path);
@@ -1964,8 +1961,7 @@ describe('dev.cycle', () => {
     // CI's coverage runner has no gitleaks binary: bind the SAME hermetic
     // scanner fixture the other agent-leg tests use so the pre-upload scan is
     // clean and the wall is spent by the dispatch, not the scan.
-    const scanner = await makeGitleaksFixture();
-    vi.stubEnv('PATH', scanner.path);
+    const scanner = await stubM7Scanner();
     try {
       const op = makeDevCycle({
         effects: effects(),
@@ -1986,8 +1982,7 @@ describe('dev.cycle', () => {
         unpricedCount: 1,
       });
     } finally {
-      vi.unstubAllEnvs();
-      await rm(scanner.root, { recursive: true, force: true });
+      await scanner();
     }
   });
 });

@@ -544,8 +544,8 @@ async function runTaskLoopInner(
               ? 'chore(test)'
               : `fix(${unit.package})`;
         // Trailer values here are plan-controlled labels (task.id, unit
-        // fixer/package) that validation keeps newline-free; unlike the
-        // failed path no extra sanitization is applied, so a malformed label
+        // fixer/package) that plan validation enforces as non-empty; unlike
+        // the failed path no extra sanitization is applied, so a malformed label
         // fails the commit closed via formatCqTrailers instead of emitting a
         // forged trailer line. Deliberate asymmetry with the failed path,
         // which sanitizes before the helper.

@@ -467,10 +467,10 @@ interface UsageHarness {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number } | null;
   /** When set, the Nth driver run (1-based) throws after settling usage. */
   throwOnRun?: number;
-  /** Token budget override for the caller's op input: after this many runs,
-   * the spent allowance genuinely trips the engine's own stop(). */
-  exhaustAfterRuns?: number;
-  /** When set, dispatches with this output schema name settle, then abort. */
+  /** The parent abort signal. The driver's settle path checks
+   * `state.abortSignal?.aborted` and rejects the dispatch when it is
+   * already aborted; `holdUntilAbortAfter` additionally holds a later
+   * dispatch in flight until this signal fires, then rejects it. */
   abortSignal?: AbortSignal | undefined;
   /**
    * When set with abortSignal, every dispatch AFTER this 1-based run index
@@ -485,10 +485,7 @@ interface UsageHarness {
 
 async function usageHarness(
   overrides: Partial<
-    Pick<
-      UsageHarness,
-      'usage' | 'throwOnRun' | 'exhaustAfterRuns' | 'abortSignal' | 'holdUntilAbortAfter'
-    >
+    Pick<UsageHarness, 'usage' | 'throwOnRun' | 'abortSignal' | 'holdUntilAbortAfter'>
   > = {},
 ): Promise<UsageHarness & { start: number }> {
   const state: UsageHarness & { start: number } = {
@@ -498,9 +495,6 @@ async function usageHarness(
         ? { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 }
         : overrides.usage,
     ...(overrides.throwOnRun === undefined ? {} : { throwOnRun: overrides.throwOnRun }),
-    ...(overrides.exhaustAfterRuns === undefined
-      ? {}
-      : { exhaustAfterRuns: overrides.exhaustAfterRuns }),
     ...(overrides.abortSignal === undefined ? {} : { abortSignal: overrides.abortSignal }),
     ...(overrides.holdUntilAbortAfter === undefined
       ? {}
@@ -744,12 +738,13 @@ test('M7-address failure evidence', async () => {
 
 test('M7-address exhaustion evidence', async () => {
   return withUsageEnv(async () => {
-    // The FIRST dispatch settles measured usage (2 in / 1 out); the SECOND
-    // dispatch genuinely exhausts the caller-imposed wall budget, so the
-    // ENGINE's own stop() trips and finish() records the structured budget
-    // marker. The exhausted exit retains the settled spend exactly once, the
-    // exhausted dispatch invents no usage, and parent totals match the summary.
-    const f = await usageHarness({ exhaustAfterRuns: 1 });
+    // The FIRST dispatch settles measured usage (2 in / 1 out); that spend
+    // consumes the caller-imposed token allowance, so the next partition
+    // trips its own BEFORE-dispatch token-budget stop (no second dispatch
+    // runs) and finish() records the structured budget marker. The exhausted
+    // exit retains the settled spend exactly once, no dispatch invents usage,
+    // and parent totals match the summary.
+    const f = await usageHarness();
     try {
       const result = await f.op({
         repoRoot: f.repoRoot,

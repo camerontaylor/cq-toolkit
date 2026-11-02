@@ -449,15 +449,42 @@ describe('M6b review commit evidence attribution (addressWorker)', () => {
   // M6b failure evidence: the retained failed-attempt commit carries the shared
   // Cq-* key set through the real pinAddressFailure path, and the retained
   // commit is evidence of failure, never a fix: the caller head stays put.
+  // Like the nominal test, the driver resolves a DIFFERENT model than the
+  // configured worker role, so the failed pin must record what the driver
+  // actually served (mock/served-configured), not the configured role.
   test('M6b failure evidence', async () => {
-    const f = await fixture(
-      async (input) => {
-        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'PARTIAL\n');
-        throw new Error('worker failed');
+    // The fixture driver below (set via engineDeps.drivers) writes PARTIAL and
+    // throws; the default fixture handler is not used, so pass undefined like
+    // the nominal test.
+    const f = await fixture(undefined, '', {
+      runPrefix: 'run/x',
+      configure: (config) => {
+        config.roles = {
+          worker: { provider: 'mock', model: 'configured' },
+          rescue: { ...role, model: 'rescue' },
+          reviewer: { ...role, model: 'reviewer' },
+        };
       },
-      '',
-      { runPrefix: 'run/x' },
-    );
+    });
+    // The fixture factory resolves each request to a distinct served model,
+    // so the pin's model distinguishes the resolved value from configured.
+    // The driver writes PARTIAL and throws: a real failed dispatch that the
+    // engine retains as failed-attempt evidence.
+    f.engineDeps.drivers = {
+      resolve: (request) => ({
+        lane: 'ai-sdk',
+        modelSpec: {
+          provider: request.modelSpec.provider,
+          model: `served-${request.modelSpec.model}`,
+        },
+        driver: {
+          run: async (input) => {
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'PARTIAL\n');
+            throw new Error('worker failed');
+          },
+        },
+      }),
+    };
     try {
       const result = await f.engine.fix(finding(), 1);
       expect(result.finding.status).toBe('deferred');
@@ -469,7 +496,8 @@ describe('M6b review commit evidence attribution (addressWorker)', () => {
       expect(message).toContain('Cq-Task: src/a.ts');
       expect(message).toContain('Cq-Attempt: 1');
       expect(message).toContain('Cq-Tier: worker');
-      expect(message).toContain('Cq-Model: mock/worker');
+      expect(message).toContain('Cq-Model: mock/served-configured');
+      expect(retained.model).toEqual({ provider: 'mock', model: 'served-configured' });
       expect(message).toContain('Cq-Outcome: unfixed');
     } finally {
       await f.cleanup();

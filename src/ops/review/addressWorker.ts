@@ -820,6 +820,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       let terminalAttempt: object | undefined;
       let terminalDeferred = false;
       let editingRow: AddressAttempt | undefined;
+      // The driver-resolved model of the in-flight dispatch. Set in the
+      // dispatch row callback together with `touched`, so it is always set
+      // when the failed path pins (restore() pins only when touched); kept
+      // optional for the same defensive reason as `editingRow`.
+      let resolvedModel: ModelSpec | undefined;
       let restoreRefused = false;
       let dispatch:
         | { tier: 'worker' | 'rescue'; role: ModelSpec; ordinal: number; slug: string }
@@ -880,7 +885,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               parent: head,
               firstAttempt: dispatch.ordinal,
               tier: dispatch.tier,
-              model: dispatch.role,
+              model: resolvedModel!,
               gate,
               outcome,
               reason,
@@ -892,7 +897,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               finding: finding.id,
               unit: `review/${dispatch.slug}`,
               outcome,
-              model: dispatch.role,
+              model: resolvedModel!,
               file,
               parent: head,
               executionHead: observedHead,
@@ -1051,6 +1056,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   }
                   touched = true;
                   editingRow = row;
+                  resolvedModel = row.model;
                 },
               ),
             );
