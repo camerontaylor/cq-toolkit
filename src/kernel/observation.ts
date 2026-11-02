@@ -267,46 +267,67 @@ export async function readObservations(journalDir: string): Promise<ObservationS
       if (!file.endsWith('.ndjson')) continue;
       const compositionRunId = file.slice(0, -'.ndjson'.length);
       const { events, complete } = await readStreamFile(join(dir, file));
-      streams.push({ workId, compositionRunId, events, complete });
+      const stream: ObservationStream = { workId, compositionRunId, events, complete };
+      assertStreamIdentity(stream);
+      streams.push(stream);
     }
   }
   return streams;
 }
 
 /**
+ * Stream identity couplings (ADR-0008), enforced on the read and fold paths
+ * too (readObservations/foldObservations never parse through the schema, so
+ * the schema's refinement alone does not cover on-disk streams): a COMPLETE
+ * stream opens with exactly one composition-started header (an INCOMPLETE
+ * stream is exempt — a crash during the header write leaves a torn prefix);
+ * the header's correlation.workId matches the stream's directory workId; and
+ * every event's runId matches the stream's compositionRunId.
+ */
+function assertStreamIdentity(stream: ObservationStream): void {
+  if (!stream.complete) return;
+  const headers = stream.events.filter((e) => e.type === 'composition-started');
+  if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
+    throw new Error(
+      `observation: stream '${stream.workId}/${stream.compositionRunId}' must carry exactly ` +
+        `one composition-started header at its head, found ${headers.length}`,
+    );
+  }
+  const headerEvent = headers[0];
+  if (
+    headerEvent !== undefined &&
+    headerEvent.payload.correlation.workId !== stream.workId
+  ) {
+    throw new Error(
+      `observation: stream '${stream.workId}/${stream.compositionRunId}' header ` +
+        `correlation.workId '${headerEvent.payload.correlation.workId}' does not match ` +
+        `this stream's workId '${stream.workId}'`,
+    );
+  }
+  for (const event of stream.events) {
+    if (event.runId !== stream.compositionRunId) {
+      throw new Error(
+        `observation: stream '${stream.workId}/${stream.compositionRunId}' carries an event ` +
+          `with runId '${event.runId}' that does not match its compositionRunId`,
+      );
+    }
+  }
+}
+
+/**
  * Fold observation streams into per-composition-run observations joined to
  * their kernel runs (ADR-0008): the join is by workId and kernel-run-linked
  * ONLY — file order is preserved within each stream, and cross-stream order
- * is never manufactured from timestamps. Each stream must carry exactly one
- * composition-started header; a stream without one (or with two) is corrupt
- * evidence. Kernel replay consumes only kernel streams; observational
- * events never alter reservations, sequence claims or job statuses (that is
- * the kernel fold's property, untouched here).
+ * is never manufactured from timestamps. Identity is validated before any
+ * stream folds (see {@link assertStreamIdentity}). Kernel replay consumes
+ * only kernel streams; observational events never alter reservations,
+ * sequence claims or job statuses (that is the kernel fold's property,
+ * untouched here).
  */
 export function foldObservations(streams: readonly ObservationStream[]): ObservationStream[] {
   const folded: ObservationStream[] = [];
   for (const stream of streams) {
-    const headers = stream.events.filter((e) => e.type === 'composition-started');
-    if (headers.length !== 1) {
-      throw new Error(
-        `observation: stream '${stream.workId}/${stream.compositionRunId}' must carry exactly ` +
-          `one composition-started header, found ${headers.length}`,
-      );
-    }
-    // The header must be first: a stream that opens with anything else is a
-    // broken stream, not evidence (same rule as the kernel journal header).
-    if (stream.events[0]?.type !== 'composition-started') {
-      throw new Error(
-        `observation: stream '${stream.workId}/${stream.compositionRunId}' does not open with ` +
-          'its composition-started header',
-      );
-    }
-    const links = stream.events.filter((e) => e.type === 'kernel-run-linked');
-    // The fold is the identity on well-formed streams; the linked kernel
-    // runs are readable from the kernel-run-linked events by the report
-    // assembler (T36/T37), joined by workId. No cross-stream ordering is
-    // imposed here.
-    void links;
+    assertStreamIdentity(stream);
     folded.push(stream);
   }
   return folded;

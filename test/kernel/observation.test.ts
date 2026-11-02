@@ -35,7 +35,7 @@ import type {
   ObservationEvent,
   ObservationStream,
 } from '../../src/kernel/types.js';
-import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -319,10 +319,39 @@ describe('T29 unknown evidence', () => {
         `${JSON.stringify(linked())}\n`,
         'utf8',
       );
-      const headerless = await readObservations(dir2);
-      expect(() => foldObservations(headerless)).toThrow(/exactly one composition-started/);
+      // Identity is validated during READ (readObservations never parses
+      // through the schema), so a headerless complete stream throws there.
+      await expect(readObservations(dir2)).rejects.toThrow(/exactly one composition-started/);
     } finally {
       await rm(dir2, { recursive: true, force: true });
+    }
+    // A header whose correlation.workId does not match the stream's workId
+    // directory is refused on READ, not just at write time — the writer's
+    // check does not cover on-disk streams.
+    const dir3 = await tempDir();
+    try {
+      const foreign: CompositionStartedJournalEvent = {
+        ...header(),
+        payload: {
+          ...header().payload,
+          correlation: { ...header().payload.correlation, workId: WORK_ID_2 },
+        },
+      };
+      const writer = openObservationWriter({
+        journalDir: dir3,
+        workId: WORK_ID,
+        compositionRunId: CR_ID,
+      });
+      await expect(writer.append(foreign)).rejects.toThrow(
+        /does not match this stream's workId/,
+      );
+      // Out-of-band write simulates a stream the writer never validated.
+      const streamDir = join(dir3, 'observations', WORK_ID);
+      await mkdir(streamDir, { recursive: true });
+      await writeFile(join(streamDir, `${CR_ID}.ndjson`), `${JSON.stringify(foreign)}\n`, 'utf8');
+      await expect(readObservations(dir3)).rejects.toThrow(/does not match/);
+    } finally {
+      await rm(dir3, { recursive: true, force: true });
     }
   });
 

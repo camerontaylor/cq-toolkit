@@ -1245,9 +1245,15 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
     complete: z.boolean(),
   })
   .strict()
-  // Stream coupling (ADR-0008): a COMPLETE stream carries exactly one
-  // composition-started header, first. An INCOMPLETE stream is exempt — a
-  // crash during the header write can leave a torn, headerless prefix.
+  // Stream couplings (ADR-0008), encoded per the refinements policy —
+  // validated on PARSE, not only at write time (writer-side checks do not
+  // validate supplied or on-disk streams):
+  //   - a COMPLETE stream opens with exactly one composition-started header
+  //     (an INCOMPLETE stream is exempt: a crash during the header write can
+  //     leave a torn, headerless prefix);
+  //   - the header's correlation.workId matches the stream's directory workId
+  //     (a mismatch would misattribute the whole stream at the join);
+  //   - every event's runId matches the stream's compositionRunId.
   .superRefine((stream, ctx) => {
     if (!stream.complete) return;
     const headers = stream.events.filter((e) => e.type === 'composition-started');
@@ -1257,7 +1263,27 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
         message: 'a complete stream must open with exactly one composition-started header',
         path: ['events'],
       });
+      return;
     }
+    const headerEvent = headers[0];
+    if (headerEvent !== undefined && headerEvent.payload.correlation.workId !== stream.workId) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `header correlation.workId '${headerEvent.payload.correlation.workId}' does not ` +
+          `match this stream's workId '${stream.workId}'`,
+        path: ['events'],
+      });
+    }
+    stream.events.forEach((event, i) => {
+      if (event.runId !== stream.compositionRunId) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `event.runId '${event.runId}' does not match this stream's ` +
+            `compositionRunId '${stream.compositionRunId}'`,
+          path: ['events', i],
+        });
+      }
+    });
   });
 
 /**
