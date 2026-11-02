@@ -1244,6 +1244,16 @@ def rolling_discovery_interval(q, config):
         return merged_reconcile.normalize_interval(active["after"], active["before"])
     watermark = q.get("merged_watermark")
     after = max(floor, iso(parse_iso(watermark) - dt.timedelta(minutes=5))) if watermark else floor
+    hints = _span(active)
+    span = hints.get("span")
+    if hints.get("overlap_from") and watermark:
+        # The overlap below this point held more identities than one inventory.
+        after = max(after, min(hints["overlap_from"], watermark))
+    if span and watermark:
+        # Recovering from an inventory-cap partition: grow the next interval
+        # from the last width that completed instead of the whole outage.
+        before = max(min(before, iso(parse_iso(watermark) + dt.timedelta(seconds=span))),
+                     iso(parse_iso(after) + dt.timedelta(seconds=1)))
     return merged_reconcile.normalize_interval(after, before)
 
 
@@ -1503,6 +1513,37 @@ def prune_recent_wrappers(q):
     return removed
 
 
+def _partition(after, before, watermark):
+    """Shorter frozen interval after an inventory-cap refusal, or None.
+
+    Split between max(after, watermark) and before, so each completed part
+    advances the watermark past the overlap it re-reads. Only if the overlap
+    itself cannot fit (under two seconds left above the watermark) does the
+    part start at the watermark instead of keeping the overlap.
+    """
+    low = max(after, watermark) if isinstance(watermark, str) else after
+    seconds = int((parse_iso(before) - parse_iso(low)).total_seconds())
+    if seconds >= 2:
+        return after, iso(parse_iso(low) + dt.timedelta(seconds=seconds // 2)), seconds // 2
+    if after < low < before:
+        return low, before, seconds
+    return None
+
+
+def _span(record):
+    """Partition hints carried in merged_discovery (not in status): the width
+    to try next, and the watermark below which the overlap was too dense."""
+    record = record or {}
+    span, start = record.get("span"), record.get("overlap_from")
+    hints = {"span": span} if type(span) is int and 0 < span <= MAX_SPAN else {}
+    if hints and isinstance(start, str) and merged_reconcile.TS_RE.fullmatch(start):
+        hints["overlap_from"] = start
+    return hints
+
+
+MAX_SPAN = 400 * 86400
+
+
 def discover_merged(q, budget, *, interval, recent=False):
     """Persist one caller-frozen discovery scan; tick supplies validated bounds."""
     caller = q
@@ -1519,16 +1560,26 @@ def discover_merged(q, budget, *, interval, recent=False):
     same = (active.get("after"), active.get("before")) == (after, before)
     if not same or "error" in active or "reason" in active:
         q["merged_discovery"] = {"after": after, "before": before,
-                                 "complete": same and active.get("complete") is True}
+                                 "complete": same and active.get("complete") is True, **_span(active)}
         _save_discovery_queue(q, "bounds-save")
     try:
         with forge_window(budget):
             result = reconcile_merged(q, after=after, before=before, page_budget=4, recent=recent)
-        q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"]}
+        hints = _span(active)
+        if hints and result["complete"]:
+            # A partition completed: try twice its width next, until the
+            # interval reaches the rolling upper bound again. A reduced
+            # overlap lapses once the normal five minutes have passed it.
+            hints["span"] = min(hints["span"] * 2, MAX_SPAN)
+            if before >= iso(now() - dt.timedelta(seconds=1)):
+                hints = {}
+            elif hints.get("overlap_from", "") <= iso(parse_iso(before) - dt.timedelta(minutes=5)):
+                hints.pop("overlap_from", None)
+        q["merged_discovery"] = {"after": after, "before": before, "complete": result["complete"], **hints}
         _save_discovery_queue(q, "discovery-summary-save")
         pruned = 0
         if result["complete"]:
-            q["merged_watermark"] = before
+            q["merged_watermark"] = max(before, q.get("merged_watermark") or before)
             _save_discovery_queue(q, "watermark-save")
             if recent and _prune_due(q.get("merged_wrappers_pruned_at")):
                 # Hourly at most: each prune reads every retained wrapper.
@@ -1541,12 +1592,25 @@ def discover_merged(q, budget, *, interval, recent=False):
                  + (f" reason={result['reason']}" if result.get("reason") else "")]
                 + ([f"pruned {pruned} completed rolling discovery checkpoint(s)"] if pruned else []))
     except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
+        split = (_partition(after, before, q.get("merged_watermark"))
+                 if isinstance(exc, merged_reconcile.InventoryCapExceeded) else None)
+        if split:
+            # Too many identities for one inventory: durably narrow the frozen
+            # interval. Rolling discovery resumes it, enrolls, and only then
+            # advances the watermark to its upper bound; the next interval
+            # keeps the five-minute overlap.
+            q["merged_discovery"] = {"after": split[0], "before": split[1], "complete": False, "span": split[2],
+                                     **({"overlap_from": split[0]} if split[0] != after else
+                                        {k: v for k, v in _span(active).items() if k == "overlap_from"})}
         q["merged_discovery"]["complete"] = False
         q["merged_discovery"]["error"] = str(exc)[:200]
-        q["merged_discovery"]["reason"] = exc.reason if isinstance(exc, merged_reconcile.PageFailed) else "reconcile-refused"
+        q["merged_discovery"]["reason"] = (exc.reason if isinstance(exc, merged_reconcile.PageFailed) else
+                                           "inventory-cap-partitioned" if split else "reconcile-refused")
         _save_discovery_queue(q, "refusal-debt-save")
         caller.clear()
         caller.update(q)
+        if split:
+            return [f"merged discovery incomplete; inventory cap: partitioned to ({split[0]}, {split[1]}]"]
         return ["merged discovery incomplete; cursor/debt retained: " + str(exc)[:200]]
 
 

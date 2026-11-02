@@ -46,6 +46,10 @@ class ReconcileRefused(Exception):
     """Invalid input; no successful complete-inventory claim is possible."""
 
 
+class InventoryCapExceeded(ReconcileRefused):
+    """More than MAX_INVENTORY represented identities: a shorter interval can complete."""
+
+
 class PageFailed(Exception):
     """Retryable page read failure; resume without advancing its cursor."""
     reason = "transport-failure"
@@ -248,7 +252,7 @@ def reconcile_page(checkpoint: Dict[str, Any], page_records: Any) -> Dict[str, A
             else:
                 updated["seen"][str(identity["pr"])] = {"merge_sha": identity["merge_sha"], "merged_at": at}
         if len(updated["inventory"]) >= MAX_INVENTORY:
-            raise ReconcileRefused("inventory cap reached; partition the interval")
+            raise InventoryCapExceeded("inventory cap reached; partition the interval")
         updated["inventory"].append(identity)
     updated["inventory"].sort(key=lambda e: (e.get("merged_at", ""), e.get("pr", 0), e.get("reason", "")))
     updated["pages_read"] += 1

@@ -256,10 +256,65 @@ tick lock, with at most ten seconds per request and four discovery pages per tic
 Budget exhaustion retains incomplete cursor/debt and leaves review scheduling
 independent. Other existing scheduler operations retain their own limits; this
 budget covers recovery reads. Source scans cap at 20,000 repository numbers,
-1,000 pages and 5,000 represented identities. Caps refuse rather than truncate;
-oversized inventories require smaller time intervals, and repository-universe
-cap refusal requires a separately reviewed adapter. This bounds repeated
-checkpoint serialization; it is not a new unbounded inventory service.
+1,000 pages and 5,000 represented identities. Caps refuse rather than truncate.
+This bounds repeated checkpoint serialization; it is not a new unbounded
+inventory service. The caps are never raised to work around a refusal.
+
+### Oversized natural intervals (5,000 identities)
+
+An interval holds one represented identity per merged PR (or unsupported
+source) whose merge falls inside it. When automatic discovery's interval holds
+more than 5,000, the inventory refuses with `InventoryCapExceeded`. Discovery
+then splits it in the same tick, with no extra forge reads:
+
+1. The frozen interval is durably narrowed. It is cut halfway between the
+   watermark (or its lower bound) and its upper bound. `merged_discovery`
+   records `complete: false`, `reason: inventory-cap-partitioned` and the
+   error, so status and client health report the outage honestly.
+2. Later ticks resume that shorter interval under the usual budget, four-page
+   limit and tick lock. On completion, enrollment is saved first, then the
+   watermark advances to that part's upper bound. The frontier only moves
+   through contiguous, independently complete parts.
+3. The next interval keeps the five-minute overlap, and enrollment
+   deduplicates the re-read sources. It is capped at twice the width that last
+   completed, and halved again on a further refusal, until it reaches the
+   rolling upper bound. The width and an `overlap_from` marker live in
+   `merged_discovery`, outside status.
+4. If more than 5,000 merges fall inside one five-minute overlap, that part
+   starts at the watermark instead (`overlap_from`), until normal overlap
+   clears it. One second holding more than 5,000 merges still refuses.
+
+Any other refusal, a transport failure or budget exhaustion keeps the current
+part and its cursor. A crash at any storage boundary is resumed from disk.
+Manual `reconcile-merged` runs do not split; use shorter manual intervals.
+
+Measured headroom (2026-11-03): 449 merges in the repository's entire 50-day
+history, a mean of 9 a day, at most 60 in one day, 201 in 7 days and 326 in
+30 days. The largest live natural interval held 24 identities and the largest
+manual interval 116. Reaching 5,000 needs an outage of about 83 days at the
+peak daily rate, or more than a year at the mean.
+
+### Repository-universe cap (20,000 numbers)
+
+Only the manual `reconcile-merged` number-slot adapter (`all-number-slots-v1`)
+enumerates every issue and PR number up to a frozen ceiling. It refuses above
+20,000 numbers, and a time split cannot help, because every interval
+enumerates the whole universe. Automatic discovery uses the closed-PR list and
+is not subject to this cap. The highest number on 2026-11-03 was 833, growing
+about 17 a day, so the cap is roughly three years away.
+
+Supported recovery when the manual adapter refuses for the universe cap:
+
+- Automatic discovery keeps finding and enrolling merges, because it reads the
+  closed-PR list, not number slots.
+- A manual interval inventory (and the queue inventory operation that reads
+  it) stays unavailable for that repository, and answers with an error
+  because no complete durable inventory exists.
+- An operator can still check a specific interval's merges by reading GitHub
+  directly.
+- Restoring manual inventories needs a separately reviewed,
+  completeness-preserving adapter, for example one paged by number range with
+  a frozen per-range ceiling. Do not raise the cap.
 
 Status separates complete discovery from pending, reviewing, blocked, unsupported,
 unverified, no-current-code, partial-scope and proven terminal receipts. Receipt

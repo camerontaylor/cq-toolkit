@@ -2657,6 +2657,143 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.assertTrue(any(size > crq.merged_reconcile.MAX_CURSOR_BYTES for size in sizes))
 
 
+class OversizedIntervalPartitionTest(unittest.TestCase):
+    """#565: an interval with more identities than the inventory cap is split
+    durably; the watermark advances only through completed, enrolled parts."""
+
+    AFTER = RecentKeysetDiscoveryTest.AFTER
+    BEFORE = RecentKeysetDiscoveryTest.BEFORE
+    CAP = 10
+    setUp = RecentKeysetDiscoveryTest.setUp
+    forge = RecentKeysetDiscoveryTest.forge
+    enrolled = RecentKeysetDiscoveryTest.enrolled
+
+    def outage(self, times):
+        """Closed merged PRs at the given merge seconds after AFTER."""
+        base = crq.parse_iso(self.AFTER)
+        self.rows = {n: {"number": n, "base": {"ref": "main"},
+                         "updated_at": crq.iso(base + crq.dt.timedelta(seconds=t)),
+                         "merged_at": crq.iso(base + crq.dt.timedelta(seconds=t)),
+                         "merge_commit_sha": f"{n:040x}", "head": {"sha": f"{n:040x}"}}
+                     for n, t in enumerate(times, start=1)}
+        self.merged = set(self.rows)
+
+    def tick(self):
+        interval = crq.rolling_discovery_interval(self.q, {"enabled": True, "after": self.AFTER})
+        with mock.patch.object(crq, "gh_json", side_effect=self.forge), \
+                mock.patch.object(crq.merged_reconcile, "MAX_INVENTORY", self.CAP):
+            return crq.discover_merged(self.q, crq.ForgeBudget(), interval=interval, recent=True)
+
+    def check_frontier(self):
+        """Enrollment precedes the watermark, and nothing is enrolled twice."""
+        disk = crq.load_queue()
+        numbers = [item["pr"] for item in disk["items"]]
+        self.assertEqual(len(numbers), len(set(numbers)))
+        watermark = disk["merged_watermark"]
+        due = {n for n in self.merged if self.rows[n]["merged_at"] <= watermark}
+        self.assertLessEqual(due, set(numbers))
+        if disk.get("merged_reconcile", {}).get("complete"):
+            self.assertLessEqual(disk["merged_reconcile"]["represented"], self.CAP)
+        return disk
+
+    def drive(self, ticks=40, on_tick=None):
+        marks, logs = [], []
+        for i in range(ticks):
+            if on_tick:
+                on_tick(i)
+            try:
+                logs += self.tick()
+            except crq.DiscoveryStorageFailed:
+                self.q = crq.load_queue()  # restart from disk, like the next tick
+            disk = self.check_frontier()
+            marks.append(disk["merged_watermark"])
+            if disk["merged_watermark"] == self.BEFORE and disk["merged_discovery"].get("complete"):
+                break
+        else:
+            self.fail("outage did not drain")
+        self.assertEqual(marks, sorted(marks))
+        self.assertEqual(self.enrolled(), self.merged)
+        return marks, logs
+
+    def test_oversized_outage_drains_through_enrolled_partitions(self):
+        # 45 merges spread over the two-day outage: 4.5x the inventory cap.
+        self.outage([3600 * k + 7 for k in range(45)])
+        first = self.tick()
+        self.assertIn("inventory cap: partitioned", first[0])
+        md = crq.load_queue()["merged_discovery"]
+        self.assertEqual((md["after"], md["before"], md["complete"], md["reason"]),
+                         (self.AFTER, "2026-10-02T00:00:00Z", False, "inventory-cap-partitioned"))
+        self.assertEqual(self.enrolled(), set())
+        self.assertEqual(crq.load_queue()["merged_watermark"], self.AFTER)
+        # Status reports the partition honestly; the width hint stays internal.
+        import status_summary
+        natural = status_summary.merged_current(crq.load_queue(), crq.STATE / "receipts")["natural_discovery"]
+        self.assertEqual((natural["complete"], natural["reason"]), (False, "inventory-cap-partitioned"))
+        self.assertNotIn("span", natural)
+        marks, logs = self.drive()
+        self.assertGreater(len(set(marks)), 4)  # several independently complete parts
+        self.assertTrue(any("complete=True" in line for line in logs))
+
+    def test_merges_at_a_partition_boundary_enroll_once(self):
+        # Three merges exactly at the first split second (2026-10-02T00:00:00Z,
+        # included in the first half) and more just after it, inside the
+        # five-minute overlap of the next interval.
+        # 19 merges in 17 s exceed the cap of 10, even inside one five-minute
+        # overlap: parts there start at the watermark until the overlap clears.
+        self.outage([86400] * 3 + [86400 + k for k in range(1, 9)] + [86400 - k for k in range(1, 9)])
+        self.drive(ticks=80)
+
+    def test_restart_at_partition_enrollment_and_watermark_boundaries(self):
+        for stage in ("refusal-debt-save", "enrollment-save", "discovery-summary-save", "watermark-save"):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.outage([3600 * k + 7 for k in range(45)])
+                save = crq._save_discovery_queue
+                hits = []
+
+                def flaky(q, name):
+                    if name == stage:
+                        hits.append(name)
+                        if len(hits) in (1, 3):
+                            raise crq.DiscoveryStorageFailed("fixture storage fault: " + name)
+                    return save(q, name)
+
+                with mock.patch.object(crq, "_save_discovery_queue", side_effect=flaky):
+                    self.drive()
+                self.assertGreaterEqual(len(hits), 3)
+
+    def test_errors_and_budget_exhaustion_retain_the_partition(self):
+        self.outage([3600 * k + 7 for k in range(45)])
+        self.tick()
+        part = dict(crq.load_queue()["merged_discovery"])
+        for failure, reason in ((OSError("down"), "transport-failure"),
+                                (crq.deferred_refresh.RefreshExhausted("spent"), "budget-exhausted")):
+            with mock.patch.object(self, "forge", side_effect=failure):
+                self.assertIn("reason=" + reason, self.tick()[0])
+            disk = crq.load_queue()
+            self.assertEqual((disk["merged_discovery"]["after"], disk["merged_discovery"]["before"]),
+                             (part["after"], part["before"]))
+            self.assertEqual(disk["merged_watermark"], self.AFTER)
+        self.drive()
+
+    def test_other_refusals_do_not_partition(self):
+        self.outage([3600 * k + 7 for k in range(45)])
+        self.rows[45]["number"] = "bad"
+        self.assertIn("cursor/debt retained", self.tick()[0])
+        md = crq.load_queue()["merged_discovery"]
+        self.assertEqual((md["before"], md["reason"]), (self.BEFORE, "reconcile-refused"))
+
+    def test_partition_bounds(self):
+        t = "2026-10-01T00:{:02d}:{:02d}Z".format
+        # Halves above the watermark, keeping the overlap below it.
+        self.assertEqual(crq._partition(t(0, 0), t(10, 0), t(5, 0)), (t(0, 0), t(7, 30), 150))
+        self.assertEqual(crq._partition(t(0, 0), t(0, 3), None), (t(0, 0), t(0, 1), 1))
+        # An overlap too dense to fit starts at the watermark instead.
+        self.assertEqual(crq._partition(t(0, 0), t(5, 1), t(5, 0)), (t(5, 0), t(5, 1), 1))
+        # One second at the watermark over the cap still refuses.
+        self.assertIsNone(crq._partition(t(5, 0), t(5, 1), t(5, 0)))
+
+
 class RecentWrapperRetentionTest(unittest.TestCase):
     """Rolling discovery leaves one wrapper per tick; growth stays bounded."""
 
