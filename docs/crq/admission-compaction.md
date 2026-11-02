@@ -65,11 +65,11 @@ host/load dependent and are not a production runtime guarantee.
 
 Measured sequentially on a Linux development VM, 2026-11-02 UTC, under nice 5:
 
-| Phase | Load/parse | Save | Total | Peak RSS |
-| --- | ---: | ---: | ---: | ---: |
-| Legacy | 32.111 s | 88.168 s | 120.280 s | 3,406,352 KiB |
-| Migration | 49.498 s | 1.584 s | 51.082 s | 808,176 KiB |
-| Compacted | 3.553 s | 2.570 s | 6.122 s | 413,724 KiB |
+| Phase     | Load/parse |     Save |     Total |      Peak RSS |
+| --------- | ---------: | -------: | --------: | ------------: |
+| Legacy    |   32.111 s | 88.168 s | 120.280 s | 3,406,352 KiB |
+| Migration |   49.498 s |  1.584 s |  51.082 s |   808,176 KiB |
+| Compacted |    3.553 s |  2.570 s |   6.122 s |   413,724 KiB |
 
 Size: 785,800,490 → 157,791,949 bytes (749.4 → 150.5 MiB, 79.9% smaller).
 Migration peak is 789.2 MiB, compared with legacy peak 3.25 GiB. Admission
