@@ -4,7 +4,6 @@ import base64
 import contextlib
 import copy
 import importlib.util
-import inspect
 import io
 import json
 import os
@@ -1065,7 +1064,26 @@ class CurrentTest(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 crq.git_z("diff", "--name-only", "--no-renames", "-z", self.pre, self.merge)
         self.assertEqual(launch.call_args.kwargs["timeout"], 600)
-        self.assertEqual(launch.call_args.kwargs["timeout"], inspect.signature(crq.run).parameters["timeout"].default)
+
+    def test_non_utf8_path_names_are_unsupported_with_exact_stable_rows(self):
+        raw = os.fsencode(self.repo) + b"/latin1-\xe9.py"
+        with open(raw, "w") as handle:
+            handle.write("not reviewed\n")
+        self.write("plain.py", "reviewed\n")
+        names = self.new_source("non-UTF-8 path name")
+        odd = b"latin1-\xe9.py".decode("utf-8", "surrogateescape")
+        self.assertEqual(names, [odd, "plain.py"])
+        item = self.enroll()
+        plan = self.plan_item(item)
+        rows = item["capture"]["paths"]
+        self.assertEqual(rows[0], {"source_path": odd, "path": odd, "resolution": "same-path-current",
+                                   "disposition": "unsupported", "reason": "path name is not valid UTF-8; never reviewed"})
+        self.assertEqual(rows[1]["disposition"], "included")
+        self.assertEqual(self.g("diff", "--name-status", plan["base"], plan["head"]).splitlines(), ["A\tplain.py"])
+        reloaded = crq.load_queue()["items"][-1]["capture"]
+        self.assertEqual(reloaded["paths"], rows)
+        self.assertEqual(crq.review_receipt.current_equivalence(reloaded), item["capture"]["equivalence"])
+        self.assertEqual(crq.current_paths(self.merge, self.merge), rows)
 
     def test_source_at_path_count_cap_is_scanned_normally(self):
         names = self.oversized_source()

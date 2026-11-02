@@ -866,6 +866,18 @@ def git_z(*args: str, timeout: int = 600) -> List[str]:
     return [f.decode("utf-8", "surrogateescape") for f in out.rstrip(b"\0").split(b"\0")] if out else []
 
 
+NON_UTF8_PATH = "path name is not valid UTF-8; never reviewed"
+
+
+def utf8_path(path: str) -> bool:
+    """False for names git_z decoded with surrogate escapes (invalid UTF-8 bytes)."""
+    try:
+        path.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def oversized_current_paths(names: List[str]) -> List[Dict[str, Any]]:
     """Bounded, truthful manifest for a source over CURRENT_PATH_CAP paths.
 
@@ -919,6 +931,10 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
     for original in names:
         path = original
         evidence = "same-path-current"
+        if not utf8_path(path):
+            result.append({"source_path": original, "path": path, "resolution": evidence,
+                           "disposition": "unsupported", "reason": NON_UTF8_PATH})
+            continue
         if not path_exists(target, path) and path in renames:
             blob = git("rev-parse", merge + ":" + path)
             path = renames[path]
@@ -928,6 +944,10 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
                 continue
             evidence = "git-rename-M50"
         row = {"source_path": original, "path": path, "resolution": evidence}
+        if not utf8_path(path):
+            row.update(disposition="unsupported", reason=NON_UTF8_PATH)
+            result.append(row)
+            continue
         if any(c in path for c in "\n\r\t\\"):
             row.update(disposition="unsupported", reason="path cannot be safely scanned")
             result.append(row)
