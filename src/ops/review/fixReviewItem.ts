@@ -99,26 +99,14 @@ import type {
   ToolDenial,
   ToolPolicy,
   Usage,
-  WorkCorrelation,
   WorkerResult,
 } from '../../driver/types.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { Op } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
 import type { ThreadComment } from './threads.js';
 import type { Finding } from './findings.js';
-
-/**
- * Session-log correlation (preservation plan items 1.3–1.5): the
- * invocation fragment carrying the governed job's work identity, or `{}`
- * outside a governed dispatch (exactOptionalPropertyTypes-safe spread).
- */
-function correlationInvocation(): { correlation?: WorkCorrelation } {
-  const info = currentJobContext()?.info;
-  const correlation = info?.correlation;
-  if (correlation === undefined) return {};
-  return { correlation: { ...correlation, role: correlation.role ?? 'fixer' } };
-}
 
 /**
  * The one review item a fixer worker fixes. Plain JSON, built from the
