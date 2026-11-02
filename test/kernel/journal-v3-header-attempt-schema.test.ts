@@ -12,7 +12,7 @@
 //      reclassified to version 3 fails the v3 schema (no additive sleight of
 //      hand), and a v3 header with disagreeing baseSha/witnesses.base fails.
 //   3. Failure boundary: strict extras rejection; the v1/v2 kernel RunLog
-//      (JournalEventSchema via append/parseLine) must keep REJECTING both v3
+//      (JournalEventSchema, via append and read-back) must keep REJECTING both v3
 //      carriers — strict v2 rejection of v3 (ADR acceptance); attempt-finished
 //      and the v3 header are observation-stream carriers until T02 assembles
 //      the v3 union and dual reader.
@@ -242,11 +242,16 @@ describe('journal v3 header/attempt schemas (T25)', () => {
     disagreeing.provenance.witnesses.base = 'c'.repeat(40);
     expect(RunStartedV3JournalEventSchema.safeParse(disagreeing).success).toBe(false);
 
-    // Strict v2 rejection of v3: the kernel v1/v2 RunLog validates through
-    // JournalEventSchema (append AND read-back), so both v3 carriers must
-    // fail there — attempt-finished and the v3 header are observation-stream
-    // carriers until T02 assembles the v3 union and dual reader. Old shapes
-    // still write and read back unchanged.
+    // Strict v2 rejection of v3, directly on the union: both v3 carriers
+    // fail JournalEventSchema (the schema behind append and the read-back).
+    expect(JournalEventSchema.safeParse(header()).success).toBe(false);
+    expect(JournalEventSchema.safeParse(attemptFinished()).success).toBe(false);
+
+    // The kernel v1/v2 RunLog validates through JournalEventSchema (append
+    // AND read-back), so both v3 carriers must fail there — attempt-finished
+    // and the v3 header are observation-stream carriers until T02 assembles
+    // the v3 union and dual reader. Old shapes still write and read back
+    // unchanged.
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t25-'));
