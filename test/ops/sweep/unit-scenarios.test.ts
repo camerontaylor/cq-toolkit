@@ -1679,7 +1679,7 @@ test.each(['probe-fault', 'no-progress'] as const)(
 import type { OpInvocation } from '../../../src/driver/types.js';
 import { runLadder } from '../../../src/kernel/governor.js';
 
-test('M5b4 nominal evidence: unit op forwards the governed correlation onto its driver invocation', async () => {
+test('M5b4 nominal evidence', async () => {
   const world = await makeWorld([{ failing: true }, { failing: false }]);
   const invocations: OpInvocation[] = [];
   try {
@@ -1717,7 +1717,7 @@ test('M5b4 nominal evidence: unit op forwards the governed correlation onto its 
   }
 });
 
-test('M5b4 missing evidence: un-governed unit op invents no correlation', async () => {
+test('M5b4 missing evidence', async () => {
   const world = await makeWorld([{ failing: true }, { failing: false }]);
   const invocations: OpInvocation[] = [];
   try {
@@ -1741,7 +1741,7 @@ test('M5b4 missing evidence: un-governed unit op invents no correlation', async 
   }
 });
 
-test('M5b4 failure evidence: outer-job fields forward verbatim and no role is re-derived', async () => {
+test('M5b4 failure evidence', async () => {
   const world = await makeWorld([{ failing: true }, { failing: false }]);
   const invocations: OpInvocation[] = [];
   try {

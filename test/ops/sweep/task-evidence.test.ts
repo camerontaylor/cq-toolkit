@@ -564,39 +564,84 @@ test('M5b4 missing evidence', async () => {
   const invocations: OpInvocation[] = [];
   const outcome = await runLoop(invocations);
   expect(['ok', 'failed']).toContain(outcome.status);
+  // Discriminating, not vacuous: the loop must actually have built driver
+  // invocations to inspect, and every one of them must carry NO correlation
+  // (a forwarded correlation key here would fail the loop below).
+  expect(invocations.length).toBeGreaterThan(0);
+  expect(invocations.some((invocation) => invocation.correlation !== undefined)).toBe(false);
   for (const invocation of invocations) {
     expect(invocation.correlation).toBeUndefined();
   }
 });
 
+// Table-driven over the correlation shapes the runner may hand the task
+// loop: run/work/parent/task forward verbatim, the role passes through
+// untouched, and an absent role falls back to the helper's 'fixer' default
+// (never re-derived from the op id).
 test('M5b4 failure evidence', async () => {
-  const invocations: OpInvocation[] = [];
-  // A governed correlation carrying the OUTER job's identity fields: the
-  // invocation forwards them verbatim and invents NO new role.
-  await runLadder(
-    () => runLoop(invocations),
-    { wallClockMs: 5000 },
+  const cases: Array<{
+    name: string;
+    correlation: Record<string, unknown>;
+    expected: Record<string, unknown>;
+  }> = [
     {
-      op: 'sweep.unit',
-      jobKey: 'j-outer',
-      attempt: 7,
+      name: 'run id forwards verbatim',
+      correlation: { workId: 'run:j-outer:7', runId: 'outer-run', role: 'orchestrator' },
+      expected: { workId: 'run:j-outer:7', runId: 'outer-run', role: 'orchestrator' },
+    },
+    {
+      name: 'work/parent ids forward verbatim',
       correlation: {
         workId: 'run:j-outer:7',
         runId: 'outer-run',
         parentWorkId: 'parent-1',
         role: 'orchestrator',
+      },
+      expected: {
+        workId: 'run:j-outer:7',
+        runId: 'outer-run',
+        parentWorkId: 'parent-1',
+        role: 'orchestrator',
+      },
+    },
+    {
+      name: 'task label forwards verbatim and no role is re-derived',
+      correlation: {
+        workId: 'run:j-outer:7',
+        runId: 'outer-run',
+        role: 'orchestrator',
+        task: 'outer task',
+      },
+      expected: {
+        workId: 'run:j-outer:7',
+        runId: 'outer-run',
+        role: 'orchestrator',
         task: 'outer task',
       },
     },
-  );
-  expect(invocations.length).toBeGreaterThan(0);
-  for (const invocation of invocations) {
-    expect(invocation.correlation).toEqual({
-      workId: 'run:j-outer:7',
-      runId: 'outer-run',
-      parentWorkId: 'parent-1',
-      role: 'orchestrator',
-      task: 'outer task',
-    });
+    {
+      name: 'absent role defaults to fixer',
+      correlation: { workId: 'run:j-outer:7', runId: 'outer-run' },
+      expected: { workId: 'run:j-outer:7', runId: 'outer-run', role: 'fixer' },
+    },
+  ];
+  for (const { name, correlation, expected } of cases) {
+    const invocations: OpInvocation[] = [];
+    // A governed correlation carrying the OUTER job's identity fields: the
+    // invocation forwards them verbatim and invents NO new role.
+    await runLadder(
+      () => runLoop(invocations),
+      { wallClockMs: 5000 },
+      {
+        op: 'sweep.unit',
+        jobKey: 'j-outer',
+        attempt: 7,
+        correlation: correlation as never,
+      },
+    );
+    expect(invocations.length, name).toBeGreaterThan(0);
+    for (const invocation of invocations) {
+      expect(invocation.correlation, name).toEqual(expected);
+    }
   }
 });
