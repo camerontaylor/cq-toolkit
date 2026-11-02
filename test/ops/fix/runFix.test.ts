@@ -417,12 +417,13 @@ process.exitCode = failed ? 1 : 0;
   });
 
   // ---- M7-fix: retain fix exit spend -------------------------------------
-  // finish() folds landed attempt evidence once; on exits where NO attempt
-  // evidence survived (killed or replaced units whose dispatches were still
-  // governed-metered) the report adopts the engine's settled ledger exactly
-  // once. The carriers are disjoint, so settled usage never double counts,
-  // and absence stays explicit (no ledger and no attempt usage: zeros, never
-  // a fabricated measurement). Every named case runs through makeFixRun.
+  // finish() folds landed attempt evidence, then adopts the runner's
+  // once-only usage rollup when the engine produced one: the rollup is the
+  // fold of every metered dispatch (attempt usage plus metered faults that
+  // left no surviving attempt evidence), so settled usage is preserved once
+  // in full and partial evidence is never dropped. Absence stays explicit
+  // (no rollup and no attempt usage: zeros, never a fabricated
+  // measurement). Every named case runs through makeFixRun.
 
   /**
    * A driver whose dispatches meter real governed usage but never leave
@@ -479,9 +480,10 @@ process.exitCode = failed ? 1 : 0;
         cacheRead: 8,
         cacheWrite: 4,
       });
-      // Settled exactly once: the surviving attempt rows carry NO usage
-      // (the driver threw before returning a measurement), so the report's
-      // spend comes solely from the ledger, never double folded.
+      // Settled exactly once through the runner rollup: the surviving attempt
+      // rows carry NO usage (the driver threw before returning a
+      // measurement), so the report's spend comes solely from the ledger,
+      // never double folded.
       expect(
         result.report?.tasks.flatMap((task) =>
           (task.attempts ?? []).filter((attempt) => attempt.usage !== undefined),
@@ -515,18 +517,48 @@ process.exitCode = failed ? 1 : 0;
   test('M7-fix failure evidence', async () => {
     const f = await fixture();
     try {
-      // Landed attempt evidence (the shared-SHA unit's open row carries one
-      // usage-bearing attempt {1,1,0,0}) keeps folding through the task
-      // attempts: the ledger must NOT be adopted alongside it (the carriers
-      // are disjoint, so no double counting), and the sums preserve the
-      // attempt evidence once.
+      // Mixed evidence: the canned unit's open row lands one usage-bearing
+      // attempt {1,1,0,0} in the attempt fold, and the unit op also meters a
+      // DISTINCT {5,5,0,0} dispatch through the governed reportResult seam
+      // (spend that never survived as attempt evidence, a killed/replaced
+      // dispatch). The report adopts the runner's once-only rollup {5,5,0,0}
+      // — never the attempt fold alone (which would drop the metered fault)
+      // and never a double count of the two carriers.
+      const unitJob = {
+        id: 'fixture-unit',
+        op: 'sweep.unit',
+        input: { package: 'scratch-repo', fixer: 'tests-1', files: [] },
+        dependsOn: [],
+      };
+      const planEntry = {
+        name: 'sweep.planSweep',
+        inputSchema: z.unknown(),
+        importer: async () => async () => ({
+          status: 'ok' as const,
+          value: { jobs: [unitJob], units: [unitJob.input], suppressed: [], needsHuman: [] },
+        }),
+      } as unknown as OpRegistryEntry<never, never>;
+      const unitEntry = {
+        name: 'sweep.unit',
+        inputSchema: z.unknown(),
+        importer: async () => async () => {
+          currentJobContext()?.reportResult({
+            usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
+          });
+          return { status: 'ok' as const, value: sharedUnitReport() };
+        },
+      } as unknown as OpRegistryEntry<never, never>;
+      const entries = new Map([
+        [planEntry.name, planEntry],
+        [unitEntry.name, unitEntry],
+      ]);
       const result = await makeFixRun({
         drivers: fixingDrivers(false),
-        registry: { get: stubSweepRegistries(sharedUnitReport()) },
+        registry: { get: (name) => entries.get(name) },
       })(input(f));
       expect(result.status).toBe('needs-human');
       const report = reportOf(result);
-      expect(report.usage).toEqual({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0 });
+      expect(report.usage).toEqual({ input: 5, output: 5, cacheRead: 0, cacheWrite: 0 });
       expect(report.fixesPerRun).toBe(2);
     } finally {
       await rm(f.root, { recursive: true, force: true });
