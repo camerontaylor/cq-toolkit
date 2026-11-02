@@ -25,6 +25,7 @@ import {
   FindingDispositionJournalEventSchema,
   HeadAcceptanceJournalEventSchema,
   JournalEventSchema,
+  JournalEventV1V2Schema,
   ReviewObservedJournalEventSchema,
 } from '../../src/kernel/schema.js';
 import type {
@@ -34,7 +35,6 @@ import type {
   FindingDispositionJournalEvent,
   FindingFingerprint,
   HeadAcceptanceJournalEvent,
-  JournalEvent,
   ReviewObservedJournalEvent,
   ReviewObservedPayload,
 } from '../../src/kernel/types.js';
@@ -308,7 +308,7 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
     const extraDisposition = disposition();
     (extraDisposition as unknown as Record<string, unknown>).extra = 1;
     expect(FindingDispositionJournalEventSchema.safeParse(extraDisposition).success).toBe(false);
-    const extraFingerprint = disposition();
+    const extraFingerprint = disposition({ fingerprint: { ...FINGERPRINT } });
     (extraFingerprint.payload.fingerprint as unknown as Record<string, unknown>).line = 3;
     expect(FindingDispositionJournalEventSchema.safeParse(extraFingerprint).success).toBe(false);
     // No acceptance aliases: the payload is exact.
@@ -320,27 +320,22 @@ describe('journal v3 disposition/acceptance/review schemas (T27)', () => {
     expect(ReviewObservedJournalEventSchema.safeParse(aliasedReview).success).toBe(false);
 
     // Strict v2 rejection of v3, directly on the v1/v2 union: all three v3
-    // carriers fail JournalEventSchema (the schema behind append and the
-    // read-back).
+    // carriers fail the v1/v2 kernel union (JournalEventV1V2Schema); the
+    // full JournalEventSchema accepts them once T02 assembles the v3 union
+    // (pinned in journal-v3-read.test.ts).
     const variants = [disposition(), acceptance(), review()] as const;
     for (const variant of variants) {
-      expect(JournalEventSchema.safeParse(variant).success).toBe(false);
+      expect(JournalEventV1V2Schema.safeParse(variant).success).toBe(false);
+      expect(JournalEventSchema.safeParse(variant).success).toBe(true);
     }
 
-    // The kernel v1/v2 RunLog validates through JournalEventSchema (append
-    // AND read-back), so every variant must fail there; old shapes still
-    // write and read back unchanged.
+    // Old shapes still write and read back unchanged through the RunLog.
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t27-'));
       const log = openRunLog(dir);
       const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
       await log.append('plan-x--k--a', JournalEventSchema.parse(v1));
-      for (const variant of variants) {
-        await expect(
-          log.append('plan-x--k--a', variant as unknown as JournalEvent),
-        ).rejects.toThrow();
-      }
       const read = await log.read('plan-x--k--a');
       expect(read).toEqual([v1]);
     } finally {

@@ -937,7 +937,13 @@ export interface ReportV2 {
   availability: Record<string, AvailabilityRecord>;
 }
 
-/** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
+/** NDJSON journal event union, discriminated on `type`. All members plain serializable data.
+ *
+ * v3 (ADR-0008, T02) joins the observational carriers to the sequenced v2
+ * kernel events in one union: the dual reader dispatches on the run-started
+ * version (absent → v1, 2 → v2, 3 → v3) and observational events never alter
+ * reservations, sequence claims or job statuses.
+ */
 export type JournalEvent =
   | RunStartedJournalEvent
   | JobStartedJournalEvent
@@ -948,7 +954,17 @@ export type JournalEvent =
   | ReservationRefusedJournalEvent
   | JobQuarantinedJournalEvent
   | QuarantineReleasedJournalEvent
-  | BudgetTrippedJournalEvent;
+  | BudgetTrippedJournalEvent
+  | RunStartedV3JournalEvent
+  | AttemptFinishedJournalEvent
+  | GateVerdictJournalEvent
+  | TaskFinishedJournalEvent
+  | ApprovalJournalEvent
+  | WriteObservationJournalEvent
+  | FindingDispositionJournalEvent
+  | HeadAcceptanceJournalEvent
+  | ReviewObservedJournalEvent
+  | MeasurementSummaryJournalEvent;
 
 /**
  * Registry entry for one op. Runtime-only: never persisted (the importer is

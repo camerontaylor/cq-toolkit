@@ -1058,9 +1058,10 @@ export async function assertNoSeqGap(
 }
 
 /**
- * THE FOLD ORDER (ADR-0003 annex §3, r1 m4): v1 runs (run-started without
- * `journalVersion`) ordered by `at` then runId, ALL before every v2 run; v2
- * runs ordered by `seq`. The injected clock can no longer reorder the fold —
+ * THE FOLD ORDER (ADR-0003 annex §3, r1 m4; v3 per ADR-0008 T02): v1 runs
+ * (run-started without `journalVersion`) ordered by `at` then runId, ALL
+ * before every v2/v3 run; v2 and v3 runs ordered by `seq` (v3 joins the
+ * existing sequenced ordering, never a new era). The injected clock can no longer reorder the fold —
  * `at` is display-only for v2 runs. Corruption is loud: a v2 run without
  * `seq`, two v2 runs of the plan sharing one `seq`, or a SURVIVING run file
  * whose line count disagrees with its `run-finished.eventCount` all throw
@@ -1100,13 +1101,21 @@ export function foldOrderRuns(runs: readonly FoldRun[]): FoldRun[] {
     }
     if (started.journalVersion === undefined) {
       v1.push({ run, at: started.at });
-    } else {
+    } else if (started.journalVersion === 2 || started.journalVersion === 3) {
+      // ADR-0008 T02 dispatch: v3 joins the existing sequenced v2 ordering —
+      // same seq claim, same duplicate-seq refusal — never a new era.
       if (started.seq === undefined) {
         throw new Error(
-          `journal: corrupt — v2 run '${run.runId}' (plan '${started.planId}') has no seq`,
+          `journal: corrupt — v${started.journalVersion} run '${run.runId}' (plan '${started.planId}') has no seq`,
         );
       }
       v2.push({ run, seq: started.seq });
+    } else {
+      // Unknown future versions fail explicitly (dual-reader rule 1).
+      throw new Error(
+        `journal: corrupt — run '${run.runId}' (plan '${started.planId}') declares unsupported ` +
+          `journalVersion ${started.journalVersion}; this reader understands v1, v2 and v3 (ADR-0008) only`,
+      );
     }
   }
   v1.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.run.runId < b.run.runId ? -1 : 1));
@@ -1265,6 +1274,22 @@ export function deriveJobStatuses(events: readonly JournalEvent[]): JobStatus[] 
       case 'quarantine-released':
       case 'budget-tripped':
         break; // no per-job VERDICT facts (a quarantine is not a terminal verdict; the governed runner owns it)
+      case 'attempt-finished':
+      case 'approval-expired':
+      case 'approval-granted':
+      case 'finding-disposition':
+      case 'gate-verdict':
+      case 'head-acceptance':
+      case 'measurement-summary':
+      case 'review-observed':
+      case 'task-finished':
+      case 'write-path-cap-tripped':
+      case 'write-path-denied':
+        // ADR-0008 T02: the v3 observational carriers are evidence for
+        // reports and offline analysis only — they NEVER alter job outcome
+        // derivation, reservations or sequence claims. Kernel replay
+        // semantics are unchanged.
+        break;
     }
   }
   return [...states].map(([jobId, state]) => ({ jobId, state }));

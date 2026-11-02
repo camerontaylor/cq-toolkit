@@ -24,6 +24,7 @@ import { describe, expect, test } from 'vitest';
 import { openRunLog } from '../../src/kernel/journal.js';
 import {
   JournalEventSchema,
+  JournalEventV1V2Schema,
   MeasurementSummaryJournalEventSchema,
   ReportV2Schema,
 } from '../../src/kernel/schema.js';
@@ -654,18 +655,18 @@ describe('journal v3 metric + report v2 schemas (T28)', () => {
     expect(ReportV2Schema.safeParse(badGate).success).toBe(false);
 
     // Strict v2 rejection of the v3 measurement-summary carrier on the
-    // v1/v2 union, directly and through the kernel RunLog (append and
-    // read-back); old shapes still write and read back unchanged.
-    expect(JournalEventSchema.safeParse(measurement()).success).toBe(false);
+    // v1/v2 union (JournalEventV1V2Schema); the full JournalEventSchema
+    // accepts it once T02 assembles the v3 union (pinned in
+    // journal-v3-read.test.ts). Old shapes still write and read back
+    // unchanged through the RunLog.
+    expect(JournalEventV1V2Schema.safeParse(measurement()).success).toBe(false);
+    expect(JournalEventSchema.safeParse(measurement()).success).toBe(true);
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t28-'));
       const log = openRunLog(dir);
       const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
       await log.append('plan-x--k--a', JournalEventSchema.parse(v1));
-      await expect(
-        log.append('plan-x--k--a', measurement() as unknown as Parameters<typeof log.append>[1]),
-      ).rejects.toThrow();
       const read = await log.read('plan-x--k--a');
       expect(read).toEqual([v1]);
     } finally {

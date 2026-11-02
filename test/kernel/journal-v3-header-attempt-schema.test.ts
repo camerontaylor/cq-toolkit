@@ -23,13 +23,13 @@ import { openRunLog } from '../../src/kernel/journal.js';
 import {
   AttemptFinishedJournalEventSchema,
   JournalEventSchema,
+  JournalEventV1V2Schema,
   RunStartedV3JournalEventSchema,
 } from '../../src/kernel/schema.js';
 import type {
   AttemptFinishedJournalEvent,
   AttemptStopClass,
   AvailabilityState,
-  JournalEvent,
   RunStartedV3JournalEvent,
 } from '../../src/kernel/types.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -251,26 +251,21 @@ describe('journal v3 header/attempt schemas (T25)', () => {
     disagreeing.provenance.witnesses.base = 'c'.repeat(40);
     expect(RunStartedV3JournalEventSchema.safeParse(disagreeing).success).toBe(false);
 
-    // Strict v2 rejection of v3, directly on the union: both v3 carriers
-    // fail JournalEventSchema (the schema behind append and the read-back).
-    expect(JournalEventSchema.safeParse(header()).success).toBe(false);
-    expect(JournalEventSchema.safeParse(attemptFinished()).success).toBe(false);
+    // The v1/v2 kernel union (JournalEventV1V2Schema) keeps rejecting the v3
+    // carriers; the full JournalEventSchema accepts them once T02 assembles
+    // the v3 union and dual reader (pinned in journal-v3-read.test.ts).
+    expect(JournalEventV1V2Schema.safeParse(header()).success).toBe(false);
+    expect(JournalEventV1V2Schema.safeParse(attemptFinished()).success).toBe(false);
+    expect(JournalEventSchema.safeParse(header()).success).toBe(true);
+    expect(JournalEventSchema.safeParse(attemptFinished()).success).toBe(true);
 
-    // The kernel v1/v2 RunLog validates through JournalEventSchema (append
-    // AND read-back), so both v3 carriers must fail there — attempt-finished
-    // and the v3 header are observation-stream carriers until T02 assembles
-    // the v3 union and dual reader. Old shapes still write and read back
-    // unchanged.
+    // Old shapes still write and read back unchanged through the RunLog.
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t25-'));
       const log = openRunLog(dir);
       const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
       await log.append('plan-x--k--a', JournalEventSchema.parse(v1));
-      await expect(
-        log.append('plan-x--k--a', attemptFinished() as unknown as JournalEvent),
-      ).rejects.toThrow();
-      await expect(log.append('plan-x--k--a', header() as never)).rejects.toThrow();
       const read = await log.read('plan-x--k--a');
       expect(read).toEqual([v1]);
     } finally {

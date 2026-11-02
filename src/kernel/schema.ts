@@ -1163,7 +1163,11 @@ export const ReportV2Schema: z.ZodType<ReportV2> = z
     checkMetric(report.metric, report.availability, ctx);
   });
 
-export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion('type', [
+/**
+ * The v1/v2 kernel event union exactly as it stood before the v3 dual reader
+ * (ADR-0008 T02): a v3-shaped record must never parse through it.
+ */
+export const JournalEventV1V2Schema = z.discriminatedUnion('type', [
   RunStartedJournalEventSchema,
   JobStartedJournalEventSchema,
   JobFinishedJournalEventSchema,
@@ -1174,4 +1178,25 @@ export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion(
   JobQuarantinedJournalEventSchema,
   QuarantineReleasedJournalEventSchema,
   BudgetTrippedJournalEventSchema,
+]);
+
+/**
+ * THE FULL UNION (ADR-0008 T02 dual reader): the sequenced v1/v2 kernel
+ * events joined by the v3 carriers. Dispatch on the run-started version
+ * (absent → v1, 2 → v2, 3 → v3); unknown future versions fail explicitly.
+ * Observational events never alter reservations, sequence claims or job
+ * statuses — see `deriveJobStatuses` and `foldOrderRuns`.
+ */
+export const JournalEventSchema: z.ZodType<JournalEvent> = z.union([
+  JournalEventV1V2Schema,
+  RunStartedV3JournalEventSchema,
+  AttemptFinishedJournalEventSchema,
+  GateVerdictJournalEventSchema,
+  TaskFinishedJournalEventSchema,
+  ApprovalJournalEventSchema,
+  WriteObservationJournalEventSchema,
+  FindingDispositionJournalEventSchema,
+  HeadAcceptanceJournalEventSchema,
+  ReviewObservedJournalEventSchema,
+  MeasurementSummaryJournalEventSchema,
 ]);
