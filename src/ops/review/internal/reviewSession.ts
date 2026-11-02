@@ -6,6 +6,7 @@ import type { DriverFactory } from '../../../driver/factory.js';
 import type { ModelSpec, Usage, WorkerErrorClass, WorkerResult } from '../../../driver/types.js';
 import { toOutputSchema } from '../../../driver/common/structured.js';
 import { boundedErrorText } from '../../../driver/error-text.js';
+import { correlationInvocation } from '../../../driver/correlationInvocation.js';
 import { defaultHarnessConfig } from '../../../harness/config.js';
 import { currentJobContext } from '../../../kernel/governor.js';
 import type { OpResult } from '../../../kernel/types.js';
@@ -261,6 +262,12 @@ export async function runReviewSession(
         workspace: { path: resolve(input.repoRoot) },
         budget: { maxTokens, maxSteps: plan.maxSteps ?? input.maxSteps },
         outputSchema: toOutputSchema('review.agent/v3', OutputSchema),
+        // Session-log correlation (items 1.3–1.5): forward the runner's
+        // governed work identity onto this invocation so the session log
+        // names THE work unit it served. Absent context preserves the
+        // un-governed behavior exactly; the shared helper stays pure over
+        // the correlation value (ADR-0002 one-directional rule).
+        ...correlationInvocation(currentJobContext()?.info?.correlation),
       },
       { signal },
     );

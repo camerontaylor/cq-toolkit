@@ -874,3 +874,75 @@ describe('runAgentReviewer S7 deltas', () => {
     expect(result.status).not.toBe('ok');
   });
 });
+
+// M5b2 — forward governed invocation correlation: every OpInvocation the
+// reviewer dispatches carries the runner's governed correlation verbatim
+// when one exists, and stays correlation-free when none does. Run/work/
+// parent identity never silently inherits the outer job's; no new role is
+// invented here (the helper's absent-role default is the preserved one).
+describe('runAgentReviewer correlation forwarding (M5b2)', () => {
+  it('M5b2 nominal evidence', async () => {
+    const fake = fakeDrivers({ skipHook: true });
+    const correlation = { workId: 'w-m5b2', role: 'critic', runId: 'r-m5b2' } as const;
+    const result = await runLadder(
+      () => runAgentReviewer(fake.drivers, reviewerInput()),
+      {},
+      { op: 'review.run', jobKey: 'm5b2-nominal', attempt: 1, correlation: { ...correlation } },
+    );
+    expect(result.outcome).toBe('completed');
+    expect(fake.invocations.length).toBeGreaterThan(0);
+    for (const invocation of fake.invocations)
+      expect(invocation.correlation).toEqual({ ...correlation });
+  });
+
+  it('M5b2 missing evidence', async () => {
+    const fake = fakeDrivers({ skipHook: true });
+    const result = await runLadder(
+      () => runAgentReviewer(fake.drivers, reviewerInput()),
+      {},
+      { op: 'review.run', jobKey: 'm5b2-missing', attempt: 1 },
+    );
+    expect(result.outcome).toBe('completed');
+    expect(fake.invocations.length).toBeGreaterThan(0);
+    for (const invocation of fake.invocations) expect(invocation.correlation).toBeUndefined();
+  });
+
+  it('M5b2 failure evidence', async () => {
+    const fake = fakeDrivers({ skipHook: true });
+    // Table cases: run/work/parent/role are varied row by row; each row
+    // proves the governed correlation's identity fields ride VERBATIM onto
+    // every dispatched invocation — none silently inherits any outer-job
+    // value. Rows with an absent role exercise the shared helper's preserved
+    // default; no new role is minted by the reviewer. (The case name follows
+    // the M5b0 literal naming convention; this row set proves the
+    // absent-role default, not a failing dispatch.)
+    const rows = [
+      { workId: 'w-child', parentWorkId: 'w-parent', role: 'critic' },
+      { workId: 'w-other', runId: 'r-9' },
+      { workId: 'w-third', role: 'observer', task: 'review a diff' },
+    ] as const;
+    let i = 0;
+    for (const governed of rows) {
+      const result = await runLadder(
+        () => runAgentReviewer(fake.drivers, reviewerInput()),
+        {},
+        {
+          op: 'review.run',
+          jobKey: `m5b2-table-${i++}`,
+          attempt: 1,
+          correlation: { ...governed },
+        },
+      );
+      expect(result.outcome).toBe('completed');
+    }
+    expect(fake.invocations.length).toBeGreaterThanOrEqual(rows.length);
+    for (const invocation of fake.invocations) {
+      const governed = rows.find((row) => invocation.correlation?.workId === row.workId);
+      expect(governed).toBeDefined();
+      expect(invocation.correlation).toEqual({
+        ...governed,
+        role: ('role' in governed! ? governed.role : undefined) ?? 'fixer',
+      });
+    }
+  });
+});
