@@ -6,6 +6,7 @@ exercised against temporary detached git clones exactly as
 started; the controller never signals a process.
 """
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -832,7 +833,7 @@ class DeployPlanTests(ControllerFixture):
             raise ValueError("helper failed before checkout")
 
         with mock.patch.object(host, "switch", side_effect=partial):
-            with mock.patch.object(dc, "_load_helper", return_value=host):
+            with mock.patch.object(dc, "_load_helper", return_value=(host, "0" * 64)):
                 with mock.patch.object(dc, "Effects", return_value=self.effects):
                     with mock.patch("builtins.print") as printed:
                         code = dc.main(["--root", str(self.root), "--overlay", str(self.overlay_path),
@@ -852,10 +853,12 @@ class DeployPlanTests(ControllerFixture):
         # name it; the fixture provides one alongside the target tag.
         self.command("tag", "-a", "crq-runner/20261027-9", self.before,
                      "-m", "prior fixture approval")
+        digest = "ab" * 32
         with self.fake_switch():
             plan = dc.deploy_plan(self.effects, host, self.target, self.tag,
-                                  self.overlay_path)
+                                  self.overlay_path, helper_sha256=digest)
         self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.target)
+        self.assertEqual(plan["helper_sha256"], digest)
         steps = {step["step"]: step for step in plan["steps"]}
         self.assertTrue(steps["drain"]["drained"])
         self.assertTrue(steps["preservation"]["preserved"])
@@ -869,6 +872,7 @@ class DeployPlanTests(ControllerFixture):
         self.assertEqual(entry["prior_tag"], "crq-runner/20261027-9")
         self.assertEqual(entry["tag"], self.tag)
         self.assertEqual(entry["target"], self.target)
+        self.assertEqual(entry["helper_sha256"], digest)  # #549: what ran
         self.assertTrue(entry["rollback_compatibility"])
         self.assertTrue(dc.rollback_target(entry)["prior_head"] == self.before)
         self.assertTrue(plan["automatic_rollback_permitted"])
@@ -1111,12 +1115,14 @@ class RollbackPlanTests(ControllerFixture):
         self.at_target()
         with self.fake_switch():
             result = dc.rollback_plan(self.effects, host, self.prior,
-                                      self.overlay_path)
+                                      self.overlay_path, helper_sha256="cd" * 32)
         self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
         self.assertEqual(result["rolled_back_to"], self.before)
+        self.assertEqual(result["helper_sha256"], "cd" * 32)
         journals = [json.loads(p.read_text())
                     for p in self.record_dir.glob("controller-*.json")]
         self.assertEqual([j["operation"] for j in journals], ["rollback"])
+        self.assertEqual(journals[0]["helper_sha256"], "cd" * 32)
 
     def test_post_journal_author_requests_refuse_before_drain_or_switch(self):
         with self.fake_switch():
@@ -1280,7 +1286,29 @@ class CliTests(ControllerFixture):
     def test_switch_cli_drains_real_runner_without_pythonpath(self):
         self.switch_cli_fixture(recorded_run=True)
 
-    def switch_cli_fixture(self, recorded_run=False):
+    def test_switch_cli_with_matching_pinned_helper_digest_succeeds(self):
+        self.switch_cli_fixture(pin_helper=True)
+
+    def test_helper_digest_mismatch_refuses_before_import_lock_or_preflight(self):
+        self.write_state("queue.json", {"items": [], "starts": []})
+        lock = self.runner / "state" / dc.LOCK_NAME
+        for expected in ("0" * 64, "ABC", "0" * 63):
+            with self.subTest(expected=expected):
+                # A bad --sha would refuse in preflight; the identity check
+                # must refuse first, with the helper never imported.
+                result = self.run_cli("--expect-helper-sha256", expected,
+                                      "switch", "--sha", "nothex", "--tag", self.tag)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("refused:", result.stderr)
+                self.assertIn("helper", result.stderr)
+                self.assertNotIn("--sha", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(lock.exists())
+                self.assertEqual(list(self.record_dir.iterdir()), [])
+                self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+
+
+    def switch_cli_fixture(self, recorded_run=False, pin_helper=False):
         self.write_state("queue.json", {"items": [], "starts": []})
         if recorded_run:
             # Real probe and dependencies, tracked before the helper clean guard.
@@ -1341,7 +1369,9 @@ class CliTests(ControllerFixture):
         expected_status = [" M " + host.CONFIG]
         before_cli = self.command("status", "--porcelain", "--untracked-files=all").splitlines()
         self.assertEqual(before_cli, expected_status, before_cli[:10])
-        result = self.run_cli("switch", "--sha", pinned, "--tag", "crq-runner/20261028-2",
+        helper_digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+        pin = ["--expect-helper-sha256", helper_digest] if pin_helper else []
+        result = self.run_cli(*pin, "switch", "--sha", pinned, "--tag", "crq-runner/20261028-2",
                               env={"PATH": str(shim) + ":" + os.environ["PATH"],
                                    # Exercise -B even when inherited env does
                                    # not suppress bytecode (as in CI discovery).
@@ -1354,6 +1384,10 @@ class CliTests(ControllerFixture):
         self.assertEqual(artifact["operation"], "switch")
         self.assertEqual(artifact["target"], pinned)
         self.assertTrue(artifact["automatic_rollback_permitted"])
+        self.assertEqual(artifact["helper_sha256"], helper_digest)
+        journals = [json.loads(p.read_text())
+                    for p in self.record_dir.glob("controller-*.json")]
+        self.assertEqual([j["helper_sha256"] for j in journals], [helper_digest])
 
     def test_health_cli_missing_heartbeat_refuses_with_isolated_env(self):
         # The CLI subprocess resolves WATCHDOG_HOME from its own environment:
@@ -1392,6 +1426,39 @@ class CliTests(ControllerFixture):
         self.assertEqual(result.returncode, 2)
         self.assertIn("refused:", result.stderr)
         self.assertEqual(result.stdout, "")
+
+
+class HelperIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="crq-helper-")
+        self.addCleanup(self.temp.cleanup)
+        self.sentinel = Path(self.temp.name) / "imported"
+        self.helper = Path(self.temp.name) / "prepare-host.py"
+        self.helper.write_text("from pathlib import Path\n"
+                               "Path(%r).write_text('ran')\nVALUE = 7\n"
+                               % str(self.sentinel))
+        self.digest = hashlib.sha256(self.helper.read_bytes()).hexdigest()
+
+    def test_digest_is_computed_and_returned_with_the_module(self):
+        module, digest = dc._load_helper(self.helper)
+        self.assertEqual(digest, self.digest)
+        self.assertEqual(module.VALUE, 7)
+
+    def test_matching_pin_loads_exactly_the_hashed_bytes(self):
+        module, digest = dc._load_helper(self.helper, self.digest)
+        self.assertEqual((module.VALUE, digest), (7, self.digest))
+        self.assertTrue(self.sentinel.exists())
+
+    def test_mismatch_or_malformed_pin_refuses_without_executing(self):
+        for expected in ("0" * 64, self.digest.upper(), self.digest[:-1], ""):
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(dc.Refused, "helper"):
+                    dc._load_helper(self.helper, expected)
+                self.assertFalse(self.sentinel.exists())
+
+    def test_unreadable_helper_refuses(self):
+        with self.assertRaisesRegex(dc.Refused, "helper unreadable"):
+            dc._load_helper(Path(self.temp.name) / "absent.py")
 
 
 if __name__ == "__main__":

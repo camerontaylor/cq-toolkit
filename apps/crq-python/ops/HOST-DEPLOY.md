@@ -182,10 +182,20 @@ Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
 never claims the switch was undone. The controller lock
 is `state/controller.lock`, distinct from the runner's tick lock.
 
+Helper identity: the controller reads `--helper` (default
+`<root>/apps/crq-python/ops/prepare-host.py`) once, computes its sha256 and
+executes exactly those bytes. The digest is `helper_sha256` in the switch and
+rollback stdout artifacts and in every intent, recovery, deploy and rollback
+journal. The optional global `--expect-helper-sha256 HEX64` pins the reviewed
+helper: a mismatch (or a value that is not 64 lowercase hex) refuses with exit 2
+before the helper is imported, before the controller lock and before preflight.
+Order: identity check, then lock, then preflight.
+
 ```sh
 # Preflight, drain, helper switch, preservation, journal:
 python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \
   --overlay /private/host.json --record-dir /private/crq-deploy-records \
+  --expect-helper-sha256 REVIEWED_HELPER_SHA256 \
   switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
 # After the owner starts units (this document, step 6):
 python3 /srv/crq-deploy/apps/crq-python/ops/deploy-controller.py --root /srv/crq-deploy \

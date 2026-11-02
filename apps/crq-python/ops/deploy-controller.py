@@ -23,6 +23,8 @@ renderer, switcher or scheduler. The controller's additions:
     read only from the runner's completion heartbeat (crq.py replaces it
     after status publication; the earlier queue saves prove nothing), plus
     representative receipt readability (distinct checks);
+  * the helper's sha256 is computed from the exact bytes executed, recorded
+    in every journal, and optionally pinned by the owner before the lock;
   * fail-stopped, owner-approved automatic rollback, only to a recorded
     compatible previous target: same helper path, same drift/stopped-unit
     fence. A queue/receipt schema the prior target cannot read disables
@@ -52,12 +54,30 @@ import uuid
 from pathlib import Path
 
 
-def _load_helper(path: Path):
-    """Load the accepted helper as a module; never reimplement it."""
+def _load_helper(path: Path, expected_sha256: str | None = None):
+    """Load the accepted helper as a module; never reimplement it.
+
+    The helper's bytes are read ONCE and hashed before anything executes;
+    exactly those bytes are compiled, so the recorded digest is the code
+    that ran (#549). An owner-pinned ``expected_sha256`` that disagrees
+    refuses before any import, lock or preflight. Returns (module, digest).
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise Refused("helper unreadable: " + str(exc)[:200]) from exc
+    digest = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None:
+        if not HELPER_SHA_RE.fullmatch(expected_sha256):
+            raise Refused("--expect-helper-sha256 must be 64 lowercase hex")
+        if digest != expected_sha256:
+            raise Refused("helper " + str(path) + " sha256 " + digest
+                          + " does not match the owner-pinned "
+                          + expected_sha256 + "; nothing imported or run")
     spec = importlib.util.spec_from_file_location("crq_prepare_host", path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    exec(compile(data, str(path), "exec"), module.__dict__)  # noqa: S102 - bound bytes
+    return module, digest
 
 
 LOCK_NAME = "controller.lock"
@@ -65,6 +85,7 @@ JOURNAL_SCHEMA = 1
 
 TAG_RE = re.compile(r"crq-runner/[0-9]{8}-[0-9]+")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+HELPER_SHA_RE = re.compile(r"[0-9a-f]{64}")
 # launch(): item ID + UTC timestamp; author IDs add ._ and promotion retries +.
 # Retain legacy hex IDs, but accept only bounded ASCII filesystem components.
 RUN_ID_RE = re.compile(
@@ -514,7 +535,7 @@ def rollback_compatible(record: dict) -> bool:
 
 @contextlib.contextmanager
 def mutation_record(effects: Effects, operation: str, state: dict, target: str,
-                    tag: str, prior_tag: str | None):
+                    tag: str, prior_tag: str | None, helper_sha256: str | None = None):
     """Persist recovery identity BEFORE calling the mutating helper.
 
     Exception translation is confined to this mutation boundary: every failure
@@ -528,6 +549,7 @@ def mutation_record(effects: Effects, operation: str, state: dict, target: str,
                 "prior_head": state["prior_head"],
                 "prior_config_sha256": state["prior_config_sha256"],
                 "prior_tag": prior_tag, "target": target, "tag": tag,
+                "helper_sha256": helper_sha256,
                 "automatic_rollback_permitted": False,
                 "rollback_compatibility": {}}
     intent = {**identity, "operation": operation + "_pending", "outcome": "pending"}
@@ -560,7 +582,7 @@ def mutation_record(effects: Effects, operation: str, state: dict, target: str,
 
 
 def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
-                overlay_path: Path) -> dict:
+                overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Preflight -> drain -> durable intent -> helper -> proofs -> completion.
 
     Failures after helper entry require owner recovery; they never claim the
@@ -570,7 +592,7 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
         pre = preflight(effects, target, tag)
         effects.record_preflight()
         prior_tag = prior_tag_for(effects, pre["state"]["prior_head"])
-        plan = {"preflight": pre, "steps": []}
+        plan = {"preflight": pre, "steps": [], "helper_sha256": helper_sha256}
         drain = drain_check(effects, _runner_liveness(effects))
         plan["steps"].append({"step": "drain", **drain})
         if not drain["drained"]:
@@ -578,7 +600,8 @@ def deploy_plan(effects: Effects, helper_module, target: str, tag: str,
                           "documented author-recovery path first: "
                           + json.dumps(drain["blocked"])[:400])
         overlay, raw = helper_module.load_overlay(overlay_path)
-        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag) as tx:
+        with mutation_record(effects, "deploy", pre["state"], target, tag, prior_tag,
+                             helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, target, tag)
             tx["phase"] = "preservation"
             post = preservation_check(effects, pre["state"])
@@ -632,6 +655,7 @@ def deploy_journal(prior_state: dict, target: str, tag: str, plan: dict,
             "prior_tag": prior_tag,
             "target": target,
             "tag": tag,
+            "helper_sha256": plan.get("helper_sha256"),
             "rollback_compatibility": plan.get("rollback_compatibility_after") or {},
             "automatic_rollback_permitted": plan.get("automatic_rollback_permitted"),
             "plan": plan}
@@ -706,7 +730,7 @@ def _refusing_liveness(*_args, **_kwargs):
 
 
 def rollback_plan(effects: Effects, helper_module, prior: dict,
-                  overlay_path: Path) -> dict:
+                  overlay_path: Path, helper_sha256: str | None = None) -> dict:
     """Owner-approved rollback to the recorded prior target, through the SAME
     helper fence. Consumes exactly the journal ``deploy_plan`` wrote.
     Refuses when the compatibility record disables automatic rollback
@@ -737,7 +761,7 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
         prior_tag = prior_tag_for(effects, state["prior_head"])
         overlay, raw = helper_module.load_overlay(overlay_path)
         with mutation_record(effects, "rollback", state, record["prior_head"],
-                             record["tag"], prior_tag) as tx:
+                             record["tag"], prior_tag, helper_sha256) as tx:
             helper_module.switch(effects.root, overlay, raw, record["prior_head"],
                                  record["tag"])
             tx["phase"] = "preservation"
@@ -746,8 +770,10 @@ def rollback_plan(effects: Effects, helper_module, prior: dict,
             effects.journal_replace(tx["path"], {
                 "schema_version": JOURNAL_SCHEMA, "operation": "rollback",
                 "outcome": "completed", "transaction_id": tx["id"], "at": now_iso(),
-                "to": record["prior_head"], "tag": record["tag"]})
-        return {"rolled_back_to": record["prior_head"], "tag": record["tag"]}
+                "to": record["prior_head"], "tag": record["tag"],
+                "helper_sha256": helper_sha256})
+        return {"rolled_back_to": record["prior_head"], "tag": record["tag"],
+                "helper_sha256": helper_sha256}
 
 
 # --------------------------------------------------------------------- main
@@ -763,6 +789,9 @@ def main(argv=None) -> int:
                         help="private controller record directory (outside Git)")
     parser.add_argument("--helper", type=Path,
                         help="path to prepare-host.py (default: <root>/apps/crq-python/ops)")
+    parser.add_argument("--expect-helper-sha256", metavar="HEX64",
+                        help="owner-pinned sha256 of the helper; a mismatch refuses "
+                             "before import, lock and preflight")
     sub = parser.add_subparsers(dest="operation", required=True)
     switch = sub.add_parser("switch", help="preflight, drain, switch, verify, journal")
     switch.add_argument("--sha", required=True)
@@ -779,20 +808,24 @@ def main(argv=None) -> int:
 
     root = args.root.resolve()
     helper_path = args.helper or (root / "apps/crq-python/ops/prepare-host.py")
-    helper_module = _load_helper(helper_path)
     effects = Effects(root, args.record_dir.resolve())
 
     try:
+        # Identity first, then the controller lock, then preflight (#549).
+        helper_module, helper_sha256 = _load_helper(helper_path,
+                                                    args.expect_helper_sha256)
         if args.operation == "switch":
             plan = deploy_plan(effects, helper_module, args.sha, args.tag,
-                               args.overlay)
+                               args.overlay, helper_sha256)
             print(json.dumps({"operation": "switch", "target": plan["preflight"]["target"],
                               "automatic_rollback_permitted":
                                   plan["automatic_rollback_permitted"],
+                              "helper_sha256": helper_sha256,
                               "steps": plan["steps"]}, indent=2, sort_keys=True))
         elif args.operation == "rollback":
             prior = json.loads(args.prior_record.read_text())
-            result = rollback_plan(effects, helper_module, prior, args.overlay)
+            result = rollback_plan(effects, helper_module, prior, args.overlay,
+                                   helper_sha256)
             print(json.dumps({"operation": "rollback", **result}, indent=2,
                              sort_keys=True))
         else:
