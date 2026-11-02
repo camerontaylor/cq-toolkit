@@ -160,12 +160,13 @@ export async function isolateAddressMany(
   }
 }
 /**
- * Retain exit spend across every terminal result. Each admitted leg's settled
- * usage is recorded once (known from its report, unknown when the leg was
- * dispatched without a measurement, measured zero when it never dispatched),
- * and the folded summary is attached to EVERY exit, including failure,
- * budget exhaustion, needs-human and an input-schema refusal, so a bulk run
- * never loses the spend it already paid for on a non-ok exit.
+ * Retain exit spend across every terminal result that carries a report, plus
+ * `ok`. Each admitted leg's settled usage is recorded once (known from its
+ * report, unknown when the leg was dispatched without a measurement, measured
+ * zero when it never dispatched), and the folded summary is attached to that
+ * result, so failure, budget exhaustion and thrown legs never lose the spend
+ * they already paid for. A report-less refusal exits before any dispatch: no
+ * spend exists, and there is no report to extend.
  */
 export function makeReviewAddressMany(
   deps: {
