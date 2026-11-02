@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent
+RUNNER_ROOT = ROOT.parents[1]
 STATE = ROOT / "state"
 RUNS = STATE / "runs"
 LEDGER = STATE / "ledger"
@@ -2423,10 +2424,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
-        client_health.record(sys.modules[__name__], q, discovery_enabled=(not only and
+        log.extend(client_health.record(sys.modules[__name__], q, discovery_enabled=(not only and
             isinstance(CONFIG.get("merged_discovery"), dict) and
-            CONFIG["merged_discovery"].get("enabled") is True),
-            budget=budget if not only else None)
+            CONFIG["merged_discovery"].get("enabled") is True)))
         save_queue(q)
     return log
 

@@ -352,7 +352,8 @@ A blocked status has `fixed:false` and omits `remediation` entirely.
 
 ### Advisory runner health
 
-`review.queueHealth` accepts the same `QueueReference` as `review.queueStatus`.
+`review.queueHealth` accepts `{requestId, binding: {repo, targetSelector}}`.
+This dedicated health binding cannot enqueue, bind, or read review receipts.
 The SDK client exposes `health(reference)`; queue-v1 uses `op: "health"`.
 It returns `lastCompletedTick`, `ageSeconds`, `discoveryComplete` (null before
 an enabled discovery tick), `incompleteTicks`, `pending`, `blocked`,
@@ -361,13 +362,16 @@ completion, not from the reviewed repository or via a process per read.
 Reads use snapshot admission (two concurrent reads), never the tick lock.
 A changed snapshot returns retryable `busy`.
 
-Deployment must retain the ordinary `read`, `repo`, `targets` and `branches`
+Deployment must retain the ordinary `read`, `repo` and `targets`
 permissions and explicitly add this queue-policy grant (binding is the exact
-client QueueReference binding, not a wildcard):
+client health binding, not a wildcard):
 
 ```json
-{"health_reads":[{"principal":"CLIENT_PRINCIPAL","binding":{"kind":"deferred-author","repo":"camerontaylor/cq-toolkit","producer":"health-client","head":"0000000000000000000000000000000000000000","target":"main","targetSelector":"promoted-main"}}]}
+{"health_reads":[{"principal":"CLIENT_PRINCIPAL","binding":{"repo":"camerontaylor/cq-toolkit","targetSelector":"promoted-main"}}]}
 ```
 
 No enqueue or forge verification is needed. Use a stable requestId such as
 `health-client` with that binding. Health is advisory and grants no review credit.
+
+Health has no branch permission requirement. A `health_reads` grant authorizes
+only `health`; it grants no status/report or write authority.

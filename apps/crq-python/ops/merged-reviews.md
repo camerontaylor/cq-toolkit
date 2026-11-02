@@ -250,7 +250,7 @@ A blocked status has `fixed:false` and omits `remediation` entirely.
 
 On deploy, add `health_reads` to the queue policy as documented in
 [queue-client.md](../../../docs/queue-client.md#advisory-runner-health).
-The principal still needs ordinary read/repository/selector/branch permission.
+The principal still needs ordinary read/repository/selector permission, with no branch requirement.
 No deployment-controller change is needed.
 
 Runner config `discovery_incomplete_ticks` defaults to 3 (integer 1–1000000).
@@ -258,12 +258,19 @@ Existing `merged_discovery.enabled: true` enables discovery health accounting.
 A completed tick stores a single `client_health` record in queue.json: timestamp,
 runner checkout HEAD, last discovery result, capped streak, issue number and
 settled issue state. Restarts retain the streak; no per-tick history grows.
-Disabled discovery reports unknown and does not close an existing advisory.
+Skipped discovery (including `--only`) retains the last complete flag and streak;
+it does not trigger advisory work or close an existing advisory.
 
 At the threshold, crq finds its stable `crq: merged discovery incomplete` issue
 with marker `<!-- crq-discovery-health-v1 -->`, creates or updates it, and
-comments/closes on recovery. Successful transitions make no further forge calls
-until the next transition; failed transitions retry later. Each attempt makes
-at most three calls from the tick's existing ForgeBudget, after discovery work.
+comments/closes on recovery. The issue body refreshes only at multiples of
+`discovery_incomplete_ticks` (3, 6, 9 by default), and on open/recovery transitions.
+Each attempt uses a separate fixed ForgeBudget of three calls and ten seconds,
+so exhausted discovery cannot starve the advisory. Skipped or failed attempts
+produce a tick log line. Before create, a durable opening marker is saved; an
+ambiguous create is never repeated automatically. A bounded, non-search-index
+issue list finds the stable marker on later ticks; if it cannot find the issue,
+the attempt is logged and skipped. Operators can reconcile a persistent opening
+marker after checking GitHub; it is advisory and never blocks dispatch.
 Budget exhaustion and forge failures never fail a tick. Existing gh credentials
 are reused. The advisory does not block dispatch or alter review credit.

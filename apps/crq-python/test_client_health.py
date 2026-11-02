@@ -31,7 +31,7 @@ class HealthTests(unittest.TestCase):
             self.assertEqual(health.checkout_sha(worktree), "b" * 40)
 
     def runner(self):
-        c = SimpleNamespace(CONFIG={}, ROOT=crq.ROOT, REPO="owner/repo", ForgeBudget=crq.ForgeBudget,
+        c = SimpleNamespace(CONFIG={}, ROOT=crq.ROOT, RUNNER_ROOT=crq.RUNNER_ROOT, save_queue=mock.Mock(), REPO="owner/repo", ForgeBudget=crq.ForgeBudget,
             forge_window=crq.forge_window, iso=lambda: "2026-11-02T00:00:00Z",
             run=mock.Mock(return_value=SimpleNamespace(stdout="a" * 40)), gh_json=mock.Mock())
         c.gh_json.side_effect = [[], {"number": 42}, {}, {}, {}, {}]
@@ -64,29 +64,76 @@ class HealthTests(unittest.TestCase):
         for _ in range(2):
             health.record(c, q, discovery_enabled=True)
         health.record(c, q, discovery_enabled=False)
-        self.assertIsNone(q["client_health"]["complete"])
+        self.assertFalse(q["client_health"]["complete"])
         self.assertEqual(q["client_health"]["incomplete_ticks"], 2)
         health.record(c, q, discovery_enabled=True)
         self.assertTrue(q["client_health"]["issue_open"])
 
     def test_existing_issue_updated_once(self):
         c = self.runner()
-        c.CONFIG["discovery_incomplete_ticks"] = 1
+        c.CONFIG["discovery_incomplete_ticks"] = 3
         c.gh_json.side_effect = [[{"number": 42, "title": health.TITLE, "body": health.MARKER}], {}]
-        q = {"merged_discovery": {"complete": False}}
+        q = {"merged_discovery": {"complete": False}, "client_health": {"incomplete_ticks": 2}}
         health.record(c, q, discovery_enabled=True)
         health.record(c, q, discovery_enabled=True)
         self.assertEqual(c.gh_json.call_count, 2)
         self.assertIn("PATCH", c.gh_json.call_args.args[0])
 
-    def test_budget_exhaustion_advisory_only(self):
+    def test_exhausted_discovery_budget_does_not_starve_advisory(self):
+        c = self.runner()
+        q = {"merged_discovery": {"complete": False}, "client_health": {"incomplete_ticks": 3}}
+        exhausted = crq.ForgeBudget(requests=0)
+        with crq.forge_window(exhausted):
+            self.assertEqual(health.record(c, q, discovery_enabled=True), [])
+        self.assertTrue(q["client_health"]["issue_open"])
+        self.assertEqual(q["client_health"]["issue_number"], 42)
+        self.assertEqual(exhausted.remaining, 0)
+
+    def test_advisory_budget_exhaustion_logged(self):
         c = self.runner()
         c.CONFIG["discovery_incomplete_ticks"] = 1
+        c.ForgeBudget = lambda **kw: crq.ForgeBudget(requests=0)
         q = {"merged_discovery": {"complete": False}}
-        health.record(c, q, discovery_enabled=True, budget=crq.ForgeBudget(requests=0))
+        self.assertIn("skipped or failed", health.record(c, q, discovery_enabled=True)[0])
         c.gh_json.assert_not_called()
-        self.assertEqual(q["client_health"]["incomplete_ticks"], 1)
-        self.assertNotIn("issue_open", q["client_health"])
-        c.gh_json.side_effect = RuntimeError("offline")
+
+    def test_ambiguous_create_is_not_repeated_after_restart(self):
+        c = self.runner()
+        c.CONFIG["discovery_incomplete_ticks"] = 1
+        c.gh_json.side_effect = [[], RuntimeError("lost create response")]
+        q = {"merged_discovery": {"complete": False}}
+        persisted = []
+        c.save_queue.side_effect = lambda q: persisted.append(json.loads(json.dumps(q)))
+        self.assertIn("failed", health.record(c, q, discovery_enabled=True)[0])
+        q = persisted[-1]
+        self.assertTrue(q["client_health"]["opening"])
+        c.gh_json.reset_mock(side_effect=True)
+        c.gh_json.side_effect = [[], [{"number": 42, "title": health.TITLE, "body": health.MARKER}], {}]
+        self.assertIn("skipped", health.record(c, q, discovery_enabled=True)[0])
         health.record(c, q, discovery_enabled=True)
-        self.assertEqual(q["client_health"]["incomplete_ticks"], 2)
+        self.assertTrue(q["client_health"]["issue_open"])
+        self.assertEqual(c.gh_json.call_count, 3)  # list, list, update; never a second create
+        self.assertNotIn("--search", c.gh_json.call_args_list[0].args[0])
+
+    def test_recovery_reconciles_an_ambiguous_opening(self):
+        c = self.runner()
+        q = {"merged_discovery": {"complete": True},
+             "client_health": {"opening": True, "incomplete_ticks": 5}}
+        c.gh_json.side_effect = [[{"number": 42, "title": health.TITLE, "body": health.MARKER}], {}, {}]
+        self.assertEqual(health.record(c, q, discovery_enabled=True), [])
+        self.assertFalse(q["client_health"]["issue_open"])
+        self.assertFalse(q["client_health"]["opening"])
+        self.assertEqual(c.gh_json.call_count, 3)
+
+    def test_issue_updates_only_at_threshold_multiples(self):
+        c = self.runner()
+        q = {"merged_discovery": {"complete": False}}
+        for _ in range(8):
+            health.record(c, q, discovery_enabled=True)
+        self.assertEqual(c.gh_json.call_count, 3)  # list/create at 3, update at 6
+        self.assertIn("6 ticks", c.gh_json.call_args.args[0][-1])
+        health.record(c, q, discovery_enabled=True)
+        self.assertEqual(c.gh_json.call_count, 4)
+
+    def test_checkout_does_not_search_parent_directories(self):
+        self.assertIsNone(health.checkout_sha(crq.ROOT))

@@ -46,6 +46,13 @@ export const QueueReferenceSchema = z
   .object({ requestId: QueueToken, binding: QueueBindingSchema })
   .strict();
 export type QueueReference = z.infer<typeof QueueReferenceSchema>;
+export const QueueHealthBindingSchema = z
+  .object({ repo: QueueRepo, targetSelector: QueueTarget })
+  .strict();
+export const QueueHealthReferenceSchema = z
+  .object({ requestId: QueueToken, binding: QueueHealthBindingSchema })
+  .strict();
+export type QueueHealthReference = z.infer<typeof QueueHealthReferenceSchema>;
 export const QueueBindSchema = QueueReferenceSchema.extend({
   pr: z.number().int().positive(),
   mergeSha: QueueSha.exactOptional(),

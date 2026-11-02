@@ -1,9 +1,11 @@
-import { ZodError } from 'zod';
 /** SDK-first queue ops. No vendor dispatch and no author admission mutation. */
+import { ZodError } from 'zod';
 import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import { makeQueueClient, QueueUnsupported, sshQueueTransport } from './internal/queueClient.js';
 import {
+  QueueHealthReferenceSchema,
+  type QueueHealthReference,
   QueueEnqueueInputSchema,
   QueueReferenceSchema,
   QueueReportInputSchema,
@@ -28,6 +30,8 @@ export type {
   DeferredAuthorBinding,
   DeferredQueueClient,
   QueueBinding,
+  QueueHealthReference,
+  QueueHealth,
   QueueReference,
   QueueBindInput,
   QueueStatus,
@@ -39,7 +43,7 @@ type Unsupported = { state: 'unsupported'; reason: string };
 export function makeQueueOps(transport?: QueueTransport): {
   enqueue: Op<QueueEnqueueInput, QueueStatus | Unsupported>;
   queueStatus: Op<QueueReference, QueueStatus | Unsupported>;
-  queueHealth: Op<QueueReference, QueueHealth | Unsupported>;
+  queueHealth: Op<QueueHealthReference, QueueHealth | Unsupported>;
   report: Op<
     QueueReportInput,
     { state: 'pending' | 'consumed'; evidence: QueueEvidence | null } | Unsupported
@@ -125,7 +129,7 @@ export function makeQueueOps(transport?: QueueTransport): {
       return command.kind === 'cancel' ? client.cancel(command.ref) : client.enqueue(command.ref);
     }),
     queueHealth: wrap(
-      (input: QueueReference) => QueueReferenceSchema.parse(input),
+      (input: QueueHealthReference) => QueueHealthReferenceSchema.parse(input),
       (client, reference) => client.health(reference),
       true,
     ),

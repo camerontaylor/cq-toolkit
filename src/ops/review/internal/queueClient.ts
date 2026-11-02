@@ -8,6 +8,8 @@ import {
   QueueReferenceSchema,
   QueueStatusSchema,
   QueueHealthSchema,
+  QueueHealthReferenceSchema,
+  type QueueHealthReference,
   type QueueHealth,
   QUEUE_WIRE_BYTES,
   type DeferredQueueClient,
@@ -160,16 +162,17 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
     },
   ): Promise<QueueEvidence | null>;
-  health(input: QueueReference, options?: QueueLifetimeOptions): Promise<QueueHealth>;
+  health(input: QueueHealthReference, options?: QueueLifetimeOptions): Promise<QueueHealth>;
 } {
   async function request(
     op: string,
-    input: QueueReference,
+    input: QueueReference | QueueHealthReference,
     extra: Record<string, unknown> = {},
     options?: QueueLifetimeOptions,
   ): Promise<unknown> {
     refuseOnLifetime(options, op);
-    const ref = QueueReferenceSchema.parse(input);
+    const schema = op === 'health' ? QueueHealthReferenceSchema : QueueReferenceSchema;
+    const ref = schema.parse(input);
     const wire = JSON.stringify({ v: 1, op, ...ref, ...extra }) + '\n';
     if (Buffer.byteLength(wire) > QUEUE_WIRE_BYTES) throw new Error('oversized queue request');
     const raw = await transport(wire, requestLifetime(options));
@@ -178,7 +181,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       .object({
         v: z.literal(1),
         requestId: z.string(),
-        binding: QueueReferenceSchema.shape.binding,
+        binding: schema.shape.binding,
         result: z.unknown(),
       })
       .strict()

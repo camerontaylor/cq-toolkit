@@ -627,6 +627,10 @@ describe('queue report lifetime enforcement', () => {
 });
 
 test('health parses an authorized snapshot and rejects malformed counts', async () => {
+  const healthRef = {
+    requestId: ref.requestId,
+    binding: { repo: ref.binding.repo, targetSelector: ref.binding.targetSelector },
+  };
   const result = {
     lastCompletedTick: '2026-11-02T00:00:00Z',
     ageSeconds: 10,
@@ -640,11 +644,14 @@ test('health parses an authorized snapshot and rejects malformed counts', async 
   const transport: QueueTransport = async (wire) => {
     const request = JSON.parse(wire) as Record<string, unknown>;
     expect(request['op']).toBe('health');
-    return JSON.stringify({ v: 1, requestId: ref.requestId, binding: ref.binding, result });
+    return JSON.stringify({ v: 1, requestId: ref.requestId, binding: healthRef.binding, result });
   };
-  expect(await makeQueueClient(transport).health(ref)).toEqual(result);
-  expect(await makeQueueOps(transport).queueHealth(ref)).toEqual({ status: 'ok', value: result });
+  expect(await makeQueueClient(transport).health(healthRef)).toEqual(result);
+  expect(await makeQueueOps(transport).queueHealth(healthRef)).toEqual({
+    status: 'ok',
+    value: result,
+  });
   result.pending = -1;
-  expect(await makeQueueOps(transport).queueHealth(ref)).toMatchObject({ status: 'failed' });
-  await expect(makeQueueClient(transport).health(ref)).rejects.toThrow();
+  expect(await makeQueueOps(transport).queueHealth(healthRef)).toMatchObject({ status: 'failed' });
+  await expect(makeQueueClient(transport).health(healthRef)).rejects.toThrow();
 });

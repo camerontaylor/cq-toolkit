@@ -22,6 +22,8 @@ export type {
   DeferredAuthorBinding,
   DeferredQueueClient,
   QueueBinding,
+  QueueHealthReference,
+  QueueHealth,
   QueueReference,
   QueueBindInput,
   QueueStatus,

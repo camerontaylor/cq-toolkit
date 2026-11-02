@@ -17,85 +17,25 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "additionalProperties": false,
   "properties": {
     "binding": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "head": {
-              "pattern": "^[0-9a-f]{40}$",
-              "type": "string"
-            },
-            "kind": {
-              "const": "deferred-author",
-              "type": "string"
-            },
-            "producer": {
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",
-              "type": "string"
-            },
-            "repo": {
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
-              "type": "string"
-            },
-            "target": {
-              "type": "string"
-            },
-            "targetSelector": {
-              "enum": [
-                "promoted-main",
-                "merge-queue"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "repo",
-            "producer",
-            "head",
-            "target",
-            "targetSelector"
-          ],
-          "type": "object"
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
+          "type": "string"
         },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "merged-current",
-              "type": "string"
-            },
-            "mergeSha": {
-              "pattern": "^[0-9a-f]{40}$",
-              "type": "string"
-            },
-            "pr": {
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991,
-              "type": "integer"
-            },
-            "repo": {
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$",
-              "type": "string"
-            },
-            "targetSelector": {
-              "enum": [
-                "promoted-main",
-                "merge-queue"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "repo",
-            "pr",
-            "mergeSha",
-            "targetSelector"
+        "targetSelector": {
+          "enum": [
+            "promoted-main",
+            "merge-queue"
           ],
-          "type": "object"
+          "type": "string"
         }
-      ]
+      },
+      "required": [
+        "repo",
+        "targetSelector"
+      ],
+      "type": "object"
     },
     "requestId": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$",

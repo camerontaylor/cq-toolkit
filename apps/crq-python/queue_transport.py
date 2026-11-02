@@ -146,7 +146,7 @@ def validate_policy(policy):
     for grant in grants:
         if (type(grant) is not dict or set(grant) != {"principal", "binding"}
                 or not isinstance(grant["principal"], str) or not grant["principal"]
-                or binding(grant["binding"])["repo"] != policy["repo"]):
+                or _health_binding(grant["binding"])["repo"] != policy["repo"]):
             raise ValueError("invalid health grant")
     limit = policy.get("max_requests", 10000)
     if type(limit) is not int or not 1 <= limit <= 100000:
@@ -193,6 +193,14 @@ def binding(value):
         raise ValueError("invalid merged source")
     return value
 
+
+
+def _health_binding(value):
+    if (type(value) is not dict or set(value) != {"repo", "targetSelector"}
+            or not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value.get("repo"))
+            or value.get("targetSelector") not in receipts.SELECTORS):
+        raise ValueError("invalid health binding")
+    return value
 
 
 def _inventory_binding(value):
@@ -325,6 +333,11 @@ def decode(raw):
     if not isinstance(request, dict) or type(request.get("v")) is not int or request["v"] != 1:
         raise ValueError("unsupported queue protocol")
     op = request.get("op")
+    if op == "health":
+        if set(request) != {"v", "op", "requestId", "binding"} or not _match(TOKEN, request["requestId"]):
+            raise ValueError("invalid health fields")
+        _health_binding(request["binding"])
+        return request
     if op == "inventory":
         if set(request) != {"v", "op", "requestId", "binding", "cursor", "limit", "states"}:
             raise ValueError("invalid inventory fields")
@@ -544,7 +557,7 @@ def authorize(req, principal, policy):
         raise ValueError("health capability denied")
     if op == "inventory" and {"principal": principal, "binding": b} not in policy.get("inventory_reads", []):
         raise ValueError("inventory capability denied")
-    if op != "inventory" and b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
+    if op not in {"inventory", "health"} and b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
         raise ValueError("target branch denied")
 
 

@@ -125,7 +125,10 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     },
   }),
   'review.queueStatus': () => minimalInputs['review.enqueue']!(),
-  'review.queueHealth': () => minimalInputs['review.enqueue']!(),
+  'review.queueHealth': () => ({
+    requestId: 'health-client',
+    binding: { repo: 'owner/repo', targetSelector: 'promoted-main' },
+  }),
   'review.report': () => ({
     ...minimalInputs['review.enqueue']!(),
     evidenceDir: '/tmp/queue-evidence',
