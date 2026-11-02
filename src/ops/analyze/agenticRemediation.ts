@@ -66,8 +66,9 @@ import type {
   ToolPolicy,
   WorkerResult,
 } from '../../driver/types.js';
-import type { Op } from '../../kernel/types.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import type { Op } from '../../kernel/types.js';
 import type { Cluster } from './clusterErrors.js';
 
 /**
@@ -267,6 +268,12 @@ export function makeAgenticRemediation(
         ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
         budget: input.budget ?? {},
         outputSchema: AGENTIC_PROPOSAL_OUTPUT_SCHEMA,
+        // Session-log correlation (items 1.3–1.5): forward the runner's
+        // governed work identity onto this invocation so the session log
+        // names THE work unit it served. Absent context preserves the
+        // un-governed behavior exactly; the shared helper stays pure over
+        // the correlation value (ADR-0002 one-directional rule).
+        ...correlationInvocation(currentJobContext()?.info?.correlation),
       };
       result = await resolved.driver.run(invocation, { signal: currentJobContext()?.signal });
     } catch (err) {

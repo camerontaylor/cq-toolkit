@@ -502,3 +502,80 @@ describe('makeAgenticRemediation (the driver-factory seam)', () => {
     expect(factory.requests).toHaveLength(2);
   });
 });
+
+// M5b2 — forward governed invocation correlation: the invocation built in
+// makeAgenticRemediation carries the runner's governed correlation verbatim
+// (plus the helper's preserved role default) when one exists, and stays
+// correlation-free when none does. Run/work/parent identity never silently
+// inherits the outer job's; no new role is invented here.
+describe('makeAgenticRemediation correlation forwarding (M5b2)', () => {
+  test('M5b2 nominal evidence', async () => {
+    const driver = fakeDriver(COMPLETE);
+    const factory = fakeFactory(driver);
+    const correlation = { workId: 'w-m5b2', role: 'remediator', runId: 'r-m5b2' } as const;
+    const outcome = await runLadder(
+      () => makeAgenticRemediation(factory)(baseInput()),
+      {},
+      {
+        op: 'analyze.agenticRemediation',
+        jobKey: 'm5b2-nominal',
+        attempt: 1,
+        correlation: { ...correlation },
+      },
+    );
+    expect(outcome.outcome).toBe('completed');
+    expect(driver.invocations).toHaveLength(1);
+    expect(driver.invocations[0]!.correlation).toEqual({ ...correlation });
+  });
+
+  test('M5b2 missing evidence', async () => {
+    const driver = fakeDriver(COMPLETE);
+    const factory = fakeFactory(driver);
+    const outcome = await runLadder(
+      () => makeAgenticRemediation(factory)(baseInput()),
+      {},
+      { op: 'analyze.agenticRemediation', jobKey: 'm5b2-missing', attempt: 1 },
+    );
+    expect(outcome.outcome).toBe('completed');
+    expect(driver.invocations).toHaveLength(1);
+    expect(driver.invocations[0]!.correlation).toBeUndefined();
+  });
+
+  test('M5b2 failure evidence', async () => {
+    const driver = fakeDriver(COMPLETE);
+    // Table cases: run/work/parent/role are varied row by row; each row
+    // proves the governed correlation's identity fields ride VERBATIM onto
+    // the invocation — none silently inherits any outer-job value. Rows
+    // with an absent role exercise the shared helper's preserved default;
+    // no new role is minted here. (The case name follows the M5b0 literal
+    // naming convention; this row set proves the absent-role default, not a
+    // failing dispatch.)
+    const rows = [
+      { workId: 'w-child', parentWorkId: 'w-parent', role: 'remediator' },
+      { workId: 'w-other', runId: 'r-9' },
+      { workId: 'w-third', role: 'observer', task: 'review a cluster' },
+    ] as const;
+    let i = 0;
+    for (const governed of rows) {
+      const outcome = await runLadder(
+        () => makeAgenticRemediation(fakeFactory(driver))(baseInput()),
+        {},
+        {
+          op: 'analyze.agenticRemediation',
+          jobKey: `m5b2-table-${i++}`,
+          attempt: 1,
+          correlation: { ...governed },
+        },
+      );
+      expect(outcome.outcome).toBe('completed');
+    }
+    expect(driver.invocations).toHaveLength(rows.length);
+    driver.invocations.forEach((invocation, index) => {
+      const governed = rows[index]!;
+      expect(invocation.correlation).toEqual({
+        ...governed,
+        role: ('role' in governed ? governed.role : undefined) ?? 'fixer',
+      });
+    });
+  });
+});
