@@ -34,17 +34,26 @@ class ReceiptTest(unittest.TestCase):
                                 git=lambda *args: "d" * 40, is_ancestor=lambda *args: True)
             repair_tick.reconcile_current_fix(c, item)
             self.assertTrue(receipt.remediation_fixed(item, doc, rid))
+            c.pr_info = lambda _: self.fail("historical merged PR was fetched again")
+            repair_tick.reconcile_current_fix(c, item)
+            self.assertTrue(receipt.remediation_fixed(item, doc, rid))
+            c.pr_info = lambda _: info
             complete = copy.deepcopy(item)
             for field, value in (("receipt_id", "0" * 64), ("subject", {}), ("capture", {})):
                 changed = copy.deepcopy(complete)
                 changed[field] = value
                 self.assertFalse(receipt.remediation_fixed(changed, doc, changed["receipt_id"]))
             for field, value in (("state", "OPEN"), ("baseRefName", "other"), ("headRefOid", "e" * 40)):
+                record.pop("merged_fix", None)
                 old = info[field]
                 info[field] = value
                 repair_tick.reconcile_current_fix(c, item)
                 self.assertNotIn("remediation", item)
                 info[field] = old
+            (Path(td) / "receipts" / (rid + ".json")).unlink()
+            repair_tick.reconcile_current_fix(c, item)
+            self.assertNotIn("remediation", item)
+            receipt.write_receipt(Path(td) / "receipts", doc)
             record["verdicts"][0]["verdict"] = "NOT-FIXED"
             repair_tick.reconcile_current_fix(c, item)
             self.assertNotIn("remediation", item)

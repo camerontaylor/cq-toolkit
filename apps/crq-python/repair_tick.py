@@ -373,11 +373,14 @@ def reconcile_current_fix(c, item):
     rid = item.get('receipt_id')
     if not rid:
         return
-    data = (c.STATE / 'receipts' / (rid + '.json')).read_bytes()
     import hashlib
-    if hashlib.sha256(data).hexdigest() != rid:
+    try:
+        data = (c.STATE / 'receipts' / (rid + '.json')).read_bytes()
+        if hashlib.sha256(data).hexdigest() != rid:
+            return
+        doc = json.loads(data)
+    except (OSError, ValueError):
         return
-    doc = json.loads(data)
     for record in item.get('repair_runs', {}).values():
         pr = record.get('fix_pr')
         publication = record.get('publication', {})
@@ -390,7 +393,13 @@ def reconcile_current_fix(c, item):
                 or len(verdicts) != len(doc.get('findings', []))
                 or record.get('receipt_findings') != sorted(review_receipt.digest(f) for f in doc.get('findings', []))):
             continue
-        info = c.pr_info(pr['number'])
+        # Merged PR identity is immutable; only target ancestry needs refreshing.
+        info = record.get('merged_fix')
+        if not info:
+            try:
+                info = c.pr_info(pr['number'])
+            except Exception:
+                continue
         selector = item['subject']['target_selector']
         ref = review_receipt.SELECTORS[selector]
         target = c.git('rev-parse', ref)
@@ -406,6 +415,7 @@ def reconcile_current_fix(c, item):
                         fix_pr=pr['number'], merge=merge, head=info['headRefOid'], target=target)
         item['remediation'] = evidence
         if review_receipt.remediation_fixed(item, doc, rid):
+            record['merged_fix'] = copy.deepcopy(info)
             return
         item.pop('remediation', None)
 

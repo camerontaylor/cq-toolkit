@@ -216,10 +216,9 @@ Response echoes `v`, `requestId` and `binding`, with this `result` shape:
 ```
 
 States are `missing`, `pending`, `reviewed`, `reused`, `no-current-code`,
-`partial-scope`, `consumed`, or `blocked`
-(with bounded typed `reason`). The current merged-current receipt producer records
-remediation as `disabled/deferred`, so inventory never infers `fixed`. Durable
-receipt-bound remediation evidence is tracked in [#777](https://github.com/camerontaylor/cq-toolkit/issues/777). Pending includes work currently reviewing.
+`partial-scope`, `consumed`, `fixed`, or `blocked` (with bounded typed `reason`).
+`fixed` requires complete receipt-bound merged repair evidence. Pending includes
+work currently reviewing.
 Set `states:["pending","blocked"]` for the outstanding summary; null includes
 everything. Known PRs without a visible mapped request remain `missing`.
 Requests owned by another principal reveal neither IDs nor status; missing
