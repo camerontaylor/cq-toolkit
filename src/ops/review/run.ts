@@ -1133,7 +1133,20 @@ export function makeReviewRun(
   };
   return async (input): Promise<ReviewRunResult> => {
     const usageSummaries: KnownUsageSummary[] = [];
-    const result = await execute(input, usageSummaries);
-    return { ...result, usageSummary: foldKnownUsageSummaries(usageSummaries) };
+    // A thrown reviewer fault must not erase the spend it already settled:
+    // the fold runs on the rejection too and rides the existing
+    // usageSummary carrier on the error, then the error propagates unchanged
+    // (never laundered into a result, never rewritten). A fault that never
+    // observed usage contributes no invented measurement — the empty fold
+    // stays counts-only.
+    try {
+      const result = await execute(input, usageSummaries);
+      return { ...result, usageSummary: foldKnownUsageSummaries(usageSummaries) };
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && !('usageSummary' in error))
+        (error as { usageSummary?: KnownUsageSummary }).usageSummary =
+          foldKnownUsageSummaries(usageSummaries);
+      throw error;
+    }
   };
 }
