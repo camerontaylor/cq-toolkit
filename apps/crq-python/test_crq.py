@@ -985,6 +985,71 @@ class CurrentTest(unittest.TestCase):
         self.assertEqual(next(r for r in rows if r["source_path"] == "affected.py")["reason"],
                          "non-regular file; never dereferenced")
 
+    def oversized_source(self):
+        """Source of 9 cheap paths: empty, deleted, symlinked and unsupported names."""
+        for n in range(4):
+            self.write(f"empty-{n}.py", "")
+        self.write("tab\tname.py", "x\n")
+        os.symlink("unrelated.py", self.repo / "link.py")
+        (self.repo / "affected.py").unlink()
+        (self.repo / "rename.py").unlink()
+        self.write("unrelated.py", "")
+        self.merge = self.commit("many tiny, empty, deleted and unsupported paths")
+        self.info["mergeCommit"]["oid"] = self.merge
+        self.g("update-ref", "refs/remotes/origin/main", self.merge)
+        return sorted(self.g("diff", "--name-only", "--no-renames", "-z", self.merge + "^1",
+                             self.merge).rstrip("\0").split("\0"))
+
+    def test_oversized_source_path_count_is_unsupported_before_per_path_work(self):
+        names = self.oversized_source()
+        self.assertEqual(len(names), 9)
+        item = self.enroll()
+        real_git = crq.git
+        def no_per_path_git(*args, **kw):
+            self.assertNotIn(args[0], ("ls-tree", "cat-file"))
+            self.assertFalse(args[0] == "rev-parse" and ":" in args[-1], args)
+            return real_git(*args, **kw)
+        with mock.patch.object(crq, "CURRENT_PATH_CAP", 4), \
+             mock.patch.object(crq, "git", side_effect=no_per_path_git), \
+             mock.patch.object(crq, "path_exists", side_effect=AssertionError("per-path work")):
+            self.assertIsNone(self.plan_item(item))
+        rows = item["capture"]["paths"]
+        self.assertEqual([r["source_path"] for r in rows], names[:4])
+        reason = ("source path count 9 exceeds cap 4; not scanned; first 4 sorted source paths listed; "
+                  "all-source-paths sha256 " + crq.review_receipt.digest(names))
+        self.assertEqual(rows, [{"source_path": n, "path": n, "resolution": "same-path-current",
+                                 "disposition": "unsupported", "reason": reason} for n in names[:4]])
+        self.assertEqual(item["state"], "unsupported")
+        self.assertEqual(self.document(item)["outcome"], "unsupported")
+        self.assertFalse(self.document(item)["counted"])
+        self.assertNotIn("base", item["capture"])
+        self.assertEqual(self.q["starts"], [])
+        self.assertFalse((self.repo / ".git" / "refs" / "crq").exists())
+        self.assertEqual(item["capture"]["scope_digest"], crq.review_receipt.digest(rows))
+        self.assertEqual(item["capture"]["equivalence"], crq.review_receipt.current_equivalence(item["capture"]))
+
+    def test_source_at_path_count_cap_is_scanned_normally(self):
+        names = self.oversized_source()
+        with mock.patch.object(crq, "CURRENT_PATH_CAP", len(names)):
+            rows = crq.current_paths(self.merge, self.merge)
+        self.assertEqual([r["source_path"] for r in rows], names)
+        self.assertFalse(any("exceeds cap" in r.get("reason", "") for r in rows))
+        by_path = {r["source_path"]: r["disposition"] for r in rows}
+        self.assertEqual(by_path["empty-0.py"], "excluded-with-reason")
+        self.assertEqual(by_path["affected.py"], "deleted")
+        self.assertEqual(by_path["link.py"], "unsupported")
+        self.assertEqual(by_path["tab\tname.py"], "unsupported")
+
+    def test_normal_manifest_shape_is_unchanged_by_path_count_cap(self):
+        blob = lambda path: self.g("rev-parse", self.merge + ":" + path)
+        self.assertEqual(crq.current_paths(self.merge, self.merge), [
+            {"source_path": "affected.py", "path": "affected.py", "resolution": "same-path-current",
+             "blob": blob("affected.py"), "mode": "100644", "bytes": 38, "disposition": "included"},
+            {"source_path": "gone.py", "path": "gone.py", "resolution": "same-path-current",
+             "disposition": "deleted", "reason": "no current path or evidenced rename"},
+            {"source_path": "rename.py", "path": "rename.py", "resolution": "same-path-current",
+             "blob": blob("rename.py"), "mode": "100644", "bytes": 160, "disposition": "included"}])
+
     def test_equivalent_receipt_reuse_and_legacy_does_not_upgrade(self):
         item = self.enroll()
         self.launch_item(item)

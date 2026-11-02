@@ -846,6 +846,26 @@ def build_synthetic(item: Dict[str, Any], target: str) -> Tuple[str, str, int]:
 # ----------------------------------------------------------- merged-current Q1
 
 
+# Source paths scanned per merged-current subject. Larger sources are refused
+# whole before any per-path git work; see oversized_current_paths.
+CURRENT_PATH_CAP = 1000
+
+
+def oversized_current_paths(names: List[str]) -> List[Dict[str, Any]]:
+    """Bounded, truthful manifest for a source over CURRENT_PATH_CAP paths.
+
+    Nothing is scanned or selected, so the subject is unsupported and never
+    claims coverage. The first CAP sorted source paths are retained; the reason
+    names the full count and the digest of every sorted source path, so the
+    omission is explicit and distinct sources never share a scope identity.
+    """
+    reason = (f"source path count {len(names)} exceeds cap {CURRENT_PATH_CAP}; not scanned; "
+              f"first {CURRENT_PATH_CAP} sorted source paths listed; all-source-paths sha256 "
+              f"{review_receipt.digest(names)}")
+    return [{"source_path": name, "path": name, "resolution": "same-path-current",
+             "disposition": "unsupported", "reason": reason} for name in names[:CURRENT_PATH_CAP]]
+
+
 def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
     """Full affected files at T, without blame/survival or historical content."""
     if not is_ancestor(merge, target):
@@ -854,6 +874,8 @@ def current_paths(merge: str, target: str) -> List[Dict[str, Any]]:
     pre = git("rev-parse", f"{merge}^1")
     source = run(["git", "diff", "--name-only", "--no-renames", "-z", pre, merge], cwd=CLONE).stdout
     names = sorted(set(source.rstrip("\0").split("\0"))) if source else []
+    if len(names) > CURRENT_PATH_CAP:
+        return oversized_current_paths(names)
     raw = run(["git", "diff", "--name-status", "-M50%", "-z", merge, target], cwd=CLONE).stdout
     fields = raw.rstrip("\0").split("\0") if raw else []
     renames = {}
