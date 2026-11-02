@@ -15,8 +15,44 @@ from crq_repair.drivers import cq, codex, paseo
 from crq_repair.bounded import drain_job, drain_order, select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
-# A job still rate limited after this many 30-minute deferrals ends FAILED.
-MAX_RATE_LIMIT_DEFERRALS = 3
+DEFAULT_RATE_LIMIT_PAUSE = dt.timedelta(minutes=30)
+MAX_RATE_LIMIT_PAUSE = dt.timedelta(hours=24)
+
+
+def pause_path():
+    return ROOT / 'state/repair/rate-limited-until'
+
+
+def rate_limit_pause(report, job_id):
+    """Any provider rate limit pauses ALL repair dispatch until the provider's
+    retry time (30 minutes if it gives none). Nothing is counted against jobs."""
+    retry_ms = report.get('retry_after_ms')
+    if retry_ms is None:
+        retry_ms = (report.get('providerSignals') or {}).get('retryAfterMs')
+    wait = DEFAULT_RATE_LIMIT_PAUSE
+    if isinstance(retry_ms, (int, float)) and not isinstance(retry_ms, bool) and retry_ms > 0:
+        wait = min(dt.timedelta(milliseconds=retry_ms), MAX_RATE_LIMIT_PAUSE)
+    until = (dt.datetime.now(dt.timezone.utc) + wait).strftime('%Y-%m-%dT%H:%M:%SZ')
+    current = paused()
+    if current and current > until:
+        until = current  # never shorten an existing pause
+    atomic(pause_path(), {'until': until, 'job': job_id, 'at': utc()})
+    return until
+
+
+def paused(now=None):
+    """The pause end (ISO UTC) while it is in the future, else None."""
+    path = pause_path()
+    if not path.exists():
+        return None
+    try:
+        until = json.loads(path.read_text())['until']
+        end = dt.datetime.fromisoformat(until.replace('Z', '+00:00'))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        # Unreadable marker: fail closed for one default window from its mtime.
+        end = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc) + DEFAULT_RATE_LIMIT_PAUSE
+        until = end.strftime('%Y-%m-%dT%H:%M:%SZ')
+    return until if end > (now or dt.datetime.now(dt.timezone.utc)) else None
 
 
 def blackout(repair, now=None):
@@ -124,23 +160,15 @@ def process(config, job, wt):
     base = job['repair_base']
     evidence = result.get('evidence', '')
     rung = result.get('next_rung', max((int(a['rung'][1:]) + 1 for a in result['attempts']), default=0))
-    def defer(reason, rate_limited=False):
-        if rate_limited:
-            count = result.get('rate_limit_deferrals', 0) + 1
-            result['rate_limit_deferrals'] = count
-            if count > MAX_RATE_LIMIT_DEFERRALS:
-                if result.pop('pending_judge', None):
-                    result['judge'] = {'stop': 'rate-limit', 'verdict': 'unsure', 'reason': reason}
-                result.update(verdict='FAILED', finished_at=utc(),
-                              reason=reason + '; still rate limited after ' + str(MAX_RATE_LIMIT_DEFERRALS)
-                              + ' deferrals; needs human')
-                atomic(result_path, result)
-                return {**result, 'rate_limited': True}
-        result['retry_after'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    def defer(reason, rate_limit=None):
+        if rate_limit is not None:
+            # Global pause marker first: no model call anywhere until it expires.
+            result['retry_after'] = rate_limit_pause(rate_limit, job['job'])
+        else:
+            result['retry_after'] = (dt.datetime.now(dt.timezone.utc) + DEFAULT_RATE_LIMIT_PAUSE).strftime('%Y-%m-%dT%H:%M:%SZ')
         result['reason'] = reason
         atomic(result_path, result)
-        # The flag is returned, never persisted: it tells the drain to stop this pass.
-        return {**result, 'rate_limited': True} if rate_limited else result
+        return result
     while rung < 3:
         role = roles['fixer' if rung < 2 else 'fixer_escalation']
         attempt_dir = directory / ('A' + str(rung))
@@ -166,7 +194,7 @@ def process(config, job, wt):
                 result.pop('dispatch_pending', None)
                 if report.get('stop') == 'rate-limit':
                     result['next_rung'] = rung
-                    return defer('provider rate limit; attempt deferred', rate_limited=True)
+                    return defer('provider rate limit; attempt deferred', rate_limit=report)
                 attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
                            'driver': role['driver'], 'model': role['model'], 'stop': report.get('stop'),
                            'changed': report.get('changed', False)}
@@ -203,7 +231,7 @@ def process(config, job, wt):
                 finally:
                     result.pop('dispatch_pending', None)
                 if judged.get('stop') == 'rate-limit':
-                    return defer('judge rate limit; resume judge without repeating fixer', rate_limited=True)
+                    return defer('judge rate limit; resume judge without repeating fixer', rate_limit=judged)
                 result.pop('pending_judge', None)
                 result['judge'] = judged
                 if judged.get('verdict') == 'valid' and judged.get('stop') == 'ok':
@@ -270,19 +298,39 @@ def mark_stale(job, reason):
         'commits': [], 'attempts': [], 'judge': None, 'started_at': utc(), 'finished_at': utc()})
 
 
+def fetch_clone(config):
+    """`git fetch --prune` under the tick's own lock (crq.with_lock: the same
+    state/tick.lock file, flock LOCK_EX|LOCK_NB). If the tick holds it, skip
+    this pass rather than race its fetch. Returns an error string, or None."""
+    lock_path = ROOT / 'state/tick.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 'crq tick holds tick.lock'
+        try:
+            fetched = command(['git', 'fetch', '--prune', '--quiet', 'origin'], cwd=config['clone'], timeout=300)
+            return 'clone fetch failed: ' + fetched.stderr.strip() if fetched.returncode else None
+        except Exception as exc:  # timeout: command() already killed its process group
+            return 'clone fetch failed: ' + str(exc)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def drain(config):
     """Automatic inbox drain, oldest first. Items run serially: one item
     worktree at a time, serial findings within it (see README for why)."""
     repair = config['repair']
+    until = paused()
+    if until:
+        print('repair drain paused: provider rate limit until ' + until)
+        return
     # Stale checks read origin refs; refresh them first. Fetch only: the worker
     # never pushes or calls the GitHub API. A failed fetch skips this pass.
-    try:
-        fetched = command(['git', 'fetch', '--prune', '--quiet', 'origin'], cwd=config['clone'], timeout=300)
-        error = fetched.stderr.strip() if fetched.returncode else None
-    except Exception as exc:  # timeout: command() already killed its process group
-        error = str(exc)
+    error = fetch_clone(config)
     if error is not None:
-        print('repair drain skipped: clone fetch failed: ' + error[:200])
+        print('repair drain skipped: ' + error[:200])
         return
     groups = {}  # item -> job ids, items in order of their oldest job
     for job_id in drain_order(ROOT):
@@ -322,7 +370,7 @@ def drain(config):
             print('repair item ' + item + ' failed: ' + str(exc)[:300])
             continue
         if outcome == 'rate-limit':
-            print('repair drain stopped: provider rate limit; the next timer pass retries')
+            print('repair drain stopped: provider rate limit until ' + str(paused()))
             return
 
 
@@ -341,12 +389,14 @@ def process_item(config, jobs):
     for job in jobs:
         if blocked(config['repair']):
             break  # never start a new finding inside the GLM peak window
+        if paused():
+            return 'rate-limit'  # no model call anywhere while the pause marker is live
         if job['run'] != last_run:
             base = job['repair_base']
             last_run = job['run']
         job['repair_base'] = base
         res = process(config, job, wt)
-        if res.get('rate_limited'):
+        if paused():
             return 'rate-limit'
         if res.get('retry_after'):
             break

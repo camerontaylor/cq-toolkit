@@ -83,9 +83,14 @@ publication then discards the result. Prepared (`repair-prepare`) jobs keep the
 strict one-job selector, so a moved tip makes them `STALE`.
 `--job/--source-sha/--finding-sha256` still repairs exactly one prepared job.
 
-On a provider rate limit the attempt (or pending judge) defers 30 minutes and the
-whole drain pass stops; the next timer pass resumes. A job rate limited again
-after 3 deferrals ends `FAILED` (needs human).
+Any provider rate limit (fixer or judge) atomically writes the global pause
+marker `state/repair/rate-limited-until` with the provider's retry time
+(`retryAfterMs`; 30 minutes if none, at most 24 hours, never shortened). The
+attempt or pending judge defers to that time and the drain stops. While the
+marker is in the future no pass makes any model call for any item; nothing is
+counted against jobs, so a long quota window fails nothing. The drain's
+`git fetch --prune` runs under the tick's own `state/tick.lock` (non-blocking
+flock, as `crq.with_lock`); if the tick holds it, the pass is skipped.
 Runtime dispatch requires `repair.enabled`, a recorded
 `repair.spend_authorization` string, and `ZAI_API_KEY` in the service environment
 (`EnvironmentFile=-%h/.config/crq/repair.env`). Roles are cq-driver GLM only

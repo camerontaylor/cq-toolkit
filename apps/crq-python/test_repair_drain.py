@@ -1,5 +1,6 @@
 """Automatic repair drain: selection, stale skip, GLM blackout. Real local Git, no models."""
 import datetime as dt
+import fcntl
 import importlib.util
 import json
 import os
@@ -257,35 +258,83 @@ class RepairDrainTest(unittest.TestCase):
         self.assertEqual(process_item.call_count, 1)
         self.assertEqual(process_item.call_args.args[1][0]['item'], 'pr1-merged')
 
-    def test_process_item_reports_rate_limit_and_starts_no_later_finding(self):
+    def test_process_item_stops_once_the_pause_marker_is_written(self):
         (self.root / 'wt/crq-repair-pr1-merged').mkdir(parents=True)
         jobs = [bounded.drain_job(self.root, self.config, self.queue, j)[1] for j in ('crq-run1-F1', 'crq-run1-F2')]
-        limited = {'rate_limited': True, 'retry_after': '2999-01-01T00:00:00Z', 'verdict': 'FAILED'}
+
+        def limited(config, job, wt):
+            service.rate_limit_pause({'stop': 'rate-limit'}, job['job'])
+            return {'retry_after': '2999-01-01T00:00:00Z', 'verdict': 'FAILED'}
         with mock.patch.object(service, 'blocked', return_value=False), \
-             mock.patch.object(service, 'process', return_value=limited) as process:
+             mock.patch.object(service, 'process', side_effect=limited) as process:
             self.assertEqual(service.process_item(self.config, jobs), 'rate-limit')
         self.assertEqual(process.call_count, 1)
 
-    def test_rate_limit_deferrals_are_bounded_then_failed(self):
-        wt = self.worktree()
-        _, job, _ = bounded.drain_job(self.root, self.config, self.queue, 'crq-run1-F1')
+    def test_rate_limit_pauses_every_item_until_the_window_ends(self):
+        self.queue['items'].append(self.item('pr4-merged', 'run4', ['crq-run4-F1'], open_pr=False))
+        self.job('crq-run4-F1', 'pr4-merged', 'run4', 'src/kept.ts')
+        atomic(self.root / 'state/queue.json', self.queue)
+        unchanged = {'stop': 'ok', 'changed': False, 'summary': 'no change warranted', 'commits': []}
+        limited = {'stop': 'rate-limit', 'retry_after_ms': 3600000}
         with mock.patch.object(service, 'blocked', return_value=False), \
-             mock.patch.object(service.cq, 'invoke', return_value={'stop': 'rate-limit'}) as invoke:
-            for count in range(1, service.MAX_RATE_LIMIT_DEFERRALS + 1):
-                result = service.process(self.config, dict(job), wt)
-                self.assertTrue(result['rate_limited'])
-                self.assertEqual(result['rate_limit_deferrals'], count)
-                self.assertTrue(result['retry_after'])
-                self.assertNotIn('rate_limited', self.result('crq-run1-F1'))
-                self.past('crq-run1-F1')
-            result = service.process(self.config, dict(job), wt)
-        self.assertEqual(invoke.call_count, service.MAX_RATE_LIMIT_DEFERRALS + 1)
-        self.assertTrue(result['rate_limited'])
-        stored = self.result('crq-run1-F1')
-        self.assertEqual(stored['verdict'], 'FAILED')
-        self.assertNotIn('retry_after', stored)
-        self.assertIn('needs human', stored['reason'])
-        self.assertIsNotNone(stored['finished_at'])
+             mock.patch.object(service.cq, 'invoke', side_effect=[limited, unchanged, unchanged]) as invoke:
+            service.drain(self.config)  # first item hits the limit; pr4 is never reached
+            self.assertEqual(invoke.call_count, 1)
+            marker = json.loads((self.root / 'state/repair/rate-limited-until').read_text())
+            until = dt.datetime.fromisoformat(marker['until'].replace('Z', '+00:00'))
+            self.assertGreater(until, dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=55))
+            self.assertEqual(self.result('crq-run1-F1')['retry_after'], marker['until'])
+            self.assertIsNone(self.result('crq-run4-F1'))
+            service.drain(self.config)  # inside the window: no model call for ANY item
+            self.assertEqual(invoke.call_count, 1)
+            self.assertIsNone(self.result('crq-run4-F1'))
+            # The window ends: both the marker and the job's own retry time pass.
+            atomic(self.root / 'state/repair/rate-limited-until', {**marker, 'until': '2000-01-01T00:00:00Z'})
+            self.past('crq-run1-F1')
+            service.drain(self.config)
+        self.assertEqual(invoke.call_count, 3)
+        for job_id in ('crq-run1-F1', 'crq-run4-F1'):
+            result = self.result(job_id)
+            self.assertEqual(result['verdict'], 'NOT-FIXED')
+            self.assertNotIn('retry_after', result)
+
+    def test_pause_defaults_to_30_minutes_and_is_never_shortened(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        first = dt.datetime.fromisoformat(service.rate_limit_pause({}, 'j1').replace('Z', '+00:00'))
+        self.assertTrue(now + dt.timedelta(minutes=29) < first <= now + dt.timedelta(minutes=31))
+        second = service.rate_limit_pause({'retry_after_ms': 1000}, 'j2')
+        self.assertEqual(dt.datetime.fromisoformat(second.replace('Z', '+00:00')), first)
+        self.assertEqual(service.paused(), second)
+        self.assertIsNone(service.paused(first + dt.timedelta(seconds=1)))
+
+    def test_cq_driver_passes_provider_retry_time(self):
+        out = json.dumps({'status': 'error', 'error': 'errorClass=rate-limit',
+                          'providerSignals': {'httpStatus': 429, 'retryAfterMs': 5000}})
+        self.config.update(repo='example/repo')
+        self.config['repair']['cq_bin'] = '/unused/cli.js'
+        job = {'job': 'crq-run1-F1', 'finding': {'path': 'src/kept.ts', 'line': 1, 'body': 'x'},
+               'source_snapshot': {}}
+        with mock.patch.object(service.cq, 'command',
+                               return_value=SimpleNamespace(returncode=1, stdout=out, stderr='')):
+            report = service.cq.invoke(self.config, ROLES['fixer'], job, self.root, self.root)
+        self.assertEqual((report['stop'], report['retry_after_ms']), ('rate-limit', 5000))
+
+    def test_drain_skips_pass_while_the_tick_holds_its_lock(self):
+        lock_path = self.root / 'state/tick.lock'
+        with lock_path.open('w') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(service, 'blocked', return_value=False), \
+                 mock.patch.object(service, 'command', wraps=service.command) as command, \
+                 mock.patch.object(service, 'process_item') as process_item:
+                service.drain(self.config)
+            fcntl.flock(held, fcntl.LOCK_UN)
+        command.assert_not_called()  # no fetch while the tick owns the clone
+        process_item.assert_not_called()
+        self.assertIsNone(self.result('crq-run1-F2'))
+        with mock.patch.object(service, 'blocked', return_value=False), \
+             mock.patch.object(service, 'process_item') as process_item:
+            service.drain(self.config)
+        self.assertEqual(self.result('crq-run1-F2')['verdict'], 'STALE')
 
     def test_judge_deferred_by_blackout_resumes_without_repeating_fixer(self):
         self.job('crq-run1-F1', 'pr1-merged', 'run1', 'src/kept.ts', severity='critical')
