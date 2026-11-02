@@ -795,13 +795,45 @@ test.each([
 test('report storage failure retains the complete non-ok artifact', async () => {
   const f = await fixture([]);
   try {
-    const journalFile = join(f.input.journalDir, 'file');
-    await writeFile(journalFile, 'not a directory');
-    const result = await makeReviewAddress(f.deps)({ ...f.input, journalDir: journalFile });
+    const reportDirectory = join(f.input.journalDir, 'review-address-report.json');
+    await mkdir(reportDirectory);
+    const result = await makeReviewAddress(f.deps)(f.input);
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toContain('report write failed');
     expect(reportOf(result).findings).toEqual([]);
     expect(reportOf(result).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    expect(reportOf(result).reportPath).toBe(reportDirectory);
+    expect(f.calls).toEqual([]);
+    await expect(readFile(reportDirectory, 'utf8')).rejects.toMatchObject({ code: 'EISDIR' });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('non-directory report ancestor refuses after entry without report persistence', async () => {
+  const f = await fixture([]);
+  try {
+    const journalFile = join(f.input.journalDir, 'file');
+    await writeFile(journalFile, 'not a directory');
+    const result = await makeReviewAddress(f.deps)({ ...f.input, journalDir: journalFile });
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toBe(
+      'address lifetime finalization failed; durability unconfirmed: address terminal: report ancestor refused',
+    );
+    const report = reportOf(result);
+    expect(report.stop).toBeUndefined();
+    expect(f.calls).toEqual([]);
+    expect(report.rounds).toEqual([]);
+    expect(report.findings).toEqual([]);
+    expect(report.openBlocking).toEqual([]);
+    expect(report.fixes).toEqual([]);
+    expect(report.attempts).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(report.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    expect(report.reasons).toEqual([result.status === 'failed' && result.error]);
+    expect(report.reportPath).toBe(join(journalFile, 'review-address-report.json'));
+    expect(await readFile(journalFile, 'utf8')).toBe('not a directory');
+    await expect(readFile(report.reportPath, 'utf8')).rejects.toMatchObject({ code: 'ENOTDIR' });
   } finally {
     await f.cleanup();
   }

@@ -31,6 +31,7 @@ async function fixture(
   check = '',
   options: {
     scannerFails?: boolean;
+    terminalBinding?: object;
     parentSignal?: AbortSignal;
     maxTokens?: number;
     workerAttempts?: number;
@@ -200,6 +201,7 @@ async function fixture(
         return components.map((c) => ({ component: c.component, hits: [] }));
       }),
     ...(options.parentSignal ? { parentSignal: options.parentSignal } : {}),
+    ...(options.terminalBinding ? { terminalBinding: options.terminalBinding } : {}),
   });
   return {
     repo,
@@ -2565,4 +2567,19 @@ describe('verification gate regressions', () => {
       }
     },
   );
+});
+
+test('a structural terminal binding never dispatches a driver or edits a file', async () => {
+  const f = await fixture(undefined, '', { terminalBinding: Object.freeze({ terminal: true }) });
+  try {
+    const result = await f.engine.fix(finding(), 1);
+    expect(result.reason).toContain('forged worker association');
+    expect(f.attempts).toEqual([]);
+    expect(f.calls()).toBe(0);
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+    expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+    expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/heads/cq-address/')).toBe('');
+  } finally {
+    await f.cleanup();
+  }
 });

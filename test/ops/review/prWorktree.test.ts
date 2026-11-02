@@ -322,6 +322,22 @@ const baseOpts = (
 // ---------------------------------------------------------------------------
 
 describe('fetch-first — origin branch is truth', () => {
+  test('admission mismatch refuses before registry consult or stale checkout removal', async () => {
+    const calls: string[][] = [];
+    const registry = memRegistry({
+      '7': { path: '/stale/pr-7', branch: LABEL, createdAt: NOW - 1000 },
+    });
+    await expect(
+      resolvePrWorktree({
+        ...baseOpts(mkModel(), registry),
+        run: fakeGit(mkModel(), calls),
+        expectedHead: SHA_A,
+      }),
+    ).rejects.toThrow('changed since admission');
+    expect(calls.map((args) => args[2])).toEqual(['rev-parse', 'fetch', 'rev-parse']);
+    expect(registry.calls).toEqual([]);
+    expect(registry.current()['7']?.path).toBe('/stale/pr-7');
+  });
   test('the fetch runs FIRST and a fetch failure THROWS before the registry is even consulted', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
