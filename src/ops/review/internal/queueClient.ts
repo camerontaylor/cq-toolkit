@@ -223,7 +223,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       .object({ error: z.object({ code: z.enum(['busy', 'stale-cursor']) }).passthrough() })
       .passthrough()
       .safeParse(envelope.result);
-    if (fault.success) throw new QueueReadFault(fault.data.error.code);
+    if (fault.success && op !== 'health') throw new QueueReadFault(fault.data.error.code);
     return envelope.result;
   }
   function parseStatus(input: QueueReference, value: unknown) {

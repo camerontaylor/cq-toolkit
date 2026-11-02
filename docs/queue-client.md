@@ -378,7 +378,6 @@ No enqueue or forge verification is needed. Use a stable requestId such as
 Health has no branch permission requirement. A `health_reads` grant authorizes
 only `health`; it grants no status/report or write authority.
 
-
 ### Bounded observation and explicit transient retry (Q3R)
 
 `review.drain` takes `requests` (requestId/binding references), `waitMs` (0–3600000)
