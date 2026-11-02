@@ -539,9 +539,10 @@ export interface CorrelationRecord {
  * `E.journalVersion = 3`; carries the preserved v2 envelope fields (`planId`,
  * `seq`, exactly one of `governance`/`ungoverned` — v3 joins the existing
  * sequenced v2 ordering) plus provenance, correlation and availability.
- * Dispatch on run-started version: absent → v1, 2 → v2, 3 → v3. Writer
- * disabled until the v3 dual-reader ships (schema-only, this slice); the
- * v1/v2 RunLog must keep rejecting this shape.
+ * Dispatch on run-started version: absent → v1, 2 → v2, 3 → v3. The dual
+ * READER (T02) accepts this shape; the kernel RunLog's append still
+ * validates v1/v2 shapes only — the v3 header writer arrives with T04, so
+ * a v3 header in a kernel file today is operator-written evidence.
  */
 export interface RunStartedV3JournalEvent {
   type: 'run-started';

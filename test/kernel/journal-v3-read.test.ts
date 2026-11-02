@@ -2,15 +2,19 @@
 // kernel journal.
 //
 // Pinned here:
-//   1. Round-trip: a v3 run (v3 header + observational carriers) and v1/v2
-//      kernel events write and read back byte-identically through the kernel
-//      RunLog; foldOrderRuns dispatches absent → v1 (at-ordered), 2 → v2 and
-//      3 → v3 (sequenced, one shared ordering), all v2/v3 before v1.
+//   1. Round-trip: a v3 run (v3 header + observational carriers, written RAW
+//      — the kernel RunLog's append stays v1/v2 until T04/T29) and v1/v2
+//      kernel events read back byte-identically; foldOrderRuns dispatches
+//      absent → v1 (at-ordered), 2 → v2 and 3 → v3 (sequenced, one shared
+//      ordering), all v2/v3 before v1.
 //   2. Unknown evidence: an unknown journal version (4) on a run-started
-//      header is refused loudly by foldOrderRuns — never silently folded.
+//      header is refused loudly by the schema and by foldOrderRuns — never
+//      silently folded.
 //   3. Failure boundary: observational v3 events never alter job outcome
 //      derivation (deriveJobStatuses ignores them; kernel replay unchanged);
-//      seq/reservation/torn-tail rules are preserved.
+//      seq/reservation/torn-tail rules are preserved; per-file version
+//      strictness refuses a v3-only line in a v1/v2-header file and a second
+//      run-started anywhere.
 //
 // Determinism: fixed ISO timestamps and fixture SHAs, no Date.now().
 import { describe, expect, test } from 'vitest';
@@ -33,7 +37,7 @@ import type {
   OpResult,
   RunStartedV3JournalEvent,
 } from '../../src/kernel/types.js';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -149,14 +153,14 @@ function v2Started(runId = RUN_A, seq = 1): JournalEvent {
   };
 }
 
-function jobStarted(jobId: string): JournalEvent {
-  return { type: 'job-started', runId: RUN_A, at: AT2, jobId, op: `op-${jobId}`, attempt: 1 };
+function jobStarted(jobId: string, runId = RUN_A): JournalEvent {
+  return { type: 'job-started', runId, at: AT2, jobId, op: `op-${jobId}`, attempt: 1 };
 }
 
-function jobFinished(jobId: string, result: OpResult<unknown>): JournalEvent {
+function jobFinished(jobId: string, result: OpResult<unknown>, runId = RUN_A): JournalEvent {
   return {
     type: 'job-finished',
-    runId: RUN_A,
+    runId,
     at: AT3,
     jobId,
     opId: `op-${jobId}`,
@@ -175,6 +179,13 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
+/** Write a raw NDJSON stream (the kernel writer stays v1/v2 until T04/T29). */
+async function writeRaw(dir: string, runId: string, events: readonly unknown[]): Promise<void> {
+  const body = events.map((event) => `${JSON.stringify(event)}\n`).join('');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${runId}.ndjson`), body, 'utf8');
+}
+
 describe('journal v3 read (T02)', () => {
   test('T02 round-trip', async () => {
     const v3 = v3Header();
@@ -182,19 +193,21 @@ describe('journal v3 read (T02)', () => {
     const events: JournalEvent[] = [v3, approval(), measurement()];
     for (const event of events) expect(JournalEventSchema.parse(event)).toEqual(event);
 
-    // The kernel RunLog now writes and reads back a v3 stream byte-identically.
+    // The kernel RunLog's widened READER reads a raw-written v3 stream
+    // byte-identically; its append still validates v1/v2 shapes only (dual
+    // reader first — ADR-0008 Migration §1), pinned in the T25–T28 tests.
     await withTempDir(async (dir) => {
+      await writeRaw(dir, RUN_A, events);
       const log = openRunLog(dir);
-      for (const event of events) await log.append(RUN_A, event);
       expect(await log.read(RUN_A)).toEqual(events);
 
-      // v1 and v2 kernel streams are unchanged on the same reader.
+      // v1 kernel streams are unchanged on the same reader.
       const v1 = [
         v1Started(RUN_B),
-        { ...jobStarted('j1'), runId: RUN_B },
-        { ...jobFinished('j1', { status: 'ok', value: 1 }), runId: RUN_B },
+        jobStarted('j1', RUN_B),
+        jobFinished('j1', { status: 'ok', value: 1 }, RUN_B),
       ];
-      for (const event of v1) await log.append(RUN_B, event);
+      await writeRaw(dir, RUN_B, v1);
       expect(await log.read(RUN_B)).toEqual(v1);
     });
 
@@ -245,10 +258,9 @@ describe('journal v3 read (T02)', () => {
     expect(JournalEventV1V2Schema.safeParse(v3Header()).success).toBe(false);
     expect(JournalEventV1V2Schema.safeParse(approval()).success).toBe(false);
 
-    // A v4 header that somehow lands in a run file is refused loudly at fold
-    // time — never silently reordered into the v2/v3 bucket. (The line is
-    // written raw because the writer validates against the union it
-    // understands.)
+    // A v4 header that somehow lands in a run file is refused loudly — the
+    // widened union has no journalVersion-4 member, so the line is corrupt.
+    // (Written raw because the writer validates shapes it understands.)
     await withTempDir(async (dir) => {
       const raw = JSON.stringify({
         type: 'run-started',
@@ -261,10 +273,26 @@ describe('journal v3 read (T02)', () => {
       });
       await writeFile(join(dir, `${RUN_A}.ndjson`), `${raw}\n`, 'utf8');
       const log = openRunLog(dir);
-      await expect(log.read(RUN_A)).rejects.toThrow(
-        /unsupported\s+journalVersion 4|corrupt line 1/u,
-      );
-      expect(() => foldOrderRuns([{ runId: RUN_A, events: [] }])).toThrow(/run-started/);
+      await expect(log.read(RUN_A)).rejects.toThrow(/corrupt line 1/u);
+      // A synthesized FoldRun carrying the same unknown version fails the
+      // fold dispatch explicitly (never silently bucketed).
+      expect(() =>
+        foldOrderRuns([
+          {
+            runId: RUN_A,
+            events: [
+              {
+                type: 'run-started',
+                runId: RUN_A,
+                at: AT,
+                planId: 'plan-x',
+                journalVersion: 4,
+                seq: 1,
+              } as unknown as JournalEvent,
+            ],
+          },
+        ]),
+      ).toThrow(/unsupported journalVersion 4/u);
     });
   });
 
@@ -285,34 +313,72 @@ describe('journal v3 read (T02)', () => {
         ...observational,
       ]),
     ).toEqual([{ jobId: 'j1', state: 'running' }]);
+    // A v2 fixture folds through the SAME fold + derivation unchanged
+    // (P3): at-irrelevant sequenced ordering, job statuses intact.
+    const v2Fold: FoldRun = {
+      runId: RUN_A,
+      events: [
+        v2Started(),
+        jobStarted('j2'),
+        jobFinished('j2', { status: 'failed', error: 'boom' }),
+      ],
+    };
+    expect(foldOrderRuns([v2Fold]).map((run) => run.runId)).toEqual([RUN_A]);
+    expect(deriveJobStatuses(v2Fold.events)).toEqual([{ jobId: 'j2', state: 'failed' }]);
 
     // A v3 run rides the same read path with the same torn-tail tolerance:
     // an unterminated trailing line is dropped; a corrupt complete line in
     // the middle still throws.
     await withTempDir(async (dir) => {
-      const log = openRunLog(dir);
       const stream = [v3Header(), approval(), measurement()];
-      for (const event of stream) await log.append(RUN_A, event);
-      const raw = await (
-        await import('node:fs/promises')
-      ).readFile(join(dir, `${RUN_A}.ndjson`), 'utf8');
+      await writeRaw(dir, RUN_A, stream);
+      const raw = await readFile(join(dir, `${RUN_A}.ndjson`), 'utf8');
       await writeFile(
         join(dir, `${RUN_A}.ndjson`),
         `${raw}${JSON.stringify({ torn: true })}`,
         'utf8',
       );
+      const log = openRunLog(dir);
       expect(await log.read(RUN_A)).toEqual(stream);
       // Reservations/sequence rules are untouched: the duplicate-seq refusal
       // from foldOrderRuns covers v3 exactly as v2 (pinned in round-trip),
       // and the full kernel replay path (statusOf) folds a v3 stream's
-      // kernel events unchanged.
+      // kernel events unchanged — observational events derive nothing.
       const dir2 = join(dir, 'replay');
       const log2 = openRunLog(dir2);
-      await log2.append(RUN_A, v3Header());
-      await log2.append(RUN_A, jobStarted('j1'));
-      await log2.append(RUN_A, jobFinished('j1', { status: 'failed', error: 'boom' }));
-      await log2.append(RUN_A, measurement());
+      await writeRaw(dir2, RUN_A, [
+        v3Header(),
+        jobStarted('j1'),
+        jobFinished('j1', { status: 'failed', error: 'boom' }),
+        measurement(),
+      ]);
       expect(await log2.statusOf(RUN_A)).toEqual([{ jobId: 'j1', state: 'failed' }]);
+    });
+  });
+
+  test('T02 per-file version strictness', async () => {
+    await withTempDir(async (dir) => {
+      const log = openRunLog(dir);
+      // A v2 header refuses a v3-only observational line.
+      await writeRaw(dir, RUN_A, [v2Started(), approval()]);
+      await expect(log.read(RUN_A)).rejects.toThrow(/corrupt line 2.*approval-granted/u);
+      // A v1 header refuses a v3 run-started (a second header of the new era).
+      await writeRaw(dir, RUN_B, [v1Started(RUN_B), v3Header({ runId: RUN_B })]);
+      await expect(log.read(RUN_B)).rejects.toThrow(/corrupt line 2/u);
+      // Any file refuses a second run-started (concatenated/forged stream).
+      const dir2 = join(dir, 'dup');
+      const log2 = openRunLog(dir2);
+      await writeRaw(dir2, RUN_A, [v1Started(), v1Started()]);
+      await expect(log2.read(RUN_A)).rejects.toThrow(/second run-started/u);
+      // Sanity: the same v2 kernel stream WITHOUT the v3 line reads clean.
+      const dir3 = join(dir, 'clean');
+      const log3 = openRunLog(dir3);
+      await writeRaw(dir3, RUN_A, [
+        v2Started(),
+        jobStarted('j1'),
+        jobFinished('j1', { status: 'ok', value: 1 }),
+      ]);
+      expect(await log3.read(RUN_A)).toHaveLength(3);
     });
   });
 });

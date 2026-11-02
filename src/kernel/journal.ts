@@ -5,8 +5,9 @@
 //     asserts runIds are filesystem-safe (they become `<runId>.ndjson` file
 //     names) and that the event's own `runId` matches the file it lands in.
 //   - Append-only: one validated JSON line per event, never rewritten. Every
-//     event is validated against the frozen JournalEventSchema BEFORE it hits
-//     disk — an invalid event is a loud error, not silent evidence rot.
+//     event is validated BEFORE it hits disk (the v1/v2 kernel union — the
+//     dual reader's widened union governs reads; ADR-0008 Migration §1) — an
+//     invalid event is a loud error, not silent evidence rot.
 //   - Status is derived at READ time (`statusOf`): the file stores facts
 //     (started, finished with result X); states are a fold over those facts,
 //     so a corrupted or stale derived view can always be recomputed.
@@ -42,7 +43,7 @@ import type { LockOptions, lock } from 'proper-lockfile';
 import { z } from 'zod';
 import { PlanLockRefusedError } from './errors.js';
 import { runLadder } from './governor.js';
-import { JournalEventSchema } from './schema.js';
+import { JournalEventSchema, JournalEventV1V2Schema } from './schema.js';
 import type { JobState, JobStatus, JournalEvent } from './types.js';
 
 /**
@@ -849,8 +850,14 @@ export function openRunLog(journalDir: string): RunLog {
     async append(runId, event, opts): Promise<void> {
       assertSafeRunId(runId);
       // Validate BEFORE writing: the journal only ever contains facts that
-      // parse. The parsed value is what lands on disk.
-      const parsed: JournalEvent = JournalEventSchema.parse(event);
+      // parse. The kernel RunLog is the KERNEL stream: ADR-0008 Migration §1
+      // ships the dual READER first and the v3 writer arrives with T04 (v3
+      // headers via RunOptions provenance/correlation) and T29 (observational
+      // events only in the separate composition stream — the RunLog is not
+      // exposed to ops). Until those writers exist, append accepts exactly
+      // the v1/v2 shapes; the READER (readEvents → JournalEventSchema) is
+      // already widened to the v3 carriers.
+      const parsed: JournalEvent = JournalEventV1V2Schema.parse(event) as JournalEvent;
       if (parsed.runId !== runId) {
         throw new Error(
           `journal: event.runId '${parsed.runId}' does not match target run '${runId}'`,
@@ -1169,6 +1176,28 @@ async function readEvents(fileRunId: string, path: string): Promise<JournalEvent
     lines.pop();
   }
   const events: JournalEvent[] = [];
+  // Per-file version strictness (ADR-0008 T02 review P1-3): the file's
+  // run-started header fixes its journal version. A v1/v2 kernel file must
+  // never contain a v3-only line (v3 header or any observational carrier);
+  // any file must contain exactly one run-started (a second one is a
+  // concatenated or forged stream, not evidence). A v3-header kernel file
+  // accepts the v3 carriers defensively here — whether kernel files may
+  // carry them at all is T29's call, and deriveJobStatuses ignores them.
+  const V3_ONLY_TYPES: ReadonlySet<string> = new Set([
+    'attempt-finished',
+    'approval-expired',
+    'approval-granted',
+    'finding-disposition',
+    'gate-verdict',
+    'head-acceptance',
+    'measurement-summary',
+    'review-observed',
+    'task-finished',
+    'write-path-cap-tripped',
+    'write-path-denied',
+  ]);
+  let headerSeen = false;
+  let headerIsV3 = false;
   for (const [i, line] of lines.entries()) {
     const parsed = parseLine(line);
     if (parsed !== null) {
@@ -1180,6 +1209,22 @@ async function readEvents(fileRunId: string, path: string): Promise<JournalEvent
         throw new Error(
           `journal: corrupt line ${i + 1} of ${path} — event.runId '${parsed.runId}' does not ` +
             `match this file's run '${fileRunId}'`,
+        );
+      }
+      if (parsed.type === 'run-started') {
+        if (headerSeen) {
+          throw new Error(
+            `journal: corrupt line ${i + 1} of ${path} — a second run-started in one file is a ` +
+              "concatenated or forged stream, not one run's evidence",
+          );
+        }
+        headerSeen = true;
+        headerIsV3 = parsed.journalVersion === 3;
+      }
+      if (headerSeen && headerIsV3 === false && V3_ONLY_TYPES.has(parsed.type)) {
+        throw new Error(
+          `journal: corrupt line ${i + 1} of ${path} — a v3-only event (${parsed.type}) cannot ` +
+            'follow a v1/v2 run-started header; strict schemas forbid additive mixing',
         );
       }
       events.push(parsed);

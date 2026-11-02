@@ -386,9 +386,11 @@ export const RunReportSchema: z.ZodType<RunReport> = z
 // Kernel: journal events
 // ---------------------------------------------------------------------------
 
-// Union members stay inferred ZodObjects (discriminatedUnion needs the
-// discriminant metadata); the JournalEventSchema annotation transitively
-// forces each member output into the frozen JournalEvent union.
+// The v1/v2 union members stay inferred ZodObjects (discriminatedUnion needs
+// the discriminant metadata); the annotated v3 carriers compose with them in
+// the top-level JournalEventSchema (z.union over the v1/v2 discriminated
+// union plus the v3 carriers) whose annotation transitively forces every
+// member output into the frozen JournalEvent union.
 
 export const RunStartedJournalEventSchema = z
   .object({

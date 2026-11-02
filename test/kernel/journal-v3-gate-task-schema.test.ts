@@ -29,6 +29,7 @@ import {
 } from '../../src/kernel/schema.js';
 import type {
   ApprovalJournalEvent,
+  JournalEvent,
   AvailabilityState,
   GateVerdictJournalEvent,
   TaskFinishedJournalEvent,
@@ -248,13 +249,21 @@ describe('journal v3 gate/task/approval/write schemas (T26)', () => {
       expect(JournalEventSchema.safeParse(variant).success).toBe(true);
     }
 
-    // Old shapes still write and read back unchanged through the RunLog.
+    // The kernel RunLog's append still validates v1/v2 shapes only (dual
+    // reader first — ADR-0008 Migration §1): every variant fails there;
+    // the widened READER accepts them (pinned in journal-v3-read.test.ts).
+    // Old shapes still write and read back unchanged.
     let dir: string | undefined;
     try {
       dir = await mkdtemp(join(tmpdir(), 'jv3-t26-'));
       const log = openRunLog(dir);
       const v1 = { type: 'run-started', runId: 'plan-x--k--a', at: AT, planId: 'plan-x' };
       await log.append('plan-x--k--a', JournalEventSchema.parse(v1));
+      for (const variant of variants) {
+        await expect(
+          log.append('plan-x--k--a', variant as unknown as JournalEvent),
+        ).rejects.toThrow();
+      }
       const read = await log.read('plan-x--k--a');
       expect(read).toEqual([v1]);
     } finally {

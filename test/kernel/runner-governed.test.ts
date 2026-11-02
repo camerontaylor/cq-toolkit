@@ -32,7 +32,7 @@
 //
 // The fold-ordering unit rules themselves live in journal-v2.test.ts — this
 // file pins only the runner's USE of that order.
-import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -1560,6 +1560,101 @@ describe('governed journal v2 + resume', () => {
         seq: 2,
         governance: { capUsd: 10, attended: false, raiseCap: { from: 5, to: 10 } },
       });
+    },
+    journalEnclosure(3),
+  );
+
+  test(
+    'a v3 header in history joins the sequenced era: ungoverned refusal and seq continuity (ADR-0008 T02)',
+    async () => {
+      // History carries a v3-header run (operator-written evidence — the
+      // kernel writer is v1/v2 until T04): the resume fold must classify it
+      // as SEQUENCED, not v1. Concretely: governed v3 history refuses an
+      // ungoverned run (refusal a), and the v3 seq counts toward
+      // maxPriorSeq so the next run claims seq 2 (not 1).
+      const started: Extract<JournalEvent, { type: 'run-started' }> = {
+        type: 'run-started',
+        runId: 'plan-gov-v3--k--a',
+        at: '2026-01-03T04:05:06.789Z',
+        planId: 'plan-gov-v3',
+        journalVersion: 3,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+        provenance: {
+          cqVersion: '0.2.0',
+          producerVersion: '0.2.0',
+          repoId: null,
+          cqJsonHash: `sha256:${'b'.repeat(64)}`,
+          baseSha: 'a'.repeat(40),
+          runPrefix: 'plan-gov-v3',
+          startedAt: '2026-01-03T04:05:06.789Z',
+          endedAt: null,
+          journalLink: 'runs/plan-gov-v3--k--a.ndjson',
+          reportLink: 'reports/plan-gov-v3--k--a.json',
+          witnesses: {
+            base: 'a'.repeat(40),
+            admitted: null,
+            execution: null,
+            reviewed: null,
+            accepted: null,
+          },
+        },
+        correlation: {
+          workId: '3f2b8c1e-1111-4222-8333-444455556666',
+          parentWorkId: null,
+          branch: 'feat/demo',
+          commitSha: null,
+          sessionId: null,
+          agentId: null,
+        },
+        availability: {},
+      };
+      // The kernel writer stays v1/v2 (dual reader first), so the v3 header
+      // is written RAW — operator-written evidence, read by the widened reader.
+      await writeFile(
+        join(dir, 'plan-gov-v3--k--a.ndjson'),
+        `${JSON.stringify(started)}\n`,
+        'utf8',
+      );
+
+      // Refusal (a): governed v3 history + ungoverned request → refuse.
+      const calls: string[] = [];
+      const refusal = await refusalOf(
+        runPlan(
+          independentPlan('plan-gov-v3', 1),
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+        ),
+      );
+      expect(refusal).toBeInstanceOf(GovernanceOptInRefusedError);
+      expect((refusal as Error).message).toBe(
+        'runPlan: plan plan-gov-v3 has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned',
+      );
+      expect(calls).toEqual([]);
+
+      // Refusal (c) rides the same classification: raising the cap over v3
+      // history refuses without the opt-in.
+      const raiseRefusal = await refusalOf(
+        runPlan(
+          independentPlan('plan-gov-v3', 1),
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({ maxUsd: 10 }), allowAdvisory: true },
+        ),
+      );
+      expect(raiseRefusal).toBeInstanceOf(GovernanceOptInRefusedError);
+      expect((raiseRefusal as Error).message).toBe('runPlan: cap raised from 5 to 10');
+
+      // The v3 seq counts: the next run claims seq 2, not 1.
+      const report = await runPlan(
+        independentPlan('plan-gov-v3', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1']);
+      const events = await openRunLog(dir).read(report.runId);
+      expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 2 });
     },
     journalEnclosure(3),
   );
