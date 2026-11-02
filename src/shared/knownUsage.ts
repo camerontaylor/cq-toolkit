@@ -113,23 +113,33 @@ export function createKnownUsageLedger() {
       let knownCount = 0;
       let unknownCount = 0;
       let unpricedCount = 0;
+      // Guarded fold: a sum is clamped at the safe integer bound rather than
+      // silently wrapping, so a saturated summary is visibly extreme instead
+      // of a plausible-looking wrong number.
+      const addCount = (total: number, value: number): number => {
+        const sum = total + value;
+        return Number.isSafeInteger(sum) ? sum : Number.MAX_SAFE_INTEGER;
+      };
       for (const observation of observations.values()) {
         if (observation.usage === undefined) unknownCount++;
         else {
-          knownCount++;
+          knownCount = addCount(knownCount, 1);
           const measured = observation.usage;
           if (usage === undefined) usage = { ...measured };
           else {
-            usage.input += measured.input;
-            usage.output += measured.output;
-            usage.cacheRead += measured.cacheRead;
-            usage.cacheWrite += measured.cacheWrite;
+            usage.input = addCount(usage.input, measured.input);
+            usage.output = addCount(usage.output, measured.output);
+            usage.cacheRead = addCount(usage.cacheRead, measured.cacheRead);
+            usage.cacheWrite = addCount(usage.cacheWrite, measured.cacheWrite);
             if (measured.reasoning !== undefined)
-              usage.reasoning = (usage.reasoning ?? 0) + measured.reasoning;
+              usage.reasoning = addCount(usage.reasoning ?? 0, measured.reasoning);
           }
         }
         if (observation.costUSD === undefined) unpricedCount++;
-        else costUSD = (costUSD ?? 0) + observation.costUSD;
+        else {
+          const sum = (costUSD ?? 0) + observation.costUSD;
+          costUSD = Number.isFinite(sum) ? sum : Number.MAX_VALUE;
+        }
       }
       return {
         ...(usage === undefined ? {} : { usage }),

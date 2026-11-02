@@ -8,6 +8,12 @@ import { resolve, dirname } from 'node:path';
 import { makeGhRunner, type GhFn } from '../../adapters/forge-github/gh.js';
 import { ReviewAddressManyInputSchema } from './registry.js';
 import type { OpResult } from '../../kernel/types.js';
+import {
+  createKnownUsageLedger,
+  normalizeUsageObservation,
+  type KnownUsageSummary,
+  type UsageObservation,
+} from '../../shared/knownUsage.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { makeReviewAddress, type ReviewAddressInput, type ReviewAddressResult } from './address.js';
 import {
@@ -54,8 +60,12 @@ export interface ReviewAddressManyInput {
   wallMs?: number;
   push?: boolean;
 }
-export type ReviewAddressManyResult = OpResult<AddressManyAggregate> & {
-  report?: AddressManyAggregate;
+export type ReviewAddressManyResult = OpResult<
+  AddressManyAggregate & { usageSummary: KnownUsageSummary }
+> & {
+  report?: AddressManyAggregate & { usageSummary: KnownUsageSummary };
+  /** Top-level envelope for report-less exits, per the I1 usage-summary carrier. */
+  usageSummary?: KnownUsageSummary;
 };
 
 class IsolationRefusal extends Error {}
@@ -150,6 +160,18 @@ export async function isolateAddressMany(
     throw error;
   }
 }
+/**
+ * Retain exit spend across every terminal result that carries a report, plus
+ * `ok`. Each admitted leg's settled usage is recorded exactly once: a valid,
+ * normalized measurement (with derived cost when priced) from its report, or
+ * an explicit unknown observation whenever the leg has no valid measurement —
+ * including a dispatched leg whose report omitted usage, a leg that settled
+ * without dispatching, and a malformed measurement. Not-admitted legs are
+ * never recorded. The folded summary is attached to that result, so failure,
+ * budget exhaustion, thrown and unknown legs never lose spend already paid;
+ * a report-less refusal exits before any dispatch and carries the summary on
+ * the I1 top-level envelope instead.
+ */
 export function makeReviewAddressMany(
   deps: {
     gh?: GhFn;
@@ -160,6 +182,45 @@ export function makeReviewAddressMany(
   } = {},
 ) {
   return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyResult> => {
+    // A fresh ledger per invocation: the operation can be called repeatedly,
+    // and one run's observations must never leak into another's summary.
+    const ledger = createKnownUsageLedger();
+    const run = makeReviewAddressManyCore(deps, (id, observation) =>
+      ledger.record(id, observation),
+    );
+    const result = await run(input);
+    const usageSummary = ledger.snapshot();
+    if (result.status === 'ok')
+      return { status: 'ok' as const, value: { ...result.value, usageSummary } };
+    // A report-less exit (schema refusal, pre-dispatch refusal, or the op-level
+    // catch) still carries its spend on the I1 top-level usageSummary envelope.
+    if (result.report === undefined) return { ...result, usageSummary } as ReviewAddressManyResult;
+    return {
+      status: result.status,
+      ...('error' in result ? { error: result.error } : {}),
+      ...('reason' in result ? { reason: result.reason } : {}),
+      ...('detail' in result ? { detail: result.detail } : {}),
+      report: { ...result.report, usageSummary },
+    } as ReviewAddressManyResult;
+  };
+}
+
+/** The aggregate the core returns; the wrapper stamps the retained usage summary. */
+type ReviewAddressManyCoreResult = OpResult<AddressManyAggregate> & {
+  report?: AddressManyAggregate;
+};
+
+function makeReviewAddressManyCore(
+  deps: {
+    gh?: GhFn;
+    isolate?: typeof isolateAddressMany;
+    coordinationRoot?: string;
+    enqueue?: ReturnType<typeof makeQueueOps>['enqueue'];
+    address?: (input: ReviewAddressInput) => Promise<ReviewAddressResult>;
+  } = {},
+  record: (id: string, observation: UsageObservation) => void = () => {},
+) {
+  return async (input: ReviewAddressManyInput): Promise<ReviewAddressManyCoreResult> => {
     const valid = ReviewAddressManyInputSchema.safeParse(input);
     if (!valid.success) return { status: 'failed', error: valid.error.message };
     const gh =
@@ -439,17 +500,66 @@ export function makeReviewAddressMany(
           }
           const report = result?.status === 'ok' ? result.value : result?.report;
           const usage = report?.usage;
-          const settled = usage
-            ? settleAddressMany(budget, {
-                ...identity,
-                usage: {
-                  kind: 'known',
-                  tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
-                },
+          // A measurement only counts as KNOWN when it survives normalization;
+          // a malformed one (negative or non-integer tokens) is unmeasurable
+          // telemetry, so the leg settles through the SAME unknown-usage path
+          // as a dispatched leg without a measurement. The held reservation
+          // actually releases (marked unresolved), the sticky unknown-usage
+          // stop is set, and the raw value can never leak into the ledger as
+          // a token total.
+          const observation = usage
+            ? normalizeUsageObservation({
+                usage,
+                ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
               })
-            : dispatched
-              ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
-              : settleAddressMany(budget, { ...identity, usage: { kind: 'known', tokens: 0 } });
+            : undefined;
+          const known = observation?.usage !== undefined && usage !== undefined;
+          // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
+          // settlement point: the normalized observation when the settled
+          // report carried a valid measurement, an explicit unknown observation
+          // otherwise. A leg that settled without dispatching is also unknown:
+          // it is not an invocation, so counting it as measured zero would
+          // inflate knownCount. Not-admitted legs are never recorded, so a
+          // refusal cannot invent spend. A telemetry failure degrades to
+          // unknown and never replaces the leg's settlement.
+          try {
+            record(identity.id, observation ?? {});
+          } catch {
+            try {
+              record(identity.id, {});
+            } catch {
+              // The dispatch was already recorded; retain the first observation.
+            }
+          }
+          // A thrown settlement (ledger arithmetic leaving the safe range) is
+          // folded into the same unknown-usage settlement path: the held
+          // reservation releases as unresolved, the sticky stop is set, and
+          // the fault is named — the leg can never skip settlement, and the
+          // aggregate can never spuriously flip on a held allocation.
+          let settled: ReturnType<typeof settleAddressMany>;
+          try {
+            settled = known
+              ? settleAddressMany(budget, {
+                  ...identity,
+                  usage: {
+                    kind: 'known',
+                    tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+                  },
+                })
+              : dispatched
+                ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
+                : // A leg refused before dispatch provably spent nothing through
+                  // the provider, so its BUDGET settlement is measured zero (the
+                  // ledger stays clean, needs-human stays needs-human); its
+                  // ledger OBSERVATION above stays explicit unknown because a
+                  // non-dispatch is not an invocation.
+                  settleAddressMany(budget, { ...identity, usage: { kind: 'known', tokens: 0 } });
+          } catch (error) {
+            settled = settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } });
+            faults.push(
+              `PR #${candidate.number} settlement threw and was settled as unknown: ${String(error)}`,
+            );
+          }
           budget = settled.state;
           if (settled.kind === 'refused')
             faults.push(`PR #${candidate.number} settlement refused: ${JSON.stringify(settled)}`);
@@ -532,15 +642,16 @@ export function makeReviewAddressMany(
             }),
         ],
       };
-      if (report.status === 'ok') return { status: 'ok', value: report };
+      if (report.status === 'ok') return { status: 'ok' as const, value: report };
       if (report.status === 'failed')
-        return { status: 'failed', error: report.reasons.join('; '), report };
+        return { status: 'failed' as const, error: report.reasons.join('; '), report };
       if (report.status === 'indeterminate')
-        return { status: 'indeterminate', detail: report.reasons.join('; '), report };
-      if (report.status === 'budget-exhausted') return { status: 'budget-exhausted', report };
-      return { status: 'needs-human', reason: report.reasons.join('; '), report };
+        return { status: 'indeterminate' as const, detail: report.reasons.join('; '), report };
+      if (report.status === 'budget-exhausted')
+        return { status: 'budget-exhausted' as const, report };
+      return { status: 'needs-human' as const, reason: report.reasons.join('; '), report };
     } catch (error) {
-      return { status: 'failed', error: String(error) };
+      return { status: 'failed' as const, error: String(error) };
     }
   };
 }
