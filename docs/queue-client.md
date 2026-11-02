@@ -402,7 +402,9 @@ The exact additional operator policy grant is
 binding. It is required in addition to the existing `write` principal and
 repository/target permissions; read permission alone grants no retry authority.
 The optional integer `maxRetries` is 1–100 and defaults to 3. Accepted retries
-are counted durably per request in queue state; each failed receipt is consumed
+are counted durably per request ID in queue state; every alias needs its own
+explicit operator grant (including its own request ID and binding). The budget
+is not shared across alias IDs; each failed receipt is consumed
 for retry only once, with replay reporting its previous acceptance. A fresh
 failed attempt requires its own expected receipt and cannot bypass the grant
 budget. Existing cooldowns and scheduling caps remain in force.
@@ -414,5 +416,9 @@ caller) returns `action:"already-accepted",accepted:false`. Retain the same
 request ID, binding and expected receipt after an uncertain response.
 
 Retry busy responses return `action:"busy",accepted:false,reason:"not-applied"`.
-An unavailable/refused retry capability returns `state:"unsupported"`; no retry
+A supported probe with a denied grant returns
+`action:"denied",accepted:false,reason:"no-permission"`. The probe performs no
+queue mutation and never takes tick.lock. An unavailable retry capability returns `state:"unsupported"`; no retry
 is inferred.
+
+Drain returns `state:"unsupported"` immediately on an unsupported capability.

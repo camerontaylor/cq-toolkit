@@ -203,7 +203,7 @@ export const QueueRetryInputSchema = QueueReferenceSchema.extend({
 export type QueueRetryInput = z.input<typeof QueueRetryInputSchema>;
 export const QueueRetryResultSchema = z
   .object({
-    action: z.enum(['accepted', 'already-accepted', 'needs-human']),
+    action: z.enum(['accepted', 'already-accepted', 'needs-human', 'denied']),
     accepted: z.boolean(),
     reason: z.string(),
   })

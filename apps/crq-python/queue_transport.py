@@ -613,7 +613,12 @@ def authorize(req, principal, policy):
 def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     policy = validate_policy(policy)
     req = decode(raw)
-    authorize(req, principal, policy)
+    try:
+        authorize(req, principal, policy)
+    except ValueError:
+        if req["op"] == "retry-capability":
+            return _encode(req, {"denied": "no-permission"})
+        raise
     b, op, rid = req["binding"], req["op"], req["requestId"]
     if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})

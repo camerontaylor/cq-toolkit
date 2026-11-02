@@ -252,9 +252,17 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
     parseStatus(input, await request('status', input, {}, options));
   return {
     retry: async (input, expectedReceiptId) => {
+      const probe = await request('retry-capability', input);
+      if (
+        z
+          .object({ denied: z.literal('no-permission') })
+          .strict()
+          .safeParse(probe).success
+      )
+        return { action: 'denied', accepted: false, reason: 'no-permission' };
       z.object({ retry: z.literal(1) })
         .strict()
-        .parse(await request('retry-capability', input));
+        .parse(probe);
       return QueueRetryResultSchema.parse(await request('retry', input, { expectedReceiptId }));
     },
     enqueue: async (input, options) =>

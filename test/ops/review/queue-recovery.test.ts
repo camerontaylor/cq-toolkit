@@ -165,3 +165,43 @@ test('transport rejection at the deadline still returns unfinished IDs', async (
     },
   });
 });
+test('drain returns unsupported immediately without spending its wait budget', async () => {
+  vi.useFakeTimers();
+  let calls = 0;
+  const ops = makeQueueOps(async (raw) => {
+    calls++;
+    const req = JSON.parse(raw) as { requestId: string; binding: unknown };
+    return JSON.stringify({
+      v: 1,
+      requestId: req.requestId,
+      binding: req.binding,
+      result: { unsupported: 'old runner' },
+    });
+  });
+  expect(await ops.drain({ requests: [ref], waitMs: 60000 })).toMatchObject({
+    status: 'ok',
+    value: { state: 'unsupported' },
+  });
+  expect(calls).toBe(1);
+  expect(vi.getTimerCount()).toBe(0);
+});
+test('denied probe reports no-permission and sends no retry write', async () => {
+  const calls: string[] = [];
+  const ops = makeQueueOps(async (raw) => {
+    const req = JSON.parse(raw) as { op: string; requestId: string; binding: unknown };
+    calls.push(req.op);
+    return JSON.stringify({
+      v: 1,
+      requestId: req.requestId,
+      binding: req.binding,
+      result: { denied: 'no-permission' },
+    });
+  });
+  expect(
+    await ops.retry({ ...ref, transient: true, expectedReceiptId: 'a'.repeat(64) }),
+  ).toMatchObject({
+    status: 'ok',
+    value: { action: 'denied', accepted: false, reason: 'no-permission' },
+  });
+  expect(calls).toEqual(['retry-capability']);
+});

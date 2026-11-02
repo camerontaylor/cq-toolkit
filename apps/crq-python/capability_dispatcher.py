@@ -34,6 +34,11 @@ def queue_main():
         policy = queue_transport.validate_policy(
             json.loads(Path(os.environ["CRQ_QUEUE_POLICY"]).read_text()))
         principal = os.environ["CRQ_QUEUE_PRINCIPAL"]
+        # No-op probe: validate authorization without importing the runner or taking tick.lock.
+        if queue_transport.decode(raw)["op"] == "retry-capability":
+            sys.stdout.buffer.write(queue_transport.handle(raw, None, principal=principal,
+                policy=policy, verify_source=None, receipt_root=None))
+            return 0
         queue_transport.authorize(queue_transport.decode(raw), principal, policy)
         if policy.get("enabled") is not True:
             sys.stdout.buffer.write(queue_transport.handle(raw, None, principal=principal,

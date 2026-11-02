@@ -1067,8 +1067,54 @@ class QueueTransportTests(unittest.TestCase):
         self.assertEqual(self.call("retry-capability"), {"retry": 1})
         self.assertEqual(self.q, before)
         self.policy.pop("transient_retries")
-        with self.assertRaisesRegex(ValueError, "capability denied"):
-            self.call("retry-capability")
+        self.assertEqual(self.call("retry-capability"), {"denied": "no-permission"})
+
+    def test_retry_probe_dispatcher_never_takes_lock_and_reports_denial(self):
+        self.retry_fixture()
+        policy_path = Path(self.tmp.name) / "policy.json"
+        policy_path.write_text(json.dumps(self.policy))
+        request = receipts.canonical({"v": 1, "op": "retry-capability", "requestId": "request-1", "binding": self.b})
+        before = copy.deepcopy(self.q)
+        for principal, expected in (("developer", {"retry": 1}), ("stranger", {"denied": "no-permission"})):
+            output = io.BytesIO()
+            with mock.patch.dict(os.environ, {"CRQ_QUEUE_POLICY": str(policy_path), "CRQ_QUEUE_PRINCIPAL": principal}), \
+                    mock.patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request))), \
+                    mock.patch.object(sys, "stdout", SimpleNamespace(buffer=output)), \
+                    mock.patch("signal.signal"), mock.patch("signal.alarm"), \
+                    mock.patch("author_transport.supervised", side_effect=AssertionError("must not lock")) as supervised:
+                self.assertEqual(dispatcher.queue_main(), 0)
+                self.assertEqual(json.loads(output.getvalue())["result"], expected)
+                supervised.assert_not_called()
+            self.assertEqual(self.q, before)
+
+    def test_unknown_exits_and_unlisted_causes_never_authorize_retry(self):
+        for exit_code in (2, 3, 255):
+            for events in ('', '{"type":"error","errorType":"network_error","recoverable":true}'):
+                with self.subTest(exit=exit_code, events=events):
+                    receipt, doc = self.failed_attempt(events, exit_code)
+                    self.assertEqual(doc["classification"]["outcome"], "error")
+                    self.assertNotIn("retry_transient", doc["classification"])
+                    # Even a forged transport tag cannot authorize an unsupported exit.
+                    doc["classification"]["retry_transient"] = {"version": 1, "category": "transport"}
+                    self.assert_retry_document_refused(doc)
+        for code in ("auth", "scan", "permanent", "unknown", "not-a-transient"):
+            receipt, doc = self.failed_attempt('{"type":"error","errorType":"network_error","recoverable":true}', 1)
+            doc["classification"]["failure_provenance"]["causes"].append(
+                {"source": "queue", "category": "unknown", "code": code})
+            self.assert_retry_document_refused(doc)
+            # The producer also refuses recoverable errors with unlisted types.
+            receipt, doc = self.failed_attempt(json.dumps({"type": "error", "errorType": code, "recoverable": True}), 1)
+            self.assertNotIn("retry_transient", doc["classification"])
+            self.assertFalse(self.call("retry", expectedReceiptId=receipt)["accepted"])
+
+    def assert_retry_document_refused(self, doc):
+        item = self.q["items"][0]
+        receipt = receipts.write_receipt(self.tmp.name, doc)
+        item["receipt_id"] = receipt
+        item["attempts"][-1]["receipt_id"] = receipt
+        before = copy.deepcopy(self.q)
+        self.assertEqual(self.call("retry", expectedReceiptId=receipt)["action"], "needs-human")
+        self.assertEqual(self.q, before)
 
     def test_retry_durable_replay_and_serialized_competitors(self):
         receipt = self.retry_fixture()

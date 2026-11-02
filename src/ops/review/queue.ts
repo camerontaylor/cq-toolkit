@@ -178,6 +178,7 @@ export function makeQueueOps(transport?: QueueTransport): {
               )
                 unfinished.push(ref);
             } catch (error) {
+              if (error instanceof QueueUnsupported) throw error;
               errors[ref.requestId] =
                 error instanceof QueueReadFault ? error.code : messageOf(error);
               unfinished.push(ref);
