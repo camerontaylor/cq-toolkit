@@ -1,8 +1,10 @@
 // Session-log correlation (preservation plan items 1.3–1.5): the ONE place a
-// lane's WorkCorrelation reaches the CQ_* child-env names. Each subprocess
-// transport hands applyCorrelationEnv the env it has already composed for
-// its child, so a governed job's work identity reaches the harness however
-// it is spawned. When a correlation is present it is
+// lane's WorkCorrelation reaches the CQ_* child-env names. The driver
+// transports (SDK, ACP) hand applyCorrelationEnv the child env they have
+// already composed; the CLI path instead hands an overrides-only map that
+// buildChildEnv composes later, so applyCorrelationEnv is the shared
+// treatment for both shapes and a governed job's work identity reaches the
+// harness however it is spawned. When a correlation is present it is
 // authoritative: a field it lacks REMOVES any inherited value of that name
 // (the names are allowlisted, so an outer run's CQ_ROLE/CQ_TASK would
 // otherwise sit next to this job's CQ_WORK_ID). Absent correlation leaves
