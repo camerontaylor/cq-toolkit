@@ -2062,6 +2062,24 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.assertFalse(crq.load_queue()["merged_discovery"]["complete"])
         self.assertEqual(health(), 1)
 
+    def test_resumed_bounds_drop_a_previous_refusal_error(self):
+        self.path.write_bytes(b"{")
+        self.assertIn("incomplete", self.discover()[0])
+        self.assertIn("error", crq.load_queue()["merged_discovery"])
+        self.path.unlink()
+        stages = []
+        save = crq._save_discovery_queue
+
+        def record(q, stage):
+            stages.append((stage, copy.deepcopy(q["merged_discovery"])))
+            return save(q, stage)
+
+        with mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
+            self.assertIn("complete=True", self.discover()[0])
+        self.assertEqual(stages[0], ("bounds-save", {"after": self.AFTER, "before": self.BEFORE,
+                                                     "complete": False}))
+        self.assertNotIn("error", crq.load_queue()["merged_discovery"])
+
     def test_wrapper_read_io_aborts_without_mutating_caller(self):
         read = Path.read_text
         for error in (PermissionError, OSError):
@@ -2314,6 +2332,52 @@ class RecentKeysetDiscoveryTest(unittest.TestCase):
         self.assertEqual(self.enrolled(), self.merged)
         self.assertEqual(self.q["merged_watermark"], self.BEFORE)
 
+    def tie(self, numbers, second):
+        for n in numbers:
+            self.rows[n]["updated_at"] = f"2026-10-02T00:{second // 60:02d}:{second % 60:02d}Z"
+
+    def until_complete(self, ticks=8):
+        for _ in range(ticks):
+            log = self.tick()
+            self.assertNotIn("incomplete", log[0])
+            if self.q["merged_discovery"]["complete"]:
+                return
+        self.fail("scan did not complete")
+
+    def test_oversized_same_second_group_recovers_without_refusal(self):
+        # 400 closed PRs share one update second mid-list (more than the
+        # cursor remembers); a reopen and a move land during the traversal.
+        self.closed(600, unmerged={550})
+        self.tie(range(100, 500), 300)
+        self.hooks[2] = lambda: (self.reopen(550)(), self.move(250)())
+        self.until_complete()
+        self.assertEqual(self.enrolled(), self.merged)
+        self.assertEqual(self.q["merged_watermark"], self.BEFORE)
+        for size, page in self.calls:
+            self.assertLessEqual(size, 100)
+
+    def test_oversized_group_at_the_head_completes(self):
+        self.closed(300)
+        self.tie(range(1, 301), 600)
+        self.until_complete()
+        self.assertEqual(self.enrolled(), self.merged)
+        self.assertLessEqual(len(self.calls), 12)
+
+    def test_cursor_stays_within_capacity_for_large_numbers(self):
+        self.closed(0)
+        base = 10 ** 30  # 100 anchors plus 100 head numbers exceed 4 KB
+        self.rows = {n: {"number": n, "base": {"ref": "main"}, "updated_at": "2026-10-02T00:10:00Z",
+                         "merged_at": "2026-10-02T00:10:00Z", "merge_commit_sha": f"{n % 10 ** 9:040x}",
+                         "head": {"sha": f"{n % 10 ** 9:040x}"}} for n in range(base, base + 250)}
+        self.merged = set(self.rows)
+        dumps = crq.json.dumps
+        sizes = []
+        with mock.patch.object(crq.json, "dumps", side_effect=lambda *a, **k: (
+                lambda out: sizes.append(len(out)) or out)(dumps(*a, **k))):
+            self.until_complete()
+        self.assertEqual(self.enrolled(), self.merged)
+        self.assertTrue(any(size > crq.merged_reconcile.MAX_CURSOR_BYTES for size in sizes))
+
 
 class RecentWrapperRetentionTest(unittest.TestCase):
     """Rolling discovery leaves one wrapper per tick; growth stays bounded."""
@@ -2378,6 +2442,18 @@ class RecentWrapperRetentionTest(unittest.TestCase):
         befores = [json.loads(p.read_text())["checkpoint"]["before"]
                    for p in (self.root / "reconcile").glob("*.json") if p not in retained]
         self.assertGreaterEqual(min(befores), crq.iso(self.clock - crq.RECENT_WRAPPER_RETENTION))
+
+    def test_prune_runs_at_most_hourly(self):
+        old = ("2026-09-01T00:00:00Z", "2026-09-01T00:12:00Z")
+        with mock.patch.object(crq, "prune_recent_wrappers", wraps=crq.prune_recent_wrappers) as prune:
+            for minutes in (12, 24, 36, 48, 60, 72):
+                self.clock += crq.dt.timedelta(minutes=12)
+                self.tick()
+                if minutes == 24:
+                    stale = self.put(self.key(*old), after=old[0], before=old[1])
+            self.assertEqual(prune.call_count, 2)
+        self.assertFalse(stale.exists())
+        self.assertEqual(crq.load_queue()["merged_wrappers_pruned_at"], crq.iso(self.clock))
 
     def test_unenrolled_or_referenced_complete_wrappers_are_retained(self):
         self.clock = crq.parse_iso("2026-10-20T00:00:00Z")

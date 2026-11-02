@@ -1176,14 +1176,14 @@ def rolling_discovery_interval(q, config):
 
 RECENT_PAGE = 100
 RECENT_OVERLAP = 2
-RECENT_MAX_TIES = 250
-RECENT_FIELDS = {"n", "p", "f", "fs", "h", "hs", "o", "u", "t", "k", "c"}
+RECENT_MAX_TIES = 100
+RECENT_FIELDS = {"n", "p", "f", "fs", "fa", "h", "hs", "ha", "o", "u", "t", "k", "c"}
 
 
 def _recent_state(cursor, after):
     """Decode a keyset cursor; a legacy page-number cursor restarts the scan."""
-    fresh = {"n": 0, "p": 0, "f": after, "fs": [], "h": None, "hs": [], "o": 0,
-             "u": None, "t": [], "k": 0, "c": 0}
+    fresh = {"n": 0, "p": 0, "f": after, "fs": [], "fa": False, "h": None, "hs": [], "ha": False,
+             "o": 0, "u": None, "t": [], "k": 0, "c": 0}
     if cursor is None or (cursor.isdigit() and cursor == str(int(cursor)) and int(cursor) >= 1):
         return fresh
     try:
@@ -1208,7 +1208,9 @@ def _recent_state(cursor, after):
             or any(type(state[k]) is not int or state[k] < 0 for k in ("n", "p", "o", "k", "c"))
             or not ts(state["f"]) or not ts(state["h"], True) or not ts(state["u"], True)
             or not all(numbers(state[k]) for k in ("fs", "hs", "t"))
-            or (state["p"] == 0 and (state["f"] != after or state["fs"]))
+            or type(state["fa"]) is not bool or type(state["ha"]) is not bool
+            or (state["fa"] and state["fs"]) or (state["ha"] and state["hs"])
+            or (state["p"] == 0 and (state["f"] != after or state["fs"] or state["fa"]))
             or (state["k"] == 0 and (state["h"] is not None or state["o"] or state["u"] is not None))
             or (state["o"] and state["u"] is None)):
         raise merged_reconcile.ReconcileRefused("invalid closed-PR page cursor")
@@ -1233,6 +1235,11 @@ def recent_merged_page(cursor, after):
     more than one request is followed by a head pass over rows updated since
     that pass began, until one request covers the head (an atomic snapshot) or
     a head pass finds nothing new. Single-page scans stay one request.
+
+    Same-second groups never refuse. The anchor keeps the newest
+    RECENT_MAX_TIES processed numbers; a forgotten tie row is reprocessed
+    (deduplicated), never skipped. An oversized head-second group is recorded
+    as wholly seen, relying on stable same-second order like the overlap.
     """
     state = _recent_state(cursor, after)
     size, page, start = _recent_window(state["o"])
@@ -1256,7 +1263,7 @@ def recent_merged_page(cursor, after):
         prior = updated
         if "merged_at" not in row:
             raise merged_reconcile.ReconcileRefused("missing merge metadata")
-    anchor, ties = state["u"], set(state["t"])
+    anchor, ties = state["u"], list(state["t"])
 
     def covered(row):
         return anchor is not None and (row["updated_at"] > anchor or
@@ -1270,7 +1277,7 @@ def recent_merged_page(cursor, after):
         return {"records": [], "has_next_page": True, "next_cursor": json.dumps(nxt, separators=(",", ":"))}
     floor, seen = state["f"], set(state["fs"])
     head = state["h"] if state["k"] else (rows[0]["updated_at"] if rows else None)
-    head_seen = set(state["hs"])
+    head_seen, head_all = set(state["hs"]), state["ha"]
     records = []
     ended = len(rows) < size
     for row in rows:
@@ -1281,35 +1288,50 @@ def recent_merged_page(cursor, after):
             ended = True
             break
         if anchor is None or updated < anchor:
-            anchor, ties = updated, set()
-        ties.add(row["number"])
-        if updated == head:
+            anchor, ties = updated, []
+        if row["number"] not in ties:
+            ties = (ties + [row["number"]])[-RECENT_MAX_TIES:]
+        if updated == head and not head_all:
             head_seen.add(row["number"])
-        if updated == floor and row["number"] in seen:
+            if len(head_seen) > RECENT_MAX_TIES:
+                head_seen, head_all = set(), True
+        if updated == floor and (state["fa"] or row["number"] in seen):
             continue
         nxt["c"] += 1
         if row["merged_at"] and (row.get("base") or {}).get("ref") in DISCOVERY_BRANCHES:
             records.append({"number": row["number"], "mergedAt": row["merged_at"],
                 "mergeCommit": {"oid": row.get("merge_commit_sha")},
                 "headRefOid": (row.get("head") or {}).get("sha")})
-    if len(ties) > RECENT_MAX_TIES or len(head_seen) > RECENT_MAX_TIES:
-        raise merged_reconcile.ReconcileRefused("closed-PR update tie group exceeds cursor capacity")
     if ended:
         if state["k"] == 0 or (state["p"] > 0 and nxt["c"] == 0):
             return {"records": records, "has_next_page": False, "next_cursor": None}
         # Rows updated during this multi-request pass moved above its anchor.
-        nxt = {"n": state["n"] + 1, "p": state["p"] + 1, "f": head, "fs": sorted(head_seen), "h": None,
-               "hs": [], "o": 0, "u": None, "t": [], "k": 0, "c": 0}
+        nxt = {"n": state["n"] + 1, "p": state["p"] + 1, "f": head, "fs": sorted(head_seen), "fa": head_all,
+               "h": None, "hs": [], "ha": False, "o": 0, "u": None, "t": [], "k": 0, "c": 0}
     else:
-        nxt.update(h=head, hs=sorted(head_seen), u=anchor, t=sorted(ties),
+        nxt.update(h=head, hs=sorted(head_seen), ha=head_all, u=anchor, t=ties,
                    o=max(0, start + len(rows) - 1 - RECENT_OVERLAP))
     encoded = json.dumps(nxt, separators=(",", ":"))
     if len(encoded.encode()) > merged_reconcile.MAX_CURSOR_BYTES:
-        raise merged_reconcile.ReconcileRefused("closed-PR update tie group exceeds cursor capacity")
+        # Only very large PR numbers get here. Degrade the same way as an
+        # oversized group: keep the overlap's anchors, mark head sets seen.
+        for name, flag in (("fs", "fa"), ("hs", "ha")):
+            if nxt[name]:
+                nxt[name], nxt[flag] = [], True
+        nxt["t"] = nxt["t"][-(RECENT_OVERLAP + 1):]
+        encoded = json.dumps(nxt, separators=(",", ":"))
     return {"records": records, "has_next_page": True, "next_cursor": encoded}
 
 
 RECENT_WRAPPER_RETENTION = dt.timedelta(days=7)
+RECENT_PRUNE_INTERVAL = dt.timedelta(hours=1)
+
+
+def _prune_due(last):
+    try:
+        return not (isinstance(last, str) and now() - parse_iso(last) < RECENT_PRUNE_INTERVAL)
+    except (TypeError, ValueError):
+        return True
 
 
 def prune_recent_wrappers(q):
@@ -1371,10 +1393,13 @@ def discover_merged(q, budget, *, interval, recent=False):
     # Record the frozen bounds in queue too: a crash after source pinning but
     # before page one must not cause the next tick to choose a different upper.
     # Identical persisted bounds are already durable; rewriting them would
-    # briefly report a completed interval as complete:false.
+    # briefly report a completed interval as complete:false. Any rewrite drops
+    # a previous refusal's error/reason, which this attempt supersedes.
     active = q.get("merged_discovery") or {}
-    if (active.get("after"), active.get("before")) != (after, before):
-        q["merged_discovery"] = {"after": after, "before": before, "complete": False}
+    same = (active.get("after"), active.get("before")) == (after, before)
+    if not same or "error" in active or "reason" in active:
+        q["merged_discovery"] = {"after": after, "before": before,
+                                 "complete": same and active.get("complete") is True}
         _save_discovery_queue(q, "bounds-save")
     try:
         with forge_window(budget):
@@ -1385,8 +1410,11 @@ def discover_merged(q, budget, *, interval, recent=False):
         if result["complete"]:
             q["merged_watermark"] = before
             _save_discovery_queue(q, "watermark-save")
-            if recent:
+            if recent and _prune_due(q.get("merged_wrappers_pruned_at")):
+                # Hourly at most: each prune reads every retained wrapper.
                 pruned = prune_recent_wrappers(q)
+                q["merged_wrappers_pruned_at"] = iso()
+                _save_discovery_queue(q, "prune-save")
         caller.clear()
         caller.update(q)
         return ([f"merged discovery: complete={result['complete']} represented={result['represented']}"
