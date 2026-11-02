@@ -753,7 +753,9 @@ export function makeFixReviewItem(deps: {
       // minted work identity onto the invocation so the lane stamps the
       // child's CQ_* env. Absent outside a governed dispatch — the
       // un-governed op behaves exactly as before.
-      ...correlationInvocation(),
+      // The KERNEL reads the job context; the shared driver helper stays
+      // pure over the correlation value (ADR-0002 one-directional rule).
+      ...correlationInvocation(currentJobContext()?.info?.correlation),
     };
     let worker: WorkerResult;
     try {
