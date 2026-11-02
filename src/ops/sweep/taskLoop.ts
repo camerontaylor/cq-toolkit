@@ -24,6 +24,7 @@ import { fixerBudgetBreach, startFixerDeadline } from './internal/fixerBudget.js
 import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
 import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
+import { formatCqTrailers } from '../../shared/cqTrailers.js';
 import { hackDetector } from '../gates/hackDetector.js';
 
 export interface TaskLoopConfig {
@@ -542,7 +543,19 @@ async function runTaskLoopInner(
             : output.outcome === 'todo'
               ? 'chore(test)'
               : `fix(${unit.package})`;
-        const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: ${String(output.confidence)}\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}`;
+        const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: ${String(output.confidence)}\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}\n${formatCqTrailers(
+          [
+            ['Cq-Run', bindings.runPrefix],
+            [
+              'Cq-Unit',
+              `${bindings.segments?.kind ?? unit.fixer}/${bindings.segments?.slug ?? unit.package}`,
+            ],
+            ['Cq-Task', task.id],
+            ['Cq-Attempt', String(decision.attempt)],
+            ['Cq-Tier', tier],
+            ['Cq-Model', `${resolved.modelSpec.provider}/${resolved.modelSpec.model}`],
+          ],
+        )}`;
         const identical =
           config.source === 'static' && JSON.stringify(related) === JSON.stringify(fullCheck);
         const broader = async () => {
@@ -945,7 +958,17 @@ export async function commitFailedAttempt(
     const reasonLine = input.reason.replace(/[\r\n]+/g, ' ').trim() || 'task attempt refused';
     const taskLine = input.task.replace(/[\r\n]+/g, ' ');
     const subject = `cq-failed(${input.outcome}): ${taskLine}${input.pushFailed ? ' [skip ci]' : ''}`;
-    const message = `${subject}\n\n${reasonLine}\n\nCq-Run: ${input.runPrefix}\nCq-Unit: ${input.kind}/${input.slug}\nCq-Task: ${taskLine}\nCq-Ref-Identity: ${identity}\nCq-Attempt: ${String(attempt)}\nCq-Tier: ${input.tier}\nCq-Model: ${input.model.provider}/${input.model.model}\nCq-Gate: ${input.gate}\nCq-Outcome: ${input.outcome}`;
+    const message = `${subject}\n\n${reasonLine}\n\n${formatCqTrailers([
+      ['Cq-Run', input.runPrefix],
+      ['Cq-Unit', `${input.kind}/${input.slug}`],
+      ['Cq-Task', taskLine],
+      ['Cq-Ref-Identity', identity],
+      ['Cq-Attempt', String(attempt)],
+      ['Cq-Tier', input.tier],
+      ['Cq-Model', `${input.model.provider}/${input.model.model}`],
+      ['Cq-Gate', input.gate],
+      ['Cq-Outcome', input.outcome],
+    ])}`;
     const sha = await git([
       '-c',
       'user.name=CQ fix engine',
