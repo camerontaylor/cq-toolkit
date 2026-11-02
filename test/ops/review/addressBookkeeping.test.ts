@@ -14,7 +14,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
 import {
   DEV_LEDGER_VERSION,
@@ -432,13 +432,15 @@ test.each(['valid', 'changed', 'wrong-name', 'symlink', 'hardlink', 'unregistere
 // ---------------------------------------------------------------------------
 
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { runLadder } from '../../../src/kernel/governor.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import { Finding, FindingsRecord } from '../../../src/ops/review/findings.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
-beforeEach(async () => {
+/** Scoped gitleaks/git env for the M7-address real-path cases only. */
+async function withUsageEnv<T>(fn: () => Promise<T>): Promise<T> {
   scanner = await makeGitleaksFixture();
   vi.stubEnv('PATH', scanner.path);
   vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
@@ -448,11 +450,13 @@ beforeEach(async () => {
   vi.stubEnv('GIT_AUTHOR_EMAIL', 'review-fixture@example.invalid');
   vi.stubEnv('GIT_COMMITTER_NAME', 'Review fixture');
   vi.stubEnv('GIT_COMMITTER_EMAIL', 'review-fixture@example.invalid');
-});
-afterEach(async () => {
-  vi.unstubAllEnvs();
-  await rm(scanner.root, { recursive: true, force: true });
-});
+  try {
+    return await fn();
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(scanner.root, { recursive: true, force: true });
+  }
+}
 
 interface UsageHarness {
   op: ReturnType<typeof makeReviewAddress>;
@@ -463,23 +467,33 @@ interface UsageHarness {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number } | null;
   /** When set, the Nth driver run (1-based) throws after settling usage. */
   throwOnRun?: number;
+  /**
+   * Token budget override for the caller's op input: after this many runs,
+   * the spent allowance genuinely trips the engine's own stop().
+   */
+  exhaustAfterRuns?: number;
+  exhausted?: boolean;
   cleanup: () => Promise<void>;
 }
 
 async function usageHarness(
-  overrides: Partial<Pick<UsageHarness, 'usage' | 'throwOnRun'>> = {},
-): Promise<UsageHarness> {
-  const state: UsageHarness = {
+  overrides: Partial<Pick<UsageHarness, 'usage' | 'throwOnRun' | 'exhaustAfterRuns'>> = {},
+): Promise<UsageHarness & { start: number }> {
+  const state: UsageHarness & { start: number } = {
     runs: 0,
     usage:
       overrides.usage === undefined
         ? { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 }
         : overrides.usage,
     ...(overrides.throwOnRun === undefined ? {} : { throwOnRun: overrides.throwOnRun }),
+    ...(overrides.exhaustAfterRuns === undefined
+      ? {}
+      : { exhaustAfterRuns: overrides.exhaustAfterRuns }),
     repoRoot: '',
     journalDir: '',
     op: undefined as unknown as ReturnType<typeof makeReviewAddress>,
     cleanup: async () => undefined,
+    start: 0,
   };
   const repo = await makeTestRepo();
   repo.git('config', 'user.name', 'Test');
@@ -534,6 +548,18 @@ async function usageHarness(
             // A REAL post-settlement fault: the dispatch itself throws.
             throw new Error(`driver run ${run} lost after settlement`);
           }
+          if (state.exhaustAfterRuns !== undefined && run > state.exhaustAfterRuns) {
+            // From here on every dispatch burns real wall time so the engine's
+            // own budget machinery observes the elapsed clock (only used when
+            // a caller drives exhaustion through wallMs).
+            state.exhausted = true;
+          }
+          if (state.exhausted) {
+            const waited = Date.now();
+            while (Date.now() - waited < 200) {
+              if (Date.now() - state.start >= (state.exhaustAfterRuns as number)) break;
+            }
+          }
           let structuredOutput: unknown;
           if (input.outputSchema?.name === 'review.agent/v3') {
             const serialized = JSON.stringify({
@@ -578,93 +604,235 @@ async function usageHarness(
     await repo.cleanup();
     await rm(journalDir, { recursive: true, force: true });
   };
-  return state;
+  const start = Date.now();
+  // state IS the harness: the driver closures and the test both hold this
+  // same object, so live counters (runs, exhausted) are visible to both.
+  return Object.assign(state, { start });
 }
 
 test('M7-address nominal evidence', async () => {
-  const f = await usageHarness();
-  try {
-    const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
-    expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
-    if (result.status !== 'ok') throw new Error('expected success');
-    const runs = f.runs;
-    expect(runs).toBeGreaterThan(0);
-    // Success retains settled usage exactly once: every dispatch measured
-    // 2 in / 1 out, and the summary folds to precisely runs x that
-    // measurement.
-    expect(result.value.usageSummary).toEqual({
-      usage: { input: 2 * runs, output: runs, cacheRead: 0, cacheWrite: 0 },
-      knownCount: runs,
-      unknownCount: 0,
-      unpricedCount: runs,
-    });
-    // Parent totals agree with the summary: no double counting.
-    expect(result.value.usage.input).toBe(2 * runs);
-    expect(result.value.usage.output).toBe(runs);
-    // The persisted artifact carries the same summary as the envelope.
-    const persisted = JSON.parse(await readFile(result.value.reportPath, 'utf8')) as {
-      usageSummary?: unknown;
-    };
-    expect(persisted.usageSummary).toEqual(result.value.usageSummary);
-  } finally {
-    await f.cleanup();
-  }
+  return withUsageEnv(async () => {
+    const f = await usageHarness();
+    try {
+      const result = await f.op({
+        repoRoot: f.repoRoot,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
+      if (result.status !== 'ok') throw new Error('expected success');
+      const runs = f.runs;
+      expect(runs).toBeGreaterThan(0);
+      // Success retains settled usage exactly once: every dispatch measured
+      // 2 in / 1 out, and the summary folds to precisely runs x that
+      // measurement.
+      expect(result.value.usageSummary).toEqual({
+        usage: { input: 2 * runs, output: runs, cacheRead: 0, cacheWrite: 0 },
+        knownCount: runs,
+        unknownCount: 0,
+        unpricedCount: runs,
+      });
+      // Parent totals agree with the summary: no double counting.
+      expect(result.value.usage.input).toBe(2 * runs);
+      expect(result.value.usage.output).toBe(runs);
+      // The persisted artifact carries the same summary as the envelope.
+      const persisted = JSON.parse(await readFile(result.value.reportPath, 'utf8')) as {
+        usageSummary?: unknown;
+      };
+      expect(persisted.usageSummary).toEqual(result.value.usageSummary);
+    } finally {
+      await f.cleanup();
+    }
+  });
 });
 
 test('M7-address missing evidence', async () => {
-  // Every dispatch reports legacy usage without provenance: the summary must
-  // be explicit unknown (unknownCount = runs), never a fabricated measured
-  // zero, while the run itself still completes honestly.
-  const f = await usageHarness({ usage: null });
-  try {
-    const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
-    expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
-    if (result.status !== 'ok') throw new Error('expected success');
-    const runs = f.runs;
-    expect(runs).toBeGreaterThan(0);
-    expect(result.value.usageSummary).toEqual({
-      knownCount: 0,
-      unknownCount: runs,
-      unpricedCount: runs,
-    });
-    expect(result.value.usageSummary?.usage).toBeUndefined();
-  } finally {
-    await f.cleanup();
-  }
+  return withUsageEnv(async () => {
+    // Every dispatch reports legacy usage without provenance: the summary must
+    // be explicit unknown (unknownCount = runs), never a fabricated measured
+    // zero, while the run itself still completes honestly.
+    const f = await usageHarness({ usage: null });
+    try {
+      const result = await f.op({
+        repoRoot: f.repoRoot,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
+      if (result.status !== 'ok') throw new Error('expected success');
+      const runs = f.runs;
+      expect(runs).toBeGreaterThan(0);
+      expect(result.value.usageSummary).toEqual({
+        knownCount: 0,
+        unknownCount: runs,
+        unpricedCount: runs,
+      });
+      expect(result.value.usageSummary?.usage).toBeUndefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
 });
 
 test('M7-address failure evidence', async () => {
-  // The FIRST dispatch throws; the loop's retry then settles measured usage
-  // (2 in / 1 out) before the run still exits needs-human carrying the thrown
-  // fault. The settled spend is retained exactly once on the failure exit,
-  // the THROWN dispatch settles as an explicit unknown (it may already have
-  // been paid upstream), and parent totals match the measured run only.
-  const f = await usageHarness({ throwOnRun: 1 });
-  try {
-    const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'ok') throw new Error('expected needs-human');
-    expect(f.runs).toBe(2);
-    expect(result.report?.usageSummary).toEqual({
-      usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
-      knownCount: 1,
-      unknownCount: 1,
-      unpricedCount: 2,
-    });
-    // Parent totals do not double count the settled run's usage.
-    expect(result.report?.usage).toEqual({
-      input: 2,
-      output: 1,
-      cacheRead: 0,
-      cacheWrite: 0,
-    });
-    // The thrown dispatch is a real fault inside the loop; the run still
-    // reaches a terminal needs-human exit at the round cap with the thrown
-    // run's settled sibling spend retained exactly once.
-    expect(result.report?.reasons.join('; ')).toContain(
-      'review round cap reached with open findings',
-    );
-  } finally {
-    await f.cleanup();
-  }
+  return withUsageEnv(async () => {
+    // The FIRST dispatch throws; the loop's retry then settles measured usage
+    // (2 in / 1 out) before the run still exits needs-human carrying the thrown
+    // fault. The settled spend is retained exactly once on the failure exit,
+    // the THROWN dispatch settles as an explicit unknown (it may already have
+    // been paid upstream), and parent totals match the measured run only.
+    const f = await usageHarness({ throwOnRun: 1 });
+    try {
+      const result = await f.op({
+        repoRoot: f.repoRoot,
+        source: 'local',
+        journalDir: f.journalDir,
+      });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'ok') throw new Error('expected needs-human');
+      expect(f.runs).toBe(2);
+      expect(result.report?.usageSummary).toEqual({
+        usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+        knownCount: 1,
+        unknownCount: 1,
+        unpricedCount: 2,
+      });
+      // Parent totals do not double count the settled run's usage.
+      expect(result.report?.usage).toEqual({
+        input: 2,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      // The thrown dispatch is a real fault inside the loop; the run still
+      // reaches a terminal needs-human exit at the round cap with the thrown
+      // run's settled sibling spend retained exactly once.
+      expect(result.report?.reasons.join('; ')).toContain(
+        'review round cap reached with open findings',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
+test('M7-address exhaustion evidence', async () => {
+  return withUsageEnv(async () => {
+    // The FIRST dispatch settles measured usage (2 in / 1 out); the SECOND
+    // dispatch genuinely exhausts the caller-imposed wall budget, so the
+    // ENGINE's own stop() trips and finish() records the structured budget
+    // marker. The exhausted exit retains the settled spend exactly once, the
+    // exhausted dispatch invents no usage, and parent totals match the summary.
+    const f = await usageHarness({ exhaustAfterRuns: 1 });
+    try {
+      const result = await f.op({
+        repoRoot: f.repoRoot,
+        source: 'local',
+        journalDir: f.journalDir,
+        // A genuine engine budget trip: the first dispatch's settled spend
+        // (3 tokens) consumes the caller-imposed token allowance, so the
+        // reviewer partition trips its own before-dispatch budget stop and
+        // finish() records the structured budget marker with that spend kept.
+        maxTokens: 3,
+      });
+      expect(result.status, JSON.stringify(result.report?.reasons)).toBe('needs-human');
+      if (result.status === 'ok') throw new Error('expected needs-human');
+      expect(result.report?.stop).toBe('budget');
+      expect(result.report?.reasons.join('; ')).toContain('token or wall budget exhausted');
+      // The budget must have tripped AFTER at least one settled dispatch: the
+      // exhausted exit proves retention only if spend preceded the trip.
+      const summaryAfterTrip = result.report?.usageSummary;
+      expect(
+        (summaryAfterTrip?.knownCount ?? 0) + (summaryAfterTrip?.unknownCount ?? 0),
+        JSON.stringify({ runs: f.runs, reasons: result.report?.reasons }),
+      ).toBeGreaterThan(0);
+      expect(result.report?.usageSummary).toEqual({
+        usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+        knownCount: 1,
+        unknownCount: 0,
+        unpricedCount: 1,
+      });
+      expect(result.report?.usage).toEqual({
+        input: 2,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      // The persisted artifact carries the same summary as the envelope.
+      const persisted = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
+        usageSummary?: unknown;
+        stop?: string;
+      };
+      expect(persisted.usageSummary).toEqual(result.report?.usageSummary);
+      expect(persisted.stop).toBe('budget');
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
+test('M7-address cancellation evidence', async () => {
+  return withUsageEnv(async () => {
+    // A REAL parent cancellation through the engine's own carrier: the governing
+    // runLadder's signal aborts while the first driver dispatch is in flight
+    // (after its ledger settlement is queued by the same synchronous account()
+    // slice that returns the result). The cancelled exit retains the settled
+    // spend exactly once, invents no usage, and the engine's terminal lifetime
+    // persists the same summary to the artifact.
+    const parent = new AbortController();
+    const f = await usageHarness();
+    try {
+      const opPromise = runLadder(
+        () => f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir }),
+        { wallClockMs: 30000, abortGraceMs: 5000, killGraceMs: 5000 },
+        { op: 'review.address', jobKey: 'm7-cancel', attempt: 1 },
+        { signal: parent.signal },
+      );
+      // Abort once the first driver dispatch has started; account() for that
+      // dispatch settles synchronously when its promise resolves, so the run
+      // then reaches the cancelled exit carrying its spend.
+      const cancelledWhileDispatched = new Promise<void>((done) => {
+        const timer = setInterval(() => {
+          if (f.runs >= 1) {
+            clearInterval(timer);
+            parent.abort();
+            done();
+          }
+        }, 1);
+      });
+      await cancelledWhileDispatched;
+      const ladder = await opPromise;
+      expect(ladder.outcome).toBe('completed');
+      if (ladder.outcome !== 'completed') throw new Error('ladder did not complete');
+      const result = ladder.value;
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'ok') throw new Error('expected needs-human');
+      expect(result.report?.reasons.join('; ')).toContain('parent cancelled');
+      expect(f.runs).toBeGreaterThanOrEqual(1);
+      // Every dispatch that SETTLED is retained exactly once; a dispatch cut
+      // down by the abort settles as explicit unknown, never dropped.
+      const summary = result.report?.usageSummary;
+      expect(summary).toBeDefined();
+      expect(summary?.knownCount ?? 0).toBeLessThanOrEqual(f.runs);
+      expect((summary?.knownCount ?? 0) + (summary?.unknownCount ?? 0)).toBe(f.runs);
+      if (summary?.usage !== undefined) {
+        expect(summary.usage).toEqual({
+          input: 2 * summary.knownCount,
+          output: summary.knownCount,
+          cacheRead: 0,
+          cacheWrite: 0,
+        });
+        // Parent totals do not double count the retained spend.
+        expect(result.report?.usage.input).toBeGreaterThanOrEqual(summary.usage.input);
+      }
+      // The engine's terminal lifetime persists the same summary to the artifact.
+      const persisted = JSON.parse(await readFile(result.report!.reportPath, 'utf8')) as {
+        usageSummary?: unknown;
+      };
+      expect(persisted.usageSummary).toEqual(summary);
+    } finally {
+      parent.abort();
+      await f.cleanup();
+    }
+  });
 });

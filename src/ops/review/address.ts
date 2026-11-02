@@ -134,8 +134,10 @@ export interface ReviewAddressReport {
    * this summary exactly once, on every terminal exit — success, failure,
    * budget exhaustion, cancellation and a thrown fault included. A dispatch
    * whose provider supplied no measurement settles as an explicit unknown,
-   * never a measured zero. Same report-envelope carrier as the agent review
-   * leg; absent until the first snapshot at exit, never a v3 wire field.
+   * never a measured zero. The ONLY report-shape addition of this slice: a
+   * new optional field carrying the existing KnownUsageSummary shape (the
+   * same carrier the agent review leg already uses); no event kinds,
+   * migration versions or other wire contracts change.
    */
   usageSummary?: KnownUsageSummary;
   wallMs: number;
@@ -384,7 +386,9 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // budget exhaustion, cancellation and a thrown fault included — retains
       // the settled usage summary, so spend already paid is never lost to the
       // exit route. Stamped before persistence, so the written artifact
-      // matches the returned envelope.
+      // matches the returned envelope. The sole report-shape addition is the
+      // optional usageSummary field (existing KnownUsageSummary shape); no
+      // other wire contract changes.
       report.usageSummary = usageLedger.snapshot();
       if (parent?.aborted) {
         delete report.stop;
@@ -685,11 +689,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 // KERNEL reads the job context; the shared driver helper
                 // stays pure over the correlation value (ADR-0002
                 // one-directional rule). Absent outside a governed dispatch.
-                const correlation = correlationInvocation(currentJobContext()?.info?.correlation);
                 const result = await resolved.driver.run(
                   {
                     ...invocation,
-                    ...correlation,
+                    ...correlationInvocation(currentJobContext()?.info?.correlation),
                   },
                   options,
                 );
