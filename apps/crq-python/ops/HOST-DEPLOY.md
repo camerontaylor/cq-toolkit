@@ -176,8 +176,9 @@ authority: the owner approval, tag and target requirements of this document
 are unchanged, and the controller starts nothing.
 
 One JSON artifact on stdout, narration on stderr; exit 0 switched/healthy,
-1 health observation failed, 2 refused before helper entry (deployment surfaces
-unchanged), 3 `recovery_required` (mutation occurred or cannot be excluded).
+1 health observation failed, 2 refused with deployment surfaces unchanged
+(before helper entry, or a helper refusal recorded as `refused_no_change`), 3
+`recovery_required` (mutation occurred or cannot be excluded).
 Exit 3 emits structured recovery evidence on stdout and narration on stderr; it
 never claims the switch was undone. The controller lock
 is `state/controller.lock`, distinct from the runner's tick lock.
@@ -218,8 +219,13 @@ Ordering and guarantees:
    `alive` or `ambiguous` blocks the controller; it never signals or kills a
    process (exact owned-PID drain means: verified-none, not a sweep). Drain
    live/ambiguous work through the documented author-recovery path first.
-3. **Switch** — the helper's `switch` runs unchanged, under its tick lock and
-   drift fence.
+3. **Switch** — before the durable intent is written, the controller calls
+   the helper's own pure validators (`root_check`, `verify_target` with its
+   full `crq-runner/YYYYMMDD-N` tag match and annotated-tag binding, and the
+   destination `render`). A bad tag or target is a plain exit-2 refusal with
+   no record and no change. The controller's own tag check is also a full
+   match now. Then the helper's `switch` runs unchanged, under its tick lock
+   and drift fence.
 4. **Preservation** — `state/queue.json` (items, starts, author_requests,
    author_observations) and `state/heartbeat.json` must be byte-identical
    across the switch; any difference after helper entry requires owner recovery
@@ -282,15 +288,37 @@ without an absence proof for every recorded run.
 Schema-1 records add `transaction_id` and `outcome` without changing legacy
 completed journal inputs. Before entering the helper, a `deploy_pending` or
 `rollback_pending` intent retains the prior HEAD/config/preserved-state digests,
-prior approval tag and intended target/tag. Once the helper is entered, even a
-config-only partial failure with unchanged HEAD requires owner recovery. Any
-helper, preservation, compatibility or completion-write exception produces
+prior approval tag and intended target/tag, plus the checkout status and the
+installed CRQ user units (`$XDG_CONFIG_HOME/systemd/user/crq-*` and
+`*.wants/crq-*` links). If the helper raises and the controller then observes
+HEAD, rendered-config bytes, checkout status, units and preserved state all
+equal to that identity, the intent is replaced with `outcome:
+"refused_no_change"` (`operation: deploy_refused`/`rollback_refused`) carrying
+the `observations`, and the controller exits 2. The same evidence is printed
+on stdout (`record_persisted`, plus `record_write_error` if the journal
+update failed and the pending intent was retained). Nothing needs clearing before a
+corrected rerun, and the record is never a rollback input. Any changed or
+unobservable surface (even a config-only partial failure with unchanged HEAD)
+still requires owner recovery: any such helper exception, and any
+preservation, compatibility or completion-write exception, produces
 `recovery_required`/exit 3 with that identity. The controller attempts to replace
 the intent with a recovery record; `record_persisted: false` plus
 `record_write_error` explicitly reports a failed final update, retaining the
 original intent when atomic replacement fails. Keep the stdout receipt privately
 if record storage is unavailable. Do not rerun blindly, restore queue snapshots,
 or infer automatic rollback permission from a pending/recovery receipt.
+
+Records are never rewritten after their outcome is final (only the pending
+intent is replaced by its outcome); resolution notes are separate files. To
+close a stale `recovery_required` record (for
+example one written before `refused_no_change` existed, such as a pre-checkout
+tag refusal), verify the physical state against the record's prior identity:
+HEAD equals `prior_head`, config bytes match `prior_config_sha256` (and any
+retained baselines), and unit enablement and preserved state are unchanged.
+Then write a separate `OPERATOR-RESOLUTION.md` beside the retained record that
+names the record, the observations and the decision. Earlier intent, recovery
+and refusal records are not consumed by a later preflight, so they do not block
+a separately approved switch.
 
 A completed journal is written only after the checks and durable completion
 write succeed. Pending/recovery/unknown outcomes are not rollback inputs;

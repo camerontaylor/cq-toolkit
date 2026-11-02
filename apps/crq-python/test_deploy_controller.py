@@ -99,6 +99,18 @@ class ControllerFixture(unittest.TestCase):
         self.floor.start()
         self.addCleanup(self.floor.stop)
         self.effects = dc.Effects(self.root, self.record_dir)
+        # Installed-unit observation reads an isolated user config, never the
+        # real one; the CLI subprocess inherits the same environment.
+        self.units_home = self.base / "xdg-config/systemd/user"
+        self.units_home.mkdir(parents=True)
+        (self.units_home / "crq-tick.timer").write_text("[Timer]\n")
+        (self.units_home / "timers.target.wants").mkdir()
+        (self.units_home / "timers.target.wants/crq-tick.timer").symlink_to(
+            self.units_home / "crq-tick.timer")
+        isolated = mock.patch.dict(os.environ,
+                                   {"XDG_CONFIG_HOME": str(self.base / "xdg-config")})
+        isolated.start()
+        self.addCleanup(isolated.stop)
 
     def command(self, *args):
         return subprocess.run(["git", "-C", str(self.root), *args], check=True,
@@ -1057,6 +1069,159 @@ class DeployPlanTests(ControllerFixture):
         self.assertEqual(recovery["observed_head"], self.target)
         self.assertIn("Refused", recovery["reason"])
 
+    def records(self):
+        return [json.loads(p.read_text()) for p in self.record_dir.glob("controller-*.json")]
+
+    def test_bad_tag_is_a_plain_refusal_before_intent_or_helper(self):
+        # The 20261103-1b case on the deploy host: an annotated tag the controller's
+        # prefix check once accepted and the helper's full match rejects.
+        bad = "crq-runner/20261103-1b"
+        self.command("tag", "-a", bad, self.target, "-m", "non-numeric suffix")
+        status = self.command("status", "--porcelain", "--untracked-files=all")
+        with mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "--tag must be"):
+                dc.deploy_plan(self.effects, host, self.target, bad, self.overlay_path)
+        switch.assert_not_called()
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.command("rev-parse", "HEAD").strip(), self.before)
+        self.assertEqual(self.command("status", "--porcelain", "--untracked-files=all"), status)
+
+    def test_helper_input_validation_refuses_before_intent(self):
+        # The helper's own validators run before the durable intent: a
+        # rejection there (here, its tag check) is a no-change refusal.
+        real_verify = host.verify_target
+
+        def verify(root, target, tag):
+            raise ValueError("runner annotated tag required")
+
+        for patch in (mock.patch.object(host, "verify_target", side_effect=verify),
+                      mock.patch.object(host, "root_check",
+                                        side_effect=ValueError("not the overlay deployment checkout"))):
+            with self.subTest(patch=patch.attribute):
+                with patch, mock.patch.object(host, "switch") as switch:
+                    with self.assertRaisesRegex(dc.Refused, "helper input validation refused"):
+                        dc.deploy_plan(self.effects, host, self.target, self.tag,
+                                       self.overlay_path)
+                switch.assert_not_called()
+                self.assertEqual(self.records(), [])
+        self.assertIs(host.verify_target, real_verify)
+        # A target the helper cannot verify through git is refused the same way.
+        self.command("update-ref", "refs/remotes/origin/main", self.before)
+        with mock.patch.object(host, "switch") as switch:
+            with self.assertRaisesRegex(dc.Refused, "git check failed"):
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        switch.assert_not_called()
+        self.assertEqual(self.records(), [])
+
+    def test_helper_exception_before_mutation_records_refused_no_change(self):
+        def refuse(*_args):
+            raise ValueError("refusing active or unknown unit: crq-tick.service")
+
+        with mock.patch.object(host, "switch", side_effect=refuse):
+            with self.assertRaisesRegex(dc.Refused, "observed unchanged") as raised:
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        self.assertIn("refused_no_change", str(raised.exception))
+        [record] = self.records()
+        self.assertEqual(record["outcome"], "refused_no_change")
+        self.assertEqual(record["operation"], "deploy_refused")
+        self.assertIn("refusing active or unknown unit", record["reason"])
+        observed = record["observations"]
+        self.assertEqual(observed["head"], self.before)
+        self.assertEqual(observed["config_sha256"], record["prior_config_sha256"])
+        self.assertEqual(observed["units"], record["prior_state"]["units"])
+        self.assertIn("timers.target.wants/crq-tick.timer", observed["units"])
+        with self.assertRaises(dc.Refused):
+            dc.rollback_target(record)
+        # Re-runnable: the refusal leaves nothing to clear before a retry.
+        with self.fake_switch():
+            plan = dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        self.assertTrue(plan["steps"])
+        self.assertEqual(sorted(r["outcome"] for r in self.records()),
+                         ["completed", "refused_no_change"])
+
+    def test_helper_exception_cli_exits_two_when_unchanged(self):
+        with mock.patch.object(host, "switch", side_effect=ValueError("busy unit")):
+            with mock.patch.object(dc, "_load_helper", return_value=(host, "0" * 64)):
+                with mock.patch.object(dc, "Effects", return_value=self.effects):
+                    with mock.patch("builtins.print") as printed:
+                        code = dc.main(["--root", str(self.root), "--overlay",
+                                        str(self.overlay_path), "--record-dir",
+                                        str(self.record_dir), "switch",
+                                        "--sha", self.target, "--tag", self.tag])
+        self.assertEqual(code, 2)
+        self.assertTrue(any("refused:" in c.args[0] for c in printed.call_args_list))
+        self.assertEqual([r["outcome"] for r in self.records()], ["refused_no_change"])
+        artifact = json.loads(next(c.args[0] for c in printed.call_args_list
+                                   if not c.kwargs.get("file")))
+        self.assertEqual(artifact["outcome"], "refused_no_change")
+        self.assertTrue(artifact["record_persisted"])
+        self.assertEqual(artifact["observations"]["head"], self.before)
+
+    def test_refused_no_change_evidence_survives_a_failed_journal_write(self):
+        replace = dc.os.replace
+
+        def fail_refused(source, target):
+            if json.loads(Path(source).read_text()).get("outcome") == "refused_no_change":
+                raise OSError("record volume became unavailable")
+            return replace(source, target)
+
+        with mock.patch.object(host, "switch", side_effect=ValueError("busy unit")):
+            with mock.patch.object(dc.os, "replace", side_effect=fail_refused):
+                with self.assertRaises(dc.NoChangeRefused) as raised:
+                    dc.deploy_plan(self.effects, host, self.target, self.tag,
+                                   self.overlay_path)
+        record = raised.exception.record
+        self.assertFalse(record["record_persisted"])
+        self.assertIn("record volume", record["record_write_error"])
+        self.assertEqual(record["observations"]["head"], self.before)
+        self.assertEqual([r["outcome"] for r in self.records()], ["pending"])
+
+    def test_helper_exception_after_checkout_remains_recovery_required(self):
+        def partial(*_args):
+            self.command("restore", "--", host.CONFIG)
+            self.command("checkout", "-q", "--detach", self.target)
+            raise ValueError("post-switch status must contain only rendered config")
+
+        with mock.patch.object(host, "switch", side_effect=partial):
+            with self.assertRaises(dc.RecoveryRequired) as raised:
+                dc.deploy_plan(self.effects, host, self.target, self.tag, self.overlay_path)
+        recovery, record = self.assert_recovery(raised.exception, "helper")
+        self.assertEqual(recovery["observed_head"], self.target)
+        self.assertEqual(record["outcome"], "recovery_required")
+
+    def test_any_changed_or_unobservable_surface_remains_recovery_required(self):
+        def unit_changed(*_args):
+            (self.units_home / "crq-tick.timer").write_text("[Timer]\nOnCalendar=*:0/5\n")
+            raise ValueError("helper failed after unit change")
+
+        def status_changed(*_args):
+            (self.root / "stray.txt").write_text("untracked\n")
+            raise ValueError("helper failed after writing into the checkout")
+
+        def state_changed(*_args):
+            self.write_state("queue.json", {"items": [], "starts": [], "x": 1})
+            raise ValueError("helper failed after touching state")
+
+        for side_effect in (unit_changed, status_changed, state_changed):
+            with self.subTest(side_effect=side_effect.__name__):
+                with mock.patch.object(host, "switch", side_effect=side_effect):
+                    with self.assertRaises(dc.RecoveryRequired) as raised:
+                        dc.deploy_plan(self.effects, host, self.target, self.tag,
+                                       self.overlay_path)
+                self.assert_recovery(raised.exception, "helper")
+                (self.root / "stray.txt").unlink(missing_ok=True)
+                (self.units_home / "crq-tick.timer").write_text("[Timer]\n")
+                self.write_state("queue.json", {"items": [
+                    {"id": "pr1", "kind": "merged", "state": "done"}], "starts": []})
+        # Unchanged surfaces that cannot be observed are never absence proof.
+        with mock.patch.object(host, "switch", side_effect=ValueError("early")):
+            with mock.patch.object(dc, "no_change_observation",
+                                   side_effect=OSError("units unreadable")):
+                with self.assertRaises(dc.RecoveryRequired) as raised:
+                    dc.deploy_plan(self.effects, host, self.target, self.tag,
+                                   self.overlay_path)
+        self.assert_recovery(raised.exception, "helper")
+
     def test_failed_head_observation_preserves_original_mutation_failure(self):
         def partial(*_args):
             self.effects.config_path.write_bytes(b"partial config\n")
@@ -1359,7 +1524,8 @@ class RollbackPlanTests(ControllerFixture):
         self.assertEqual(self.effects.config_path.read_bytes(), b"partial rollback config\n")
 
     def test_pending_recovery_and_unknown_outcomes_are_not_rollback_inputs(self):
-        for outcome in ["pending", "recovery_required", "unknown", None, False]:
+        for outcome in ["pending", "recovery_required", "refused_no_change",
+                        "unknown", None, False]:
             with self.subTest(outcome=outcome):
                 with self.assertRaisesRegex(dc.Refused, "completed deploy journal"):
                     dc.rollback_target({**self.prior, "outcome": outcome})
