@@ -289,6 +289,13 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           if (attempt.usage.reasoning !== undefined)
             report.usage.reasoning = (report.usage.reasoning ?? 0) + attempt.usage.reasoning;
         }
+      // Retain the engine's settled ledger when the runner rollup is present:
+      // it is the runner's once-only fold of every metered dispatch (attempt
+      // usage plus metered faults that left no surviving attempt evidence),
+      // so it never double counts and preserves partial evidence the attempt
+      // fold alone would drop. Without a rollup (no real dispatches observed,
+      // e.g. canned unit evidence), the attempt fold is the carrier.
+      report.usage = report.run?.usage ?? report.usage;
       if (escalationPolicy)
         report.escalation = {
           ...escalation,

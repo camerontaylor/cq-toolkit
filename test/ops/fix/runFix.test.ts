@@ -415,4 +415,153 @@ process.exitCode = failed ? 1 : 0;
       await rm(f.root, { recursive: true, force: true });
     }
   });
+
+  // ---- M7-fix: retain fix exit spend -------------------------------------
+  // finish() folds landed attempt evidence, then adopts the runner's
+  // once-only usage rollup when the engine produced one: the rollup is the
+  // fold of every metered dispatch (attempt usage plus metered faults that
+  // left no surviving attempt evidence), so settled usage is preserved once
+  // in full and partial evidence is never dropped. Absence stays explicit
+  // (no rollup and no attempt usage: zeros, never a fabricated
+  // measurement). Every named case runs through makeFixRun.
+
+  /**
+   * A driver whose dispatches meter real governed usage but never leave
+   * surviving attempt evidence: it throws a fault after settlement, so the
+   * unit folds to a rejected result with no FixTaskReport attempts. The
+   * engine's ledger is the only carrier that observed the spend.
+   */
+  const meterThenFaultDriver = (): DriverFactory => ({
+    resolve: ({ modelSpec }) => ({
+      modelSpec,
+      lane: 'ai-sdk',
+      driver: {
+        run: async () => {
+          const usage = { input: 7, output: 3, cacheRead: 2, cacheWrite: 1 };
+          currentJobContext()?.reportResult({ usage });
+          const error = new Error('fixture: dispatch fault after settlement') as Error & {
+            usage?: typeof usage;
+          };
+          error.usage = usage;
+          throw error;
+        },
+      },
+    }),
+  });
+
+  /** A driver whose dispatches are never metered at all. */
+  const silentFaultDriver = (): DriverFactory => ({
+    resolve: ({ modelSpec }) => ({
+      modelSpec,
+      lane: 'ai-sdk',
+      driver: {
+        run: async () => {
+          throw new Error('fixture: unmetered fault');
+        },
+      },
+    }),
+  });
+
+  test('M7-fix nominal evidence', async () => {
+    const f = await fixture();
+    try {
+      // A fault thrown AFTER settlement: governed metering still observed
+      // the dispatch spend, so the failed report retains it via the engine
+      // ledger instead of the zeroed attempt fold.
+      const result = await makeFixRun({ drivers: meterThenFaultDriver() })(input(f));
+      // A thrown dispatch folds to needs-human (a misconfiguration-class
+      // ending), which still flows through finish(). The fixture repo has
+      // four tasks, so the fault metered four governed dispatches: the
+      // ledger retains exactly that spend once.
+      expect(result.status).toBe('needs-human');
+      expect(result.report?.usage).toEqual({
+        input: 28,
+        output: 12,
+        cacheRead: 8,
+        cacheWrite: 4,
+      });
+      // Settled exactly once through the runner rollup: the surviving attempt
+      // rows carry NO usage (the driver threw before returning a
+      // measurement), so the report's spend comes solely from the ledger,
+      // never double folded.
+      expect(
+        result.report?.tasks.flatMap((task) =>
+          (task.attempts ?? []).filter((attempt) => attempt.usage !== undefined),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('M7-fix missing evidence', async () => {
+    const f = await fixture();
+    try {
+      // A fault that never metered anything: the ledger is absent and the
+      // attempt fold is empty, so the report keeps explicit zeros rather
+      // than inventing a measurement.
+      const result = await makeFixRun({ drivers: silentFaultDriver() })(input(f));
+      expect(result.status).toBe('needs-human');
+      expect(result.report?.usage).toEqual({
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      expect(result.report?.run?.usage).toBeUndefined();
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('M7-fix failure evidence', async () => {
+    const f = await fixture();
+    try {
+      // Mixed evidence: the canned unit's open row lands one usage-bearing
+      // attempt {1,1,0,0} in the attempt fold, and the unit op also meters a
+      // DISTINCT {5,5,0,0} dispatch through the governed reportResult seam
+      // (spend that never survived as attempt evidence, a killed/replaced
+      // dispatch). The report adopts the runner's once-only rollup {5,5,0,0}
+      // — never the attempt fold alone (which would drop the metered fault)
+      // and never a double count of the two carriers.
+      const unitJob = {
+        id: 'fixture-unit',
+        op: 'sweep.unit',
+        input: { package: 'scratch-repo', fixer: 'tests-1', files: [] },
+        dependsOn: [],
+      };
+      const planEntry = {
+        name: 'sweep.planSweep',
+        inputSchema: z.unknown(),
+        importer: async () => async () => ({
+          status: 'ok' as const,
+          value: { jobs: [unitJob], units: [unitJob.input], suppressed: [], needsHuman: [] },
+        }),
+      } as unknown as OpRegistryEntry<never, never>;
+      const unitEntry = {
+        name: 'sweep.unit',
+        inputSchema: z.unknown(),
+        importer: async () => async () => {
+          currentJobContext()?.reportResult({
+            usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
+          });
+          return { status: 'ok' as const, value: sharedUnitReport() };
+        },
+      } as unknown as OpRegistryEntry<never, never>;
+      const entries = new Map([
+        [planEntry.name, planEntry],
+        [unitEntry.name, unitEntry],
+      ]);
+      const result = await makeFixRun({
+        drivers: fixingDrivers(false),
+        registry: { get: (name) => entries.get(name) },
+      })(input(f));
+      expect(result.status).toBe('needs-human');
+      const report = reportOf(result);
+      expect(report.usage).toEqual({ input: 5, output: 5, cacheRead: 0, cacheWrite: 0 });
+      expect(report.fixesPerRun).toBe(2);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 });
