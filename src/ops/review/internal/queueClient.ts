@@ -7,10 +7,10 @@ import {
   QueueDigest,
   QueueReferenceSchema,
   QueueStatusSchema,
-  QueueHealthSchema,
+  QueueHealthResultSchema,
   QueueHealthReferenceSchema,
   type QueueHealthReference,
-  type QueueHealth,
+  type QueueHealthResult,
   QUEUE_WIRE_BYTES,
   type DeferredQueueClient,
   type QueueReference,
@@ -162,7 +162,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       onEvidenceImported?: (evidence: { receiptId: string; path: string }) => Promise<void>;
     },
   ): Promise<QueueEvidence | null>;
-  health(input: QueueHealthReference, options?: QueueLifetimeOptions): Promise<QueueHealth>;
+  health(input: QueueHealthReference, options?: QueueLifetimeOptions): Promise<QueueHealthResult>;
 } {
   async function request(
     op: string,
@@ -227,7 +227,7 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
       parseStatus(input, await request('enqueue', input, {}, options)),
     status,
     health: async (input, options) =>
-      QueueHealthSchema.parse(await request('health', input, {}, options)),
+      QueueHealthResultSchema.parse(await request('health', input, {}, options)),
     bind: async (input: QueueBindInput, options) => {
       const i = QueueBindSchema.parse(input);
       return parseStatus(

@@ -13,7 +13,7 @@ import {
   type QueueReference,
   type QueueReportInput,
   type QueueStatus,
-  type QueueHealth,
+  type QueueHealthResult,
   type QueueTransport,
 } from './internal/queueProtocol.js';
 import type { QueueEvidence } from './internal/queueEvidence.js';
@@ -32,6 +32,7 @@ export type {
   QueueBinding,
   QueueHealthReference,
   QueueHealth,
+  QueueHealthResult,
   QueueReference,
   QueueBindInput,
   QueueStatus,
@@ -43,7 +44,7 @@ type Unsupported = { state: 'unsupported'; reason: string };
 export function makeQueueOps(transport?: QueueTransport): {
   enqueue: Op<QueueEnqueueInput, QueueStatus | Unsupported>;
   queueStatus: Op<QueueReference, QueueStatus | Unsupported>;
-  queueHealth: Op<QueueHealthReference, QueueHealth | Unsupported>;
+  queueHealth: Op<QueueHealthReference, QueueHealthResult | Unsupported>;
   report: Op<
     QueueReportInput,
     { state: 'pending' | 'consumed'; evidence: QueueEvidence | null } | Unsupported

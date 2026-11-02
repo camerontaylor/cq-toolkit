@@ -159,6 +159,13 @@ export const QueueHealthSchema = z
   })
   .strict();
 export type QueueHealth = z.infer<typeof QueueHealthSchema>;
+export const QueueHealthResultSchema = z.union([
+  QueueHealthSchema,
+  z
+    .object({ error: z.object({ code: z.literal('busy'), retryable: z.literal(true) }).strict() })
+    .strict(),
+]);
+export type QueueHealthResult = z.infer<typeof QueueHealthResultSchema>;
 
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;
 

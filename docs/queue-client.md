@@ -360,7 +360,9 @@ an enabled discovery tick), `incompleteTicks`, `pending`, `blocked`,
 `deployedSha` and `snapshot`. SHA is read from the runner checkout at tick
 completion, not from the reviewed repository or via a process per read.
 Reads use snapshot admission (two concurrent reads), never the tick lock.
-A changed snapshot returns retryable `busy`.
+A changed snapshot or exhausted read slots return `{error: {code: "busy", retryable: true}}`.
+The typed health client preserves that result; `review.queueHealth` returns it
+in `status: "ok"` with the error payload as its value, so callers can retry.
 
 Deployment must retain the ordinary `read`, `repo` and `targets`
 permissions and explicitly add this queue-policy grant (binding is the exact

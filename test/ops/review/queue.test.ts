@@ -655,3 +655,19 @@ test('health parses an authorized snapshot and rejects malformed counts', async 
   expect(await makeQueueOps(transport).queueHealth(healthRef)).toMatchObject({ status: 'failed' });
   await expect(makeQueueClient(transport).health(healthRef)).rejects.toThrow();
 });
+
+test('health preserves retryable busy replies from admission and generation changes', async () => {
+  const healthRef = {
+    requestId: 'health-client',
+    binding: { repo: 'owner/repo', targetSelector: 'promoted-main' as const },
+  };
+  const result = { error: { code: 'busy', retryable: true } };
+  const transport: QueueTransport = async () => JSON.stringify({ v: 1, ...healthRef, result });
+  expect(await makeQueueClient(transport).health(healthRef)).toEqual(result);
+  expect(await makeQueueOps(transport).queueHealth(healthRef)).toEqual({
+    status: 'ok',
+    value: result,
+  });
+  result.error.retryable = false;
+  await expect(makeQueueClient(transport).health(healthRef)).rejects.toThrow();
+});

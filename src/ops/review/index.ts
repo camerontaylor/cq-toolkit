@@ -24,6 +24,7 @@ export type {
   QueueBinding,
   QueueHealthReference,
   QueueHealth,
+  QueueHealthResult,
   QueueReference,
   QueueBindInput,
   QueueStatus,
