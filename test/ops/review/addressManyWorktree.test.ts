@@ -3055,9 +3055,10 @@ test.each(['commands', 'ref-creations'] as const)(
 );
 
 // Regression: a real sibling commit is allowed, but its source bytes are never restored.
-test.each([false, true])(
-  'cancelled edit accepts a verified sibling successor (unignored bookkeeping=%s)',
-  async (bookkeeping) => {
+test.each(['normal', 'bookkeeping-after-cancel', 'checkpoint-after-cancel', 'symlink-root'])(
+  'cancelled edit accepts a verified sibling successor: %s',
+  async (scenario) => {
+    const bookkeeping = scenario === 'bookkeeping-after-cancel';
     const f = await fixture();
     const parent = new AbortController();
     const report = terminalReport(join(f.root, 'successor-cancel.json'));
@@ -3090,11 +3091,18 @@ test.each([false, true])(
               f.repo.git('add', '--', 'src/sibling.ts');
               f.repo.git('commit', '-m', 'verified sibling');
               successor = f.repo.git('rev-parse', 'HEAD').trim();
-              await ownershipModule.checkpointAddressTerminalWorker(
-                binding,
-                f.repo.root,
-                successor,
-              );
+              if (scenario === 'checkpoint-after-cancel') parent.abort();
+              let root = f.repo.root;
+              if (scenario === 'symlink-root') {
+                root = join(f.root, 'checkpoint-alias');
+                await symlink(f.repo.root, root);
+              }
+              expect(
+                await ownershipModule.checkpointAddressTerminalWorker(binding, root, undefined, {
+                  parent: input.parent,
+                  tree: f.repo.git('rev-parse', `${successor}^{tree}`).trim(),
+                }),
+              ).toBe(successor);
               committed.resolve();
             })(),
           ]);
@@ -3106,6 +3114,7 @@ test.each([false, true])(
               await writeFile(path, '{}\n');
               entries.set(path, createHash('sha256').update('{}\n').digest('hex'));
             }
+            parent.abort();
             await ownershipModule.addressTerminalBookkeeping(lease, f.repo.root, entries);
           }
           parent.abort();
@@ -3170,6 +3179,80 @@ test('cancellation adopts the ordinary report and removes an owned candidate aft
     ).toContain('parent cancelled');
     await expect(lstat(candidate)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain(candidate);
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('a failing sibling restore may rewrite index stats before cancellation', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const report = terminalReport(join(f.root, 'restore-sibling-cancel.json'));
+  try {
+    const head = f.repo.git('rev-parse', 'HEAD').trim();
+    const result = await withAddressOwnership(
+      {
+        repoRoot: f.repo.root,
+        git: f.run,
+        source: 'local',
+        production: false,
+        signal: parent.signal,
+      },
+      async (lease) => {
+        await ownershipModule.bindAddressTerminalReport(lease, report);
+        const binding = ownershipModule.addressTerminalWorkerBinding(lease);
+        const attempt = await ownershipModule.recordAddressTerminalAttempt(
+          binding,
+          terminalInput(f.repo),
+        );
+        const index = join(f.repo.root, '.git', 'index');
+        const originalIndex = createHash('sha256')
+          .update(await readFile(index))
+          .digest('hex');
+        await writeFile(join(f.repo.root, 'src/a.ts'), 'CANCELLED A\n');
+        await writeFile(join(f.repo.root, 'src/sibling.ts'), 'FAILED B\n');
+        f.repo.git('restore', `--source=${head}`, '--staged', '--worktree', '--', 'src/sibling.ts');
+        expect(
+          createHash('sha256')
+            .update(await readFile(index))
+            .digest('hex'),
+        ).not.toBe(originalIndex);
+        parent.abort();
+        ownershipModule.deferAddressTerminalAttempt(binding, attempt);
+        return ownershipModule.addressCancelledResult(lease);
+      },
+    );
+    expect(result.status).toBe('needs-human');
+    expect(report.failed).toHaveLength(1);
+    expect(f.repo.git('show', `${report.failed[0]!.sha}:src/a.ts`)).toBe('CANCELLED A\n');
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = 1;\n');
+    expect(await readFile(join(f.repo.root, 'src/sibling.ts'), 'utf8')).toBe(
+      'export const sibling = 2;\n',
+    );
+    expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(head);
+    expect(f.repo.git('diff', '--cached', '--name-only')).toBe('');
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+      async () => {},
+    );
+  } finally {
+    await f.repo.cleanup();
+  }
+});
+
+test('ordinary reports larger than the cancellation copy cap still succeed', async () => {
+  const f = await fixture();
+  const path = join(f.root, 'large-ordinary-report.json');
+  try {
+    const bytes = JSON.stringify({ reason: 'x'.repeat(16 * 1024 * 1024 + 1) });
+    await withAddressOwnership(
+      { repoRoot: f.repo.root, git: f.run, source: 'local', production: false },
+      async (lease) => {
+        await writeFile(path, bytes);
+        await ownershipModule.addressOrdinaryReport(lease, path, bytes);
+      },
+    );
+    expect((await lstat(path)).size).toBe(Buffer.byteLength(bytes));
   } finally {
     await f.repo.cleanup();
   }

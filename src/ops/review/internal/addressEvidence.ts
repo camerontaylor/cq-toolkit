@@ -128,7 +128,6 @@ interface TerminalSession {
   index: string;
   bytes: number;
   records: number;
-  expectedIndexes: Map<string, string>;
   verifiedHeads?: Map<string, Set<string>>;
   bookkeeping?: Map<string, string>;
 }
@@ -201,14 +200,19 @@ async function terminalSession(
   token: object,
   root: string,
   terminal = false,
+  allowStopping = false,
 ): Promise<TerminalSession> {
-  await validateEvidenceAuthority(token, terminal);
+  const validate = () =>
+    allowStopping
+      ? validateAddressTerminalAuthority(token)
+      : validateEvidenceAuthority(token, terminal);
+  await validate();
   if (!constants.O_NOFOLLOW || !constants.O_DIRECTORY)
     throw new Error('terminal required no-follow/directory IO unsupported');
   let pending = terminalSessions.get(token);
   if (!pending) {
     pending = (async () => {
-      const context = await validateEvidenceAuthority(token, terminal);
+      const context = await validate();
       const canonical = await realpath(root);
       let bin: string | undefined;
       for (const path of (process.env.PATH ?? '').split(delimiter)) {
@@ -229,13 +233,13 @@ async function terminalSession(
       if (!bin) throw new Error('terminal trusted Git executable unavailable');
       const binary = await lstat(bin);
       const directory = join(context.commonDir, `cq-address-terminal-${randomUUID()}`);
-      await validateEvidenceAuthority(token, terminal);
+      await validate();
       await mkdir(directory, { mode: 0o700 });
       const config = join(directory, 'empty-config');
       const hooks = join(directory, 'empty-hooks');
-      await validateEvidenceAuthority(token, terminal);
+      await validate();
       await mkdir(hooks, { mode: 0o700 });
-      await validateEvidenceAuthority(token, terminal);
+      await validate();
       await writeFile(config, '', { flag: 'wx', mode: 0o600 });
       return {
         bin,
@@ -251,7 +255,6 @@ async function terminalSession(
         index: join(directory, 'index'),
         bytes: 0,
         records: 0,
-        expectedIndexes: new Map(),
       };
     })();
     terminalSessions.set(token, pending);
@@ -462,21 +465,30 @@ async function terminalPath(root: string, file: string) {
   return { root: canonical, path, stat };
 }
 
-/** Called only by the private worker association after normal commit verification. */
-export async function checkpointAddressTerminalEvidence(token: object, root: string, head: string) {
-  const session = await terminalSession(token, root);
-  const git = (args: string[]) => terminalGit(token, session, root, args);
-  if ((await git(['rev-parse', 'HEAD'])).toString().trim() !== head)
+/** Verify an already-created commit and record its canonical successor during shutdown too. */
+export async function checkpointAddressTerminalEvidence(
+  token: object,
+  root: string,
+  head?: string,
+  expected?: { parent: string; tree: string },
+): Promise<string> {
+  root = await realpath(root);
+  const session = await terminalSession(token, root, false, true);
+  const git = (args: string[]) => terminalGit(token, session, root, args, { cleanup: true });
+  const current = (await git(['rev-parse', 'HEAD'])).toString().trim();
+  if ((head !== undefined && current !== head) || !/^[a-f0-9]{40,64}$/.test(current))
     throw new Error('terminal successor checkpoint changed');
-  const gitDir = await realpath((await git(['rev-parse', '--absolute-git-dir'])).toString().trim());
+  if (
+    expected &&
+    ((await git(['rev-parse', `${current}^`])).toString().trim() !== expected.parent ||
+      (await git(['rev-parse', `${current}^{tree}`])).toString().trim() !== expected.tree)
+  )
+    throw new Error('commit does not match gated parent/tree');
   session.verifiedHeads ??= new Map();
   const heads = session.verifiedHeads.get(root) ?? new Set<string>();
-  heads.add(head);
+  heads.add(current);
   session.verifiedHeads.set(root, heads);
-  session.expectedIndexes.set(
-    gitDir,
-    digestBytes(await boundedBytes(join(gitDir, 'index'), OUTPUT_CAP)),
-  );
+  return current;
 }
 
 export async function noteAddressTerminalBookkeeping(
@@ -484,7 +496,7 @@ export async function noteAddressTerminalBookkeeping(
   root: string,
   entries: ReadonlyMap<string, string>,
 ) {
-  const session = await terminalSession(token, root);
+  const session = await terminalSession(token, root, false, true);
   session.bookkeeping = new Map(entries);
 }
 
@@ -514,7 +526,7 @@ export async function noteAddressOrdinaryReport(token: object, path: string, byt
   if (
     !stat.isFile() ||
     stat.nlink !== 1 ||
-    digestBytes(await boundedBytes(path, REPORT_CAP)) !== digest
+    digestBytes(await boundedBytes(path, Buffer.byteLength(bytes))) !== digest
   )
     throw new Error('ordinary report changed before terminal adoption');
   const reports =
@@ -568,8 +580,6 @@ export async function recordAddressTerminalEvidence(
     throw new Error('terminal RAW baseline differs from committed blob');
   const mode = path.stat.mode & 0o111 ? '100755' : '100644';
   if (mode !== match[1]) throw new Error('terminal baseline mode refused');
-  const indexHash = digestBytes(await boundedBytes(join(gitDir, 'index'), OUTPUT_CAP));
-  session.expectedIndexes.set(gitDir, indexHash);
   await validateEvidenceAuthority(token, false);
   return {
     ...input,
@@ -688,9 +698,15 @@ export async function settleAddressTerminalEvidence(
         )
           throw new Error('terminal source HEAD changed');
       }
-      const hash = digestBytes(await boundedBytes(join(attempt.gitDir, 'index'), OUTPUT_CAP));
-      if (hash !== session.expectedIndexes.get(attempt.gitDir))
-        throw new Error('terminal source index changed');
+      // Stat-cache rewrites from a sibling restore are harmless. Workers edit
+      // worktree bytes only: staged paths, modes and objects must match HEAD.
+      const staged = (
+        await git(['diff', ...HARDENED_DIFF_FLAGS, '--cached', '--name-only', '-z', head, '--'])
+      )
+        .toString()
+        .split('\0')
+        .filter(Boolean);
+      if (staged.length) throw new Error('terminal source index changed');
       const tracked = (await git(['ls-files', '--stage', '-z'])).toString();
       // Iterate the bounded output without allocating an entry array first.
       let cursor = 0;
@@ -821,10 +837,6 @@ export async function settleAddressTerminalEvidence(
     }
     await validateEvidenceAuthority(token, true);
     await git(['update-index', '--cacheinfo', attempt.mode, attempt.blob, attempt.file]);
-    session.expectedIndexes.set(
-      attempt.gitDir,
-      digestBytes(await boundedBytes(join(attempt.gitDir, 'index'), OUTPUT_CAP)),
-    );
     const restored = createHash(attempt.blob.length === 40 ? 'sha1' : 'sha256');
     restored.update(`blob ${attempt.baseline.length}\0`);
     restored.update(attempt.baseline);

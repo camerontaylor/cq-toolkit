@@ -88,7 +88,11 @@ interface TerminalInternals {
   track(promise: Promise<void>): void;
   record(participant: Participant, input: AddressTerminalAttemptInput): Promise<object>;
   defer(participant: Participant, attempt: object): boolean;
-  checkpoint(root: string, head: string): Promise<void>;
+  checkpoint(
+    root: string,
+    head?: string,
+    expected?: { parent: string; tree: string },
+  ): Promise<string>;
   bookkeeping(root: string, entries: ReadonlyMap<string, string>): Promise<void>;
   ordinaryReport(path: string, bytes: string): Promise<void>;
   candidate(root: string, path: string, remove: boolean): Promise<void>;
@@ -313,7 +317,8 @@ export class AddressOwnership {
       { root: string; directory: Identity; entry: Identity; link: string }
     >();
     terminalInternals.set(this, {
-      checkpoint: (root, head) => checkpointAddressTerminalEvidence(this.terminalToken, root, head),
+      checkpoint: (root, head, expected) =>
+        checkpointAddressTerminalEvidence(this.terminalToken, root, head, expected),
       bookkeeping: (root, entries) =>
         noteAddressTerminalBookkeeping(this.terminalToken, root, entries),
       ordinaryReport: (path, bytes) => noteAddressOrdinaryReport(this.terminalToken, path, bytes),
@@ -1359,12 +1364,13 @@ export function noteAddressOpaqueInvocation(lease: AddressLease): void {
 export function checkpointAddressTerminalWorker(
   binding: object,
   root: string,
-  head: string,
-): Promise<void> {
+  head?: string,
+  expected?: { parent: string; tree: string },
+): Promise<string> {
   const association = terminalWorkers.get(binding);
   if (!association || association.participant.closed)
     throw new Error('address terminal: invalid worker checkpoint');
-  return terminalInternals.get(association.owner)!.checkpoint(root, head);
+  return terminalInternals.get(association.owner)!.checkpoint(root, head, expected);
 }
 export function addressTerminalCandidate(
   binding: object,

@@ -1246,15 +1246,21 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               )
                 throw new AddressRefusal('staging absorbed sibling paths', true);
               await git(root, ['commit', '-m', message]);
-              const commit = await git(root, ['rev-parse', 'HEAD']);
+              // Verification is bookkeeping for an already-created commit. It
+              // must settle even when cancellation has stopped new admissions.
+              const commit = deps.terminalBinding
+                ? await checkpointAddressTerminalWorker(deps.terminalBinding, root, undefined, {
+                    parent,
+                    tree,
+                  })
+                : await git(root, ['rev-parse', 'HEAD']);
               if (
-                (await git(root, ['rev-parse', `${commit}^`])) !== parent ||
-                (await git(root, ['rev-parse', `${commit}^{tree}`])) !== tree
+                !deps.terminalBinding &&
+                ((await git(root, ['rev-parse', `${commit}^`])) !== parent ||
+                  (await git(root, ['rev-parse', `${commit}^{tree}`])) !== tree)
               )
                 throw new AddressRefusal('commit does not match gated parent/tree', true);
               verifiedHeads.add(commit);
-              if (deps.terminalBinding)
-                await checkpointAddressTerminalWorker(deps.terminalBinding, root, commit);
               touched = false;
               for (let i = 0; i < baseline.length; i++)
                 state = recordFixedFailures(state, baseline[i]!, broader[i]!);
