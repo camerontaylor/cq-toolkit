@@ -39,8 +39,10 @@ import {
   isProtectedConfigPath,
   isProtectedTestPath,
   PROTECTED_TEST_FILE_PATTERN_SOURCES,
+  PROTECTED_TEST_FILE_PATTERNS,
   PROTECTED_TEST_ROOT_PATTERN_SOURCES,
 } from './protectedPaths.js';
+import { PythonSectionScanner } from './pythonSkipMarkers.js';
 
 /**
  * One configurable suppression signature. `pattern` is a regex SOURCE
@@ -114,6 +116,14 @@ export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
  * Regex source of the shipped skip/only marker, matched case-insensitively
  * against every ADDED line (`describe.skip`, `it.only`, `test . skip`, …).
  * Frozen: the marker taxonomy is a shipped default, not call-site knowledge.
+ * The shipped default ALSO carries Python skip/xfail recognition (#774) for
+ * Python test basenames (`test_*.py`, `*_test.py`): pytest
+ * `mark.skip`/`mark.skipif`/`mark.xfail`, `pytest.skip`/`pytest.xfail`,
+ * `pytest.importorskip` inside a test body, and unittest
+ * `skip`/`skipIf`/`skipUnless`/`expectedFailure`, `skipTest(...)` and
+ * `raise SkipTest`, through import aliases, ignoring strings and comments
+ * (see `pythonSkipMarkers.ts`). A caller-supplied `skipOnlyPattern`
+ * replaces the whole shipped taxonomy, Python recognition included.
  */
 export const DEFAULT_SKIP_ONLY_PATTERN =
   '\\b(?:x(?:it|test|describe)|f(?:it|test|describe))\\s*\\(|\\b(?:describe|it|test)\\s*\\.\\s*(?:skip|only|todo|skipIf|runIf|fails|concurrent(?:\\.skip)?)\\b|\\b(?:x?(?:it|test)|f(?:it|test)|describe)\\s*\\([^,\\n]*,\\s*\\{[^}\\n]*\\b(?:skip|todo|only|fails)\\s*:\\s*(?:true|false|["\'][^"\']*["\']|[A-Za-z_$])';
@@ -165,7 +175,9 @@ export type TamperFindingKind =
  *     tracking; `null` when unknowable (deleted files have no new lines).
  *   - `pattern` — which configured pattern matched: a
  *     {@link SuppressionPattern} `name` for suppressions, the regex source
- *     for the built-in skip/only and test-file heuristics; omitted for
+ *     for the built-in skip/only and test-file heuristics, the canonical
+ *     marker name (`pytest.mark.skip`, `unittest.skipIf`, …) for shipped
+ *     Python skip/xfail recognition; omitted for
  *     tautologies (a pure heuristic with no configured pattern).
  *   - `snippet` — the matched line's content, trimmed (the `---` header
  *     line for deleted files).
@@ -186,6 +198,8 @@ interface CompiledConfig {
   detectDeletedTests: boolean;
   skipOnly: RegExp | null;
   skipOnlySource: string;
+  /** Shipped Python skip/xfail recognition: on only with the default marker. */
+  pythonMarkers: boolean;
   detectTautologies: boolean;
 }
 
@@ -242,6 +256,7 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
       detectDeletedTests,
       skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
+      pythonMarkers: tamper.detectNewSkipOnly !== false && tamper.skipOnlyPattern === undefined,
       detectTautologies: tamper.detectTautologies ?? true,
     };
   } catch (err) {
@@ -280,6 +295,29 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let addedTestDeclarations = 0;
   let removedTestDeclarations = 0;
   let removedFailingTestDeclarations = 0;
+  let python: PythonSectionScanner | null = null;
+  const flushPython = (): void => {
+    if (python === null || newPath === null) return;
+    const file = newPath;
+    for (const marker of python.markers()) {
+      if (
+        findings.some(
+          (f) => f.kind === 'new-skip-only' && f.file === file && f.line === marker.line,
+        )
+      ) {
+        continue; // one skip finding per line: the regex marker already reported it
+      }
+      findings.push({
+        kind: 'new-skip-only',
+        file,
+        line: marker.line,
+        pattern: marker.marker,
+        snippet: marker.content.trim(),
+        message: 'added line marks a Python test as skipped or expected to fail',
+      });
+    }
+    python = null;
+  };
   const flushRemovedTest = (): void => {
     if (
       sectionPath !== null &&
@@ -298,6 +336,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   };
   for (const line of diff.split(/\r?\n/)) {
     if (line.startsWith('diff --git ')) {
+      flushPython();
       flushRemovedTest();
       addedTestDeclarations = 0;
       removedTestDeclarations = 0;
@@ -337,6 +376,8 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       if (line.startsWith('+++ ')) {
         newPath = headerPathOf(line.slice(4));
         sectionPath = newPath === '/dev/null' ? oldPath : newPath;
+        python =
+          config.pythonMarkers && isPythonTestPath(newPath) ? new PythonSectionScanner() : null;
         if (sectionPath !== null && isProtectedConfigPathInDiff(sectionPath)) {
           reportProtectedConfig(findings, sectionPath);
         }
@@ -352,6 +393,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       if (hunk) {
         inHunk = true;
         newLine = Number(hunk[1]);
+        python?.hunk(line);
       }
       continue;
     }
@@ -359,6 +401,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       const hunk = HUNK_HEADER_RE.exec(line);
       if (hunk) {
         newLine = Number(hunk[1]);
+        python?.hunk(line);
       }
       continue;
     }
@@ -368,6 +411,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
     if (line.startsWith('+')) {
       if (isExecutableTestDeclaration(line.slice(1))) addedTestDeclarations += 1;
       scanAddedLine(findings, config, newPath, newLine, line.slice(1));
+      python?.line(line.slice(1), true, newLine);
       newLine++;
       continue;
     }
@@ -381,8 +425,10 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       }
       continue; // removed line — a deleted suppression is a fix, never scanned
     }
+    python?.line(line.slice(1), false, newLine);
     newLine++; // context line ('' or ' ') advances the new-file cursor
   }
+  flushPython();
   flushRemovedTest();
   return findings;
 }
@@ -451,6 +497,15 @@ function isProtectedConfigPathInDiff(path: string | null): boolean {
 function isExecutableTestDeclaration(content: string): boolean {
   const code = content.replace(/^\s*(?:\/\/|\/\*|\*).*?(?:\*\/)?$/, '');
   return /\b(?:x?(?:it|test)|f(?:it|test))\s*\(/.test(code) || /\bdescribe\s*\(/.test(code);
+}
+
+/**
+ * A Python test file by #684's basename recognition (`test_*.py`,
+ * `*_test.py`): a `.py` path matching a shipped test-FILE shape. Test roots
+ * alone (`tests/helpers.py`) and `conftest.py` are not Python test files.
+ */
+function isPythonTestPath(path: string): boolean {
+  return /\.py$/i.test(path) && PROTECTED_TEST_FILE_PATTERNS.some((pattern) => pattern.test(path));
 }
 
 function isTestPath(path: string, config: CompiledConfig): boolean {
