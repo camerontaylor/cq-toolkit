@@ -200,6 +200,9 @@ describe('worker gate pattern liveness (reverse direction)', () => {
 });
 
 test.each([
+  'testing.py',
+  'contest.py',
+  'latest_test_data.json',
   'apps/crq-python/ops/prepare-host.py',
   'pkg/contest_widget.py',
   'pkg/widget_testing.py',
