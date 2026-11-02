@@ -13,6 +13,8 @@ import json
 import re
 
 import review_receipt as receipts
+import merged_reconcile as reconcile
+from runtime_target import DISCOVERY_SELECTOR
 
 MAX_BYTES = 8192
 MAX_RECEIPT_BYTES = 64 * 1024 * 1024
@@ -50,12 +52,14 @@ class _ReceiptSnapshot:
     Keep the exact verified bytes for both source checks and Q1-compatible pages.
     A cursor selects bytes from this snapshot and grants no read authority.
     """
-    def __init__(self, root, receipt_id):
+    def __init__(self, root, receipt_id, max_bytes=None):
+        if max_bytes is None:
+            max_bytes = MAX_RECEIPT_BYTES
         if not _match(r"[0-9a-f]{64}", receipt_id):
             raise ValueError("invalid receipt id")
         with (Path(root) / (receipt_id + ".json")).open("rb") as stream:
-            self.data = stream.read(MAX_RECEIPT_BYTES + 1)
-        if len(self.data) > MAX_RECEIPT_BYTES:
+            self.data = stream.read(max_bytes + 1)
+        if len(self.data) > max_bytes:
             raise ValueError("receipt exceeds supported client capacity")
         if hashlib.sha256(self.data).hexdigest() != receipt_id:
             raise ValueError("receipt digest mismatch")
@@ -113,6 +117,16 @@ def validate_policy(policy):
         b = binding(grant["binding"])
         if b["kind"] != "merged-current" or b["repo"] != policy["repo"]:
             raise ValueError("invalid reconciled read binding")
+    grants = policy.get("inventory_reads", [])
+    if type(grants) is not list:
+        raise ValueError("invalid inventory grants")
+    for grant in grants:
+        if (type(grant) is not dict or set(grant) != {"principal", "binding"}
+                or not isinstance(grant["principal"], str) or not grant["principal"]):
+            raise ValueError("invalid inventory grant")
+        scope = _inventory_binding(grant["binding"])
+        if scope["repo"] != policy["repo"]:
+            raise ValueError("inventory repository denied")
     limit = policy.get("max_requests", 10000)
     if type(limit) is not int or not 1 <= limit <= 100000:
         raise ValueError("invalid queue policy capacity")
@@ -159,6 +173,98 @@ def binding(value):
     return value
 
 
+
+def _inventory_binding(value):
+    if type(value) is not dict or set(value) != {"repo", "targetSelector", "after", "before"}:
+        raise ValueError("invalid inventory binding")
+    if (not _match(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value["repo"])
+            or value["targetSelector"] not in receipts.SELECTORS):
+        raise ValueError("invalid inventory repository/selector")
+    reconcile.normalize_interval(value["after"], value["before"])
+    return value
+
+
+def _inventory(req, runner, q, principal, receipt_root):
+    b = req["binding"]
+    interval = {k: b[k] for k in ("after", "before")}
+    key = receipts.digest({"repo": b["repo"], "base": DISCOVERY_SELECTOR, **interval})
+    path = runner.STATE / "reconcile" / (key + ".json")
+    # Trusted runner validates the stored wrapper, source identity and checkpoint.
+    raw = json.loads(path.read_text())
+    checkpoint = raw.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        raise ValueError("inventory checkpoint unavailable")
+    wrapper = runner._read_reconcile_wrapper(path, interval, checkpoint.get("page_budget"))
+    cp = wrapper["checkpoint"]
+    if not cp["complete"] or cp["dry_run"]:
+        raise ValueError("complete durable inventory required")
+    rows = []
+    entries = q.get("queue_client_requests", {})
+    mapped = sorted(q.get("merged_current_requests", {}).items(),
+                    key=lambda pair: (entries.get(pair[0], {}).get("principal") != principal, pair[0]))
+    by_subject = {}
+    for rid, mapping in mapped:
+        by_subject.setdefault(receipts.digest(mapping["binding"]), []).append((rid, mapping))
+    items = {item["id"]: item for item in q.get("items", [])}
+    receipt_budget = MAX_RECEIPT_BYTES
+    for source in cp["inventory"]:
+        row = {"pr": source.get("pr"), "mergeSha": source.get("merge_sha"),
+               "requestId": None, "itemId": None, "state": "missing", "reason": None}
+        subject = {"repo": b["repo"], "pr": row["pr"], "merge_sha": row["mergeSha"],
+                   "target_selector": b["targetSelector"], "policy": receipts.POLICY}
+        for rid, mapping in by_subject.get(receipts.digest(subject), []):
+            if mapping.get("binding") != subject:
+                continue
+            entry = entries.get(rid)
+            if entry is not None and entry.get("principal") != principal:
+                continue
+            item = items.get(mapping.get("item"))
+            if item is None:
+                raise ValueError("inventory mapping item missing")
+            status = receipts.status({**q, "items": [item]}, rid)
+            if status is None:
+                continue
+            row.update(requestId=rid, itemId=status["item_id"], state="pending")
+            if entry and entry.get("reason"):
+                row.update(state="blocked", reason=_status(q, rid, entry)["reason"])
+            elif status.get("receipt_id"):
+                if not _match(r"[0-9a-f]{64}", status["receipt_id"]):
+                    raise ValueError("invalid receipt id")
+                if (Path(receipt_root) / (status["receipt_id"] + ".json")).stat().st_size > receipt_budget:
+                    row.update(state="blocked", reason={"source": "queue", "category": "capacity", "code": "inventory-receipt-budget"})
+                    break
+                snapshot = _ReceiptSnapshot(receipt_root, status["receipt_id"], receipt_budget)
+                receipt_budget -= len(snapshot.data)
+                doc = snapshot.document
+                if doc.get("source") != subject:
+                    row.update(state="blocked", reason={"source": "queue", "category": "identity", "code": "receipt-source"})
+                elif (doc.get("counted") is True and doc.get("classification", {}).get("counted") is True
+                      and doc.get("classification", {}).get("outcome") == "completed"
+                      and doc.get("outcome") in {"terminal-clean", "terminal-with-findings", "partial-scope"}):
+                    row["state"] = "consumed" if entry and entry.get("consumed") == status["receipt_id"] else "reviewed"
+                else:
+                    row.update(state="blocked", reason={"source": "vendor", "category": "vendor-rate-limited", "code": "rate_limit"}
+                               if _vendor_rate_limit(doc) else {"source": "queue", "category": "unknown", "code": "unclassified"})
+            elif status["state"] not in {"pending", "reviewing"}:
+                row.update(state="blocked", reason={"source": "queue", "category": "unknown", "code": "no-receipt"})
+            break
+        rows.append(row)
+    rows.sort(key=lambda row: (row["pr"] or 0, row["mergeSha"] or ""))
+    digest = receipts.digest({"principal": principal, "binding": b, "checkpoint": cp["digest"], "states": req["states"], "entries": rows})
+    selected = [row for row in rows if req["states"] is None or row["state"] in req["states"]]
+    start = 0
+    if req["cursor"] is not None:
+        match = re.fullmatch(re.escape(digest) + r":(0|[1-9][0-9]{0,5})", req["cursor"])
+        if not match or int(match[1]) >= len(selected):
+            raise ValueError("stale or invalid inventory cursor; restart")
+        start = int(match[1])
+    end = min(start + req["limit"], len(selected))
+    return {"entries": selected[start:end], "terminal": end == len(selected),
+            "nextCursor": None if end == len(selected) else digest + ":" + str(end),
+            "proof": {"checkpoint": cp["digest"], "completeThrough": cp["before"],
+                      "count": len(rows), "digest": digest, "selectedCount": len(selected),
+                      "intervalConvention": "(after,before]"}}
+
 def decode(raw):
     if not isinstance(raw, bytes) or len(raw) > MAX_BYTES:
         raise ValueError("queue request exceeds bound")
@@ -166,6 +272,18 @@ def decode(raw):
     if not isinstance(request, dict) or type(request.get("v")) is not int or request["v"] != 1:
         raise ValueError("unsupported queue protocol")
     op = request.get("op")
+    if op == "inventory":
+        if set(request) != {"v", "op", "requestId", "binding", "cursor", "limit", "states"}:
+            raise ValueError("invalid inventory fields")
+        _inventory_binding(request["binding"])
+        if (not _match(TOKEN, request["requestId"]) or type(request["limit"]) is not int
+                or not 1 <= request["limit"] <= 10
+                or request["cursor"] is not None and not isinstance(request["cursor"], str)
+                or request["states"] is not None and (type(request["states"]) is not list
+                    or any(state not in {"pending", "reviewed", "consumed", "fixed", "blocked", "missing"}
+                           for state in request["states"]))):
+            raise ValueError("invalid inventory pagination/filter")
+        return request
     extra = {"bind": {"pr", "mergeSha"}, "report": {"receiptId", "cursor"},
              "ack": {"receiptId", "sha256", "chunks", "bytes"}}.get(op, set())
     if op not in READ | WRITE or set(request) != {"v", "op", "requestId", "binding"} | extra:
@@ -290,15 +408,22 @@ def _request_alias(q, req, entry, document, receipt_id):
             "policy": receipts.POLICY, "receiptId": receipt_id, "receiptEquivalence": equivalence}
 
 
-def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
-    policy = validate_policy(policy)
-    req = decode(raw)
+def authorize(req, principal, policy):
     b, op, rid = req["binding"], req["op"], req["requestId"]
     allowed = policy.get("write" if op in WRITE else "read", [])
     if principal not in allowed or b["repo"] != policy.get("repo") or b["targetSelector"] not in policy.get("targets", []):
         raise ValueError("queue capability denied")
-    if b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
+    if op == "inventory" and {"principal": principal, "binding": b} not in policy.get("inventory_reads", []):
+        raise ValueError("inventory capability denied")
+    if op != "inventory" and b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
         raise ValueError("target branch denied")
+
+
+def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
+    policy = validate_policy(policy)
+    req = decode(raw)
+    authorize(req, principal, policy)
+    b, op, rid = req["binding"], req["op"], req["requestId"]
     if policy.get("enabled") is not True:
         return _encode(req, {"unsupported": "Reviewed D1C queue-v1 activation required"})
 
@@ -307,6 +432,8 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         q = copy.deepcopy(runner.load_queue())
         if type(q) is not dict:
             raise ValueError("invalid queue object")
+        if op == "inventory":
+            return _encode(req, _inventory(req, runner, q, principal, receipt_root))
         entries = q.setdefault("queue_client_requests", {})
         if type(entries) is not dict:
             raise ValueError("invalid queue client requests")
@@ -436,7 +563,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
     with contextlib.redirect_stdout(io.StringIO()):
         result = runner.with_lock(locked)
     if not isinstance(result, bytes):
-        raise ValueError("queue lock busy; delivery unknown")
+        return _encode(req, {"error": {"code": "busy", "retryable": True}})
     return result
 
 
