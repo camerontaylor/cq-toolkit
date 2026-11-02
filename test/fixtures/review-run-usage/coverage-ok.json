@@ -1,0 +1,39 @@
+{
+  "comment": "M7-review fixture data: one complete v2 coverage payload for the terminal-ok path (single session), and the settled child engine spend every scripted reviewer outcome reports. Loaded at runtime by test/ops/review/run-usage.test.ts; head/base are bound to the fixture repo's actual reviewed identity at load time.",
+  "coverage": {
+    "version": 2,
+    "scope": "full",
+    "mode": "session",
+    "modeReason": "fixture single session",
+    "piece": {
+      "component": "diff",
+      "path": "review.diff",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "chars": 3,
+      "bytes": 3,
+      "state": "completed",
+      "sessionId": "s1"
+    },
+    "session": {
+      "id": "s1",
+      "status": "complete",
+      "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0 },
+      "delivery": { "component": "diff", "start": 0, "end": 3 },
+      "request": { "serializedChars": 3, "decodedChars": 3 }
+    }
+  },
+  "childUsage": {
+    "usage": { "input": 11, "output": 5, "cacheRead": 2, "cacheWrite": 1 },
+    "costUSD": 0.03,
+    "knownCount": 3,
+    "unknownCount": 1,
+    "unpricedCount": 2
+  },
+  "cqConfig": {
+    "schemaVersion": 2,
+    "checks": [{ "adapter": "tsc-lines", "command": { "command": "tsc", "args": [] } }],
+    "roles": { "reviewer": { "provider": "mock", "model": "mock" } },
+    "budgets": { "run": { "maxTokens": 500 } },
+    "review": { "reviewers": ["agent"] }
+  }
+}

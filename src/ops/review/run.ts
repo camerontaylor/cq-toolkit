@@ -1143,9 +1143,18 @@ export function makeReviewRun(
       const result = await execute(input, usageSummaries);
       return { ...result, usageSummary: foldKnownUsageSummaries(usageSummaries) };
     } catch (error) {
-      if (typeof error === 'object' && error !== null && !('usageSummary' in error))
-        (error as { usageSummary?: KnownUsageSummary }).usageSummary =
-          foldKnownUsageSummaries(usageSummaries);
+      // A fault that never observed usage contributes no invented measurement:
+      // the empty fold stays counts-only. A non-extensible thrown value (ESM
+      // strict objects, primitives) must never mask the original fault with
+      // an assignment TypeError — the carrier attach is best-effort.
+      if (typeof error === 'object' && error !== null && !('usageSummary' in error)) {
+        const summary = foldKnownUsageSummaries(usageSummaries);
+        try {
+          (error as { usageSummary?: KnownUsageSummary }).usageSummary = summary;
+        } catch {
+          /* frozen/non-extensible error: the fold is skipped, the fault stands */
+        }
+      }
       throw error;
     }
   };
