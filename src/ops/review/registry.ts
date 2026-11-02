@@ -602,6 +602,12 @@ export const registry: OpRegistryEntry[] = [
       (await import('./queue.js')).makeQueueOps().enqueue as Op<unknown, unknown>,
   },
   {
+    name: 'review.queueHealth',
+    inputSchema: QueueReferenceSchema,
+    importer: async () =>
+      (await import('./queue.js')).makeQueueOps().queueHealth as Op<unknown, unknown>,
+  },
+  {
     name: 'review.queueStatus',
     inputSchema: QueueReferenceSchema,
     importer: async () =>

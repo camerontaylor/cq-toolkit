@@ -349,3 +349,25 @@ records may still project after the repair opt-in is turned off, but never while
 `queue.project_fixed` is off. This PR retains the widened strict status client and
 tests parsing both the compact remediation object and the Python-produced receipt.
 A blocked status has `fixed:false` and omits `remediation` entirely.
+
+### Advisory runner health
+
+`review.queueHealth` accepts the same `QueueReference` as `review.queueStatus`.
+The SDK client exposes `health(reference)`; queue-v1 uses `op: "health"`.
+It returns `lastCompletedTick`, `ageSeconds`, `discoveryComplete` (null before
+an enabled discovery tick), `incompleteTicks`, `pending`, `blocked`,
+`deployedSha` and `snapshot`. SHA is read from the runner checkout at tick
+completion, not from the reviewed repository or via a process per read.
+Reads use snapshot admission (two concurrent reads), never the tick lock.
+A changed snapshot returns retryable `busy`.
+
+Deployment must retain the ordinary `read`, `repo`, `targets` and `branches`
+permissions and explicitly add this queue-policy grant (binding is the exact
+client QueueReference binding, not a wildcard):
+
+```json
+{"health_reads":[{"principal":"CLIENT_PRINCIPAL","binding":{"kind":"deferred-author","repo":"camerontaylor/cq-toolkit","producer":"health-client","head":"0000000000000000000000000000000000000000","target":"main","targetSelector":"promoted-main"}}]}
+```
+
+No enqueue or forge verification is needed. Use a stable requestId such as
+`health-client` with that binding. Health is advisory and grants no review credit.

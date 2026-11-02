@@ -625,3 +625,26 @@ describe('queue report lifetime enforcement', () => {
     expect(await readdir(dir)).toEqual([]);
   });
 });
+
+test('health parses an authorized snapshot and rejects malformed counts', async () => {
+  const result = {
+    lastCompletedTick: '2026-11-02T00:00:00Z',
+    ageSeconds: 10,
+    discoveryComplete: false,
+    incompleteTicks: 3,
+    pending: 2,
+    blocked: 1,
+    deployedSha: 'a'.repeat(40),
+    snapshot: 'b'.repeat(64),
+  };
+  const transport: QueueTransport = async (wire) => {
+    const request = JSON.parse(wire) as Record<string, unknown>;
+    expect(request['op']).toBe('health');
+    return JSON.stringify({ v: 1, requestId: ref.requestId, binding: ref.binding, result });
+  };
+  expect(await makeQueueClient(transport).health(ref)).toEqual(result);
+  expect(await makeQueueOps(transport).queueHealth(ref)).toEqual({ status: 'ok', value: result });
+  result.pending = -1;
+  expect(await makeQueueOps(transport).queueHealth(ref)).toMatchObject({ status: 'failed' });
+  await expect(makeQueueClient(transport).health(ref)).rejects.toThrow();
+});

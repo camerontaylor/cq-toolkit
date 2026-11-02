@@ -136,6 +136,23 @@ export const QueueStatusSchema = z
     requestAlias: QueueRequestAliasSchema.nullable().exactOptional(),
   })
   .strict();
+export const QueueHealthSchema = z
+  .object({
+    lastCompletedTick: z.string().datetime().nullable(),
+    ageSeconds: z.number().nonnegative().nullable(),
+    discoveryComplete: z.boolean().nullable(),
+    incompleteTicks: z.number().int().nonnegative(),
+    pending: z.number().int().nonnegative(),
+    blocked: z.number().int().nonnegative(),
+    deployedSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .nullable(),
+    snapshot: z.string(),
+  })
+  .strict();
+export type QueueHealth = z.infer<typeof QueueHealthSchema>;
+
 export type QueueStatus = z.infer<typeof QueueStatusSchema>;
 
 /** Q6 persists the same immutable producer/head/target binding before publication.

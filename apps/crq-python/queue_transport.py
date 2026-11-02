@@ -42,7 +42,7 @@ SHA = r"[0-9a-f]{40}"
 # would let one implementation accept a target the other rejects. Neither U+0085 nor
 # U+FEFF is forbidden.
 REFNAME_FORBIDDEN = re.compile(r"[~^:?*\[\]\\]")
-READ = {"status", "report"}
+READ = {"status", "report", "health"}
 WRITE = {"enqueue", "bind", "cancel", "ack"}
 
 
@@ -140,6 +140,14 @@ def validate_policy(policy):
         scope = _inventory_binding(grant["binding"])
         if scope["repo"] != policy["repo"]:
             raise ValueError("inventory repository denied")
+    grants = policy.get("health_reads", [])
+    if type(grants) is not list:
+        raise ValueError("invalid health grants")
+    for grant in grants:
+        if (type(grant) is not dict or set(grant) != {"principal", "binding"}
+                or not isinstance(grant["principal"], str) or not grant["principal"]
+                or binding(grant["binding"])["repo"] != policy["repo"]):
+            raise ValueError("invalid health grant")
     limit = policy.get("max_requests", 10000)
     if type(limit) is not int or not 1 <= limit <= 100000:
         raise ValueError("invalid queue policy capacity")
@@ -532,6 +540,8 @@ def authorize(req, principal, policy):
     allowed = policy.get("write" if op in WRITE else "read", [])
     if principal not in allowed or b["repo"] != policy.get("repo") or b["targetSelector"] not in policy.get("targets", []):
         raise ValueError("queue capability denied")
+    if op == "health" and {"principal": principal, "binding": b} not in policy.get("health_reads", []):
+        raise ValueError("health capability denied")
     if op == "inventory" and {"principal": principal, "binding": b} not in policy.get("inventory_reads", []):
         raise ValueError("inventory capability denied")
     if op != "inventory" and b["kind"] == "deferred-author" and b["target"] not in policy.get("branches", []):
@@ -566,6 +576,9 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             if generation is not None and _queue_generation(queue_path) != generation:
                 return _encode(req, {"error": {"code": "busy", "retryable": True}})
             return _encode(req, result)
+        if op == "health":
+            import client_health
+            return encode(client_health.snapshot(q))
         if op == "inventory":
             return encode(_inventory(req, runner, q, principal, receipt_root, project_fixed=project_fixed))
         entries = q.setdefault("queue_client_requests", {})

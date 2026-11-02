@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from runtime_target import DEFAULT_REF, DISCOVERY_BRANCHES, DISCOVERY_SELECTOR
+import client_health
 import status_summary
 import repair_tick
 import coverage
@@ -2375,6 +2376,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             try:
                 interval = rolling_discovery_interval(q, discovery)
             except (ValueError, TypeError, merged_reconcile.ReconcileRefused):
+                q.setdefault("merged_discovery", {})["complete"] = False
                 log.append("merged discovery disabled: invalid configured interval")
             else:
                 log += discover_merged(q, budget, interval=interval, recent=True)
@@ -2421,6 +2423,10 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         refresh_slot_deadline(q, usage, remaining, global_gate)
         write_status(q)
         write_heartbeat(q)
+        client_health.record(sys.modules[__name__], q, discovery_enabled=(not only and
+            isinstance(CONFIG.get("merged_discovery"), dict) and
+            CONFIG["merged_discovery"].get("enabled") is True),
+            budget=budget if not only else None)
         save_queue(q)
     return log
 

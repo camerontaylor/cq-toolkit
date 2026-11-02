@@ -1552,6 +1552,7 @@ class CurrentTest(unittest.TestCase):
                        {"enabled": True, "after": "2099-01-01T00:00:00Z", "before": "2099-01-02T00:00:00Z"},
                        {"enabled": True, "after": "bad", "before": "bad"}):
             with mock.patch.dict(crq.CONFIG, {"merged_discovery": config}), \
+                 mock.patch.object(crq.client_health, "advisory"), \
                  mock.patch.object(crq, "gh_json", side_effect=actual) as forge:
                 self.tick(discovery=True)
                 forge.assert_not_called()

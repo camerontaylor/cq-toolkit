@@ -1,3 +1,4 @@
+import { ZodError } from 'zod';
 /** SDK-first queue ops. No vendor dispatch and no author admission mutation. */
 import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
@@ -10,6 +11,7 @@ import {
   type QueueReference,
   type QueueReportInput,
   type QueueStatus,
+  type QueueHealth,
   type QueueTransport,
 } from './internal/queueProtocol.js';
 import type { QueueEvidence } from './internal/queueEvidence.js';
@@ -37,6 +39,7 @@ type Unsupported = { state: 'unsupported'; reason: string };
 export function makeQueueOps(transport?: QueueTransport): {
   enqueue: Op<QueueEnqueueInput, QueueStatus | Unsupported>;
   queueStatus: Op<QueueReference, QueueStatus | Unsupported>;
+  queueHealth: Op<QueueReference, QueueHealth | Unsupported>;
   report: Op<
     QueueReportInput,
     { state: 'pending' | 'consumed'; evidence: QueueEvidence | null } | Unsupported
@@ -65,6 +68,7 @@ export function makeQueueOps(transport?: QueueTransport): {
   function wrap<I, P, O>(
     validate: (input: I) => P,
     fn: (client: ReturnType<typeof makeQueueClient>, input: P) => Promise<O>,
+    failInvalidResponse = false,
   ): Op<I, O | Unsupported> {
     return async (input) => {
       let parsed: P;
@@ -97,6 +101,8 @@ export function makeQueueOps(transport?: QueueTransport): {
           value: await fn(makeQueueClient(queueTransport), parsed),
         };
       } catch (error) {
+        if (failInvalidResponse && error instanceof ZodError)
+          return { status: 'failed', error: messageOf(error) };
         if (error instanceof QueueUnsupported)
           return { status: 'ok', value: { state: 'unsupported', reason: error.message } };
         return {
@@ -118,6 +124,11 @@ export function makeQueueOps(transport?: QueueTransport): {
         });
       return command.kind === 'cancel' ? client.cancel(command.ref) : client.enqueue(command.ref);
     }),
+    queueHealth: wrap(
+      (input: QueueReference) => QueueReferenceSchema.parse(input),
+      (client, reference) => client.health(reference),
+      true,
+    ),
     queueStatus: wrap(
       (input: QueueReference) => QueueReferenceSchema.parse(input),
       (client, reference) => client.status(reference),
