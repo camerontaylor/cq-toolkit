@@ -269,11 +269,12 @@ process.exitCode = failed ? 1 : 0;
   };
 
   /**
-   * The shared-SHA unit evidence: two fixed rows resolving with ONE commit SHA,
-   * a duplicate-SHA pair, a sibling fixed/no-commit row and an outstanding row
-   * whose attempt evidence carries SHAs. Distinct verified SHAs = 2 while the
-   * old task-count formula reads 4, so either finish-path write reverting to
-   * the old formula (or being deleted) fails these composition assertions.
+   * The shared-SHA unit evidence: two fixed rows resolving with ONE commit
+   * SHA, a duplicate-SHA pair, a sibling fixed/no-commit row and an
+   * outstanding row whose attempt evidence carries SHAs. Distinct verified
+   * SHAs = 2 while the old task-count formula reads 5 (five fixed rows,
+   * one of them commit-less), so reverting the observable finish() write to
+   * the old formula fails these composition assertions.
    */
   const sharedUnitReport = (): SweepUnitReport => {
     const sha = 'a'.repeat(40);
@@ -328,17 +329,48 @@ process.exitCode = failed ? 1 : 0;
   test('M1 missing evidence through fix.run composition', async () => {
     const f = await fixture();
     try {
-      // Same shared-SHA evidence through the PR-assembly leg: the open row
-      // fails the run, but the assembly-path accounting pass also re-derives
-      // the metric from the shared-SHA evidence: 2, not 4 or 5.
+      // Seed a committed marker under the run-state dir so the pr:true leg
+      // reaches real assembly bookkeeping (marker read + package matching),
+      // with the tracker/assemble ops stubbed so no forge is contacted.
+      const segments = { kind: 'tests-1', slug: 'scratch-repo' };
+      const markerDir = join(f.journalDir, 'state', 'committed', segments.kind);
+      await mkdir(markerDir, { recursive: true });
+      await writeFile(
+        join(markerDir, `${segments.slug}.json`),
+        `${JSON.stringify({
+          package: 'scratch-repo',
+          fixer: 'tests-1',
+          branch: `cq/fixture/${segments.kind}/${segments.slug}`,
+        })}\n`,
+      );
+      const assembled: unknown[] = [];
+      const forgeStub = (name: string) =>
+        ({
+          name,
+          inputSchema: z.unknown(),
+          importer: async () => async (raw: unknown) => {
+            assembled.push({ name, raw });
+            return { status: 'ok' as const, value: { offline: true } };
+          },
+        }) as unknown as OpRegistryEntry<never, never>;
+      const sweep = stubSweepRegistries(sharedUnitReport());
       const result = await makeFixRun({
         drivers: fixingDrivers(true),
-        registry: { get: stubSweepRegistries(sharedUnitReport()) },
+        registry: {
+          get: (name) =>
+            name === 'pr.ensureTrackerBranch' || name === 'pr.assemblePrs'
+              ? forgeStub(name)
+              : sweep(name),
+        },
       })({
         ...input(f),
         pr: true,
       });
       expect(result.status).toBe('needs-human');
+      // The assembly leg actually ran over the seeded marker.
+      expect(assembled.map((entry) => (entry as { name: string }).name)).toContain(
+        'pr.assemblePrs',
+      );
       const report = reportOf(result);
       expect(report.fixesPerRun).toBe(2);
       expect(report.counters.fixed).toBe(4);
@@ -351,8 +383,8 @@ process.exitCode = failed ? 1 : 0;
     const f = await fixture();
     try {
       // The early-finish leg of the persisted-artifact path: no tasks, so
-      // the metric must read 0 (a stale or deleted assignment cannot fake
-      // this, since the report is written before any unit ran).
+      // the metric reads the initializer 0. This pins the empty-task path
+      // behavior (0, never a fabricated count).
       const failed = await makeFixRun({ drivers: fixingDrivers(false) })({
         ...input(f),
         repoRoot: f.root,
@@ -362,7 +394,8 @@ process.exitCode = failed ? 1 : 0;
       expect(failed.report?.tasks).toHaveLength(0);
 
       // The ok leg of the same persisted path with the shared-SHA evidence:
-      // distinctness is asserted through the composition (2, not 4).
+      // distinctness is asserted through the composition (2, not the old
+      // formula's 5).
       const ok = await makeFixRun({
         drivers: fixingDrivers(false),
         registry: {
@@ -378,7 +411,6 @@ process.exitCode = failed ? 1 : 0;
       const report = reportOf(ok);
       expect(report.verdict).toBe('pass');
       expect(report.fixesPerRun).toBe(2);
-      expect(report.fixesPerRun !== undefined).toBe(true);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

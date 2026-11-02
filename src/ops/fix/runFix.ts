@@ -273,10 +273,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             ];
       });
       accountPlanned();
+      // The single observable write of the metric: every terminal return
+      // flows through finish(), so this is the value any test or consumer
+      // reads (the pre-assembly write below is superseded on every path).
       report.fixesPerRun = fixesPerRunOf(report.tasks);
-      // The needs-human terminal leg above and this failed/ok terminal write
-      // are each load-bearing: deleting either one fails the composition
-      // tests below (the needs-human run asserts 2, not the init 0).
       // Sum landed invocation evidence even when governance replaces a job result.
       report.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       for (const task of report.tasks)
@@ -609,8 +609,10 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           });
         }
       }
-      // Distinctness is load-bearing in the tests below: with two fixed rows
-      // sharing one commit SHA, the old task-count formula would read 4.
+      // Pre-assembly write: the PR-body leg below reads report state before
+      // finish() recomputes the metric; the field itself is not read in
+      // between today, so finish()'s write above is the observable one and
+      // the composition tests pin THIS value, not this line.
       report.fixesPerRun = fixesPerRunOf(report.tasks);
       report.usage = report.run.usage ?? report.usage;
       const human =
