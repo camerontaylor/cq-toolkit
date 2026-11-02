@@ -144,7 +144,7 @@ class RuntimeTest(unittest.TestCase):
     def test_vendor_terminal_hold_is_not_subtracted_twice_after_a_successful_probe(self):
         jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 2, "observed_at": AT}, False)
         key = self.item["attempt_id"]
-        jobs.terminal(self.q, self.item, AT, "complete", vendor_terminal=True)
+        jobs.terminal(self.q, self.item, AT, "completed", vendor_terminal=True)
         self.c.iso = lambda: "2026-10-30T00:10:00Z"
         runtime.usage_context(self.c, self.q, {"remaining": 3, "rollingWindowMs": 3600000}, [])
         self.assertEqual(self.q["backfill_usage"]["reflected_reservations"], [key])
@@ -152,6 +152,19 @@ class RuntimeTest(unittest.TestCase):
         decision = jobs.admission(self.q, self.item, "2026-10-30T00:10:00Z", self.q["backfill_usage"], False, reserve=False)
         self.assertEqual(decision["effective_remaining"], 3)
         runtime.usage_context(self.c, self.q, None, [])
+        self.assertEqual(self.q["backfill_usage"]["reflected_reservations"], [])
+
+    def test_released_or_later_terminal_holds_are_not_reflected(self):
+        jobs.admission(self.q, self.item, AT, {"successful": True, "remaining": 2, "observed_at": AT}, False)
+        key = self.item["attempt_id"]
+        hold = self.q["backfill_reservations"][key]
+        hold["terminal_at"] = "2026-10-30T00:05:00Z"
+        self.c.iso = lambda: "2026-10-30T00:04:00Z"  # probe precedes the terminal time
+        runtime.usage_context(self.c, self.q, {"remaining": 2, "rollingWindowMs": 3600000}, [])
+        self.assertEqual(self.q["backfill_usage"]["reflected_reservations"], [])
+        hold["quota_state"] = "released"
+        self.c.iso = lambda: "2026-10-30T00:10:00Z"
+        runtime.usage_context(self.c, self.q, {"remaining": 2, "rollingWindowMs": 3600000}, [])
         self.assertEqual(self.q["backfill_usage"]["reflected_reservations"], [])
 
     def test_harvest_accepts_blank_lines_and_float_only_in_vendor_metadata(self):

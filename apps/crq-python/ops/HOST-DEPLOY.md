@@ -312,10 +312,13 @@ and switch guard stay within the protected helper. No signer byte changes.
 
 ## Background ledger publication
 
-Render/install `crq-publisher.service` and `crq-publisher.timer` through the same
-immutable-target unit renderer. The timer retries every minute after completion;
-activation remains part of the owner-controlled deployment. Stop/drain this worker
-with the other `crq-*` units before a checkout switch.
+Render/install `crq-publisher.service`, `crq-publisher.timer` and
+`crq-publisher.path` through the same immutable-target unit renderer. The path unit
+starts the worker as soon as a record lands in `state/backfill/publication/pending`;
+the timer retries every minute after completion as the fallback. Enable both
+(`systemctl --user enable --now crq-publisher.timer crq-publisher.path`) as part of
+the owner-controlled deployment. Stop/drain the path unit, timer and worker with the
+other `crq-*` units before a checkout switch.
 
 Ticks only write `state/backfill/publish-request.json`. The worker uses its own
 `state/backfill/publisher.git` bare clone and `publisher.lock`, but retains the
@@ -326,7 +329,9 @@ invokes this same worker and lock. No queue snapshot is restored.
 
 Pending records and reconciliation intent survive failed pushes and crashes after
 remote acknowledgement. The timer scans pending records even without a request
-marker. `backfill_publication_error` reports a failed attempt; retry clears it only
+marker. A busy queue lock after a successful push is not a failure: the worker exits 0
+with `reconciliation-pending`, keeps the request marker and retries on the next
+trigger, with no failure marker or halt. `backfill_publication_error` reports a failed attempt; retry clears it only
 after verified remote reconciliation. Pending/live jobs retain ownership. The
 45-minute worker limit bounds each invocation without deleting pending evidence.
 Publication failures also retain `publication-failure.json`, which blocks new

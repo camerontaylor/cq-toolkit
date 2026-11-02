@@ -89,13 +89,14 @@ class PublisherTest(unittest.TestCase):
         outbox = self.prepare()
         lock = self.c.with_lock
         self.c.with_lock = lambda fn, **kwargs: None
-        with self.assertRaisesRegex(ledger.IntegrityError, "queue lock busy"):
-            worker.run(self.c)
+        self.assertEqual(worker.run(self.c)["publication"], "reconciliation-pending")
         self.assertFalse(outbox.pending())  # Remote ack is not queue reconciliation.
+        self.assertNotIn("review_ledger_head", self.q)
         self.assertTrue((self.state / "backfill/publish-request.json").exists())
-        self.assertTrue((self.state / "backfill/publication-failure.json").exists())
-        with mock.patch.object(runtime, "services", side_effect=AssertionError("admission passed halt")):
-            self.assertEqual(runtime.select(self.c, self.q, [], False, None), (None, False))
+        # A routinely busy lock is not a publication failure and must not halt rank 4.
+        self.assertFalse((self.state / "backfill/publication-failure.json").exists())
+        self.assertNotIn("backfill_publication_error", self.q)
+        self.assertNotEqual(self.q.get("backfill_halt_operation"), "publication")
         self.c.with_lock = lock
         self.q["backfill_halted"] = "unrelated operator halt"
         worker.run(self.c)
