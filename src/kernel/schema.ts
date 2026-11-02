@@ -68,6 +68,12 @@ import type {
   HeadAcceptanceJournalEvent,
   ReviewObservedJournalEvent,
   ReviewObservedPayload,
+  BaselineFailureRecord,
+  ClosureRecord,
+  MeasurementSummaryJournalEvent,
+  MeasurementSummaryPayload,
+  MetricRecord,
+  ReportV2,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -998,6 +1004,83 @@ export const ReviewObservedJournalEventSchema: z.ZodType<ReviewObservedJournalEv
     taskId: z.string().min(1).nullable(),
     attempt: z.number().int().min(1).nullable(),
     payload: ReviewObservedPayloadSchema,
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Kernel: journal v3 metric + report v2 root schemas (ADR-0008, T28 — schema
+// only; composes previously landed payload schemas, writer disabled)
+// ---------------------------------------------------------------------------
+
+export const ClosureRecordSchema: z.ZodType<ClosureRecord> = z
+  .object({
+    commitSha: ShaSchema,
+    taskIds: z.array(z.string().min(1)),
+    findingFingerprints: z.array(FindingFingerprintSchema),
+    verificationEvidence: z.array(z.string()),
+    todo: z.boolean(),
+  })
+  .strict();
+
+export const BaselineFailureRecordSchema: z.ZodType<BaselineFailureRecord> = z
+  .object({
+    unitId: z.string().min(1),
+    probeHead: ShaSchema.nullable(),
+    completed: z.boolean(),
+    count: NonnegativeSafeCountSchema.nullable(),
+    unknownReason: z.string().nullable(),
+  })
+  .strict();
+
+export const MetricRecordSchema: z.ZodType<MetricRecord> = z
+  .object({
+    fixesPerRun: z
+      .object({
+        numerator: NonnegativeSafeCountSchema.nullable(),
+        denominator: NonnegativeSafeCountSchema.nullable(),
+      })
+      .strict(),
+    verifiedCommits: z.array(ShaSchema),
+    closures: z.array(ClosureRecordSchema),
+    baselineFailures: z.array(BaselineFailureRecordSchema),
+  })
+  .strict();
+
+export const MeasurementSummaryPayloadSchema: z.ZodType<MeasurementSummaryPayload> = z
+  .object({
+    metric: MetricRecordSchema,
+    availability: AvailabilityMapSchema,
+  })
+  .strict();
+
+export const MeasurementSummaryJournalEventSchema: z.ZodType<MeasurementSummaryJournalEvent> = z
+  .object({
+    type: z.literal('measurement-summary'),
+    runId: z.string(),
+    at: z.iso.datetime({ precision: 3 }),
+    unitId: z.string().min(1).nullable(),
+    jobId: z.string().min(1).nullable(),
+    taskId: z.string().min(1).nullable(),
+    attempt: z.number().int().min(1).nullable(),
+    payload: MeasurementSummaryPayloadSchema,
+  })
+  .strict();
+
+export const ReportV2Schema: z.ZodType<ReportV2> = z
+  .object({
+    reportVersion: z.literal(2),
+    provenance: ProvenanceRecordSchema,
+    correlation: CorrelationRecordSchema,
+    tasks: z.array(TaskFinishedPayloadSchema),
+    attempts: z.array(AttemptFinishedPayloadSchema),
+    gates: z.array(GateVerdictPayloadSchema),
+    dispositions: z.array(DispositionPayloadSchema),
+    acceptances: z.array(AcceptancePayloadSchema),
+    reviews: z.array(ReviewObservedPayloadSchema),
+    approvals: z.array(ApprovalPayloadSchema),
+    writeDecisions: z.array(WriteObservationPayloadSchema),
+    metric: MetricRecordSchema,
+    availability: AvailabilityMapSchema,
   })
   .strict();
 

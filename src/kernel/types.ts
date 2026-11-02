@@ -860,6 +860,82 @@ export interface ReviewObservedJournalEvent {
   payload: ReviewObservedPayload;
 }
 
+/** One verified closure of a finding or unit by a commit (ADR-0008 metric row). */
+export interface ClosureRecord {
+  commitSha: string;
+  taskIds: string[];
+  findingFingerprints: FindingFingerprint[];
+  verificationEvidence: string[];
+  /** Commit carries the `Cq-Todo: true` trailer; never counts toward the numerator. */
+  todo: boolean;
+}
+
+/** Baseline evidence for one planned unit (ADR-0008); every planned unit is represented. */
+export interface BaselineFailureRecord {
+  unitId: string;
+  /** Baseline probe head, or null when no probe ran. */
+  probeHead: string | null;
+  completed: boolean;
+  /** Unknown stays null, never zero. */
+  count: number | null;
+  unknownReason: string | null;
+}
+
+/**
+ * Run measurement (ADR-0008). `verifiedCommits` is the deduplicated projection
+ * of verified non-todo closures, not independent evidence; an unknown
+ * denominator is null, never zero (no success ratio without a denominator).
+ */
+export interface MetricRecord {
+  fixesPerRun: { numerator: number | null; denominator: number | null };
+  verifiedCommits: string[];
+  closures: ClosureRecord[];
+  baselineFailures: BaselineFailureRecord[];
+}
+
+/** The `measurement-summary` payload (ADR-0008 metric row), all fields exact. */
+export interface MeasurementSummaryPayload {
+  metric: MetricRecord;
+  availability: Record<string, AvailabilityRecord>;
+}
+
+/**
+ * Journal: one run measurement summary (ADR-0008). Counts print on every exit
+ * path; no cross-run state. Scope fields nullable: measurement is run-scoped,
+ * not inherently task-scoped. Writer disabled until T23.
+ */
+export interface MeasurementSummaryJournalEvent {
+  type: 'measurement-summary';
+  runId: string;
+  at: string;
+  unitId: string | null;
+  jobId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  payload: MeasurementSummaryPayload;
+}
+
+/**
+ * Report v2 root (ADR-0008 report row): a versioned payload inside I1's
+ * existing report carrier. Rows fold the journal v3 payloads; unknown or
+ * partial values carry availability. Assembler disabled until T36/T37.
+ */
+export interface ReportV2 {
+  reportVersion: 2;
+  provenance: ProvenanceRecord;
+  correlation: CorrelationRecord;
+  tasks: TaskFinishedPayload[];
+  attempts: AttemptFinishedPayload[];
+  gates: GateVerdictPayload[];
+  dispositions: DispositionPayload[];
+  acceptances: AcceptancePayload[];
+  reviews: ReviewObservedPayload[];
+  approvals: ApprovalPayload[];
+  writeDecisions: WriteObservationPayload[];
+  metric: MetricRecord;
+  availability: Record<string, AvailabilityRecord>;
+}
+
 /** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
 export type JournalEvent =
   | RunStartedJournalEvent
