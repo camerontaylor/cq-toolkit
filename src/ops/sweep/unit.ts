@@ -58,6 +58,7 @@ import { isAbsolute, join, resolve, win32 } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { AdapterName, CheckCommand, FailureSet, RunCheck } from '../gates/checkRunner.js';
 import { subprocessRunCheck } from '../gates/checkRunner.js';
@@ -717,6 +718,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
           sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
           workspace: { path: worktree.path },
           budget: bindings.budget,
+          // Session-log correlation (items 1.3–1.5): forward the runner's
+          // minted work identity so the lane stamps the child's CQ_* env.
+          // Absent outside a governed dispatch — unchanged behavior there.
+          ...correlationInvocation(currentJobContext()?.info?.correlation),
         },
         { signal: deadline.signal },
       );

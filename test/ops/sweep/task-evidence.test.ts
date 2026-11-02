@@ -447,3 +447,156 @@ test('duplicate or conflicting identity trailers do not consume an attempt numbe
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// M5b4 forward governed invocation correlation: every OpInvocation the task
+// loop builds forwards the governed job's correlation (the shared
+// correlationInvocation helper result); run/work/parent/task forward
+// verbatim and the role is passed through, never re-derived.
+import type { OpInvocation, WorkerResult } from '../../../src/driver/types.js';
+import { runTaskLoop } from '../../../src/ops/sweep/taskLoop.js';
+import { runLadder } from '../../../src/kernel/governor.js';
+
+const UNIT = { package: 'alpha', fixer: 'fix', files: ['src/a.ts'] };
+const PROBE = {
+  verdict: 'failing' as const,
+  attempts: 1,
+  failureSet: {
+    tool: 'vitest',
+    exitCode: 1,
+    failures: [
+      {
+        file: 'src/a.ts',
+        line: 1,
+        column: 1,
+        ruleId: null,
+        message: 'broken',
+        severity: 'error' as const,
+      },
+    ],
+  },
+};
+const EFFECTS = {
+  broader: async () => ({
+    final: {
+      verdict: 'clean' as const,
+      attempts: 1,
+      failureSet: { tool: 'vitest', exitCode: 0, failures: [] },
+    },
+    treeSha: 'b'.repeat(40),
+  }),
+  commit: async () => 'c'.repeat(40),
+  verify: async () => {},
+  publish: async () => {},
+};
+
+function loopBindings(invocations: OpInvocation[]): Parameters<typeof runTaskLoop>[0] {
+  return {
+    driver: {
+      run: async (invocation: OpInvocation): Promise<WorkerResult> => {
+        invocations.push(invocation);
+        return {
+          structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'complete',
+        };
+      },
+    },
+    prompt: () => 'fix it',
+    git: async () => ({ code: 0, stdout: '', stderr: '' }),
+    runCheck: async () => ({
+      stdout: JSON.stringify({
+        success: true,
+        numTotalTests: 1,
+        testResults: [
+          {
+            name: 's.test.js',
+            status: 'passed',
+            assertionResults: [{ fullName: 'p', status: 'passed' }],
+          },
+        ],
+      }),
+      stderr: '',
+      exitCode: 0,
+    }),
+    adapter: 'vitest-json' as const,
+    checkCommand: () => ({ command: 'node', args: ['check'], cwd: '/tmp/unused' }),
+    budget: { wallClockMs: 60_000 },
+    scanPrompt: async () => {},
+    modelSpec: { provider: 'fixture', model: 'scripted' },
+  } as unknown as Parameters<typeof runTaskLoop>[0];
+}
+
+const runLoop = (invocations: OpInvocation[]) =>
+  runTaskLoop(
+    loopBindings(invocations),
+    UNIT,
+    { path: '/tmp/unused', branch: 'run/x' } as never,
+    PROBE,
+    'run/x',
+    EFFECTS,
+  );
+
+test('M5b4 nominal evidence', async () => {
+  const invocations: OpInvocation[] = [];
+  const outcome = await runLadder(
+    () => runLoop(invocations),
+    { wallClockMs: 5000 },
+    {
+      op: 'sweep.unit',
+      jobKey: 'j-1',
+      attempt: 1,
+      correlation: { workId: 'run:j-1:1', runId: 'run', role: 'sweep.unit' },
+    },
+  );
+  expect(outcome.outcome).toBe('completed');
+  expect(invocations.length).toBeGreaterThan(0);
+  for (const invocation of invocations) {
+    expect(invocation.correlation).toEqual({
+      workId: 'run:j-1:1',
+      runId: 'run',
+      role: 'sweep.unit',
+    });
+  }
+});
+
+test('M5b4 missing evidence', async () => {
+  const invocations: OpInvocation[] = [];
+  const outcome = await runLoop(invocations);
+  expect(['ok', 'failed']).toContain(outcome.status);
+  for (const invocation of invocations) {
+    expect(invocation.correlation).toBeUndefined();
+  }
+});
+
+test('M5b4 failure evidence', async () => {
+  const invocations: OpInvocation[] = [];
+  // A governed correlation carrying the OUTER job's identity fields: the
+  // invocation forwards them verbatim and invents NO new role.
+  await runLadder(
+    () => runLoop(invocations),
+    { wallClockMs: 5000 },
+    {
+      op: 'sweep.unit',
+      jobKey: 'j-outer',
+      attempt: 7,
+      correlation: {
+        workId: 'run:j-outer:7',
+        runId: 'outer-run',
+        parentWorkId: 'parent-1',
+        role: 'orchestrator',
+        task: 'outer task',
+      },
+    },
+  );
+  expect(invocations.length).toBeGreaterThan(0);
+  for (const invocation of invocations) {
+    expect(invocation.correlation).toEqual({
+      workId: 'run:j-outer:7',
+      runId: 'outer-run',
+      parentWorkId: 'parent-1',
+      role: 'orchestrator',
+      task: 'outer task',
+    });
+  }
+});

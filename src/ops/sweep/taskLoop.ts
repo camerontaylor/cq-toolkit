@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import { correlationInvocation } from '../../driver/correlationInvocation.js';
 import type { OpResult } from '../../kernel/types.js';
 import type { SweepWorkspace } from '../../adapters/git/worktreeFor.js';
 import type { CheckCommand, FailureSet } from '../gates/checkRunner.js';
@@ -390,6 +391,11 @@ async function runTaskLoopInner(
                   mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
                 },
                 sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
+                // Session-log correlation (items 1.3–1.5): forward the
+                // runner's minted work identity so the lane stamps the
+                // child's CQ_* env. Absent outside a governed dispatch —
+                // unchanged behavior there.
+                ...correlationInvocation(currentJobContext()?.info?.correlation),
                 outputSchema: {
                   name: 'fix.task/v1',
                   schema: {
