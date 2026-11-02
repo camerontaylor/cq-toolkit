@@ -6,32 +6,20 @@ import type { OpInvocation, WorkerResult } from '../../src/driver/types.js';
 import type { DriverFactory, DriverRequest } from '../../src/driver/factory.js';
 import type { FixReviewItemInput } from '../../src/ops/review/fixReviewItem.js';
 
-// M5b0 nominal evidence: shared helper returns the current governed
-// correlation unchanged; absent role falls back to the preserved 'fixer'
-// default.
+// M5b0 nominal evidence: the helper is pure over its argument — it returns
+// the passed correlation with role defaulted to 'fixer' when absent, and
+// unchanged (all governed fields preserved) when role is present.
 describe('correlationInvocation', () => {
-  it('M5b0 nominal evidence', async () => {
-    const seen: Array<ReturnType<typeof correlationInvocation>> = [];
+  it('M5b0 nominal evidence', () => {
     const correlation = { workId: 'w-1', task: 'review' } as const;
-    await runLadder(
-      async () => {
-        seen.push(correlationInvocation({ ...correlation }));
-      },
-      { wallClockMs: 5000 },
-      { op: 'review.fixItem', jobKey: 'j-1', attempt: 1, correlation: { ...correlation } },
-    );
-    expect(seen).toEqual([{ correlation: { ...correlation, role: 'fixer' } }]);
+    expect(correlationInvocation({ ...correlation })).toEqual({
+      correlation: { ...correlation, role: 'fixer' },
+    });
 
     const governed = { workId: 'w-2', role: 'critic', runId: 'r-1' } as const;
-    const withRole: Array<ReturnType<typeof correlationInvocation>> = [];
-    await runLadder(
-      async () => {
-        withRole.push(correlationInvocation({ ...governed }));
-      },
-      { wallClockMs: 5000 },
-      { op: 'review.fixItem', jobKey: 'j-2', attempt: 1, correlation: { ...governed } },
-    );
-    expect(withRole).toEqual([{ correlation: { ...governed } }]);
+    expect(correlationInvocation({ ...governed })).toEqual({
+      correlation: { ...governed },
+    });
   });
 
   // M5b0 missing evidence: absent context preserves the existing fallback
