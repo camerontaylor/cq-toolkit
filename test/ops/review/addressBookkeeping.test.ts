@@ -3,15 +3,18 @@ import {
   lstat,
   link,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   realpath,
+  rm,
   symlink,
   unlink,
   writeFile,
 } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
-import { expect, test } from 'vitest';
+import { tmpdir } from 'node:os';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { makeAddressBookkeepingReceipt } from '../../../src/ops/review/internal/addressBookkeeping.js';
 import {
   DEV_LEDGER_VERSION,
@@ -419,3 +422,248 @@ test.each(['valid', 'changed', 'wrong-name', 'symlink', 'hardlink', 'unregistere
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// M7-address: retain address exit spend. Each settled driver dispatch folds
+// into the report's usageSummary exactly once, on every terminal exit route.
+// These cases run the REAL makeReviewAddress local path (test repo, fake
+// drivers, gitleaks fixture): no fixture-object loops, no pre-assigned
+// carriers.
+// ---------------------------------------------------------------------------
+
+import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import type { DriverFactory } from '../../../src/driver/factory.js';
+import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
+import { Finding, FindingsRecord } from '../../../src/ops/review/findings.js';
+import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
+
+let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
+beforeEach(async () => {
+  scanner = await makeGitleaksFixture();
+  vi.stubEnv('PATH', scanner.path);
+  vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+  vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+  vi.stubEnv('GIT_ALLOW_PROTOCOL', 'file');
+  vi.stubEnv('GIT_AUTHOR_NAME', 'Review fixture');
+  vi.stubEnv('GIT_AUTHOR_EMAIL', 'review-fixture@example.invalid');
+  vi.stubEnv('GIT_COMMITTER_NAME', 'Review fixture');
+  vi.stubEnv('GIT_COMMITTER_EMAIL', 'review-fixture@example.invalid');
+});
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await rm(scanner.root, { recursive: true, force: true });
+});
+
+interface UsageHarness {
+  op: ReturnType<typeof makeReviewAddress>;
+  repoRoot: string;
+  journalDir: string;
+  runs: number;
+  /** Usage each driver run reports; a null entry reports unmeasured spend. */
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number } | null;
+  /** When set, the Nth driver run (1-based) throws after settling usage. */
+  throwOnRun?: number;
+  cleanup: () => Promise<void>;
+}
+
+async function usageHarness(
+  overrides: Partial<Pick<UsageHarness, 'usage' | 'throwOnRun'>> = {},
+): Promise<UsageHarness> {
+  const state: UsageHarness = {
+    runs: 0,
+    usage:
+      overrides.usage === undefined
+        ? { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 }
+        : overrides.usage,
+    ...(overrides.throwOnRun === undefined ? {} : { throwOnRun: overrides.throwOnRun }),
+    repoRoot: '',
+    journalDir: '',
+    op: undefined as unknown as ReturnType<typeof makeReviewAddress>,
+    cleanup: async () => undefined,
+  };
+  const repo = await makeTestRepo();
+  repo.git('config', 'user.name', 'Test');
+  repo.git('config', 'user.email', 'test@example.invalid');
+  const journalDir = await mkdtemp(join(tmpdir(), 'cq-address-usage-'));
+  const role = { provider: 'mock', model: 'worker' };
+  const config: CqConfig = {
+    schemaVersion: 2,
+    checks: [
+      { adapter: 'tsc-lines', command: { command: process.execPath, args: ['scripts/check.cjs'] } },
+    ],
+    roles: {
+      worker: role,
+      reviewer: { ...role, model: 'reviewer' },
+    },
+    review: { reviewers: ['agent'], rounds: 1 },
+    budgets: { run: { maxTokens: 10000, wallMs: 20000 }, step: { wallMs: 5000 } },
+    escalation: { workerAttempts: 1, rescueBase: 0 },
+  };
+  await repo.write('.gitignore', '.cq/\n');
+  await repo.write('src/a.ts', 'export const a = "BAD";\n');
+  await repo.write('scripts/check.cjs', 'process.exitCode = 0;\n');
+  await repo.write('cq.json', JSON.stringify(config));
+  repo.commitAll('review address usage fixture');
+  const head = repo.git('rev-parse', 'HEAD').trim();
+  const finding: Finding = {
+    id: 'seed-a',
+    source: 'agent',
+    file: 'src/a.ts',
+    line: 1,
+    severity: 'major',
+    text: 'Replace BAD with GOOD',
+    status: 'open',
+  };
+  const record: FindingsRecord = {
+    schemaVersion: 1,
+    branch: 'feature/x',
+    head,
+    sources: [{ kind: 'agent', status: 'terminal' }],
+    findings: [finding],
+  };
+  const drivers: DriverFactory = {
+    resolve: (request) => ({
+      lane: 'ai-sdk',
+      modelSpec: request.modelSpec,
+      driver: {
+        run: async (input) => {
+          state.runs += 1;
+          const run = state.runs;
+          const content = await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8');
+          if (state.throwOnRun === run) {
+            // A REAL post-settlement fault: the dispatch itself throws.
+            throw new Error(`driver run ${run} lost after settlement`);
+          }
+          let structuredOutput: unknown;
+          if (input.outputSchema?.name === 'review.agent/v3') {
+            const serialized = JSON.stringify({
+              prompt: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+            });
+            await request.beforeRequest?.(serialized, [{ text: input.prompt }], {
+              kind: 'model-request',
+            });
+            structuredOutput = {
+              findings: content.includes('BAD')
+                ? [{ file: 'src/a.ts', line: 1, severity: 'high', text: finding.text }]
+                : [],
+            };
+          } else if (input.outputSchema?.name === 'review.address.closure/v1')
+            structuredOutput = { closed: content.includes('GOOD'), reason: 'verified candidate' };
+          else {
+            if (!input.prompt.startsWith('related-check feedback'))
+              await writeFile(
+                join(input.workspace!.path, 'src/a.ts'),
+                content.replace('BAD', 'GOOD'),
+              );
+            structuredOutput = { disposition: 'fixed', reason: 'fixed seeded issue', evidence: [] };
+          }
+          return {
+            stopReason: 'complete' as const,
+            structuredOutput,
+            ...(state.usage === null
+              ? // Legacy result: usage without provenance. The engine treats
+                // absence as unknown, and the ledger must agree.
+                { usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
+              : { usage: state.usage, usageProvenance: 'measured' as const }),
+            denials: [],
+          };
+        },
+      },
+    }),
+  };
+  state.repoRoot = repo.root;
+  state.journalDir = journalDir;
+  state.op = makeReviewAddress({ drivers, initialRecord: record });
+  state.cleanup = async () => {
+    await repo.cleanup();
+    await rm(journalDir, { recursive: true, force: true });
+  };
+  return state;
+}
+
+test('M7-address nominal evidence', async () => {
+  const f = await usageHarness();
+  try {
+    const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
+    expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
+    if (result.status !== 'ok') throw new Error('expected success');
+    const runs = f.runs;
+    expect(runs).toBeGreaterThan(0);
+    // Success retains settled usage exactly once: every dispatch measured
+    // 2 in / 1 out, and the summary folds to precisely runs x that
+    // measurement.
+    expect(result.value.usageSummary).toEqual({
+      usage: { input: 2 * runs, output: runs, cacheRead: 0, cacheWrite: 0 },
+      knownCount: runs,
+      unknownCount: 0,
+      unpricedCount: runs,
+    });
+    // Parent totals agree with the summary: no double counting.
+    expect(result.value.usage.input).toBe(2 * runs);
+    expect(result.value.usage.output).toBe(runs);
+    // The persisted artifact carries the same summary as the envelope.
+    const persisted = JSON.parse(await readFile(result.value.reportPath, 'utf8')) as {
+      usageSummary?: unknown;
+    };
+    expect(persisted.usageSummary).toEqual(result.value.usageSummary);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('M7-address missing evidence', async () => {
+  // Every dispatch reports legacy usage without provenance: the summary must
+  // be explicit unknown (unknownCount = runs), never a fabricated measured
+  // zero, while the run itself still completes honestly.
+  const f = await usageHarness({ usage: null });
+  try {
+    const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
+    expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
+    if (result.status !== 'ok') throw new Error('expected success');
+    const runs = f.runs;
+    expect(runs).toBeGreaterThan(0);
+    expect(result.value.usageSummary).toEqual({
+      knownCount: 0,
+      unknownCount: runs,
+      unpricedCount: runs,
+    });
+    expect(result.value.usageSummary?.usage).toBeUndefined();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('M7-address failure evidence', async () => {
+  // The FIRST dispatch throws; the loop's retry then settles measured usage
+  // (2 in / 1 out) before the run still exits needs-human carrying the thrown
+  // fault. The settled spend is retained exactly once on the failure exit,
+  // the thrown run invents no spend, and parent totals match the summary.
+  const f = await usageHarness({ throwOnRun: 1 });
+  try {
+    const result = await f.op({ repoRoot: f.repoRoot, source: 'local', journalDir: f.journalDir });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'ok') throw new Error('expected needs-human');
+    expect(f.runs).toBe(2);
+    expect(result.report?.usageSummary).toEqual({
+      usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+      knownCount: 1,
+      unknownCount: 0,
+      unpricedCount: 1,
+    });
+    // Parent totals do not double count the settled run's usage.
+    expect(result.report?.usage).toEqual({
+      input: 2,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    // The thrown dispatch is a real fault inside the loop; the run still
+    // reaches a terminal needs-human exit at the round cap with the thrown
+    // run's settled sibling spend retained exactly once.
+    expect(result.report?.reasons.join('; ')).toContain(
+      'review round cap reached with open findings',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

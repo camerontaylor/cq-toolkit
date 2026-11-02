@@ -83,6 +83,11 @@ import {
   type AddressLease,
 } from './internal/addressOwnership.js';
 import { DEV_LEDGER_VERSION, devLedgerPath, type DevCycleRecord } from '../dev/record.js';
+import {
+  createKnownUsageLedger,
+  normalizeUsageObservation,
+  type KnownUsageSummary,
+} from '../../shared/knownUsage.js';
 
 export interface ReviewAddressInput {
   repoRoot: string;
@@ -124,6 +129,15 @@ export interface ReviewAddressReport {
   fixesPerRun: number;
   usage: Usage;
   costUSD?: number;
+  /**
+   * Retained exit spend (M7-address): each settled driver dispatch folds into
+   * this summary exactly once, on every terminal exit — success, failure,
+   * budget exhaustion, cancellation and a thrown fault included. A dispatch
+   * whose provider supplied no measurement settles as an explicit unknown,
+   * never a measured zero. Same report-envelope carrier as the agent review
+   * leg; absent until the first snapshot at exit, never a v3 wire field.
+   */
+  usageSummary?: KnownUsageSummary;
   wallMs: number;
   reasons: string[];
   preconditions?: AddressPrecondition[];
@@ -272,6 +286,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       wallMs: 0,
       reasons: [],
     };
+    // M7-address: a fresh ledger per invocation, so one run's observations
+    // never leak into another's summary. Dispatches settle exactly once
+    // through account(); the snapshot is stamped onto every finish() exit.
+    const usageLedger = createKnownUsageLedger();
+    let dispatchSequence = 0;
     const bookkeeping = new Map<string, string>();
     let bookkeepingTampered = false;
     let bookkeepingRevision = 0;
@@ -361,6 +380,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       reason = '',
       structuredStop?: 'round-cap' | 'rereview-blocked' | 'budget',
     ): Promise<ReviewAddressResult> => {
+      // M7-address: every terminal exit — success, failure, needs-human,
+      // budget exhaustion, cancellation and a thrown fault included — retains
+      // the settled usage summary, so spend already paid is never lost to the
+      // exit route. Stamped before persistence, so the written artifact
+      // matches the returned envelope.
+      report.usageSummary = usageLedger.snapshot();
       if (parent?.aborted) {
         delete report.stop;
         if (!report.reasons.includes('parent cancelled')) report.reasons.push('parent cancelled');
@@ -592,6 +617,18 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (result.costUSD !== undefined) report.costUSD = (report.costUSD ?? 0) + result.costUSD;
         if (result.usage.reasoning !== undefined)
           report.usage.reasoning = (report.usage.reasoning ?? 0) + result.usage.reasoning;
+        // Retain the dispatch's settled spend exactly once (M7-address): a
+        // measured provider report keeps its usage, anything else — including
+        // an unmeasured placeholder and a legacy result without provenance —
+        // is an explicit unknown. The summary is snapshotted at exit, so a
+        // thrown fault after settlement never loses spend already paid.
+        usageLedger.record(
+          `dispatch-${++dispatchSequence}`,
+          normalizeUsageObservation({
+            ...(result.usageProvenance === 'measured' ? { usage: result.usage } : {}),
+            ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
+          }),
+        );
         if (governed) {
           const context = currentJobContext();
           const measurement = {
