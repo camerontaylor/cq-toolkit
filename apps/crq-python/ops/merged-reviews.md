@@ -91,7 +91,7 @@ existing strict author admission is unchanged.
 
 The v1 document contains original `request_id`, `item_id`, `source`, `capture`,
 `outcome`, `classification`, `counted`, complete `findings`, `run_id`, `started_at`,
-artifact byte digests, `remediation=pending-merged-evidence`,
+artifact byte digests, `remediation=disabled/deferred`,
 `independent_acceptance=false`, and `cli_functional_acceptance=pending-D1`.
 Aliases bind through the durable request index; a reused receipt retains its
 original source/request identity and `reused_from` remains visible in status.
@@ -195,7 +195,8 @@ inferences without versioned scope evidence conservatively require a full review
 Merged-current remediation is stored separately from the immutable review receipt.
 The tick binds the exact subject, receipt, capture and every finding to published
 repair jobs, then verifies the fix PR head, selected base, merge commit ancestry
-and capture ancestry before retaining merge evidence. Status preserves the receipt outcome and reports `fixed: true` with a compact
+and capture ancestry before retaining merge evidence. With `queue.project_fixed: true`, status preserves the receipt outcome and reports
+`fixed: true` with a compact
 `remediation` reference only for complete receipt-bound evidence. Inventory exposes
 `reviewed`, `consumed` and `fixed` facts separately; its `fixed` state applies only
 before consumption, so the consumed filter retains consumed repairs. Fact filters
@@ -207,7 +208,9 @@ Evidence reflects the last tick's target observation and is revalidated each tic
 
 Automatic merged-current repair requires `repair.merged_current.enabled: true`;
 the default is false, independently of the existing repair drain enablement.
-With the flag off, existing published repair records can still earn evidence.
+Receipt-bound repair records are written only when this repair opt-in is on.
+Existing bound records can still earn internal evidence after it is turned off;
+only `queue.project_fixed` controls whether that evidence is projected externally.
 Opt-in enqueue requires a complete receipt containing only critical/major findings;
 minor/trivial/info findings, including mixed receipts, are not automatically repaired
 and cannot earn partial fixed credit. Review state stays `done` when repair fails;
@@ -222,10 +225,23 @@ another repair onto the fix branch: the changed head receives no credit for the
 original receipt. Successful immutable merge metadata is cached; target ancestry
 is refreshed locally. Capture identity is stored as a digest, not a copied manifest.
 
-Upgrade deployed TS consumers to the boolean `fixed` and optional compact
-`remediation` schema before deploying this Python producer or enabling
-`repair.merged_current.enabled`. Existing bound repair records can emit
-`fixed:true` even with the flag off. Pre-PR strict clients reject that response,
-so the default-off flag does not protect old consumers. This PR's strict client
-parses the full remediation object in its queue-client regression test.
-See [queue client rollout and filter semantics](../../../docs/queue-client.md).
+The producer gate `queue.project_fixed` defaults to false and is absent from
+`config.json`. With it off, status and acknowledgement always return `fixed:false` and omit
+`remediation`. Report wire responses retain the legacy chunk-only envelope;
+imported report evidence remains `fixed:false` and never grants remediation
+authority. Inventory retains the pre-PR row shape without reviewed/consumed/fixed
+fact fields and uses exact-state filtering. Its fixed filter matches nothing.
+Receipt-bound remediation evidence is still recorded internally. Receipts always
+retain `remediation: "disabled/deferred"` for compatibility with the existing TS
+receipt schema; pending/fixed merged evidence is tracked in queue state instead.
+
+Turn `queue.project_fixed` on only after TS consumers run a client from this PR or
+later, including `~/repos/cq-toolkit/dist` on triton and every deferred-ledger host.
+The default-off gate keeps the producer compatible with old strict clients during
+rollout; upgrading the producer does not require a consumer-first deploy sequence.
+With projection enabled, `fixed:true` requires bound repair records; those records
+are written only while `repair.merged_current.enabled` is on. Previously bound
+records may still project after the repair opt-in is turned off, but never while
+`queue.project_fixed` is off. This PR retains the widened strict status client and
+tests parsing both the compact remediation object and the Python-produced receipt.
+A blocked status has `fixed:false` and omits `remediation` entirely.

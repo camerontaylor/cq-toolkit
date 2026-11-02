@@ -8,7 +8,11 @@ import {
   sshQueueTransport,
 } from '../../../src/ops/review/internal/queueClient.js';
 import * as queueClient from '../../../src/ops/review/internal/queueClient.js';
-import { readQueueEvidence, sha256 } from '../../../src/ops/review/internal/queueEvidence.js';
+import {
+  parseQueueReceipt,
+  readQueueEvidence,
+  sha256,
+} from '../../../src/ops/review/internal/queueEvidence.js';
 import { FindingsRecordSchema } from '../../../src/ops/review/findings.js';
 import { makeQueueOps } from '../../../src/ops/review/queue.js';
 import { registry } from '../../../src/ops/review/registry.js';
@@ -374,7 +378,10 @@ describe('complete immutable queue result consumption', () => {
       status: 'ok',
       value: { consumed: true, reviewed: true, fixed: false },
     });
-    expect(await readdir(store)).toHaveLength(1);
+    const files = await readdir(store);
+    expect(files).toHaveLength(1);
+    const evidence = await readQueueEvidence(store, files[0]!.replace(/\.json$/, ''));
+    expect(parseQueueReceipt(evidence.document).remediation).toBe('disabled/deferred');
   });
 });
 

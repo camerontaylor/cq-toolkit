@@ -942,7 +942,7 @@ def current_document(item: Dict[str, Any], outcome: str, *, meta=None, cls=None,
             "capture": item["capture"], "outcome": outcome, "classification": cls,
             "counted": bool(cls and cls["counted"]), "findings": findings,
             "run_id": (meta or {}).get("run_id"), "started_at": (meta or {}).get("started_at"),
-            "artifacts": artifacts, "remediation": "pending-merged-evidence", "independent_acceptance": False,
+            "artifacts": artifacts, "remediation": "disabled/deferred", "independent_acceptance": False,
             "cli_functional_acceptance": "pending-D1"}
 
 
@@ -1729,6 +1729,8 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item.setdefault("attempts", []).append({"run_id": r["run_id"], "outcome": cls["outcome"],
                                               "counted": cls["counted"], "receipt_id": item["receipt_id"]})
         item["run"] = None
+        if outcome == "terminal-with-findings":
+            item["remediation_state"] = "pending-merged-evidence"
         if (cls["counted"] and cls["findings"] and not partial
                 and repair_tick.merged_current_enabled(sys.modules[__name__])):
             try:

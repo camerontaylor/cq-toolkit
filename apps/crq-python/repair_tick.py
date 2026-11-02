@@ -381,6 +381,8 @@ def archive_legacy(c, q):
 def reconcile_current_fix(c, item):
     # Revalidate on every tick; a rewritten target must revoke old evidence.
     item.pop('remediation', None)
+    if item.get('remediation_state') == 'fixed':
+        item['remediation_state'] = 'pending-merged-evidence'
     rid = item.get('receipt_id')
     records = [r for r in item.get('repair_runs', {}).values()
                if r.get('receipt_id') == rid and r.get('state') == 'published'
@@ -436,6 +438,7 @@ def reconcile_current_fix(c, item):
                         fix_pr=pr['number'], merge=merge, head=info['headRefOid'], target=target)
         item['remediation'] = evidence
         if review_receipt.remediation_fixed(item, doc, rid):
+            item['remediation_state'] = 'fixed'
             record['merged_fix'] = copy.deepcopy(info)
             return
         item.pop('remediation', None)
@@ -448,6 +451,8 @@ def reconcile_fix_prs(c, q):
                 reconcile_current_fix(c, item)
             except Exception as exc:
                 item.pop('remediation', None)
+                if item.get('remediation_state') == 'fixed':
+                    item['remediation_state'] = 'pending-merged-evidence'
                 item['repair_error'] = str(exc)[:300]
             continue
         if item['kind'] != 'promotion':

@@ -760,6 +760,14 @@ class CurrentTest(unittest.TestCase):
                 repair.assert_not_called()
             return result
 
+    def test_current_receipts_pin_legacy_remediation_literal(self):
+        item = {'id': 'fixture', 'request_id': 'request', 'subject': {}, 'capture': {}}
+        for outcome in ('terminal-clean', 'terminal-with-findings', 'partial-scope', 'no-current-code'):
+            with self.subTest(outcome=outcome):
+                document = crq.current_document(item, outcome)
+                self.assertEqual(document['remediation'], 'disabled/deferred')
+                self.assertNotIn('remediation_state', document)
+
     def test_merged_current_repair_opt_in_and_complete_supported_scope(self):
         for enabled, severities in ((False, ['major']), (True, ['major']),
                                     (True, ['major', 'minor']), (True, ['minor'])):
@@ -873,7 +881,8 @@ class CurrentTest(unittest.TestCase):
         doc = self.document(item)
         self.assertEqual(doc["outcome"], "terminal-with-findings")
         self.assertTrue(doc["counted"])
-        self.assertEqual(doc["remediation"], "pending-merged-evidence")
+        self.assertEqual(doc["remediation"], "disabled/deferred")
+        self.assertEqual(item["remediation_state"], "pending-merged-evidence")
         self.assertEqual(item["cycles"], [])
         manifest = crq.current_report("missed")
         self.assertEqual(manifest, crq.current_report("missed"))
