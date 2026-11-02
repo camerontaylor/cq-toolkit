@@ -310,7 +310,9 @@ def fetch_clone(config):
         except BlockingIOError:
             return 'crq tick holds tick.lock'
         try:
-            fetched = command(['git', 'fetch', '--prune', '--quiet', 'origin'], cwd=config['clone'], timeout=300)
+            # Under tick.lock: stay below the tick's 90 s lock wait so a hung fetch
+            # skips this drain pass instead of making a tick exit.
+            fetched = command(['git', 'fetch', '--prune', '--quiet', 'origin'], cwd=config['clone'], timeout=60)
             return 'clone fetch failed: ' + fetched.stderr.strip() if fetched.returncode else None
         except Exception as exc:  # timeout: command() already killed its process group
             return 'clone fetch failed: ' + str(exc)
