@@ -219,6 +219,13 @@ States are `missing`, `pending`, `reviewed`, `reused`, `no-current-code`,
 `partial-scope`, `consumed`, `fixed`, or `blocked` (with bounded typed `reason`).
 `fixed` requires complete receipt-bound merged repair evidence. Pending includes
 work currently reviewing.
+Filters have OR semantics: a row matches its exact `state` or any requested true
+`reviewed`, `consumed` or `fixed` fact. In particular, `states:["reviewed"]` also
+returns reused, consumed and fixed rows with review credit. `states:["fixed"]`
+includes consumed repairs; `states:["consumed"]` includes repairs that are fixed.
+Other state names match only the exact row state. These filters overlap; they are
+not disjoint lifecycle buckets. The cursor digest and proof use this same selected
+set, so these semantics do not change paging or proof verification.
 Set `states:["pending","blocked"]` for the outstanding summary; null includes
 everything. Known PRs without a visible mapped request remain `missing`.
 Requests owned by another principal reveal neither IDs nor status; missing
@@ -305,9 +312,22 @@ minor/trivial/info findings, including mixed receipts, are not automatically rep
 and cannot earn partial fixed credit. Review state stays `done` when repair fails;
 repair outcomes and errors are recorded separately.
 
-Forge lookups share the tick's existing aggregate ForgeBudget. Closed-unmerged PRs
+Forge lookups share the tick's existing aggregate ForgeBudget, including its
+30-second allowance, with recovery and discovery. Busy ticks can exhaust it before
+fix-PR polling, delaying new remediation evidence until a later tick. This fails
+safe: deferred or unavailable evidence earns no fresh fixed credit. Closed-unmerged PRs
 and merged PRs whose head differs from the prepared publication are terminal
 not-fixed observations, not polled again. This also applies if crq itself pushes
 another repair onto the fix branch: the changed head receives no credit for the
 original receipt. Successful immutable merge metadata is cached; target ancestry
 is refreshed locally. Capture identity is stored as a digest, not a copied manifest.
+
+Deployment order: upgrade deployed TS queue consumers to this PR's boolean `fixed`
+and optional compact `remediation` schema before deploying the Python producer,
+and before turning on `repair.merged_current.enabled`. The flag controls enqueue,
+not evidence projection: existing repair records can emit `fixed:true` with the
+flag off. Pre-PR strict clients (`fixed: z.literal(false)`, no remediation field)
+reject those statuses, so leaving the flag off is not a compatibility safeguard.
+The strict client in this PR accepts the full remediation object; the queue-client
+parseStatus test covers it. Older deployed clients must be upgraded first.
+A blocked status has `fixed:false` and omits `remediation` entirely.

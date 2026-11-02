@@ -2,6 +2,11 @@
 
 No reviewer starts, credentials, shell commands or author-grant mutations.
 Runner owns tick lock/load/save; Q1 owns immutable receipt storage.
+Inventory state filters use OR semantics: an exact row state matches, as does
+any requested true reviewed/consumed/fixed fact. Thus reviewed includes reused,
+consumed and fixed rows with review credit; fixed includes consumed repairs.
+Other names match only the row state. Filtering, cursor digest and proof all use
+the same selected rows; these are fact filters, not disjoint lifecycle buckets.
 """
 import base64
 import contextlib
@@ -654,6 +659,7 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
         if entry.get("reason") is not None:
             persisted = _status(q, rid, entry)
             result.update(state="blocked", reviewed=False, fixed=False, reason=persisted["reason"])
+            result.pop("remediation", None)
             if op in {"report", "ack"}:
                 raise ValueError("source revalidation required before receipt consumption")
         elif receipt_id and result["state"] == "blocked" and document.get("outcome") == "blocked-secret-scan":

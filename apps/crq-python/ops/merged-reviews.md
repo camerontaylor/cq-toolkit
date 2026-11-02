@@ -213,9 +213,19 @@ minor/trivial/info findings, including mixed receipts, are not automatically rep
 and cannot earn partial fixed credit. Review state stays `done` when repair fails;
 repair outcomes and errors are recorded separately.
 
-Forge lookups share the tick's existing aggregate ForgeBudget. Closed-unmerged PRs
+Forge lookups share the tick's existing aggregate ForgeBudget and its 30-second
+allowance with recovery/discovery. Busy ticks can defer fix-PR polling until a
+later tick; this fails safe without granting fresh fixed credit. Closed-unmerged PRs
 and merged PRs whose head differs from the prepared publication are terminal
 not-fixed observations, not polled again. This also applies if crq itself pushes
 another repair onto the fix branch: the changed head receives no credit for the
 original receipt. Successful immutable merge metadata is cached; target ancestry
 is refreshed locally. Capture identity is stored as a digest, not a copied manifest.
+
+Upgrade deployed TS consumers to the boolean `fixed` and optional compact
+`remediation` schema before deploying this Python producer or enabling
+`repair.merged_current.enabled`. Existing bound repair records can emit
+`fixed:true` even with the flag off. Pre-PR strict clients reject that response,
+so the default-off flag does not protect old consumers. This PR's strict client
+parses the full remediation object in its queue-client regression test.
+See [queue client rollout and filter semantics](../../../docs/queue-client.md).

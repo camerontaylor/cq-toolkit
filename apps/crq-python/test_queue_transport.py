@@ -339,6 +339,14 @@ class QueueTransportTests(unittest.TestCase):
         self.assertTrue(row["fixed"] and row["consumed"] and row["reviewed"])
         self.assertEqual(self.inventory_call(states=["fixed"])["entries"][0]["state"], "consumed")
         self.assertEqual(self.call("status")["remediation"]["captureDigest"], receipts.digest({}))
+        self.q["queue_client_requests"][self.request_id]["reason"] = {
+            "source": "queue", "category": "identity", "code": "forge-identity"}
+        blocked = self.call("status")
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertFalse(blocked["fixed"])
+        self.assertNotIn("remediation", blocked)
+        self.q["queue_client_requests"][self.request_id].pop("reason")
+        self.assertTrue(self.call("status")["fixed"])
         self.q["items"][0]["remediation"]["receipt_id"] = "0" * 64
         self.assertFalse(self.call("status")["fixed"])
         self.assertEqual(self.inventory_call(states=["fixed"])["entries"], [])

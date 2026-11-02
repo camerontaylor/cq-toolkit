@@ -26,7 +26,19 @@ import {
 test('parseStatus accepts independent fixed evidence without replacing the receipt outcome', async () => {
   const f = fixture(false, true);
   const status = await makeQueueClient(f.transport).status(ref);
-  expect(status).toMatchObject({ state: 'terminal-with-findings', fixed: true, consumed: false });
+  expect(status).toMatchObject({
+    state: 'terminal-with-findings',
+    fixed: true,
+    consumed: false,
+    remediation: {
+      receiptId: f.receiptId,
+      captureDigest: 'd'.repeat(64),
+      fixPr: 99,
+      mergeSha: 'e'.repeat(40),
+      headSha: 'f'.repeat(40),
+      targetSha: 'a'.repeat(40),
+    },
+  });
 });
 
 describe('queue pre-PR binding', () => {
@@ -165,6 +177,18 @@ function fixture(clean = false, fixed = false) {
     consumed: false,
     reviewed: true,
     fixed,
+    ...(fixed
+      ? {
+          remediation: {
+            receiptId,
+            captureDigest: 'd'.repeat(64),
+            fixPr: 99,
+            mergeSha: 'e'.repeat(40),
+            headSha: 'f'.repeat(40),
+            targetSha: 'a'.repeat(40),
+          },
+        }
+      : {}),
   };
   const common = {
     version: 1,
