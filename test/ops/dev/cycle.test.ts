@@ -1648,69 +1648,6 @@ describe('dev.cycle', () => {
     expect(result.status).toBe('failed');
     if (result.status === 'failed') expect(result.error).toContain('invalid input');
   });
-});
-
-describe('followUpCommand and renderFindingsSection', () => {
-  test('the follow-up command spells the PR-side address source', () => {
-    expect(followUpCommand(7, '/repo')).toBe("cq review.address --repoRoot='/repo' --source=pr:7");
-  });
-
-  test('the findings section is markdown-safe and carries every attempt', () => {
-    const state = {
-      branch: 'feature/x',
-      head: 'a'.repeat(40),
-      base: 'b'.repeat(40),
-    } as WorkState;
-    const finding = {
-      id: 'c001|x',
-      source: 'agent',
-      file: 'src/a|b.ts',
-      severity: 'major',
-      text: 'has `backticks` and <script>',
-      status: 'open' as const,
-    };
-    const report = addressReport(
-      state,
-      [finding],
-      [
-        {
-          finding: 'c001|x',
-          tier: 'rescue',
-          attempt: 2,
-          invocation: 'feedback',
-          reason: 'the fix did not compile',
-          model: { provider: 'fixture', model: 'rescue|m' },
-          observedHead: state.head,
-          wallMs: 1200,
-        },
-      ],
-    );
-    const section = renderFindingsSection(report);
-    expect(section.startsWith(DEV_FINDINGS_SECTION_MARKER)).toBe(true);
-    expect(section).toContain('<!-- /cq:dev-findings -->');
-    // mdLine: pipes escape even inside code spans; mdSafe rewrites backticks
-    // to typographic apostrophes and strips angle brackets.
-    expect(section).toContain('`c001\\|x`');
-    expect(section).toContain('src/a\\|b.ts');
-    expect(section).toContain('’backticks’');
-    // mdSafe strips angle brackets entirely: '<script>' → 'script'.
-    expect(section).toContain('and script');
-    expect(section).not.toContain('<script>');
-    expect(section).toContain('rescue/feedback #2');
-    expect(section).toContain('1200ms');
-  });
-
-  test('an empty attempt log renders the explicit none-note', () => {
-    const state = {
-      branch: 'feature/x',
-      head: 'a'.repeat(40),
-      base: 'b'.repeat(40),
-    } as WorkState;
-    const section = renderFindingsSection(addressReport(state, [], []));
-    expect(section).toContain('(no attempts were dispatched)');
-    expect(section).toContain('(none)');
-  });
-
   // ---- M7-cycle: retain exit spend -------------------------------------
   // The cycle meters its drivers (meterDrivers feeds the ONE run budget), and
   // the usage ledger closes at EVERY exit with settled usage preserved once:
@@ -1721,11 +1658,6 @@ describe('followUpCommand and renderFindingsSection', () => {
   // explicit through unknownCount/unpricedCount. The summary is the ledger's
   // per-dispatch fold, so parent totals never double count child usage.
 
-  /**
-   * A driver whose first dispatch settles an explicitly measured reading and
-   * whose later dispatches return NO usage at all (an unmeasured
-   * cancellation-style settle): one known observation plus explicit unknowns.
-   */
   /**
    * A driver that settles ONE explicitly measured review dispatch: session
    * mode plans a single session, so a cycle's known aggregate is this one
@@ -1777,7 +1709,11 @@ describe('followUpCommand and renderFindingsSection', () => {
     unpricedCount: 1,
   };
 
-  /** The cq.json the default review leg needs (the agent-review fixture). */
+  /**
+   * The cq.json the default review leg needs (the agent-review fixture):
+   * session mode plans ONE dispatch, so a cycle's known aggregate is the
+   * single measured observation the M7 drivers settle.
+   */
   async function seedM7Budget(): Promise<void> {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-cycle' }));
     await repo.write(
@@ -1903,11 +1839,180 @@ describe('followUpCommand and renderFindingsSection', () => {
     expect(result.reason).toContain('address exploded');
     expect(fault).toHaveProperty('marker', 'original fault');
     // Only the review leg dispatched once: its measured usage folds once.
-    expect(result.report?.usageSummary).toEqual({
-      usage: { input: 100, output: 50, cacheRead: 10, cacheWrite: 0 },
-      knownCount: 1,
-      unknownCount: 0,
-      unpricedCount: 1,
+    expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+  });
+
+  test('M7-cycle exhaustion evidence', async () => {
+    await seedM7Budget();
+    // A one-dispatch token budget: the measured review dispatch spends it
+    // exactly, so the address leg's remainder is <= 0 and the cycle exits
+    // budget-exhausted AFTER settled usage exists.
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        budgets: { run: { maxTokens: 160, wallMs: 3_600_000 } },
+        review: { reviewers: ['agent'] },
+      }),
+    );
+    repo.commitAll('M7 exhaustion fixture');
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    const op = makeDevCycle({
+      effects: effects(),
+      check: greenCheck(),
+      drivers: measuredDriver(),
+      address: async () => {
+        throw new Error('address must not run after token exhaustion');
+      },
     });
+    const result: OpResult<unknown> & {
+      report?: { usageSummary?: unknown };
+    } = await op({ repoRoot: repo.root });
+    // The typed exhaustion carries the settled summary once: the spent
+    // dispatch is KNOWN (its measured declaration), never dropped.
+    expect(result, JSON.stringify(result)).toMatchObject({ status: 'budget-exhausted' });
+    expect(result.report?.usageSummary).toEqual(MEASURED_SUMMARY);
+  });
+
+  test('M7-cycle cancellation evidence', async () => {
+    // An in-flight dispatch the wall cancels: the driver never settles, so
+    // the cycle's close records it ONCE as unknown through the pending drain.
+    const never = {
+      resolve: () => {
+        return {
+          lane: 'ai-sdk' as const,
+          modelSpec: { provider: 'mock', model: 'mock' },
+          driver: {
+            run: async (): Promise<WorkerResult> => {
+              console.log('RUN at', Date.now() % 100000);
+              return new Promise((_resolve, reject) => {
+                // Outlives the wall budget on purpose: the pending drain at
+                // close (not this handler) is what the test exercises.
+                setTimeout(() => reject(new Error('driver outlived the wall')), 30_000);
+              });
+            },
+          },
+        };
+      },
+    } as unknown as DriverFactory;
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-cycle' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        roles: { reviewer: { provider: 'mock', model: 'mock' } },
+        // Tokens are ample; the WALL is what cancels mid-dispatch. Search is
+        // off so the driver's rg probe never consumes the tight wall before
+        // the dispatch itself starts.
+        budgets: { run: { maxTokens: 10_000, wallMs: 4_000 } },
+        review: { reviewers: ['agent'], searchTools: false },
+      }),
+    );
+    repo.commitAll('M7 cancellation fixture');
+    const state = await seed(repo);
+    await seedReadyLedger(state);
+    // CI's coverage runner has no gitleaks binary: bind the SAME hermetic
+    // scanner fixture the other agent-leg tests use so the pre-upload scan is
+    // clean and the wall is spent by the dispatch, not the scan.
+    const scanner = await makeGitleaksFixture();
+    vi.stubEnv('PATH', scanner.path);
+    try {
+      const op = makeDevCycle({
+        effects: repoEffects(repo, (command) =>
+          command === 'coderabbit'
+            ? {
+                exitCode: 0,
+                stdout: `${JSON.stringify({ type: 'complete', status: 'review_completed' })}\n`,
+                stderr: '',
+                timedOut: false,
+              }
+            : undefined,
+        ),
+        check: greenCheck(),
+        drivers: never,
+      });
+      const result: OpResult<unknown> & {
+        report?: { usageSummary?: unknown };
+      } = await op({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status !== 'needs-human') return;
+      expect(result.reason).toContain('dev.cycle (review.run)');
+      // Partial/absent observed usage stays EXPLICIT: the cancelled dispatch
+      // contributes unknownCount 1, never a zero aggregate.
+      expect(result.report?.usageSummary).toEqual({
+        knownCount: 0,
+        unknownCount: 1,
+        unpricedCount: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(scanner.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('followUpCommand and renderFindingsSection', () => {
+  test('the follow-up command spells the PR-side address source', () => {
+    expect(followUpCommand(7, '/repo')).toBe("cq review.address --repoRoot='/repo' --source=pr:7");
+  });
+
+  test('the findings section is markdown-safe and carries every attempt', () => {
+    const state = {
+      branch: 'feature/x',
+      head: 'a'.repeat(40),
+      base: 'b'.repeat(40),
+    } as WorkState;
+    const finding = {
+      id: 'c001|x',
+      source: 'agent',
+      file: 'src/a|b.ts',
+      severity: 'major',
+      text: 'has `backticks` and <script>',
+      status: 'open' as const,
+    };
+    const report = addressReport(
+      state,
+      [finding],
+      [
+        {
+          finding: 'c001|x',
+          tier: 'rescue',
+          attempt: 2,
+          invocation: 'feedback',
+          reason: 'the fix did not compile',
+          model: { provider: 'fixture', model: 'rescue|m' },
+          observedHead: state.head,
+          wallMs: 1200,
+        },
+      ],
+    );
+    const section = renderFindingsSection(report);
+    expect(section.startsWith(DEV_FINDINGS_SECTION_MARKER)).toBe(true);
+    expect(section).toContain('<!-- /cq:dev-findings -->');
+    // mdLine: pipes escape even inside code spans; mdSafe rewrites backticks
+    // to typographic apostrophes and strips angle brackets.
+    expect(section).toContain('`c001\\|x`');
+    expect(section).toContain('src/a\\|b.ts');
+    expect(section).toContain('’backticks’');
+    // mdSafe strips angle brackets entirely: '<script>' → 'script'.
+    expect(section).toContain('and script');
+    expect(section).not.toContain('<script>');
+    expect(section).toContain('rescue/feedback #2');
+    expect(section).toContain('1200ms');
+  });
+
+  test('an empty attempt log renders the explicit none-note', () => {
+    const state = {
+      branch: 'feature/x',
+      head: 'a'.repeat(40),
+      base: 'b'.repeat(40),
+    } as WorkState;
+    const section = renderFindingsSection(addressReport(state, [], []));
+    expect(section).toContain('(no attempts were dispatched)');
+    expect(section).toContain('(none)');
   });
 });
