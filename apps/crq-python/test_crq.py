@@ -1661,14 +1661,20 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.assertEqual(self.q["merged_watermark"], self.BEFORE)
 
     def test_budget_exhaustion_is_not_transport_failure(self):
-        self.forge.side_effect = crq.deferred_refresh.RefreshExhausted("exhausted")
-        crq.discover_merged(self.q, crq.ForgeBudget(),
-            interval={"after": self.AFTER, "before": self.BEFORE}, recent=True)
-        summary = self.q["merged_reconcile"]
-        self.assertEqual(summary["reason"], "budget-exhausted")
-        self.assertEqual(summary["transient_failures"], 0)
-        self.assertFalse(summary["complete"])
-        self.assertEqual(self.q["merged_watermark"], self.AFTER)
+        for failure, reason, failures in (
+                (crq.deferred_refresh.RefreshExhausted("exhausted"), "budget-exhausted", 0),
+                (OSError("unavailable"), "transport-failure", 1)):
+            with self.subTest(reason=reason):
+                self.reset_case()
+                self.forge.side_effect = failure
+                log = crq.discover_merged(self.q, crq.ForgeBudget(),
+                    interval={"after": self.AFTER, "before": self.BEFORE}, recent=True)
+                summary = self.q["merged_reconcile"]
+                self.assertEqual(summary["reason"], reason)
+                self.assertEqual(summary["transient_failures"], failures)
+                self.assertFalse(summary["complete"])
+                self.assertEqual(self.q["merged_watermark"], self.AFTER)
+                self.assertIn("reason=" + reason, log[0])
 
     def reset_case(self, count=1):
         self.count = count

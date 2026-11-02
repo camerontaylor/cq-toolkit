@@ -1204,7 +1204,8 @@ def discover_merged(q, budget, *, interval=None, recent=False):
             _save_discovery_queue(q, "watermark-save")
         caller.clear()
         caller.update(q)
-        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"]
+        return [f"merged discovery: complete={result['complete']} represented={result['represented']}"
+                + (f" reason={result['reason']}" if result.get("reason") else "")]
     except (merged_reconcile.ReconcileRefused, merged_reconcile.PageFailed) as exc:
         q["merged_discovery"]["error"] = str(exc)[:200]
         q["merged_discovery"]["reason"] = exc.reason if isinstance(exc, merged_reconcile.PageFailed) else "reconcile-refused"
