@@ -121,6 +121,9 @@ test('changed head before dispatch refuses and never invokes the address engine'
     address,
   })({ ...input, pulls: [1] });
   expect(address).not.toHaveBeenCalled();
+  // A leg refused before dispatch provably spent nothing: its BUDGET
+  // settlement is measured zero, so the ledger stays clean and the aggregate
+  // is needs-human, never a spurious budget-exhausted flip.
   expect(result.status).toBe('needs-human');
   expect(result.report?.rows[0]?.status).toBe('settled-needs-human');
 });
@@ -535,7 +538,10 @@ test('a throwing settlement waits for siblings and preserves their individual re
   })({ ...input, concurrency: 2 });
   expect(result.report?.rows).toHaveLength(2);
   expect(result.report?.rows.every((row) => row.result?.status === 'ok')).toBe(true);
-  expect(result.report?.reasons.join(';')).toContain('Worker rejected');
+  // The thrown settlement is now settled as unknown with a named fault, so
+  // both rows survive with their individual results and no worker is lost.
+  expect(result.report?.reasons.join(';')).toContain('settlement threw and was settled as unknown');
+  expect(result.report?.accounting.stop).toBe('overrun');
 });
 
 test('an ineligible enrolled PR remains advisory while eligible siblings dispatch', async () => {
@@ -561,7 +567,7 @@ test('an ineligible enrolled PR remains advisory while eligible siblings dispatc
   expect(address).toHaveBeenCalledTimes(1);
 });
 
-test('skipped rows name the real worker rejection and held allocation', async () => {
+test('skipped rows name the settlement fault and held allocation', async () => {
   const address = vi.fn(async () => ({
     status: 'ok' as const,
     value: {
@@ -576,10 +582,10 @@ test('skipped rows name the real worker rejection and held allocation', async ()
     isolate: async (root) => root,
   })({ ...input, pulls: [1, 2, 3], concurrency: 2 });
   expect(result.report?.rows).toHaveLength(3);
-  // The sticky overrun is an explicit budget refusal, not a generic missing worker result.
+  // The sticky stop is an explicit budget refusal, not a generic missing worker result.
   expect(result.report?.rows[2]?.reason).toBe('budget');
-  expect(result.report?.rows[2]?.detail).toContain('Worker rejected');
-  expect(result.report?.reasons.join(';')).toContain('Worker rejected');
+  expect(result.report?.rows[2]?.detail).toContain('Runtime faults');
+  expect(result.report?.reasons.join(';')).toContain('settlement threw and was settled as unknown');
 });
 
 test('aggregate reports the preserved isolation path for each leg', async () => {
@@ -733,7 +739,7 @@ test('M7-many exhaustion evidence', async () => {
   expect(result.report?.accounting.observedTokens).toBe(80);
 });
 
-test('M7-many failure evidence', async () => {
+test('M7-many failed-result evidence', async () => {
   // The first leg settles with a definitive NON-THROWN failure and its OWN
   // measured usage; the second succeeds: the failed leg's spend is retained
   // exactly once beside the successful sibling's, and parent totals do not
@@ -797,9 +803,11 @@ test('M7-many cancellation evidence', async () => {
 });
 
 test('M7-many malformed evidence degrades to unknown without losing settlement', async () => {
-  // A malformed usage measurement never throws out of the leg: settlement
-  // still lands (held reservation released) and the observation degrades to
-  // explicit unknown instead of losing the dispatch.
+  // A malformed usage measurement is unmeasurable telemetry: it settles
+  // through the unknown-usage path, so the held reservations actually release
+  // (marked unresolved), the sticky unknown-usage stop is set, the aggregate
+  // never spuriously reports settled-ok accounting, and the observation
+  // degrades to explicit unknown instead of throwing out of the leg.
   const badUsage = report();
   (badUsage.usage as unknown as { input: number }).input = -5;
   const address = vi.fn(async () => ({ status: 'ok' as const, value: badUsage }));
@@ -811,9 +819,71 @@ test('M7-many malformed evidence degrades to unknown without losing settlement',
   })(input);
   expect(result.report?.usageSummary).toEqual({
     knownCount: 0,
-    unknownCount: 2,
-    unpricedCount: 2,
+    unknownCount: 1,
+    unpricedCount: 1,
   });
+  // The malformed leg's reservation is retained in outstanding marked
+  // unresolved at its full allocation (the pure planner's carrier: an
+  // unpriceable hold is visible, never refunded and never dropped), the
+  // ledger is stopped, and no raw -5 token total ever folded in.
+  expect(result.report?.accounting).toEqual({
+    limitTokens: 100,
+    observedTokens: 0,
+    heldTokens: 50,
+    unresolved: ['1'],
+    stop: 'unknown-usage',
+  });
+});
+
+test('M7-many post-dispatch exit retains the envelope through a thrown settlement', async () => {
+  // Leg 1 settles with measured usage; leg 2's settlement arithmetic leaves
+  // the safe integer range and throws. The guard settles it as unknown with
+  // a named fault, and the post-dispatch budget-exhausted exit still carries
+  // leg 1's retained spend on its report envelope — nothing is lost.
+  let calls = 0;
+  const address = vi.fn(async () =>
+    ++calls === 1
+      ? { status: 'ok' as const, value: report() }
+      : {
+          status: 'ok' as const,
+          value: {
+            ...report(),
+            usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        },
+  );
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.status).toBe('budget-exhausted');
+  // Leg 1's measured spend and leg 2's normalized (safe) measurement are both
+  // retained; the fold clamps at the safe bound (float rounding makes the
+  // saturated sum land one below the literal maximum, which is still >= each
+  // individual measurement and far above any real spend).
+  expect(result.report?.usageSummary.usage?.input).toBeGreaterThan(Number.MAX_SAFE_INTEGER - 100);
+  expect(result.report?.reasons.join(';')).toContain('settlement threw and was settled as unknown');
+});
+
+test('M7-many clamp saturation at the safe integer bound', async () => {
+  // A leg at MAX_SAFE_INTEGER plus a sibling saturates the summary fold at
+  // the bound instead of silently wrapping to a plausible wrong number.
+  const address = vi.fn(async () => ({
+    status: 'ok' as const,
+    value: {
+      ...report(),
+      usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  }));
+  const result = await makeReviewAddressMany({
+    coordinationRoot: '/unused-test-coordination',
+    isolate: async (root) => root,
+    gh,
+    address,
+  })(input);
+  expect(result.report?.usageSummary.usage?.input).toBe(Number.MAX_SAFE_INTEGER);
 });
 
 test('M7-many report-less refusal carries a top-level usage summary', async () => {

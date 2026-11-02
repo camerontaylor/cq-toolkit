@@ -162,12 +162,15 @@ export async function isolateAddressMany(
 }
 /**
  * Retain exit spend across every terminal result that carries a report, plus
- * `ok`. Each admitted leg's settled usage is recorded once (known from its
- * report, unknown when the leg was dispatched without a measurement, measured
- * zero when it never dispatched), and the folded summary is attached to that
- * result, so failure, budget exhaustion and thrown legs never lose the spend
- * they already paid for. A report-less refusal exits before any dispatch: no
- * spend exists, and there is no report to extend.
+ * `ok`. Each admitted leg's settled usage is recorded exactly once: a valid,
+ * normalized measurement (with derived cost when priced) from its report, or
+ * an explicit unknown observation whenever the leg has no valid measurement —
+ * including a dispatched leg whose report omitted usage, a leg that settled
+ * without dispatching, and a malformed measurement. Not-admitted legs are
+ * never recorded. The folded summary is attached to that result, so failure,
+ * budget exhaustion, thrown and unknown legs never lose spend already paid;
+ * a report-less refusal exits before any dispatch and carries the summary on
+ * the I1 top-level envelope instead.
  */
 export function makeReviewAddressMany(
   deps: {
@@ -497,24 +500,30 @@ function makeReviewAddressManyCore(
           }
           const report = result?.status === 'ok' ? result.value : result?.report;
           const usage = report?.usage;
+          // A measurement only counts as KNOWN when it survives normalization;
+          // a malformed one (negative or non-integer tokens) is unmeasurable
+          // telemetry, so the leg settles through the SAME unknown-usage path
+          // as a dispatched leg without a measurement. The held reservation
+          // actually releases (marked unresolved), the sticky unknown-usage
+          // stop is set, and the raw value can never leak into the ledger as
+          // a token total.
+          const observation = usage
+            ? normalizeUsageObservation({
+                usage,
+                ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
+              })
+            : undefined;
+          const known = observation?.usage !== undefined && usage !== undefined;
           // Exit spend is recorded EXACTLY ONCE per admitted leg, at its
-          // settlement point: measured usage (and derived cost, when priced)
-          // when the settled report carried a measurement, an explicit unknown
-          // observation otherwise. A leg that settled without dispatching is
-          // also unknown: it is not an invocation, so counting it as measured
-          // zero would inflate knownCount. Not-admitted legs are never
-          // recorded, so a refusal cannot invent spend. A telemetry failure
-          // degrades to unknown and never replaces the leg's settlement.
+          // settlement point: the normalized observation when the settled
+          // report carried a valid measurement, an explicit unknown observation
+          // otherwise. A leg that settled without dispatching is also unknown:
+          // it is not an invocation, so counting it as measured zero would
+          // inflate knownCount. Not-admitted legs are never recorded, so a
+          // refusal cannot invent spend. A telemetry failure degrades to
+          // unknown and never replaces the leg's settlement.
           try {
-            record(
-              identity.id,
-              usage
-                ? normalizeUsageObservation({
-                    usage,
-                    ...(report?.costUSD === undefined ? {} : { costUSD: report.costUSD }),
-                  })
-                : {},
-            );
+            record(identity.id, observation ?? {});
           } catch {
             try {
               record(identity.id, {});
@@ -522,17 +531,35 @@ function makeReviewAddressManyCore(
               // The dispatch was already recorded; retain the first observation.
             }
           }
-          const settled = usage
-            ? settleAddressMany(budget, {
-                ...identity,
-                usage: {
-                  kind: 'known',
-                  tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
-                },
-              })
-            : dispatched
-              ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
-              : settleAddressMany(budget, { ...identity, usage: { kind: 'known', tokens: 0 } });
+          // A thrown settlement (ledger arithmetic leaving the safe range) is
+          // folded into the same unknown-usage settlement path: the held
+          // reservation releases as unresolved, the sticky stop is set, and
+          // the fault is named — the leg can never skip settlement, and the
+          // aggregate can never spuriously flip on a held allocation.
+          let settled: ReturnType<typeof settleAddressMany>;
+          try {
+            settled = known
+              ? settleAddressMany(budget, {
+                  ...identity,
+                  usage: {
+                    kind: 'known',
+                    tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+                  },
+                })
+              : dispatched
+                ? settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } })
+                : // A leg refused before dispatch provably spent nothing through
+                  // the provider, so its BUDGET settlement is measured zero (the
+                  // ledger stays clean, needs-human stays needs-human); its
+                  // ledger OBSERVATION above stays explicit unknown because a
+                  // non-dispatch is not an invocation.
+                  settleAddressMany(budget, { ...identity, usage: { kind: 'known', tokens: 0 } });
+          } catch (error) {
+            settled = settleAddressMany(budget, { ...identity, usage: { kind: 'unknown' } });
+            faults.push(
+              `PR #${candidate.number} settlement threw and was settled as unknown: ${String(error)}`,
+            );
+          }
           budget = settled.state;
           if (settled.kind === 'refused')
             faults.push(`PR #${candidate.number} settlement refused: ${JSON.stringify(settled)}`);
