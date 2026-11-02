@@ -1814,7 +1814,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                     before=self.BEFORE, page_budget=budget)
 
     def discover(self, q=None):
-        return crq.discover_merged(self.q if q is None else q, crq.ForgeBudget())
+        return crq.discover_merged(self.q if q is None else q, crq.ForgeBudget(),
+                                   interval={"after": self.AFTER, "before": self.BEFORE})
 
     @contextlib.contextmanager
     def fault(self, *, stage=None, wrapper_write=None, post=False):
@@ -1942,7 +1943,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                         effects["refresh_deferred"].side_effect = (
                                             lambda *a, **k: order.append("refresh") or [])
                                         crq.tick()
-                                        self.assertEqual(order[:3], ["refresh", "bounds-save", "refusal-debt-save"])
+                                        # Identical frozen bounds are already durable; no rewrite.
+                                        self.assertEqual(order[:2], ["refresh", "refusal-debt-save"])
                                         for name in ("harvest_review", "harvest", "enroll",
                                                       "read_slot_usage", "admit_available",
                                                      "write_status", "write_heartbeat"):
@@ -1958,7 +1960,7 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                                             if name != "refresh_deferred":
                                                 effect.assert_not_called()
                                         self.assertEqual([event[1] for event in events],
-                                                         ["bounds-save", "refusal-debt-save"])
+                                                         ["refusal-debt-save"])
                             # Shared parser restored before persisted reloads or digest checks.
                             self.assertIs(json.loads, original_loads)
                             self.assertEqual(len(encounters), attempt + 1)
@@ -2005,6 +2007,34 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
         self.put_wrapper(value)
         with self.assertRaises(crq.merged_reconcile.ReconcileRefused):
             self.manual(saved)
+
+    def test_completed_interval_rerun_never_persists_incomplete_or_bumps_health(self):
+        self.assertIn("complete=True", self.discover()[0])
+        persisted = []
+        save = crq._save_discovery_queue
+
+        def record(q, stage):
+            persisted.append((stage, copy.deepcopy(q["merged_discovery"])))
+            return save(q, stage)
+
+        def health():
+            with mock.patch.object(crq.client_health, "advisory"), \
+                    mock.patch.object(crq.client_health, "checkout_sha", return_value="a" * 40):
+                crq.client_health.record(crq, self.q, discovery_enabled=True)
+            return self.q["client_health"]["incomplete_ticks"]
+
+        with mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
+            self.assertIn("complete=True", self.discover()[0])
+        self.assertNotIn("bounds-save", [stage for stage, _ in persisted])
+        self.assertTrue(persisted)
+        self.assertTrue(all(value["complete"] is True for _, value in persisted))
+        self.assertTrue(crq.load_queue()["merged_discovery"]["complete"])
+        self.assertEqual(health(), 0)
+        # A genuine refusal of the same completed bounds still reports incomplete.
+        self.path.write_bytes(b"{")
+        self.assertIn("incomplete", self.discover()[0])
+        self.assertFalse(crq.load_queue()["merged_discovery"]["complete"])
+        self.assertEqual(health(), 1)
 
     def test_wrapper_read_io_aborts_without_mutating_caller(self):
         read = Path.read_text
@@ -2130,7 +2160,8 @@ class DiscoveryFailureBoundaryTest(unittest.TestCase):
                 mock.patch.object(crq, "_save_discovery_queue", side_effect=record):
             effects["refresh_deferred"].side_effect = lambda *a, **k: order.append("refresh") or []
             crq.tick()
-            self.assertEqual(order[:3], ["refresh", "bounds-save", "refusal-debt-save"])
+            # Identical frozen bounds are already durable; no rewrite.
+            self.assertEqual(order[:2], ["refresh", "refusal-debt-save"])
             for name in ("harvest_review", "harvest", "enroll",
                          "read_slot_usage", "admit_available", "write_status", "write_heartbeat"):
                 effects[name].assert_called_once()
