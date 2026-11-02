@@ -977,11 +977,98 @@ class QueueTransportTests(unittest.TestCase):
                     attempts=[{"run_id": "run-1", "receipt_id": receipt, "counted": False}])
         self.runner.read_pidfile = lambda path: {"pid": 123}
         self.runner.RUNS = Path(self.tmp.name)
-        (self.runner.RUNS / "run-1").mkdir()
+        (self.runner.RUNS / "run-1").mkdir(exist_ok=True)
         (self.runner.RUNS / "run-1" / "exit.json").write_text('{"exit":1}')
         self.runner.run_liveness = lambda *args: "harvest"
         self.policy["transient_retries"] = [{"principal": "developer", "requestId": "request-1", "binding": self.b}]
         return receipt
+
+    def failed_attempt(self, events, exit_code):
+        self.q = {"items": []}
+        self.retry_fixture()
+        stream = Path(self.tmp.name) / "fixture.ndjson"
+        stream.write_text(events)
+        cls = crq.classify(stream, exit_code)
+        item = self.q["items"][0]
+        doc = {"source": item["subject"], "outcome": cls["outcome"], "counted": cls["counted"], "classification": cls}
+        receipt = receipts.write_receipt(self.tmp.name, doc)
+        item["receipt_id"] = receipt
+        item["attempts"][-1]["receipt_id"] = receipt
+        return receipt, doc
+
+    def test_typed_transient_attempts_and_permanent_refusals(self):
+        cases = [
+            ('{"type":"error","errorType":"network_error","recoverable":true}', 1, True),
+            ('{"type":"error","errorType":"transport_error","recoverable":true}', 1, True),
+            ('', 124, True), ('', -9, True), ('', 137, True), ('', -15, True),
+            ('{"type":"error","errorType":"permanent","recoverable":false}', 1, False),
+            ('{"type":"error","errorType":"blocked-secret-scan","recoverable":true}', 1, False),
+            ('not json', 124, False),
+            ('{"type":"error","errorType":"network_error","recoverable":"true"}', 1, False),
+            ('{"type":"error","errorType":"network_error","recoverable":false}', 1, False),
+            ('', None, False), ('', True, False),
+        ]
+        for stream, exit_code, accepted in cases:
+            with self.subTest(stream=stream, exit=exit_code):
+                receipt, doc = self.failed_attempt(stream, exit_code)
+                before = copy.deepcopy(self.q)
+                result = self.call("retry", expectedReceiptId=receipt)
+                self.assertEqual(result["accepted"], accepted)
+                if not accepted:
+                    self.assertEqual(self.q, before)
+
+    def test_retry_type_proof_is_required_even_for_transient_exit(self):
+        for field, value in [("retry_transient", None), ("bad_lines", True), ("exit", True),
+                             ("counted", 0), ("retry_transient", {"version": True, "category": "timeout"})]:
+            with self.subTest(field=field, value=value):
+                receipt, doc = self.failed_attempt('', 124)
+                doc["classification"][field] = value
+                receipt = receipts.write_receipt(self.tmp.name, doc)
+                item = self.q["items"][0]
+                item["receipt_id"] = receipt
+                item["attempts"][-1]["receipt_id"] = receipt
+                self.assertFalse(self.call("retry", expectedReceiptId=receipt)["accepted"])
+
+    def test_grant_retry_budget_defaults_and_override(self):
+        for limit in (1, 3):
+            receipt, doc = self.failed_attempt('', 124)
+            grant = self.policy["transient_retries"][0]
+            if limit == 1:
+                grant["maxRetries"] = limit
+            for attempt in range(limit + 1):
+                item = self.q["items"][0]
+                doc["run_id"] = str(attempt)
+                receipt = receipts.write_receipt(self.tmp.name, doc)
+                item.update(state="blocked", receipt_id=receipt)
+                item["attempts"].append({"run_id": "run-1", "receipt_id": receipt, "counted": False})
+                result = self.call("retry", expectedReceiptId=receipt)
+                self.assertEqual(result["accepted"], attempt < limit)
+                if attempt < limit:
+                    self.assertEqual(self.call("retry", expectedReceiptId=receipt)["action"], "already-accepted")
+                else:
+                    self.assertEqual(result["reason"], "retry-limit")
+            self.assertEqual(self.q["queue_client_requests"]["request-1"]["retry_count"], limit)
+        for invalid in (True, 0, -1, "3", 101):
+            self.policy["transient_retries"][0]["maxRetries"] = invalid
+            with self.assertRaisesRegex(ValueError, "invalid transient retry grant"):
+                self.call("retry", expectedReceiptId=receipt)
+
+    def test_retry_refuses_receipt_consumed_through_another_alias(self):
+        receipt = self.retry_fixture()
+        self.q["merged_current_requests"]["alias"] = copy.deepcopy(self.q["merged_current_requests"]["request-1"])
+        self.q["queue_client_requests"]["alias"] = {"consumed": receipt}
+        before = copy.deepcopy(self.q)
+        self.assertEqual(self.call("retry", expectedReceiptId=receipt)["reason"], "consumed")
+        self.assertEqual(self.q, before)
+
+    def test_retry_capability_is_authorized_and_never_mutates(self):
+        self.retry_fixture()
+        before = copy.deepcopy(self.q)
+        self.assertEqual(self.call("retry-capability"), {"retry": 1})
+        self.assertEqual(self.q, before)
+        self.policy.pop("transient_retries")
+        with self.assertRaisesRegex(ValueError, "capability denied"):
+            self.call("retry-capability")
 
     def test_retry_durable_replay_and_serialized_competitors(self):
         receipt = self.retry_fixture()

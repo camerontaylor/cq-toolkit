@@ -154,6 +154,16 @@ export function sshQueueTransport(alias: string): QueueTransport {
       child.on('close', (code) => {
         clearTimeout(timer);
         if (code === 0 && size <= QUEUE_WIRE_BYTES) resolve(Buffer.concat(chunks).toString('utf8'));
+        else if (
+          code === 2 &&
+          size === 0 &&
+          (JSON.parse(request) as { op?: unknown }).op === 'retry-capability'
+        )
+          reject(
+            new QueueUnsupported(
+              'Retry capability unavailable or refused; upgraded queue-v1 runner required',
+            ),
+          );
         else
           reject(
             new Error('queue delivery unknown: refused or interrupted; deployment may be required'),
@@ -241,8 +251,12 @@ export function makeQueueClient(transport: QueueTransport): DeferredQueueClient 
   const status = async (input: QueueReference, options?: QueueLifetimeOptions) =>
     parseStatus(input, await request('status', input, {}, options));
   return {
-    retry: async (input, expectedReceiptId) =>
-      QueueRetryResultSchema.parse(await request('retry', input, { expectedReceiptId })),
+    retry: async (input, expectedReceiptId) => {
+      z.object({ retry: z.literal(1) })
+        .strict()
+        .parse(await request('retry-capability', input));
+      return QueueRetryResultSchema.parse(await request('retry', input, { expectedReceiptId }));
+    },
     enqueue: async (input, options) =>
       parseStatus(input, await request('enqueue', input, {}, options)),
     status,

@@ -137,7 +137,13 @@ export function makeQueueOps(transport?: QueueTransport): {
         const ref = { requestId: i.requestId, binding: i.binding };
         if (!i.transient)
           return { action: 'observed', accepted: false, current: await client.status(ref) };
-        return client.retry(ref, i.expectedReceiptId!);
+        try {
+          return await client.retry(ref, i.expectedReceiptId!);
+        } catch (error) {
+          if (error instanceof QueueReadFault && error.code === 'busy')
+            return { action: 'busy', accepted: false, reason: 'not-applied' };
+          throw error;
+        }
       },
     ),
     drain: wrap(
@@ -145,6 +151,8 @@ export function makeQueueOps(transport?: QueueTransport): {
       async (client, i) => {
         const deadline = Date.now() + i.waitMs;
         let pending = [...i.requests];
+        const observations: Record<string, QueueStatus> = {};
+        const errors: Record<string, string> = {};
         while (pending.length && Date.now() < deadline) {
           const unfinished: QueueReference[] = [];
           for (const ref of pending) {
@@ -160,13 +168,18 @@ export function makeQueueOps(transport?: QueueTransport): {
                   timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
                 }),
               ]).finally(() => clearTimeout(timer));
+              if (current) {
+                observations[ref.requestId] = current;
+                delete errors[ref.requestId];
+              } else errors[ref.requestId] = 'deadline';
               if (
                 !current ||
                 (!current.reviewed && !['cancelled', 'no-current-code'].includes(current.state))
               )
                 unfinished.push(ref);
             } catch (error) {
-              if (!(error instanceof QueueReadFault)) throw error;
+              errors[ref.requestId] =
+                error instanceof QueueReadFault ? error.code : messageOf(error);
               unfinished.push(ref);
             }
           }
@@ -180,6 +193,8 @@ export function makeQueueOps(transport?: QueueTransport): {
           action: 'observed',
           accepted: false,
           unfinished: pending.map((ref) => ref.requestId),
+          observations,
+          errors,
         };
       },
     ),

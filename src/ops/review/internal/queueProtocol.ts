@@ -212,7 +212,7 @@ export const QueueDrainInputSchema = z
   .object({
     requests: z.array(QueueReferenceSchema).min(1).max(100),
     waitMs: z.number().int().nonnegative().max(3600000),
-    pollMs: z.number().int().min(10).max(60000).default(1000),
+    pollMs: z.number().int().min(1000).max(60000).default(1000),
   })
   .strict();
 export type QueueDrainInput = z.input<typeof QueueDrainInputSchema>;

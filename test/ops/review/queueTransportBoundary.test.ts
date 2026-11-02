@@ -149,3 +149,14 @@ test('a stalled process is killed at the existing 45 second delivery deadline', 
   child.emit('close', null);
   expect(vi.getTimerCount()).toBe(0);
 });
+test('old runner refusal is unsupported only for the pre-write capability probe', async () => {
+  for (const op of ['retry-capability', 'retry']) {
+    const child = childProcess();
+    const pending = sshQueueTransport('queue')(JSON.stringify({ op }));
+    const refused = expect(pending).rejects.toThrow(
+      op === 'retry-capability' ? 'Retry capability unavailable' : 'queue delivery unknown',
+    );
+    child.emit('close', 2);
+    await refused;
+  }
+});

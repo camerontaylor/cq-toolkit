@@ -382,26 +382,37 @@ only `health`; it grants no status/report or write authority.
 ### Bounded observation and explicit transient retry (Q3R)
 
 `review.drain` takes `requests` (requestId/binding references), `waitMs` (0–3600000)
-and optional `pollMs` (10–60000, default 1000). It only reads status, returns
+and optional `pollMs` (1000–60000, default 1000). It only reads status, returns
 `{action:"observed",accepted:false,unfinished:[...requestIds]}`, and can resume
-with the same references after disconnect. Busy and stale reads are revisited
+with the same references after disconnect. Successful per-ID `observations` are retained alongside per-ID `errors`. Busy and stale reads are revisited
 on the next poll; status reads carry no cursor. It never starts a tick.
 
 `review.retry` defaults to inspection (`action:"observed"`, `accepted:false`,
 `current` status). An explicit `transient:true` requires `expectedReceiptId`.
-Only a complete typed vendor rate-limit receipt on a blocked merged-current
-item can be retried after the existing ownership probe proves its owner empty.
+A blocked merged-current item requires typed recorded evidence of vendor rate-limit,
+recoverable network/transport error, timeout exit 124, or runner termination
+(-2/-9/-15/130/137/143), plus an ownership probe proving its owner empty. Unknown exits,
+missing exit evidence, malformed output and scan blocks are refused.
 Subject, attempts, failure counts and global cooldown remain intact. No credit
 is granted. Author dispatch, consumed evidence, scan and permanent failures,
 and live or ambiguous owners return `action:"needs-human"`.
 
 The exact additional operator policy grant is
-`transient_retries: [{principal, requestId, binding}]`, with an exact queue-v1
+`transient_retries: [{principal, requestId, binding, maxRetries?}]`, with an exact queue-v1
 binding. It is required in addition to the existing `write` principal and
 repository/target permissions; read permission alone grants no retry authority.
+The optional integer `maxRetries` is 1–100 and defaults to 3. Accepted retries
+are counted durably per request in queue state; each failed receipt is consumed
+for retry only once, with replay reporting its previous acceptance. A fresh
+failed attempt requires its own expected receipt and cannot bypass the grant
+budget. Existing cooldowns and scheduling caps remain in force.
 No policy is activated by this change.
 
 A successful durable transition returns `action:"accepted",accepted:true`.
 Replay of the same expected receipt (including a lost response or a competing
 caller) returns `action:"already-accepted",accepted:false`. Retain the same
 request ID, binding and expected receipt after an uncertain response.
+
+Retry busy responses return `action:"busy",accepted:false,reason:"not-applied"`.
+An unavailable/refused retry capability returns `state:"unsupported"`; no retry
+is inferred.
