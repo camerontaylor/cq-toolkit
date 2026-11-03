@@ -136,6 +136,7 @@ export const VerifyRatchetCommandInputSchema = z
     measureConclusion: z.string().min(1),
     measurementPath: z.string().min(1).exactOptional(),
     typecheckCount: z.number().int().nonnegative().exactOptional(),
+    typecheckSkipped: z.string().min(1).exactOptional(),
   })
   .strict();
 

@@ -54,6 +54,24 @@ describe('PR-only advisory verification', () => {
     expect(received).not.toHaveProperty('authorization');
     expect(result).toMatchObject({ status: 'failed', error: 'fixture result' });
   });
+  test('forwards an explicit recompute skip reason', async () => {
+    let received: VerifyRatchetInput | undefined;
+    await verifySubject(
+      {
+        verify: async (input) => {
+          received = input;
+          return { status: 'failed', error: 'fixture' };
+        },
+      },
+      parseVerifyArgs([
+        ...ARGV.filter((arg) => !arg.startsWith('--typecheckCount=')),
+        '--typecheckSkipped=lockfile changed',
+      ]),
+    );
+    expect(received?.typecheckSkipped).toBe('lockfile changed');
+    expect(received).not.toHaveProperty('typecheckCount');
+  });
+
   test('rejects retired push subjects', () => {
     expect(() =>
       parseVerifyArgs(ARGV.map((arg) => (arg === '--subjectKind=pr' ? '--subjectKind=push' : arg))),

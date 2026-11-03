@@ -123,6 +123,8 @@ export interface VerifyRatchetInput {
   measurementPath?: string;
   /** typecheck-count from the trusted recompute; absent when the recompute failed. */
   typecheckCount?: number;
+  /** Trusted PR workflow intentionally skipped recomputation (dependency graph changed). */
+  typecheckSkipped?: string;
   /**
    * The D11 authorization bound by an in-process caller; the strict CLI
    * schema cannot carry it. Absent: every definition change is needs-human.
@@ -136,7 +138,7 @@ export interface RatchetResult {
   evidence: RatchetDefinition['evidence'];
   baseline: number | null;
   value: number | null;
-  verdict: 'pass' | 'fail';
+  verdict: 'pass' | 'fail' | 'skipped';
   reason?: string;
 }
 
@@ -311,6 +313,20 @@ async function judgeRatchet(
   );
   if ('reason' in subjectRead) return fail(subjectRead.reason);
   const trustValue = trustRead.value;
+  if (
+    input.subjectKind === 'pr' &&
+    def.evidence === 'recompute' &&
+    def.metric === 'typecheck-count' &&
+    input.typecheckSkipped?.trim()
+  ) {
+    return {
+      ...base,
+      baseline: trustValue,
+      value: null,
+      verdict: 'skipped',
+      reason: input.typecheckSkipped,
+    };
+  }
   const raw = evidenceValue(def, input, measured);
   if (typeof raw !== 'number') {
     return {
@@ -437,6 +453,10 @@ export const createVerifyRatchet =
     if (d11 !== undefined) reasons.push(...d11.lines);
     if (guard.ok === false) reasons.push(...formatViolations(guard.violations));
     for (const r of results) {
+      if (r.verdict === 'skipped')
+        reasons.push(
+          `${r.target}/${r.metric}: skipped — ${r.reason ?? 'trusted recompute skipped'}`,
+        );
       if (r.verdict === 'fail')
         reasons.push(
           `${advisoryRecompute(r) ? 'advisory (dependency universe): ' : ''}${r.target}/${r.metric}: ${r.reason ?? 'failed'}`,
@@ -446,7 +466,7 @@ export const createVerifyRatchet =
       guard.ok === false || results.some((r) => r.verdict === 'fail' && !advisoryRecompute(r));
     const verdict = unauthorized ? 'needs-human' : failing ? 'fail' : 'pass';
     if (verdict === 'pass') {
-      for (const r of results)
+      for (const r of results.filter((result) => result.verdict !== 'skipped'))
         reasons.push(`${r.target}/${r.metric}: ${r.value} vs baseline ${r.baseline}`);
     }
     return {
