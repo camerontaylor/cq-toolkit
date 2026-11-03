@@ -277,7 +277,12 @@ export async function resolveFixPrBase(
     (await execFileAsync('git', ['-C', repoRoot, ...args], { timeout: 10_000 })).stdout.trim();
   try {
     let ref = base;
-    if (ref === undefined || ref === 'HEAD') {
+    if (
+      ref === undefined ||
+      ref === 'HEAD' ||
+      ref === 'origin/HEAD' ||
+      ref === 'refs/remotes/origin/HEAD'
+    ) {
       ref = await git('symbolic-ref', 'refs/remotes/origin/HEAD').catch(() =>
         git('rev-parse', '--symbolic-full-name', '@{upstream}'),
       );

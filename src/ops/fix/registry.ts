@@ -15,7 +15,7 @@ const SweepInstallSchema = z
   .object({
     command: z.string().min(1),
     args: z.array(z.string()),
-    timeoutMs: z.number().int().positive().exactOptional(),
+    timeoutMs: z.number().int().min(1).exactOptional(),
   })
   .strict();
 export const FixRunInputSchema = z

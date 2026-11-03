@@ -654,6 +654,8 @@ test('PR base resolves the remote default, explicit branches and upstream; refus
     await git('update-ref', 'refs/remotes/origin/release', 'HEAD');
     await git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
     expect(await resolveFixPrBase(root)).toBe('main');
+    expect(await resolveFixPrBase(root, 'origin/HEAD')).toBe('main');
+    expect(await resolveFixPrBase(root, 'refs/remotes/origin/HEAD')).toBe('main');
     expect(await resolveFixPrBase(root, 'release')).toBe('release');
     expect(await resolveFixPrBase(root, 'origin/release')).toBe('release');
     expect(await resolveFixPrBase(root, 'HEAD~1')).toBeUndefined();
