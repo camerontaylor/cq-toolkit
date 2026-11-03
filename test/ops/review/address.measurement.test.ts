@@ -4,11 +4,12 @@
 // initialOpenBlocking population the review-address report captures — so
 // they stay together rather than scattering across the mechanism splits.
 import { readFile } from 'node:fs/promises';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import { createEscalationState } from '../../../src/ops/fix/escalation.js';
 import { reviewPlannedUnitsOf } from '../../../src/ops/fix/measurement.js';
 import { finding, fixture, reportOf } from './address.helpers.js';
+import { world } from './address-pr.helpers.js';
 
 describe('review.address round-1 baseline', () => {
   test('the initial open-blocker population survives the fix that resolves it', async () => {
@@ -56,6 +57,40 @@ describe('review.address round-1 baseline', () => {
       expect(persisted.initialOpenBlocking).toEqual(['a']);
     } finally {
       await f.cleanup();
+    }
+  });
+  test('a PR item stopped at the fix wall still joins the round-1 baseline', async () => {
+    // The second dispatch item is stopped by the fix wall BEFORE its
+    // admission, so the dispatch capture never sees it. Round 1 must merge
+    // the full open-thread population anyway: the denominator is 2, not 1.
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skewMs);
+    const w = await world(true, {
+      wallMs: 8000,
+      concurrency: 1,
+      // T1's fix lands first; the moved clock then leaves only the final
+      // re-review reserve (a quarter of the 8s wall), so T2 stops at the wall.
+      afterFix: (id) => {
+        if (id === 'T1') skewMs = 6100;
+      },
+    });
+    try {
+      const result = await w.run();
+      const report = reportOf(result);
+      expect(result.status).toBe('needs-human');
+      expect(report.reasons.join(' ')).toContain('preserve final re-review wall');
+      // Exactly one item was admitted and fixed…
+      expect(report.fixes.map((fix) => fix.finding.id)).toEqual(['T1']);
+      // …while the round-1 population holds both open threads.
+      expect(report.initialOpenBlocking).toEqual(['T1', 'T2']);
+      const persisted = JSON.parse(await readFile(report.reportPath, 'utf8')) as {
+        initialOpenBlocking?: string[];
+      };
+      expect(persisted.initialOpenBlocking).toEqual(['T1', 'T2']);
+    } finally {
+      clock.mockRestore();
+      await w.cleanup();
     }
   });
 });

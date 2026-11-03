@@ -54,6 +54,12 @@ export async function world(
      * the base witness's own probe — fails.
      */
     missingHeadObject?: boolean;
+    /** Run wall override (default: the engine's six-hour review wall). */
+    wallMs?: number;
+    /** Observe each item's fix AFTER it settles, e.g. to advance a test clock. */
+    afterFix?: (id: string) => void;
+    /** Engine dispatch concurrency (default: the policy's own setting). */
+    concurrency?: number;
   } = {},
 ) {
   // The failer knob only has a defined thread order inside the default
@@ -462,11 +468,18 @@ export async function world(
         },
       ],
       roles: { worker: role, reviewer: role },
-      budgets: { run: { maxTokens: options.runBudget ?? 1000 } },
+      budgets: {
+        run: {
+          maxTokens: options.runBudget ?? 1000,
+          ...(options.wallMs === undefined ? {} : { wallMs: options.wallMs }),
+        },
+      },
       review: {
         rounds: options.rounds ?? 1,
         reviewers: ['agent'],
-        ...(options.refuseAdmissionAt ? { addressConcurrency: 1 } : {}),
+        ...(options.refuseAdmissionAt || options.concurrency !== undefined
+          ? { addressConcurrency: options.concurrency ?? 1 }
+          : {}),
       },
       escalation: { workerAttempts: 1, rescueBase: 0 },
     },
@@ -523,7 +536,9 @@ export async function world(
         fix: async (finding, round) => {
           if (options.failer && finding.id === 'T3')
             throw new Error('worker crash: scripted T3 fault');
-          return worker.fix(finding, round);
+          const fix = await worker.fix(finding, round);
+          options.afterFix?.(finding.id);
+          return fix;
         },
       };
     },

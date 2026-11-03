@@ -139,13 +139,18 @@ export interface ReviewAddressReport {
   advisories?: string[];
   openBlocking: Finding[];
   /**
-   * ADR-0008 baseline seam: the INITIAL open-blocker population, captured at
-   * first admission and before any fix. `openBlocking` is recomputed after
-   * fixes (and replaced by each successful re-review), so it can only shrink;
-   * substituting it for the measurement baseline would inflate
-   * fixes-per-run. Round 1's admissions populate this list, which is never
-   * reassigned on a re-review. Absent when the invocation refused before
-   * admitting any findings — unknown, never an empty baseline.
+   * ADR-0008 baseline seam: the ROUND-1 open-blocker population. It is
+   * captured at dispatch, before `admitRecord` can refuse (so a dispatched
+   * item that is then refused is still counted), and round 1 may only GAIN
+   * ids from later captures — deduplicated, in first-seen order. On the PR
+   * path round 1 also completes it from the full open-thread population
+   * before its re-review, so an item stopped BEFORE admission (the fix-wall
+   * stop, a refusal, a parent cancel) is still part of the denominator. It is
+   * never reassigned and never shrunk afterwards: `openBlocking` is recomputed
+   * after fixes and replaced by each successful re-review, so substituting it
+   * for the measurement baseline would inflate fixes-per-run. Absent only when
+   * the invocation refused before capturing any round-1 population at all —
+   * unknown, never an empty baseline.
    */
   initialOpenBlocking?: string[];
   fixes: AddressFix[];
@@ -1764,17 +1769,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               report.admissionHead ??= head;
             };
             /**
-             * ADR-0008 baseline seam: capture the initial open-blocker
-             * population at admission, before any fix. Round 1's admissions are
-             * the initial population; a later round only sees findings that
-             * appeared after fixes ran, so it never extends or replaces this
-             * list. The first admission initializes the field and later
-             * round-1 admissions (the PR path admits one finding per dispatch
-             * item) extend it in first-seen order, deduplicated — each item is
-             * admitted before its own fix, so no id is read from post-fix
-             * state. Nothing else writes this field: `openBlocking` is
-             * recomputed after fixes and `rounds[].record` is replaced by a
-             * re-review, so neither may feed the measurement baseline.
+             * ADR-0008 baseline seam: the ROUND-1 open-blocker population,
+             * captured before any fix. Round 1's captures are the initial
+             * population; every capture only GAINS ids, deduplicated, in
+             * first-seen order, and a later round is ignored, so the list is
+             * never reassigned or shrunk. Two round-1 sources feed it: each PR
+             * dispatch item before `admitRecord` can refuse (a dispatched item
+             * that is then refused stays counted), and the full open-thread
+             * population merged before the PR re-review (so an item stopped
+             * BEFORE admission — the fix-wall stop, a refusal, a cancel — is
+             * still in the denominator). Nothing else writes this field:
+             * `openBlocking` is recomputed after fixes and `rounds[].record` is
+             * replaced by a re-review, so neither may feed the measurement
+             * baseline.
              */
             const noteInitialOpenBlocking = (
               round: number,
@@ -2782,12 +2789,13 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   { ...threads, findings: report.findings },
                   policy.review.blockingSeverities,
                 );
-                // A round-1 run that dispatched no item never admitted one;
-                // the thread population is then the initial population. A run
-                // that did dispatch already captured it at admission, and this
-                // cannot shrink or replace that list.
-                if (report.initialOpenBlocking === undefined && round === 1)
-                  noteInitialOpenBlocking(round, { findings: report.findings });
+                // Round 1 ALWAYS merges the full open-thread population: items
+                // stopped BEFORE admission (the fix-wall stop, a refusal, a
+                // parent cancel) never reached the dispatch capture, so the
+                // baseline is completed here. The helper is round-1-only and
+                // only gains ids (deduplicated, first-seen order), so it can
+                // never shrink or replace the list a later round sees.
+                noteInitialOpenBlocking(round, { findings: report.findings });
                 if (stop()) return await finish('needs-human', stop());
                 const priorFindings = priorRoundFindings(previous, [
                   ...threads.findings,
