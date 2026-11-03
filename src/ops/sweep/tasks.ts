@@ -1,5 +1,5 @@
-import { realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, relative, resolve, parse, sep } from 'node:path';
 import { fnv1a32Hex } from '../gates/fingerprint.js';
 import type { AdapterName, CheckCommand, CheckFailure, FailureSet } from '../gates/checkRunner.js';
 
@@ -112,14 +112,33 @@ export function relatedCheckCommand(
 }
 
 /** Resolve existing ancestors too: a reporter may name a file removed by the fix. */
-function canonicalPath(path: string): string {
+function canonicalPath(path: string, symlinkDepth = 0): string {
+  if (symlinkDepth > 40) throw new Error('too many symlinks in check failure path');
   try {
     return realpathSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    try {
+      if (lstatSync(path).isSymbolicLink()) {
+        const target = readlinkSync(path);
+        let current = isAbsolute(target)
+          ? parse(target).root
+          : canonicalPath(dirname(path), symlinkDepth);
+        for (const component of target.split(sep)) {
+          if (component === '' || component === '.') continue;
+          current =
+            component === '..'
+              ? dirname(current)
+              : canonicalPath(resolve(current, component), symlinkDepth + 1);
+        }
+        return current;
+      }
+    } catch (linkError) {
+      if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError;
+    }
     const parent = dirname(path);
     if (parent === path) throw error;
-    return resolve(canonicalPath(parent), basename(path));
+    return resolve(canonicalPath(parent, symlinkDepth), basename(path));
   }
 }
 

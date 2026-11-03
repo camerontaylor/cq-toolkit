@@ -120,3 +120,37 @@ test('failure containment resolves workspace aliases and refuses real or symlink
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('failure containment follows dangling symlinks before accepting missing leaves', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-dangling-paths-'));
+  try {
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace);
+    await symlink('../outside/missing', join(workspace, 'escape'), 'dir');
+    await symlink('missing', join(workspace, 'inside'), 'dir');
+    await mkdir(join(workspace, 'nested', 'deep'), { recursive: true });
+    await symlink('nested/deep', join(workspace, 'alias'), 'dir');
+    await symlink('alias/../missing.ts', join(workspace, 'ordered'));
+    await symlink('../missing.ts', join(workspace, 'nested', 'deep', 'link'));
+    await writeFile(join(workspace, 'missing.ts'), 'unrelated');
+    await symlink('escape', join(workspace, 'chain'), 'dir');
+    await symlink('loop', join(workspace, 'loop'), 'dir');
+    const set = (file: string) => ({ tool: 'tests', exitCode: 1, failures: [failure(file)] });
+    for (const file of ['escape/a.test.ts', 'escape', 'chain/a.test.ts', 'loop/a.test.ts']) {
+      expect(() => normalizeFailurePaths(set(file), workspace)).toThrow();
+    }
+    expect(normalizeFailurePaths(set('ordered'), workspace).failures[0]?.file).toBe(
+      'nested/missing.ts',
+    );
+    expect(normalizeFailurePaths(set('alias/link'), workspace).failures[0]?.file).toBe(
+      'nested/missing.ts',
+    );
+    for (const file of ['inside/a.test.ts', 'missing/a.test.ts']) {
+      expect(normalizeFailurePaths(set(file), workspace).failures[0]?.file).toBe(
+        'missing/a.test.ts',
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
