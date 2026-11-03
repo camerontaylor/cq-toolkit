@@ -1276,7 +1276,22 @@ export const ObservationStreamSchema: z.ZodType<ObservationStream> = z
         });
       }
     });
-    if (!stream.complete) return;
+    if (!stream.complete) {
+      // A duplicate or misplaced header is corrupt in BOTH modes; only the
+      // MISSING-header requirement is waived for a torn/empty prefix.
+      const torn = stream.events.filter((e) => e.type === 'composition-started');
+      if (
+        torn.length > 1 ||
+        (torn.length === 1 && stream.events[0]?.type !== 'composition-started')
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'a stream cannot carry a misplaced or duplicate composition-started header',
+          path: ['events'],
+        });
+      }
+      return;
+    }
     const headers = stream.events.filter((e) => e.type === 'composition-started');
     if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
       ctx.addIssue({

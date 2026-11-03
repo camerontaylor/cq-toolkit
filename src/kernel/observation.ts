@@ -142,17 +142,28 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
   // reject — refuse before any byte lands.
   let headerWritten = false;
 
+  // Fail-stop: a failed write means the stream's on-disk evidence is
+  // already indeterminate; later appends must not silently interleave after
+  // the failure. The caller classifies the rejection as indeterminate.
+  let writeFailed: unknown = null;
+
   const write = async (line: string): Promise<void> => {
     if (streamPath === null) return; // memory-only
-    if (handle === null) {
-      await mkdir(streamDir as string, { recursive: true });
-      // Exclusive create IS the claim: a second writer for the same
-      // composition run is refused, never merged into one file.
-      handle = await open(streamPath, 'wx');
-      await syncStreamDir(streamDir as string);
+    if (writeFailed !== null) throw writeFailed;
+    try {
+      if (handle === null) {
+        await mkdir(streamDir as string, { recursive: true });
+        // Exclusive create IS the claim: a second writer for the same
+        // composition run is refused, never merged into one file.
+        handle = await open(streamPath, 'wx');
+        await syncStreamDir(streamDir as string);
+      }
+      await handle.writeFile(line, 'utf8');
+      await handle.datasync();
+    } catch (err) {
+      writeFailed ??= err;
+      throw err;
     }
-    await handle.writeFile(line, 'utf8');
-    await handle.datasync();
   };
 
   return {
@@ -195,20 +206,17 @@ export function openObservationWriter(options: OpenObservationWriterOptions): Ob
         );
       }
       const line = `${JSON.stringify(parsed)}\n`;
-      const next = tail.then(
-        () => write(line),
-        () => write(line),
-      );
+      const next = tail.then(() => write(line));
       tail = next.catch(() => undefined);
       await next;
     },
 
     async close(): Promise<void> {
-      // Serial discipline: close runs AFTER every pending append settles, so
-      // no append creates the file (or datasyncs) through an already-closed
-      // handle.
-      await tail;
+      // Refuse new appends FIRST (an append starting during the drain would
+      // otherwise queue behind the tail close() already captured and reopen
+      // or leak a handle), then drain the appends already queued.
       closed = true;
+      await tail;
       if (handle !== null) {
         const h = handle;
         handle = null;
@@ -300,7 +308,8 @@ export async function readObservations(journalDir: string): Promise<ObservationS
     for (const file of files.sort()) {
       if (!file.endsWith('.ndjson')) continue;
       const compositionRunId = file.slice(0, -'.ndjson'.length);
-      const { events, complete } = await readStreamFile(join(dir, file));
+      const { events, complete, exists } = await readStreamFile(join(dir, file));
+      if (!exists) continue; // removed between readdir and read: no streams to omit
       const stream: ObservationStream = { workId, compositionRunId, events, complete };
       assertStreamIdentity(stream);
       streams.push(stream);
@@ -340,8 +349,19 @@ function assertStreamIdentity(stream: ObservationStream): void {
       );
     }
   }
-  if (!stream.complete) return; // torn/empty prefix: header requirement waived
-  if (headers.length !== 1 || stream.events[0]?.type !== 'composition-started') {
+  // A duplicate or misplaced header is a concatenated or corrupt stream in
+  // BOTH modes — a torn prefix waives only the MISSING-header requirement.
+  if (
+    headers.length > 1 ||
+    (headers.length === 1 && stream.events[0]?.type !== 'composition-started')
+  ) {
+    throw new Error(
+      `observation: stream '${stream.workId}/${stream.compositionRunId}' has a misplaced or ` +
+        `duplicate composition-started header (found ${headers.length})`,
+    );
+  }
+  if (!stream.complete) return; // torn/empty prefix: missing header waived
+  if (headers.length !== 1) {
     throw new Error(
       `observation: stream '${stream.workId}/${stream.compositionRunId}' must carry exactly ` +
         `one composition-started header at its head, found ${headers.length}`,
