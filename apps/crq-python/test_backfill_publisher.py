@@ -6,12 +6,12 @@ from unittest import mock
 import backfill_publisher as worker
 import backfill_runtime as runtime
 import review_ledger as ledger
-import test_backfill_runtime as runtime_tests
+from test_backfill_runtime_fixtures import RuntimeTestBase
 from test_backfill_jobs import AT
 
 
 class PublisherTest(unittest.TestCase):
-    setUp = runtime_tests.RuntimeTest.setUp
+    setUp = RuntimeTestBase.setUp
 
     def prepare(self):
         self.held = False
