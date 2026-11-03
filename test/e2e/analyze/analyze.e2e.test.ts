@@ -73,7 +73,8 @@ const AST_GREP_AVAILABLE = spawnSync('ast-grep', ['--version'], { stdio: 'ignore
  * the real git one because the seeded temp tree is deliberately not a
  * repository; the state re-check, single-use nonce and the mutation lock are
  * the real code either way, and the TOCTOU/durability proofs over a REAL
- * repository live in test/ops/analyze/approval.test.ts.
+ * repository live in test/ops/analyze/toctou.test.ts and
+ * test/ops/analyze/durableLedger.test.ts.
  */
 function e2eApprovalAuthority(): ApprovalAuthority {
   // The SIGNED state and the state READER must agree, or admission's drift
