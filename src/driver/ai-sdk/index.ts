@@ -1119,7 +1119,10 @@ export class AiSdkDriver implements Driver {
                   : '[unavailable]',
                 input: '[values omitted: no scanner]',
               }));
-              content = JSON.stringify(calls);
+              content =
+                step.text !== ''
+                  ? `${step.text}\n${JSON.stringify(calls)}`
+                  : JSON.stringify(calls);
             }
             await store.appendMessage(record.sessionId, {
               role: 'assistant',
@@ -1493,11 +1496,9 @@ export class AiSdkDriver implements Driver {
       return signals !== undefined ? { providerSignals: signals } : {};
     };
 
-    // Persist the assistant turn exactly as the success path does — the
-    // model's text is real evidence even though the required object missed.
-    // Deliberate skip when there is no text: the model produced NEITHER text
-    // NOR the object, so there is no assistant turn.
-    if (mainText.trim() !== '') {
+    // As on success, completed steps already persisted their assistant turn.
+    // Keep only the no-callback fallback, never duplicate a schema miss.
+    if (mainSteps === 0 && mainText.trim() !== '') {
       await store.appendMessage(record.sessionId, {
         role: 'assistant',
         content: mainText,
