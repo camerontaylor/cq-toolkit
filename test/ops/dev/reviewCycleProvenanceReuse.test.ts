@@ -14,7 +14,7 @@ afterEach(async () => {
 describe('dev.review cycle', () => {
   // --- Q4 (#485): exact-terminal reuse before vendor dispatch --------------
 
-  test('records only literal recoverable rate-limit provenance without completion', async () => {
+  test('rate limits remain blocked without creating vendor-deferral authority', async () => {
     const effects = repoEffects(
       repo,
       reviewer(
@@ -38,12 +38,12 @@ describe('dev.review cycle', () => {
         .records.find((entry) => entry.kind === 'cycle'),
     ).toMatchObject({
       completion: { kind: 'blocked' },
-      vendorFailure: {
-        source: 'vendor',
-        category: 'vendor-rate-limited',
-        codes: ['rate_limited'],
-      },
     });
+    const record = effects
+      .openLedger('feature/x')
+      .load()
+      .records.find((entry) => entry.kind === 'cycle');
+    expect(record?.kind === 'cycle' ? record.vendorFailure : undefined).toBeUndefined();
   });
   const literalVendor = { type: 'error', errorType: 'rate_limit', recoverable: true };
   const scanWithVendorProse = {

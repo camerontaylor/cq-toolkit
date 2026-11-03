@@ -55,40 +55,6 @@ export const VendorFailureProvenanceSchema = z
   );
 export type VendorFailureProvenance = z.infer<typeof VendorFailureProvenanceSchema>;
 
-/** Recognized structured codes only; mixed/unknown causes fail closed. */
-export function classifyDeferredVendorFailure(input: {
-  origin: 'vendor-cli' | 'queue';
-  codes: readonly string[];
-  exitCode: number | null;
-  timedOut: boolean;
-  cancelled: boolean;
-  budgetStopped: boolean;
-  malformed: boolean;
-  actionRequired: boolean;
-  skipped: boolean;
-}): VendorFailureProvenance | undefined {
-  if (
-    input.origin !== 'vendor-cli' ||
-    input.exitCode === null ||
-    input.timedOut ||
-    input.cancelled ||
-    input.budgetStopped ||
-    input.malformed ||
-    input.actionRequired ||
-    input.skipped ||
-    !input.codes.length
-  )
-    return undefined;
-  const category = vendorCategory(input.codes);
-  if (!category) return undefined;
-  // A mixed vendor-only failure stays operational debt; the action-needed cause is visible.
-  return VendorFailureProvenanceSchema.parse({
-    source: 'vendor',
-    category,
-    codes: [...input.codes],
-  });
-}
-
 export const VendorOutageOriginSchema = z
   .object({
     cycleId: QueueToken,

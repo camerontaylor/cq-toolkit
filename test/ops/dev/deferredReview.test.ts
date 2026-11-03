@@ -10,7 +10,6 @@ import {
   hasDeferredReviewSources,
   allowsDeferredVendorComposition,
   refreshDeferredVendorDebt,
-  classifyDeferredVendorFailure,
   type VendorFailure,
 } from '../../../src/ops/dev/internal/deferredReview.js';
 import type {
@@ -160,50 +159,6 @@ describe('deferred vendor policy', () => {
     expect(hasPersistedVendorOutageOrigin(proof, [legacy])).toBe(false);
     expect(cycle.findings[0]!.id).toBe('known');
   });
-  test('classifies only wholly recognized structured vendor failures', () => {
-    const input = {
-      origin: 'vendor-cli' as const,
-      codes: ['con_err'],
-      exitCode: 1,
-      timedOut: false,
-      cancelled: false,
-      budgetStopped: false,
-      malformed: false,
-      actionRequired: false,
-      skipped: false,
-    };
-    expect(classifyDeferredVendorFailure(input)?.category).toBe('vendor-unavailable');
-    expect(classifyDeferredVendorFailure({ ...input, codes: ['rate_limited'] })?.category).toBe(
-      'vendor-rate-limited',
-    );
-    expect(classifyDeferredVendorFailure({ ...input, codes: ['auth', 'con_err'] })?.category).toBe(
-      'vendor-needs-action',
-    );
-    for (const codes of [
-      [],
-      ['unknown'],
-      ['con_err', 'scan'],
-      ['please login'],
-      ['auth', 'identity'],
-    ]) {
-      expect(classifyDeferredVendorFailure({ ...input, codes })).toBeUndefined();
-    }
-    for (const flag of [
-      'timedOut',
-      'cancelled',
-      'budgetStopped',
-      'malformed',
-      'actionRequired',
-      'skipped',
-    ] as const) {
-      expect(classifyDeferredVendorFailure({ ...input, [flag]: true })).toBeUndefined();
-    }
-    expect(classifyDeferredVendorFailure({ ...input, exitCode: null })).toBeUndefined();
-    expect(
-      classifyDeferredVendorFailure({ ...input, origin: 'queue', codes: ['auth'] }),
-    ).toBeUndefined();
-  });
-
   test('queue auth/read exceptions retain original debt without granting fresh continuation', async () => {
     const f = fake();
     const debt = await deferVendorReview(

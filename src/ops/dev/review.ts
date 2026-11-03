@@ -48,16 +48,11 @@ import {
 import { LegacyReviewCoverageSchema } from '../review/internal/reviewPartitions.js';
 import type { Finding } from '../review/findings.js';
 import { restoreDurableDisposition } from '../review/internal/durableDisposition.js';
-import {
-  classifyDeferredVendorFailure,
-  type VendorFailureProvenance,
-} from './internal/deferredReview.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
   coderabbitReviewArgv,
   decideCompletion,
-  deferredVendorErrorCodes,
   isTransientReviewerFailure,
   parseReviewerStream,
 } from './coderabbit.js';
@@ -572,7 +567,6 @@ function makeReviewCycle(
       logPath: string;
       findings: Omit<DevFinding, 'id'>[];
       advisories: string[];
-      vendorFailure?: VendorFailureProvenance;
       agentCoverage?: ReviewCoverageV2;
       /** The block came from the network/transient class (#509): a re-review may retry it. */
       transient?: boolean;
@@ -818,32 +812,11 @@ function makeReviewCycle(
           !signal?.aborted &&
           (remainingWallMs?.() ?? Infinity) > 0 &&
           isTransientReviewerFailure(parsed, raw);
-        const vendorFailure =
-          completion.kind === 'blocked'
-            ? classifyDeferredVendorFailure({
-                origin: 'vendor-cli',
-                codes:
-                  raw.exitCode === 0 || raw.exitCode === 1 ? deferredVendorErrorCodes(parsed) : [],
-                exitCode: raw.exitCode,
-                timedOut: raw.timedOut,
-                cancelled: signal?.aborted === true,
-                budgetStopped: (remainingWallMs?.() ?? Infinity) <= 0,
-                malformed:
-                  parsed.unparsedLines > 0 ||
-                  parsed.trailingAfterComplete > 0 ||
-                  (parsed.sawComplete && parsed.completeStatus !== 'review_completed'),
-                actionRequired: parsed.sawActionRequired,
-                // With error events, a completion can mix no-fresh and failure evidence.
-                // Refuse the mixed stream rather than classifying its prose.
-                skipped: parsed.sawComplete,
-              })
-            : undefined;
         return {
           completion,
           logPath,
           findings: [...priorFindings, ...parsed.findings],
           advisories: [],
-          ...(vendorFailure === undefined ? {} : { vendorFailure }),
           ...(transient ? { transient: true } : {}),
           ...(budgetStopped ? { budgetStopped: true as const } : {}),
         };
@@ -891,7 +864,6 @@ function makeReviewCycle(
             id: `${cycleId}#f${String(index + 1)}`,
           })),
           ...(span.advisories.length > 0 ? { advisories: span.advisories } : {}),
-          ...(span.vendorFailure === undefined ? {} : { vendorFailure: span.vendorFailure }),
           ...(span.agentCoverage === undefined ? {} : { agentCoverage: span.agentCoverage }),
           logPath: span.logPath,
           ...(logSha256 === undefined ? {} : { logSha256 }),
