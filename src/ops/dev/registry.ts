@@ -144,9 +144,15 @@ export const DevDispositionInputSchema: z.ZodType<DevDispositionInput> = z
     why: z
       .string()
       .regex(/\S/, 'why must name the fix, the false-positive mechanism, or the tracking issue'),
-    owner: z.string().min(1),
-    evidence: z.array(z.string()),
-    reviewTrigger: z.string().min(1).nullable().exactOptional(),
+    owner: z
+      .string()
+      .regex(/\S/, 'owner must name who made the adjudication'),
+    evidence: z.array(z.string().min(1)),
+    reviewTrigger: z
+      .string()
+      .regex(/\S/, 'reviewTrigger must name when the disposition is re-reviewed')
+      .nullable()
+      .exactOptional(),
     fingerprint: FindingFingerprintSchema.exactOptional(),
     acceptedRisk: z.string().nullable().exactOptional(),
   })

@@ -123,7 +123,7 @@ export function makeDevDisposition(
       owner: input.owner,
       evidence: input.evidence,
       reviewTrigger: input.reviewTrigger ?? null,
-      ...(input.fingerprint === undefined ? {} : { fingerprint: input.fingerprint }),
+      fingerprint: input.fingerprint ?? null,
       acceptedRisk: input.acceptedRisk ?? null,
     };
     try {

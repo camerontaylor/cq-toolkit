@@ -284,6 +284,7 @@ describe('dev.disposition', () => {
         owner: 'test',
         evidence: [],
         reviewTrigger: null,
+        fingerprint: null,
         acceptedRisk: null,
       },
     });

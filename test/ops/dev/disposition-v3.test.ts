@@ -41,6 +41,40 @@ function dispositionV3(overrides: Partial<DevDispositionRecord> = {}): DevDispos
   };
 }
 
+/**
+ * A scripted effects fixture for the input-surface tests: the branch/head
+ * git commands the op resolves, plus a seeded cycle carrying one finding.
+ */
+function inputEffects() {
+  const effects = makeFakeEffects((command, args) => {
+    if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
+    if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
+    return undefined;
+  });
+  effects.store.save({
+    version: DEV_LEDGER_VERSION,
+    branch: BRANCH,
+    records: [
+      {
+        kind: 'cycle',
+        cycleId: 'c001-aaaaaaaa',
+        reviewer: 'coderabbit',
+        scope: 'full',
+        target: 'main',
+        base: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        head: HEAD,
+        dirtySha256: 'dirty',
+        completion: { kind: 'terminal' },
+        findings: [{ id: 'c001-aaaaaaaa#f1', severity: 'major' }],
+        logPath: '/tmp/log',
+        untracked: [],
+        at: '2026-11-03T00:00:00.000Z',
+      },
+    ],
+  });
+  return effects;
+}
+
 function ledger(version: number, records: DevLedgerFile['records']): DevLedgerFile {
   return { version: version as DevLedgerFile['version'], branch: BRANCH, records };
 }
@@ -150,9 +184,8 @@ describe('T38: the dev-ledger v3 disposition format', () => {
   });
 
   test('T38 record failure boundary: a legacy v2 disposition authored by the CURRENT writer serializes and re-parses (dual-read, never fabricated values)', () => {
-    // The current producer still records the v2 carrier shape; the dual-read
-    // means its records stay parseable until the disposition-input ticket
-    // adds the provenance fields. Nothing fabricates owner/evidence here.
+    // The dual-read keeps legacy v2-shaped records parseable: their
+    // provenance fields are absent on read (unknown), never fabricated.
     const file = ledger(DEV_LEDGER_VERSION, [dispositionRecord()]);
     expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
   });
@@ -197,32 +230,7 @@ describe('T38: the dev-ledger v3 disposition format', () => {
 
 describe('T38: the dev.disposition input surface', () => {
   test('T38 input round-trip: owner/evidence/reviewTrigger/acceptedRisk land in the written v3 disposition verbatim', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
-      if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
-      return undefined;
-    });
-    effects.store.save({
-      version: DEV_LEDGER_VERSION,
-      branch: BRANCH,
-      records: [
-        {
-          kind: 'cycle',
-          cycleId: 'c001-aaaaaaaa',
-          reviewer: 'coderabbit',
-          scope: 'full',
-          target: 'main',
-          base: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-          head: HEAD,
-          dirtySha256: 'dirty',
-          completion: { kind: 'terminal' },
-          findings: [{ id: 'c001-aaaaaaaa#f1', severity: 'major' }],
-          logPath: '/tmp/log',
-          untracked: [],
-          at: '2026-11-03T00:00:00.000Z',
-        },
-      ],
-    });
+    const effects = inputEffects();
     const result = await makeDevDisposition(effects)({
       repoRoot: '/repo',
       findingId: 'c001-aaaaaaaa#f1',
@@ -251,36 +259,11 @@ describe('T38: the dev.disposition input surface', () => {
     expect(parseDevLedger(JSON.stringify(effects.store.file()))).toEqual(effects.store.file());
   });
 
-  test('T38 input unknown evidence: the op still records a legacy-shaped disposition when the finding came from a v2 cycle without fingerprint provenance (input fields stay independent of cycle provenance)', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
-      if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
-      return undefined;
-    });
-    // The finding is known from a vendor-debt receipt lookup path only; the
-    // disposition names no fingerprint (its input is optional) and the record
-    // still parses — unknown identity stays unknown, never manufactured.
-    effects.store.save({
-      version: 2 as DevLedgerFile['version'],
-      branch: BRANCH,
-      records: [
-        {
-          kind: 'cycle',
-          cycleId: 'c001-aaaaaaaa',
-          reviewer: 'coderabbit',
-          scope: 'full',
-          target: 'main',
-          base: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-          head: HEAD,
-          dirtySha256: 'dirty',
-          completion: { kind: 'terminal' },
-          findings: [{ id: 'c001-aaaaaaaa#f1', severity: 'major' }],
-          logPath: '/tmp/log',
-          untracked: [],
-          at: '2026-11-03T00:00:00.000Z',
-        },
-      ],
-    });
+  test('T38 input unknown evidence: a disposition without a fingerprint records fingerprint as an EXPLICIT null (unknown, never omitted, never manufactured)', async () => {
+    const effects = inputEffects();
+    // The finding is known from the cycle; the disposition names no
+    // fingerprint and the record still parses — unknown identity is a
+    // null key, not a manufactured F1 identity.
     const result = await makeDevDisposition(effects)({
       repoRoot: '/repo',
       findingId: 'c001-aaaaaaaa#f1',
@@ -293,19 +276,29 @@ describe('T38: the dev.disposition input surface', () => {
     const stored = effects.store
       .file()
       .records.find((r): r is DevDispositionRecord => r.kind === 'disposition');
-    expect(stored?.fingerprint).toBeUndefined();
+    expect(stored).toHaveProperty('fingerprint', null);
     expect(stored?.owner).toBe('implementor');
     expect(stored?.reviewTrigger).toBeNull();
   });
 
+  test('T38 input unknown evidence: a v3 disposition record missing the fingerprint key is rejected (unknown is null, not absent)', () => {
+    const withoutFingerprint: Partial<DevDispositionRecord> = dispositionV3();
+    delete withoutFingerprint.fingerprint;
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          version: DEV_LEDGER_VERSION,
+          branch: BRANCH,
+          records: [withoutFingerprint],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+  });
+
   test('T38 input failure boundary: an invalid input fails without writing a disposition', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
-      if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
-      return undefined;
-    });
+    const effects = inputEffects();
     // The schema guard (registry mirror) rejects a deferred disposition
-    // without a reviewTrigger BEFORE any ledger is opened or written.
+    // without a reviewTrigger BEFORE any ledger lookup or write happens.
     const guarded = await makeDevDisposition(effects)({
       repoRoot: '/repo',
       findingId: 'c001-aaaaaaaa#f1',
@@ -315,8 +308,30 @@ describe('T38: the dev.disposition input surface', () => {
       evidence: [],
     });
     expect(guarded.status).toBe('failed');
-    expect(effects.store.file().records).toHaveLength(0);
-    // An unknown finding id likewise fails at the op boundary and writes nothing.
+    expect(guarded.status === 'failed' && guarded.error).toMatch(/reviewTrigger/);
+    // A blank reviewTrigger, a blank owner and an empty-string evidence
+    // entry each fail the same guard; nothing is written in any case.
+    // (The undefined reviewTrigger case is the guarded call above.)
+    for (const bad of [
+      { reviewTrigger: '' },
+      { reviewTrigger: '  ' },
+      { owner: '' },
+      { owner: '  ' },
+      { evidence: ['ok', ''] as string[] },
+    ]) {
+      const result = await makeDevDisposition(effects)({
+        repoRoot: '/repo',
+        findingId: 'c001-aaaaaaaa#f1',
+        action: 'deferred',
+        why: 'tracked as TODO-1',
+        owner: 'implementor',
+        evidence: [],
+        reviewTrigger: 're-check at next head',
+        ...bad,
+      });
+      expect(result.status).toBe('failed');
+    }
+    // An unknown finding id fails at the op boundary and writes nothing.
     const unknown = await makeDevDisposition(effects)({
       repoRoot: '/repo',
       findingId: 'c999-zzzzzzzz#f1',
@@ -326,6 +341,8 @@ describe('T38: the dev.disposition input surface', () => {
       evidence: [],
     });
     expect(unknown.status).toBe('failed');
-    expect(effects.store.file().records).toHaveLength(0);
+    // In every failure case the ledger still holds only the seeded cycle.
+    expect(effects.store.file().records).toHaveLength(1);
+    expect(effects.store.file().records[0]?.kind).toBe('cycle');
   });
 });

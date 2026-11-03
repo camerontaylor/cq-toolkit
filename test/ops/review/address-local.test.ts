@@ -237,12 +237,18 @@ describe('review.address local full cycle', () => {
       expect(f.models.filter((model) => model === 'reviewer').length).toBeGreaterThan(0);
       expect((await scanner.calls()).length).toBeGreaterThan(3);
       const ledger = makeSubprocessDevEffects(f.repo.root).openLedger('feature/x').load();
-      expect(
-        ledger.records.some(
-          (row) =>
-            row.kind === 'disposition' && row.findingId === 'seed-a' && row.action === 'fixed',
-        ),
-      ).toBe(true);
+      const disposition = ledger.records.find(
+        (row): row is Extract<typeof row, { kind: 'disposition' }> =>
+          row.kind === 'disposition' && row.findingId === 'seed-a' && row.action === 'fixed',
+      );
+      expect(disposition).toBeDefined();
+      // ADR-0008 T38: the v3 disposition carries full provenance — the
+      // engine names itself as owner, and the evidence is the finding's
+      // own verbatim proof: the gated commit SHA for a fixed disposition.
+      expect(disposition?.owner).toBe('review.address');
+      expect(disposition?.evidence).toEqual([f.repo.git('rev-parse', 'HEAD').trim()]);
+      expect(disposition?.fingerprint ?? null).toBeNull();
+      expect(disposition?.acceptedRisk ?? null).toBeNull();
       expect(JSON.parse(await readFile(result.value.reportPath, 'utf8'))).toEqual(result.value);
       expect(f.repo.git('show', '--format=', '--name-only', 'HEAD').trim()).toBe('src/a.ts');
       // Publication is an explicit opt-in even after a successful run.
