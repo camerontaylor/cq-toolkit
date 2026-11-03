@@ -307,7 +307,7 @@ describe('analyze.fix — cluster + rule', () => {
     const { dir, clusterId, sidecarPath } = await fixture();
     const alias = join(dir, '.cq/analysis/selected.json');
     const replacement = join(dir, '.cq/analysis/replacement.json');
-    writeFileSync(replacement, `${readFileSync(sidecarPath, 'utf8')}\n`);
+    writeFileSync(replacement, readFileSync(sidecarPath));
     symlinkSync(sidecarPath, alias);
     const run = scriptedRunner({
       onTsc: () => {
