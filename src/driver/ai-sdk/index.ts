@@ -1326,6 +1326,7 @@ export class AiSdkDriver implements Driver {
           steps: completedSteps,
           sessionId: record.sessionId,
           denials,
+          ...capabilityEvidence,
           stopReason: 'error',
           error: boundedErrorText(
             `ai-sdk driver: strict token ceiling infrastructure failure (${err.reason}) — ${err.message}`,
