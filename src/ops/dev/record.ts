@@ -279,9 +279,11 @@ export interface DevCheckRecord {
  * One disposition: the author's recorded adjudication of one finding.
  * The v2 carrier fields are unchanged (ADR-0008 T38: action/why/head/at map
  * to status/reason/observedHead/observedAt in the journal without renaming
- * the dev carrier). The v3 provenance fields are present on every record a
- * version-3 writer emits; on a legacy v2 record they are absent — a reader
- * must treat that as UNKNOWN, never manufacture a value.
+ * the dev carrier). The v3 provenance fields are optional HERE because this
+ * persistence subpart only teaches the format to dual-read; the disposition
+ * producer (disposition.ts) still records the v2 carrier until its own
+ * ticket adds the input fields — never fabricate them at this layer. On a
+ * legacy record they are absent: a reader must treat that as UNKNOWN.
  */
 export interface DevDispositionRecord {
   kind: 'disposition';

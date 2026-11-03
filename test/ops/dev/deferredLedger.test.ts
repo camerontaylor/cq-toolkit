@@ -162,7 +162,7 @@ async function fixture() {
   return { repo, effects, state, client, ledger, debt, origin, agent, assemble, identity };
 }
 
-test('strict additive ledger keeps old v2 readable and refuses forged failure classes/reuse', async () => {
+test('strict additive ledger round-trips at the current version and refuses forged failure classes/reuse', async () => {
   const f = await fixture();
   expect(parseDevLedger(serializeDevLedger(f.ledger))).toEqual(f.ledger);
   const legacy = { ...f.ledger, records: [cycleRecord()] };
