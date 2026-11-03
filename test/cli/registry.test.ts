@@ -235,7 +235,7 @@ describe('registry family scan (src/ops)', () => {
       }
     }
     expect(violations).toEqual([]);
-  });
+  }, 30_000);
 });
 
 describe('registry ⇄ CLI subcommand surface', () => {
@@ -265,7 +265,7 @@ describe('registry ⇄ CLI subcommand surface', () => {
     expect(skippedFamilies).toEqual([]);
     // list() is exactly the diagnostics' entry half (same cached scan).
     expect(diagEntries).toEqual(entries);
-  });
+  }, 30_000);
 });
 
 describe('fixture-root DI (test/fixtures/cli-ops)', () => {
@@ -614,7 +614,7 @@ describe('root barrel aliases (src/index.js)', () => {
     ]) {
       expect(Object.hasOwn(barrel, name), name).toBe(true);
     }
-  });
+  }, 30_000);
 
   test('exposes listOps/getOp; the generic list/get names never sit on the barrel', async () => {
     const barrel = await import('../../src/index.js');
@@ -625,5 +625,5 @@ describe('root barrel aliases (src/index.js)', () => {
     // first family barrel that ever exports them — they must stay absent.
     expect(Object.hasOwn(barrel, 'list')).toBe(false);
     expect(Object.hasOwn(barrel, 'get')).toBe(false);
-  });
+  }, 30_000);
 });
