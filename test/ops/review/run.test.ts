@@ -145,8 +145,21 @@ describe('review.run', () => {
     try {
       await configureAgentRepo(repo);
       expect(reviewBranchKey('feature/x')).toBe('feature%2Fx');
+      for (const length of [178, 179]) {
+        const key = reviewBranchKey('x'.repeat(length) + 'é' + 'y'.repeat(100));
+        const prefix = key.slice(0, key.lastIndexOf('-'));
+        expect(prefix).not.toMatch(/%[0-9A-F]?$/);
+        expect(prefix).toBe('%_' + 'x'.repeat(length));
+      }
       const prefix = 'long/' + 'é/'.repeat(80);
-      const branches = [prefix + 'one', prefix + 'two'];
+      const branches = [
+        prefix + 'one',
+        prefix + 'two',
+        'a/'.repeat(80) + 'tail',
+        'a/'.repeat(45) + '-462a0fe9a6d5689f',
+      ];
+      // The last ordinary branch previously aliased the shortened long key.
+      expect(reviewBranchKey(branches[2]!)).not.toBe(reviewBranchKey(branches[3]!));
       expect(reviewBranchKey(branches[0]!)).not.toBe(reviewBranchKey(branches[1]!));
       for (const branch of branches) {
         repo.git('checkout', '-b', branch);
