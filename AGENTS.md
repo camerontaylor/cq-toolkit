@@ -92,6 +92,10 @@ refused; integration/live suites require their include flags. Quote the final
 
 ## GLM peak-hour blackout
 
+> **SUSPENDED by the owner, 2026-11-02:** GLM work may run through the 14:00–18:00 SGT window.
+> No pause/resume schedule is active. Do not pause or go dark for it. The text below is kept for
+> when the owner reinstates it (toolkit-research `CLAUDE.md` carries the same banner).
+
 No work on the `claude-zai` or `zcode` (Z.ai GLM) harnesses between
 14:00–18:00 Asia/Singapore (UTC+8), Monday–Friday. That is Z.ai's GLM
 Coding Plan peak-hour window, where quota consumption multiplies (~3×)
