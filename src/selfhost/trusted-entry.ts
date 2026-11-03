@@ -16,6 +16,8 @@
 //     reads a failure, never nothing. Unlike the CLI, the result is not
 //     schema-checked before printing: each workflow step re-validates the
 //     line with jq, and anything malformed is a failure there.
+// These CI verdict entries intentionally do not accept --fail-on-verdict;
+// each workflow evaluates the verdict in the emitted artifact.
 import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
 

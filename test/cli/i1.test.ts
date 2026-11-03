@@ -744,25 +744,28 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
     await expect(list({ opsRoot: hashedRoot })).resolves.toBeDefined();
   });
 
-  test('reserved-schema enforcement: an entry declaring the reserved json key rejects at scan', async () => {
-    // json/help/h are reserved on EVERY subcommand and stripped before any
-    // schema sees input — a schema declaring one could never receive it
-    // through its subcommand, so registration rejects loudly instead of
-    // shipping an op whose field is unreachable.
-    const tmp = await makeTmpOpsRoot('cq-i1-reservedschema-');
-    await mkdir(join(tmp, 'reservedfam'), { recursive: true });
-    await writeFile(
-      join(tmp, 'reservedfam', 'registry.js'),
-      [
-        "import { z } from 'zod';",
-        'export const registry = [',
-        "  { name: 'jsonop', inputSchema: z.object({ json: z.string() }), importer: async () => async () => ({ status: 'ok', value: null }) },",
-        '];',
-        '',
-      ].join('\n'),
-    );
-    await expect(list({ opsRoot: tmp })).rejects.toThrow(/reserved CLI key 'json'/);
-  });
+  test.each(['json', 'help', 'h', 'fail-on-verdict'])(
+    'reserved-schema enforcement: %s rejects at scan',
+    async (key) => {
+      // json/help/h/fail-on-verdict are reserved on EVERY subcommand and stripped before any
+      // schema sees input — a schema declaring one could never receive it
+      // through its subcommand, so registration rejects loudly instead of
+      // shipping an op whose field is unreachable.
+      const tmp = await makeTmpOpsRoot('cq-i1-reservedschema-');
+      await mkdir(join(tmp, 'reservedfam'), { recursive: true });
+      await writeFile(
+        join(tmp, 'reservedfam', 'registry.js'),
+        [
+          "import { z } from 'zod';",
+          'export const registry = [',
+          `  { name: 'jsonop', inputSchema: z.object({ [${JSON.stringify(key)}]: z.string() }), importer: async () => async () => ({ status: 'ok', value: null }) },`,
+          '];',
+          '',
+        ].join('\n'),
+      );
+      await expect(list({ opsRoot: tmp })).rejects.toThrow(new RegExp(`reserved CLI key '${key}'`));
+    },
+  );
 
   test('a CYCLIC plan file is an invalid plan (exit 2), never a narrated runtime crash (review-debt #84)', async () => {
     // topoOrder throws 'topoOrder: dependency cycle among jobs: …' for a
