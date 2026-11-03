@@ -98,7 +98,7 @@ The spec's framing is right and incomplete. Precisely:
 2. **The ruleset template lists seven** — S4 — including `cq/*` and
    `from-source`, and it does **not** list the plain `ratchet` context: the
    recorded supersession is `ratchet` → `cq/ratchet`
-   (`test/ops/gates/protectedPaths.test.ts:323-326`, documented at
+   (`test/ops/gates/protectedPaths.trustedJobs.test.ts`, documented at
    `docs/methods-w1-10.md:243`).
 3. **`from-source` is deliberately not a required check** — `.github/workflows/ci.yml:76-84`
    and the template narrative at `policy/templates/required-check.md:134-142`
@@ -241,7 +241,7 @@ head-defined obligation into the App-pinned group — a trust _upgrade_ nobody
 authorised, and unsatisfiable while the App is absent.
 
 Corollary for this change set: `static-macos` adds **no new supersession** to
-`test/ops/gates/protectedPaths.test.ts:323-326`. The single recorded
+`test/ops/gates/protectedPaths.trustedJobs.test.ts`. The single recorded
 supersession stays `ratchet` → `cq/ratchet`, and its documentation assertion
 (`:348-352`, the methods-note Residuals text) is untouched by it.
 

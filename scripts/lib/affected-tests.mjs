@@ -52,7 +52,7 @@ export const NON_IMPORT_MAP = [
   // protectedPaths walks the relative-import closure of the gate and
   // acceptance entry points from disk; that closure crosses src/, so any
   // source can join it.
-  [/^src\/.*\.ts$/, [/^test\/ops\/gates\/protectedPaths\.test\.ts$/]],
+  [/^src\/.*\.ts$/, [/^test\/ops\/gates\/protectedPaths(?:\.[\w-]+)?\.test\.ts$/]],
   // Entry points these suites only run in a child process (or a generated
   // fixture) by path: their closures, less what the suites import.
   [
@@ -83,14 +83,17 @@ export const NON_IMPORT_MAP = [
   // Root configs that specific suites read from disk.
   [
     /^knip\.json$/,
-    [/^test\/scripts\/knip\.test\.ts$/, /^test\/ops\/gates\/protectedPaths\.test\.ts$/],
+    [
+      /^test\/scripts\/knip\.test\.ts$/,
+      /^test\/ops\/gates\/protectedPaths(?:\.[\w-]+)?\.test\.ts$/,
+    ],
   ],
   [
     /^(\.oxlintrc\.json|lint\/(?!.*\.test\.ts$).*)$/,
     [
       /^lint\//,
       /^test\/scripts\/(oxlint-boundaries|static-conformance|tooling-commands)\.test\.ts$/,
-      /^test\/ops\/gates\/protectedPaths\.test\.ts$/,
+      /^test\/ops\/gates\/protectedPaths(?:\.[\w-]+)?\.test\.ts$/,
       /^test\/ops\/sweep\/unit-registry\.test\.ts$/,
     ],
   ],
@@ -99,7 +102,7 @@ export const NON_IMPORT_MAP = [
     /^\.github\/(workflows|actions)\//,
     [
       /^test\/workflows\//,
-      /^test\/ops\/gates\/(workflowScan|protectedPaths)\.test\.ts$/,
+      /^test\/ops\/gates\/(?:workflowScan|protectedPaths(?:\.[\w-]+)?)\.test\.ts$/,
       /^test\/ops\/gates\/policyDiff(\..+)?\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
       /^test\/scripts\/(github-settings|adversarial-suite)\.test\.ts$/,

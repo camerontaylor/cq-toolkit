@@ -172,14 +172,14 @@ launcher already strips runner credentials from run children
 (`test/adversarial/boundary-rows.test.ts` A11/A17); the remaining gap is the
 in-process code.
 
-`test/ops/gates/protectedPaths.test.ts` pins this table. Every script or
+`test/ops/gates/protectedPaths.trustedJobs.test.ts` pins this table. Every script or
 selfhost entry that a privileged job runs must be protected or appear in its
 residual list, and every listed entry must still be in use. Adding a
 privileged executor therefore fails CI until someone classifies it.
 
 ## How the scope stays honest
 
-`test/ops/gates/protectedPaths.test.ts` follows the value-import closure of
+`test/ops/gates/protectedPaths.closure.test.ts` follows the value-import closure of
 the judging entry points and fails when a file is unprotected. The entry
 points include the ratchet engine that `loadEngine` imports, parsed from the
 script. It also pins which `trust/dist/...` calls the workflows contain.

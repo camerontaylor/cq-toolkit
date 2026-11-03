@@ -31,8 +31,8 @@ export const PROTECTED_TEST_FILE_PATTERNS: readonly RegExp[] = Object.freeze(
  * RATCHET-SET SYNC (composition F1): every shape in the ratchet definition
  * set is ALSO protected here — `baselines/ratchets.json`'s `definitionSet`
  * is the trust-ref list that routes a subject's edit to needs-human, and
- * `test/ops/gates/protectedPaths.test.ts` asserts that direction over the
- * real manifest, plus the shapes ADR-0004 D-G.1 names that no regex can
+ * `test/ops/gates/protectedPaths.definitionSet.test.ts` asserts that direction
+ * over the real manifest, plus the shapes ADR-0004 D-G.1 names that no regex can
  * enumerate statically (`baselines/**`, `.node-version`, `.cq/tool/**`, the
  * tsconfig `extends`/`references` graph).
  *
