@@ -493,6 +493,66 @@ describe('M6c availability discipline (review r2)', () => {
     expect(row.availability['']).toMatchObject({ state: 'partial' });
   });
 
+  it('a null value carrying partial is contradictory (partial implies a known subtotal)', () => {
+    const base = attemptEvent();
+    const noUsage = { ...base, payload: { ...base.payload, tokens: null, wallMs: null } };
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([noUsage]),
+    });
+    const row = JSON.parse(JSON.stringify(index.sessions[0])) as {
+      availability: Record<string, unknown>;
+    };
+    row.availability['/tokens'] = { state: 'partial', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse({ indexVersion: 1, sessions: [row] })).toThrow(
+      /cannot carry availability state 'partial'/,
+    );
+  });
+
+  it('availability pointers outside the nullable-field set are rejected', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    const forged = {
+      indexVersion: 1 as const,
+      sessions: [
+        JSON.parse(JSON.stringify(index.sessions[0])) as {
+          availability: Record<string, unknown>;
+        },
+      ],
+    };
+    const row = forged.sessions[0]!;
+    row.availability['/bogus'] = { state: 'not-collected', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow(/not a nullable row field/);
+    delete row.availability['/bogus'];
+    // parentWorkId is a structural null, never an availability pointer.
+    row.availability['/parentWorkId'] = { state: 'not-collected', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow(/not a nullable row field/);
+    delete row.availability['/parentWorkId'];
+    expect(() => SessionIndexSchema.parse(forged)).not.toThrow();
+  });
+
+  it('the root availability entry must state partial; a known root is rejected', () => {
+    const index = buildSessionIndex({
+      correlation: correlation(),
+      stream: stream([attemptEvent()]),
+    });
+    const forged = {
+      indexVersion: 1 as const,
+      sessions: [
+        JSON.parse(JSON.stringify(index.sessions[0])) as {
+          availability: Record<string, unknown>;
+        },
+      ],
+    };
+    const row = forged.sessions[0]!;
+    row.availability[''] = { state: 'known', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).toThrow(/root availability entry/);
+    row.availability[''] = { state: 'partial', reason: 'x', source: null };
+    expect(() => SessionIndexSchema.parse(forged)).not.toThrow();
+  });
+
   it('availability keys must be valid JSON Pointers; the root is the empty string', () => {
     const index = buildSessionIndex({
       correlation: correlation(),

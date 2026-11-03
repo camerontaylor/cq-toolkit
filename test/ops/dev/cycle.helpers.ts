@@ -265,10 +265,11 @@ export function structuredStopAddress(
   });
 }
 
-/** A helper every agent-leg test with a pre-dispatch scan shares (the four
- * default-review-leg M7 tests plus the S7 probe and the M7 cancellation
- * and usage tests): CI runners have no gitleaks binary, so the scan needs
- * the hermetic scanner fixture on PATH. Returns the cleanup. */
+/** A helper every agent-leg test with a pre-dispatch scan shares (the five
+ * M7-cycle tests that dispatch an agent leg — nominal, failure, folded usage,
+ * exhaustion and cancellation — plus the S7 H (D2) token-site test and the
+ * BEFORE (P2 7kNi) address-factory test): CI runners have no gitleaks binary,
+ * so the scan needs the hermetic scanner fixture on PATH. Returns the cleanup. */
 export async function stubM7Scanner(): Promise<() => Promise<void>> {
   const scanner = await makeGitleaksFixture();
   vi.stubEnv('PATH', scanner.path);

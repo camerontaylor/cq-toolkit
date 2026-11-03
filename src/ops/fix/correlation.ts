@@ -51,7 +51,10 @@ export function resolveCorrelation(input: ResolveCorrelationInput): CorrelationR
   // An untyped caller can smuggle a non-object restore (null at runtime):
   // reject it on the correlation-error path, never let a TypeError surface.
   if (restored !== undefined && (restored === null || typeof restored !== 'object')) {
-    throw new Error('correlation: restored record must be a correlation object, not null');
+    throw new Error(
+      'correlation: restored record must be a correlation object ' +
+        '(a non-null object of the expected shape)',
+    );
   }
   if (restored !== undefined && restored.branch !== input.branch) {
     throw new Error(

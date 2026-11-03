@@ -81,7 +81,8 @@ export const SessionIndexSchema = z
     // a null nullable value MUST carry an availability entry at its
     // pointer; a non-null value must NOT be marked not-collected or
     // unavailable (a present value with an absence state contradicts
-    // itself), and never known/known-zero on a null.
+    // itself), and never known/known-zero/partial on a null (partial also
+    // implies a known subtotal, which a null cannot carry).
     // parentWorkId is excluded: its null is a structural value (root work),
     // not missing evidence, and never carries an availability entry.
     const nullableFields = [
@@ -93,7 +94,32 @@ export const SessionIndexSchema = z
       'tokens',
       'wallMs',
     ];
+    // Availability keys are JSON Pointers to a row field, so only the
+    // nullable-field pointers and the '' root sentinel are meaningful: an
+    // entry at any other pointer states an absence nothing can consume.
+    const allowedPointers = new Set(nullableFields.map((field) => `/${field}`));
     index.sessions.forEach((row, i) => {
+      for (const pointer of Object.keys(row.availability)) {
+        if (pointer !== '' && !allowedPointers.has(pointer)) {
+          ctx.addIssue({
+            code: 'custom',
+            message:
+              `availability pointer '${pointer}' is not a nullable row field: ` +
+              `use '' (root) or one of ${[...allowedPointers].join(', ')}`,
+            path: ['sessions', i, 'availability'],
+          });
+        }
+      }
+      // The root sentinel marks a torn/incomplete stream, which the builder
+      // only ever writes as 'partial'; a known root would claim completeness.
+      const root = row.availability[''];
+      if (root !== undefined && root.state !== 'partial') {
+        ctx.addIssue({
+          code: 'custom',
+          message: `the root availability entry (torn/incomplete stream) must state 'partial', not '${root.state}'`,
+          path: ['sessions', i, 'availability', ''],
+        });
+      }
       for (const field of nullableFields) {
         const pointer = `/${field}`;
         const entry = row.availability[pointer];
@@ -118,7 +144,11 @@ export const SessionIndexSchema = z
           }
         }
         if (row[field] === null && entry !== undefined) {
-          if (entry.state === 'known' || entry.state === 'known-zero') {
+          if (
+            entry.state === 'known' ||
+            entry.state === 'known-zero' ||
+            entry.state === 'partial'
+          ) {
             ctx.addIssue({
               code: 'custom',
               message: `a null value at ${pointer} cannot carry availability state '${entry.state}'`,
@@ -227,7 +257,7 @@ export function buildSessionIndex(input) {
       return {
         value: null,
         state: 'not-collected',
-        reason: `no attempt carried a ${field === 'tokens' ? 'token count' : 'wall-time duration'}`,
+        reason: `no attempt reported a ${field === 'tokens' ? 'token count' : 'wall time'}`,
       };
     }
     const subtotal = known.reduce((sum, a) => sum + a.payload[field], 0);
@@ -237,15 +267,15 @@ export function buildSessionIndex(input) {
         state: subtotal === 0 ? 'known-zero' : 'known',
         reason:
           subtotal === 0
-            ? `every attempt carried a known ${field === 'tokens' ? 'token count' : 'wall-time duration'} and the observed sum is zero`
-            : `every attempt carried a known ${field === 'tokens' ? 'token count' : 'wall-time duration'}`,
+            ? `every attempt reported a known ${field === 'tokens' ? 'token count' : 'wall time'} and the observed sum is zero`
+            : `every attempt reported a known ${field === 'tokens' ? 'token count' : 'wall time'}`,
       };
     }
     return {
       value: subtotal,
       state: 'partial',
       reason:
-        `some attempts carried a known ${field === 'tokens' ? 'token count' : 'wall-time duration'}; ` +
+        `some attempts reported a known ${field === 'tokens' ? 'token count' : 'wall time'}; ` +
         'the value preserves the known subtotal without claiming a complete sum',
     };
   }

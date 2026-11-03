@@ -820,10 +820,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       let terminalAttempt: object | undefined;
       let terminalDeferred = false;
       let editingRow: AddressAttempt | undefined;
-      // The driver-resolved model of the in-flight dispatch. Set in the
-      // dispatch row callback together with `touched`, so it is always set
-      // when the failed path pins (restore() pins only when touched); kept
-      // optional for the same defensive reason as `editingRow`.
+      // The driver-resolved model of the in-flight dispatch. Typed optional
+      // only because it is assigned inside the dispatch callback (a
+      // definite-assignment consequence, not a real possibility of absence):
+      // the callback sets it together with `touched`, and restore() pins only
+      // when `touched`, so both non-null uses are safe to assert.
       let resolvedModel: ModelSpec | undefined;
       let restoreRefused = false;
       let dispatch:
