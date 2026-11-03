@@ -45,6 +45,15 @@ export async function world(
     incrementingCommits?: boolean;
     /** Fail every git push from this 1-based ordinal on with the scripted stderr. */
     failPushFrom?: { ordinal: number; stderr: string };
+    /** Caller-asserted PR head (the pr:N base witness inputs). */
+    expectedHead?: string;
+    /**
+     * The clone NAMES the asserted head but does not CONTAIN its object: ref
+     * and string paths resolve it (admission and the worktree guard agree on
+     * the sha), while an object read — `rev-parse --verify <oid>^{commit}`,
+     * the base witness's own probe — fails.
+     */
+    missingHeadObject?: boolean;
   } = {},
 ) {
   // The failer knob only has a defined thread order inside the default
@@ -54,11 +63,21 @@ export async function world(
   // wrong world.
   if (options.failer && (human || options.sameFile || options.fileless))
     throw new Error('world(): failer cannot be combined with human, sameFile or fileless');
+  if (options.missingHeadObject && options.expectedHead === undefined)
+    throw new Error('world(): missingHeadObject requires expectedHead');
   const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
   const worktree = join(root, 'git', 'cq-review-worktrees', 'worker');
   await mkdir(worktree, { recursive: true });
-  let head = initial,
-    remote = initial;
+  // A PR head the clone does not contain YET: the head ref names it (ref and
+  // string paths resolve the sha, exactly as they do in a fresh clone whose
+  // refs were fetched later), but the COMMIT object only arrives with the
+  // PR-head fetch the loop performs. So the base witness's object read — the
+  // one probe that runs BEFORE that fetch — fails, and every later object read
+  // succeeds. That is the production ordering this branch models.
+  const seedHead = options.missingHeadObject ? options.expectedHead : undefined;
+  let prHeadObjectArrived = false;
+  let head = seedHead ?? initial,
+    remote = seedHead ?? initial;
   const resolved = new Set<string>();
   let failResolve = options.recoverResolution === true;
   let login = 'responder';
@@ -84,7 +103,8 @@ export async function world(
   for (const file of files) await writeFile(join(worktree, file), 'BAD\n');
   const initialTree = new Map(files.map((file) => [file, 'BAD\n']));
   const trees = new Map<string, Map<string, string>>([[initial, new Map(initialTree)]]);
-  const heads = new Map<string, string>([[worktree, initial]]);
+  if (seedHead !== undefined) trees.set(seedHead, new Map(initialTree));
+  const heads = new Map<string, string>([[worktree, seedHead ?? initial]]);
   const indices = new Map<string, Map<string, string>>([[worktree, new Map(initialTree)]]);
   const treeHash = (tree: Map<string, string>) =>
     createHash('sha1')
@@ -314,7 +334,11 @@ export async function world(
           .join(''),
       );
     }
-    if (a[0] === 'fetch') return ok('');
+    if (a[0] === 'fetch') {
+      // The PR-head fetch is what BRINGS the asserted head's commit object.
+      if (a.some((arg) => arg.includes('refs/pull/'))) prHeadObjectArrived = true;
+      return ok('');
+    }
     if (a[0] === 'worktree' && a[1] === 'list')
       return ok(`worktree ${worktree}\nHEAD ${head}\nbranch refs/heads/cq-review/pr-7\n\n`);
     if (a[0] === 'rev-parse') {
@@ -323,7 +347,7 @@ export async function world(
       if (a[1] === '--abbrev-ref') return ok('cq-review/pr-7');
       if (a[1] === '--verify') {
         const sha = a[2]!.replace('HEAD', head).replace(/\^\{commit\}$/, '');
-        return sha === initial || commits.has(sha)
+        return sha === initial || commits.has(sha) || (sha === seedHead && prHeadObjectArrived)
           ? ok(sha)
           : { code: 1, stdout: '', stderr: 'unknown commit' };
       }
@@ -536,6 +560,7 @@ export async function world(
       const result = await op({
         repoRoot: root,
         source: 'pr:7',
+        ...(options.expectedHead === undefined ? {} : { expectedHead: options.expectedHead }),
         ...(options.verifyClosure ? { verifyClosure: true } : {}),
         push,
         ...(target ? { target } : {}),

@@ -16,10 +16,12 @@
 //      the run's verdict; the observation surface carries the sanitized
 //      first error and the status is indeterminate.
 // Fake/local inputs only: no provider, no network, no credentials.
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import {
   openObservationWriter,
   readObservations,
@@ -86,13 +88,15 @@ async function fixture(): Promise<Fixture> {
       reviewer: { ...role, model: 'reviewer' },
     },
     review: { reviewers: ['agent'], rounds: 2 },
-    budgets: { run: { maxTokens: 10000, wallMs: 20000 }, step: { wallMs: 5000 } },
+    budgets: { run: { maxTokens: 10000, wallMs: 60000 }, step: { wallMs: 5000 } },
     escalation: { workerAttempts: 2, rescueBase: 1, rescuePerPackageCap: 1 },
   };
   await repo.write('.gitignore', '.cq/\n');
   await repo.write('src/a.ts', 'export const a = "BAD";\n');
   await repo.write('scripts/check.cjs', 'process.exitCode = 0;\n');
-  await repo.write('cq.json', JSON.stringify(config));
+  // Pretty-printed on purpose: the provenance hash must cover the cq.json
+  // FILE TEXT (T30 parity), which differs from JSON.stringify(config).
+  await repo.write('cq.json', `${JSON.stringify(config, null, 2)}\n`);
   repo.commitAll('address observation fixture');
   const head = repo.git('rev-parse', 'HEAD').trim();
   const finding: Finding = {
@@ -252,18 +256,25 @@ describe('T31 round-trip through the address composition', () => {
       if (header?.type !== 'composition-started') throw new Error('header missing');
       expect(header.payload.journalVersion).toBe(3);
       expect(header.payload.provenance.baseSha).toBe(header.payload.provenance.witnesses.base);
+      expect(header.payload.provenance.baseSha).toBe(f.record.head);
       expect(header.payload.provenance.repoId === null).toBe(true);
-      // Explicit kernel-run links for every returned run; the linked ids are
-      // the actual runs the report retained.
-      const links = stream.events.filter((event) => event.type === 'kernel-run-linked');
-      expect(links.length).toBeGreaterThanOrEqual(1);
-      const returned = new Set(
-        report?.rounds.flatMap((round) => round.runs.map((run) => run.runId)) ?? [],
+      // P3-6: the hash covers the cq.json FILE TEXT (pretty-printed by the
+      // fixture, so this differs from JSON.stringify(config)), exactly as T30
+      // runFix's captureProvenance hashes it.
+      expect(header.payload.provenance.cqJsonHash).toBe(
+        `sha256:${createHash('sha256')
+          .update(await readFile(join(f.repo.root, 'cq.json'), 'utf8'), 'utf8')
+          .digest('hex')}`,
       );
-      for (const link of links) {
-        if (link.type !== 'kernel-run-linked') continue;
-        expect(returned.has(link.payload.kernelRunId)).toBe(true);
-      }
+      expect(report?.observation?.baseSha).toBe(header.payload.provenance.baseSha);
+      // Explicit kernel-run links for every returned run; the linked ids are
+      // the actual runs the report retained. P3-9: the count EQUALS the
+      // returned-run count — no missing link and no link for an unreturned run.
+      const links = stream.events.filter((event) => event.type === 'kernel-run-linked');
+      const returned = report?.rounds.flatMap((round) => round.runs.map((run) => run.runId)) ?? [];
+      expect(returned.length).toBeGreaterThan(0);
+      expect(links.length).toBe(returned.length);
+      expect(new Set(links.map((link) => link.payload.kernelRunId))).toEqual(new Set(returned));
       // The report surface lists the same kernel runs, and the persisted
       // artifact is a DTO: no writer instance ever serialized.
       // T04's kernel v3 header writer has not landed: kernel runs are still
@@ -315,11 +326,145 @@ describe('T31 round-trip through the address composition', () => {
       await f.cleanup();
     }
   });
+
+  test('a fresh journal directory is usable: the writer creates it and the stream is durable', async () => {
+    const f = await fixture();
+    // P2-1: addressMany hands every PR run exactly this shape — a journal dir
+    // that does not exist yet. ENOENT is USABLE (the writer mkdir -p's it).
+    const fresh = join(dirname(f.repo.root), 'fresh-journal');
+    try {
+      await expect(lstat(fresh)).rejects.toMatchObject({ code: 'ENOENT' });
+      const result = await makeReviewAddress({
+        drivers: f.drivers,
+        initialRecord: f.record,
+        review: f.review,
+      })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: fresh });
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      const report = reportOf(result);
+      expect(report?.observation?.persistence).toBe('durable');
+      const streams = await readObservations(fresh);
+      expect(streams).toHaveLength(1);
+      expect(streams[0]?.complete).toBe(true);
+      expect(streams[0]?.events[0]?.type).toBe('composition-started');
+    } finally {
+      await f.cleanup();
+      await rm(fresh, { recursive: true, force: true });
+    }
+  });
+
+  test('injected writer owns the composition identity and closes before the report persists', async () => {
+    const f = await fixture();
+    const workId = '00000000-0000-4000-8000-000000000000';
+    const compositionRunId = 't31-injected';
+    const writer = await openObservationWriter({ workId, compositionRunId });
+    const reportPath = join(f.journalDir, 'review-address-report.json');
+    // P3-9: record whether the report already existed at close time.
+    const persistedWhenClosed: boolean[] = [];
+    const originalClose = writer.close.bind(writer);
+    const closeSpy = vi.spyOn(writer, 'close').mockImplementation(async () => {
+      persistedWhenClosed.push(
+        await readFile(reportPath, 'utf8').then(
+          () => true,
+          () => false,
+        ),
+      );
+      await originalClose();
+    });
+    try {
+      const result = await makeReviewAddress({
+        drivers: f.drivers,
+        initialRecord: f.record,
+        review: f.review,
+        observationWriter: writer,
+      })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      const report = reportOf(result);
+      // P3-8: the composition adopts BOTH identities from the injected writer.
+      expect(report?.observation?.compositionRunId).toBe(compositionRunId);
+      expect(report?.observation?.workId).toBe(workId);
+      // P3-9: close happens BEFORE the report write, exactly once.
+      expect(persistedWhenClosed).toEqual([false]);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      await expect(readFile(reportPath, 'utf8')).resolves.toContain('"observation"');
+      const header = writer.events()[0];
+      expect(header?.type).toBe('composition-started');
+      if (header?.type === 'composition-started') {
+        expect(header.runId).toBe(compositionRunId);
+        expect(header.payload.correlation.workId).toBe(workId);
+      }
+    } finally {
+      await f.cleanup();
+      await writer.close().catch(() => undefined);
+    }
+  });
+
+  test('an unwitnessable base never fails the run and records null/unavailable', async () => {
+    const f = await fixture();
+    const realGit = makeGhRunner({ bin: 'git', cwd: f.repo.root, timeoutMs: 10_000 });
+    let probeFailed = false;
+    const git: GhFn = async (args) => {
+      // Fail ONLY the composition's first base probe (the local HEAD read);
+      // every later git call in the run is real.
+      if (
+        !probeFailed &&
+        args.includes('rev-parse') &&
+        args.includes('-C') &&
+        args.at(-1) === 'HEAD'
+      ) {
+        probeFailed = true;
+        return { code: 128, stdout: '', stderr: 'fatal: ambiguous argument HEAD' };
+      }
+      return realGit(args);
+    };
+    try {
+      const result = await makeReviewAddress({
+        git,
+        drivers: f.drivers,
+        initialRecord: f.record,
+        review: f.review,
+      })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
+      // P3-5: an observation PRE-FLIGHT failure never changes the verdict.
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(probeFailed).toBe(true);
+      const report = reportOf(result);
+      expect(report?.observation?.baseSha).toBeNull();
+      expect(report?.observation?.status).toBe('indeterminate');
+      expect(report?.observation?.persistence).toBe('unavailable');
+      expect(report?.observation?.failure).toContain('base witness unavailable');
+      // No base, no schema-valid header: no stream file is written at all.
+      expect(await readObservations(f.journalDir)).toHaveLength(0);
+      expect(report?.observation?.kernelRuns).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
 });
 
 // ---- T31 unknown evidence -------------------------------------------------
 
 describe('T31 unknown evidence: unreturned runs stay unlinked', () => {
+  test('a refusal after the stream opens leaves no kernel-run link and no guessed id', async () => {
+    const f = await fixture();
+    try {
+      // A findings record whose head does not match the checkout refuses in
+      // admission — AFTER the composition stream has opened (header written),
+      // before any dispatch. The stream boundary exists; no link may.
+      const result = await makeReviewAddress({
+        drivers: f.drivers,
+        initialRecord: { ...f.record, head: 'b'.repeat(40) },
+        review: f.review,
+      })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
+      expect(result.status).toBe('needs-human');
+      const streams = await readObservations(f.journalDir);
+      expect(streams).toHaveLength(1);
+      expect(streams[0]?.complete).toBe(true);
+      expect(streams[0]?.events.map((event) => event.type)).toEqual(['composition-started']);
+      expect(reportOf(result)?.observation?.kernelRuns).toEqual([]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   test('a pre-dispatch refusal leaves no kernel-run link and no guessed id', async () => {
     const f = await fixture();
     try {
@@ -352,25 +497,13 @@ describe('T31 failure boundary', () => {
       });
       const append = writer.append.bind(writer);
       const originalClose = writer.close.bind(writer);
+      // P3-8: the composition adopts the writer's own compositionRunId/workId,
+      // so the injected events pass through unchanged — no test-side rewrite.
       const appendSpy = vi.spyOn(writer, 'append').mockImplementation(async (event) => {
         if (boundary === 'header' && event.type === 'composition-started')
           throw new Error('https://u:tok@h/x?k=v');
         if (boundary === 'link' && event.type === 'kernel-run-linked') await originalClose();
-        await append(
-          event.type === 'composition-started'
-            ? {
-                ...event,
-                runId: writer.compositionRunId,
-                payload: {
-                  ...event.payload,
-                  correlation: {
-                    ...event.payload.correlation,
-                    workId: '00000000-0000-4000-8000-000000000000',
-                  },
-                },
-              }
-            : { ...event, runId: writer.compositionRunId },
-        );
+        await append(event);
       });
       const closeSpy = vi.spyOn(writer, 'close').mockImplementation(async () => {
         if (boundary === 'close') throw new Error('https://u:tok@h/x?k=v');

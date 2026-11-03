@@ -85,6 +85,12 @@ export interface FoldedObservation {
 export interface ObservationWriter {
   /** The compositionRunId this writer was opened with; the observation `runId`. */
   readonly compositionRunId: string;
+  /**
+   * The workId this writer was opened with; the correlation identity its
+   * streams join kernel runs on. A composition adopting an injected writer
+   * takes BOTH identities from it (never a second, divergent allocation).
+   */
+  readonly workId: string;
   /** `'durable'` with a journalDir; `'unavailable'` memory-only (P2-2 ruling). */
   readonly persistence: ObservationPersistence;
   /**
@@ -205,6 +211,7 @@ export async function openObservationWriter(
 
   return {
     compositionRunId,
+    workId,
     persistence: streamPath === null ? 'unavailable' : 'durable',
     get failure(): unknown {
       return writeFailed;
