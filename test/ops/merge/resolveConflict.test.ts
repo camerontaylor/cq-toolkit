@@ -1182,8 +1182,8 @@ describe('the acted verification', () => {
 describe('I11 forge fact: a push to the head branch IS refs/pull/<pr>/head', () => {
   test('the acted verification observes the push THROUGH the pull ref, exclusively', async () => {
     // THE PREMISE (I11: forge facts carried as tests — the sibling pin is
-    // executeMerges.test.ts's exact-sequence assertions, where every
-    // baseline and revalidation call addresses refs/pull/<n>/head): the
+    // executeMerges.happy-path.test.ts's exact-sequence assertions, where
+    // every baseline and revalidation call addresses refs/pull/<n>/head): the
     // agent pushes to the pr's head BRANCH, and the forge reflects that on
     // the read-only pull ref. The fake models exactly that — its movable
     // head lives ON refs/pull/<pr>/head — so the acted verification's
