@@ -83,7 +83,7 @@ function scriptedDrivers(
 }
 
 describe('review.run', () => {
-  it('deduplicates agent and CodeRabbit producer findings by file, line and rule', async () => {
+  it('retains CodeRabbit lines and ID fallback without a vendor rule', async () => {
     const repo = await makeTestRepo();
     try {
       await configureAgentRepo(repo);
@@ -96,8 +96,11 @@ describe('review.run', () => {
                 JSON.stringify({
                   type: 'finding',
                   fileName: identity.file,
-                  line: identity.line,
-                  rule: identity.rule,
+                  startLine: identity.line,
+                  endLine: identity.line,
+                  title: 'Fixture issue',
+                  codegenInstructions: 'Inspect the fixture',
+                  suggestions: [],
                   severity: 'major',
                   comment: 'vendor wording',
                 }),
@@ -118,9 +121,13 @@ describe('review.run', () => {
       })({ repoRoot: repo.root, reviewers: ['coderabbit', 'agent'] });
       expect(result.status).toBe('ok');
       if (result.status !== 'ok') throw new Error(result.status);
-      expect(result.value.findings).toHaveLength(1);
-      expect(result.value.findings[0]).toMatchObject(identity);
-      expect(result.value.findings[0]?.source.split(',').sort()).toEqual(['agent', 'coderabbit']);
+      expect(result.value.findings).toHaveLength(2);
+      const vendor = result.value.findings.find((finding) => finding.source === 'coderabbit');
+      const agent = result.value.findings.find((finding) => finding.source === 'agent');
+      expect(vendor).toMatchObject({ file: identity.file, line: identity.line });
+      expect(vendor).not.toHaveProperty('rule');
+      expect(agent).toMatchObject(identity);
+      expect(vendor?.id).not.toBe(agent?.id);
       const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
       const [recordFile] = await readdir(folder);
       const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {

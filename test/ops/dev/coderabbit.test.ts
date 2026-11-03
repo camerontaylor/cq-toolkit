@@ -40,21 +40,33 @@ describe('coderabbitReviewArgv', () => {
 });
 
 describe('parseReviewerStream', () => {
-  test.each([1, 42])('retains finding identity at line %s', (line) => {
+  // Sanitized field shape from the captured real CodeRabbit agent stream.
+  test.each([1, 42])('retains real startLine %s without inventing a rule', (line) => {
     const parsed = parseReviewerStream(
       JSON.stringify({
         type: 'finding',
         severity: 'major',
         fileName: 'src/a.ts',
-        line,
-        rule: 'identity',
+        startLine: line,
+        endLine: line,
+        title: 'Fixture issue',
+        comment: 'Fixture issue details',
+        codegenInstructions: 'Inspect the fixture',
+        suggestions: [],
       }),
     );
-    expect(parsed.findings[0]).toMatchObject({ fileName: 'src/a.ts', line, rule: 'identity' });
+    expect(parsed.findings[0]).toMatchObject({ fileName: 'src/a.ts', line });
+    expect(parsed.findings[0]).not.toHaveProperty('rule');
   });
   test.each([0, -1, 1.5, '1', null])('ignores invalid optional finding line %s', (line) => {
     const parsed = parseReviewerStream(
-      JSON.stringify({ type: 'finding', severity: 'major', line, rule: 1 }),
+      JSON.stringify({
+        type: 'finding',
+        severity: 'major',
+        startLine: line,
+        endLine: line,
+        title: 'Fixture issue',
+      }),
     );
     expect(parsed.findings[0]).not.toHaveProperty('line');
     expect(parsed.findings[0]).not.toHaveProperty('rule');
