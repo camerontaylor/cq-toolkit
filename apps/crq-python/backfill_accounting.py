@@ -37,6 +37,7 @@ class Repository:
         self._cache_bytes = 0
         self._entry_cache = collections.OrderedDict()
         self._entry_bytes = 0
+        self._verified = {}  # review digest -> verified credit; immutable_cache invocations only
 
     def git(self, *args, check=True, env=None, input=None):
         cacheable = (self.immutable_cache is not None and check and env is None and input is None
@@ -322,10 +323,17 @@ class Repository:
             if not ledger.creditable(value):
                 continue
             try:
-                for ref in value["payload"]["artifacts"]:
-                    artifacts.verify(ref)
-                self.restore(value["payload"]["artifacts"], artifacts)
-                verified = self.verify_review(value)
+                # Restore and verification are target-independent: with the
+                # invocation cache on, do them once per review, not per target.
+                key = ledger.digest(value) if self.immutable_cache is not None else None
+                verified = self._verified.get(key) if key else None
+                if verified is None:
+                    for ref in value["payload"]["artifacts"]:
+                        artifacts.verify(ref)
+                    self.restore(value["payload"]["artifacts"], artifacts)
+                    verified = self.verify_review(value)
+                    if key:
+                        self._verified[key] = verified
                 for name, lines in verified.items():
                     mapped, inherited = (name, lines) if value["payload"]["target"] == target else self.carry(value["payload"]["target"], target, name, lines)
                     if inherited:

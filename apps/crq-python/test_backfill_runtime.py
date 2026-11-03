@@ -1,4 +1,5 @@
 """End-to-end offline scheduler, vendor artifact harvest and remote publication."""
+import collections
 import copy
 from pathlib import Path
 import subprocess
@@ -524,6 +525,15 @@ class RuntimeTest(unittest.TestCase):
         covered, evidence, gaps = repo.coverage(self.t, records, store)
         self.assertEqual(covered, {"a": {1, 2}}); self.assertFalse(gaps)
         self.assertEqual(len(launches), 1)
+        # One refresh over several targets restores/verifies each review once.
+        later = self.f.commit({"b": b"unrelated\n"})
+        repo.immutable_cache = {}
+        with mock.patch.object(repo, "restore", wraps=repo.restore) as restore:
+            for target in (self.t, later):
+                folded = collections.defaultdict(set)
+                repo.fold(target, records, store, folded, collections.defaultdict(list), [])
+        self.assertEqual(restore.call_count, 1)
+        self.assertEqual(dict(folded), {"a": {1, 2}})  # carried to the later target
 
     def test_publication_error_after_bound_launch_remains_harvestable(self):
         runtime.usage_context(self.c, self.q, {"remaining": 2}, [])
