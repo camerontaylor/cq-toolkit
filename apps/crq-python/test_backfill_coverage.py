@@ -57,7 +57,7 @@ class CoverageSnapshotTest(unittest.TestCase):
         moved = events + [event("state-1"), event("finding-1")]
         self.assertEqual(coverage.load(self.state, T1, moved), ({"p": {1}}, []))
         repo = FakeRepo()
-        self.assertEqual(coverage.refresh(self.state, repo, None, moved, {T1}), {T1: "extended"})
+        self.assertEqual(coverage.refresh(self.state, repo, None, moved, {T1}), {T1: "unchanged"})
         self.assertEqual(repo.folded, [])
         self.assertEqual(coverage.refresh(self.state, repo, None, moved, {T1}), {T1: "current"})
 
@@ -133,6 +133,28 @@ class CoverageSnapshotTest(unittest.TestCase):
             for target in (T1, T2):
                 self.assertIsNotNone(coverage.load(self.state, target, events, digests))
         self.assertEqual(digest.call_count, 1)
+
+    def test_a_still_failing_gap_retry_is_unchanged_but_a_new_failing_review_wakes_once(self):
+        events = [event("r1", True), event("r2", True)]
+        self.assertEqual(coverage.refresh(self.state, FakeRepo(fail={"r2"}), None, events, {T1}), {T1: "full"})
+        repo = FakeRepo(fail={"r2"})
+        self.assertEqual(coverage.refresh(self.state, repo, None, events, {T1}), {T1: "unchanged"})
+        self.assertEqual(repo.folded, [(T1, "r2")])  # retried, still failing: no wake
+        moved = events + [event("r3", True)]  # selection rejected the snapshot for this head
+        self.assertEqual(coverage.refresh(self.state, FakeRepo(fail={"r2", "r3"}), None, moved, {T1}), {T1: "extended"})
+        self.assertEqual(coverage.refresh(self.state, FakeRepo(fail={"r2", "r3"}), None, moved, {T1}), {T1: "unchanged"})
+
+    def test_one_failing_target_never_blocks_the_others(self):
+        events = [event("r1", True)]
+        class Broken(FakeRepo):
+            def fold(self, target, *args):
+                if target == T1:
+                    raise RuntimeError("git crashed")
+                return super().fold(target, *args)
+        self.assertEqual(coverage.refresh(self.state, Broken(), None, events, {T1, T2}),
+                         {T1: "error: git crashed", T2: "full"})
+        self.assertIsNone(coverage.load(self.state, T1, events))
+        self.assertEqual(coverage.load(self.state, T2, events), ({"p": {1}}, []))
 
 
 class VerificationOutcomeCacheTest(unittest.TestCase):

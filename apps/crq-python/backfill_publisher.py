@@ -96,13 +96,28 @@ def run(c):
 def main(c):
     result = run(c)
     # Off tick.lock: refresh the coverage snapshots selection reads, after a
-    # publication moved the ledger head or when selection asked for one.
-    result["coverage"] = backfill_coverage.run(c, published_head=result.get("ledger_head"))
+    # publication moved the ledger head or when selection asked for one. A
+    # refresh failure never hides the publication result.
+    try:
+        result["coverage"] = backfill_coverage.run(c, published_head=result.get("ledger_head"))
+    except Exception as exc:
+        result["coverage"] = "failed: " + str(exc)[:300]
     return result
+
+
+def coverage_failed(result):
+    value = result.get("coverage")
+    if isinstance(value, str):
+        return value.startswith("failed")
+    targets = value.get("targets", {}) if isinstance(value, dict) else {}
+    return any(str(outcome).startswith(("error", "invalid")) for outcome in targets.values())
 
 
 if __name__ == "__main__":
     import json
     import crq
     # Journal the outcome so recurring reconciliation-pending runs are visible.
-    print(json.dumps(main(crq), sort_keys=True))
+    outcome = main(crq)
+    print(json.dumps(outcome, sort_keys=True))
+    # Coverage failures fail the unit visibly (publication already succeeded).
+    raise SystemExit(1 if coverage_failed(outcome) else 0)

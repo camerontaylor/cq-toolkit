@@ -100,7 +100,9 @@ def refresh(state, repo, store, events, targets, keep=()):
     left a gap (gaps can be transient, e.g. an unreadable artifact). A sequence
     that no longer extends the snapshot (it should not happen on an append-only
     ledger) recomputes in full, as does an unreadable snapshot. Returns
-    {target: "current"|"extended"|"full"|"invalid-target"}.
+    {target: outcome}: "current" (nothing to do), "unchanged" (snapshot advanced,
+    admission unaffected), "extended"/"full" (admission may change: callers wake
+    selection), "invalid-target", or "error: ..." (that target only).
     """
     ledger.validate_sequence(events)
     repo.begin_invocation()  # immutable-object cache; earlier gaps are retried
@@ -111,28 +113,10 @@ def refresh(state, repo, store, events, targets, keep=()):
         except ledger.IntegrityError:
             outcome[target] = "invalid-target"  # one bad target never blocks the rest
             continue
-        snapshot = _read(state, target)  # unreadable/corrupt reads as None: full recompute
-        if snapshot is not None and _extends(snapshot, events):
-            start = snapshot["events"]
-            retry = {gap.get("review") for gap in snapshot["gaps"] if isinstance(gap, dict)}
-            todo = [value for value in events[:start] if value["id"] in retry] + list(events[start:])
-            if not any(ledger.creditable(value) for value in todo):
-                if start == len(events):
-                    outcome[target] = "current"
-                    continue
-                todo = []
-            covered = collections.defaultdict(set, snapshot["covered"])
-            outcome[target] = "extended"
-        else:
-            todo, covered = list(events), collections.defaultdict(set)
-            outcome[target] = "full"
-        gaps = []
-        repo.fold(target, todo, store, covered, collections.defaultdict(list), gaps)
-        ledger.atomic(_snapshot_path(state, target), ledger.canonical({
-            "version": VERSION, "target": target, "events": len(events),
-            "prefix": _prefix_digest(events, len(events)),
-            "covered": {name: _ranges(lines) for name, lines in sorted(covered.items()) if lines},
-            "gaps": gaps}))
+        try:
+            outcome[target] = _refresh_one(state, repo, store, events, target)
+        except Exception as exc:  # isolate: the remaining targets still refresh
+            outcome[target] = "error: " + str(exc)[:200]
     # Snapshots for targets no live job uses are dead weight; drop them. A job
     # that is reviewing may return to pending, so its target's snapshot stays.
     directory, keep = Path(state) / DIRECTORY, set(keep)
@@ -141,6 +125,45 @@ def refresh(state, repo, store, events, targets, keep=()):
             if path.stem not in outcome and path.stem not in keep:
                 path.unlink(missing_ok=True)
     return outcome
+
+
+def _gap_ids(gaps):
+    return {gap.get("review") for gap in gaps if isinstance(gap, dict)}
+
+
+def _refresh_one(state, repo, store, events, target):
+    snapshot = _read(state, target)  # unreadable/corrupt reads as None: full recompute
+    if snapshot is not None and _extends(snapshot, events):
+        start = snapshot["events"]
+        retry = _gap_ids(snapshot["gaps"])
+        appended = list(events[start:])
+        # Selection already accepts this snapshot unless a creditable review was appended.
+        valid_before = not any(ledger.creditable(value) for value in appended)
+        todo = [value for value in events[:start] if value["id"] in retry] + appended
+        if not any(ledger.creditable(value) for value in todo):
+            if start == len(events):
+                return "current"
+            todo = []
+        covered = collections.defaultdict(set, {name: set(lines) for name, lines in snapshot["covered"].items()})
+    else:
+        snapshot, valid_before, todo, covered = None, False, list(events), collections.defaultdict(set)
+    gaps = []
+    repo.fold(target, todo, store, covered, collections.defaultdict(list), gaps)
+    ledger.atomic(_snapshot_path(state, target), ledger.canonical({
+        "version": VERSION, "target": target, "events": len(events),
+        "prefix": _prefix_digest(events, len(events)),
+        "covered": {name: _ranges(lines) for name, lines in sorted(covered.items()) if lines},
+        "gaps": gaps}))
+    if snapshot is None:
+        return "full"
+    # Wake selection only when admission can change: a snapshot it rejected is
+    # now valid, credit grew, or a gap cleared. A still-failing gap retry or a
+    # state-only head move must not wake it (no minute-by-minute loop).
+    before = {name: lines for name, lines in snapshot["covered"].items() if lines}
+    after = {name: lines for name, lines in covered.items() if lines}
+    if not valid_before or after != before or not _gap_ids(gaps) >= _gap_ids(snapshot["gaps"]):
+        return "extended"
+    return "unchanged"
 
 
 def pending_targets(queue):

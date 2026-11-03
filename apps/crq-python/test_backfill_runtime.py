@@ -305,6 +305,18 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(runtime.select(self.c, self.q, [], False, None), ("vendor-1", True))
         self.c.launch.assert_called_once()
 
+    def test_publisher_journals_publication_when_the_refresh_fails(self):
+        import backfill_coverage
+        import backfill_publisher
+        with mock.patch.object(backfill_publisher, "run", return_value={"publication": "idle"}), \
+             mock.patch.object(backfill_coverage, "run", side_effect=OSError("snapshot volume full")):
+            result = backfill_publisher.main(self.c)
+        self.assertEqual(result, {"publication": "idle", "coverage": "failed: snapshot volume full"})
+        self.assertTrue(backfill_publisher.coverage_failed(result))
+        self.assertTrue(backfill_publisher.coverage_failed({"coverage": {"targets": {self.t: "error: boom"}}}))
+        self.assertFalse(backfill_publisher.coverage_failed({"coverage": {"targets": {self.t: "unchanged"}}}))
+        self.assertFalse(backfill_publisher.coverage_failed({"coverage": "idle"}))
+
     def test_launch_still_requests_targets_seen_stale_earlier_in_the_pass(self):
         stale = copy.deepcopy(self.item); stale["id"] += "-stale"; stale["target"] = "c" * 40
         stale["score"] = self.item["score"] + 1  # higher score sorts before the launchable job
@@ -338,7 +350,7 @@ class RuntimeTest(unittest.TestCase):
         # A changed snapshot wakes the next one-minute slot, as a harvest does.
         self.assertEqual((self.state / "next-review-at").read_text().strip(), AT)
         (self.state / "next-review-at").unlink()
-        with mock.patch.object(backfill_coverage, "refresh", return_value={self.t: "current"}):
+        with mock.patch.object(backfill_coverage, "refresh", return_value={self.t: "unchanged"}):
             backfill_coverage.run(self.c)  # the next run consumes the surviving request
         self.assertFalse(marker.exists())
         self.assertFalse((self.state / "next-review-at").exists())  # nothing changed: no wake
@@ -400,6 +412,7 @@ class RuntimeTest(unittest.TestCase):
         # Off-lock refresher (crq-publisher) answers the request with one full pass.
         self.assertEqual(backfill_publisher.main(self.c)["coverage"]["targets"], {self.t: "full"})
         self.assertFalse((self.state / backfill_coverage.REQUEST).exists())
+        (self.state / "next-review-at").unlink()  # the cold refresh woke the slot
         # The ledger head moves (a state event is published); no review was appended.
         def root_publish(base, head, bundle):
             filename = self.root / "submission.bundle"
@@ -412,7 +425,8 @@ class RuntimeTest(unittest.TestCase):
         runtime.state_event(self.c, self.q, self.item, AT, "fixture head move")
         moved = backfill_publisher.main(self.c)
         self.assertNotEqual(moved["ledger_head"], before)
-        self.assertEqual(moved["coverage"]["targets"], {self.t: "extended"})
+        self.assertEqual(moved["coverage"]["targets"], {self.t: "unchanged"})  # state event: no new credit
+        self.assertFalse((self.state / "next-review-at").exists())  # so no wake either
         self.item.pop("wait_reason", None)
         with under_lock:  # a second fresh process at the moved head admits from the snapshot
             self.assertEqual(runtime.select(fresh(), self.q, [], False, None), ("vendor-1", True))

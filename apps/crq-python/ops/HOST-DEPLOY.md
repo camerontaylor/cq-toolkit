@@ -429,7 +429,12 @@ request rebuilds it.
 A cold refresh (new inventory target, or no snapshots after a deploy) delays
 the next publication run by its duration; measured on the queue host 2026-11-03 (7
 targets, 17 creditable reviews, load ~14) at 124 s for all targets, about 1.3 s
-when nothing changed. A refresh that changed any snapshot writes
-`next-review-at` = now, so the next slot re-evaluates instead of waiting for
-its quota-paced deadline. Permanent gaps are retried on each refresher run
+when nothing changed. A refresh that can change admission (a snapshot selection
+rejected becomes valid, credit grows, or a gap clears) writes `next-review-at` =
+now, so the next slot re-evaluates instead of waiting for its quota-paced
+deadline; a still-failing gap retry or a state-only head move does not. Refresh
+errors are isolated per target, and the worker still journals the publication
+result before exiting non-zero. `inventory_mode: "integrated"` still runs
+inventory coverage inside the tick and is outside this guarantee (#968); the queue host
+uses `timer`. Permanent gaps are retried on each refresher run
 (about once a minute, off-lock; restored once per run, not per target).
