@@ -11,6 +11,7 @@
 // is recorded in src/driver/pricing/data.ts's `FETCHED:` line). Like
 // routing-tables.test.ts this is a DATA pin: no network, no model calls.
 import { describe, expect, test } from 'vitest';
+import { computeDerivedCost } from '../../src/driver/claude-code/usage.js';
 import { PRICE_TABLE } from '../../src/driver/pricing/data.js';
 import { computeCostUSD, priceOf } from '../../src/driver/pricing/index.js';
 
@@ -86,4 +87,14 @@ test('additive reasoning is priced once at the output rate', () => {
   expect(computeCostUSD(model, usage)).toBeCloseTo(0.6, 12);
   expect(computeCostUSD(model, { ...usage, reasoning: 2_000_000 })).toBeCloseTo(1.8, 12);
   expect(computeCostUSD(model, { ...usage, reasoning: 0 })).toBeCloseTo(0.6, 12);
+});
+
+test('injected Claude Code pricing includes additive reasoning at the output rate', () => {
+  expect(
+    computeDerivedCost(
+      () => ({ input: 1, output: 2 }),
+      { provider: 'mock', model: 'mock' },
+      { input: 0, output: 1_000_000, reasoning: 2_000_000, cacheRead: 0, cacheWrite: 0 },
+    ),
+  ).toBe(6);
 });

@@ -1873,6 +1873,7 @@ export class AcpDriver implements Driver {
     return (
       perMillion(usage.input, rates.input) +
       perMillion(usage.output, rates.output) +
+      perMillion(usage.reasoning ?? 0, rates.output) +
       perMillion(usage.cacheRead, rates.cacheRead) +
       perMillion(usage.cacheWrite, rates.cacheWrite)
     );
