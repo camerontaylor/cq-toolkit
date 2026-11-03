@@ -26,6 +26,11 @@ const ruleTester = new RuleTester({
 ruleTester.run('no-cli-beyond-registry-kernel', rule, {
   valid: [
     {
+      code: "import '../../../kernel/types.js';",
+      filename: 'src/cli/x/src/a.ts',
+      options: OPTIONS,
+    },
+    {
       code: "import '../kernel/types.js';",
       filename: 'C:\\repo\\src\\cli\\main.ts',
       options: OPTIONS,
@@ -86,6 +91,17 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
     },
   ],
   invalid: [
+    ...[
+      'src/cli/x/src/a.ts',
+      '/repo/src/cli/x/src/a.ts',
+      'C:\\repo\\src\\cli\\x\\src\\a.ts',
+      '/repo/src/cli/checkout/src/cli/x/src/a.ts',
+    ].map((filename) => ({
+      code: "import '../../../ops/index.js';",
+      filename,
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    })),
     {
       code: "import '../kernel/../driver/index.js';",
       filename: 'C:\\repo\\src\\cli\\main.ts',
