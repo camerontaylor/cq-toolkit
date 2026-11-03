@@ -6,7 +6,8 @@ import { relative, resolve, sep } from 'node:path';
 // content check, including path.join(..., 'dist') references.
 const INDIRECT_DIST_TESTS = new Set([
   'test/e2e/review/review-address.e2e.test.ts',
-  'test/e2e/fix/fix-run.e2e.test.ts',
+  'test/e2e/fix/fix-run-cli.e2e.test.ts',
+  'test/e2e/fix/fix-run-static.e2e.test.ts',
   'test/scripts/static-conformance.test.ts',
   'test/scripts/tooling-commands.test.ts',
   'test/scripts/ratchet-propose.test.ts',
