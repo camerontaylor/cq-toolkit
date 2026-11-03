@@ -6,61 +6,70 @@ import type {
 } from '../../kernel/types.js';
 import type { FixTaskReport } from '../sweep/taskLoop.js';
 
-const TODO_TRAILER = /^cq-todo$/i;
-const TODO_TRUE = /^true$/i;
+const TODO_KEY = 'cq-todo';
 
 /**
- * True when the commit message carries a `Cq-Todo: true` trailer (ADR-0008
- * non-todo rule): key and value are trimmed and compared case-insensitively.
- * This is the only intent signal; TODOs are never guessed from source text,
- * skip markers or the commit subject.
+ * True when the commit's trailer block carries a `Cq-Todo: true` trailer
+ * (ADR-0008 non-todo rule): the key and value are trimmed and compared
+ * case-insensitively. Only the last paragraph — the git trailer block — is
+ * scanned; the subject and prose are never treated as intent signals.
  */
 export function isTodoCommitMessage(message: string): boolean {
-  for (const line of message.split('\n')) {
-    const trimmed = line.trim();
-    const separator = trimmed.indexOf(':');
+  const trailerBlock = message.trimEnd().split('\n\n').pop() ?? '';
+  for (const line of trailerBlock.split('\n')) {
+    const separator = line.indexOf(':');
     if (separator === -1) continue;
-    const key = trimmed.slice(0, separator).trim();
-    const value = trimmed.slice(separator + 1).trim();
-    if (TODO_TRAILER.test(key) && TODO_TRUE.test(value)) return true;
+    if (line.slice(0, separator).trim().toLowerCase() !== TODO_KEY) continue;
+    if (
+      line
+        .slice(separator + 1)
+        .trim()
+        .toLowerCase() === 'true'
+    )
+      return true;
   }
   return false;
 }
 
 /**
  * Exact verified-fix predicate over one task's raw evidence (ADR-0008):
- * outcome `fixed`, validation present with passing verdict, the SHA appears
- * in that task's commits, and a closure link to the task exists. A commit
- * whose message is unavailable (lookup returned undefined) is a closure with
- * unknown trailer status: it is never counted toward the numerator.
+ * outcome `fixed`, validation present with passing verdict, the SHA in that
+ * task's commits, and a closure link to the task. A commit whose message is
+ * unavailable yields no closure: its trailer status is unknown, never
+ * guessed. `readCommitMessage` returns the full commit message or undefined.
  */
 export function verifiedClosuresOf(
   tasks: readonly FixTaskReport[],
   readCommitMessage: (sha: string) => string | undefined,
-): ClosureRecord[] {
+): { closures: ClosureRecord[]; unknownTrailerShas: string[] } {
   const closures: ClosureRecord[] = [];
+  const unknownTrailerShas: string[] = [];
   for (const task of tasks) {
     if (task.outcome !== 'fixed' || task.validation?.verdict !== 'pass') continue;
     for (const commitSha of task.commits) {
-      if (commitSha === '') continue;
       const message = readCommitMessage(commitSha);
-      if (message === undefined) continue;
+      if (message === undefined) {
+        if (!unknownTrailerShas.includes(commitSha)) unknownTrailerShas.push(commitSha);
+        continue;
+      }
       closures.push({
         commitSha,
         taskIds: [task.task.id],
         findingFingerprints: [],
-        verificationEvidence: [task.task.id],
+        verificationEvidence: [`validation:${task.validation.verdict}`],
         todo: isTodoCommitMessage(message),
       });
     }
   }
-  return closures;
+  return { closures, unknownTrailerShas };
 }
 
 /**
  * Denominator evidence for every planned unit (ADR-0008 baseline row): every
  * planned unit is represented. A completed probe reports its count; a bailed,
- * absent or probeless unit is unknown with a reason, never zero.
+ * absent or probeless unit is unknown with a reason, never zero. `probeHead`
+ * stays null: FixTaskReport carries no probe head, and the baseline probe
+ * producer (ADR-0008 planner/T35 scope) is not wired in this slice.
  */
 export function baselineFailuresOf(
   plannedUnits: readonly string[],
@@ -80,18 +89,12 @@ export function baselineFailuresOf(
   });
 }
 
-const notCollected = (reason: string): AvailabilityRecord => ({
-  state: 'not-collected',
-  reason,
-  source: null,
-});
-
 /**
- * The run's metric record (ADR-0008 metric row). Only distinct verified
- * non-todo commits count toward the numerator; duplicate SHAs across tasks
- * count once. An unknown denominator is null, never zero, so no success
- * ratio is printed without a denominator. `readCommitMessage` supplies each
- * commit's full message; returning undefined leaves that commit unverified.
+ * The run's metric record (ADR-0008 metric row), with the availability map
+ * keyed by JSON Pointer per the T28 schema. A zero numerator is known zero
+ * (state `known-zero`), never null; null means genuinely unknown (a
+ * candidate closure whose trailer evidence is missing). Duplicate SHAs count
+ * once; an unknown denominator is null, never zero.
  */
 export function measureRun(
   tasks: readonly FixTaskReport[],
@@ -99,27 +102,48 @@ export function measureRun(
   probeCounts: ReadonlyMap<string, { completed: boolean; count: number | null }>,
   readCommitMessage: (sha: string) => string | undefined,
 ): MetricRecord & { availability: Record<string, AvailabilityRecord> } {
-  const closures = verifiedClosuresOf(tasks, readCommitMessage);
+  const { closures, unknownTrailerShas } = verifiedClosuresOf(tasks, readCommitMessage);
   const verified = closures.filter((closure) => !closure.todo);
   const distinctVerified = [...new Set(verified.map((closure) => closure.commitSha))];
   const baselineFailures = baselineFailuresOf(plannedUnits, probeCounts);
   const denominatorKnown = baselineFailures.every((row) => row.count !== null);
+  const numerator: number | null = unknownTrailerShas.length > 0 ? null : distinctVerified.length;
   const availability: Record<string, AvailabilityRecord> = {
-    'metric.fixesPerRun.numerator': notCollected(
-      'closure trailer evidence is in-memory; journal producer pending (ADR-0008 T13)',
-    ),
-    'metric.fixesPerRun.denominator': denominatorKnown
-      ? notCollected(
-          'denominator counts derive from in-memory probes; journal producer pending (ADR-0008 T13)',
-        )
-      : notCollected('at least one planned unit has no completed baseline probe'),
-    'metric.verifiedCommits': notCollected(
-      'commit trailer evidence is in-memory; journal producer pending (ADR-0008 T13)',
-    ),
+    // A missing entry is only required for null values (T28 checkMetric);
+    // known values still carry their state honestly.
+    '/metric/fixesPerRun/numerator':
+      numerator === null
+        ? {
+            state: 'unavailable',
+            reason: 'candidate closure commit message unavailable',
+            source: null,
+          }
+        : numerator === 0
+          ? {
+              state: 'known-zero',
+              reason: 'no verified non-todo closure in this run',
+              source: null,
+            }
+          : { state: 'known', reason: 'counted from run closure evidence', source: null },
+    '/metric/fixesPerRun/denominator': denominatorKnown
+      ? { state: 'known', reason: 'summed from completed unit baseline probes', source: null }
+      : {
+          state: 'unavailable',
+          reason: 'a planned unit has no completed baseline probe',
+          source: null,
+        },
   };
+  baselineFailures.forEach((row, i) => {
+    if (row.count === null)
+      availability[`/metric/baselineFailures/${i}/count`] = {
+        state: 'unavailable',
+        reason: row.unknownReason ?? 'baseline count unknown',
+        source: null,
+      };
+  });
   return {
     fixesPerRun: {
-      numerator: distinctVerified.length === 0 ? null : distinctVerified.length,
+      numerator,
       denominator: denominatorKnown
         ? baselineFailures.reduce((sum, row) => sum + (row.count ?? 0), 0)
         : null,
