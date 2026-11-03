@@ -1,7 +1,7 @@
 // W1.10 — tests for the read-only I2 acceptance judgment behind
 // `cq/acceptance` (src/selfhost/acceptance.ts, methods Decisions 10–11).
 //
-// The forge is a fake GhFn (merge-recheck.test.ts's approach, minimal
+// The forge is a fake GhFn (merge-recheck.helpers.ts's approach, minimal
 // helpers copied): `api graphql` answers with a synthetic single-page PR
 // payload built per test, and the I11 REST reviews/comments reads answer
 // with collections CONSISTENT with that payload plus per-spec extras. Every

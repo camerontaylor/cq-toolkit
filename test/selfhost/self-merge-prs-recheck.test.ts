@@ -1,6 +1,7 @@
 // W1.2 slice C — tests for the merge-time recheck WIRING in the scheduled
 // merge entry (src/selfhost/self-merge-prs.ts). The recheck itself is pinned
-// by merge-recheck.test.ts and the store by state-branch.test.ts; this file
+// by the merge-recheck-*.test.ts files and the store by state-branch.test.ts;
+// this file
 // pins the DEPLOYMENT composition end to end, through the REAL central
 // registry (no driverRegistryView injected) with only the INNER merge
 // effects faked (the `mergeEffects` seam) and the forge faked at the gh
