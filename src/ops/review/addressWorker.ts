@@ -298,11 +298,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   // observationFailures() hands them to the composition, which folds them
   // into observation.status 'indeterminate'.
   const observationFailures: string[] = [];
-  // ADR-0008 T14: fixer invocations whose attempt event has not yet been
-  // handed to the writer. finish() drains these BEFORE it closes the stream
-  // (settleObservations), because runPlan can return with an op body still
-  // running when the ladder's kill rung detaches it.
-  const inFlightInvocations = new Set<Promise<void>>();
+  // Track whole fix bodies, including the gaps between fixer dispatches.
+  const inFlightFixes = new Map<Promise<void>, string>();
+  let settled = false;
   const observationDrainMs = deps.observationDrainMs ?? 5_000;
   // ADR-0008 T14 emitter (mirrors T13): the event is BUILT inside the try so a
   // schema refusal becomes evidence instead of escaping the invocation, and an
@@ -506,20 +504,15 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     sources: readonly { path: string; text: string }[] = [],
     diagnostics: readonly FailureSet[] = [],
   ) => {
-    // Registered at the boundary and released only AFTER the attempt event has
-    // been handed to the writer (the final finally), so settleObservations()
-    // is a true barrier: no event can be appended once it resolves.
-    let releaseInvocation!: () => void;
-    const invocationSettled = new Promise<void>((resolve) => {
-      releaseInvocation = resolve;
-    });
-    inFlightInvocations.add(invocationSettled);
     // ADR-0008 T14: the attempt boundary is the FIXER dispatch. A reviewer
     // closure verifies an attempt already recorded, and the payload's tier has
     // no reviewer member: labelling it 'worker' would fabricate evidence, so a
     // closure dispatch emits no attempt event.
     const attemptTier = tier === 'reviewer' ? null : tier;
     const unit = attemptTier === null ? '' : packageOf(finding.file!);
+    const afterClose = settled;
+    if (attemptTier !== null && afterClose)
+      observationFailures.push(`attempt observation after close: ${unit}`);
     const ordinal = attemptTier === null ? 0 : (attemptOrdinals.get(unit) ?? 0) + 1;
     if (attemptTier !== null) attemptOrdinals.set(unit, ordinal);
     // Observed stop evidence for the finally-path event. Every throw route is
@@ -808,7 +801,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       // whatever route reached this boundary (spawn failure, cancellation,
       // budget exhaustion, a refusal before dispatch). Observation failures
       // never change the outcome: emitAttempt swallows them into evidence.
-      if (attemptTier !== null) {
+      if (attemptTier !== null && !afterClose) {
         // Once the row exists its measured dispatch wall is the event's wall;
         // only a refusal that never reached the row falls back to the whole
         // boundary (which includes the pre-dispatch scan).
@@ -892,24 +885,16 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           }),
         }));
       }
-      // The barrier is released LAST: the invocation counts as in flight until
-      // its attempt event has been handed to the writer above.
-      inFlightInvocations.delete(invocationSettled);
-      releaseInvocation();
     }
   };
-  /**
-   * ADR-0008 T14: settle the invocations still in flight, bounded. Resolving
-   * means every attempt event has been handed to the writer, so the caller may
-   * fold observationFailures() and close the stream without racing an append;
-   * timing out means a detached invocation could not be settled in-process, and
-   * that is recorded as observation evidence rather than a silent loss.
-   */
+  /** Drain whole fixes, bounded and verdict-neutral, before closing the writer. */
   const settleObservations = async (): Promise<void> => {
-    if (inFlightInvocations.size === 0) return;
-    const outstanding = [...inFlightInvocations];
+    settled = true;
+    if (inFlightFixes.size === 0) return;
+    const outstanding = [...inFlightFixes.keys()];
+    const units = [...inFlightFixes.values()];
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const settled = await Promise.race([
+    const drained = await Promise.race([
       Promise.allSettled(outstanding).then(() => true),
       new Promise<boolean>((resolve) => {
         timer = setTimeout(() => resolve(false), observationDrainMs);
@@ -917,10 +902,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       }),
     ]);
     if (timer !== undefined) clearTimeout(timer);
-    if (!settled)
-      observationFailures.push(
-        `attempt observation still in flight at close: ${String(outstanding.length)} invocation(s)`,
-      );
+    if (!drained)
+      observationFailures.push(`attempt observation still in flight at close: ${units.join(', ')}`);
   };
   const runChecks = async (
     cwd: string,
@@ -1186,565 +1169,587 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       }, stop);
     },
     async fix(finding, round) {
-      let observedHead = '';
-      const history: AddressFailedAttempt[] = [];
-      const validations: ValidationVerdict[] = [];
-      const failed = (reason: string): AddressFix => ({
-        finding: {
-          ...finding,
-          status: 'deferred',
-          reason,
-          ...(history.length ? { evidence: JSON.stringify(history.at(-1)) } : {}),
-        },
-        observedHead,
-        reason,
-        validation: validations,
-        failedAttempts: history,
+      let releaseFix!: () => void;
+      const fixSettled = new Promise<void>((resolve) => {
+        releaseFix = resolve;
       });
-      let file = finding.file;
-      if (!file) return failed('unanchored finding needs human scope');
       try {
-        file = relative(await realpath(root), await safeFile(root, file));
-        finding = { ...finding, file };
-      } catch (error) {
-        return failed(String(error));
-      }
-      if (active.has(file)) return failed('overlapping finding file is already active');
-      active.add(file);
-      const unitStart = Date.now();
-      unitDeadlines.set(finding.id, unitStart + policy.budgets.unit.wallMs);
-      let touched = false;
-      let terminalAttempt: object | undefined;
-      let terminalDeferred = false;
-      let editingRow: AddressAttempt | undefined;
-      // The driver-resolved model of the in-flight dispatch. Typed optional
-      // only because it is assigned inside the dispatch callback (a
-      // definite-assignment consequence, not a real possibility of absence):
-      // the callback sets it together with `touched`, and restore() pins only
-      // when `touched`, so both non-null uses are safe to assert.
-      let resolvedModel: ModelSpec | undefined;
-      let restoreRefused = false;
-      let dispatch:
-        | { tier: 'worker' | 'rescue'; role: ModelSpec; ordinal: number; slug: string }
-        | undefined;
-      const admitMutation = () => {
-        stop();
-        if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
-      };
-      const restore = async () => {
-        if (terminalDeferred) return;
-        if (
-          touched &&
-          deps.terminalBinding &&
-          terminalAttempt &&
-          deps.parentSignal?.aborted &&
-          deferAddressTerminalAttempt(deps.terminalBinding, terminalAttempt)
-        ) {
-          terminalDeferred = true;
-          return;
-        }
-        return withMutation(async () => {
-          if (!touched) return;
-          if (restoreRefused)
-            throw new Error('prior evidence restore refused; caller bytes retained');
-          const head = await git(root, ['rev-parse', 'HEAD']);
-          if (!verifiedHeads.has(head))
-            throw new Error('unexpected HEAD movement; evidence left intact');
-          const indexed = zList(await git(root, ['diff', '--cached', '--name-only', '-z']));
-          if (indexed.some((path) => path !== file))
-            fatal = 'worker changed the index outside its scope';
-          if (!dispatch) throw new Error('failed attempt has no dispatch identity');
-          const content = await readFile(await safeFile(root, file));
-          const candidate = resolve(deps.journalDir, `failed-candidate-${randomUUID()}`);
-          await git(root, ['worktree', 'add', '--detach', candidate, head]);
-          if (deps.terminalBinding)
-            await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
-          try {
-            await writeFile(await safeFile(candidate, file), content);
-            await git(candidate, ['add', '--', file]);
-            const lastGate = validations
-              .at(-1)
-              ?.gates.find((gate) => gate.verdict !== 'pass')?.gate;
-            const gate: FailedAttemptGate = /budget|cancel|aborted/.test(reason)
-              ? 'budget'
-              : fatal || /index|HEAD|snapshot|mutated/.test(reason)
-                ? 'tamper'
-                : /scope|protected/.test(reason)
-                  ? 'path-policy'
-                  : lastGate === 'paths'
-                    ? 'path-policy'
-                    : (lastGate ?? 'none');
-            const outcome = gate === 'budget' || fatal ? 'escalated-to-human' : 'unfixed';
-            const pinned = await pinAddressFailure((args) => git(candidate, args), {
-              runPrefix,
-              kind: 'review',
-              slug: dispatch.slug,
-              task: finding.id,
-              parent: head,
-              firstAttempt: dispatch.ordinal,
-              tier: dispatch.tier,
-              model: resolvedModel!,
-              gate,
-              outcome,
-              reason,
-              pushFailed: false,
-            });
-            const ordinal = Number(pinned.branch.slice(pinned.branch.lastIndexOf('/a') + 2));
-            const retained: AddressFailedAttempt = {
-              ...pinned,
-              finding: finding.id,
-              unit: `review/${dispatch.slug}`,
-              outcome,
-              model: resolvedModel!,
-              file,
-              parent: head,
-              executionHead: observedHead,
-              ordinal,
-              tier: dispatch.tier,
-              gate,
-              reason,
-            };
-            history.push(retained);
-            failures.push(retained);
-            ordinals.set(finding.id, ordinal);
-            if (editingRow) editingRow.failedAttempt = retained;
-            if (
-              (await git(root, ['rev-parse', 'HEAD'])) !== head ||
-              !(await readFile(await safeFile(root, file))).equals(content)
-            )
-              throw new Error('failed-attempt source changed before owned restore');
-            await git(root, ['restore', `--source=${head}`, '--staged', '--worktree', '--', file]);
-          } finally {
-            await (deps.terminalBinding
-              ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
-              : git(root, ['worktree', 'remove', '--force', candidate]));
-          }
-          if (deps.terminalBinding && terminalAttempt) {
-            releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
-            terminalAttempt = undefined;
-          }
-          touched = false;
-        }).catch((error: unknown) => {
-          restoreRefused = true;
-          throw error;
-        });
-      };
-      let workerUsed = 0,
-        rescueUsed = 0,
-        regression = false;
-      let reason = 'initial finding';
-      try {
-        await initialize(admitMutation);
-        await safeFile(root, file);
-        const classified = classifyStagePaths([file], undefined, false, false);
-        if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
-        if (!policy.roles.reviewer)
-          refusePrecondition(
-            new Error('roles.reviewer required for assigned-finding closure'),
-            'reviewer',
-            finding,
-          );
-        await withMutation(async () => {
-          const baselineHead = await git(root, ['rev-parse', 'HEAD']);
-          if (!verifiedHeads.has(baselineHead))
-            throw new AddressRefusal('unexpected baseline head outside engine', true);
-          const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
-          await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
-          if (deps.terminalBinding)
-            await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
-          let failure: { error: unknown } | undefined;
-          try {
-            await prepareBaseline(candidate, baselineHead, finding, admitMutation);
-          } catch (error) {
-            failure = { error };
-          }
-          try {
-            await (deps.terminalBinding
-              ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
-              : git(root, ['worktree', 'remove', '--force', candidate]));
-          } catch (cleanup) {
-            if (failure) throw new BaselineCleanupError(failure.error, cleanup);
-            throw cleanup;
-          }
-          if (failure) throw failure.error;
-        }, admitMutation).catch((error: unknown) => refusePrecondition(error, 'setup', finding));
-        while (true) {
-          stop();
-          if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
-            return failed('unit wall budget exhausted');
-          // The dispatched package is the observation unit identity; one
-          // resolver so the observation envelope and the escalation agree.
-          const packageName = packageOf(file);
-          const next = nextEscalation(state, policy.escalation, {
-            package: packageName,
-            task: finding.id,
-            workerUsed,
-            rescueUsed,
-            canRescue: policy.roles.rescue !== undefined,
-            regression,
+        // Resolve the unit before registration; every registered fix is released
+        // by this finally, including early returns and thrown setup failures.
+        const unit = finding.file ? packageOf(finding.file) : finding.id;
+        inFlightFixes.set(fixSettled, unit);
+        let observedHead = '';
+        const history: AddressFailedAttempt[] = [];
+        const validations: ValidationVerdict[] = [];
+        const failed = (reason: string): AddressFix => ({
+          finding: {
+            ...finding,
+            status: 'deferred',
             reason,
-          });
-          state = next.state;
-          if (next.decision.tier === 'human') return failed(next.decision.reason);
-          const { tier, attempt } = next.decision;
-          if (tier === 'worker') workerUsed++;
-          else rescueUsed++;
-          const role = tier === 'worker' ? policy.roles.worker : policy.roles.rescue;
-          if (!role) return failed(`roles.${tier} is required`);
-          observedHead = await withMutation(async () => {
+            ...(history.length ? { evidence: JSON.stringify(history.at(-1)) } : {}),
+          },
+          observedHead,
+          reason,
+          validation: validations,
+          failedAttempts: history,
+        });
+        let file = finding.file;
+        if (!file) return failed('unanchored finding needs human scope');
+        try {
+          file = relative(await realpath(root), await safeFile(root, file));
+          finding = { ...finding, file };
+        } catch (error) {
+          return failed(String(error));
+        }
+        if (active.has(file)) return failed('overlapping finding file is already active');
+        active.add(file);
+        const unitStart = Date.now();
+        unitDeadlines.set(finding.id, unitStart + policy.budgets.unit.wallMs);
+        let touched = false;
+        let terminalAttempt: object | undefined;
+        let terminalDeferred = false;
+        let editingRow: AddressAttempt | undefined;
+        // The driver-resolved model of the in-flight dispatch. Typed optional
+        // only because it is assigned inside the dispatch callback (a
+        // definite-assignment consequence, not a real possibility of absence):
+        // the callback sets it together with `touched`, and restore() pins only
+        // when `touched`, so both non-null uses are safe to assert.
+        let resolvedModel: ModelSpec | undefined;
+        let restoreRefused = false;
+        let dispatch:
+          | { tier: 'worker' | 'rescue'; role: ModelSpec; ordinal: number; slug: string }
+          | undefined;
+        const admitMutation = () => {
+          stop();
+          if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
+        };
+        const restore = async () => {
+          if (terminalDeferred) return;
+          if (
+            touched &&
+            deps.terminalBinding &&
+            terminalAttempt &&
+            deps.parentSignal?.aborted &&
+            deferAddressTerminalAttempt(deps.terminalBinding, terminalAttempt)
+          ) {
+            terminalDeferred = true;
+            return;
+          }
+          return withMutation(async () => {
+            if (!touched) return;
+            if (restoreRefused)
+              throw new Error('prior evidence restore refused; caller bytes retained');
             const head = await git(root, ['rev-parse', 'HEAD']);
             if (!verifiedHeads.has(head))
-              throw new AddressRefusal('unexpected worker execution head', true);
-            return head;
-          }, admitMutation);
-          let prior: Awaited<ReturnType<typeof addressFailureFeedback>> | undefined;
-          if (tier === 'rescue' && history.length) {
-            prior = await withMutation(async () => {
-              if (
-                (await git(root, ['diff', '--name-only', '-z', 'HEAD', '--', file])) ||
-                (await git(root, ['diff', '--cached', '--name-only', '-z', '--', file]))
-              )
-                throw new AddressRefusal('owned file is dirty before rescue feedback', true);
-              return addressFailureFeedback((args) => git(root, args), history.at(-1)!);
-            }, admitMutation);
-          }
-          dispatch = {
-            tier,
-            role,
-            ordinal: (ordinals.get(finding.id) ?? 0) + 1,
-            slug: packageName,
-          };
-          let output: z.infer<typeof OutcomeSchema>;
-          try {
-            output = OutcomeSchema.parse(
-              await invoke(
-                finding,
-                tier,
-                attempt,
-                'edit',
-                observedHead,
-                root,
-                `${next.decision.reason}\nAddress only ${file}. Read it with the read tool first; to fix the finding, apply the change to ${file} with the edit tool before you answer. Never stage or commit, run commands, or edit any other path. Return fixed only after a successful edit; otherwise return rejected or deferred with a concrete reason and code evidence.\nRound ${round}. Finding: ${JSON.stringify(finding)}\nPrevious: ${reason}`,
-                role,
-                true,
-                prior,
-                async (row) => {
-                  if (deps.terminalBinding) {
-                    terminalAttempt = await withMutation(async () => {
-                      const parent = await git(root, ['rev-parse', 'HEAD']);
-                      if (!verifiedHeads.has(parent))
-                        throw new AddressRefusal('unexpected terminal capture head', true);
-                      return recordAddressTerminalAttempt(deps.terminalBinding!, {
-                        root,
-                        file,
-                        parent,
-                        executionHead: observedHead,
-                        runPrefix,
-                        finding: finding.id,
-                        slug: dispatch!.slug,
-                        ordinal: dispatch!.ordinal,
-                        tier,
-                        model: row.model,
-                      });
-                    }, admitMutation);
-                  }
-                  touched = true;
-                  editingRow = row;
-                  resolvedModel = row.model;
-                },
-              ),
-            );
-          } catch (error) {
-            reason = error instanceof Error ? error.message : String(error);
-            await restore();
-            if (error instanceof AddressRefusal) {
-              if (error.fatal) fatal = reason;
-              return failed(reason);
-            }
-            continue;
-          }
-          let refusal: AddressRefusal | undefined;
-          const accepted = await withMutation(async (): Promise<AddressFix | undefined> => {
-            stop();
-            const parent = await git(root, ['rev-parse', 'HEAD']);
-            if (!verifiedHeads.has(parent))
-              throw new AddressRefusal('verified parent changed outside engine', true);
-            const index = await git(root, ['diff', '--cached', '--name-only', '-z']);
-            if (index)
-              throw new AddressRefusal('worker changed the index; engine refuses staging', true);
-            const changes = zList(await git(root, ['diff', '--name-only', '-z', 'HEAD']));
-            const { paths: untracked, unknown: callerUntracked } = await inspectUntracked();
-            if ([...changes, ...callerUntracked].some((p) => !active.has(p)))
-              throw new AddressRefusal('unknown or out-of-scope worker edits', true);
-            if (
-              classifyStagePaths([...changes, ...untracked], undefined, false, false).kind !==
-              'clean'
-            )
-              throw new AddressRefusal('protected worker edits', true);
-            const candidate = resolve(deps.journalDir, `candidate-${randomUUID()}`);
-            await git(root, [
-              'worktree',
-              'add',
-              '--detach',
-              candidate,
-              output.disposition === 'fixed' ? parent : observedHead,
-            ]);
+              throw new Error('unexpected HEAD movement; evidence left intact');
+            const indexed = zList(await git(root, ['diff', '--cached', '--name-only', '-z']));
+            if (indexed.some((path) => path !== file))
+              fatal = 'worker changed the index outside its scope';
+            if (!dispatch) throw new Error('failed attempt has no dispatch identity');
+            const content = await readFile(await safeFile(root, file));
+            const candidate = resolve(deps.journalDir, `failed-candidate-${randomUUID()}`);
+            await git(root, ['worktree', 'add', '--detach', candidate, head]);
             if (deps.terminalBinding)
               await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
             try {
-              // Candidate checks may invoke a package manager. Keep their
-              // node_modules metadata private so relinking cannot corrupt the
-              // caller's dependencies. Package links retain absolute targets.
-              const prepared =
-                output.disposition === 'fixed'
-                  ? await prepareBaseline(candidate, parent, finding, admitMutation, true)
-                  : undefined;
-              const dependencies = prepared?.dependencies;
-              const baseline = prepared?.checks ?? [];
-
-              const content = await readFile(await safeFile(root, file));
               await writeFile(await safeFile(candidate, file), content);
               await git(candidate, ['add', '--', file]);
-              const tree = await git(candidate, ['write-tree']);
-              const diff = await git(candidate, [
-                'diff',
-                '--cached',
-                '--no-ext-diff',
-                '--no-textconv',
+              const lastGate = validations
+                .at(-1)
+                ?.gates.find((gate) => gate.verdict !== 'pass')?.gate;
+              const gate: FailedAttemptGate = /budget|cancel|aborted/.test(reason)
+                ? 'budget'
+                : fatal || /index|HEAD|snapshot|mutated/.test(reason)
+                  ? 'tamper'
+                  : /scope|protected/.test(reason)
+                    ? 'path-policy'
+                    : lastGate === 'paths'
+                      ? 'path-policy'
+                      : (lastGate ?? 'none');
+              const outcome = gate === 'budget' || fatal ? 'escalated-to-human' : 'unfixed';
+              const pinned = await pinAddressFailure((args) => git(candidate, args), {
+                runPrefix,
+                kind: 'review',
+                slug: dispatch.slug,
+                task: finding.id,
+                parent: head,
+                firstAttempt: dispatch.ordinal,
+                tier: dispatch.tier,
+                model: resolvedModel!,
+                gate,
+                outcome,
+                reason,
+                pushFailed: false,
+              });
+              const ordinal = Number(pinned.branch.slice(pinned.branch.lastIndexOf('/a') + 2));
+              const retained: AddressFailedAttempt = {
+                ...pinned,
+                finding: finding.id,
+                unit: `review/${dispatch.slug}`,
+                outcome,
+                model: resolvedModel!,
+                file,
+                parent: head,
+                executionHead: observedHead,
+                ordinal,
+                tier: dispatch.tier,
+                gate,
+                reason,
+              };
+              history.push(retained);
+              failures.push(retained);
+              ordinals.set(finding.id, ordinal);
+              if (editingRow) editingRow.failedAttempt = retained;
+              if (
+                (await git(root, ['rev-parse', 'HEAD'])) !== head ||
+                !(await readFile(await safeFile(root, file))).equals(content)
+              )
+                throw new Error('failed-attempt source changed before owned restore');
+              await git(root, [
+                'restore',
+                `--source=${head}`,
+                '--staged',
+                '--worktree',
                 '--',
                 file,
               ]);
-              if (output.disposition !== 'fixed') {
-                if (diff) throw new Error('disposition accompanied by edits');
-                if (output.evidence.length === 0)
-                  throw new Error('disposition needs execution-head evidence');
-                for (const evidence of output.evidence) {
-                  await safeFile(root, evidence.path);
-                  const text = await git(root, ['show', `${observedHead}:${evidence.path}`]);
-                  if (text.split('\n').length < evidence.line)
-                    throw new Error('disposition evidence missing at execution head');
-                }
-                if (output.disposition === 'rejected') {
-                  if (!policy.roles.reviewer)
-                    throw new Error('roles.reviewer required for rejection evidence');
-                  const reviewed = ClosureSchema.parse(
-                    await invoke(
-                      finding,
-                      'reviewer',
-                      attempt,
-                      'closure',
-                      observedHead,
-                      candidate,
-                      `Verify this rejection using only the worker-observed execution head ${observedHead}. closed=true means the finding is a false positive supported by this tree. Finding: ${JSON.stringify(finding)}. Reason/evidence: ${JSON.stringify(output)}`,
-                      policy.roles.reviewer,
-                      false,
-                    ),
-                  );
-                  if (!reviewed.closed)
-                    throw new Error('rejection not supported at worker execution head');
-                }
-                touched = false;
-                if (deps.terminalBinding && terminalAttempt) {
-                  releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
-                  terminalAttempt = undefined;
-                }
-                return {
-                  finding: {
-                    ...finding,
-                    status: output.disposition,
-                    reason: output.reason,
-                    evidence: JSON.stringify(output.evidence),
-                  },
-                  observedHead,
-                  evidence: output.evidence,
-                  reason: output.reason,
-                  validation: [],
-                  failedAttempts: history,
-                };
-              }
-              if (!diff) throw new Error('fixed claim has no candidate edit');
-              const related = await runChecks(candidate, finding, true);
-              const feedback = OutcomeSchema.parse(
-                await invoke(
-                  finding,
-                  tier,
-                  attempt,
-                  'feedback',
-                  parent,
-                  candidate,
-                  `related-check feedback\nConfirm this candidate fix for ${JSON.stringify(finding)}. Candidate tree ${tree}, parent ${parent}. Checks: ${JSON.stringify(related)}. Read only; return fixed only if the finding is addressed.`,
-                  role,
-                  false,
-                  prior,
-                  undefined,
-                  undefined,
-                  related,
-                ),
-              );
-              if (feedback.disposition !== 'fixed')
-                throw new Error(`feedback did not confirm fix: ${feedback.reason}`);
-              const broader = await runChecks(candidate, finding, false);
-              const message = `fix(review): Address ${finding.id.replace(/[\r\n]/g, ' ')}\n\nOutcome: code-bug\nConfidence: 90\nTested: configured related and broader checks\n${formatCqTrailers(
-                [
-                  ['Cq-Run', runPrefix],
-                  ['Cq-Unit', `review/${dispatch!.slug}`],
-                  // Review finding ids are caller-supplied paths that may
-                  // contain newlines (existing commits sanitize the subject
-                  // the same way); a trailer is a single physical line, so
-                  // sanitize before the shared writer.
-                  ['Cq-Task', finding.id.replace(/[\r\n]+/g, ' ')],
-                  ['Cq-Attempt', String(dispatch!.ordinal)],
-                  ['Cq-Tier', tier],
-                  // Attribution must record the model the driver actually
-                  // resolved, not the configured role (invoke() stamps
-                  // editingRow.model from resolved.modelSpec).
-                  ['Cq-Model', `${editingRow!.model.provider}/${editingRow!.model.model}`],
-                ],
-              )}`;
-              const gates = await Promise.all(
-                baseline.map((base, index) =>
-                  validateFix({
-                    baseline: base,
-                    related: async () => related[index]!,
-                    broader: async () => broader[index]!,
-                    relatedAccepts: (set) =>
-                      // Lint and bounded tests compare stable failure identities below,
-                      // including pre-existing failures in the finding file.
-                      ['test-narrow', 'oxlint-json'].includes(policy.checks[index]!.adapter) ||
-                      set.exitCode === 0 ||
-                      (set.failures.length > 0 && !set.failures.some((f) => f.file === file)),
-                    stagedPaths: [file],
-                    diff,
-                    message,
-                    protectTests: false,
-                    requireProgress: false,
-                  }),
-                ),
-              );
-              validations.push(...gates);
-              const latest = [...deps.attempts].reverse().find((row) => row.finding === finding.id);
-              if (latest) latest.validation = gates;
-              regression = gates.some((g) => g.regression === true);
-              if (gates.some((g) => g.verdict !== 'pass'))
-                throw new Error('candidate validation refused');
-              const reviewer = policy.roles.reviewer;
-              if (!reviewer)
-                throw new Error('roles.reviewer required for assigned-finding closure');
-              const closure = ClosureSchema.parse(
-                await invoke(
-                  finding,
-                  'reviewer',
-                  attempt,
-                  'closure',
-                  parent,
-                  candidate,
-                  `Verify assigned-finding closure on this exact candidate. Read only. Return closed=true only if the defect described is resolved.\nFinding: ${JSON.stringify(finding)}\nCandidate tree: ${tree}\nPatch: ${diff}`,
-                  reviewer,
-                  false,
-                  undefined,
-                  undefined,
-                  [
-                    { path: file, text: diff },
-                    { path: file, text: await git(candidate, ['show', `${parent}:${file}`]) },
-                    { path: file, text: await git(candidate, ['show', `${tree}:${file}`]) },
-                  ],
-                ),
-              );
-              if (!closure.closed)
-                throw new Error(`assigned finding remains open: ${closure.reason}`);
-              stop();
-              if (
-                (await git(candidate, ['write-tree'])) !== tree ||
-                (await git(candidate, ['diff', '--name-only', '-z'])) ||
-                zList(
-                  await git(candidate, ['ls-files', '-z', '--others', '--exclude-standard']),
-                ).filter(
-                  (path) =>
-                    !(
-                      dependencies &&
-                      (path === 'node_modules' || path.startsWith('node_modules/'))
-                    ),
-                ).length > 0
-              )
-                throw new AddressRefusal('check or feedback mutated candidate', true);
-              if ((await git(root, ['rev-parse', 'HEAD'])) !== parent)
-                throw new AddressRefusal('verified parent changed during candidate gates', true);
-              if (!(await readFile(await safeFile(root, file))).equals(content))
-                throw new AddressRefusal('worker file changed after candidate snapshot', true);
-              await git(root, ['add', '--', file]);
-              if (
-                zList(await git(root, ['diff', '--cached', '--name-only', '-z'])).some(
-                  (p) => p !== file,
-                )
-              )
-                throw new AddressRefusal('staging absorbed sibling paths', true);
-              await git(root, ['commit', '-m', message]);
-              // Verification is bookkeeping for an already-created commit. It
-              // must settle even when cancellation has stopped new admissions.
-              const commit = deps.terminalBinding
-                ? await checkpointAddressTerminalWorker(deps.terminalBinding, root, undefined, {
-                    parent,
-                    tree,
-                  })
-                : await git(root, ['rev-parse', 'HEAD']);
-              if (
-                !deps.terminalBinding &&
-                ((await git(root, ['rev-parse', `${commit}^`])) !== parent ||
-                  (await git(root, ['rev-parse', `${commit}^{tree}`])) !== tree)
-              )
-                throw new AddressRefusal('commit does not match gated parent/tree', true);
-              verifiedHeads.add(commit);
-              touched = false;
-              if (deps.terminalBinding && terminalAttempt) {
-                releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
-                terminalAttempt = undefined;
-              }
-              for (let i = 0; i < baseline.length; i++)
-                state = recordFixedFailures(state, baseline[i]!, broader[i]!);
-              return {
-                finding: {
-                  ...finding,
-                  status: 'fixed',
-                  reason: closure.reason,
-                  evidence: commit,
-                },
-                observedHead,
-                validatedParent: parent,
-                commit,
-                reason: closure.reason,
-                validation: gates,
-                failedAttempts: history,
-              };
             } finally {
               await (deps.terminalBinding
                 ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
                 : git(root, ['worktree', 'remove', '--force', candidate]));
             }
-          }, admitMutation).catch(async (error: unknown) => {
-            reason = error instanceof Error ? error.message : String(error);
-            if (error instanceof AddressRefusal) {
-              refusal = error;
-              if (error.fatal) fatal = reason;
+            if (deps.terminalBinding && terminalAttempt) {
+              releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+              terminalAttempt = undefined;
             }
-            await restore();
-            return undefined;
+            touched = false;
+          }).catch((error: unknown) => {
+            restoreRefused = true;
+            throw error;
           });
-          if (accepted) return accepted;
-          if (refusal) return failed(reason);
-        }
-      } catch (error) {
-        reason = error instanceof Error ? error.message : String(error);
-        if (error instanceof AddressRefusal && error.fatal) fatal = reason;
+        };
+        let workerUsed = 0,
+          rescueUsed = 0,
+          regression = false;
+        let reason = 'initial finding';
         try {
-          await restore();
-        } catch (restoreError) {
-          fatal = `evidence restore refused: ${String(restoreError)}`;
-          return failed(`${reason}; ${fatal}`);
+          await initialize(admitMutation);
+          await safeFile(root, file);
+          const classified = classifyStagePaths([file], undefined, false, false);
+          if (classified.kind !== 'clean') return failed(classified.message ?? 'protected scope');
+          if (!policy.roles.reviewer)
+            refusePrecondition(
+              new Error('roles.reviewer required for assigned-finding closure'),
+              'reviewer',
+              finding,
+            );
+          await withMutation(async () => {
+            const baselineHead = await git(root, ['rev-parse', 'HEAD']);
+            if (!verifiedHeads.has(baselineHead))
+              throw new AddressRefusal('unexpected baseline head outside engine', true);
+            const candidate = resolve(deps.journalDir, `baseline-${randomUUID()}`);
+            await git(root, ['worktree', 'add', '--detach', candidate, baselineHead]);
+            if (deps.terminalBinding)
+              await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
+            let failure: { error: unknown } | undefined;
+            try {
+              await prepareBaseline(candidate, baselineHead, finding, admitMutation);
+            } catch (error) {
+              failure = { error };
+            }
+            try {
+              await (deps.terminalBinding
+                ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
+                : git(root, ['worktree', 'remove', '--force', candidate]));
+            } catch (cleanup) {
+              if (failure) throw new BaselineCleanupError(failure.error, cleanup);
+              throw cleanup;
+            }
+            if (failure) throw failure.error;
+          }, admitMutation).catch((error: unknown) => refusePrecondition(error, 'setup', finding));
+          while (true) {
+            stop();
+            if (Date.now() - unitStart >= policy.budgets.unit.wallMs)
+              return failed('unit wall budget exhausted');
+            // The dispatched package is the observation unit identity; one
+            // resolver so the observation envelope and the escalation agree.
+            const packageName = packageOf(file);
+            const next = nextEscalation(state, policy.escalation, {
+              package: packageName,
+              task: finding.id,
+              workerUsed,
+              rescueUsed,
+              canRescue: policy.roles.rescue !== undefined,
+              regression,
+              reason,
+            });
+            state = next.state;
+            if (next.decision.tier === 'human') return failed(next.decision.reason);
+            const { tier, attempt } = next.decision;
+            if (tier === 'worker') workerUsed++;
+            else rescueUsed++;
+            const role = tier === 'worker' ? policy.roles.worker : policy.roles.rescue;
+            if (!role) return failed(`roles.${tier} is required`);
+            observedHead = await withMutation(async () => {
+              const head = await git(root, ['rev-parse', 'HEAD']);
+              if (!verifiedHeads.has(head))
+                throw new AddressRefusal('unexpected worker execution head', true);
+              return head;
+            }, admitMutation);
+            let prior: Awaited<ReturnType<typeof addressFailureFeedback>> | undefined;
+            if (tier === 'rescue' && history.length) {
+              prior = await withMutation(async () => {
+                if (
+                  (await git(root, ['diff', '--name-only', '-z', 'HEAD', '--', file])) ||
+                  (await git(root, ['diff', '--cached', '--name-only', '-z', '--', file]))
+                )
+                  throw new AddressRefusal('owned file is dirty before rescue feedback', true);
+                return addressFailureFeedback((args) => git(root, args), history.at(-1)!);
+              }, admitMutation);
+            }
+            dispatch = {
+              tier,
+              role,
+              ordinal: (ordinals.get(finding.id) ?? 0) + 1,
+              slug: packageName,
+            };
+            let output: z.infer<typeof OutcomeSchema>;
+            try {
+              output = OutcomeSchema.parse(
+                await invoke(
+                  finding,
+                  tier,
+                  attempt,
+                  'edit',
+                  observedHead,
+                  root,
+                  `${next.decision.reason}\nAddress only ${file}. Read it with the read tool first; to fix the finding, apply the change to ${file} with the edit tool before you answer. Never stage or commit, run commands, or edit any other path. Return fixed only after a successful edit; otherwise return rejected or deferred with a concrete reason and code evidence.\nRound ${round}. Finding: ${JSON.stringify(finding)}\nPrevious: ${reason}`,
+                  role,
+                  true,
+                  prior,
+                  async (row) => {
+                    if (deps.terminalBinding) {
+                      terminalAttempt = await withMutation(async () => {
+                        const parent = await git(root, ['rev-parse', 'HEAD']);
+                        if (!verifiedHeads.has(parent))
+                          throw new AddressRefusal('unexpected terminal capture head', true);
+                        return recordAddressTerminalAttempt(deps.terminalBinding!, {
+                          root,
+                          file,
+                          parent,
+                          executionHead: observedHead,
+                          runPrefix,
+                          finding: finding.id,
+                          slug: dispatch!.slug,
+                          ordinal: dispatch!.ordinal,
+                          tier,
+                          model: row.model,
+                        });
+                      }, admitMutation);
+                    }
+                    touched = true;
+                    editingRow = row;
+                    resolvedModel = row.model;
+                  },
+                ),
+              );
+            } catch (error) {
+              reason = error instanceof Error ? error.message : String(error);
+              await restore();
+              if (error instanceof AddressRefusal) {
+                if (error.fatal) fatal = reason;
+                return failed(reason);
+              }
+              continue;
+            }
+            let refusal: AddressRefusal | undefined;
+            const accepted = await withMutation(async (): Promise<AddressFix | undefined> => {
+              stop();
+              const parent = await git(root, ['rev-parse', 'HEAD']);
+              if (!verifiedHeads.has(parent))
+                throw new AddressRefusal('verified parent changed outside engine', true);
+              const index = await git(root, ['diff', '--cached', '--name-only', '-z']);
+              if (index)
+                throw new AddressRefusal('worker changed the index; engine refuses staging', true);
+              const changes = zList(await git(root, ['diff', '--name-only', '-z', 'HEAD']));
+              const { paths: untracked, unknown: callerUntracked } = await inspectUntracked();
+              if ([...changes, ...callerUntracked].some((p) => !active.has(p)))
+                throw new AddressRefusal('unknown or out-of-scope worker edits', true);
+              if (
+                classifyStagePaths([...changes, ...untracked], undefined, false, false).kind !==
+                'clean'
+              )
+                throw new AddressRefusal('protected worker edits', true);
+              const candidate = resolve(deps.journalDir, `candidate-${randomUUID()}`);
+              await git(root, [
+                'worktree',
+                'add',
+                '--detach',
+                candidate,
+                output.disposition === 'fixed' ? parent : observedHead,
+              ]);
+              if (deps.terminalBinding)
+                await addressTerminalCandidate(deps.terminalBinding, root, candidate, false);
+              try {
+                // Candidate checks may invoke a package manager. Keep their
+                // node_modules metadata private so relinking cannot corrupt the
+                // caller's dependencies. Package links retain absolute targets.
+                const prepared =
+                  output.disposition === 'fixed'
+                    ? await prepareBaseline(candidate, parent, finding, admitMutation, true)
+                    : undefined;
+                const dependencies = prepared?.dependencies;
+                const baseline = prepared?.checks ?? [];
+
+                const content = await readFile(await safeFile(root, file));
+                await writeFile(await safeFile(candidate, file), content);
+                await git(candidate, ['add', '--', file]);
+                const tree = await git(candidate, ['write-tree']);
+                const diff = await git(candidate, [
+                  'diff',
+                  '--cached',
+                  '--no-ext-diff',
+                  '--no-textconv',
+                  '--',
+                  file,
+                ]);
+                if (output.disposition !== 'fixed') {
+                  if (diff) throw new Error('disposition accompanied by edits');
+                  if (output.evidence.length === 0)
+                    throw new Error('disposition needs execution-head evidence');
+                  for (const evidence of output.evidence) {
+                    await safeFile(root, evidence.path);
+                    const text = await git(root, ['show', `${observedHead}:${evidence.path}`]);
+                    if (text.split('\n').length < evidence.line)
+                      throw new Error('disposition evidence missing at execution head');
+                  }
+                  if (output.disposition === 'rejected') {
+                    if (!policy.roles.reviewer)
+                      throw new Error('roles.reviewer required for rejection evidence');
+                    const reviewed = ClosureSchema.parse(
+                      await invoke(
+                        finding,
+                        'reviewer',
+                        attempt,
+                        'closure',
+                        observedHead,
+                        candidate,
+                        `Verify this rejection using only the worker-observed execution head ${observedHead}. closed=true means the finding is a false positive supported by this tree. Finding: ${JSON.stringify(finding)}. Reason/evidence: ${JSON.stringify(output)}`,
+                        policy.roles.reviewer,
+                        false,
+                      ),
+                    );
+                    if (!reviewed.closed)
+                      throw new Error('rejection not supported at worker execution head');
+                  }
+                  touched = false;
+                  if (deps.terminalBinding && terminalAttempt) {
+                    releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+                    terminalAttempt = undefined;
+                  }
+                  return {
+                    finding: {
+                      ...finding,
+                      status: output.disposition,
+                      reason: output.reason,
+                      evidence: JSON.stringify(output.evidence),
+                    },
+                    observedHead,
+                    evidence: output.evidence,
+                    reason: output.reason,
+                    validation: [],
+                    failedAttempts: history,
+                  };
+                }
+                if (!diff) throw new Error('fixed claim has no candidate edit');
+                const related = await runChecks(candidate, finding, true);
+                const feedback = OutcomeSchema.parse(
+                  await invoke(
+                    finding,
+                    tier,
+                    attempt,
+                    'feedback',
+                    parent,
+                    candidate,
+                    `related-check feedback\nConfirm this candidate fix for ${JSON.stringify(finding)}. Candidate tree ${tree}, parent ${parent}. Checks: ${JSON.stringify(related)}. Read only; return fixed only if the finding is addressed.`,
+                    role,
+                    false,
+                    prior,
+                    undefined,
+                    undefined,
+                    related,
+                  ),
+                );
+                if (feedback.disposition !== 'fixed')
+                  throw new Error(`feedback did not confirm fix: ${feedback.reason}`);
+                const broader = await runChecks(candidate, finding, false);
+                const message = `fix(review): Address ${finding.id.replace(/[\r\n]/g, ' ')}\n\nOutcome: code-bug\nConfidence: 90\nTested: configured related and broader checks\n${formatCqTrailers(
+                  [
+                    ['Cq-Run', runPrefix],
+                    ['Cq-Unit', `review/${dispatch!.slug}`],
+                    // Review finding ids are caller-supplied paths that may
+                    // contain newlines (existing commits sanitize the subject
+                    // the same way); a trailer is a single physical line, so
+                    // sanitize before the shared writer.
+                    ['Cq-Task', finding.id.replace(/[\r\n]+/g, ' ')],
+                    ['Cq-Attempt', String(dispatch!.ordinal)],
+                    ['Cq-Tier', tier],
+                    // Attribution must record the model the driver actually
+                    // resolved, not the configured role (invoke() stamps
+                    // editingRow.model from resolved.modelSpec).
+                    ['Cq-Model', `${editingRow!.model.provider}/${editingRow!.model.model}`],
+                  ],
+                )}`;
+                const gates = await Promise.all(
+                  baseline.map((base, index) =>
+                    validateFix({
+                      baseline: base,
+                      related: async () => related[index]!,
+                      broader: async () => broader[index]!,
+                      relatedAccepts: (set) =>
+                        // Lint and bounded tests compare stable failure identities below,
+                        // including pre-existing failures in the finding file.
+                        ['test-narrow', 'oxlint-json'].includes(policy.checks[index]!.adapter) ||
+                        set.exitCode === 0 ||
+                        (set.failures.length > 0 && !set.failures.some((f) => f.file === file)),
+                      stagedPaths: [file],
+                      diff,
+                      message,
+                      protectTests: false,
+                      requireProgress: false,
+                    }),
+                  ),
+                );
+                validations.push(...gates);
+                const latest = [...deps.attempts]
+                  .reverse()
+                  .find((row) => row.finding === finding.id);
+                if (latest) latest.validation = gates;
+                regression = gates.some((g) => g.regression === true);
+                if (gates.some((g) => g.verdict !== 'pass'))
+                  throw new Error('candidate validation refused');
+                const reviewer = policy.roles.reviewer;
+                if (!reviewer)
+                  throw new Error('roles.reviewer required for assigned-finding closure');
+                const closure = ClosureSchema.parse(
+                  await invoke(
+                    finding,
+                    'reviewer',
+                    attempt,
+                    'closure',
+                    parent,
+                    candidate,
+                    `Verify assigned-finding closure on this exact candidate. Read only. Return closed=true only if the defect described is resolved.\nFinding: ${JSON.stringify(finding)}\nCandidate tree: ${tree}\nPatch: ${diff}`,
+                    reviewer,
+                    false,
+                    undefined,
+                    undefined,
+                    [
+                      { path: file, text: diff },
+                      { path: file, text: await git(candidate, ['show', `${parent}:${file}`]) },
+                      { path: file, text: await git(candidate, ['show', `${tree}:${file}`]) },
+                    ],
+                  ),
+                );
+                if (!closure.closed)
+                  throw new Error(`assigned finding remains open: ${closure.reason}`);
+                stop();
+                if (
+                  (await git(candidate, ['write-tree'])) !== tree ||
+                  (await git(candidate, ['diff', '--name-only', '-z'])) ||
+                  zList(
+                    await git(candidate, ['ls-files', '-z', '--others', '--exclude-standard']),
+                  ).filter(
+                    (path) =>
+                      !(
+                        dependencies &&
+                        (path === 'node_modules' || path.startsWith('node_modules/'))
+                      ),
+                  ).length > 0
+                )
+                  throw new AddressRefusal('check or feedback mutated candidate', true);
+                if ((await git(root, ['rev-parse', 'HEAD'])) !== parent)
+                  throw new AddressRefusal('verified parent changed during candidate gates', true);
+                if (!(await readFile(await safeFile(root, file))).equals(content))
+                  throw new AddressRefusal('worker file changed after candidate snapshot', true);
+                await git(root, ['add', '--', file]);
+                if (
+                  zList(await git(root, ['diff', '--cached', '--name-only', '-z'])).some(
+                    (p) => p !== file,
+                  )
+                )
+                  throw new AddressRefusal('staging absorbed sibling paths', true);
+                await git(root, ['commit', '-m', message]);
+                // Verification is bookkeeping for an already-created commit. It
+                // must settle even when cancellation has stopped new admissions.
+                const commit = deps.terminalBinding
+                  ? await checkpointAddressTerminalWorker(deps.terminalBinding, root, undefined, {
+                      parent,
+                      tree,
+                    })
+                  : await git(root, ['rev-parse', 'HEAD']);
+                if (
+                  !deps.terminalBinding &&
+                  ((await git(root, ['rev-parse', `${commit}^`])) !== parent ||
+                    (await git(root, ['rev-parse', `${commit}^{tree}`])) !== tree)
+                )
+                  throw new AddressRefusal('commit does not match gated parent/tree', true);
+                verifiedHeads.add(commit);
+                touched = false;
+                if (deps.terminalBinding && terminalAttempt) {
+                  releaseAddressTerminalAttempt(deps.terminalBinding, terminalAttempt);
+                  terminalAttempt = undefined;
+                }
+                for (let i = 0; i < baseline.length; i++)
+                  state = recordFixedFailures(state, baseline[i]!, broader[i]!);
+                return {
+                  finding: {
+                    ...finding,
+                    status: 'fixed',
+                    reason: closure.reason,
+                    evidence: commit,
+                  },
+                  observedHead,
+                  validatedParent: parent,
+                  commit,
+                  reason: closure.reason,
+                  validation: gates,
+                  failedAttempts: history,
+                };
+              } finally {
+                await (deps.terminalBinding
+                  ? addressTerminalCandidate(deps.terminalBinding, root, candidate, true)
+                  : git(root, ['worktree', 'remove', '--force', candidate]));
+              }
+            }, admitMutation).catch(async (error: unknown) => {
+              reason = error instanceof Error ? error.message : String(error);
+              if (error instanceof AddressRefusal) {
+                refusal = error;
+                if (error.fatal) fatal = reason;
+              }
+              await restore();
+              return undefined;
+            });
+            if (accepted) return accepted;
+            if (refusal) return failed(reason);
+          }
+        } catch (error) {
+          reason = error instanceof Error ? error.message : String(error);
+          if (error instanceof AddressRefusal && error.fatal) fatal = reason;
+          try {
+            await restore();
+          } catch (restoreError) {
+            fatal = `evidence restore refused: ${String(restoreError)}`;
+            return failed(`${reason}; ${fatal}`);
+          }
+          return failed(reason);
+        } finally {
+          active.delete(file);
+          unitDeadlines.delete(finding.id);
         }
-        return failed(reason);
       } finally {
-        active.delete(file);
-        unitDeadlines.delete(finding.id);
+        inFlightFixes.delete(fixSettled);
+        releaseFix();
       }
     },
   };

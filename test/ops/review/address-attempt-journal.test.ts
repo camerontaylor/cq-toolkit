@@ -21,7 +21,7 @@
 //     driver throw past the wallClockMs deadline is the wall cap with timeout
 //     evidence; a worker 'budget' stop with no named cap keeps the raw code.
 // Local, fake-driver fixtures only: no provider, no network, no credentials.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -670,7 +670,10 @@ describe('T14 address attempt journal', () => {
       await draining;
       expect(drained).toBe(true);
       const events = attemptEvents(journal.writer);
-      expect(events).toHaveLength(2);
+      expect(events).toHaveLength(1);
+      expect(f.engine.observationFailures?.()).toContain(
+        'attempt observation after close: fixture',
+      );
       // Landed BEFORE the drain resolved: a close after the drain cannot
       // refuse them.
       expect(events.every((event) => event.payload.stopCode === 'completed')).toBe(true);
@@ -679,6 +682,68 @@ describe('T14 address attempt journal', () => {
       await f.cleanup();
       await rm(journal.root, { recursive: true, force: true });
     }
+  });
+
+  test('T14 detached fix during checks refuses feedback after close without changing verdict', async () => {
+    const run = async (observe: boolean) => {
+      const journal = await headerWriter();
+      const marker = join(journal.root, 'checks-entered');
+      const release = join(journal.root, 'checks-release');
+      const controller = new AbortController();
+      const check = `const fs = require('node:fs');
+        if (fs.readFileSync('src/a.ts', 'utf8').includes('GOOD')) {
+          fs.writeFileSync(${JSON.stringify(marker)}, 'entered');
+          const timer = setInterval(() => {
+            if (fs.existsSync(${JSON.stringify(release)})) clearInterval(timer);
+          }, 5);
+        }`;
+      const f = await fixture(slowHandler, check, {
+        parentSignal: controller.signal,
+        scanner: async (components) => {
+          if (components.some((component) => component.text.includes('related-check feedback')))
+            controller.abort();
+          return components.map((component) => ({ component: component.component, hits: [] }));
+        },
+        observationDrainMs: 20,
+        ...(observe ? { observationWriter: journal.writer } : {}),
+        configure: noRescue,
+      });
+      let fixing: Promise<AddressFix> | undefined;
+      try {
+        fixing = f.engine.fix(finding(), 1);
+        // Wait for the real check child after the edit event, not a driver gate.
+        for (let i = 0; ; i++) {
+          try {
+            await readFile(marker);
+            break;
+          } catch {
+            if (i > 1000) throw new Error('checks did not start');
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        }
+        if (observe) expect(attemptEvents(journal.writer)).toHaveLength(1);
+        await f.engine.settleObservations?.();
+        const failuresAtClose = f.engine.observationFailures?.() ?? [];
+        expect(failuresAtClose).toContain('attempt observation still in flight at close: fixture');
+        await journal.writer.close();
+        const countAtClose = journal.writer.events().length;
+        await writeFile(release, 'release');
+        const fix = await fixing;
+        expect(f.engine.observationFailures?.()).toContain(
+          'attempt observation after close: fixture',
+        );
+        expect(journal.writer.events()).toHaveLength(countAtClose);
+        expect(journal.writer.failure).toBeNull();
+        expect(f.calls()).toBe(1); // feedback was refused before driver dispatch
+        return verdictOf(fix);
+      } finally {
+        await writeFile(release, 'release');
+        await fixing;
+        await f.cleanup();
+        await rm(journal.root, { recursive: true, force: true });
+      }
+    };
+    expect(await run(true)).toEqual(await run(false));
   });
 
   test('T14 settleObservations is bounded and names what it could not settle', async () => {
