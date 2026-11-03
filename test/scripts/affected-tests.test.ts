@@ -249,7 +249,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.test.ts',
       'test/ops/gates/workflowScan.test.ts',
       'test/ops/ratchet/definitions.test.ts',
-      'test/scripts/github-settings.test.ts',
+      'test/scripts/github-settings.target.test.ts',
     ];
     for (const path of ['.github/workflows/ci.yml', '.github/actions/static-gate/action.yml']) {
       expect(
