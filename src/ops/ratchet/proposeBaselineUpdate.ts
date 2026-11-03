@@ -29,7 +29,7 @@
 // deterministic — `<headPrefix ?? 'ratchet/propose'>-<digest>` where digest
 // is the first 12 hex (48 bits — the same width as format.ts's baseline-path
 // digest) of sha256 over JSON.stringify(sorted [target, metric] pairs of the
-// applied set), the canonical-JSON convention format.ts uses for baseline
+// judged measurement set), using the canonical-JSON convention for baseline
 // paths — so identical inputs collide onto one head and one PR, while a
 // different set cannot practically share a head branch. Idempotency is
 // find-then-upsert: effects.findOpenPrByHead(head) hit →
@@ -814,9 +814,19 @@ export function createProposeBaselineUpdate(
       }
     }
 
-    // Deterministic sorted order: the PR body, the files list, and the head
-    // hash are all stable regardless of the caller's improvement order.
+    // Deterministic order for proposal files and the body. Head identity
+    // includes all judged measurements, even those that do not tighten.
     applied.sort(byPair);
+    // Proposal and withdrawal share the complete, last-wins measurement set.
+    // The tightening subset can change between runs without changing identity.
+    const pairs = [...judged]
+      .sort(byPair)
+      .map((entry): [string, string] => [entry.target, entry.metric]);
+    const digest = createHash('sha256')
+      .update(JSON.stringify(pairs), 'utf8')
+      .digest('hex')
+      .slice(0, 12);
+    const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${digest}`;
     if (applied.length === 0) {
       // Only usable, non-tightening readings justify withdrawal. Missing or
       // corrupt baselines are not evidence that an existing proposal is stale.
@@ -824,12 +834,6 @@ export function createProposeBaselineUpdate(
         judged.length > 0 &&
         skipped.every((entry) => entry.reason.includes('not a tightening'))
       ) {
-        const pairs = [...judged].sort(byPair).map((entry) => [entry.target, entry.metric]);
-        const digest = createHash('sha256')
-          .update(JSON.stringify(pairs), 'utf8')
-          .digest('hex')
-          .slice(0, 12);
-        const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${digest}`;
         const comment =
           'Closing this baseline proposal: the latest measurements no longer tighten the committed baselines.\n\n' +
           judged.map((entry) => `${entry.target}/${entry.metric}: ${entry.value}`).join('\n');
@@ -848,17 +852,6 @@ export function createProposeBaselineUpdate(
       };
     }
 
-    // 12-hex (48-bit) digest over the canonical JSON of the SORTED (target,
-    // metric) pairs — the same convention AND width as format.ts's baseline
-    // path digest (injective JSON encoding, deterministic). Same set ⇒ same
-    // head ⇒ idempotent upsert; a different set cannot practically collide
-    // onto the same head branch.
-    const pairs = applied.map((a): [string, string] => [a.target, a.metric]);
-    const digest = createHash('sha256')
-      .update(JSON.stringify(pairs), 'utf8')
-      .digest('hex')
-      .slice(0, 12);
-    const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${digest}`;
     if (violatesWholeRefRules(head)) {
       return {
         status: 'failed',

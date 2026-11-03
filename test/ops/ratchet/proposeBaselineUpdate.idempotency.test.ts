@@ -4,6 +4,7 @@ import { join } from 'node:path';
 // sorted pairs, re-run updates of the same open PR, duplicate
 // (target, metric) last-wins collapse, and the upsert result's
 // authoritative PR identity.
+import { baselineRelPath, parseBaseline } from '../../../src/ops/ratchet/format.js';
 import { createHash } from 'node:crypto';
 import { match } from '../../helpers/matchers.js';
 import { describe, expect, test } from 'vitest';
@@ -13,6 +14,8 @@ import {
   CAPTURED_AT,
   makeFakeEffects,
   METRIC,
+  REL,
+  ws,
   proposeInput,
   seedBaseline,
   TARGET,
