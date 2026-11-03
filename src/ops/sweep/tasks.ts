@@ -121,7 +121,9 @@ function canonicalPath(path: string, symlinkDepth = 0): string {
     try {
       if (lstatSync(path).isSymbolicLink()) {
         const target = readlinkSync(path);
-        let current = isAbsolute(target) ? parse(target).root : dirname(path);
+        let current = isAbsolute(target)
+          ? parse(target).root
+          : canonicalPath(dirname(path), symlinkDepth);
         for (const component of target.split(sep)) {
           if (component === '' || component === '.') continue;
           current =

@@ -131,6 +131,7 @@ test('failure containment follows dangling symlinks before accepting missing lea
     await mkdir(join(workspace, 'nested', 'deep'), { recursive: true });
     await symlink('nested/deep', join(workspace, 'alias'), 'dir');
     await symlink('alias/../missing.ts', join(workspace, 'ordered'));
+    await symlink('../missing.ts', join(workspace, 'nested', 'deep', 'link'));
     await writeFile(join(workspace, 'missing.ts'), 'unrelated');
     await symlink('escape', join(workspace, 'chain'), 'dir');
     await symlink('loop', join(workspace, 'loop'), 'dir');
@@ -139,6 +140,9 @@ test('failure containment follows dangling symlinks before accepting missing lea
       expect(() => normalizeFailurePaths(set(file), workspace)).toThrow();
     }
     expect(normalizeFailurePaths(set('ordered'), workspace).failures[0]?.file).toBe(
+      'nested/missing.ts',
+    );
+    expect(normalizeFailurePaths(set('alias/link'), workspace).failures[0]?.file).toBe(
       'nested/missing.ts',
     );
     for (const file of ['inside/a.test.ts', 'missing/a.test.ts']) {
