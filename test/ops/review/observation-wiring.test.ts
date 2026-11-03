@@ -481,6 +481,62 @@ describe('T31 round-trip through the address composition', () => {
       await f.cleanup();
     }
   });
+
+  test('a null base with an injected writer appends no links, hands nothing to the worker, and still closes', async () => {
+    const f = await fixture();
+    const realGit = makeGhRunner({ bin: 'git', cwd: f.repo.root, timeoutMs: 10_000 });
+    let probeFailed = false;
+    const git: GhFn = async (args) => {
+      // Fail ONLY the composition's first base probe: the run sees no base.
+      if (
+        !probeFailed &&
+        args.includes('rev-parse') &&
+        args.includes('-C') &&
+        args.at(-1) === 'HEAD'
+      ) {
+        probeFailed = true;
+        return { code: 128, stdout: '', stderr: 'fatal: ambiguous argument HEAD' };
+      }
+      return realGit(args);
+    };
+    const writer = await openObservationWriter({
+      workId: '00000000-0000-4000-8000-000000000000',
+      compositionRunId: 't31-null-base',
+    });
+    const appendSpy = vi.spyOn(writer, 'append');
+    const closeSpy = vi.spyOn(writer, 'close');
+    try {
+      const result = await makeReviewAddress({
+        git,
+        drivers: f.drivers,
+        initialRecord: f.record,
+        review: f.review,
+        observationWriter: writer,
+        workerFactory: (deps) => {
+          f.boundDeps.push(deps);
+          return makeAddressWorker(deps);
+        },
+      })({ repoRoot: f.repo.root, source: 'local' as const, journalDir: f.journalDir });
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(probeFailed).toBe(true);
+      const report = reportOf(result);
+      expect(report?.observation?.baseSha).toBeNull();
+      expect(report?.observation?.status).toBe('indeterminate');
+      expect(report?.observation?.failure).toContain('base witness unavailable');
+      // P3-2: with no header written there is no streaming surface. The
+      // injected writer receives NO link appends and is NOT handed to the
+      // worker; only its close lifecycle is adopted.
+      expect(appendSpy).not.toHaveBeenCalled();
+      expect(f.boundDeps.length).toBeGreaterThan(0);
+      expect(f.boundDeps.every((deps) => deps.observationWriter === undefined)).toBe(true);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      // No stream exists: the writer was never a composition stream source.
+      expect(await readObservations(f.journalDir)).toHaveLength(0);
+    } finally {
+      await f.cleanup();
+      await writer.close().catch(() => undefined);
+    }
+  });
 });
 
 // ---- T31 unknown evidence -------------------------------------------------
@@ -582,4 +638,30 @@ describe('T31 failure boundary', () => {
       }
     },
   );
+
+  test('an observation OPEN failure leaves the surface indeterminate and changes no verdict', async () => {
+    const f = await fixture();
+    try {
+      // P3-1: the exclusive create fails here (ENOTDIR: a regular file sits
+      // where the stream directory must go; EEXIST on a pre-existing stream
+      // file and EACCES/ENOSPC are the same class). The open failure is an
+      // OBSERVATION failure: it must not reach the owned catch, which would
+      // turn the run into needs-human.
+      await writeFile(join(f.journalDir, 'observations'), 'not a directory\n');
+      const result = await invoke(f);
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      const report = reportOf(result);
+      expect(report?.observation?.status).toBe('indeterminate');
+      expect(report?.observation?.persistence).toBe('unavailable');
+      expect(report?.observation?.failure).toContain('ENOTDIR');
+      expect(report?.observation?.kernelRuns).toEqual([]);
+      // No writer existed, so nothing was handed to the worker.
+      expect(f.boundDeps.length).toBeGreaterThan(0);
+      expect(f.boundDeps.every((deps) => deps.observationWriter === undefined)).toBe(true);
+      // The run continued without opening a stream: the blocker is untouched.
+      expect((await lstat(join(f.journalDir, 'observations'))).isFile()).toBe(true);
+    } finally {
+      await f.cleanup();
+    }
+  });
 });

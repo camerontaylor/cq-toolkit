@@ -387,7 +387,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     // adopting it must not allocate a second, divergent composition run id.
     const injectedWriter = deps.observationWriter;
     const compositionRunId = injectedWriter?.compositionRunId ?? randomUUID();
-    let observation: (ReviewAddressObservation & { writer?: ObservationWriter }) | undefined;
+    // `writer` is the streaming surface: link appends and the worker handoff
+    // only ever use it once the composition header has ACTUALLY landed.
+    // `closeWriter` is the lifecycle handle: every writer the composition
+    // opened or adopted is closed exactly once, header or no header.
+    let observation:
+      | (ReviewAddressObservation & {
+          writer?: ObservationWriter;
+          closeWriter?: ObservationWriter;
+        })
+      | undefined;
     let observationClosed = false;
     // Links recorded by a settled PR fix run are appended asynchronously (the
     // loop does not await that callback). Keep every pending link so finish()
@@ -409,7 +418,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
     const closeObservation = async () => {
       if (!observation || observationClosed) return;
       observationClosed = true;
-      const writer = observation.writer;
+      const writer = observation.closeWriter;
       if (writer === undefined) return;
       try {
         await writer.close();
@@ -869,7 +878,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       // the lifetime catch owns no journal, so it must perform none of that.
       // Until the owned path opens the stream the surface reports honestly:
       // no stream, indeterminate, with the reason.
-      const surface: ReviewAddressObservation & { writer?: ObservationWriter } = {
+      const surface: ReviewAddressObservation & {
+        writer?: ObservationWriter;
+        closeWriter?: ObservationWriter;
+      } = {
         persistence: 'unavailable',
         status: 'indeterminate',
         compositionRunId,
@@ -884,26 +896,42 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       observation = surface;
       // Called ONLY from the owned path, after the ownership entry created the
       // journal directory. A null base has no schema-valid header, so no
-      // stream opens (an injected writer is still adopted for close, never
-      // appended without a header); otherwise the writer opens and the header
-      // is its first event. P2-1 is preserved: a fresh journal dir (ENOENT at
+      // stream opens (an injected writer is retained for CLOSE only: no link
+      // append, no worker handoff — nothing may precede a header); otherwise
+      // the writer opens and the header is its first event. An OPEN failure
+      // is an observation failure, never a verdict: it is recorded on the
+      // surface, which stays indeterminate, and the run continues with no
+      // writer. P2-1 is preserved: a fresh journal dir (ENOENT at
       // pre-flight) is usable because the ownership entry creates it first.
       const openCompositionObservation = async () => {
         if (baseSha === null) {
-          if (injectedWriter !== undefined) surface.writer = injectedWriter;
+          if (injectedWriter !== undefined) surface.closeWriter = injectedWriter;
           return;
         }
-        const writer =
-          injectedWriter ??
-          (await openObservationWriter({
-            ...(input.journalDir === undefined ? {} : { journalDir }),
-            workId: correlationRecord.workId,
-            compositionRunId,
-          }));
-        surface.writer = writer;
+        // Ownership is held from here on, so the pre-ownership reason is
+        // stale: the open (or header append) below records its own reason.
+        surface.failure = null;
+        let writer: ObservationWriter;
+        try {
+          writer =
+            injectedWriter ??
+            (await openObservationWriter({
+              ...(input.journalDir === undefined ? {} : { journalDir }),
+              workId: correlationRecord.workId,
+              compositionRunId,
+            }));
+        } catch (error) {
+          // EACCES/ENOSPC/EEXIST from the exclusive create is observed, not
+          // owned: the surface stays indeterminate with the sanitized reason
+          // and the run continues WITHOUT a writer. This must never reach the
+          // owned catch, which would turn the run into needs-human/failed.
+          observationFailure(error);
+          return;
+        }
+        // Close is a lifecycle duty independent of the header landing.
+        surface.closeWriter = writer;
         surface.persistence = writer.persistence;
         surface.status = writer.persistence;
-        surface.failure = null;
         if (sanitizedProvenance === null) return;
         try {
           await writer.append({
@@ -922,7 +950,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           });
         } catch (error) {
           observationFailure(error);
+          return;
         }
+        // Only a stream whose header ACTUALLY landed may receive link appends
+        // or be handed to the worker: an event before the header would make
+        // the on-disk stream unreadable, and a worker append would land one.
+        surface.writer = writer;
       };
       // ADR-0008: link every RETURNED kernel run explicitly, after the
       // runPlan result — including partial results when present. Never a
