@@ -59,6 +59,7 @@ const TEST_FILE_SEGMENT_SCHEMA = z
 export const DevCheckInputSchema: z.ZodType<DevCheckInput> = z
   .object({
     repoRoot: z.string().min(1),
+    uncommitted: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     range: z
       .string()

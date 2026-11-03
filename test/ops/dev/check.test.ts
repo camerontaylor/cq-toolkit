@@ -60,6 +60,25 @@ describe('rangeFault and knipTrigger', () => {
 });
 
 describe('dev.check', () => {
+  test('uncommitted selects HEAD changes and records a limited scope', async () => {
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root, uncommitted: true });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.scope).toBe('uncommitted');
+    expect(pnpmArgs(effects)).toContainEqual(['test:narrow', '--base', result.value.head]);
+    expect(result.value.gates.map((gate) => gate.name)).not.toContain('diff-check:committed');
+    expect(result.value.gates.map((gate) => gate.name)).toContain('diff-check:staged');
+    expect(result.value.gates.map((gate) => gate.name)).toContain('diff-check:unstaged');
+  });
+  test('uncommitted refuses competing selections', async () => {
+    const result = await makeDevCheck(effectsFor())({
+      repoRoot: repo.root,
+      uncommitted: true,
+      range: 'a..b',
+    });
+    expect(result.status).toBe('failed');
+  });
   test('runs repository cq.json checks and skips address-only checks for adopters', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(
