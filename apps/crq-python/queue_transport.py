@@ -293,7 +293,8 @@ def _inventory(req, runner, q, principal, receipt_root, *, project_fixed=False):
                 source_matches = (receipt_source.get("repo") == subject["repo"]
                                   and receipt_source.get("target_selector") == subject["target_selector"])
                 equivalent = (status.get("reused_from")
-                              and receipts.reusable_current(doc, status.get("capture")))
+                              and (receipts.reusable_current(doc, status.get("capture"))
+                                   or receipts.reusable_noncounted_terminal(doc, status.get("capture"))))
                 if not source_matches or doc.get("source") != subject and not equivalent:
                     row.update(state="blocked", reason={"source": "queue", "category": "identity", "code": "receipt-source"})
                 elif (doc.get("counted") is True and doc.get("classification", {}).get("counted") is True
@@ -775,7 +776,8 @@ def handle(raw, runner, *, principal, policy, verify_source, receipt_root):
             if source.get("repo") != b["repo"] or source.get("target_selector") != b["targetSelector"]:
                 raise ValueError("receipt source repository/target mismatch")
             if source.get("pr") != entry.get("pr") or source.get("merge_sha") != entry.get("mergeSha"):
-                if not item.get("reused_from") or not receipts.reusable_current(document, item.get("capture")):
+                if not item.get("reused_from") or not (receipts.reusable_current(document, item.get("capture"))
+                                                      or receipts.reusable_noncounted_terminal(document, item.get("capture"))):
                     raise ValueError("receipt source mismatch without proven equivalent reuse")
             result["receiptSource"] = {"kind": "merged-current", "repo": source["repo"], "pr": source["pr"],
                                        "mergeSha": source["merge_sha"], "targetSelector": source["target_selector"]}

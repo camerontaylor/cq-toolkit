@@ -168,6 +168,22 @@ class ReceiptTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 receipt.read_receipt(td, identity)
 
+    def test_noncounted_reuse_never_confers_review_credit(self):
+        capture = dict(target='a' * 40, tree='b' * 40, paths=[], scope_digest=receipt.digest([]),
+                       policy=receipt.POLICY, projection='current-affected-files/full-file-addition-projection',
+                       reviewer='coderabbit-review-agent-committed-v1', reviewer_version='fixture')
+        capture['equivalence'] = receipt.current_equivalence(capture)
+        for outcome in ('no-current-code', 'unsupported'):
+            doc = dict(version=1, capture=capture, counted=False, outcome=outcome,
+                       classification=None, independent_acceptance=False)
+            self.assertTrue(receipt.reusable_noncounted_terminal(doc, capture))
+            self.assertFalse(receipt.reusable_current(doc, capture))
+            for changes in (dict(counted=True), dict(classification={'counted': True}),
+                            dict(independent_acceptance=True), dict(outcome='unknown'),
+                            dict(version=0), dict(capture={})):
+                self.assertFalse(receipt.reusable_noncounted_terminal(dict(doc, **changes), capture))
+            self.assertFalse(receipt.reusable_noncounted_terminal(doc, dict(capture, tree='f' * 40)))
+
     def test_current_equivalence_never_upgrades_legacy_or_changes_target(self):
         capture = dict(target="a" * 40, tree="b" * 40, paths=[], scope_digest=receipt.digest([]),
                        policy=receipt.POLICY, projection="current-affected-files/full-file-addition-projection",

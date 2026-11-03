@@ -1265,6 +1265,38 @@ class QueueTransportTests(unittest.TestCase):
         self.q["items"][0]["capture"]["tree"] = "e" * 40
         with self.assertRaisesRegex(ValueError, "equivalent"): self.call("status")
 
+    def test_cross_source_noncounted_receipts_can_be_consumed_without_credit(self):
+        _, template = self.receipt()
+        for outcome in ('no-current-code', 'unsupported'):
+            with self.subTest(outcome=outcome):
+                doc = copy.deepcopy(template)
+                paths = []
+                capture = dict(target='c' * 40, tree='d' * 40, paths=paths,
+                               scope_digest=receipts.digest(paths), policy=receipts.POLICY,
+                               projection='current-affected-files/full-file-addition-projection',
+                               reviewer='coderabbit-review-agent-committed-v1', reviewer_version='fixture')
+                capture['equivalence'] = receipts.current_equivalence(capture)
+                doc.update(capture=capture, outcome=outcome, counted=False,
+                           classification=None, independent_acceptance=False)
+                doc['source'] = {**doc['source'], 'pr': 99, 'merge_sha': 'f' * 40}
+                rid = receipts.write_receipt(self.tmp.name, doc)
+                self.q['items'][0].update(receipt_id=rid, capture=copy.deepcopy(capture),
+                                          reused_from='original-item')
+                status = self.call('status')
+                self.assertFalse(status['reviewed'])
+                self.assertFalse(status['fixed'])
+                manifest = self.call('report', receiptId=rid, cursor=None)['page']
+                for index in range(manifest['chunks']):
+                    self.call('report', receiptId=rid, cursor=f'{rid}:{index}')
+                result = self.call('ack', receiptId=rid,
+                                   **{k: manifest[k] for k in ('sha256', 'chunks', 'bytes')})
+                self.assertTrue(result['consumed'])
+                self.assertFalse(result['reviewed'])
+                self.assertEqual(result['receiptSource']['pr'], 99)
+                self.q['items'][0]['capture']['tree'] = 'e' * 40
+                with self.assertRaisesRegex(ValueError, 'equivalent'):
+                    self.call('status')
+
     def test_persisted_identity_block_survives_reads_and_exact_revalidation_clears(self):
         self.call("enqueue")
         reason = {"source": "queue", "category": "identity", "code": "forge-identity"}
