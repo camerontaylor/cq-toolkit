@@ -1,6 +1,6 @@
 // M8b — measurement archive transport wrapper. One case per condition:
-//   - nominal: check the existing archive, copy with manifest.json as the
-//     commit marker, then verify the remote one-way;
+//   - nominal: check the existing archive, copy the payload, verify it, then
+//     commit manifest.json as the marker and verify the marker;
 //   - missing evidence: an absent bundle is failed, never archived silently;
 //   - failure evidence: an archive/copy/verify failure is explicit, names the
 //     untouched local bundle, and deletes/mutates nothing;
@@ -10,6 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   open,
@@ -79,7 +80,7 @@ describe('M8b nominal evidence', () => {
       run,
     });
 
-    expect(calls.map((call) => call.args[0])).toEqual(['lsf', 'copy', 'copyto', 'check']);
+    expect(calls.map((call) => call.args[0])).toEqual(['lsf', 'copy', 'check', 'copyto', 'check']);
     expect(calls[0]).toEqual({
       command: 'rclone',
       args: ['lsf', TARGET, '--max-depth', '1'],
@@ -100,12 +101,30 @@ describe('M8b nominal evidence', () => {
       '--exclude',
       '/manifest.json',
     ]);
+    // The payload is verified before the commit marker exists on the remote.
     expect(calls[2]?.args).toEqual([
+      'check',
+      root,
+      destination,
+      '--one-way',
+      '--exclude',
+      '/manifest.json',
+      '--copy-links',
+    ]);
+    expect(calls[3]?.args).toEqual([
       'copyto',
       `${root}/manifest.json`,
       `${destination}/manifest.json`,
     ]);
-    expect(calls[3]?.args).toEqual(['check', root, destination, '--one-way']);
+    expect(calls[4]?.args).toEqual([
+      'check',
+      root,
+      destination,
+      '--one-way',
+      '--include',
+      '/manifest.json',
+      '--copy-links',
+    ]);
     expect(result).toMatchObject({
       state: 'archived',
       runId: 'run-m8b-nominal',
@@ -225,7 +244,7 @@ describe('M8b failure evidence', () => {
     expect(result.reason).toContain('commit marker');
     expect(result.reason).toContain('partial content');
     expect(result.reason).toContain('permission denied');
-    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'copyto']);
+    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto']);
   });
 
   test('a failed remote verification is local and reports an incomplete copy', async () => {
@@ -253,8 +272,36 @@ describe('M8b failure evidence', () => {
     expect(result.reason).toContain('sizes differ');
     expect(result.reason).not.toContain('skipping symlink');
     expect(result.archive.state).toBe('present');
-    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'copyto', 'check']);
-    expect(calls[3]).toEqual(['check', await realpath(bundle), destination, '--one-way']);
+    // The payload check fails before the commit marker is ever written.
+    expect(calls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check']);
+    expect(calls[2]).toEqual([
+      'check',
+      await realpath(bundle),
+      destination,
+      '--one-way',
+      '--exclude',
+      '/manifest.json',
+      '--copy-links',
+    ]);
+
+    const markerCalls: string[][] = [];
+    const markerRun = async (_command: string, args: string[]) => {
+      markerCalls.push(args);
+      return args.includes('--include')
+        ? { code: 1, stderr: 'ERROR : manifest.json: sizes differ' }
+        : { code: 0 };
+    };
+    const marker = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+      run: markerRun,
+    });
+
+    expect(marker.state).toBe('local');
+    expect(marker.reason).toContain('could not be verified');
+    expect(marker.archive.state).toBe('present');
+    expect(markerCalls.map((args) => args[0])).toEqual(['lsf', 'copy', 'check', 'copyto', 'check']);
   });
 
   test('invalid targets, hosts, runIds and manifests are failed with zero remote calls', async () => {
@@ -282,6 +329,11 @@ describe('M8b failure evidence', () => {
       { label: 'colonless target', dir: bundle, input: { target: 'session-archive' } },
       { label: 'relative target', dir: bundle, input: { target: 'rel/dir' } },
       { label: 'bare remote target', dir: bundle, input: { target: 'session-archive:' } },
+      {
+        label: 'absolute remote path target',
+        dir: bundle,
+        input: { target: 'session-archive:/abs/root' },
+      },
       {
         label: 'connection-string target',
         dir: bundle,
@@ -335,6 +387,84 @@ describe('M8b failure evidence', () => {
     expect(result.state).toBe('failed');
     expect(result.reason).toContain('not a regular file');
     expect(run).not.toHaveBeenCalled();
+  });
+
+  test('a real symlink or FIFO anywhere in the bundle fails before any remote call', async () => {
+    const base = await workspace();
+    const run = vi.fn(async () => ({ code: 0 }));
+    // A REAL symlink under files/, and every fake runner answer says success:
+    // the verdict must come from the lstat walk alone, because the rclone
+    // local backend silently omits symlinks from both copy and check.
+    const bundle = await bundleIn(base, 'run-m8b-symlink');
+    await symlink(join(bundle, 'manifest.json'), join(bundle, 'files', 'fix', 'link.ndjson'));
+
+    const linked = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+      run,
+    });
+
+    expect(linked.state).toBe('failed');
+    expect(linked.reason).toContain('symlink');
+    expect(run).not.toHaveBeenCalled();
+
+    const fifoBundle = await bundleIn(base, 'run-m8b-fifo-tree');
+    execFileSync('mkfifo', [join(fifoBundle, 'files', 'fix', 'pipe.ndjson')]);
+    const piped = await runMeasurementArchive({
+      bundleDir: fifoBundle,
+      target: TARGET,
+      host: 'triton',
+      run,
+    });
+
+    expect(piped.state).toBe('failed');
+    expect(piped.reason).toContain('non-regular file');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  test('a killed rclone is a labelled timeout; only ENOENT/EACCES read as never-run', async () => {
+    const base = await workspace();
+    const bundle = await bundleIn(base, 'run-m8b-timeout');
+    // Real runner against a fake rclone that dies from a signal, like the
+    // execFile timeout kill (code null, signal SIGTERM).
+    const bin = join(base, 'bin');
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, 'rclone'), '#!/bin/sh\nkill -TERM $$\n');
+    await chmod(join(bin, 'rclone'), 0o755);
+    vi.stubEnv('PATH', bin);
+
+    const killed = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+    });
+
+    expect(killed.state).toBe('local');
+    expect(killed.archive.state).toBe('unavailable');
+    expect(killed.reason).toContain('timed out');
+
+    // A string code that is not ENOENT/EACCES (the maxBuffer abort) means
+    // rclone ran: unavailable, never "never ran".
+    const buffered = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+      run: async () => ({
+        code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+        stderr: 'maxBuffer exceeded',
+      }),
+    });
+    expect(buffered.archive.state).toBe('unavailable');
+    expect(buffered.reason).toContain('maxBuffer');
+
+    const absent = await runMeasurementArchive({
+      bundleDir: bundle,
+      target: TARGET,
+      host: 'triton',
+      run: async () => ({ code: 'ENOENT' }),
+    });
+    expect(absent.archive.state).toBe('unknown');
   });
 
   test('a missing rclone is unknown, not unavailable, and keeps evidence local', async () => {

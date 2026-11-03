@@ -15,22 +15,37 @@ M8a bundle. Each rclone call runs with a five-minute timeout.
    bundle: `manifest.json` must be a regular file (`bundleVersion: 1`, a safe
    `runId`), read with `O_NOFOLLOW` after an `lstat` and a device/inode
    comparison. A target without a remote (`rel/dir`), a connection string, a
-   bare `remote:`, or a missing or invalid bundle returns `state: "failed"`
-   and no remote command runs.
+   bare `remote:`, an absolute remote path (`remote:/abs`), or a missing or
+   invalid bundle returns `state: "failed"` and no remote command runs; an
+   absolute sftp or local root is used through an rclone alias remote
+   (`type = alias`) instead. Before any remote command, the whole bundle tree
+   is walked with `lstat`, links never followed (M8a's rule): every entry
+   must be a regular file or directory, so a symlink — or a FIFO or device
+   node — anywhere in the bundle, including under `files/`, returns
+   `state: "failed"` with zero remote calls.
 2. Check the **existing session archive** first with
-   `rclone lsf <target> --max-depth 1`. An unreachable archive is reported
-   `unavailable`; a spawn failure (no rclone on `PATH`) is `unknown`. Neither
-   is ever treated as empty or "skipped".
+   `rclone lsf <target> --max-depth 1`. An unreachable archive (including a
+   call that times out) is reported `unavailable`; a spawn failure (no rclone
+   on `PATH`) is `unknown`. Neither is ever treated as empty or "skipped".
 3. `rclone copy <bundleDir> <target>/<host>/measurement/<runId>` with
    `--immutable`, `--no-update-modtime`, `--exclude /manifest.json`, two
    transfers and two checkers. `sync` and every `--delete*` flag are absent by
    construction.
-4. `rclone copyto <bundleDir>/manifest.json <dest>/manifest.json` writes the
-   commit marker: the manifest appears on the remote only after every other
-   file copied, so an interrupted push never looks like a whole bundle.
-5. `rclone check <bundleDir> <dest> --one-way` verifies the remote. rclone can
-   skip a file with a NOTICE and still exit 0, so a mismatch here returns
-   `state: "local"` with the reason "remote copy incomplete".
+4. `rclone check <bundleDir> <dest> --one-way --exclude /manifest.json
+--copy-links` verifies the payload while the remote still has no manifest:
+   rclone can skip a file with a NOTICE and still exit 0, so a mismatch here
+   returns `state: "local"` with the reason "remote copy incomplete" and the
+   commit marker is never written. `--copy-links` makes `check` follow a
+   local symlink instead of skipping it on both sides, so one the walk missed
+   is still caught.
+5. `rclone copyto <bundleDir>/manifest.json <dest>/manifest.json` writes the
+   commit marker: the manifest appears on the remote only after the payload
+   has been verified, so an interrupted push never looks like a whole bundle.
+6. `rclone check <bundleDir> <dest> --one-way --include /manifest.json
+--copy-links` confirms the marker itself (`check` cannot compare single
+   files, so the tree comparison is filtered to the manifest path); a failure
+   returns `state: "local"` with the reason "the archived commit marker could
+   not be verified".
 
 `<target>` is the same configured target the crq session archive uses
 (`session-archive:session-log-archive/crq` in the queue-host runbook).
@@ -46,11 +61,12 @@ already archived file fails loudly instead of rewriting it.
 
 ## Explicit local fallback
 
-If the archive check, copy, commit or verification fails, the wrapper returns
-`state: "local"`, names the untouched M8a bundle in `localBundle`, and carries
-a sanitized `reason`. A copy or commit failure also says the remote may hold
-partial content; the commit marker bounds that state, because a bundle without
-`manifest.json` was never committed. The evidence stays durable at
+If the archive check, copy, payload verification, commit or marker check
+fails, the wrapper returns `state: "local"`, names the untouched M8a bundle in
+`localBundle`, and carries a sanitized `reason`. A copy or commit failure also
+says the remote may hold partial content; the commit marker bounds that state,
+because `manifest.json` is written only after the payload has been verified —
+a bundle without it was never committed. The evidence stays durable at
 `~/.local/state/cq/measurement-bundles/<runId>`; nothing is copied, moved or
 deleted. A missing bundle is `state: "failed"` — unknown, never zero.
 

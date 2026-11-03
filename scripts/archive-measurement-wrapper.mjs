@@ -1,15 +1,17 @@
 // Measurement archive transport — measurement slice M8b. Transport only: a
-// validated M8a bundle is checked against the configured session archive,
-// copied to <target>/<host>/measurement/<runId> with manifest.json as the
-// commit marker, then verified with `rclone check --one-way`. The copy is
-// append-only (`copy --immutable`, never `sync`/`--delete`); the bundle is
-// read-only and the session manifest is never written. If the archive check,
-// copy, commit or verification fails, the result says so and names the
-// untouched local bundle as the explicit fallback. Reasons are sanitized;
-// command lines carry no env values.
+// validated M8a bundle (every entry a regular file or directory, no symlinks)
+// is checked against the configured session archive, copied to
+// <target>/<host>/measurement/<runId>, verified with `rclone check --one-way`,
+// and only then given manifest.json as the commit marker, which is confirmed
+// by a final filtered check. The copy is append-only (`copy --immutable`,
+// never `sync`/`--delete`); the bundle is read-only and the session manifest
+// is never written. If the archive check, copy, verification, commit or
+// marker check fails, the result says so and names the untouched local
+// bundle as the explicit fallback. Reasons are sanitized; command lines
+// carry no env values.
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -21,6 +23,9 @@ const RCLONE = 'rclone';
 const RCLONE_TIMEOUT_MS = 5 * 60 * 1000;
 const BUNDLE_VERSION = 1;
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
+/** Bounds for the pre-flight tree walk; real bundles hold dozens of entries. */
+const MAX_TREE_ENTRIES = 10_000;
+const MAX_TREE_DEPTH = 40;
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TARGET_SEGMENT = /^[A-Za-z0-9._:-]+$/;
 const REMOTE_NAME = /^[A-Za-z0-9_-]+$/;
@@ -60,13 +65,18 @@ async function runRclone(command, args) {
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
-    // A spawn failure (missing rclone, timeout) carries a string code; keep it
-    // so the caller can report the archive as unknown rather than unavailable.
+    // Only ENOENT/EACCES mean the binary never ran; any other failure — an
+    // exit code, the maxBuffer abort — means it did. A kill signal (the
+    // timeout) leaves no exit code at all, so label it 'timeout' with its own
+    // reason instead of guessing from a null code.
+    const killed = error?.killed === true || typeof error?.signal === 'string';
     const code = error?.code;
     return {
-      code: typeof code === 'number' || typeof code === 'string' ? code : 1,
+      code: killed ? 'timeout' : typeof code === 'number' || typeof code === 'string' ? code : 1,
       stdout: String(error?.stdout ?? ''),
-      stderr: String(error?.stderr || error?.message || ''),
+      stderr: killed
+        ? `rclone ${args[0]} timed out after ${RCLONE_TIMEOUT_MS} ms`
+        : String(error?.stderr || error?.message || ''),
     };
   }
 }
@@ -120,6 +130,43 @@ async function readBundle(bundleDir) {
   }
 }
 
+/**
+ * Walk the bundle with lstat, never following links (M8a's rule,
+ * archive-measurement-evidence.mjs): every entry must be a regular file or a
+ * directory, so `copy` can reproduce the tree faithfully and nothing can ride
+ * along a symlink. Returns null when the tree is safe, else a reason.
+ */
+async function walkBundleTree(root) {
+  let entries = 0;
+  const walk = async (dir, depth) => {
+    let names;
+    try {
+      names = await readdir(dir);
+    } catch (error) {
+      return `the bundle could not be walked (${error?.code ?? 'unknown'})`;
+    }
+    for (const name of names) {
+      if (++entries > MAX_TREE_ENTRIES || depth >= MAX_TREE_DEPTH)
+        return 'the bundle tree exceeds the walk bound';
+      let stat;
+      try {
+        stat = await lstat(join(dir, name));
+      } catch (error) {
+        return `the bundle could not be walked (${error?.code ?? 'unknown'})`;
+      }
+      if (stat.isSymbolicLink()) return 'the bundle contains a symlink';
+      if (stat.isDirectory()) {
+        const failure = await walk(join(dir, name), depth + 1);
+        if (failure) return failure;
+      } else if (!stat.isFile()) {
+        return 'the bundle contains a non-regular file';
+      }
+    }
+    return null;
+  };
+  return walk(root, 0);
+}
+
 /** Archive one bundle. See docs/measurement/archive-install.md for the contract. */
 export async function runMeasurementArchive(input = {}) {
   const target = input.target;
@@ -140,15 +187,21 @@ export async function runMeasurementArchive(input = {}) {
   const bundle = await readBundle(input.bundleDir);
   if (bundle.state !== 'present')
     return { ...result, reason: `measurement archive: ${bundle.reason}` };
+  // Before any remote call: a symlink (or FIFO/device node) anywhere in the
+  // tree is silently skipped by the rclone local backend, so it would never
+  // reach the archive yet would not fail the copy either.
+  const tree = await walkBundleTree(bundle.root);
+  if (tree) return { ...result, reason: `measurement archive: ${tree}` };
 
   const destination = `${targetOf(target)}/${host}/measurement/${bundle.runId}`;
   const local = { ...result, runId: bundle.runId, localBundle: bundle.root, destination };
   const check = await run(RCLONE, ['lsf', targetOf(target), '--max-depth', '1']);
   if (check.code !== 0) {
     const reason = reasonLine(check.stderr, `rclone lsf exited ${check.code}`);
-    // A string code means rclone never ran: the archive condition is unknown,
-    // not unavailable.
-    const ran = typeof check.code !== 'string';
+    // Only ENOENT/EACCES mean rclone never ran: the archive condition is
+    // unknown. Every other failure — an exit code, the maxBuffer abort, a
+    // timeout — means it ran and the archive could not be checked.
+    const ran = check.code !== 'ENOENT' && check.code !== 'EACCES';
     return {
       ...local,
       state: 'local',
@@ -182,8 +235,32 @@ export async function runMeasurementArchive(input = {}) {
       reason: `rclone copy failed; evidence stays local and the remote may hold partial content: ${reason}`,
     };
   }
+  // Verify the payload while the commit marker is still absent from the
+  // remote: the manifest may only appear once everything else is confirmed
+  // there. rclone can skip a file with a NOTICE and still exit 0, so confirm
+  // what actually arrived. --copy-links is defence in depth: check follows a
+  // local symlink instead of skipping it on both sides, so one the walk
+  // missed surfaces as a missing remote file instead of a clean report.
+  const payload = await run(RCLONE, [
+    'check',
+    bundle.root,
+    destination,
+    '--one-way',
+    '--exclude',
+    '/manifest.json',
+    '--copy-links',
+  ]);
+  if (payload.code !== 0) {
+    const reason = reasonLine(payload.stderr, `rclone check exited ${payload.code}`);
+    return {
+      ...local,
+      state: 'local',
+      archive: { state: 'present', reason },
+      reason: `remote copy incomplete; evidence stays local: ${reason}`,
+    };
+  }
   // manifest.json is the commit marker: it only appears once the payload copy
-  // has succeeded, so an interrupted push never looks like a whole bundle.
+  // has been verified, so an interrupted push never looks like a whole bundle.
   const commit = await run(RCLONE, [
     'copyto',
     `${bundle.root}/manifest.json`,
@@ -198,16 +275,24 @@ export async function runMeasurementArchive(input = {}) {
       reason: `the archive commit marker could not be written; evidence stays local and the remote may hold partial content: ${reason}`,
     };
   }
-  // rclone can skip a file with a NOTICE and still exit 0, so confirm what
-  // actually reached the remote before reporting it archived.
-  const verified = await run(RCLONE, ['check', bundle.root, destination, '--one-way']);
+  // Confirm the marker itself landed. check cannot compare single files, so
+  // the tree comparison is filtered down to the manifest path.
+  const verified = await run(RCLONE, [
+    'check',
+    bundle.root,
+    destination,
+    '--one-way',
+    '--include',
+    '/manifest.json',
+    '--copy-links',
+  ]);
   if (verified.code === 0) return { ...local, state: 'archived', archive: { state: 'present' } };
   const reason = reasonLine(verified.stderr, `rclone check exited ${verified.code}`);
   return {
     ...local,
     state: 'local',
     archive: { state: 'present', reason },
-    reason: `remote copy incomplete; evidence stays local: ${reason}`,
+    reason: `the archived commit marker could not be verified; evidence stays local: ${reason}`,
   };
 }
 

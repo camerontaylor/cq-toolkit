@@ -17,5 +17,5 @@ export declare function runMeasurementArchive(input?: {
   run?: (
     command: string,
     args: string[],
-  ) => Promise<{ code: number; stdout?: string; stderr?: string }>;
+  ) => Promise<{ code: number | string; stdout?: string; stderr?: string }>;
 }): Promise<MeasurementArchiveResult>;
