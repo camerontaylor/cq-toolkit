@@ -242,7 +242,7 @@ async function captureProvenance(
   const inboundParent = inboundParentWorkId(process.env) ?? null;
   const correlation: CorrelationRecord = {
     workId: randomUUID(),
-    parentWorkId: UUID_PATTERN.test(inboundParent) ? inboundParent : null,
+    parentWorkId: inboundParent !== null && UUID_PATTERN.test(inboundParent) ? inboundParent : null,
     branch: runPrefix,
     commitSha: null,
     sessionId: null,

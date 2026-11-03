@@ -246,7 +246,12 @@ describe('T30 round-trip through the fix composition', () => {
       const result = await makeFixRun({
         drivers: fixingDrivers(),
         registry: { get: stubSweepRegistries(fixedUnitReport()) },
-      })({ ...input(f), ...(f.journalDir === undefined ? {} : { journalDir: undefined }) });
+      })({
+        repoRoot: f.repo,
+        source: 'tests' as const,
+        selector: { mode: 'workspace-all' as const },
+        runPrefix: 'cq/fixture',
+      });
       const report = reportOf(result);
       expect(report.observation).toBeDefined();
       expect(report.observation?.writer.persistence).toBe('unavailable');
@@ -285,9 +290,8 @@ describe('T30 unknown evidence: unreturned kernel runs stay unlinked', () => {
       // The stream still observed its boundaries — but the kernel-run link
       // names only the run the composition actually RETURNED.
       const links =
-        report.observation?.writer
-          .events()
-          .filter((event) => event.type === 'kernel-run-linked') ?? [];
+        report.observation?.writer.events().filter((event) => event.type === 'kernel-run-linked') ??
+        [];
       for (const link of links) {
         if (link.type !== 'kernel-run-linked') continue;
         // Never a guessed link: the linked id is the actual returned run's.
@@ -386,7 +390,8 @@ describe('T30 failure boundary', () => {
       const raw = await readFile(join(dir, workIds[0] as string, files[0] as string), 'utf8');
       expect(raw.endsWith('\n')).toBe(true);
       for (const line of raw.split('\n').filter((l) => l !== '')) {
-        expect(() => JSON.parse(line)).not.toThrow();
+        const parsed: unknown = JSON.parse(line);
+        expect(parsed).toBeTypeOf('object');
       }
     } finally {
       await rm(f.root, { recursive: true, force: true });
