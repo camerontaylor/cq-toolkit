@@ -4,6 +4,8 @@ Design at base `1eea0b5b323de8b23a9388a72da4e97f8e631450` (#517).
 Current scope is a fixture-only prototype; H1 production implementation is not complete.
 The original production recompute source and dependency-resolution path are unchanged.
 
+> Path note: this record predates the #950 split of `test/ops/ratchet/recomputeTypecheck.test.ts` into `test/ops/ratchet/recomputeTypecheck.*.test.ts`. The file paths below were updated to the split modules; every count, duration and verdict is the original run's output.
+
 Publish-safe provenance: host names are generic role labels and personal home
 paths use `<USER_HOME>`. Versions, hashes, result lines and proof limitations
 are preserved. Identity excerpts below are sanitized representations; original
@@ -76,12 +78,12 @@ been introduced. Assertions after the install (including the clean compiler run)
 have not been reached and are not passing evidence.
 
 Evidence: `/tmp/h1-boundary-diagnosis.log` on worker-host. The named selection was
-`test/ops/ratchet/recomputeTypecheck.test.ts test/ops/ratchet/adapters.test.ts`;
+`test/ops/ratchet/recomputeTypecheck.*.test.ts test/ops/ratchet/adapters.test.ts`;
 the narrow runner also selected `test/driver/process-inventory.test.ts`.
 Its final result was:
 
 ```text
-test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="54/55" failed=1 skipped=0 wait="0.0s" duration="4.1s" nice=5 load="0.5" uptime="2012368s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="54/55" failed=1 skipped=0 wait="0.0s" duration="4.1s" nice=5 load="0.5" uptime="2012368s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 Earlier runs exposed a TypeScript AST guard typing error and an obsolete fixture
@@ -151,12 +153,12 @@ execution evidence. The registry-addressing sequence remains an unproven
 candidate and production wiring remains stopped.
 
 Evidence: `/tmp/h1-loopback-boundary-narrow.log` on worker-host. The named selection was
-`test/ops/ratchet/recomputeTypecheck.test.ts test/ops/ratchet/adapters.test.ts`;
+`test/ops/ratchet/recomputeTypecheck.*.test.ts test/ops/ratchet/adapters.test.ts`;
 the runner also selected `test/driver/process-inventory.test.ts`. Its actual final
 line was:
 
 ```text
-test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="54/55" failed=1 skipped=0 wait="0.0s" duration="3.4s" nice=5 load="0.4" uptime="2013052s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="54/55" failed=1 skipped=0 wait="0.0s" duration="3.4s" nice=5 load="0.4" uptime="2013052s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 The pre-run `pnpm run format:check` completed with exit 0 and
@@ -190,7 +192,7 @@ fixture edit, workaround or retry follows this result.
 Evidence: `/tmp/h1-h4-boundary-narrow.log` on worker-host. Actual final line:
 
 ```text
-test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="51/51" failed=0 skipped=0 wait="0.0s" duration="1.3s" nice=5 load="0.3" uptime="2013189s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="51/51" failed=0 skipped=0 wait="0.0s" duration="1.3s" nice=5 load="0.3" uptime="2013189s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 The summary's `failed=0` describes individual tests; the failed suite still gives
@@ -261,12 +263,12 @@ not convert either into passing evidence. No retry was run.
 ## H5 actual boundary evidence and trust-review handoff
 
 Evidence: `/tmp/h1-h5-boundary-narrow.log` on worker-host. The named selection was
-`test/ops/ratchet/recomputeTypecheck.test.ts test/ops/ratchet/adapters.test.ts`;
+`test/ops/ratchet/recomputeTypecheck.*.test.ts test/ops/ratchet/adapters.test.ts`;
 the runner also selected `test/driver/process-inventory.test.ts`. Its actual
 final line was:
 
 ```text
-test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="55/55" failed=0 skipped=0 wait="0.0s" duration="3.2s" nice=5 load="0.1" uptime="2013597s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="55/55" failed=0 skipped=0 wait="0.0s" duration="3.2s" nice=5 load="0.1" uptime="2013597s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 The boundary test passed and emitted every checkpoint after its assertions:
@@ -338,7 +340,7 @@ Exactly one named selection ran on worker-host after correction; no boundary ret
 Evidence: `/tmp/h1-p1-boundary-narrow.log`. The actual final wrapper line is:
 
 ```text
-test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="55/55" failed=0 skipped=0 wait="0.0s" duration="3.3s" nice=5 load="0.1" uptime="2014284s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="55/55" failed=0 skipped=0 wait="0.0s" duration="3.3s" nice=5 load="0.1" uptime="2014284s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 All boundary checkpoints were reached: registry-name seed and absent canary;
@@ -398,7 +400,7 @@ the coordinator before the single named run.
 ### Portability correction actual evidence
 
 One named selection ran on worker-host, launched with SHELL removed using
-`env -u SHELL pnpm test:narrow test/ops/ratchet/recomputeTypecheck.test.ts test/ops/ratchet/adapters.test.ts`.
+`env -u SHELL pnpm test:narrow test/ops/ratchet/recomputeTypecheck.*.test.ts test/ops/ratchet/adapters.test.ts`.
 No retry. Log: `/tmp/h1-portability-narrow.log`. Sanitized identities/version:
 
 ```text
@@ -409,7 +411,7 @@ H1 verified pnpm version: 12.8.1 entrypoint: <USER_HOME>/.cache/node/corepack/v1
 Actual final wrapper line:
 
 ```text
-test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="55/55" failed=0 skipped=0 wait="0.0s" duration="3.2s" nice=5 load="1.1" uptime="2014773s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="55/55" failed=0 skipped=0 wait="0.0s" duration="3.2s" nice=5 load="1.1" uptime="2014773s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 All nine existing boundary checkpoints were reached, including seed canary,
@@ -483,7 +485,7 @@ authorized validation host; no full suite, watch, coverage or provider calls.
 Log: `/tmp/h1-macos-repair-narrow.log`. Actual final wrapper line:
 
 ```text
-test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="58/58" failed=0 skipped=0 wait="0.0s" duration="5.5s" nice=5 load="5.3" uptime="851562s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.test.ts"
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="58/58" failed=0 skipped=0 wait="0.0s" duration="5.5s" nice=5 load="5.3" uptime="851562s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/ratchet/adapters.test.ts,test/ops/ratchet/recomputeTypecheck.*.test.ts"
 ```
 
 All nine existing boundary checkpoints were reached, alongside three new
