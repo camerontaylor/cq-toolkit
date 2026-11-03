@@ -5,14 +5,13 @@ import { describe, expect, test } from 'vitest';
 import { finding, fixture } from './addressWorker.helpers.js';
 
 describe('review.address candidate isolation', () => {
-  test.each(['unused', 'unanchored', 'unsafe'] as const)(
+  test.each(['unused', 'unsafe'] as const)(
     'an %s worker leaves no asynchronous lock setup beyond its lifetime',
     async (mode) => {
       const f = await fixture(undefined, '', { indexIdentityUnavailable: true });
       try {
         if (mode !== 'unused') {
           const item = finding(mode === 'unsafe' ? '../outside.ts' : undefined);
-          if (mode === 'unanchored') delete item.file;
           const fix = await f.engine.fix(item, 1);
           expect(fix.finding.status).toBe('deferred');
           expect(fix.commit).toBeUndefined();
@@ -27,6 +26,27 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test('an unanchored deferral reads a verified head through the mutation lock', async () => {
+    // T19: the unanchored deferral is a durable disposition, so before it
+    // returns it must read the observation head exactly the way the dispatch
+    // loop does — through withMutation, accepted only from verifiedHeads. A
+    // direct call with no prior admission finds no verified head and refuses;
+    // the admitted case (40-hex head on the emitted disposition) is covered
+    // by address-pr.humanDeferral. The lock setup settles within the fix
+    // call's lifetime: identity is requested once, nothing leaks after.
+    const f = await fixture();
+    try {
+      const item = finding();
+      delete item.file;
+      await expect(f.engine.fix(item, 1)).rejects.toThrow('unexpected worker execution head');
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      expect(f.identityRequests()).toBe(1);
+      expect(f.calls()).toBe(0);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('unavailable checkout identity refuses every mutation and worker dispatch', async () => {
     const f = await fixture(undefined, '', { indexIdentityUnavailable: true });
     try {
@@ -377,9 +397,21 @@ console.error('deterministic baseline unavailable'); process.exitCode = 1;`,
   test('protected scope refuses before dispatch or configured check execution', async () => {
     const f = await fixture();
     try {
-      const fix = await f.engine.fix(finding('package.json'), 1);
+      // The protected path must EXIST and be committed: a nonexistent one
+      // fails safeFile first, and the unit never reaches the stage-path
+      // policy (the pre-fix shape of this test never exercised :classify).
+      await f.repo.write('pnpm-lock.yaml', 'lockfileVersion: 9\n');
+      f.repo.commitAll('lockfile');
+      const protectedHead = f.repo.git('rev-parse', 'HEAD').trim();
+      const fix = await f.engine.fix(finding('pnpm-lock.yaml'), 1);
       expect(fix.finding.status).toBe('deferred');
       expect(f.calls()).toBe(0);
+      // T19 classification rule: the protected-scope refusal is decided from
+      // the finding's own path and policy before any attempt, so it is a
+      // deliberate deferral — no `failure` discriminator — and it carries the
+      // verified head initialize() admitted.
+      expect(fix.failure).toBeUndefined();
+      expect(fix.observedHead).toBe(protectedHead);
     } finally {
       await f.cleanup();
     }
