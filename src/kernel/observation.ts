@@ -292,7 +292,11 @@ export async function readObservations(journalDir: string): Promise<ObservationS
   const root = join(journalDir, 'observations');
   let workIds: string[];
   try {
-    workIds = await readdir(root);
+    // Only directories are stream scopes: a stray file under observations/
+    // (editor temp, .DS_Store) must not fail the whole scan with ENOTDIR.
+    workIds = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
   } catch (err) {
     if (isEnoent(err)) return []; // no observations yet
     throw err;
