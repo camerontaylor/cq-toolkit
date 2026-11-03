@@ -1,3 +1,4 @@
+import { reviewBranchKey } from './internal/branchKey.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -849,7 +850,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const admitHistory = async (root: string, branch: string) => {
               // PR history must have an exact engine receipt; filenames/schema alone confer no ownership.
               if (persistedBookkeeping) return;
-              const folder = resolve(root, '.cq', 'review', encodeURIComponent(branch));
+              const folder = resolve(root, '.cq', 'review', reviewBranchKey(branch));
               let names: string[];
               try {
                 names = await readdir(folder);
@@ -2222,7 +2223,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 if (!record) {
                   let path = input.record;
                   if (!path) {
-                    const folder = resolve(root, '.cq', 'review', encodeURIComponent(branch));
+                    const folder = resolve(root, '.cq', 'review', reviewBranchKey(branch));
                     const files = (await readdir(folder))
                       .filter((name) => /^\d+\.json$/.test(name))
                       .sort((a, b) => Number(b.slice(0, -5)) - Number(a.slice(0, -5)));
