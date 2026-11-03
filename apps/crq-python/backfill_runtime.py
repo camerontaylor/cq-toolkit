@@ -118,11 +118,16 @@ def rank4_gate(c, queue, item, dry=False):
     ordinary_eligible = c.ordinary_review_eligible(queue)
     observation = queue.get("backfill_usage")
     refresh = getattr(c, "refresh_backfill_usage", None)
+    probed = usage_age(c, {"observed_at": queue.get("backfill_usage_probe_at")})
     if not ordinary_eligible and refresh is not None and (
             not observation or not observation.get("successful")
-            or (usage_age(c, observation) or 0) > USAGE_REFRESH_AFTER_SECONDS):
+            or (age := usage_age(c, observation)) is None or age > USAGE_REFRESH_AFTER_SECONDS) and (
+            probed is None or probed < 0 or probed > USAGE_REFRESH_AFTER_SECONDS):
         # Ordinary selection, ledger fetch and coverage can take minutes after
-        # the tick's usage read; re-read rather than refusing spare quota.
+        # the tick's usage read; re-read rather than refusing spare quota. At
+        # most one attempt per minute, so a failing vendor probe (up to its
+        # timeout, under tick.lock) is not repeated per candidate.
+        queue["backfill_usage_probe_at"] = c.iso()
         refresh(queue)
     observation = copy.deepcopy(queue.get("backfill_usage"))
     if observation:

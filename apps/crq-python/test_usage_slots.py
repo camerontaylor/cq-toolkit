@@ -222,6 +222,35 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual(self.q['backfill_usage']['observed_at'], crq.iso(AT))
         self.assertEqual(self.q['backfill_starts_at_observation'], 2)
 
+    def test_rank4_gate_reprobes_through_runner_once_and_counts_earlier_holds(self):
+        import backfill_jobs as jobs
+        import backfill_runtime as runtime
+        import test_backfill_jobs as job_fixtures
+        stale = crq.iso(AT - dt.timedelta(minutes=10))
+        self.q['items'] = []
+        first = jobs.enqueue(self.q, job_fixtures.partition(), stale)
+        second = jobs.enqueue(self.q, job_fixtures.partition(1, path='other'), stale)
+        self.q['backfill_usage'] = {'successful': True, 'remaining': 8, 'observed_at': stale,
+                                    'reflected_reservations': []}
+        self.q['backfill_starts_at_observation'] = 0
+        # A hold made earlier in this tick, before the refresh, stays subtracted.
+        jobs.admission(self.q, first, stale, self.q['backfill_usage'], False)
+        first['run'] = dict(run_id='first', started_at=stale)
+        first['state'] = 'reviewing'
+        with mock.patch.object(crq, 'now', return_value=AT), \
+             mock.patch.object(crq, 'ordinary_review_eligible', return_value=False):
+            self.probe.return_value = None
+            self.assertFalse(runtime.rank4_gate(crq, self.q, second, dry=True))
+            self.assertFalse(runtime.rank4_gate(crq, self.q, second, dry=True))
+            self.assertEqual(self.probe.call_count, 1)
+            self.assertEqual(second['wait_reason'], 'usage-stale-or-invalid')
+        self.probe.return_value = {'remaining': 3}
+        with mock.patch.object(crq, 'now', return_value=AT + dt.timedelta(minutes=2)), \
+             mock.patch.object(crq, 'ordinary_review_eligible', return_value=False):
+            self.assertTrue(runtime.rank4_gate(crq, self.q, second, dry=True))
+        self.assertEqual(self.probe.call_count, 2)
+        self.assertEqual(self.q['backfill_admissions'][-1]['effective_remaining'], 2)
+
     def test_old_progress_stays_reserved_when_usage_is_unavailable(self):
         self.items()
         run = dict(run_id='old-progress', started_at=crq.iso(AT - dt.timedelta(hours=2)))

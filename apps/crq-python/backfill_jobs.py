@@ -104,9 +104,10 @@ def defer_terminal_quota(queue, item, at, retry_seconds):
 # Callers re-probe usage before the gate when an observation is older than a
 # minute (backfill_runtime.rank4_gate); this bound only applies when that probe
 # fails. Every crq start and hold made after the observation is subtracted
-# (rank4_gate, reflected_reservations), so an older reading stays conservative
-# for crq's own spending.
-USAGE_MAX_AGE_SECONDS = 600
+# (rank4_gate, reflected_reservations). Spending outside crq on the same vendor
+# account (manual or agent CLI reviews) is not, so the fallback stays short and
+# the one-slot reserve absorbs a single such start.
+USAGE_MAX_AGE_SECONDS = 180
 
 
 def admission(queue, item, at, observation, ordinary_eligible, *, reserve=True):
