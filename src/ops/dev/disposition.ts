@@ -1,5 +1,5 @@
 // Dev lane — `dev.disposition`: the author's recorded adjudication of one
-// finding (strategy §3, disposition row). Judgement stays short and
+// finding (strategy §3, disposition row; ADR-0008 T38 input subpart). Judgement stays short and
 // RECORDED (strategy §2.6): the verb set is exactly fixed|rejected|deferred,
 // the reason is mandatory, and the record lands in the branch dev-record.
 //
@@ -11,7 +11,7 @@
 // THE FINDING MUST EXIST: the findingId is checked against every cycle in
 // the branch ledger, so a typo fails instead of writing an orphan
 // disposition that closes nothing.
-import type { Op } from '../../kernel/types.js';
+import type { Op, FindingFingerprint } from '../../kernel/types.js';
 import type { DevEffects } from './effects.js';
 import { faultText, guardDevOp } from './effects.js';
 import { DEV_LEDGER_VERSION, type DevDispositionRecord } from './record.js';
@@ -28,10 +28,20 @@ export interface DevDispositionInput {
   repoRoot: string;
   /** The finding's id, exactly as a dev.review cycle recorded it. */
   findingId: string;
-  /** The adjudication verb. */
+  /** The adjudication verb (ADR-0008 disposition `status`). */
   action: 'fixed' | 'rejected' | 'deferred';
-  /** The mandatory reason / fix note / deferral pointer. */
+  /** The mandatory reason / fix note / deferral pointer (ADR-0008 `reason`). */
   why: string;
+  /** Who made the adjudication (ADR-0008 T38 disposition `owner`). */
+  owner: string;
+  /** The evidence references supporting the adjudication (ADR-0008 `evidence`). */
+  evidence: string[];
+  /** When the disposition must be re-reviewed; required nonempty for `deferred`. */
+  reviewTrigger?: string | null;
+  /** The finding's shared cross-run identity, fingerprint version 1. */
+  fingerprint?: FindingFingerprint;
+  /** The explicitly accepted risk, when a deferral accepts one. */
+  acceptedRisk?: string | null;
 }
 
 /** The recorded disposition — the op's ok value. */
@@ -110,6 +120,11 @@ export function makeDevDisposition(
       why: input.why.trim(),
       head,
       at: effects.nowIso(),
+      owner: input.owner,
+      evidence: input.evidence,
+      reviewTrigger: input.reviewTrigger ?? null,
+      ...(input.fingerprint === undefined ? {} : { fingerprint: input.fingerprint }),
+      acceptedRisk: input.acceptedRisk ?? null,
     };
     try {
       return {

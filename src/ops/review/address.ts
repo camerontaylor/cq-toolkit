@@ -1418,6 +1418,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                         findingId: finding.id,
                         action: finding.status as 'fixed' | 'rejected' | 'deferred',
                         why: finding.reason ?? 'engine validated fix',
+                        owner: 'review.address',
+                        evidence: [`finding:${finding.id}`],
+                        ...(finding.status === 'deferred'
+                          ? { reviewTrigger: finding.reason ?? 're-review at next head' }
+                          : {}),
                       });
                   if (recorded.status !== 'ok') {
                     bookkeepingFailed = true;

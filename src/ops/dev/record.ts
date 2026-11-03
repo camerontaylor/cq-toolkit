@@ -300,8 +300,8 @@ export interface DevDispositionRecord {
   evidence?: string[];
   /** When the disposition must be re-reviewed; required nonempty for `deferred` (v3). */
   reviewTrigger?: string | null;
-  /** The finding's shared cross-run identity, fingerprint version 1 (v3). */
-  fingerprint?: FindingFingerprint;
+  /** The finding's shared cross-run identity, fingerprint version 1 (v3); null when unknown. */
+  fingerprint?: FindingFingerprint | null | undefined;
   /** The explicitly accepted risk, when a deferral accepts one (v3). */
   acceptedRisk?: string | null;
 }
@@ -462,7 +462,10 @@ const DevDispositionRecordSchemaV3 = z
     owner: z.string().min(1),
     evidence: z.array(z.string()),
     reviewTrigger: z.string().min(1).nullable(),
-    fingerprint: FindingFingerprintSchema,
+    // Unknown identity stays unknown (ADR-0008 T38: the dev carrier requires
+    // owner/evidence, not a fingerprint — a finding with no computable
+    // F1 identity is null or absent here, never manufactured).
+    fingerprint: FindingFingerprintSchema.nullable().optional(),
     acceptedRisk: z.string().nullable(),
   })
   .strict()

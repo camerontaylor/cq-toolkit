@@ -87,6 +87,8 @@ test('a spawn fault on the first read resolves through every public op as needs-
         findingId: 'c001-aaaaaaaa#f1',
         action: 'fixed',
         why: 'addressed',
+        owner: 'test',
+        evidence: [],
       }),
     () => makePrOpen(effects, {} as PrEffects)({ repoRoot: '/missing' }),
   ];

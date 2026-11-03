@@ -17,7 +17,8 @@ import {
 } from '../../../src/ops/dev/record.js';
 import type { DevDispositionRecord, DevLedgerFile } from '../../../src/ops/dev/record.js';
 import type { FindingFingerprint } from '../../../src/kernel/types.js';
-import { BRANCH, HEAD, dispositionRecord } from './fakes.js';
+import { BRANCH, HEAD, dispositionRecord, makeFakeEffects } from './fakes.js';
+import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
 
 const FINGERPRINT: FindingFingerprint = {
   version: 1,
@@ -191,5 +192,140 @@ describe('T38: the dev-ledger v3 disposition format', () => {
     expect(() =>
       parseDevLedger(JSON.stringify({ ...ledger(2, []), records: [cycleWithoutTarget] })),
     ).toThrow(/schema violation/);
+  });
+});
+
+describe('T38: the dev.disposition input surface', () => {
+  test('T38 input round-trip: owner/evidence/reviewTrigger/acceptedRisk land in the written v3 disposition verbatim', async () => {
+    const effects = makeFakeEffects((command, args) => {
+      if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
+      if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
+      return undefined;
+    });
+    effects.store.save({
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [
+        {
+          kind: 'cycle',
+          cycleId: 'c001-aaaaaaaa',
+          reviewer: 'coderabbit',
+          scope: 'full',
+          target: 'main',
+          base: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          head: HEAD,
+          dirtySha256: 'dirty',
+          completion: { kind: 'terminal' },
+          findings: [{ id: 'c001-aaaaaaaa#f1', severity: 'major' }],
+          logPath: '/tmp/log',
+          untracked: [],
+          at: '2026-11-03T00:00:00.000Z',
+        },
+      ],
+    });
+    const result = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+      findingId: 'c001-aaaaaaaa#f1',
+      action: 'deferred',
+      why: 'tracked as TODO-1',
+      owner: 'implementor',
+      evidence: ['receipt-1', 'commit:abcd'],
+      reviewTrigger: 're-check at next head',
+      fingerprint: FINGERPRINT,
+      acceptedRisk: 'cosmetic only',
+    });
+    expect(result.status).toBe('ok');
+    const stored = effects.store
+      .file()
+      .records.find((r): r is DevDispositionRecord => r.kind === 'disposition');
+    expect(stored).toMatchObject({
+      findingId: 'c001-aaaaaaaa#f1',
+      action: 'deferred',
+      owner: 'implementor',
+      evidence: ['receipt-1', 'commit:abcd'],
+      reviewTrigger: 're-check at next head',
+      fingerprint: FINGERPRINT,
+      acceptedRisk: 'cosmetic only',
+    });
+    // The persisted file parses back verbatim (round-trip through the store).
+    expect(parseDevLedger(JSON.stringify(effects.store.file()))).toEqual(effects.store.file());
+  });
+
+  test('T38 input unknown evidence: the op still records a legacy-shaped disposition when the finding came from a v2 cycle without fingerprint provenance (input fields stay independent of cycle provenance)', async () => {
+    const effects = makeFakeEffects((command, args) => {
+      if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
+      if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
+      return undefined;
+    });
+    // The finding is known from a vendor-debt receipt lookup path only; the
+    // disposition names no fingerprint (its input is optional) and the record
+    // still parses — unknown identity stays unknown, never manufactured.
+    effects.store.save({
+      version: 2 as DevLedgerFile['version'],
+      branch: BRANCH,
+      records: [
+        {
+          kind: 'cycle',
+          cycleId: 'c001-aaaaaaaa',
+          reviewer: 'coderabbit',
+          scope: 'full',
+          target: 'main',
+          base: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          head: HEAD,
+          dirtySha256: 'dirty',
+          completion: { kind: 'terminal' },
+          findings: [{ id: 'c001-aaaaaaaa#f1', severity: 'major' }],
+          logPath: '/tmp/log',
+          untracked: [],
+          at: '2026-11-03T00:00:00.000Z',
+        },
+      ],
+    });
+    const result = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+      findingId: 'c001-aaaaaaaa#f1',
+      action: 'fixed',
+      why: 'addressed in the diff',
+      owner: 'implementor',
+      evidence: [],
+    });
+    expect(result.status).toBe('ok');
+    const stored = effects.store
+      .file()
+      .records.find((r): r is DevDispositionRecord => r.kind === 'disposition');
+    expect(stored?.fingerprint).toBeUndefined();
+    expect(stored?.owner).toBe('implementor');
+    expect(stored?.reviewTrigger).toBeNull();
+  });
+
+  test('T38 input failure boundary: an invalid input fails without writing a disposition', async () => {
+    const effects = makeFakeEffects((command, args) => {
+      if (command === 'git' && args[0] === 'symbolic-ref') return 'refs/heads/test/branch\n';
+      if (command === 'git' && args[0] === 'rev-parse') return `${HEAD}\n`;
+      return undefined;
+    });
+    // The schema guard (registry mirror) rejects a deferred disposition
+    // without a reviewTrigger BEFORE any ledger is opened or written.
+    const guarded = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+      findingId: 'c001-aaaaaaaa#f1',
+      action: 'deferred',
+      why: 'tracked as TODO-1',
+      owner: 'implementor',
+      evidence: [],
+    });
+    expect(guarded.status).toBe('failed');
+    expect(effects.store.file().records).toHaveLength(0);
+    // An unknown finding id likewise fails at the op boundary and writes nothing.
+    const unknown = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+      findingId: 'c999-zzzzzzzz#f1',
+      action: 'fixed',
+      why: 'addressed',
+      owner: 'implementor',
+      evidence: [],
+    });
+    expect(unknown.status).toBe('failed');
+    expect(effects.store.file().records).toHaveLength(0);
   });
 });

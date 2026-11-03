@@ -23,6 +23,8 @@ function minimalInput(name: string): Record<string, unknown> {
     input.findingId = 'c001-aaaaaaaa#f1';
     input.action = 'fixed';
     input.why = 'addressed';
+    input.owner = 'implementor';
+    input.evidence = [];
   }
   return input;
 }

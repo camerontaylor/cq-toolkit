@@ -363,6 +363,9 @@ test('cached clean record cannot erase findings from original outage or an uncon
           findingId: finding.id,
           action: 'deferred',
           why: 'requires owner',
+          owner: 'test',
+          evidence: [],
+          reviewTrigger: 're-check at next head',
         }),
       workerFactory: () => ({
         escalation: createEscalationState,
@@ -528,6 +531,8 @@ test.each([false, true])(
             findingId: finding.id,
             action: finding.status as 'fixed',
             why: 'verified fixture fix',
+            owner: 'test',
+            evidence: [],
           }),
         workerFactory: () => ({
           escalation: createEscalationState,
@@ -932,6 +937,9 @@ test('P2: a content-mismatched cached row is reset to OPEN and loses its cached 
           findingId: finding.id,
           action: 'deferred',
           why: 'requires owner',
+          owner: 'test',
+          evidence: [],
+          reviewTrigger: 're-check at next head',
         }),
       workerFactory: () => ({
         escalation: createEscalationState,
