@@ -83,6 +83,12 @@ function stripCredentialText(text: string): string {
     const start = i;
     while (i < text.length && !/\s/.test(text[i] ?? '')) i++;
     const run = text.slice(start, i);
+    let next = i;
+    while (next < text.length && /\s/.test(text[next] ?? '')) next++;
+    const nextStart = next;
+    while (next < text.length && !/\s/.test(text[next] ?? '')) next++;
+    const newlineCredential =
+      text.slice(i, nextStart).includes('\n') && text.slice(nextStart, next).includes('@');
     // Discover all schemes in one forward pass. Never search the remaining
     // suffix again for each URL (many adjacent URLs must also stay linear).
     const schemes: Array<{ start: number; authority: number }> = [];
@@ -105,13 +111,14 @@ function stripCredentialText(text: string): string {
     }
     let cursor = 0;
     let droppingQuery = false;
+    let terminator = '';
     for (let k = 0; k < schemes.length; k++) {
       const scheme = schemes[k];
       if (scheme === undefined) continue;
       const limit = schemes[k + 1]?.start ?? run.length;
       if (droppingQuery) {
         let close = scheme.start;
-        while (close < limit && !'\'">'.includes(run[close] ?? '')) close++;
+        while (close < limit && (terminator === '' || run[close] !== terminator)) close++;
         if (close < limit) {
           chunks.push(freeText(run.slice(close, limit)));
           droppingQuery = false;
@@ -120,6 +127,8 @@ function stripCredentialText(text: string): string {
         continue;
       }
       chunks.push(freeText(run.slice(cursor, scheme.start)));
+      const opener = run[scheme.start - 1];
+      terminator = opener === "'" || opener === '"' ? opener : opener === '<' ? '>' : '';
       const token = run.slice(scheme.authority, limit);
       let authorityEnd = 0;
       while (authorityEnd < token.length && !'/?#'.includes(token[authorityEnd] ?? ''))
@@ -129,12 +138,14 @@ function stripCredentialText(text: string): string {
       let tailEnd = end;
       if (end < token.length) {
         tailEnd++;
-        while (tailEnd < token.length && !'\'">'.includes(token[tailEnd] ?? '')) tailEnd++;
+        while (tailEnd < token.length && (terminator === '' || token[tailEnd] !== terminator))
+          tailEnd++;
       }
       const at = token.lastIndexOf('@', end - 1);
       const authority = token.slice(0, authorityEnd);
       const hostPort = /^(\[[^\]]*\]|[^:@]+):\d+$/.test(authority);
-      const incomplete = i < text.length && at < 0 && authority.includes(':') && !hostPort;
+      const incomplete =
+        at < 0 && !hostPort && ((i < text.length && authority.includes(':')) || newlineCredential);
       chunks.push(run.slice(scheme.start, scheme.authority));
       chunks.push(incomplete ? '' : token.slice(at >= 0 ? at + 1 : 0, end));
       chunks.push(freeText(token.slice(tailEnd)));
@@ -143,14 +154,15 @@ function stripCredentialText(text: string): string {
     }
     if (schemes.length === 0) {
       // A newline can split user:token before @. Drop the first half too.
-      let next = i;
-      while (next < text.length && /\s/.test(text[next] ?? '')) next++;
-      const nextStart = next;
-      while (next < text.length && !/\s/.test(text[next] ?? '')) next++;
-      const splitCredential =
-        text.slice(i, nextStart).includes('\n') &&
-        run.includes(':') &&
-        text.slice(nextStart, next).includes('@');
+      // Multi-character credential fragments are ambiguous; short k:v prose,
+      // paths and numeric stack-frame segments remain intact.
+      const parts = run.split(':');
+      const credentialShape =
+        run.endsWith(':') ||
+        (!run.includes('/') &&
+          parts.length >= 2 &&
+          parts.every((part) => part.length >= 2 && !/^\d+$/.test(part)));
+      const splitCredential = newlineCredential && credentialShape;
       chunks.push(splitCredential ? '' : freeText(run));
     }
   }

@@ -109,8 +109,8 @@ describe('sanitizeObservation', () => {
     ['user:to\nken@host', '\nhost'],
     ['(u:p@host)', '(host)'],
     ['password hunter2@!x', 'password !x'],
-    ['https://h/x?q=1"user:tok@host', 'https://h/x"host'],
-    ['https://u:p@one/x?q=1"https://a:b@two/y?token=X', 'https://one/x"https://two/y'],
+    ['"https://h/x?q=1"user:tok@host', '"https://h/x"host'],
+    ['"https://u:p@one/x?q=1"https://a:b@two/y?token=X', '"https://one/x"https://two/y'],
   ])('fails closed on split and unusual credential shapes: %s', (input, expected) => {
     expect(sanitizeObservation(input)).toEqual(expected);
   });
@@ -121,6 +121,25 @@ describe('sanitizeObservation', () => {
     expect(out).not.toContain('u:p');
     expect(Date.now() - start).toBeLessThan(5000);
   });
+
+  it.each([
+    ["https://h/x?q='SECRET'", 'https://h/x'],
+    ['https://h/x?token="abc"', 'https://h/x'],
+    ['"https://h/x?q=1", next', '"https://h/x", next'],
+    ['<https://h/x?t=1>', '<https://h/x>'],
+    ['https://us\ner:pw@host', 'https://\nhost'],
+    ['at src/a.ts:10:5\nnext@thing', 'at src/a.ts:10:5\nthing'],
+    ['k:v\nfoo@bar', 'k:v\nbar'],
+  ])('uses the opening delimiter and preserves newline prose: %s', (input, expected) => {
+    expect(sanitizeObservation(input)).toEqual(expected);
+  });
+
+  it.each(['https://a/?q=xhttps://b/y"user:SEC@h', '"https://a/?q=xhttps://b/y"user:SEC@h'])(
+    'sanitizes the resumed query segment: %s',
+    (input) => {
+      expect(sanitizeObservation(input)).not.toContain('SEC');
+    },
+  );
 
   it('requires post-strip redaction for a newly exposed URL secret', () => {
     process.env.ZZ_HOOK_URL = 'https://hooks.example/svc/p';
@@ -267,7 +286,7 @@ describe('credential stripping (critic table)', () => {
     [
       'newline inside scheme userinfo splits the token',
       'https://u\nser:pw@host.example/x',
-      'https://u\nhost.example/x',
+      'https://\nhost.example/x',
     ],
     ['uppercase scheme', 'HTTPS://User:Tok@Host.Example/Path', 'HTTPS://Host.Example/Path'],
     [
