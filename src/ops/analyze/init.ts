@@ -130,7 +130,13 @@ export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detecte
 /** Build the `analyze.init` op (file-system backed; no injected seams needed). */
 export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
   return async (input) => {
-    const { dir: _dir, force: _force, migrate: _migrate, configPath: _configPath, ...options } = input;
+    const {
+      dir: _dir,
+      force: _force,
+      migrate: _migrate,
+      configPath: _configPath,
+      ...options
+    } = input;
     const policyKeys = Object.keys(options).sort();
     if (input.migrate === true && policyKeys.length > 0) {
       return {

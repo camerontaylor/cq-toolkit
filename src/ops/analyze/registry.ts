@@ -385,7 +385,13 @@ export const AnalyzeInitInputSchema: z.ZodType<AnalyzeInitInput> = CqConfigSchem
   })
   .strict()
   .superRefine((input, ctx) => {
-    const { dir: _dir, force: _force, migrate: _migrate, configPath: _configPath, ...policy } = input;
+    const {
+      dir: _dir,
+      force: _force,
+      migrate: _migrate,
+      configPath: _configPath,
+      ...policy
+    } = input;
     if (input.migrate === true && Object.keys(policy).length > 0) {
       ctx.addIssue({
         code: 'custom',

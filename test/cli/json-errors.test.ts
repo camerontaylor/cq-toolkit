@@ -64,10 +64,9 @@ async function tmpDir(prefix: string): Promise<string> {
 
 describe('--json error artifacts: post-parse sites', () => {
   test('analyze.init migration with policy options exits 2 before running the op', async () => {
-    const run = await capture(
-      ['analyze.init', '--dir=.', '--migrate', '--packages=[]', '--json'],
-      { opsRoot: fileURLToPath(new URL('../../src/ops/', import.meta.url)) },
-    );
+    const run = await capture(['analyze.init', '--dir=.', '--migrate', '--packages=[]', '--json'], {
+      opsRoot: fileURLToPath(new URL('../../src/ops/', import.meta.url)),
+    });
     expectErrorArtifact(run, 'invalid-input', 2);
     expect(run.out).toContain('policy options');
   });
