@@ -264,8 +264,11 @@ describe('the dev-record format', () => {
     expect(() =>
       parseDevLedger(JSON.stringify({ version: DEV_LEDGER_VERSION + 1, branch: 'b', records: [] })),
     ).toThrow(/schema violation/);
+    // Since ADR-0008 T38 the reader dual-reads 2 and 3, so the oldest
+    // refused version is 1 (= DEV_LEDGER_VERSION - 2): v1's cycles cannot
+    // prove their target and are never re-labelled.
     expect(() =>
-      parseDevLedger(JSON.stringify({ version: DEV_LEDGER_VERSION - 1, branch: 'b', records: [] })),
+      parseDevLedger(JSON.stringify({ version: DEV_LEDGER_VERSION - 2, branch: 'b', records: [] })),
     ).toThrow(/schema violation/);
     expect(() =>
       parseDevLedger(

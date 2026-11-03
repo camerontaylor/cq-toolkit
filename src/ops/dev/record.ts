@@ -57,18 +57,28 @@ import {
   type ReviewCoverageV2,
 } from '../review/internal/reviewCoverageV2.js';
 import { FindingEvidenceV1Schema, type FindingEvidenceV1 } from '../review/findings.js';
+import { FindingFingerprintSchema } from '../../kernel/schema.js';
+import type { FindingFingerprint } from '../../kernel/types.js';
 import { branchPathFault } from '../../shared/refname.js';
 
 export { branchPathFault };
 
 /**
- * The persisted record format version — the only one parseDevLedger accepts.
- * v2 adds `target` to cycle records: review evidence is bound to the
+ * The persisted record format version — the one serializeDevLedger writes.
+ * v2 added `target` to cycle records: review evidence is bound to the
  * intended PR target it was recorded against (the check record's existing
  * rule), and a v1 ledger — whose cycles cannot prove their target — refuses
  * to parse rather than silently re-labeling its evidence.
+ *
+ * v3 (ADR-0008 T38) adds the disposition provenance fields: `owner`,
+ * `evidence: string[]`, `reviewTrigger` (required nonempty for a
+ * `deferred`), `fingerprint` (FindingFingerprint v1) and `acceptedRisk`.
+ * parseDevLedger dual-reads 2 and 3: a v2 disposition parsed from a v3
+ * ledger keeps its legacy fields ABSENT — unknown is never manufactured —
+ * and a version-3 ledger refuses to carry a v2 disposition (old v2 records
+ * are never upgraded in place). Versions 1 and anything newer throw.
  */
-export const DEV_LEDGER_VERSION = 2;
+export const DEV_LEDGER_VERSION = 3;
 
 /**
  * Built-in defaults (strategy §5, first cut): the policy file
@@ -265,7 +275,14 @@ export interface DevCheckRecord {
   at: string;
 }
 
-/** One disposition: the author's recorded adjudication of one finding. */
+/**
+ * One disposition: the author's recorded adjudication of one finding.
+ * The v2 carrier fields are unchanged (ADR-0008 T38: action/why/head/at map
+ * to status/reason/observedHead/observedAt in the journal without renaming
+ * the dev carrier). The v3 provenance fields are present on every record a
+ * version-3 writer emits; on a legacy v2 record they are absent — a reader
+ * must treat that as UNKNOWN, never manufacture a value.
+ */
 export interface DevDispositionRecord {
   kind: 'disposition';
   findingId: string;
@@ -275,6 +292,16 @@ export interface DevDispositionRecord {
   /** The HEAD the disposition was recorded at. */
   head: string;
   at: string;
+  /** Who made the adjudication (v3; required, never fabricated for legacy). */
+  owner?: string;
+  /** The evidence references supporting the adjudication (v3). */
+  evidence?: string[];
+  /** When the disposition must be re-reviewed; required nonempty for `deferred` (v3). */
+  reviewTrigger?: string | null;
+  /** The finding's shared cross-run identity, fingerprint version 1 (v3). */
+  fingerprint?: FindingFingerprint;
+  /** The explicitly accepted risk, when a deferral accepts one (v3). */
+  acceptedRisk?: string | null;
 }
 
 /** The ledger's record union — discriminated on `kind`. */
@@ -292,9 +319,9 @@ export interface DevVendorDebtRecord {
   at: string;
 }
 
-/** The persisted dev-record file. Version 1 — the only version parse accepts. */
+/** The persisted dev-record file. Dual-read versions 2 and 3 (ADR-0008 T38). */
 export interface DevLedgerFile {
-  version: typeof DEV_LEDGER_VERSION;
+  version: 2 | typeof DEV_LEDGER_VERSION;
   branch: string;
   records: DevRecord[];
 }
@@ -401,7 +428,7 @@ const DevCheckRecordSchema = z
   })
   .strict();
 
-const DevDispositionRecordSchema = z
+const DevDispositionRecordSchemaV2 = z
   .object({
     kind: z.literal('disposition'),
     findingId: z.string().min(1),
@@ -416,6 +443,39 @@ const DevDispositionRecordSchema = z
     at: z.string().min(1),
   })
   .strict();
+
+const DevDispositionRecordSchemaV3 = z
+  .object({
+    kind: z.literal('disposition'),
+    findingId: z.string().min(1),
+    action: z.enum(['fixed', 'rejected', 'deferred']),
+    // Whitespace-only is empty for the record's purposes: a disposition
+    // without a reason is not evidence.
+    why: z
+      .string()
+      .min(1)
+      .refine((why) => why.trim() !== '', { message: 'why must not be blank' }),
+    head: z.string().min(1),
+    at: z.string().min(1),
+    owner: z.string().min(1),
+    evidence: z.array(z.string()),
+    reviewTrigger: z.string().min(1).nullable(),
+    fingerprint: FindingFingerprintSchema,
+    acceptedRisk: z.string().nullable(),
+  })
+  .strict()
+  .refine(
+    (record) =>
+      record.action !== 'deferred' ||
+      (record.reviewTrigger !== null && record.reviewTrigger.length > 0),
+    { message: 'a deferred disposition requires a nonempty reviewTrigger' },
+  );
+
+/**
+ * The disposition dual-read (ADR-0008 T38): a v2-shaped record and a v3-shaped
+ * record both parse, as distinct arms of the record union. Legacy provenance
+ * stays ABSENT on a parsed v2 record — unknown is never manufactured.
+ */
 
 const DevReuseRecordSchema = z
   .object({
@@ -439,10 +499,11 @@ const DevReuseRecordSchema = z
     'an exact-terminal reuse selects a terminal cycle and names no blocked attempt',
   );
 
-const DevRecordSchema = z.discriminatedUnion('kind', [
+const DevRecordSchema: z.ZodType<DevRecord> = z.union([
   DevCycleRecordSchema,
   DevCheckRecordSchema,
-  DevDispositionRecordSchema,
+  DevDispositionRecordSchemaV3,
+  DevDispositionRecordSchemaV2,
   DevReuseRecordSchema,
   z
     .object({
@@ -563,7 +624,7 @@ export function findReusableCycle(
 
 const DevLedgerFileSchema: z.ZodType<DevLedgerFile> = z
   .object({
-    version: z.literal(DEV_LEDGER_VERSION),
+    version: z.union([z.literal(2), z.literal(DEV_LEDGER_VERSION)]),
     branch: z.string().min(1),
     records: z.array(DevRecordSchema),
   })
@@ -590,6 +651,12 @@ function recordIdOf(record: DevRecord): string | null {
  * strict entry for anything read back.
  */
 export function serializeDevLedger(file: DevLedgerFile): string {
+  if (file.version !== 2 && file.version !== DEV_LEDGER_VERSION) {
+    throw new Error(
+      `dev-record: cannot serialize ledger version ${String(file.version)} — ` +
+        'this writer understands 2 and 3 (ADR-0008 T38) only',
+    );
+  }
   const ids = new Set<string>();
   for (const record of file.records) {
     const id = recordIdOf(record);
