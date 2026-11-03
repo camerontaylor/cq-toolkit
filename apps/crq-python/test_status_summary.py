@@ -204,3 +204,54 @@ class MergedCurrentSummaryTest(unittest.TestCase):
                     result = adapter.merged_current({"items": [original, {**reused, **bad}]}, td)
                     self.assertEqual(result["receipts"]["unverified"], 1)
                     self.assertEqual(result["receipts"]["proven_terminal"], 1)
+
+
+class ReposSummaryTests(unittest.TestCase):
+    """Additive per-repo counts for non-primary repos (docs/multi-repo.md)."""
+
+    PRIMARY = "camerontaylor/cq-toolkit"
+
+    def queue(self):
+        return {"items": [
+            {"kind": "open", "state": "pending", "cycles": []},
+            {"kind": "open", "state": "reviewing", "cycles": []},
+            {"kind": "push-current", "state": "pending", "repo": "camerontaylor/infra"},
+            {"kind": "push-current", "state": "blocked", "repo": "camerontaylor/infra"},
+            {"kind": "push-current", "state": "done", "repo": "camerontaylor/hart"},
+            {"kind": "open", "state": "pending", "repo": "camerontaylor/hart", "cycles": []},
+        ], "push_discovery": {"camerontaylor/infra": {"reviewed_tip": "a" * 40},
+                              "camerontaylor/other": {"reviewed_tip": "b" * 40}}}
+
+    def test_repos_block_counts_foreign_items_and_carries_push_tips(self):
+        data = adapter.summarize({"generated_at": "2026-11-03T00:00:00Z"}, self.queue(), {},
+                                 {"repo": self.PRIMARY, "max_starts_per_hour": 5}, [], 0)
+        self.assertEqual(data["repos"]["camerontaylor/infra"],
+                         {"pending": 1, "reviewing": 0, "blocked": 1, "other": 0,
+                          "reviewed_tip": "a" * 40})
+        self.assertEqual(data["repos"]["camerontaylor/hart"]["other"], 1)
+        # idle repos stay visible with zero counts and their push tip
+        self.assertEqual(data["repos"]["camerontaylor/other"],
+                         {"pending": 0, "reviewing": 0, "blocked": 0, "other": 0,
+                          "reviewed_tip": "b" * 40})
+
+    def test_configured_repos_stay_visible_before_their_first_item(self):
+        data = adapter.summarize({"generated_at": "2026-11-03T00:00:00Z"}, {"items": []}, {},
+                                 {"repo": self.PRIMARY, "max_starts_per_hour": 5,
+                                  "repos": [{"repo": "camerontaylor/dotfiles"},
+                                            {"repo": "camerontaylor/encoding"}]}, [], 0)
+        for slug in ("camerontaylor/dotfiles", "camerontaylor/encoding"):
+            self.assertEqual(data["repos"][slug],
+                             {"pending": 0, "reviewing": 0, "blocked": 0, "other": 0})
+
+    def test_backlog_stays_primary_and_in_flight_stays_global(self):
+        data = adapter.summarize({"generated_at": "2026-11-03T00:00:00Z"}, self.queue(), {},
+                                 {"repo": self.PRIMARY, "max_starts_per_hour": 5}, [], 0)
+        self.assertEqual(data["backlog"]["open"], 1)  # the hart open PR is not primary backlog
+        self.assertEqual(data["in_flight"], 1)        # every reviewing item holds shared quota
+
+    def test_legacy_queue_without_repo_fields_keeps_schema_two_shape(self):
+        data = adapter.summarize({"generated_at": "2026-11-03T00:00:00Z"},
+                                 {"items": [{"kind": "open", "state": "pending", "cycles": []}]}, {},
+                                 {"max_starts_per_hour": 5}, [], 0)
+        self.assertEqual(data["repos"], {})
+        self.assertEqual(data["backlog"]["open"], 1)

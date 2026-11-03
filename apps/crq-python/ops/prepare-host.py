@@ -25,6 +25,7 @@ LEGACY_SHA = '0e35cd11153fc7ad681f002d580b9b22feb22092'
 # A closed leaf allowlist, NOT arbitrary recursive config.update().
 CONFIG_KEYS = {
     'clone', 'worktree_root', 'timeout_bin', 'paseo_hosts',
+    'repos',
     'promotion.record_url_template', 'promotion.alert_agent_host',
     'promotion.alert_agent_id',
     'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_alias',
@@ -32,7 +33,8 @@ CONFIG_KEYS = {
     'repair.paseo_host', 'repair.blackout.enabled',
 }
 # Allowlisted but optional: absent means the committed value applies.
-OPTIONAL_KEYS = {'promotion.signer.spool.dir', 'promotion.alert_agent_id', 'repair.blackout.enabled'}
+OPTIONAL_KEYS = {'repos', 'promotion.signer.spool.dir', 'promotion.alert_agent_id',
+                 'repair.blackout.enabled'}
 HOST_KEYS = {'schema_version', 'deploy_root', 'record_dir', 'config', 'fleet_reader'}
 PATH_KEYS = {'clone', 'worktree_root', 'timeout_bin', 'repair.cq_bin',
              'promotion.signer.spool.dir', 'promotion.signer.spool.ssh_key'}
@@ -104,6 +106,27 @@ def validate(overlay):
                     or any(not isinstance(v, str) or not v for v in value)
                     or len(set(value)) < 2):
                 raise ValueError('paseo_hosts must contain at least two distinct nonempty endpoint strings')
+        elif name == 'repos':
+            # Per-repo review config is host-specific (its clone path lives on
+            # this host), so an overlay replaces the committed list. Shape is
+            # checked here; repo_registry.py stays the fail-closed validator
+            # for every remaining field when the runner loads it.
+            if not isinstance(value, list):
+                raise ValueError('repos must be a list')
+            seen = set()
+            for entry in value:
+                if not isinstance(entry, dict):
+                    raise ValueError('repos entries must be objects')
+                repo = entry.get('repo')
+                if not isinstance(repo, str) or not re.fullmatch(
+                        r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+                    raise ValueError('repos entries need an owner/name repo')
+                if repo in seen:
+                    raise ValueError('repos entries must be unique')
+                seen.add(repo)
+                clone = entry.get('clone')
+                if clone is not None:
+                    host_path(clone)
         elif name in PATH_KEYS:
             # The accepted legacy renderer records a literal ~/ key path.
             # CRQ expands it only at SSH invocation; retain those config bytes.

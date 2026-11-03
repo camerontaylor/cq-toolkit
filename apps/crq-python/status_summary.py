@@ -106,12 +106,44 @@ def merged_current(queue, receipt_root=None):
 
 
 
+def repos_summary(queue, primary, configured=()):
+    """Additive per-repo counts for non-primary repos (docs/multi-repo.md)."""
+    out = {}
+    zero = {"pending": 0, "reviewing": 0, "blocked": 0, "other": 0}
+    # Every configured repo stays visible before its first item or push state:
+    # the deploy checklist reads this block to confirm what is enrolled.
+    for entry in configured:
+        slug = entry.get("repo") if isinstance(entry, dict) else entry
+        if isinstance(slug, str) and slug != primary:
+            out.setdefault(slug, dict(zero))
+    # Repos with push state but no queued item stay visible (idle ≠ absent).
+    for slug in (queue.get("push_discovery") or {}):
+        if slug != primary:
+            out.setdefault(slug, dict(zero))
+    for item in queue["items"]:
+        slug = item.get("repo") or primary
+        if slug == primary:
+            continue
+        entry = out.setdefault(slug, dict(zero))
+        state = item.get("state")
+        if state in entry:
+            entry[state] += 1
+        else:
+            entry["other"] += 1
+    for slug, state in (queue.get("push_discovery") or {}).items():
+        if slug in out:
+            out[slug]["reviewed_tip"] = state.get("reviewed_tip")
+    return out
+
+
 def summarize(status, queue, heartbeat, config, events, now):
+    primary = config.get("repo")
     items = [i for i in queue["items"] if i.get("kind") != "promotion"]
+    primary_items = [i for i in items if (i.get("repo") or primary) == primary]
     backlog = {kind: sum(i["kind"] == kind and i["state"] == "pending"
                          and not (kind == "open" and
                                   len(i.get("cycles", [])) >= 1)
-                         for i in items)
+                         for i in primary_items)
                for kind in ("open", "delta", "merged", "coverage")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0
@@ -138,6 +170,8 @@ def summarize(status, queue, heartbeat, config, events, now):
         "starts_cap": starts_cap,
         "in_flight": sum(i["state"] == "reviewing" for i in items),
         "outcomes_24h": outcomes, "other_outcomes_24h": other, "backlog": backlog,
+        # Additive multi-repo block: schema stays 2; readers ignore unknown keys.
+        "repos": repos_summary(queue, primary, config.get("repos") or ()),
     }
 
 
