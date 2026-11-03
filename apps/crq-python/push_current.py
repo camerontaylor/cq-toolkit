@@ -38,7 +38,8 @@ def _part_number(item_id: str) -> int:
 
 
 def _enroll(runner, q, cfg: Dict[str, Any], base: str, head: str, item_id: str, *,
-            depends_on: Optional[str] = None, paths_filter: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+            depends_on: Optional[str] = None, paths_filter: Optional[List[str]] = None,
+            pin: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Create one pending push item; ids are sticky, so an existing id is kept.
 
     The helper stamps `repo` so every new push item carries the field
@@ -55,6 +56,11 @@ def _enroll(runner, q, cfg: Dict[str, Any], base: str, head: str, item_id: str, 
         item["depends_on"] = depends_on
     if paths_filter:
         item["subject"]["paths_filter"] = sorted(set(paths_filter))
+    if pin:
+        # Follow-up parts review the content their parent deferred: pinning the
+        # parent's capture target keeps that content from moving (or vanishing
+        # from the filtered diff) before the part runs.
+        item["subject"]["pin"] = pin
     q["items"].append(item)
     runner.event("enrolled", item=item_id, reason=item["notes"][0])
     return item
@@ -96,7 +102,11 @@ def _discover_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], dry: bool) ->
         # tip and enrolls nothing (docs/multi-repo.md step 3).
         base = None
         if cfg["floor"]:
-            base = runner.git("rev-list", "-1", f"--before={cfg['floor']}", cfg["default_ref"], cwd=clone)
+            # The reviewed range is first-parent history (docs/multi-repo.md):
+            # a side-branch commit merged after the floor must not become the
+            # boundary, or its additions would vanish from base..tip.
+            base = runner.git("rev-list", "--first-parent", "-1",
+                              f"--before={cfg['floor']}", cfg["default_ref"], cwd=clone)
         if dry:
             log.append(f"DRY-RUN would initialize {repo} reviewed tip {(base or tip)[:10]}; nothing enrolled")
             return log
@@ -133,6 +143,12 @@ def _discover_repo(runner, q: Dict[str, Any], cfg: Dict[str, Any], dry: bool) ->
         log.append(f"push discovery {repo}: tip {tip[:10]} is {age_min:.0f}m old (< {quiet}m quiet window)")
         return log
     item_id = part_id(cfg, reviewed, tip)
+    if any(i["id"] == item_id and i["state"] == "pending" and not i.get("capture") for i in mine):
+        # The same range is already enrolled and waiting for a start slot.
+        # Coalescing it into itself would mark it skipped forever (and
+        # enrollment refuses the id, since ids are sticky).
+        log.append(f"push discovery {repo}: {item_id} already pending")
+        return log
     if dry:
         log.append(f"DRY-RUN would enroll {item_id} ({reviewed[:10]}..{tip[:10]})")
         return log
@@ -190,8 +206,11 @@ def prepare(runner, q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optio
     clone = Path(cfg["clone"])
     if not item.get("capture"):
         base = item["subject"]["base"]
-        # Target is the repo's default branch pinned at capture time.
-        target = runner.git("rev-parse", cfg["default_ref"] + "^{commit}", cwd=clone)
+        # Target is the repo's default branch pinned at capture time — or, for a
+        # follow-up split part, exactly the parent capture's target, so the
+        # deferred overflow content cannot move before this part reviews it.
+        target = item["subject"].get("pin") or runner.git(
+            "rev-parse", cfg["default_ref"] + "^{commit}", cwd=clone)
         if not runner.is_ancestor(base, target, clone=clone):
             raise runner.NotReady("push base is not an ancestor of the repository default branch")
         # The affected files of the whole range, resolved at the current target.
@@ -214,7 +233,8 @@ def prepare(runner, q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optio
             n = _part_number(item["id"])
             followup_id = part_id(cfg, item["subject"]["base"], item["subject"]["head"], n + 1)
             _enroll(runner, q, cfg, item["subject"]["base"], item["subject"]["head"], followup_id,
-                    depends_on=item["id"], paths_filter=sorted({r["path"] for r in overflow}))
+                    depends_on=item["id"], paths_filter=sorted({r["path"] for r in overflow}),
+                    pin=target)
             for row in overflow:
                 row["disposition"] = "deferred-split"
                 row["reason"] = f"deferred to follow-up review {followup_id} (review scope cap)"

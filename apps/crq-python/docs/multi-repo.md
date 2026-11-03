@@ -107,7 +107,9 @@ source range generalized:
 
 - `current_paths` gains an explicit `pre` (range base) and a `clone`
   parameter; merged-PR callers pass `merge^1` and the primary clone
-  unchanged. Target for a push range is the pinned tip at capture time.
+  unchanged. Target for a push range is the pinned tip at capture time; a
+  follow-up split part reuses its parent capture's target, so the content it
+  was created for cannot move before it runs.
 - Caps are unchanged and shared: 256 KiB per file (over-cap files are
   `unsupported` rows — a file cannot be split), 2 MiB per review scope,
   1000-path manifest cap. When selected paths exceed the 2 MiB scope cap the

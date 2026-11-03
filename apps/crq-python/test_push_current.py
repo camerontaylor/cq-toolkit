@@ -380,6 +380,8 @@ class PushTest(unittest.TestCase):
         self.assertEqual([r["path"] for r in followup["capture"]["paths"]],
                          followup["subject"]["paths_filter"])
         self.assertEqual(fplan["base"], followup["capture"]["base"])
+        self.assertEqual(followup["subject"]["pin"], target)
+        self.assertEqual(fplan["target"], target)
 
     def test_split_part_harvest_does_not_advance_the_reviewed_tip(self):
         # A follow-up part (-p2) reviews a path SUBSET of its range. Harvesting
@@ -405,6 +407,10 @@ class PushTest(unittest.TestCase):
         self.launch(followup)
         self.assertEqual([r["path"] for r in followup["capture"]["paths"]],
                          followup["subject"]["paths_filter"])
+        # The part is pinned to the parent capture, not the newer tip: deferred
+        # content cannot move before this part reviews it.
+        self.assertEqual(followup["subject"]["pin"], target)
+        self.assertEqual(followup["capture"]["target"], target)
         self.harvest(followup)
         self.assertEqual(followup["state"], "done")
         self.assertEqual(self.q["push_discovery"][FOREIGN]["reviewed_tip"], target)
@@ -415,6 +421,35 @@ class PushTest(unittest.TestCase):
         newest = next(i for i in self.q["items"]
                       if i["id"] not in (item["id"], followup["id"], whole["id"]))
         self.assertEqual((newest["subject"]["base"], newest["subject"]["head"]), (target, c3))
+
+    def test_repeated_discovery_keeps_the_pending_range(self):
+        # A pending, uncaptured item waiting for a start slot is the range
+        # discovery would enroll again: it must not coalesce itself away.
+        self.commit(self.foreign_origin, "new work", when=self.ago(2), files={"a.py": "a\n"})
+        item = self.enroll_push(floor=self.iso_of(self.ago(36)), quiet_minutes=1)
+        self.assertEqual(item["state"], "pending")
+        self.assertFalse(item.get("capture"))
+        log = self.discover()
+        self.assertEqual(item["state"], "pending")
+        self.assertFalse(any("coalesced" in note for note in item.get("notes", [])), item["notes"])
+        self.assertTrue(any("already pending" in line for line in log), log)
+
+    def test_floor_initialization_follows_first_parent_history(self):
+        # A side-branch commit dated before the floor but merged after it must
+        # not become the boundary, or its additions would leave the range.
+        self.commit(self.foreign_origin, "init", when=self.ago(48), files={"base.txt": "b\n"})
+        mainline = self.commit(self.foreign_origin, "mainline one", when=self.ago(44),
+                               files={"m1.txt": "1\n"})
+        self.git(self.foreign_origin, "checkout", "-q", "-b", "side")
+        self.commit(self.foreign_origin, "side work", when=self.ago(40), files={"side.txt": "s\n"})
+        self.git(self.foreign_origin, "checkout", "-q", "main")
+        self.commit(self.foreign_origin, "mainline two", when=self.ago(10), files={"m2.txt": "2\n"})
+        stamp = f"@{int(self.ago(20).timestamp())} +0000"
+        self.git(self.foreign_origin, "merge", "--no-ff", "-q", "-m", "merge side", "side",
+                 env={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp})
+        self.repos[0] = self.cfg(floor=self.iso_of(self.ago(36)))
+        self.discover()
+        self.assertEqual(self.q["push_discovery"][FOREIGN]["reviewed_tip"], mainline)
 
     def test_quiet_window_waits(self):
         self.repos[0] = self.cfg(floor=self.iso_of(self.ago(36)))
